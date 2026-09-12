@@ -1375,10 +1375,6 @@ inline Expression Expression::selu() const {
     return (this->max(zero) * scale) + (this->min(zero).expm1() * scaleAlpha);
 }
 
-inline Expression Expression::gelu() const {
-    // Exact GELU: x * Phi(x), where Phi is the standard normal CDF.
-    return *this * this->normcdf();
-}
 
 std::string formatFloatCanonical(double x);
 bool isCommutative(ExprOp op);

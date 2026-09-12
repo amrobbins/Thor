@@ -4171,6 +4171,44 @@ Expression Expression::sqrt(const Expression& expr) { return unaryOp(expr, ExprO
 Expression Expression::tanh() const { return unaryOp(*this, ExprOp::TANH); }
 Expression Expression::normcdf() const { return unaryOp(*this, ExprOp::NORMCDF); }
 
+Expression Expression::gelu() const {
+    if (!expr)
+        throw std::runtime_error("Cannot apply GELU to empty expression");
+    if (nodeIndex >= expr->nodes.size())
+        throw std::runtime_error("GELU input node index is out of range");
+
+    // Exact GELU is x * Phi(x). Build it as one DAG, not as the generic
+    // composition `*this * this->normcdf()`: unaryOp() creates a separate
+    // PhysicalExpression and binaryOp() would then clone the x producer once
+    // for each operand. That is numerically harmless in a forward plan because
+    // EquationCompiler can CSE equivalent producer stages, but AutoDiff works
+    // from the logical graph and would legitimately differentiate both producer
+    // copies. For an affine/conv input that turns one shared activation adjoint
+    // into two dInput/dParameter boundary operations. Clone x exactly once and
+    // let both GELU terms reference that one logical value.
+    auto out = std::make_shared<PhysicalExpression>();
+    out->inputs = expr->inputs;
+
+    std::unordered_map<uint32_t, uint32_t> oldToNew;
+    const uint32_t x = cloneSubtree(*expr, nodeIndex, *out, oldToNew);
+
+    ExprNode cdf{};
+    cdf.op = ExprOp::NORMCDF;
+    cdf.lhs = x;
+    const uint32_t cdfIndex = static_cast<uint32_t>(out->nodes.size());
+    out->nodes.push_back(std::move(cdf));
+
+    ExprNode product{};
+    product.op = ExprOp::MUL;
+    product.lhs = x;
+    product.rhs = cdfIndex;
+    const uint32_t productIndex = static_cast<uint32_t>(out->nodes.size());
+    out->nodes.push_back(std::move(product));
+    out->output_node = productIndex;
+
+    return Expression(std::move(out), productIndex);
+}
+
 Expression Expression::softmax(cudnnSoftmaxAlgorithm_t algorithm, cudnnSoftmaxMode_t mode) const {
     if (algorithm == CUDNN_SOFTMAX_LOG) {
         throw std::invalid_argument("Expression::softmax computes ordinary softmax; use Expression::logSoftmax for CUDNN_SOFTMAX_LOG.");

@@ -898,6 +898,34 @@ uint32_t CustomLayer::getNumFusedCustomLossGradients() const {
     return static_cast<uint32_t>(fusedCustomLossGradientByOutputFlatIndex.size());
 }
 
+#ifdef THOR_DEBUG
+std::optional<CustomLayer::GenericSharedBackwardDebugDiagnostic>
+CustomLayer::genericSharedBackwardDebugDiagnostic(uint32_t applicationIndex) const {
+    if (applicationIndex >= applications.size()) {
+        return std::nullopt;
+    }
+    const ApplicationState& app = applications[applicationIndex];
+    if (!app.forwardVariantThisPass.has_value()) {
+        return std::nullopt;
+    }
+    const auto variantIt = app.stampedVariants.find(app.forwardVariantThisPass.value());
+    if (variantIt == app.stampedVariants.end()) {
+        return std::nullopt;
+    }
+    const StampedExecutionVariant& variant = variantIt->second;
+    if (variant.genericSharedBackwardClear == nullptr) {
+        return std::nullopt;
+    }
+
+    return GenericSharedBackwardDebugDiagnostic{
+        .clearStageKindNames = variant.genericSharedBackwardClear->stageKindNames(),
+        .clearStageDependencyIndices = variant.genericSharedBackwardClear->stageDependencyIndices(),
+        .clearExecutionCount = variant.genericSharedBackwardClearExecutionCount,
+        .accumulateExecutionCount = variant.genericSharedBackwardAccumulateExecutionCount,
+    };
+}
+#endif
+
 bool CustomLayer::registerFusedCustomLossGradient(const Tensor& predictions,
                                                  const Tensor& labels,
                                                  DynamicExpression gradientExpression,
@@ -1602,136 +1630,6 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildGenericSharedBackwardWit
     return plan;
 }
 
-std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan(
-    uint32_t applicationIndex,
-    DynamicExpressionVariantId variantId,
-    const std::vector<std::string>& fusedParameterTargets,
-    const BackwardBuildResult& parameterGradientBuild,
-    const std::unordered_map<std::string, Tensor>& optimizerUpdateInputs) {
-    if (fusedParameterTargets.empty()) {
-        return nullptr;
-    }
-    if (!gradientUpdateStream.has_value()) {
-        throw runtime_error("CustomLayer fused optimizer update requires a gradient update stream.");
-    }
-
-    ApplicationState& app = applications[applicationIndex];
-    StampedExecutionVariant& variant = stampedVariant(applicationIndex, variantId);
-    variant.fusedOptimizerRuntimeScalarBindings.clear();
-    variant.fusedOptimizerRuntimeScalars.clear();
-
-    const PhysicalOutputs& backwardOutputs = parameterGradientBuild.outputs;
-    if (!backwardOutputs.expr) {
-        throw runtime_error("CustomLayer fused optimizer update received a null parameter-gradient expression.");
-    }
-
-    std::unordered_map<std::string, Expression> gradientsByParameter;
-    for (const NamedOutput& output : backwardOutputs.outputs) {
-        constexpr const char* suffix = "_grad";
-        constexpr size_t suffixLen = 5;
-        if (output.name.size() < suffixLen || output.name.compare(output.name.size() - suffixLen, suffixLen, suffix) != 0) {
-            continue;
-        }
-        const std::string parameterName = output.name.substr(0, output.name.size() - suffixLen);
-        gradientsByParameter.emplace(parameterName, Expression::fromPhysicalNode(backwardOutputs.expr, output.node_idx));
-    }
-
-    std::vector<std::pair<std::string, Expression>> fusedOutputs;
-    // The fused optimizer graph contains the same differentiated forward expression, so retain
-    // DynamicExpression-internal stamp inputs here as well.
-    std::unordered_map<std::string, Tensor> stampInputs = app.forwardPrepared->stampInputs();
-    for (const auto& [name, tensor] : app.backwardAdditionalInputsByName) {
-        stampInputs[name] = tensor;
-    }
-    if (!parameterGradientBuild.forward_value_requirements.empty()) {
-        if (variant.forward == nullptr) {
-            throw runtime_error("CustomLayer fused optimizer saved-forward binding requires the real forward execution plan.");
-        }
-        bindRetainedForwardValues(parameterGradientBuild, *variant.forward, stampInputs);
-    }
-
-    std::unordered_map<std::string, Tensor> preallocatedOutputs;
-
-    for (const std::string& parameterName : fusedParameterTargets) {
-        auto gradIt = gradientsByParameter.find(parameterName);
-        if (gradIt == gradientsByParameter.end()) {
-            throw runtime_error("CustomLayer could not build fused optimizer update: missing gradient expression for parameter '" +
-                                parameterName + "'.");
-        }
-        auto storageIt = optimizerUpdateInputs.find(parameterName);
-        if (storageIt == optimizerUpdateInputs.end()) {
-            throw runtime_error("CustomLayer could not build fused optimizer update: missing storage for parameter '" + parameterName + "'.");
-        }
-
-        shared_ptr<PhysicalParameter> targetParameter;
-        shared_ptr<Optimizer> optimizer;
-        for (const auto& parameter : parameters) {
-            if (parameter->getName() == parameterName) {
-                targetParameter = parameter;
-                optimizer = parameter->getOptimizer();
-                break;
-            }
-        }
-        if (targetParameter == nullptr || optimizer == nullptr || !optimizer->supportsDenseUpdateFusion()) {
-            throw runtime_error("CustomLayer fused optimizer update requested for unsupported parameter '" + parameterName + "'.");
-        }
-
-        const std::string prefix = optimizerFusionNamePrefix(parameterName);
-        variant.fusedOptimizerRuntimeScalarBindings.push_back({parameterName, optimizer, prefix});
-
-        // Do not call denseUpdateRuntimeScalars(...) while building/stamping the fused
-        // optimizer update. Several optimizers, including Adam-family optimizers,
-        // intentionally advance their runtime step counter when that method is called.
-        // The reusable map is populated lazily during the first actual optimizer
-        // update so compile/stamp remains side-effect-free.
-
-        // Dense optimizer fusion consumes the parameter-gradient expression directly.  Do not
-        // materialize the optimizer-owned dense gradient tensor for fused parameters; that memory
-        // exists only for the legacy materialized optimizer path.
-        THOR_THROW_IF_FALSE(!optimizer->getWeightsGradient().has_value());
-
-        DenseOptimizerExpression updateExpression = optimizer->toDenseUpdateExpression(storageIt->second, gradIt->second, prefix);
-
-        for (const auto& [name, tensor] : updateExpression.inputs) {
-            auto [_, inserted] = stampInputs.emplace(name, tensor);
-            if (!inserted) {
-                throw runtime_error("CustomLayer fused optimizer update input name collision: " + name);
-            }
-        }
-
-        for (const NamedOutput& output : updateExpression.outputs.outputs) {
-            const std::string uniqueOutputName = optimizerFusionOutputName(parameterName, output.name);
-            auto preallocIt = updateExpression.preallocatedOutputs.find(output.name);
-            if (preallocIt == updateExpression.preallocatedOutputs.end()) {
-                throw runtime_error("CustomLayer fused optimizer update missing preallocated output for '" + output.name +
-                                    "' on parameter '" + parameterName + "'.");
-            }
-            Expression outputExpression = Expression::fromPhysicalNode(updateExpression.outputs.expr, output.node_idx);
-            if (output.name == "weights" && targetParameter->hasConstraints() &&
-                targetParameter->supportsDenseExpressionConstraintFusion()) {
-                outputExpression = targetParameter->applyDenseExpressionConstraints(outputExpression, prefix + "constraints__");
-            }
-            fusedOutputs.emplace_back(uniqueOutputName, outputExpression);
-            preallocatedOutputs.emplace(uniqueOutputName, preallocIt->second);
-        }
-    }
-
-    Outputs outputs = Expression::outputs(fusedOutputs);
-    PhysicalOutputs physicalOutputs = outputs.physicalOutputs();
-    PreparedDynamicExpression::TensorMap filteredStampInputs = filterTensorInputsForPhysicalOutputs(stampInputs, physicalOutputs);
-    PreparedDynamicExpression::TensorScalarMap filteredTensorScalarInputs =
-        filterTensorScalarInputsForPhysicalOutputs(
-            app.forwardPrepared->tensorScalarInputsForVariant(variantId), physicalOutputs);
-    FusedEquation fusedUpdateEquation = FusedEquation::compile(physicalOutputs, placement.getDeviceNum());
-    auto fusedUpdatePlan = std::make_shared<StampedExecutionPlan>(
-        fusedUpdateEquation.stamp(
-            filteredStampInputs, gradientUpdateStream.value(), filteredTensorScalarInputs, preallocatedOutputs));
-    if (variant.forward != nullptr) {
-        fusedUpdatePlan->linkRmsNormBackwardStatesFrom(*variant.forward);
-    }
-    return fusedUpdatePlan;
-}
-
 const std::unordered_map<std::string, float>& CustomLayer::updateFusedOptimizerRuntimeScalars(
     uint32_t applicationIndex, DynamicExpressionVariantId variantId, uint32_t batchSize) {
     if (batchSize == 0) {
@@ -2395,37 +2293,39 @@ void CustomLayer::compileImpl() {
         };
 
         // Build the one generic clear VJP before deciding optimizer storage. BR6.6
-        // can then classify each dParameter directly from the exact combined VJP
-        // that will become the runtime owner; no second AutoDiff invocation is
+        // can then classify each flat dParameter directly from the exact combined
+        // VJP that will become the runtime owner; no second AutoDiff invocation is
         // needed merely to decide whether an optimizer can be grafted onto it.
+        // BR6.7 deliberately includes graph-level conditionals here as well. They
+        // remain ineligible for optimizer fusion, but their one conditional VJP
+        // owns dInput and every materialized dParameter together.
         if (!wantsNativeSharedBackwardPlan() &&
-            !applicationHasConditionalBackwardVariant(applicationIndex) &&
             !app.backwardAdditionalInputsByName.empty() &&
             !allTrainableParameterTargets.empty()) {
-            for (DynamicExpressionVariantId previewVariantId : executionVariantIds) {
-                StampedExecutionVariant& previewVariant = stampedVariant(applicationIndex, previewVariantId);
-                if (!previewVariant.supportsBackward) {
+            for (DynamicExpressionVariantId buildVariantId : executionVariantIds) {
+                StampedExecutionVariant& buildVariant = stampedVariant(applicationIndex, buildVariantId);
+                if (!buildVariant.supportsBackward) {
                     continue;
                 }
 
                 std::vector<std::string> activeParameterTargets =
-                    app.forwardPrepared->equationForVariant(previewVariantId).filterTensorInputNamesReachableFromOutputs(
+                    app.forwardPrepared->equationForVariant(buildVariantId).filterTensorInputNamesReachableFromOutputs(
                         allTrainableParameterTargets, app.upstreamOutputNames);
                 if (activeParameterTargets.empty() && !allTrainableParameterTargets.empty() &&
                     !app.upstreamOutputNames.empty()) {
                     activeParameterTargets = allTrainableParameterTargets;
                 }
-                previewVariant.activeParameterTargetNames =
+                buildVariant.activeParameterTargetNames =
                     std::unordered_set<std::string>(activeParameterTargets.begin(), activeParameterTargets.end());
 
                 const std::vector<std::string> clearTargets =
                     combinedBackwardTargets(inputTargets, allTrainableParameterTargets);
-                previewVariant.genericSharedBackwardClearPreview = buildBackwardOutputsForApplication(
-                    applicationIndex, previewVariantId, clearTargets, GradientAccumulationTargets{});
-                onGenericSharedBackwardPreviewBuilt(
+                buildVariant.genericSharedBackwardClearBuild = buildBackwardOutputsForApplication(
+                    applicationIndex, buildVariantId, clearTargets, GradientAccumulationTargets{});
+                onGenericSharedBackwardBuildCreated(
                     applicationIndex,
-                    previewVariantId,
-                    previewVariant.genericSharedBackwardClearPreview.value(),
+                    buildVariantId,
+                    buildVariant.genericSharedBackwardClearBuild.value(),
                     GradientAccumulationTargets{});
             }
         }
@@ -2452,17 +2352,19 @@ void CustomLayer::compileImpl() {
                     if (!candidateVariant.supportsBackward || br66ExpressionFusedOptimizerParameterNames.empty()) {
                         continue;
                     }
-                    if (!candidateVariant.genericSharedBackwardClearPreview.has_value() ||
-                        !candidateVariant.genericSharedBackwardClearPreview->outputs.expr ||
-                        candidateVariant.genericSharedBackwardClearPreview->outputs.isConditional()) {
-                        for (const std::string& parameterName : candidateVariant.activeParameterTargetNames) {
-                            br66ExpressionFusedOptimizerParameterNames.erase(parameterName);
-                        }
-                        continue;
+                    if (!candidateVariant.genericSharedBackwardClearBuild.has_value() ||
+                        !candidateVariant.genericSharedBackwardClearBuild->outputs.expr ||
+                        candidateVariant.genericSharedBackwardClearBuild->outputs.isConditional()) {
+                        // Optimizer storage is chosen once for the parameter, not per
+                        // execution variant. If any backward-capable variant cannot be
+                        // classified from the one shared clear VJP, none of the remaining
+                        // candidates may safely omit their materialized gradient buffer.
+                        br66ExpressionFusedOptimizerParameterNames.clear();
+                        break;
                     }
 
                     std::unordered_map<std::string, uint32_t> gradientNodeByParameter;
-                    for (const NamedOutput& output : candidateVariant.genericSharedBackwardClearPreview->outputs.outputs) {
+                    for (const NamedOutput& output : candidateVariant.genericSharedBackwardClearBuild->outputs.outputs) {
                         constexpr const char* suffix = "_grad";
                         constexpr size_t suffixLen = 5;
                         if (output.name.size() >= suffixLen &&
@@ -2472,14 +2374,25 @@ void CustomLayer::compileImpl() {
                         }
                     }
 
-                    for (const std::string& parameterName : candidateVariant.activeParameterTargetNames) {
-                        if (!br66ExpressionFusedOptimizerParameterNames.contains(parameterName)) {
+                    // Dense-gradient allocation is global to the optimizer. A parameter
+                    // may be optimizer-fused only if it is active in *every* backward-
+                    // capable variant. If a clear contribution selects a branch/output
+                    // where the parameter is inactive, Thor still needs to establish a
+                    // real zero gradient and run the ordinary optimizer semantics (which
+                    // can matter for momentum/weight decay even when dW == 0). Therefore
+                    // an inactive variant forces that parameter back to materialized dW.
+                    std::vector<std::string> candidates(
+                        br66ExpressionFusedOptimizerParameterNames.begin(),
+                        br66ExpressionFusedOptimizerParameterNames.end());
+                    for (const std::string& parameterName : candidates) {
+                        if (!candidateVariant.activeParameterTargetNames.contains(parameterName)) {
+                            br66ExpressionFusedOptimizerParameterNames.erase(parameterName);
                             continue;
                         }
                         const auto gradIt = gradientNodeByParameter.find(parameterName);
                         if (gradIt == gradientNodeByParameter.end() ||
                             expressionSubgraphContainsStageBoundary(
-                                *candidateVariant.genericSharedBackwardClearPreview->outputs.expr, gradIt->second)) {
+                                *candidateVariant.genericSharedBackwardClearBuild->outputs.expr, gradIt->second)) {
                             br66ExpressionFusedOptimizerParameterNames.erase(parameterName);
                         }
                     }
@@ -2516,7 +2429,7 @@ void CustomLayer::compileImpl() {
             }
 
             std::vector<std::string> activeParameterTargets;
-            if (variant.genericSharedBackwardClearPreview.has_value()) {
+            if (variant.genericSharedBackwardClearBuild.has_value()) {
                 for (const std::string& parameterName : allTrainableParameterTargets) {
                     if (variant.activeParameterTargetNames.contains(parameterName)) {
                         activeParameterTargets.push_back(parameterName);
@@ -2537,18 +2450,20 @@ void CustomLayer::compileImpl() {
                     std::unordered_set<std::string>(activeParameterTargets.begin(), activeParameterTargets.end());
             }
 
-            // BR6.2: construct the generic shared-VJP shapes now, but do not make
-            // them runtime owners yet.  The clear preview must establish every
+            // Construct the production generic shared-VJP builds. The clear
+            // build must establish every
             // trainable parameter gradient (including an explicit zero for an
-            // unreachable/inactive parameter), while the accumulate preview only
+            // unreachable/inactive parameter), while the accumulate build only
             // contributes parameters reachable from this execution variant.  dInput
             // always overwrites; only parameter targets accumulate.
             //
-            // Keep this first step to flat generic CustomLayer variants. Native
-            // shared-backward specializations already own a one-VJP path, and
-            // conditional generic ownership is deliberately deferred to BR6.7.
+            // Native shared-backward specializations already own a one-VJP path.
+            // For conditionals, FusedEquation's reachability query conservatively
+            // keeps every requested parameter target because branch selection is a
+            // runtime decision; conditional AutoDiff then emits zero-on-clear or
+            // preserve-on-accumulate behavior for a parameter absent from the
+            // selected branch.
             if (!wantsNativeSharedBackwardPlan() &&
-                !applicationHasConditionalBackwardVariant(applicationIndex) &&
                 !app.backwardAdditionalInputsByName.empty() &&
                 !allTrainableParameterTargets.empty()) {
                 std::vector<std::string> accumulateParameterTargets;
@@ -2560,18 +2475,22 @@ void CustomLayer::compileImpl() {
                 }
                 const std::vector<std::string> accumulateTargets =
                     combinedBackwardTargets(inputTargets, accumulateParameterTargets);
-                const bool accumulatePlanCanEverRun =
-                    applications.size() > 1 || !accumulateParameterTargets.empty();
+                // BR6.8: with exactly one physical application, this application
+                // is always the first and only contribution in a backward pass, so an
+                // accumulate variant is unreachable regardless of how many materialized
+                // parameter gradients it owns. Multi-application layers retain the
+                // clear/accumulate pair.
+                const bool accumulatePlanCanEverRun = applications.size() > 1;
                 if (accumulatePlanCanEverRun && !accumulateTargets.empty()) {
                     const GradientAccumulationTargets accumulateWrtNames(
                         accumulateParameterTargets.begin(), accumulateParameterTargets.end());
                     variant.genericSharedBackwardAccumulateWrtNames = accumulateWrtNames;
-                    variant.genericSharedBackwardAccumulatePreview = buildBackwardOutputsForApplication(
+                    variant.genericSharedBackwardAccumulateBuild = buildBackwardOutputsForApplication(
                         applicationIndex, variantId, accumulateTargets, accumulateWrtNames);
-                    onGenericSharedBackwardPreviewBuilt(
+                    onGenericSharedBackwardBuildCreated(
                         applicationIndex,
                         variantId,
-                        variant.genericSharedBackwardAccumulatePreview.value(),
+                        variant.genericSharedBackwardAccumulateBuild.value(),
                         accumulateWrtNames);
                 }
             }
@@ -2800,37 +2719,19 @@ void CustomLayer::compileImpl() {
             }
 
             const bool useGenericSharedBackwardOwnership =
-                variant.genericSharedBackwardClearPreview.has_value();
+                variant.genericSharedBackwardClearBuild.has_value();
 
-            // BR2/BR6.4: preflight every backward graph before stamping the real forward
-            // so the real forward can retain the union of all primal values needed by
-            // this variant. Flat generic trainable variants are now owned exclusively
-            // by the combined shared VJP; deferred paths (notably conditionals) retain
-            // the legacy split builds until BR6.7.
-            // This is important: restamping the forward after one backward plan has already
-            // captured retained Tensor handles would bind that plan to a forward that never runs.
+            // BR6.8: generic trainable CustomLayer variants have exactly one
+            // derivative owner: the combined shared VJP. The only remaining split
+            // backward build is the parameterless/non-trainable dInput-only path.
+            // Preflight it before stamping the real forward so retained primals bind
+            // to the one forward plan that will actually execute.
             std::optional<BackwardBuildResult> backwardErrorBuild;
-            std::optional<BackwardBuildResult> fusedParameterGradientBuild;
-            std::optional<BackwardBuildResult> backwardWeightsClearBuild;
-            std::optional<BackwardBuildResult> backwardWeightsAccumulateBuild;
-
-            if (!app.backwardAdditionalInputsByName.empty() && !useGenericSharedBackwardOwnership) {
-                if (!inputTargets.empty()) {
-                    backwardErrorBuild = buildBackwardOutputsForApplication(
-                        applicationIndex, variantId, inputTargets, false);
-                }
-                if (!fusedParameterTargets.empty()) {
-                    fusedParameterGradientBuild = buildBackwardOutputsForApplication(
-                        applicationIndex, variantId, fusedParameterTargets, false);
-                }
-                if (!allMaterializedParameterTargets.empty()) {
-                    backwardWeightsClearBuild = buildBackwardOutputsForApplication(
-                        applicationIndex, variantId, allMaterializedParameterTargets, false);
-                }
-                if (!activeMaterializedParameterTargets.empty()) {
-                    backwardWeightsAccumulateBuild = buildBackwardOutputsForApplication(
-                        applicationIndex, variantId, activeMaterializedParameterTargets, true);
-                }
+            if (!app.backwardAdditionalInputsByName.empty() &&
+                !useGenericSharedBackwardOwnership &&
+                !inputTargets.empty()) {
+                backwardErrorBuild = buildBackwardOutputsForApplication(
+                    applicationIndex, variantId, inputTargets, false);
             }
 
             ConditionalForwardRetentionMap retainedForwardNodes;
@@ -2862,15 +2763,12 @@ void CustomLayer::compileImpl() {
                 }
             };
             appendRequirements(backwardErrorBuild);
-            appendRequirements(fusedParameterGradientBuild);
-            appendRequirements(backwardWeightsClearBuild);
-            appendRequirements(backwardWeightsAccumulateBuild);
-            // BR6.4: the shared plans are linked to this same real forward, so
-            // its retention set includes the combined VJPs. For flat generic
-            // shared ownership the legacy split builds above are intentionally
-            // absent; deferred paths retain only their own requirements.
-            appendRequirements(variant.genericSharedBackwardClearPreview);
-            appendRequirements(variant.genericSharedBackwardAccumulatePreview);
+            // the shared plans are linked to this same real forward,
+            // so its retention set includes the combined VJPs. Under generic
+            // shared ownership (flat or conditional) the legacy split builds
+            // above are intentionally absent.
+            appendRequirements(variant.genericSharedBackwardClearBuild);
+            appendRequirements(variant.genericSharedBackwardAccumulateBuild);
             for (auto& [path, nodes] : retainedForwardNodes) {
                 (void)path;
                 std::sort(nodes.begin(), nodes.end());
@@ -2893,11 +2791,10 @@ void CustomLayer::compileImpl() {
                     "CustomLayer cannot add generic saved-forward retention after a native-shared forward plan was stamped.");
             }
 
-            // BR6.4: stamp the combined generic VJPs against their physical
-            // destinations. These plans are now the sole runtime owner for flat
-            // generic trainable variants. dInput is graph-connected directly and
-            // dParameter writes the optimizer-owned materialized buffers created
-            // by BR6.3A.
+            // stamp the combined generic VJPs against their physical
+            // destinations. These plans are the sole runtime owner for generic
+            // trainable variants, including conditionals. dInput is graph-connected
+            // directly and dParameter writes optimizer-owned materialized buffers.
             auto exactPreallocatedOutputsForBuild = [](const BackwardBuildResult& build,
                                                        const PreparedDynamicExpression::TensorMap& candidates,
                                                        const char* planKind) {
@@ -2906,7 +2803,7 @@ void CustomLayer::compileImpl() {
                     const auto candidateIt = candidates.find(output.name);
                     if (candidateIt == candidates.end()) {
                         throw runtime_error(
-                            std::string("CustomLayer BR6.3B ") + planKind +
+                            std::string("CustomLayer ") + planKind +
                             " shared backward has no preallocated destination for output '" + output.name + "'.");
                     }
                     exactOutputs.emplace(output.name, candidateIt->second);
@@ -2914,16 +2811,16 @@ void CustomLayer::compileImpl() {
                 return exactOutputs;
             };
 
-            if (variant.genericSharedBackwardClearPreview.has_value()) {
+            if (variant.genericSharedBackwardClearBuild.has_value()) {
                 PreparedDynamicExpression::TensorMap clearCandidates = app.backwardInputGradOutputsByName;
                 clearCandidates.insert(allMaterializedParameterPreallocatedOutputs.begin(),
                                        allMaterializedParameterPreallocatedOutputs.end());
 
-                if (!br66ExpressionFusedOptimizerParameterNames.empty()) {
+                if (!fusedParameterTargets.empty()) {
                     variant.genericSharedBackwardClear = buildGenericSharedBackwardWithFusedOptimizerPlan(
                         applicationIndex,
                         variantId,
-                        variant.genericSharedBackwardClearPreview.value(),
+                        variant.genericSharedBackwardClearBuild.value(),
                         fusedParameterTargets,
                         clearCandidates,
                         parameterStorageByName,
@@ -2931,11 +2828,11 @@ void CustomLayer::compileImpl() {
                 } else {
                     PreparedDynamicExpression::TensorMap clearPreallocatedOutputs =
                         exactPreallocatedOutputsForBuild(
-                            variant.genericSharedBackwardClearPreview.value(), clearCandidates, "clear");
+                            variant.genericSharedBackwardClearBuild.value(), clearCandidates, "clear");
                     variant.genericSharedBackwardClear = stampBackwardForApplication(
                         applicationIndex,
                         variantId,
-                        variant.genericSharedBackwardClearPreview.value(),
+                        variant.genericSharedBackwardClearBuild.value(),
                         false,
                         clearPreallocatedOutputs,
                         computeStream(applicationIndex));
@@ -2951,25 +2848,25 @@ void CustomLayer::compileImpl() {
                     GradientAccumulationTargets{});
             }
 
-            if (variant.genericSharedBackwardAccumulatePreview.has_value()) {
+            if (variant.genericSharedBackwardAccumulateBuild.has_value()) {
                 PreparedDynamicExpression::TensorMap accumulateCandidates = app.backwardInputGradOutputsByName;
                 accumulateCandidates.insert(activeMaterializedParameterPreallocatedOutputs.begin(),
                                             activeMaterializedParameterPreallocatedOutputs.end());
                 PreparedDynamicExpression::TensorMap accumulatePreallocatedOutputs =
                     exactPreallocatedOutputsForBuild(
-                        variant.genericSharedBackwardAccumulatePreview.value(), accumulateCandidates, "accumulate");
+                        variant.genericSharedBackwardAccumulateBuild.value(), accumulateCandidates, "accumulate");
                 const GradientAccumulationTargets& accumulateWrtNames =
                     variant.genericSharedBackwardAccumulateWrtNames;
 
                 variant.genericSharedBackwardAccumulate = stampBackwardForApplication(
                     applicationIndex,
                     variantId,
-                    variant.genericSharedBackwardAccumulatePreview.value(),
+                    variant.genericSharedBackwardAccumulateBuild.value(),
                     true,
                     accumulatePreallocatedOutputs,
                     computeStream(applicationIndex));
                 if (variant.genericSharedBackwardAccumulate == nullptr) {
-                    throw runtime_error("CustomLayer BR6.3B failed to stamp the generic shared accumulate backward plan.");
+                    throw runtime_error("CustomLayer failed to stamp the generic shared accumulate backward plan.");
                 }
                 onGenericSharedBackwardExecutionVariantStamped(
                     applicationIndex,
@@ -3000,49 +2897,9 @@ void CustomLayer::compileImpl() {
                              activeMaterializedParameterPreallocatedOutputs.size());
             }
 
-            if (!useGenericSharedBackwardOwnership &&
-                !allTrainableParameterTargets.empty() &&
-                !app.backwardAdditionalInputsByName.empty()) {
-                THOR_THROW_IF_FALSE(gradientUpdateStream.has_value());
-
-                if (fusedParameterGradientBuild.has_value()) {
-                    variant.backwardWeightsFusedOptimizerUpdate =
-                        buildFusedOptimizerUpdatePlan(applicationIndex,
-                                                      variantId,
-                                                      fusedParameterTargets,
-                                                      fusedParameterGradientBuild.value(),
-                                                      parameterStorageByName);
-                }
-
-                if (backwardWeightsClearBuild.has_value()) {
-                    // Every backward-capable execution variant gets a clear-first stamp that writes every
-                    // materialized gradient buffer. Parameters handled by the fused optimizer stamp intentionally
-                    // skip this dense gradient write/read round trip.
-                    variant.backwardWeightsClear = stampBackwardForApplication(applicationIndex,
-                                                                               variantId,
-                                                                               backwardWeightsClearBuild.value(),
-                                                                               false,
-                                                                               allMaterializedParameterPreallocatedOutputs,
-                                                                               gradientUpdateStream.value());
-
-                    if (backwardWeightsAccumulateBuild.has_value()) {
-                        variant.backwardWeightsAccumulate = stampBackwardForApplication(applicationIndex,
-                                                                                        variantId,
-                                                                                        backwardWeightsAccumulateBuild.value(),
-                                                                                        true,
-                                                                                        activeMaterializedParameterPreallocatedOutputs,
-                                                                                        gradientUpdateStream.value());
-                    }
-                }
-            }
-
-            if (useGenericSharedBackwardOwnership &&
-                (variant.backwardError != nullptr ||
-                 variant.backwardWeightsClear != nullptr ||
-                 variant.backwardWeightsAccumulate != nullptr ||
-                 variant.backwardWeightsFusedOptimizerUpdate != nullptr)) {
+            if (useGenericSharedBackwardOwnership && variant.backwardError != nullptr) {
                 throw runtime_error(
-                    "CustomLayer BR6.4 generic shared backward cannot coexist with a legacy split backward owner.");
+                    "CustomLayer generic shared backward cannot coexist with a split dInput backward owner.");
             }
         }
     }
@@ -3052,7 +2909,7 @@ void CustomLayer::compileImpl() {
             const ApplicationState& app = applications[applicationIndex];
             for (const auto& [variantId, variant] : app.stampedVariants) {
                 std::fprintf(stderr,
-                             "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u variant=%u compiled_stamps backward_supported=%d shared_clear=%d shared_accumulate=%d backward_error=%d weights_clear=%d weights_accumulate=%d fused_update=%d expected_backward_errors=%zu num_backward_applications=%u\n",
+                             "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u variant=%u compiled_stamps backward_supported=%d shared_clear=%d shared_accumulate=%d backward_error=%d expected_backward_errors=%zu num_backward_applications=%u\n",
                              diagnosticLabel().c_str(),
                              applicationIndex,
                              variantId,
@@ -3060,9 +2917,6 @@ void CustomLayer::compileImpl() {
                              variant.genericSharedBackwardClear != nullptr ? 1 : 0,
                              variant.genericSharedBackwardAccumulate != nullptr ? 1 : 0,
                              variant.backwardError != nullptr ? 1 : 0,
-                             variant.backwardWeightsClear != nullptr ? 1 : 0,
-                             variant.backwardWeightsAccumulate != nullptr ? 1 : 0,
-                             variant.backwardWeightsFusedOptimizerUpdate != nullptr ? 1 : 0,
                              app.expectedBackwardErrorInputTensorIds.size(),
                              numBackwardApplications);
             }
@@ -3551,17 +3405,13 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
         if (useNativeSharedBackward && useGenericSharedBackward) {
             throw runtime_error("CustomLayer cannot execute native and generic shared backward ownership simultaneously.");
         }
-        if (useGenericSharedBackward &&
-            (variant.backwardError != nullptr ||
-             variant.backwardWeightsClear != nullptr ||
-             variant.backwardWeightsAccumulate != nullptr ||
-             variant.backwardWeightsFusedOptimizerUpdate != nullptr)) {
-            throw runtime_error("CustomLayer BR6.4 generic shared backward found a duplicate legacy runtime owner.");
+        if (useGenericSharedBackward && variant.backwardError != nullptr) {
+            throw runtime_error("CustomLayer generic shared backward found a duplicate split dInput runtime owner.");
         }
 
         if (trainingUpdateDiagnosticsEnabled()) {
             std::fprintf(stderr,
-                         "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u variant=%u backward_ready batch=%u active_parameters=%s generic_shared=%d backward_error_stamp=%d weights_clear_stamp=%d weights_accumulate_stamp=%d fused_update_stamp=%d\n",
+                         "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u variant=%u backward_ready batch=%u active_parameters=%s generic_shared=%d backward_error_stamp=%d fused_parameters=%s\n",
                          diagnosticLabel().c_str(),
                          applicationIndex,
                          variantId,
@@ -3569,33 +3419,17 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                          joinNames(variant.activeParameterTargetNames).c_str(),
                          useGenericSharedBackward ? 1 : 0,
                          variant.backwardError != nullptr ? 1 : 0,
-                         variant.backwardWeightsClear != nullptr ? 1 : 0,
-                         variant.backwardWeightsAccumulate != nullptr ? 1 : 0,
-                         variant.backwardWeightsFusedOptimizerUpdate != nullptr ? 1 : 0);
+                         joinNames(variant.optimizerUpdateFusedParameterNames).c_str());
         }
 
         const bool emitLayerDiagnostics = layerSubmitDiagnosticsActive();
         const auto appBackwardStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-        uint64_t readyEventMicros = 0;
         uint64_t errorComputeMicros = 0;
-        uint64_t waitErrorInputMicros = 0;
-        uint64_t waitFusedUpdateMicros = 0;
-        uint64_t accumulateMicros = 0;
         uint64_t recordBatchMicros = 0;
         uint64_t upstreamMicros = 0;
         uint64_t upstreamCount = 0;
 
         app.backwardRanThisPass = true;
-
-        Event* errorInputReadyEvent = nullptr;
-        if (!useNativeSharedBackward && !useGenericSharedBackward && gradientUpdateStream.has_value()) {
-            const auto readyEventStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-            computeStream(applicationIndex).putEvent(app.errorInputReadyEvent);
-            errorInputReadyEvent = &app.errorInputReadyEvent;
-            if (emitLayerDiagnostics) {
-                readyEventMicros = layerSubmitDiagnosticElapsedMicros(readyEventStart, layerSubmitDiagnosticNow());
-            }
-        }
 
         std::optional<Event> errorOutHasBeenComputedEvent = std::nullopt;
         bool genericSharedWroteParameterGradient = false;
@@ -3618,7 +3452,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             // contributions may legitimately be dInput-only when this application
             // has no active parameter target.
             if (runClearSharedPlan && sharedPlan == nullptr) {
-                throw runtime_error("CustomLayer BR6.4 first generic shared backward contribution has no clear plan.");
+                throw runtime_error("CustomLayer first generic shared backward contribution has no clear plan.");
             }
 
             genericSharedWroteParameterGradient =
@@ -3636,7 +3470,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                     const uint32_t previousApplication =
                         lastParameterGradientContributionApplicationThisPass.value();
                     THOR_THROW_IF_FALSE(previousApplication < applications.size());
-                    sharedStream.waitEvent(applications[previousApplication].parameterGradientReadyEvent);
+                    sharedStream.waitEvent(applications[previousApplication].backwardErrorReadyEvent);
                 }
 
                 const auto errorComputeStart =
@@ -3645,16 +3479,26 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                     throw runtime_error(
                         "CustomLayer BR6.6 expression-fused optimizer update cannot execute on an accumulate contribution.");
                 }
+#ifdef THOR_DEBUG
+                if (runClearSharedPlan) {
+                    ++variant.genericSharedBackwardClearExecutionCount;
+                } else {
+                    ++variant.genericSharedBackwardAccumulateExecutionCount;
+                }
+#endif
                 if (runClearSharedPlan && !variant.optimizerUpdateFusedParameterNames.empty()) {
                     sharedPlan->run(updateFusedOptimizerRuntimeScalars(applicationIndex, variantId, batchSize));
                 } else {
                     sharedPlan->run();
                 }
+                // One recurring completion event is sufficient for both consumers:
+                // upstream dInput readers and the next application's serialized dW
+                // contribution. StampedExecutionPlan::run() has already joined any
+                // internal helper lanes back to this stream before the event is recorded.
                 sharedStream.putEvent(app.backwardErrorReadyEvent);
                 errorOutHasBeenComputedEvent = app.backwardErrorReadyEvent;
 
                 if (genericSharedWroteParameterGradient) {
-                    sharedStream.putEvent(app.parameterGradientReadyEvent);
                     lastParameterGradientContributionApplicationThisPass = applicationIndex;
                 }
 
@@ -3693,51 +3537,6 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             }
         }
 
-        if (gradientUpdateStream.has_value() && errorInputReadyEvent != nullptr) {
-            const auto waitStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-            gradientUpdateStream.value().waitEvent(*errorInputReadyEvent);
-            if (emitLayerDiagnostics) {
-                waitErrorInputMicros = layerSubmitDiagnosticElapsedMicros(waitStart, layerSubmitDiagnosticNow());
-            }
-        }
-        if (gradientUpdateStream.has_value() && errorOutHasBeenComputedEvent.has_value() &&
-            variant.backwardWeightsFusedOptimizerUpdate != nullptr) {
-            // Fused optimizer stamps update parameter storage directly, so they must preserve the same
-            // ordering as the legacy materialized path: upstream input-gradient computation reads old
-            // weights before the optimizer overwrites them.
-            const auto waitStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-            gradientUpdateStream.value().waitEvent(errorOutHasBeenComputedEvent.value());
-            if (emitLayerDiagnostics) {
-                waitFusedUpdateMicros = layerSubmitDiagnosticElapsedMicros(waitStart, layerSubmitDiagnosticNow());
-            }
-        }
-
-        const auto accumulateStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-        if (!useNativeSharedBackward && !useGenericSharedBackward) {
-            const bool legacyWritesMaterializedParameterGradient =
-                (clearGradientFirstThisBackwardPass && variant.backwardWeightsClear != nullptr) ||
-                (!clearGradientFirstThisBackwardPass && variant.backwardWeightsAccumulate != nullptr);
-
-            if (legacyWritesMaterializedParameterGradient &&
-                gradientUpdateStream.has_value() &&
-                lastParameterGradientContributionApplicationThisPass.has_value()) {
-                const uint32_t previousApplication =
-                    lastParameterGradientContributionApplicationThisPass.value();
-                THOR_THROW_IF_FALSE(previousApplication < applications.size());
-                gradientUpdateStream.value().waitEvent(
-                    applications[previousApplication].parameterGradientReadyEvent);
-            }
-
-            accumulateWeightsGradientForApplication(applicationIndex, clearGradientFirstThisBackwardPass, batchSize);
-
-            if (legacyWritesMaterializedParameterGradient && gradientUpdateStream.has_value()) {
-                gradientUpdateStream.value().putEvent(app.parameterGradientReadyEvent);
-                lastParameterGradientContributionApplicationThisPass = applicationIndex;
-            }
-        }
-        if (emitLayerDiagnostics) {
-            accumulateMicros = layerSubmitDiagnosticElapsedMicros(accumulateStart, layerSubmitDiagnosticNow());
-        }
         const auto recordBatchStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         recordEffectiveParameterBatchSizeForApplication(applicationIndex, batchSize);
         if (emitLayerDiagnostics) {
@@ -3765,11 +3564,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                                       getId(),
                                       layerSubmitDiagnosticElapsedMicros(appBackwardStart, layerSubmitDiagnosticNow()),
                                       {{"app", applicationIndex},
-                                       {"ready_event_us", readyEventMicros},
                                        {"error_compute_us", errorComputeMicros},
-                                       {"wait_error_input_us", waitErrorInputMicros},
-                                       {"wait_fused_update_us", waitFusedUpdateMicros},
-                                       {"accumulate_us", accumulateMicros},
                                        {"record_batch_us", recordBatchMicros},
                                        {"upstream_us", upstreamMicros},
                                        {"upstream_count", upstreamCount}});
@@ -3814,9 +3609,9 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             const uint64_t waitErrorOutputsMicros =
                 emitApplyDiagnostics ? layerSubmitDiagnosticElapsedMicros(waitErrorOutputsStart, layerSubmitDiagnosticNow()) : 0;
 
-            // Legacy parameter-gradient/fused-optimizer work is submitted on
-            // gradientUpdateStream; native and BR6.4 generic shared backward may
-            // instead produce dX and dW together on an application compute stream.
+            // Native and generic shared backward may produce dX and dW together
+            // on an application compute stream. The optimizer stream joins every
+            // local backward-completion event before applying materialized gradients.
             // This stream has now joined every local backward-completion event, so
             // an event recorded here is the local last-use point for any labels or
             // batch-validity-mask tensors captured by a fused CustomLoss gradient.
@@ -4068,96 +3863,12 @@ std::optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
     return app.backwardErrorReadyEvent;
 }
 
-void CustomLayer::accumulateWeightsGradientForApplication(uint32_t applicationIndex, bool clearGradientFirst, uint32_t batchSize) {
-    if (!gradientUpdateStream.has_value()) {
-        return;
-    }
-    if (applicationIndex >= applications.size()) {
-        return;
-    }
-    ApplicationState& app = applications[applicationIndex];
-    StampedExecutionVariant& variant = backwardVariantForApplication(applicationIndex);
-    const DynamicExpressionVariantId variantId = app.forwardVariantThisPass.value();
-
-    // backwardWeightsClear is an overwrite-mode backward-gradient stamp, not a zero-only
-    // memset.  It computes this application's materialized parameter gradient and writes it into
-    // the dense gradient buffer.  Therefore the first materialized application in a backward pass
-    // must run the clear stamp instead of the accumulate stamp; running both for the same
-    // application double-counts the gradient.  Later applications use the accumulate stamp to add
-    // their contribution to the buffer established by the first application.
-    const bool ranMaterializedOverwrite = clearGradientFirst && variant.backwardWeightsClear != nullptr;
-    if (trainingUpdateDiagnosticsEnabled()) {
-        std::fprintf(stderr,
-                     "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u variant=%u accumulate batch=%u clear_first=%d run_clear=%d run_accumulate=%d run_fused_update=%d active_parameters=%s\n",
-                     diagnosticLabel().c_str(),
-                     applicationIndex,
-                     variantId,
-                     batchSize,
-                     clearGradientFirst ? 1 : 0,
-                     ranMaterializedOverwrite ? 1 : 0,
-                     (!ranMaterializedOverwrite && variant.backwardWeightsAccumulate != nullptr) ? 1 : 0,
-                     variant.backwardWeightsFusedOptimizerUpdate != nullptr ? 1 : 0,
-                     joinNames(variant.activeParameterTargetNames).c_str());
-    }
-    const bool emitDiagnostics = layerSubmitDiagnosticsActive();
-    const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-    uint64_t clearMicros = 0;
-    uint64_t fusedUpdateMicros = 0;
-    uint64_t accumulateMicros = 0;
-    if (ranMaterializedOverwrite) {
-        const auto clearStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-        variant.backwardWeightsClear->run();
-        if (emitDiagnostics) {
-            clearMicros = layerSubmitDiagnosticElapsedMicros(clearStart, layerSubmitDiagnosticNow());
-        }
-    }
-
-    if (variant.backwardWeightsFusedOptimizerUpdate != nullptr) {
-        const auto fusedStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-        variant.backwardWeightsFusedOptimizerUpdate->run(updateFusedOptimizerRuntimeScalars(applicationIndex, variantId, batchSize));
-        if (emitDiagnostics) {
-            fusedUpdateMicros = layerSubmitDiagnosticElapsedMicros(fusedStart, layerSubmitDiagnosticNow());
-        }
-    }
-
-    if (!ranMaterializedOverwrite && variant.backwardWeightsAccumulate != nullptr) {
-        const auto accumulateStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-        variant.backwardWeightsAccumulate->run();
-        if (emitDiagnostics) {
-            accumulateMicros = layerSubmitDiagnosticElapsedMicros(accumulateStart, layerSubmitDiagnosticNow());
-        }
-    }
-    if (emitDiagnostics) {
-        emitLayerSubmitDiagnostic("custom_backward_weights_compute",
-                                  diagnosticLabel(),
-                                  getId(),
-                                  layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
-                                  {{"app", applicationIndex},
-                                   {"variant", variantId},
-                                   {"batch", batchSize},
-                                   {"clear_first", clearGradientFirst ? 1UL : 0UL},
-                                   {"clear_us", clearMicros},
-                                   {"fused_update_us", fusedUpdateMicros},
-                                   {"accumulate_us", accumulateMicros},
-                                   {"has_clear", variant.backwardWeightsClear != nullptr ? 1UL : 0UL},
-                                   {"has_fused_update", variant.backwardWeightsFusedOptimizerUpdate != nullptr ? 1UL : 0UL},
-                                   {"has_accumulate", variant.backwardWeightsAccumulate != nullptr ? 1UL : 0UL}});
-    }
-}
-
-void CustomLayer::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {
-    DecodedConnection decoded = decodeInputConnectionType(static_cast<int>(connectionNumber));
-    accumulateWeightsGradientForApplication(decoded.applicationIndex, clearGradientFirst, 0);
-}
-
 void CustomLayer::cleanup() {
     for (ApplicationState& app : applications) {
         for (Event& event : app.forwardInputReadyEvents) {
             event = Event();
         }
-        app.errorInputReadyEvent = Event();
         app.backwardErrorReadyEvent = Event();
-        app.parameterGradientReadyEvent = Event();
     }
     fusedLossConsumersDoneEvent = Event();
     lastParameterGradientContributionApplicationThisPass.reset();
@@ -4177,6 +3888,14 @@ uint64_t CustomLayer::flopCountForward() {
 
 uint64_t CustomLayer::flopCountBackward() {
     uint64_t flops = 0;
+    bool genericClearContributionAccounted = false;
+
+    // Report the cost of one whole layer backward pass. Generic shared ownership
+    // executes exactly one clear contribution and then accumulate contributions
+    // for later applications. The static estimate uses application-index order to
+    // choose which primary-variant plan is the clear contribution; runtime arrival
+    // order can differ, but we no longer count an accumulate plan for every app or
+    // report an unreachable single-application accumulate plan.
     for (const ApplicationState& app : applications) {
         auto it = app.stampedVariants.find(kPrimaryDynamicExpressionVariant);
         if (it == app.stampedVariants.end()) {
@@ -4187,22 +3906,22 @@ uint64_t CustomLayer::flopCountBackward() {
             flops += variant.nativeSharedBackward->flopCount();
             continue;
         }
-        if (variant.genericSharedBackwardAccumulate != nullptr) {
-            flops += variant.genericSharedBackwardAccumulate->flopCount();
-            continue;
-        }
         if (variant.genericSharedBackwardClear != nullptr) {
-            flops += variant.genericSharedBackwardClear->flopCount();
+            if (!genericClearContributionAccounted) {
+                flops += variant.genericSharedBackwardClear->flopCount();
+                genericClearContributionAccounted = true;
+            } else if (variant.genericSharedBackwardAccumulate != nullptr) {
+                flops += variant.genericSharedBackwardAccumulate->flopCount();
+            } else {
+                // A second generic shared contribution without an accumulate plan
+                // would also be invalid at runtime. Keep the estimator conservative
+                // rather than silently dropping all of that application's work.
+                flops += variant.genericSharedBackwardClear->flopCount();
+            }
             continue;
         }
         if (variant.backwardError != nullptr) {
             flops += variant.backwardError->flopCount();
-        }
-        if (variant.backwardWeightsAccumulate != nullptr) {
-            flops += variant.backwardWeightsAccumulate->flopCount();
-        }
-        if (variant.backwardWeightsFusedOptimizerUpdate != nullptr) {
-            flops += variant.backwardWeightsFusedOptimizerUpdate->flopCount();
         }
     }
     return flops;

@@ -44,6 +44,50 @@ uint64_t tensorNumel(const Impl::Tensor& tensor) {
     return numel;
 }
 
+
+#ifdef THOR_DEBUG
+void expectBr65SharedPlanHasTwoBoundaryStagesWithOneSharedFusedParent(
+    const Impl::CustomLayer::GenericSharedBackwardDebugDiagnostic& diagnostic,
+    const string& boundaryKind) {
+    ASSERT_EQ(diagnostic.clearStageKindNames.size(), diagnostic.clearStageDependencyIndices.size());
+
+    string stageSummary;
+    vector<uint32_t> boundaryStages;
+    for (uint32_t stageIndex = 0; stageIndex < diagnostic.clearStageKindNames.size(); ++stageIndex) {
+        stageSummary += std::to_string(stageIndex) + ":" + diagnostic.clearStageKindNames[stageIndex] + " deps=[";
+        for (uint32_t depIndex : diagnostic.clearStageDependencyIndices[stageIndex]) {
+            stageSummary += std::to_string(depIndex) + ",";
+        }
+        stageSummary += "] ";
+        if (diagnostic.clearStageKindNames[stageIndex] == boundaryKind) {
+            boundaryStages.push_back(stageIndex);
+        }
+    }
+
+    ASSERT_EQ(boundaryStages.size(), 2u)
+        << "BR6.5 requires exactly two physical " << boundaryKind
+        << " stages in the shared-clear plan: dInput and dWeights. Plan: " << stageSummary;
+
+    const auto& firstDependencies = diagnostic.clearStageDependencyIndices[boundaryStages[0]];
+    const auto& secondDependencies = diagnostic.clearStageDependencyIndices[boundaryStages[1]];
+    vector<uint32_t> sharedFusedParents;
+    for (uint32_t dependency : firstDependencies) {
+        if (std::find(secondDependencies.begin(), secondDependencies.end(), dependency) == secondDependencies.end()) {
+            continue;
+        }
+        ASSERT_LT(dependency, diagnostic.clearStageKindNames.size());
+        if (diagnostic.clearStageKindNames[dependency] == "FusedKernel") {
+            sharedFusedParents.push_back(dependency);
+        }
+    }
+
+    EXPECT_EQ(sharedFusedParents.size(), 1u)
+        << "BR6.5 requires dInput and dWeights to consume one shared physical activation-adjoint prefix, "
+           "not independently materialized activation derivatives. Plan: "
+        << stageSummary;
+}
+#endif
+
 void synchronizeEvents(vector<Event>& events) {
     for (Event& event : events)
         event.synchronize();
@@ -1239,6 +1283,13 @@ TEST(Convolution2dApi, Br65DefaultGeluSharedBackwardExecutesOneAdjointAndTwoGrad
         << "BR6.5 must execute exactly one real forward convolution.";
     EXPECT_EQ(forwardCounters.convolution.backward_gradient, 0U);
 
+    const auto planDiagnosticBefore = fixture.physicalConvolution->genericSharedBackwardDebugDiagnostic();
+    ASSERT_TRUE(planDiagnosticBefore.has_value());
+    expectBr65SharedPlanHasTwoBoundaryStagesWithOneSharedFusedParent(
+        planDiagnosticBefore.value(), "ConvolutionBackward");
+    EXPECT_EQ(planDiagnosticBefore->clearExecutionCount, 0U);
+    EXPECT_EQ(planDiagnosticBefore->accumulateExecutionCount, 0U);
+
     ASSERT_GT(fixture.physicalConvolution->getErrorInputs().size(), 0U);
     ASSERT_TRUE(fixture.physicalConvolution->getErrorInputs()[0].has_value());
     Impl::Tensor errorInput = fixture.physicalConvolution->getErrorInputs()[0].value();
@@ -1256,10 +1307,15 @@ TEST(Convolution2dApi, Br65DefaultGeluSharedBackwardExecutesOneAdjointAndTwoGrad
     EXPECT_EQ(counters.convolution.forward, 0U)
         << "BR6.5 backward must not replay the forward convolution.";
     EXPECT_EQ(counters.convolution.backward_gradient, 2U)
-        << "BR6.5 Convolution2d shared backward must execute only dInput and dWeights convolutions.";
-    EXPECT_EQ(counters.fused_kernel.forward, 0U);
-    EXPECT_EQ(counters.fused_kernel.backward_gradient, 1U)
-        << "BR6.5 Convolution2d dInput and dWeights must share one activation-adjoint prefix.";
+        << "BR6.5 runtime must execute exactly the two physical dInput/dWeights convolutions. "
+           "If the stamped plan above contains exactly two ConvolutionBackward stages but this count is larger, "
+           "another backward plan or duplicate submission is executing.";
+
+    const auto planDiagnosticAfter = fixture.physicalConvolution->genericSharedBackwardDebugDiagnostic();
+    ASSERT_TRUE(planDiagnosticAfter.has_value());
+    EXPECT_EQ(planDiagnosticAfter->clearExecutionCount, 1U)
+        << "BR6.5 single-application backward must submit the shared-clear plan exactly once.";
+    EXPECT_EQ(planDiagnosticAfter->accumulateExecutionCount, 0U);
 }
 #endif
 

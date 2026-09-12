@@ -513,15 +513,16 @@ TEST(ExpressionForwardReplayInstrumentation, ConvolutionGeluUsesSavedForwardValu
     const PhysicalOutputs& backward = backward_build.outputs;
     EXPECT_FALSE(backward_build.forward_value_requirements.empty());
 
-    // Exact GELU still contains two logical references to the convolution
-    // producer, but BR6.0A turns any computed primal dependency into a retained
-    // forward input. No CONV2D producer may be cloned into the backward graph.
+    // Exact GELU now preserves one logical convolution producer shared by x and
+    // Phi(x). BR6.0A turns any computed primal dependency into a retained
+    // forward input, so no CONV2D producer may be cloned into backward and the
+    // single input-gradient request must generate exactly one backward-data op.
     EXPECT_EQ(countNodesWithProvenance(
                   backward, ExprOp::CONV2D, ExpressionExecutionProvenance::Forward),
               0U);
     EXPECT_EQ(countNodesWithProvenance(
                   backward, ExprOp::CONV2D_BACKWARD_DATA, ExpressionExecutionProvenance::BackwardGradient),
-              2U);
+              1U);
 }
 
 
@@ -550,14 +551,15 @@ TEST(ExpressionForwardReplayInstrumentation, Convolution3dGeluUsesSavedForwardVa
     const PhysicalOutputs& backward = backward_build.outputs;
     EXPECT_FALSE(backward_build.forward_value_requirements.empty());
 
-    // See the 2D case above: duplicated logical references may remain, but the
-    // forward convolution itself is never reconstructed during autodiff.
+    // See the 2D case above: GELU preserves one shared logical convolution
+    // producer, and the forward convolution itself is never reconstructed during
+    // autodiff. The single input-gradient request therefore has one backward-data op.
     EXPECT_EQ(countNodesWithProvenance(
                   backward, ExprOp::CONV3D, ExpressionExecutionProvenance::Forward),
               0U);
     EXPECT_EQ(countNodesWithProvenance(
                   backward, ExprOp::CONV3D_BACKWARD_DATA, ExpressionExecutionProvenance::BackwardGradient),
-              2U);
+              1U);
 }
 
 TEST(ExpressionForwardReplayInstrumentation, PhysicalNorm2BackwardConsumesRetainedOutputWithoutReplay) {
