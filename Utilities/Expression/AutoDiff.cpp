@@ -1325,11 +1325,11 @@ class BackwardGraphBuilder {
         if (forward_node.matmul_epilogue == MatmulEpilogue::Gelu && forward_node.matmul_forward_epilogue_aux) {
             preactivation = bindForwardEpilogueAuxInput(forward_node);
         } else {
-            // BR6.0A: AutoDiff never regenerates a swallowed forward value. A
-            // fused activation whose derivative needs a primal must have a
-            // real-forward auxiliary provider. BR3/BR4 deliberately keep
-            // unsupported training cases unfused; reaching this branch is a
-            // forward-retention contract bug, not a checkpointing request.
+            // AutoDiff never regenerates a swallowed forward value. A fused
+            // activation whose derivative needs a primal must have a real-forward
+            // auxiliary provider. Unsupported training cases remain unfused;
+            // reaching this branch is a forward-retention contract bug, not a
+            // checkpointing request.
             throw std::runtime_error(
                 "Autodiff matmul activation backward has no retained real-forward prerequisite; "
                 "keep the activation unfused or provide an explicit forward auxiliary state.");
@@ -2441,8 +2441,16 @@ class BackwardGraphBuilder {
     std::string saved_forward_input_name_qualifier;
     std::vector<ForwardValueRequirement>* forward_value_requirements = nullptr;
     PhysicalExpression grad_expr;
+    // Retained-forward bindings are memoized by physical forward-node identity.
+    // Different retained artifact kinds intentionally use different maps: a
+    // MATMUL+GELU node may need both its public NodeOutput and its epilogue
+    // auxiliary, but repeated requests for either artifact reuse one binding.
     std::unordered_map<uint32_t, uint32_t> forward_value_to_grad_node_map;
     std::unordered_map<uint32_t, uint32_t> forward_epilogue_aux_to_grad_node_map;
+
+    // One adjoint slot per physical forward node is the reverse-mode identity
+    // contract. addContribution() accumulates every downstream contribution into
+    // this slot before the reverse sweep reaches that producer.
     std::vector<std::optional<uint32_t>> node_grads;
 };
 
@@ -4139,6 +4147,12 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                             preferredGradValueDType(forward_expr.nodes.at(forward_node_idx)));
     };
 
+    // Reverse processing is node-index based: each physical forward node is
+    // visited at most once, after all later consumers have had a chance to add
+    // into node_grads[node_idx]. Some VJP rules legitimately emit several
+    // sibling backward values during this one visit (MATMUL dX/dW, RMSNorm
+    // dX/dScale, Attention dQ/dK/dV/dBias); that is one producer VJP, not one
+    // VJP per downstream consumer.
     for (int64_t node_idx = static_cast<int64_t>(forward_expr.nodes.size()) - 1; node_idx >= 0; --node_idx) {
         const auto& grad_opt = builder.gradOf(static_cast<uint32_t>(node_idx));
         if (!grad_opt.has_value()) {
@@ -6189,6 +6203,10 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
         }
     }
 
+    // INPUT is the intentional identity exception to executing producers.
+    // Several distinct physical INPUT nodes may bind the same external slot;
+    // their node-index adjoints are therefore aggregated below into one public
+    // <input>_grad. Runtime/executing producer identity remains node-based.
     std::unordered_map<uint32_t, uint32_t> first_input_node_by_slot;
     for (uint32_t i = 0; i < forward_expr.nodes.size(); ++i) {
         const ExprNode& node = forward_expr.nodes[i];

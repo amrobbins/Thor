@@ -6,6 +6,7 @@
 #include "DeepLearning/Implementation/Tensor/RowPartitionDescriptor.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/Expression/ExpressionInternal.h"
 #include "Utilities/TensorOperations/DeepLearning/CudnnRmsNorm.h"
 
 #include <cstddef>
@@ -39,41 +40,24 @@ uint64_t checkedProductForRmsNorm(const std::vector<uint64_t>& dims, const std::
     return product;
 }
 
-struct ExpressionInputDataTypes {
-    std::optional<DataType> computeDataType;
-    std::optional<DataType> outputDataType;
-};
+using ExpressionInputDataTypes = ThorImplementation::ExpressionInputAnnotations;
 
 ExpressionInputDataTypes expressionInputDataTypes(const ThorImplementation::Expression& expression,
                                                    const std::string& inputName) {
-    const ThorImplementation::PhysicalExpression physicalExpression = expression.expression();
-    std::optional<ExpressionInputDataTypes> resolved;
+    const std::vector<ExpressionInputDataTypes> annotations =
+        ThorImplementation::ExpressionInternalAccess::inputAnnotations(expression, inputName);
+    if (annotations.empty()) {
+        throw std::runtime_error("RMSNorm epilogue expression does not contain expected input '" + inputName + "'.");
+    }
 
-    for (const ThorImplementation::ExprNode& node : physicalExpression.nodes) {
-        if (node.op != ThorImplementation::ExprOp::INPUT) {
-            continue;
-        }
-        if (node.input_slot >= physicalExpression.inputs.size()) {
-            throw std::runtime_error("RMSNorm epilogue input node has an invalid input slot.");
-        }
-        if (physicalExpression.inputs[node.input_slot].name != inputName) {
-            continue;
-        }
-
-        const ExpressionInputDataTypes candidate{node.compute_dtype, node.output_dtype};
-        if (resolved.has_value() &&
-            (resolved->computeDataType != candidate.computeDataType ||
-             resolved->outputDataType != candidate.outputDataType)) {
+    const ExpressionInputDataTypes& resolved = annotations.front();
+    for (const ExpressionInputDataTypes& candidate : annotations) {
+        if (resolved != candidate) {
             throw std::runtime_error("RMSNorm epilogue input '" + inputName +
                                      "' is used with inconsistent dtype annotations.");
         }
-        resolved = candidate;
     }
-
-    if (!resolved.has_value()) {
-        throw std::runtime_error("RMSNorm epilogue expression does not contain expected input '" + inputName + "'.");
-    }
-    return resolved.value();
+    return resolved;
 }
 
 // Backend optimization probe only: the public RMSNorm epilogue contract is an
@@ -300,15 +284,8 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                                                            DataType::FP32,
                                                            inputDataType,
                                                            packedRowCapacity);
-                    ThorImplementation::PhysicalExpression physical = fused.expression();
-                    if (physical.output_node >= physical.nodes.size() ||
-                        physical.nodes[physical.output_node].op != ThorImplementation::ExprOp::RMSNORM) {
-                        throw std::runtime_error("RMSNorm internal fusion rewrite expected an RMSNORM output node.");
-                    }
-                    physical.nodes[physical.output_node].rms_norm_fused_activation =
-                        ThorImplementation::CudnnRmsNormFusedActivation::SWISH;
-                    auto fusedPhysical = std::make_shared<ThorImplementation::PhysicalExpression>(std::move(physical));
-                    return Expression::fromPhysicalNode(fusedPhysical, fusedPhysical->output_node);
+                    return ThorImplementation::ExpressionInternalAccess::withRmsNormFusedActivation(
+                        fused, ThorImplementation::CudnnRmsNormFusedActivation::SWISH);
                 }
 
                 if (cudnnSwishFusionCandidate) {

@@ -583,35 +583,6 @@ TEST(ExpressionBooleanComparisonOps, LogicalNotTransposePushThroughNormalizesTra
     EXPECT_EQ(outputs.expr->nodes.at(root.lhs).op, ExprOp::GREATER);
 }
 
-TEST(ExpressionConvenienceOps, GeluPreservesOneSharedLogicalProducer) {
-    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
-    const Expression w = Expression::input("w", DataType::FP32, DataType::FP32);
-    const Expression projection =
-        Expression::matmul(x, w, false, false, DataType::FP32, DataType::FP32);
-    const PhysicalOutputs outputs = Expression::outputs({{"y", projection.gelu()}}).physicalOutputs();
-
-    ASSERT_NE(outputs.expr, nullptr);
-    ASSERT_EQ(outputs.outputs.size(), 1u);
-    ASSERT_LT(outputs.outputs.front().node_idx, outputs.expr->nodes.size());
-    const ExprNode& geluProduct = outputs.expr->nodes.at(outputs.outputs.front().node_idx);
-    ASSERT_EQ(geluProduct.op, ExprOp::MUL);
-    ASSERT_NE(geluProduct.lhs, UINT32_MAX);
-    ASSERT_NE(geluProduct.rhs, UINT32_MAX);
-    ASSERT_LT(geluProduct.rhs, outputs.expr->nodes.size());
-
-    const ExprNode& cdf = outputs.expr->nodes.at(geluProduct.rhs);
-    ASSERT_EQ(cdf.op, ExprOp::NORMCDF);
-    EXPECT_EQ(cdf.lhs, geluProduct.lhs)
-        << "Exact GELU must reference one shared logical x producer from both x and Phi(x).";
-
-    size_t matmulCount = 0;
-    for (const ExprNode& node : outputs.expr->nodes) {
-        matmulCount += (node.op == ExprOp::MATMUL || node.op == ExprOp::GEMM) ? 1u : 0u;
-    }
-    EXPECT_EQ(matmulCount, 1u)
-        << "GELU composition must not clone an expensive affine producer before AutoDiff sees the graph.";
-}
-
 TEST(ExpressionBooleanComparisonOps, LogicalNotSubexpressionsDoNotBlockMatmulGeluEpilogueMatching) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);

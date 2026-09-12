@@ -10,6 +10,9 @@
 #include "Utilities/Expression/CudaSourceEmitter.h"
 #include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/EquationCompiler.h"
+#define THOR_EXPRESSION_TEST_HOOKS_IMPLEMENTATION
+#include "Utilities/Expression/ExpressionTestHooks.h"
+#undef THOR_EXPRESSION_TEST_HOOKS_IMPLEMENTATION
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/StampedEquation.h"
@@ -79,15 +82,15 @@ static bool physicalOutputsRequireLinkedForwardExecution(const PhysicalOutputs& 
 // Deferred-shape AutoDiff can intentionally postpone construction of backend
 // backward operators such as RMSNormBackward until runtime shapes are known.
 // Detect those real-forward-state dependencies from the original forward DAG so
-// BR6.0E's execution contract does not mistake a shape-deferred placeholder VJP
-// for a genuinely standalone one.
+// the linked-forward execution contract does not mistake a shape-deferred
+// placeholder VJP for a genuinely standalone one.
 static bool forwardStatefulOpParticipatesInRequestedVjp(
     const PhysicalOutputs& forward_outputs,
     const std::vector<std::string>& wrt_names,
     const std::optional<std::unordered_map<std::string, std::string>>& upstream_input_names_by_output) {
     if (forward_outputs.isConditional()) {
-        // BR6.0C makes the exact forward predicate part of backward state. A
-        // graph-level conditional backward therefore always belongs to the
+        // The exact forward predicate is part of backward state. A graph-level
+        // conditional backward therefore always belongs to the
         // linked-forward execution contract, even when its branch derivatives
         // otherwise use only roots.
         return true;
@@ -2063,89 +2066,6 @@ static bool canFuseMatmulActivationEpilogue(const PhysicalExpression& expr,
     return true;
 }
 
-static bool sameSubexpressionForMatmulEpilogue(const PhysicalExpression& expr,
-                                               uint32_t a_idx,
-                                               uint32_t b_idx,
-                                               uint32_t depth = 0) {
-    if (a_idx == b_idx) {
-        return true;
-    }
-    if (depth > 64 || a_idx >= expr.nodes.size() || b_idx >= expr.nodes.size()) {
-        return false;
-    }
-
-    const ExprNode& a = expr.nodes[a_idx];
-    const ExprNode& b = expr.nodes[b_idx];
-    if (a.op != b.op) {
-        return false;
-    }
-
-    if (a.output_dtype != b.output_dtype || a.compute_dtype != b.compute_dtype || a.input_tensor_dtype != b.input_tensor_dtype ||
-        a.backward_output_dtype != b.backward_output_dtype || a.backward_compute_dtype != b.backward_compute_dtype) {
-        return false;
-    }
-
-    switch (a.op) {
-        case ExprOp::INPUT:
-        case ExprOp::RUNTIME_SCALAR:
-        case ExprOp::TENSOR_RUNTIME_SCALAR:
-            return a.input_slot == b.input_slot;
-        case ExprOp::SCALAR_FP:
-            return a.scalar_fp == b.scalar_fp;
-        case ExprOp::MATMUL:
-            return a.transpose_lhs == b.transpose_lhs && a.transpose_rhs == b.transpose_rhs && a.matmul_epilogue == b.matmul_epilogue &&
-                   a.matmul_backward_epilogue == b.matmul_backward_epilogue &&
-                   a.matmul_forward_epilogue_aux == b.matmul_forward_epilogue_aux &&
-                   a.matmul_packed_row_binding == b.matmul_packed_row_binding &&
-                   a.matmul_packed_row_capacity == b.matmul_packed_row_capacity &&
-                   (a.matmul_epilogue_aux == b.matmul_epilogue_aux ||
-                    sameSubexpressionForMatmulEpilogue(expr, a.matmul_epilogue_aux, b.matmul_epilogue_aux, depth + 1)) &&
-                   sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1) &&
-                   sameSubexpressionForMatmulEpilogue(expr, a.rhs, b.rhs, depth + 1);
-        case ExprOp::GEMM:
-            return a.transpose_lhs == b.transpose_lhs && a.transpose_rhs == b.transpose_rhs && a.transpose_aux == b.transpose_aux &&
-                   a.alpha_fp == b.alpha_fp && a.beta_fp == b.beta_fp && a.matmul_epilogue == b.matmul_epilogue &&
-                   a.matmul_backward_epilogue == b.matmul_backward_epilogue &&
-                   a.matmul_forward_epilogue_aux == b.matmul_forward_epilogue_aux &&
-                   (a.matmul_epilogue_aux == b.matmul_epilogue_aux ||
-                    sameSubexpressionForMatmulEpilogue(expr, a.matmul_epilogue_aux, b.matmul_epilogue_aux, depth + 1)) &&
-                   sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1) &&
-                   sameSubexpressionForMatmulEpilogue(expr, a.rhs, b.rhs, depth + 1) &&
-                   sameSubexpressionForMatmulEpilogue(expr, a.aux, b.aux, depth + 1) &&
-                   (a.alpha_node == b.alpha_node || sameSubexpressionForMatmulEpilogue(expr, a.alpha_node, b.alpha_node, depth + 1)) &&
-                   (a.beta_node == b.beta_node || sameSubexpressionForMatmulEpilogue(expr, a.beta_node, b.beta_node, depth + 1));
-        case ExprOp::NORMCDF:
-        case ExprOp::LOGICAL_NOT:
-            return sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1);
-        case ExprOp::TAKE_ALONG_AXIS:
-            return a.reduction_axes == b.reduction_axes &&
-                   sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1) &&
-                   sameSubexpressionForMatmulEpilogue(expr, a.rhs, b.rhs, depth + 1);
-        case ExprOp::ADD:
-        case ExprOp::SUB:
-        case ExprOp::MUL:
-        case ExprOp::DIV:
-        case ExprOp::EQUAL:
-        case ExprOp::NOT_EQUAL:
-        case ExprOp::LESS:
-        case ExprOp::LESS_EQUAL:
-        case ExprOp::GREATER:
-        case ExprOp::GREATER_EQUAL:
-        case ExprOp::LOGICAL_AND:
-        case ExprOp::LOGICAL_OR:
-        case ExprOp::MIN:
-        case ExprOp::MAX:
-            return sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1) &&
-                   sameSubexpressionForMatmulEpilogue(expr, a.rhs, b.rhs, depth + 1);
-        case ExprOp::WHERE:
-            return sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1) &&
-                   sameSubexpressionForMatmulEpilogue(expr, a.rhs, b.rhs, depth + 1) &&
-                   sameSubexpressionForMatmulEpilogue(expr, a.aux, b.aux, depth + 1);
-        default:
-            return false;
-    }
-}
-
 static bool tryBuildMatmulActivationEpiloguePattern(const PhysicalExpression& expr,
                                                     uint32_t node_idx,
                                                     const std::vector<std::vector<uint64_t>>& node_dims,
@@ -2184,7 +2104,7 @@ static bool tryBuildMatmulActivationEpiloguePattern(const PhysicalExpression& ex
         if (!canFuseMatmulActivationEpilogue(expr, source_idx, node_dims)) {
             return false;
         }
-        if (!sameSubexpressionForMatmulEpilogue(expr, source_idx, expr.nodes[normcdf_idx].lhs)) {
+        if (source_idx != expr.nodes[normcdf_idx].lhs) {
             return false;
         }
         out.source_idx = source_idx;
@@ -4284,6 +4204,23 @@ static void optimizePhysicalOutputsTreeGemmPatternsInPlace(
         outputs.conditional->then_branch, dtype_resolved_outputs.conditional->then_branch, values_by_name);
     optimizePhysicalOutputsTreeGemmPatternsInPlace(
         outputs.conditional->else_branch, dtype_resolved_outputs.conditional->else_branch, values_by_name);
+}
+
+PhysicalOutputs detail::optimizeGemmPatternsForTests(
+    const PhysicalOutputs& outputs,
+    const std::unordered_map<std::string, Tensor>& named_inputs) {
+    PhysicalOutputs optimized = clonePhysicalOutputsTree(outputs);
+    PhysicalOutputs dtype_resolved = clonePhysicalOutputsTree(outputs);
+
+    std::unordered_map<std::string, RuntimeInputValue> values_by_name;
+    values_by_name.reserve(named_inputs.size());
+    for (const auto& [name, tensor] : named_inputs) {
+        values_by_name.emplace(name, tensor);
+    }
+
+    resolvePhysicalOutputsTreeDTypesInPlace(dtype_resolved, values_by_name);
+    optimizePhysicalOutputsTreeGemmPatternsInPlace(optimized, dtype_resolved, values_by_name);
+    return optimized;
 }
 
 static void optimizePhysicalOutputsTreeForTrainingBackwardInPlace(

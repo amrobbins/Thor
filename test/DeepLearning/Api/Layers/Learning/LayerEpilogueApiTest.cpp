@@ -29,3 +29,19 @@ static_assert(!AcceptsEpilogue<Thor::Transpose::Builder, std::shared_ptr<Thor::S
 TEST(LayerEpilogueApi, EpilogueSurfaceIsExpressionOnly) {
     SUCCEED();
 }
+
+TEST(LayerEpilogueApi, ExpressionDefinitionRoundTripUsesGraphScopedPhysicalImport) {
+    using ThorImplementation::DataType;
+    using ThorImplementation::Expression;
+
+    const Expression input = Thor::LayerEpilogue::input("epilogue_input", DataType::FP32, DataType::FP32);
+    const Expression authored = input.sin().exp();
+    const ThorImplementation::ExpressionDefinition definition =
+        Thor::LayerEpilogue::makeDefinition(authored, "epilogue_input", "epilogue_output", "TestLayer");
+
+    const Expression imported = Thor::LayerEpilogue::expressionFromDefinition(
+        definition, "epilogue_input", "epilogue_output", "TestLayer");
+
+    EXPECT_TRUE(Thor::LayerEpilogue::hasSameCanonicalForm(
+        authored, imported, "epilogue_input", "epilogue_output", "TestLayer"));
+}

@@ -19,6 +19,7 @@
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Expression/ConvolutionSpatial.h"
+#include "Utilities/Expression/LogicalExpressionFwd.h"
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
 #include "Utilities/TensorOperations/DeepLearning/CudnnRmsNorm.h"
 #include "Utilities/Expression/CudaKernelSecurity.h"
@@ -27,6 +28,7 @@ namespace ThorImplementation {
 struct PhysicalExecutionStage;
 class CudaKernelExpression;
 class Expression;
+class ExpressionInternalAccess;
 class Outputs;
 class RaggedExpression;
 
@@ -262,7 +264,7 @@ inline bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX || op == ExprO
 
 // Operations that terminate an ordinary fused elementwise Expression region and
 // execute as their own physical compiler stage. Keep this definition shared with
-// EquationCompiler so higher-level ownership decisions (for example BR6.6
+// EquationCompiler so higher-level ownership decisions (for example CustomLayer
 // optimizer fusion) use exactly the same boundary semantics as code generation.
 inline bool isExpressionCompilerStageBoundaryOp(ExprOp op) {
     switch (op) {
@@ -529,6 +531,14 @@ struct NamedOutput {
     OutputMaterializationContract materialization;
 };
 
+// Logical output roots stay in the persistent DAG until an explicit physical
+// materialization boundary such as Outputs::physicalOutputs().
+struct LogicalNamedOutput {
+    std::string name;
+    LogicalExpression node;
+    OutputMaterializationContract materialization;
+};
+
 struct PhysicalExpression {
     std::vector<ExprNode> nodes;
     std::vector<NamedInput> inputs;
@@ -676,28 +686,20 @@ struct ExpressionDefinition {
 
 class Outputs {
    public:
-    [[nodiscard]] const std::shared_ptr<PhysicalExpression>& expression() const { return expr; }
-    [[nodiscard]] const std::vector<NamedOutput>& namedOutputs() const { return outputs; }
+    [[nodiscard]] std::vector<std::string> outputNames() const;
+    [[nodiscard]] Expression outputExpression(size_t index) const;
+    [[nodiscard]] Expression outputExpression(const std::string& name) const;
+    [[nodiscard]] std::set<std::string> getInputNames() const;
     [[nodiscard]] bool isConditional() const { return static_cast<bool>(conditional_outputs); }
 
-    [[nodiscard]] PhysicalOutputs physicalOutputs() const {
-        if (!expr && !conditional_outputs) {
-            throw std::runtime_error("Outputs has no backing expression graph or conditional outputs.");
-        }
-        return PhysicalOutputs{
-            .expr = expr,
-            .outputs = outputs,
-            .conditional = conditional_outputs,
-        };
-    }
+    // Ordinary Outputs are logical. This is the explicit boundary that lowers
+    // every named root in one context so shared ancestry remains shared.
+    [[nodiscard]] PhysicalOutputs physicalOutputs() const;
 
-    [[nodiscard]] static Outputs fromPhysicalOutputs(PhysicalOutputs physicalOutputs) {
-        if (!physicalOutputs.expr && !physicalOutputs.conditional) {
-            throw std::runtime_error("Outputs::fromPhysicalOutputs requires a non-null PhysicalExpression or conditional outputs.");
-        }
-
-        return Outputs(std::move(physicalOutputs.expr), std::move(physicalOutputs.outputs), std::move(physicalOutputs.conditional));
-    }
+    // Ordinary physical roots are imported through one importer context.
+    // Conditional packages remain physical because conditional execution is a
+    // compiler/runtime packaging concern rather than an Expression DAG node.
+    [[nodiscard]] static Outputs fromPhysicalOutputs(PhysicalOutputs physicalOutputs);
 
     [[nodiscard]] static Outputs conditional(const Expression& predicate, const Outputs& then_outputs, const Outputs& else_outputs);
     [[nodiscard]] static Outputs ifElse(const Expression& predicate, const Outputs& then_outputs, const Outputs& else_outputs) {
@@ -709,14 +711,23 @@ class Outputs {
                                             const Outputs& else_outputs);
 
    private:
-    std::shared_ptr<PhysicalExpression> expr;
-    std::vector<NamedOutput> outputs;
+    std::vector<LogicalNamedOutput> logical_outputs;
+
+    // Conditional execution is intentionally still represented by the existing
+    // physical package. These fields are empty for ordinary Outputs.
+    std::shared_ptr<PhysicalExpression> conditional_expr;
+    std::vector<NamedOutput> conditional_named_outputs;
     std::shared_ptr<PhysicalConditionalOutputs> conditional_outputs;
 
-    Outputs(std::shared_ptr<PhysicalExpression> expr,
-            std::vector<NamedOutput> outputs,
-            std::shared_ptr<PhysicalConditionalOutputs> conditional_outputs = nullptr)
-        : expr(std::move(expr)), outputs(std::move(outputs)), conditional_outputs(std::move(conditional_outputs)) {}
+    explicit Outputs(std::vector<LogicalNamedOutput> logical_outputs)
+        : logical_outputs(std::move(logical_outputs)) {}
+
+    Outputs(std::shared_ptr<PhysicalExpression> conditional_expr,
+            std::vector<NamedOutput> conditional_named_outputs,
+            std::shared_ptr<PhysicalConditionalOutputs> conditional_outputs)
+        : conditional_expr(std::move(conditional_expr)),
+          conditional_named_outputs(std::move(conditional_named_outputs)),
+          conditional_outputs(std::move(conditional_outputs)) {}
 
     friend class Expression;
 };
@@ -765,19 +776,9 @@ class Expression {
                                          const std::vector<uint64_t>& dims,
                                          std::optional<DataType> output_dtype = std::nullopt);
 
-    [[nodiscard]] static Expression fromPhysicalNode(std::shared_ptr<PhysicalExpression> expr, uint32_t nodeIndex) {
-        if (!expr) {
-            throw std::invalid_argument("Expression::fromPhysicalNode requires a non-null PhysicalExpression.");
-        }
-        if (nodeIndex >= expr->nodes.size()) {
-            throw std::out_of_range("Expression::fromPhysicalNode node index is out of range.");
-        }
-        return Expression(std::move(expr), nodeIndex);
-    }
-
     [[nodiscard]] PhysicalExpression expression() const;
     [[nodiscard]] bool isSameLogicalNode(const Expression& other) const {
-        return expr && other.expr && expr.get() == other.expr.get() && nodeIndex == other.nodeIndex;
+        return node && other.node && node.get() == other.node.get();
     }
 
     [[nodiscard]] Expression operator+(const Expression& other) const;
@@ -1281,14 +1282,18 @@ class Expression {
     [[nodiscard]] static bool isTernaryOp(ExprOp op);
 
    private:
+    friend class ExpressionInternalAccess;
+    friend class Outputs;
     friend class RaggedExpression;
 
-    std::shared_ptr<PhysicalExpression> expr;
-    uint32_t nodeIndex = UINT32_MAX;
+    LogicalExpression node;
 
-    [[nodiscard]] Expression(std::shared_ptr<PhysicalExpression> expr, uint32_t nodeIndex) : expr(std::move(expr)), nodeIndex(nodeIndex) {}
+    [[nodiscard]] explicit Expression(LogicalExpression node) : node(std::move(node)) {}
 
+    // Immutable-ready construction seam: callers populate every non-edge semantic
+    // attribute before construction; these helpers bind only the operand edges.
     [[nodiscard]] static Expression binaryOp(const Expression& lhsExpr, const Expression& rhsExpr, ExprOp op);
+    [[nodiscard]] static Expression binaryOp(const Expression& lhsExpr, const Expression& rhsExpr, ExprNode semantics);
     [[nodiscard]] static Expression segmentedScanWithRaggedMetadata(const Expression& input,
                                                                     const Expression& offsets,
                                                                     ScanOp op,
@@ -1303,13 +1308,14 @@ class Expression {
                                                                       uint64_t ragged_max_active_values,
                                                                       uint64_t ragged_elements_per_value = 1);
     [[nodiscard]] static Expression ternaryOp(const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, ExprOp op);
+    [[nodiscard]] static Expression ternaryOp(
+        const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, ExprNode semantics);
     [[nodiscard]] static Expression quaternaryOp(
         const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, const Expression& fourthExpr, ExprOp op);
+    [[nodiscard]] static Expression quaternaryOp(
+        const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, const Expression& fourthExpr, ExprNode semantics);
     [[nodiscard]] static Expression unaryOp(const Expression& inputExpr, ExprOp op);
-    [[nodiscard]] static uint32_t cloneInto(const PhysicalExpression& src,
-                                            PhysicalExpression& dst,
-                                            std::unordered_map<std::string, uint32_t>& dst_input_slots_by_name);
-
+    [[nodiscard]] static Expression unaryOp(const Expression& inputExpr, ExprNode semantics);
     [[nodiscard]] static Expression attentionWithOptionalMetadata(const Expression& q,
                                                                   const Expression& k,
                                                                   const Expression& v,
@@ -1333,11 +1339,6 @@ class Expression {
                                                                   const Expression* amax_o = nullptr);
 
     friend class CudaKernelExpression;
-
-    static uint32_t encodeLowerableGemmScaleExpression(const Expression& scale_expr,
-                                                       PhysicalExpression& dst,
-                                                       std::unordered_map<std::string, uint32_t>& dst_input_slots_by_name,
-                                                       double& scale_fp);
 };
 
 inline Expression Expression::sigmoid() const {
@@ -1375,6 +1376,12 @@ inline Expression Expression::selu() const {
     return (this->max(zero) * scale) + (this->min(zero).expm1() * scaleAlpha);
 }
 
+inline Expression Expression::gelu() const {
+    // Exact GELU: x * Phi(x), where Phi is the standard normal CDF. Both
+    // branches intentionally reference the same authored expression node; the
+    // persistent logical DAG preserves that shared producer through lowering.
+    return *this * this->normcdf();
+}
 
 std::string formatFloatCanonical(double x);
 bool isCommutative(ExprOp op);

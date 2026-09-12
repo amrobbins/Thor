@@ -16,6 +16,7 @@
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/Expression/LogicalExpression.h"
 
 using json = nlohmann::json;
 
@@ -1346,18 +1347,55 @@ Outputs CudaKernelExpression::apply(const std::unordered_map<std::string, Expres
         throw std::invalid_argument("CudaKernelExpression apply input count mismatch. Expected {" + joinNames(expected) + "}.");
     }
 
-    std::vector<PhysicalExpression> input_physical_exprs;
-    input_physical_exprs.reserve(inputs_.size());
+    struct AdaptedRuntimeScalar {
+        const LogicalExpressionNode* source = nullptr;
+        DataType dtype = DataType::FP32;
+        LogicalExpression adapted;
+    };
+    std::vector<AdaptedRuntimeScalar> adapted_runtime_scalars;
+
+    auto adaptRuntimeScalarForAbi = [&](const LogicalExpression& input, DataType dtype) -> LogicalExpression {
+        for (const AdaptedRuntimeScalar& cached : adapted_runtime_scalars) {
+            if (cached.source == input.get() && cached.dtype == dtype) {
+                return cached.adapted;
+            }
+        }
+
+        const ExprNode& original = input->semantics();
+        const bool already_adapted = original.input_tensor_dtype == dtype && original.compute_dtype == dtype &&
+                                     original.output_dtype == dtype && original.backward_output_dtype == dtype &&
+                                     original.backward_compute_dtype == dtype;
+        if (already_adapted) {
+            return input;
+        }
+
+        ExprNode semantics = original;
+        semantics.input_tensor_dtype = dtype;
+        semantics.compute_dtype = dtype;
+        semantics.output_dtype = dtype;
+        semantics.backward_output_dtype = dtype;
+        semantics.backward_compute_dtype = dtype;
+        LogicalExpression adapted = LogicalExpressionNode::create(std::move(semantics),
+                                                                   input->dependencies(),
+                                                                   input->inputBinding(),
+                                                                   input->raggedRuntimeOffsetsBinding(),
+                                                                   input->cudaKernelApplication());
+        adapted_runtime_scalars.push_back(AdaptedRuntimeScalar{input.get(), dtype, adapted});
+        return adapted;
+    };
+
+    std::vector<LogicalExpression> application_inputs;
+    application_inputs.reserve(inputs_.size());
     for (const TensorParamSpec& input : inputs_) {
         auto it = input_exprs.find(input.name);
         if (it == input_exprs.end()) {
             throw std::invalid_argument("CudaKernelExpression apply missing input expression: " + input.name);
         }
-        PhysicalExpression physical = it->second.expression();
-        if (physical.output_node >= physical.nodes.size()) {
-            throw std::invalid_argument("CudaKernelExpression apply input expression has invalid output node: " + input.name);
+        if (!it->second.node) {
+            throw std::invalid_argument("CudaKernelExpression apply input expression has no logical root: " + input.name);
         }
-        const ExprOp actual_op = physical.nodes[physical.output_node].op;
+
+        const ExprOp actual_op = it->second.node->op();
         if (input.kind == TensorParamSpec::Kind::TensorRuntimeScalar && actual_op != ExprOp::TENSOR_RUNTIME_SCALAR) {
             throw std::invalid_argument("CudaKernelExpression input '" + input.name + "' expects Expression::tensorRuntimeScalar.");
         }
@@ -1368,7 +1406,15 @@ Outputs CudaKernelExpression::apply(const std::unordered_map<std::string, Expres
             (actual_op == ExprOp::TENSOR_RUNTIME_SCALAR || actual_op == ExprOp::RUNTIME_SCALAR)) {
             throw std::invalid_argument("CudaKernelExpression tensor input '" + input.name + "' received a runtime scalar expression.");
         }
-        input_physical_exprs.push_back(std::move(physical));
+
+        LogicalExpression logical_input = it->second.node;
+        if (input.kind == TensorParamSpec::Kind::TensorRuntimeScalar || input.kind == TensorParamSpec::Kind::HostRuntimeScalar) {
+            // Historical custom-CUDA construction stamped runtime-scalar leaf
+            // dtypes to the ABI-declared dtype. Preserve that contract
+            // immutably rather than mutating or physically cloning the input.
+            logical_input = adaptRuntimeScalarForAbi(logical_input, input.dtype);
+        }
+        application_inputs.push_back(std::move(logical_input));
     }
     for (const auto& [name, _] : input_exprs) {
         const bool known = std::any_of(inputs_.begin(), inputs_.end(), [&](const TensorParamSpec& spec) { return spec.name == name; });
@@ -1377,46 +1423,30 @@ Outputs CudaKernelExpression::apply(const std::unordered_map<std::string, Expres
         }
     }
 
-    auto dst = std::make_shared<PhysicalExpression>();
-    std::unordered_map<std::string, uint32_t> dst_input_slots_by_name;
-    std::vector<uint32_t> kernel_input_nodes;
-    kernel_input_nodes.reserve(inputs_.size());
+    std::shared_ptr<const CudaKernelExpression> specification = std::make_shared<CudaKernelExpression>(*this);
+    const LogicalCudaKernelApplicationPtr application =
+        LogicalCudaKernelApplication::create(std::move(specification), std::move(application_inputs));
 
-    for (size_t i = 0; i < input_physical_exprs.size(); ++i) {
-        uint32_t remapped_output = Expression::cloneInto(input_physical_exprs[i], *dst, dst_input_slots_by_name);
-        if (inputs_[i].kind == TensorParamSpec::Kind::TensorRuntimeScalar || inputs_[i].kind == TensorParamSpec::Kind::HostRuntimeScalar) {
-            ExprNode& node = dst->nodes.at(remapped_output);
-            node.input_tensor_dtype = inputs_[i].dtype;
-            node.output_dtype = inputs_[i].dtype;
-            node.compute_dtype = inputs_[i].dtype;
-            node.backward_output_dtype = inputs_[i].dtype;
-            node.backward_compute_dtype = inputs_[i].dtype;
-        }
-        kernel_input_nodes.push_back(remapped_output);
-    }
-
-    const uint32_t kernel_spec_index = static_cast<uint32_t>(dst->cuda_kernel_expressions.size());
-    dst->cuda_kernel_expressions.push_back(std::make_shared<CudaKernelExpression>(*this));
-
-    std::vector<NamedOutput> named_outputs;
+    std::vector<std::pair<std::string, Expression>> named_outputs;
     named_outputs.reserve(outputs_.size());
     for (uint32_t output_idx = 0; output_idx < outputs_.size(); ++output_idx) {
-        ExprNode node;
-        node.op = ExprOp::CUDA_KERNEL_OUTPUT;
-        node.cuda_kernel_spec_index = kernel_spec_index;
-        node.cuda_kernel_output_index = output_idx;
-        node.cuda_kernel_input_nodes = kernel_input_nodes;
-        node.output_dtype = outputs_[output_idx].dtype;
-        node.compute_dtype = outputs_[output_idx].dtype;
-        node.backward_output_dtype = outputs_[output_idx].dtype;
-        node.backward_compute_dtype = outputs_[output_idx].dtype;
+        ExprNode semantics{};
+        semantics.op = ExprOp::CUDA_KERNEL_OUTPUT;
+        semantics.cuda_kernel_output_index = output_idx;
+        semantics.output_dtype = outputs_[output_idx].dtype;
+        semantics.compute_dtype = outputs_[output_idx].dtype;
+        semantics.backward_output_dtype = outputs_[output_idx].dtype;
+        semantics.backward_compute_dtype = outputs_[output_idx].dtype;
 
-        const uint32_t node_idx = static_cast<uint32_t>(dst->nodes.size());
-        dst->nodes.push_back(std::move(node));
-        named_outputs.push_back(NamedOutput{outputs_[output_idx].name, node_idx});
+        LogicalExpression logical_output = LogicalExpressionNode::create(std::move(semantics),
+                                                                          {},
+                                                                          std::nullopt,
+                                                                          std::nullopt,
+                                                                          application);
+        named_outputs.emplace_back(outputs_[output_idx].name, Expression(std::move(logical_output)));
     }
 
-    return Outputs::fromPhysicalOutputs(PhysicalOutputs{.expr = dst, .outputs = std::move(named_outputs)});
+    return Expression::outputs(named_outputs);
 }
 
 DynamicExpression CudaKernelExpression::asDynamicExpression() const {

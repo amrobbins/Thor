@@ -1,4 +1,7 @@
 #include "Utilities/Expression/EquationCompiler.h"
+#define THOR_EXPRESSION_TEST_HOOKS_IMPLEMENTATION
+#include "Utilities/Expression/ExpressionTestHooks.h"
+#undef THOR_EXPRESSION_TEST_HOOKS_IMPLEMENTATION
 #include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/FusedEquation.h"
@@ -129,6 +132,9 @@ static nvrtcResult nvrtcCompileProgramChecked(
     nvrtcCompileProgramChecked(                         \
         (prog), (num_options), (options), "nvrtcCompileProgram(" #prog ", " #num_options ", " #options ")", __FILE__, __LINE__)
 
+// Structural canonicalization below is an implementation-cache key only. Planner
+// runtime value identity is established separately from PhysicalExpression node ids
+// and must never be inferred from cache-key equality.
 static LruCacheThreadSafe<EquationCacheKey, shared_ptr<CompiledEquation>> compiledEquationCache(10'000);
 static std::atomic<uint64_t> compiledEquationBuildCounterForTests{0};
 
@@ -292,6 +298,7 @@ struct StageNodeKey {
     int32_t backward_output_dtype = -1;
     int32_t backward_compute_dtype = -1;
     std::vector<uint64_t> reduction_axes;
+    std::vector<uint64_t> reshape_dims;
     std::vector<uint64_t> squeeze_axes;
     std::vector<uint64_t> unsqueeze_axes;
     std::vector<uint64_t> fill_dims;
@@ -386,6 +393,9 @@ struct StageNodeKeyHash {
         hashCombine(h, std::hash<size_t>{}(k.reduction_axes.size()));
         for (uint64_t axis : k.reduction_axes)
             hashCombine(h, std::hash<uint64_t>{}(axis));
+        hashCombine(h, std::hash<size_t>{}(k.reshape_dims.size()));
+        for (uint64_t dim : k.reshape_dims)
+            hashCombine(h, std::hash<uint64_t>{}(dim));
         hashCombine(h, std::hash<size_t>{}(k.squeeze_axes.size()));
         for (uint64_t axis : k.squeeze_axes)
             hashCombine(h, std::hash<uint64_t>{}(axis));
@@ -431,6 +441,99 @@ struct StageNodeKeyHash {
         return h;
     }
 };
+
+// Stage-local CSE is an implementation optimization, not expression identity.
+// Keep its eligibility explicit: adding a new fusable operation must not silently
+// opt it into structural deduplication before all codegen-relevant semantics are
+// represented by StageNodeKey.
+static bool isStageLocalCseEligibleOp(ExprOp op) {
+    switch (op) {
+        case ExprOp::INPUT:
+        case ExprOp::RUNTIME_SCALAR:
+        case ExprOp::TENSOR_RUNTIME_SCALAR:
+        case ExprOp::SCALAR_FP:
+        case ExprOp::FILL:
+
+        case ExprOp::ADD:
+        case ExprOp::SUB:
+        case ExprOp::MUL:
+        case ExprOp::DIV:
+        case ExprOp::POW:
+        case ExprOp::EQUAL:
+        case ExprOp::NOT_EQUAL:
+        case ExprOp::LESS:
+        case ExprOp::LESS_EQUAL:
+        case ExprOp::GREATER:
+        case ExprOp::GREATER_EQUAL:
+        case ExprOp::LOGICAL_AND:
+        case ExprOp::LOGICAL_OR:
+        case ExprOp::MIN:
+        case ExprOp::MAX:
+        case ExprOp::MIN_GRAD_LEFT:
+        case ExprOp::MIN_GRAD_RIGHT:
+        case ExprOp::MAX_GRAD_LEFT:
+        case ExprOp::MAX_GRAD_RIGHT:
+
+        case ExprOp::NEG:
+        case ExprOp::ABS:
+        case ExprOp::CEIL:
+        case ExprOp::FLOOR:
+        case ExprOp::ROUND:
+        case ExprOp::TRUNC:
+        case ExprOp::SIN:
+        case ExprOp::COS:
+        case ExprOp::TAN:
+        case ExprOp::ASIN:
+        case ExprOp::ACOS:
+        case ExprOp::ATAN:
+        case ExprOp::SINH:
+        case ExprOp::COSH:
+        case ExprOp::ASINH:
+        case ExprOp::ACOSH:
+        case ExprOp::ATANH:
+        case ExprOp::ERF:
+        case ExprOp::ERFC:
+        case ExprOp::ERFCX:
+        case ExprOp::ERFINV:
+        case ExprOp::ERFCINV:
+        case ExprOp::TGAMMA:
+        case ExprOp::LGAMMA:
+        case ExprOp::DIGAMMA:
+        case ExprOp::EXP:
+        case ExprOp::EXPM1:
+        case ExprOp::EXP2:
+        case ExprOp::EXP10:
+        case ExprOp::LN:
+        case ExprOp::LOG1P:
+        case ExprOp::LOG2:
+        case ExprOp::LOG10:
+        case ExprOp::SQRT:
+        case ExprOp::TANH:
+        case ExprOp::NORMCDF:
+        case ExprOp::LOGICAL_NOT:
+        case ExprOp::CAST:
+
+        case ExprOp::WHERE:
+        case ExprOp::ROPE:
+        case ExprOp::RESHAPE:
+        case ExprOp::STRIDED_VIEW:
+        case ExprOp::STRIDED_VIEW_BACKWARD:
+        case ExprOp::UNSQUEEZE:
+        case ExprOp::SQUEEZE:
+        case ExprOp::TRANSPOSE:
+        case ExprOp::TAKE_ALONG_AXIS:
+        case ExprOp::BROADCAST_TO:
+            return true;
+
+        case ExprOp::RAGGED_VALUEWISE_EXTENT:
+            // This marker carries partition-source/runtime-extent semantics and
+            // intentionally remains identity-preserving inside a fused stage.
+            return false;
+
+        default:
+            return false;
+    }
+}
 
 static bool isCommutativeStageOp(ExprOp op) {
     return op == ExprOp::ADD || op == ExprOp::MUL || op == ExprOp::MIN || op == ExprOp::MAX || op == ExprOp::EQUAL ||
@@ -545,6 +648,8 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
                 key.aux = n.aux;
             }
             key.reduction_axes = n.reduction_axes;
+            key.reshape_dims = n.reshape_dims;
+            key.fill_dims = n.fill_dims;
             key.broadcast_dims = n.broadcast_dims;
             key.view_dims = n.view_dims;
             key.view_strides = n.view_strides;
@@ -607,16 +712,25 @@ static void deduplicateFusedStageExpr(PhysicalExpression& stage_expr, std::vecto
             std::swap(n.lhs, n.rhs);
         }
 
-        StageNodeKey key = makeStageNodeKey(n);
-        auto it = key_to_new_idx.find(key);
-        if (it != key_to_new_idx.end()) {
-            old_to_new[old_idx] = it->second;
-            return it->second;
+        if (isStageLocalCseEligibleOp(n.op)) {
+            StageNodeKey key = makeStageNodeKey(n);
+            auto it = key_to_new_idx.find(key);
+            if (it != key_to_new_idx.end()) {
+                old_to_new[old_idx] = it->second;
+                return it->second;
+            }
+
+            uint32_t new_idx = static_cast<uint32_t>(dedup_nodes.size());
+            dedup_nodes.push_back(std::move(n));
+            key_to_new_idx.emplace(std::move(key), new_idx);
+            old_to_new[old_idx] = new_idx;
+            return new_idx;
         }
 
+        // Conservative default: unknown/new operations retain stage-local node
+        // identity until their complete codegen semantics are audited into the key.
         uint32_t new_idx = static_cast<uint32_t>(dedup_nodes.size());
         dedup_nodes.push_back(std::move(n));
-        key_to_new_idx.emplace(key, new_idx);
         old_to_new[old_idx] = new_idx;
         return new_idx;
     };
@@ -1565,7 +1679,7 @@ static const char* fusedOpTag(ExprOp op) {
         case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER:
             return "RAGGED_CONV1D_CAUSAL_BWD_FILTER";
         default:
-            throw std::runtime_error("Unsupported op in fusedRegionSignature, value: " + to_string((int)op));
+            throw std::runtime_error("Unsupported ExprOp tag, value: " + to_string((int)op));
     }
 }
 
@@ -1574,461 +1688,6 @@ static std::string optionalDTypeSignature(const std::optional<DataType>& dtype) 
         return "none";
     }
     return TensorDescriptor::getElementTypeName(dtype.value());
-}
-
-static void appendNodeDTypeSignature(std::string& s, const ExprNode& node) {
-    s += ";input=" + optionalDTypeSignature(node.input_tensor_dtype);
-    s += ";out=" + optionalDTypeSignature(node.output_dtype);
-    s += ";compute=" + optionalDTypeSignature(node.compute_dtype);
-    s += ";bwd_out=" + optionalDTypeSignature(node.backward_output_dtype);
-    s += ";bwd_compute=" + optionalDTypeSignature(node.backward_compute_dtype);
-}
-
-static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint32_t node_idx);
-
-static const char* matmulEpilogueSignatureName(MatmulEpilogue epilogue) {
-    switch (epilogue) {
-        case MatmulEpilogue::Default:
-            return "default";
-        case MatmulEpilogue::Relu:
-            return "relu";
-        case MatmulEpilogue::Gelu:
-            return "gelu";
-    }
-    throw std::runtime_error("Unknown MatmulEpilogue value.");
-}
-
-static const char* matmulBackwardEpilogueSignatureName(MatmulBackwardEpilogue epilogue) {
-    switch (epilogue) {
-        case MatmulBackwardEpilogue::Default:
-            return "default";
-        case MatmulBackwardEpilogue::DRelu:
-            return "drelu";
-        case MatmulBackwardEpilogue::DGelu:
-            return "dgelu";
-    }
-    throw std::runtime_error("Unknown MatmulBackwardEpilogue value.");
-}
-
-static std::string uintVecSignature(const std::vector<uint64_t>& v) {
-    std::string s = "[";
-    for (size_t i = 0; i < v.size(); ++i) {
-        s += std::to_string(v[i]);
-        if (i + 1 < v.size()) {
-            s += ",";
-        }
-    }
-    s += "]";
-    return s;
-}
-
-static std::string doubleVecSignature(const std::vector<double>& v) {
-    std::string s = "[";
-    for (size_t i = 0; i < v.size(); ++i) {
-        s += std::to_string(scalarBits(v[i]));
-        if (i + 1 < v.size()) {
-            s += ",";
-        }
-    }
-    s += "]";
-    return s;
-}
-
-static std::string gemmScaleSignature(const PhysicalExpression& expr, uint32_t node_idx, double scale_fp) {
-    if (node_idx == UINT32_MAX) {
-        return std::to_string(scalarBits(scale_fp));
-    }
-    return fusedRegionSignatureRec(expr, node_idx) + "*" + std::to_string(scalarBits(scale_fp));
-}
-
-static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint32_t node_idx) {
-    if (node_idx >= expr.nodes.size()) {
-        throw std::runtime_error("fusedRegionSignatureRec node_idx out of range.");
-    }
-
-    const ExprNode& node = expr.nodes[node_idx];
-
-    switch (node.op) {
-        case ExprOp::INPUT: {
-            std::string s = std::string("IN(") + std::to_string(node.input_slot) + ")";
-            appendNodeDTypeSignature(s, node);
-            return s;
-        }
-
-        case ExprOp::RUNTIME_SCALAR: {
-            std::string s = std::string("RIN(") + std::to_string(node.input_slot) + ")";
-            appendNodeDTypeSignature(s, node);
-            return s;
-        }
-
-        case ExprOp::TENSOR_RUNTIME_SCALAR: {
-            std::string s = std::string("TRIN(") + std::to_string(node.input_slot) + ")";
-            appendNodeDTypeSignature(s, node);
-            return s;
-        }
-
-        case ExprOp::SCALAR_FP: {
-            std::string s = std::string("F(") + std::to_string(scalarBits(node.scalar_fp)) + ")";
-            appendNodeDTypeSignature(s, node);
-            return s;
-        }
-
-        case ExprOp::FILL: {
-            std::string s =
-                std::string("FILL(") + std::to_string(scalarBits(node.scalar_fp)) + ",dims=" + uintVecSignature(node.fill_dims) + ")";
-            appendNodeDTypeSignature(s, node);
-            return s;
-        }
-
-        case ExprOp::CUDA_KERNEL_OUTPUT: {
-            if (node.cuda_kernel_spec_index >= expr.cuda_kernel_expressions.size() ||
-                !expr.cuda_kernel_expressions[node.cuda_kernel_spec_index]) {
-                throw std::runtime_error("fusedRegionSignatureRec CUDA kernel output references missing kernel spec.");
-            }
-
-            std::string s = "CUDA_KERNEL_OUTPUT(kernel=" +
-                            expr.cuda_kernel_expressions[node.cuda_kernel_spec_index]->cacheSignature() +
-                            ";out=" + std::to_string(node.cuda_kernel_output_index) + ";inputs=[";
-            for (size_t i = 0; i < node.cuda_kernel_input_nodes.size(); ++i) {
-                const uint32_t input_node_idx = node.cuda_kernel_input_nodes[i];
-                if (input_node_idx >= expr.nodes.size()) {
-                    throw std::runtime_error("fusedRegionSignatureRec CUDA kernel input node index out of range.");
-                }
-                if (i != 0) {
-                    s += ",";
-                }
-                s += fusedRegionSignatureRec(expr, input_node_idx);
-            }
-            s += "])";
-            appendNodeDTypeSignature(s, node);
-            return s;
-        }
-
-        default:
-            break;
-    }
-
-    if (Expression::isLeafOp(node.op)) {
-        std::string s = std::string(fusedOpTag(node.op));
-        appendNodeDTypeSignature(s, node);
-        return s;
-    }
-
-    const std::string lhs = fusedRegionSignatureRec(expr, node.lhs);
-
-    if (isStageBoundaryOp(node.op)) {
-        std::string s;
-
-        if (isTransposeOp(node.op)) {
-            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ")";
-        } else if (node.op == ExprOp::STRIDED_VIEW) {
-            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",dims=" + uintVecSignature(node.view_dims) +
-                ",strides=" + uintVecSignature(node.view_strides) + ",offset=" + std::to_string(node.view_element_offset) + ")";
-        } else if (isReduceMinMaxBackwardOp(node.op)) {
-            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
-            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs;
-            if (node.op == ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD) {
-                s += ",offsets=" + fusedRegionSignatureRec(expr, node.aux);
-            } else {
-                s += ",axes=" + uintVecSignature(node.reduction_axes) + ",squeeze=" + uintVecSignature(node.squeeze_axes);
-            }
-            s += ")";
-        } else if (isScanMinMaxBackwardOp(node.op)) {
-            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
-            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",grad=" + rhs;
-            if (node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
-                s += ",offsets=" + fusedRegionSignatureRec(expr, node.aux);
-            }
-            s += ",mode=" + std::to_string(static_cast<int>(node.scan_mode)) +
-                 ",axis=" + std::to_string(node.scan_axis) +
-                 ",reverse=" + std::to_string(node.scan_reverse ? 1 : 0) + ")";
-        } else if (isSoftmaxOp(node.op)) {
-            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs;
-            if (node.op == ExprOp::RAGGED_SOFTMAX_BACKWARD) {
-                s += ",dy=" + fusedRegionSignatureRec(expr, node.rhs) +
-                     ",offsets=" + fusedRegionSignatureRec(expr, node.aux) +
-                     ",batch=" + std::to_string(node.ragged_runtime_batch_size) +
-                     ",maxActive=" + std::to_string(node.ragged_runtime_max_active_values) +
-                     ",elementsPerValue=" + std::to_string(node.ragged_runtime_elements_per_value);
-            }
-            s += ",algorithm=" + std::to_string(static_cast<int>(node.softmax_algorithm)) +
-                 ",mode=" + std::to_string(static_cast<int>(node.softmax_mode)) + ")";
-        } else if (isSegmentedReduceOp(node.op)) {
-            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
-            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",offsets=" + rhs + ")";
-        } else if (isScanOp(node.op)) {
-            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs;
-            if (node.op == ExprOp::SEGMENTED_SCAN) {
-                const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
-                s += ",offsets=" + rhs;
-            }
-            s += ",op=" + std::to_string(static_cast<int>(node.scan_op)) +
-                 ",mode=" + std::to_string(static_cast<int>(node.scan_mode)) +
-                 ",axis=" + std::to_string(node.scan_axis) +
-                 ",reverse=" + std::to_string(node.scan_reverse ? 1 : 0) + ")";
-        } else if (isRaggedConv1dCausalOp(node.op) || isRaggedConv1dCausalBackwardDataOp(node.op) ||
-                   isRaggedConv1dCausalBackwardFilterOp(node.op)) {
-            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
-            const std::string aux = fusedRegionSignatureRec(expr, node.aux);
-            const char* lhs_label = isRaggedConv1dCausalOp(node.op) ? "values" :
-                                    (isRaggedConv1dCausalBackwardDataOp(node.op) ? "filter" : "input");
-            const char* rhs_label = isRaggedConv1dCausalOp(node.op) ? "filter" : "gradOutput";
-            s = std::string(fusedOpTag(node.op)) + "(" + lhs_label + "=" + lhs + "," + rhs_label + "=" + rhs + ",offsets=" + aux +
-                ",batch=" + std::to_string(node.ragged_runtime_batch_size) +
-                ",maxActive=" + std::to_string(node.ragged_runtime_max_active_values) +
-                ",maxPerRow=" + std::to_string(node.ragged_runtime_max_values_per_row) +
-                ",elementsPerValue=" + std::to_string(node.ragged_runtime_elements_per_value) +
-                ",inC=" + std::to_string(node.ragged_conv1d_input_channels) +
-                ",outC=" + std::to_string(node.ragged_conv1d_output_channels) +
-                ",kernel=" + std::to_string(node.ragged_conv1d_kernel_width) +
-                ",groups=" + std::to_string(node.ragged_conv1d_groups) +
-                ",stride=" + std::to_string(node.ragged_conv_spatial_1d.stride) +
-                ",pre=" + std::to_string(node.ragged_conv_spatial_1d.pre_padding) +
-                ",post=" + std::to_string(node.ragged_conv_spatial_1d.post_padding) +
-                ",dilation=" + std::to_string(node.ragged_conv_spatial_1d.dilation) + ")";
-        } else if (isRmsNormOp(node.op)) {
-            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
-            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",scale=" + rhs +
-                ",hidden=" + std::to_string(node.rms_norm_normalized_feature_count) +
-                ",epsilon=" + std::to_string(scalarBits(node.rms_norm_epsilon)) +
-                ",fused=" + std::string(toString(node.rms_norm_fused_activation)) +
-                ",packedRowsCapacity=" + std::to_string(node.rms_norm_packed_row_capacity) + ")";
-        } else if (isLayerNormOp(node.op)) {
-            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
-            const std::string aux = fusedRegionSignatureRec(expr, node.aux);
-            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",scale=" + rhs + ",bias=" + aux +
-                ",hidden=" + std::to_string(node.layer_norm_normalized_feature_count) +
-                ",epsilon=" + std::to_string(scalarBits(node.layer_norm_epsilon)) +
-                ",packedRowsCapacity=" + std::to_string(node.layer_norm_packed_row_capacity) + ")";
-        } else if (isRmsNormBackwardOp(node.op)) {
-            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
-            const std::string aux = fusedRegionSignatureRec(expr, node.aux);
-            s = std::string(fusedOpTag(node.op)) + "(x=" + lhs + ",scale=" + rhs + ",dY=" + aux +
-                ",hidden=" + std::to_string(node.rms_norm_normalized_feature_count) +
-                ",epsilon=" + std::to_string(scalarBits(node.rms_norm_epsilon)) + ")";
-        } else if (isMatmulOp(node.op)) {
-            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
-
-            if (node.op == ExprOp::MATMUL) {
-                s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",ta=" + std::to_string(node.transpose_lhs ? 1 : 0) +
-                    ",tb=" + std::to_string(node.transpose_rhs ? 1 : 0) +
-                    ",epilogue=" + std::string(matmulEpilogueSignatureName(node.matmul_epilogue)) +
-                    ",backward_epilogue=" + std::string(matmulBackwardEpilogueSignatureName(node.matmul_backward_epilogue)) +
-                    ",forward_epilogue_aux=" + std::to_string(node.matmul_forward_epilogue_aux ? 1 : 0);
-                if (node.matmul_epilogue_aux != UINT32_MAX) {
-                    s += ",epilogue_aux=" + fusedRegionSignatureRec(expr, node.matmul_epilogue_aux);
-                }
-                s += ")";
-            } else {
-                const std::string aux = fusedRegionSignatureRec(expr, node.aux);
-                s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",aux=" + aux +
-                    ",ta=" + std::to_string(node.transpose_lhs ? 1 : 0) + ",tb=" + std::to_string(node.transpose_rhs ? 1 : 0) +
-                    ",tc=" + std::to_string(node.transpose_aux ? 1 : 0) +
-                    ",alpha=" + gemmScaleSignature(expr, node.alpha_node, node.alpha_fp) +
-                    ",beta=" + gemmScaleSignature(expr, node.beta_node, node.beta_fp) +
-                    ",epilogue=" + std::string(matmulEpilogueSignatureName(node.matmul_epilogue)) +
-                    ",backward_epilogue=" + std::string(matmulBackwardEpilogueSignatureName(node.matmul_backward_epilogue)) +
-                    ",forward_epilogue_aux=" + std::to_string(node.matmul_forward_epilogue_aux ? 1 : 0);
-                if (node.matmul_epilogue_aux != UINT32_MAX) {
-                    s += ",epilogue_aux=" + fusedRegionSignatureRec(expr, node.matmul_epilogue_aux);
-                }
-                s += ")";
-            }
-        } else if (isAttentionOp(node.op)) {
-            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
-            const std::string aux = fusedRegionSignatureRec(expr, node.aux);
-            s = std::string(fusedOpTag(node.op)) + "(q=" + lhs + ",k=" + rhs + ",v=" + aux +
-                ",qLayout=" + std::to_string(static_cast<int>(node.attention_q_layout)) +
-                ",kLayout=" + std::to_string(static_cast<int>(node.attention_k_layout)) +
-                ",vLayout=" + std::to_string(static_cast<int>(node.attention_v_layout)) +
-                ",oLayout=" + std::to_string(static_cast<int>(node.attention_o_layout)) +
-                ",mask=" + std::to_string(static_cast<int>(node.attention_mask_kind)) +
-                ",left=" + std::to_string(node.attention_diagonal_left_bound) +
-                ",right=" + std::to_string(node.attention_diagonal_right_bound) +
-                ",hasScale=" + std::to_string(node.attention_has_scale ? 1 : 0) + ",scale=" + std::to_string(node.attention_scale) +
-                ",alibi=" + std::to_string(node.attention_use_alibi_mask ? 1 : 0) +
-                ",bias=" + std::to_string(node.attention_use_bias ? 1 : 0) +
-                ",padding=" + std::to_string(node.attention_use_padding_mask ? 1 : 0) +
-                ",ragged=" + std::to_string(node.attention_use_ragged_offsets ? 1 : 0) +
-                ",dropout=" + formatFloatCanonical(node.attention_dropout_probability);
-            if (node.attention_use_bias && node.alpha_node != UINT32_MAX) {
-                s += ",biasNode=" + fusedRegionSignatureRec(expr, node.alpha_node);
-            }
-            if (node.attention_use_ragged_offsets) {
-                s += ",raggedQ=" + fusedRegionSignatureRec(expr, node.attention_ragged_offset_q_node);
-                s += ",raggedKV=" + fusedRegionSignatureRec(expr, node.attention_ragged_offset_kv_node);
-            }
-            if (node.attention_use_paged_kv_cache) {
-                s += ",pagedMax=" + std::to_string(node.attention_paged_kv_max_sequence_length);
-                s += ",pageK=" + fusedRegionSignatureRec(expr, node.attention_page_table_k_node);
-                s += ",pageV=" + fusedRegionSignatureRec(expr, node.attention_page_table_v_node);
-            }
-            if (node.attention_dropout_probability > 0.0f) {
-                s += ",dropoutSeed=" + fusedRegionSignatureRec(expr, node.attention_dropout_seed_node);
-                s += ",dropoutOffset=" + fusedRegionSignatureRec(expr, node.attention_dropout_offset_node);
-            }
-            s += ")";
-        } else if (isAttentionBackwardOp(node.op)) {
-            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
-            const std::string aux = fusedRegionSignatureRec(expr, node.aux);
-            const std::string dO = fusedRegionSignatureRec(expr, node.alpha_node);
-            s = std::string(fusedOpTag(node.op)) + "(q=" + lhs + ",k=" + rhs + ",v=" + aux + ",dO=" + dO +
-                ",qLayout=" + std::to_string(static_cast<int>(node.attention_q_layout)) +
-                ",kLayout=" + std::to_string(static_cast<int>(node.attention_k_layout)) +
-                ",vLayout=" + std::to_string(static_cast<int>(node.attention_v_layout)) +
-                ",oLayout=" + std::to_string(static_cast<int>(node.attention_o_layout)) +
-                ",mask=" + std::to_string(static_cast<int>(node.attention_mask_kind)) +
-                ",left=" + std::to_string(node.attention_diagonal_left_bound) +
-                ",right=" + std::to_string(node.attention_diagonal_right_bound) +
-                ",hasScale=" + std::to_string(node.attention_has_scale ? 1 : 0) + ",scale=" + std::to_string(node.attention_scale) +
-                ",alibi=" + std::to_string(node.attention_use_alibi_mask ? 1 : 0) +
-                ",bias=" + std::to_string(node.attention_use_bias ? 1 : 0) +
-                ",padding=" + std::to_string(node.attention_use_padding_mask ? 1 : 0) +
-                ",ragged=" + std::to_string(node.attention_use_ragged_offsets ? 1 : 0) +
-                ",dropout=" + formatFloatCanonical(node.attention_dropout_probability);
-            if (node.attention_use_bias && node.beta_node != UINT32_MAX) {
-                s += ",biasNode=" + fusedRegionSignatureRec(expr, node.beta_node);
-            }
-            if (node.attention_use_ragged_offsets) {
-                s += ",raggedQ=" + fusedRegionSignatureRec(expr, node.attention_ragged_offset_q_node);
-                s += ",raggedKV=" + fusedRegionSignatureRec(expr, node.attention_ragged_offset_kv_node);
-            }
-            if (node.attention_use_paged_kv_cache) {
-                s += ",pagedMax=" + std::to_string(node.attention_paged_kv_max_sequence_length);
-                s += ",pageK=" + fusedRegionSignatureRec(expr, node.attention_page_table_k_node);
-                s += ",pageV=" + fusedRegionSignatureRec(expr, node.attention_page_table_v_node);
-            }
-            if (node.attention_dropout_probability > 0.0f) {
-                s += ",dropoutSeed=" + fusedRegionSignatureRec(expr, node.attention_dropout_seed_node);
-                s += ",dropoutOffset=" + fusedRegionSignatureRec(expr, node.attention_dropout_offset_node);
-            }
-            s += ")";
-        } else if (isConvolutionOp(node.op)) {
-            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
-            if (node.op == ExprOp::CONV2D || node.op == ExprOp::CONV2D_BACKWARD_DATA || node.op == ExprOp::CONV2D_BACKWARD_FILTER) {
-                s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs +
-                    ",sh=" + std::to_string(node.conv_spatial_2d.stride_h) +
-                    ",sw=" + std::to_string(node.conv_spatial_2d.stride_w) +
-                    ",preH=" + std::to_string(node.conv_spatial_2d.pre_padding_h) +
-                    ",postH=" + std::to_string(node.conv_spatial_2d.post_padding_h) +
-                    ",preW=" + std::to_string(node.conv_spatial_2d.pre_padding_w) +
-                    ",postW=" + std::to_string(node.conv_spatial_2d.post_padding_w) +
-                    ",dh=" + std::to_string(node.conv_spatial_2d.dilation_h) +
-                    ",dw=" + std::to_string(node.conv_spatial_2d.dilation_w) +
-                    ",groups=" + std::to_string(node.conv_groups) + ")";
-            } else {
-                s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs +
-                    ",sd=" + std::to_string(node.conv_spatial_3d.stride_d) +
-                    ",sh=" + std::to_string(node.conv_spatial_3d.stride_h) +
-                    ",sw=" + std::to_string(node.conv_spatial_3d.stride_w) +
-                    ",preD=" + std::to_string(node.conv_spatial_3d.pre_padding_d) +
-                    ",postD=" + std::to_string(node.conv_spatial_3d.post_padding_d) +
-                    ",preH=" + std::to_string(node.conv_spatial_3d.pre_padding_h) +
-                    ",postH=" + std::to_string(node.conv_spatial_3d.post_padding_h) +
-                    ",preW=" + std::to_string(node.conv_spatial_3d.pre_padding_w) +
-                    ",postW=" + std::to_string(node.conv_spatial_3d.post_padding_w) +
-                    ",dd=" + std::to_string(node.conv_spatial_3d.dilation_d) +
-                    ",dh=" + std::to_string(node.conv_spatial_3d.dilation_h) +
-                    ",dw=" + std::to_string(node.conv_spatial_3d.dilation_w) +
-                    ",groups=" + std::to_string(node.conv_groups) + ")";
-            }
-        } else {
-            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",axes=" + uintVecSignature(node.reduction_axes) +
-                ",squeeze=" + uintVecSignature(node.squeeze_axes) + ")";
-        }
-
-        appendNodeDTypeSignature(s, node);
-        return s;
-    }
-
-    if (!Expression::isBinaryOp(node.op) && !Expression::isTernaryOp(node.op)) {
-        std::string s;
-        if (node.op == ExprOp::RESHAPE) {
-            s = std::string(fusedOpTag(node.op)) + "(" + lhs + ",dims=" + uintVecSignature(node.reshape_dims) + ")";
-        } else if (node.op == ExprOp::BROADCAST_TO) {
-            s = std::string(fusedOpTag(node.op)) + "(" + lhs + ",dims=" + uintVecSignature(node.broadcast_dims) + ")";
-        } else if (node.op == ExprOp::UNSQUEEZE) {
-            s = std::string(fusedOpTag(node.op)) + "(" + lhs + ",axes=" + uintVecSignature(node.unsqueeze_axes) + ")";
-        } else if (node.op == ExprOp::SQUEEZE) {
-            s = std::string(fusedOpTag(node.op)) + "(" + lhs + ",axes=" + uintVecSignature(node.squeeze_axes) + ")";
-        } else if (node.op == ExprOp::ROPE) {
-            s = std::string(fusedOpTag(node.op)) + "(" + lhs + ",seqAxis=" + std::to_string(node.rope_sequence_axis) +
-                ",dimAxis=" + std::to_string(node.rope_head_dim_axis) + ",rotaryDim=" + std::to_string(node.rope_rotary_dim) +
-                ",base=" + std::to_string(scalarBits(node.rope_base)) + ",offset=" + std::to_string(node.rope_position_offset) +
-                ",interleaved=" + std::to_string(node.rope_interleaved ? 1 : 0) + ",inverse=" + std::to_string(node.rope_inverse ? 1 : 0) +
-                ",scaling=" + std::to_string(static_cast<int>(node.rope_scaling_kind)) +
-                ",factor=" + std::to_string(scalarBits(node.rope_scaling_factor)) +
-                ",originalMax=" + std::to_string(node.rope_original_max_position_embeddings) +
-                ",attentionFactor=" + std::to_string(scalarBits(node.rope_attention_factor)) +
-                ",yarnBetaFast=" + std::to_string(scalarBits(node.rope_yarn_beta_fast)) +
-                ",yarnBetaSlow=" + std::to_string(scalarBits(node.rope_yarn_beta_slow)) +
-                ",llama3LowFreq=" + std::to_string(scalarBits(node.rope_llama3_low_freq_factor)) +
-                ",llama3HighFreq=" + std::to_string(scalarBits(node.rope_llama3_high_freq_factor)) +
-                ",longRopeShort=" + doubleVecSignature(node.rope_long_rope_short_factors) +
-                ",longRopeLong=" + doubleVecSignature(node.rope_long_rope_long_factors) +
-                (node.rope_effective_sequence_length_node == UINT32_MAX
-                     ? std::string{}
-                     : ",effectiveSeqLen=" + fusedRegionSignatureRec(expr, node.rope_effective_sequence_length_node)) +
-                (node.rope_position_ids_node == UINT32_MAX
-                     ? std::string{}
-                     : ",positionIds=" + fusedRegionSignatureRec(expr, node.rope_position_ids_node)) +
-                ",allowInPlace=" + std::to_string(node.rope_allow_in_place_materialization ? 1 : 0) + ")";
-        } else {
-            s = std::string(fusedOpTag(node.op)) + "(" + lhs + ")";
-        }
-        appendNodeDTypeSignature(s, node);
-        return s;
-    }
-
-    if (node.op == ExprOp::WHERE) {
-        const std::string true_value = fusedRegionSignatureRec(expr, node.rhs);
-        const std::string false_value = fusedRegionSignatureRec(expr, node.aux);
-        std::string s = std::string(fusedOpTag(node.op)) + "(" + lhs + "," + true_value + "," + false_value + ")";
-        appendNodeDTypeSignature(s, node);
-        return s;
-    }
-
-    std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
-
-    if (node.op == ExprOp::TAKE_ALONG_AXIS) {
-        std::string s = std::string(fusedOpTag(node.op)) + "(" + lhs + "," + rhs + ",axis=" + uintVecSignature(node.reduction_axes) + ")";
-        appendNodeDTypeSignature(s, node);
-        return s;
-    }
-
-    if (node.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
-        return std::string(fusedOpTag(node.op)) + "(" + lhs + "," + rhs + ",source=" +
-               std::to_string(static_cast<int>(node.ragged_runtime_extent_source)) + ",batch=" +
-               std::to_string(node.ragged_runtime_batch_size) + ",maxActive=" +
-               std::to_string(node.ragged_runtime_max_active_values) + ",elementsPerValue=" +
-               std::to_string(node.ragged_runtime_elements_per_value) + ")";
-    }
-
-    if (node.op == ExprOp::SEGMENTED_BROADCAST) {
-        return std::string(fusedOpTag(node.op)) + "(" + lhs + "," + rhs + ",maxActive=" +
-               std::to_string(node.ragged_runtime_max_active_values) + ",elementsPerValue=" +
-               std::to_string(node.ragged_runtime_elements_per_value) + ",normalize=" +
-               std::to_string(node.segmented_broadcast_normalize_by_length ? 1 : 0) + ")";
-    }
-
-    if (isSegmentedReduceOp(node.op)) {
-        return std::string(fusedOpTag(node.op)) + "(" + lhs + "," + rhs + ",elementsPerValue=" +
-               std::to_string(node.ragged_runtime_elements_per_value) + ")";
-    }
-
-    if (isCommutativeStageOp(node.op) && rhs < lhs) {
-        std::string s = std::string(fusedOpTag(node.op)) + "(" + rhs + "," + lhs + ")";
-        appendNodeDTypeSignature(s, node);
-        return s;
-    }
-
-    std::string s = std::string(fusedOpTag(node.op)) + "(" + lhs + "," + rhs + ")";
-    appendNodeDTypeSignature(s, node);
-    return s;
-}
-
-static std::string fusedRegionSignature(const PhysicalExpression& expr, uint32_t root_idx) {
-    return fusedRegionSignatureRec(expr, root_idx);
 }
 
 shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey& key,
@@ -7780,9 +7439,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
     const std::vector<uint32_t> node_use_counts = computeNodeUseCounts(expr);
 
+    // Authoritative planner runtime-value identity: one mapping per physical node.
+    // Equal structure does not permit two different node ids to share a value id.
     std::unordered_map<uint32_t, uint32_t> node_output_value_id;
-    std::map<std::string, uint32_t> fused_region_value_id;
-    std::map<std::string, uint32_t> stage_boundary_value_id;
 
     struct TerminalRaggedExtentKey {
         uint32_t partition_input_slot = UINT32_MAX;
@@ -7806,6 +7465,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         }
     };
 
+    // This signature is launch-domain compatibility metadata only. It may decide
+    // whether distinct outputs can share one fused execution stage, but it never
+    // defines authored/runtime value identity.
     using TerminalRaggedExtentSignature = std::set<TerminalRaggedExtentKey>;
 
     auto terminalRaggedExtentSignature = [&](const std::unordered_set<uint32_t>& region) {
@@ -7850,13 +7512,14 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         std::unordered_set<uint32_t> region_nodes;
         std::unordered_set<uint32_t> dependency_value_ids;
         std::vector<RequestedStageOutput> outputs;
-        std::map<std::string, uint32_t> exact_region_value_id;
         TerminalRaggedExtentSignature ragged_extent_signature;
         bool emitted = false;
     };
 
     std::vector<std::optional<TerminalFusedGroup>> terminal_groups;
-    std::map<std::string, size_t> pending_terminal_region_to_group;
+    // Exact pending-root scheduling is keyed only by physical node identity.
+    // Group membership is an execution optimization and does not alias value ids.
+    std::map<uint32_t, size_t> pending_terminal_root_to_group;
 
     PlannedExecution planned;
     uint32_t next_value_id = expr.numInputs();
@@ -7901,6 +7564,61 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         return result;
     };
 
+    // Merge compatible work into one pending execution group while retaining one
+    // RequestedStageOutput/value id for every distinct physical root.
+    auto mergeIntoPendingTerminalGroup = [&](const std::unordered_set<uint32_t>& region,
+                                               const std::unordered_set<uint32_t>& dependency_value_ids,
+                                               const RequestedStageOutput& requested_output,
+                                               const TerminalRaggedExtentSignature& requested_ragged_extent_signature)
+        -> std::optional<size_t> {
+        std::vector<size_t> overlapping_groups;
+        for (size_t i = 0; i < terminal_groups.size(); ++i) {
+            if (!terminal_groups[i].has_value() || terminal_groups[i]->emitted) {
+                continue;
+            }
+            if (setsOverlap(terminal_groups[i]->dependency_value_ids, dependency_value_ids)) {
+                overlapping_groups.push_back(i);
+            }
+        }
+
+        auto target_it = std::find_if(overlapping_groups.begin(), overlapping_groups.end(), [&](size_t group_idx) {
+            return terminal_groups[group_idx].has_value() &&
+                   terminalRaggedExtentsCompatible(terminal_groups[group_idx]->ragged_extent_signature, requested_ragged_extent_signature);
+        });
+        if (target_it == overlapping_groups.end()) {
+            return std::nullopt;
+        }
+
+        const size_t target = *target_it;
+        TerminalFusedGroup& target_group = *terminal_groups[target];
+        target_group.region_nodes.insert(region.begin(), region.end());
+        target_group.dependency_value_ids.insert(dependency_value_ids.begin(), dependency_value_ids.end());
+        target_group.outputs.push_back(requested_output);
+        pending_terminal_root_to_group[requested_output.old_root_idx] = target;
+
+        for (size_t src_idx : overlapping_groups) {
+            if (src_idx == target || !terminal_groups[src_idx].has_value()) {
+                continue;
+            }
+
+            TerminalFusedGroup& src_group = *terminal_groups[src_idx];
+            if (!terminalRaggedExtentsCompatible(target_group.ragged_extent_signature, src_group.ragged_extent_signature)) {
+                continue;
+            }
+            target_group.region_nodes.insert(src_group.region_nodes.begin(), src_group.region_nodes.end());
+            target_group.dependency_value_ids.insert(src_group.dependency_value_ids.begin(), src_group.dependency_value_ids.end());
+            target_group.outputs.insert(target_group.outputs.end(), src_group.outputs.begin(), src_group.outputs.end());
+
+            for (const RequestedStageOutput& output : src_group.outputs) {
+                pending_terminal_root_to_group[output.old_root_idx] = target;
+            }
+
+            terminal_groups[src_idx].reset();
+        }
+
+        return target;
+    };
+
     std::function<void(size_t)> materializeTerminalGroup;
     std::function<void(uint32_t)> emitForDependency;
     std::function<uint32_t(uint32_t)> emitHostExtentMetadataAlias;
@@ -7924,11 +7642,6 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         }
 
         planned.stages.push_back(buildFusedStage(expr, group.region_nodes, group.outputs, node_output_value_id));
-
-        for (const auto& [region_key, value_id] : group.exact_region_value_id) {
-            fused_region_value_id[region_key] = value_id;
-        }
-
         group.emitted = true;
     };
 
@@ -8143,13 +7856,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
         std::unordered_set<uint32_t> merged_region;
         std::unordered_set<uint32_t> boundary_nodes;
-        std::vector<std::string> region_sigs;
-        region_sigs.reserve(rope_roots.size());
 
         for (uint32_t rope_root : rope_roots) {
-            const std::string region_sig = fusedRegionSignature(expr, rope_root);
-            if (fused_region_value_id.find(region_sig) != fused_region_value_id.end() ||
-                pending_terminal_region_to_group.find(region_sig) != pending_terminal_region_to_group.end()) {
+            if (node_output_value_id.find(rope_root) != node_output_value_id.end()) {
                 return {};
             }
 
@@ -8172,7 +7881,6 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
             merged_region.insert(region.begin(), region.end());
             boundary_nodes.insert(deps.begin(), deps.end());
-            region_sigs.push_back(region_sig);
         }
 
         for (uint32_t boundary_root : boundary_nodes) {
@@ -8182,14 +7890,12 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         std::vector<RequestedStageOutput> requested_outputs;
         requested_outputs.reserve(rope_roots.size());
         std::unordered_set<uint32_t> emitted_roots;
-        for (size_t i = 0; i < rope_roots.size(); ++i) {
-            const uint32_t rope_root = rope_roots[i];
+        for (uint32_t rope_root : rope_roots) {
             if (node_output_value_id.find(rope_root) != node_output_value_id.end()) {
                 return {};
             }
             const uint32_t value_id = next_value_id++;
             node_output_value_id[rope_root] = value_id;
-            fused_region_value_id.emplace(region_sigs[i], value_id);
             requested_outputs.push_back(RequestedStageOutput{
                 .name = "",
                 .old_root_idx = rope_root,
@@ -8279,9 +7985,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             // the pending terminal group before returning; otherwise the
             // consumer can be scheduled ahead of its producer and stamping the
             // execution plan will fail because the input value does not exist.
-            const std::string region_sig = fusedRegionSignature(expr, root_idx);
-            auto pending_it = pending_terminal_region_to_group.find(region_sig);
-            if (pending_it != pending_terminal_region_to_group.end()) {
+            auto pending_it = pending_terminal_root_to_group.find(root_idx);
+            if (pending_it != pending_terminal_root_to_group.end()) {
                 materializeTerminalGroup(pending_it->second);
             }
             return;
@@ -8318,13 +8023,6 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         }
 
         if (isStageBoundaryOp(root.op)) {
-            const std::string boundary_sig = fusedRegionSignature(expr, root_idx);
-            auto emitted_boundary_it = stage_boundary_value_id.find(boundary_sig);
-            if (emitted_boundary_it != stage_boundary_value_id.end()) {
-                node_output_value_id[root_idx] = emitted_boundary_it->second;
-                return;
-            }
-
             auto ensureBoundaryParentEmitted = [&](uint32_t parent_idx, const char* label) {
                 if (parent_idx >= expr.nodes.size()) {
                     throw std::runtime_error(std::string("Stage-boundary ") + label + " out of range.");
@@ -8473,8 +8171,6 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                                                                 },
                                                             },
                                                             node_output_value_id));
-                    stage_boundary_value_id.emplace(boundary_sig, first_value_id);
-                    stage_boundary_value_id.emplace(fusedRegionSignature(expr, paired_node_idx), second_value_id);
                     return;
                 }
             }
@@ -8523,7 +8219,6 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             } else {
                 planned.stages.push_back(buildReductionStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             }
-            stage_boundary_value_id.emplace(boundary_sig, stage_out_id);
             return;
         }
 
@@ -8541,109 +8236,52 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             emitForDependency(boundary_root);
         }
 
-        std::string region_sig = fusedRegionSignature(expr, root_idx);
-
-        if (forced_transpose_boundaries.empty()) {
-            auto emitted_it = fused_region_value_id.find(region_sig);
-            if (emitted_it != fused_region_value_id.end()) {
-                node_output_value_id[root_idx] = emitted_it->second;
-                return;
-            }
-
-            auto pending_it = pending_terminal_region_to_group.find(region_sig);
-            if (pending_it != pending_terminal_region_to_group.end()) {
-                materializeTerminalGroup(pending_it->second);
-
-                auto fused_it = fused_region_value_id.find(region_sig);
-                if (fused_it == fused_region_value_id.end()) {
-                    throw std::runtime_error("Pending terminal region was materialized but no fused region value id was recorded.");
-                }
-
-                node_output_value_id[root_idx] = fused_it->second;
-                return;
-            }
-        }
-
         uint32_t out_id = next_value_id++;
         node_output_value_id[root_idx] = out_id;
-        if (forced_transpose_boundaries.empty()) {
-            fused_region_value_id.emplace(region_sig, out_id);
-        }
 
-        std::vector<RequestedStageOutput> requested_outputs{RequestedStageOutput{
+        RequestedStageOutput requested_output{
             .name = "",
             .old_root_idx = root_idx,
             .value_id = out_id,
-        }};
+        };
 
+        if (forced_transpose_boundaries.empty()) {
+            std::unordered_set<uint32_t> dependency_value_ids;
+            collectExternalValueIds(expr, region, node_output_value_id, dependency_value_ids);
+            TerminalRaggedExtentSignature ragged_extent_signature = terminalRaggedExtentSignature(region);
+            std::optional<size_t> pending_group = mergeIntoPendingTerminalGroup(
+                region, dependency_value_ids, requested_output, ragged_extent_signature);
+            if (pending_group.has_value()) {
+                // Preserve authored runtime identity while retaining the old common-input
+                // execution fusion: the dependency receives its own value id/output, but
+                // shares the pending fused launch. Stage-local CSE may still reuse the
+                // actual pure arithmetic inside that stage.
+                materializeTerminalGroup(*pending_group);
+                return;
+            }
+        }
+
+        std::vector<RequestedStageOutput> requested_outputs{requested_output};
         planned.stages.push_back(buildFusedStage(expr, region, requested_outputs, node_output_value_id));
     };
 
     auto addOrMergeTerminalGroup = [&](std::unordered_set<uint32_t> region,
                                        std::unordered_set<uint32_t> dependency_value_ids,
                                        RequestedStageOutput requested_output,
-                                       const std::string& region_sig,
                                        TerminalRaggedExtentSignature requested_ragged_extent_signature) {
-        std::vector<size_t> overlapping_groups;
-        for (size_t i = 0; i < terminal_groups.size(); ++i) {
-            if (!terminal_groups[i].has_value() || terminal_groups[i]->emitted) {
-                continue;
-            }
-            if (setsOverlap(terminal_groups[i]->dependency_value_ids, dependency_value_ids)) {
-                overlapping_groups.push_back(i);
-            }
-        }
-
-        auto makeNewGroup = [&]() {
-            TerminalFusedGroup new_group;
-            new_group.region_nodes = std::move(region);
-            new_group.dependency_value_ids = std::move(dependency_value_ids);
-            new_group.outputs.push_back(requested_output);
-            new_group.exact_region_value_id.emplace(region_sig, requested_output.value_id);
-            new_group.ragged_extent_signature = std::move(requested_ragged_extent_signature);
-
-            size_t new_idx = terminal_groups.size();
-            terminal_groups.push_back(std::move(new_group));
-            pending_terminal_region_to_group[region_sig] = new_idx;
-        };
-
-        auto target_it = std::find_if(overlapping_groups.begin(), overlapping_groups.end(), [&](size_t group_idx) {
-            return terminal_groups[group_idx].has_value() &&
-                   terminalRaggedExtentsCompatible(terminal_groups[group_idx]->ragged_extent_signature, requested_ragged_extent_signature);
-        });
-        if (target_it == overlapping_groups.end()) {
-            makeNewGroup();
+        if (mergeIntoPendingTerminalGroup(region, dependency_value_ids, requested_output, requested_ragged_extent_signature).has_value()) {
             return;
         }
 
-        size_t target = *target_it;
-        TerminalFusedGroup& target_group = *terminal_groups[target];
-        target_group.region_nodes.insert(region.begin(), region.end());
-        target_group.dependency_value_ids.insert(dependency_value_ids.begin(), dependency_value_ids.end());
-        target_group.outputs.push_back(requested_output);
-        target_group.exact_region_value_id[region_sig] = requested_output.value_id;
-        pending_terminal_region_to_group[region_sig] = target;
+        TerminalFusedGroup new_group;
+        new_group.region_nodes = std::move(region);
+        new_group.dependency_value_ids = std::move(dependency_value_ids);
+        new_group.outputs.push_back(requested_output);
+        new_group.ragged_extent_signature = std::move(requested_ragged_extent_signature);
 
-        for (size_t src_idx : overlapping_groups) {
-            if (src_idx == target || !terminal_groups[src_idx].has_value()) {
-                continue;
-            }
-
-            TerminalFusedGroup& src_group = *terminal_groups[src_idx];
-            if (!terminalRaggedExtentsCompatible(target_group.ragged_extent_signature, src_group.ragged_extent_signature)) {
-                continue;
-            }
-            target_group.region_nodes.insert(src_group.region_nodes.begin(), src_group.region_nodes.end());
-            target_group.dependency_value_ids.insert(src_group.dependency_value_ids.begin(), src_group.dependency_value_ids.end());
-            target_group.outputs.insert(target_group.outputs.end(), src_group.outputs.begin(), src_group.outputs.end());
-
-            for (const auto& [key, value_id] : src_group.exact_region_value_id) {
-                target_group.exact_region_value_id[key] = value_id;
-                pending_terminal_region_to_group[key] = target;
-            }
-
-            terminal_groups[src_idx].reset();
-        }
+        const size_t new_idx = terminal_groups.size();
+        terminal_groups.push_back(std::move(new_group));
+        pending_terminal_root_to_group[requested_output.old_root_idx] = new_idx;
     };
 
     for (const NamedOutput& named_output : requested_outputs) {
@@ -8759,18 +8397,6 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                     .name = named_output.name,
                     .local_node_idx = UINT32_MAX,
                     .value_id = already_emitted_it->second,
-                });
-                continue;
-            }
-
-            const std::string boundary_sig = fusedRegionSignature(expr, named_output.node_idx);
-            auto emitted_boundary_it = stage_boundary_value_id.find(boundary_sig);
-            if (emitted_boundary_it != stage_boundary_value_id.end()) {
-                node_output_value_id[named_output.node_idx] = emitted_boundary_it->second;
-                planned.final_outputs.push_back(CompiledStageOutput{
-                    .name = named_output.name,
-                    .local_node_idx = UINT32_MAX,
-                    .value_id = emitted_boundary_it->second,
                 });
                 continue;
             }
@@ -8924,8 +8550,6 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                         .value_id = second_value_id,
                     });
                     planned.stages.push_back(buildScanStage(expr, requested_scan_outputs, node_output_value_id));
-                    stage_boundary_value_id.emplace(boundary_sig, first_value_id);
-                    stage_boundary_value_id.emplace(fusedRegionSignature(expr, paired_node_idx), second_value_id);
                     planned.final_outputs.push_back(CompiledStageOutput{
                         .name = named_output.name,
                         .local_node_idx = UINT32_MAX,
@@ -9000,8 +8624,6 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                     buildReductionStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             }
 
-            stage_boundary_value_id.emplace(boundary_sig, stage_out_id);
-
             planned.final_outputs.push_back(CompiledStageOutput{
                 .name = named_output.name,
                 .local_node_idx = UINT32_MAX,
@@ -9027,39 +8649,6 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             emitForDependency(boundary_root);
         }
 
-        std::string region_sig = fusedRegionSignature(expr, named_output.node_idx);
-
-        if (forced_transpose_boundaries.empty()) {
-            auto emitted_it = fused_region_value_id.find(region_sig);
-            if (emitted_it != fused_region_value_id.end()) {
-                node_output_value_id[named_output.node_idx] = emitted_it->second;
-                planned.final_outputs.push_back(CompiledStageOutput{
-                    .name = named_output.name,
-                    .local_node_idx = UINT32_MAX,
-                    .value_id = emitted_it->second,
-                });
-                continue;
-            }
-
-            auto pending_it = pending_terminal_region_to_group.find(region_sig);
-            if (pending_it != pending_terminal_region_to_group.end()) {
-                size_t group_idx = pending_it->second;
-                if (group_idx >= terminal_groups.size() || !terminal_groups[group_idx].has_value()) {
-                    throw std::runtime_error("Pending terminal region points to invalid group.");
-                }
-
-                uint32_t existing_value_id = terminal_groups[group_idx]->exact_region_value_id.at(region_sig);
-                node_output_value_id[named_output.node_idx] = existing_value_id;
-
-                planned.final_outputs.push_back(CompiledStageOutput{
-                    .name = named_output.name,
-                    .local_node_idx = UINT32_MAX,
-                    .value_id = existing_value_id,
-                });
-                continue;
-            }
-        }
-
         uint32_t out_id = next_value_id++;
         node_output_value_id[named_output.node_idx] = out_id;
 
@@ -9076,7 +8665,6 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             addOrMergeTerminalGroup(std::move(region),
                                     std::move(dependency_value_ids),
                                     requested_output,
-                                    region_sig,
                                     std::move(ragged_extent_signature));
         } else {
             std::vector<RequestedStageOutput> requested_outputs{requested_output};
@@ -9155,6 +8743,14 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
 std::vector<PhysicalExecutionStage> EquationCompiler::splitAtReductionBoundaries(const PhysicalOutputs& outputs) {
     return planExecution(outputs).stages;
+}
+
+detail::EquationCompilerPlanForTests detail::planEquationCompilerForTests(const PhysicalOutputs& outputs) {
+    PlannedExecution planned = planExecution(outputs);
+    return detail::EquationCompilerPlanForTests{
+        .stages = std::move(planned.stages),
+        .final_outputs = std::move(planned.final_outputs),
+    };
 }
 
 std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs& outputs,

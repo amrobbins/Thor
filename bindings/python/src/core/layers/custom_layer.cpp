@@ -374,14 +374,6 @@ std::set<std::string> toNameSet(const PhysicalTensorMap& tensors) {
     return names;
 }
 
-std::set<std::string> toNameSet(const std::vector<ThorImplementation::NamedOutput>& outputs) {
-    std::set<std::string> names;
-    for (const auto& output : outputs) {
-        names.insert(output.name);
-    }
-    return names;
-}
-
 void validateCustomLayerExpressionInputs(const std::vector<std::string>& expectedInputNames,
                                          const std::set<std::string>& actualInputNames) {
     const std::set<std::string> expectedInputNameSet = toNameSet(expectedInputNames);
@@ -618,10 +610,10 @@ DynamicExpressionBuild callBuildCallableForContext(nb::callable callable,
     applyActivationToNamedExpressions(namedExpressions, activation);
     Outputs expressionOutputs = Expression::outputs(namedExpressions);
     auto serializedDefinition = std::make_shared<ExpressionDefinition>(ExpressionDefinition::fromOutputs(expressionOutputs));
-    std::set<std::string> actualInputNames = expressionOutputs.expression()->getInputNames();
+    std::set<std::string> actualInputNames = expressionOutputs.getInputNames();
     validateCustomLayerExpressionInputs(expectedInputNames, actualInputNames);
     validateDeclaredParametersReferenced(parameterTensors, actualInputNames, outputNames);
-    validateCustomLayerForwardOutputs(outputNames, toNameSet(expressionOutputs.namedOutputs()));
+    validateCustomLayerForwardOutputs(outputNames, toNameSet(expressionOutputs.outputNames()));
 
     PhysicalTensorMap usedInputs = selectNamedTensors(inputs, actualInputNames, "expression input");
 

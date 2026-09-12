@@ -5,6 +5,7 @@
 #include "DeepLearning/Implementation/Layers/Loss/WeightedLossExpression.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
+#include "Utilities/Expression/ExpressionInternal.h"
 #include "Utilities/Expression/FusedEquation.h"
 
 #include "gtest/gtest.h"
@@ -28,6 +29,18 @@ Impl::DynamicExpression makeSerializableSquareLossExpression() {
     Impl::Expression loss = (scores * scores).withOutputDType(Api::DataType::FP32);
     Impl::ExpressionDefinition definition = Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{"loss", loss}}));
     return Impl::DynamicExpression::fromExpressionDefinition(definition);
+}
+
+size_t countNodesOfKind(const Impl::PhysicalOutputs& outputs, Impl::ExprOp op) {
+    if (!outputs.expr) {
+        return 0;
+    }
+
+    size_t count = 0;
+    for (const Impl::ExprNode& node : outputs.expr->nodes) {
+        count += node.op == op ? 1u : 0u;
+    }
+    return count;
 }
 
 size_t nodeCountAfterApplyingLossWeight(optional<float> lossWeight) {
@@ -75,6 +88,35 @@ void expectNoLayerSerializesLossWeight(Api::Network& network) {
 }
 
 }  // namespace
+
+TEST(LossWeightDiscipline, GraphScopedLeafTransformPreservesSharedPhysicalAncestry) {
+    const Impl::Expression lhs = Impl::Expression::input("lhs", Api::DataType::FP32, Api::DataType::FP32);
+    const Impl::Expression rhs = Impl::Expression::input("rhs", Api::DataType::FP32, Api::DataType::FP32);
+    const Impl::Expression sharedProducer = (lhs * rhs).sin();
+    const Impl::PhysicalOutputs rawOutputs =
+        Impl::Expression::outputs({{"exp", sharedProducer.exp()}, {"tanh", sharedProducer.tanh()}}).physicalOutputs();
+
+    vector<Impl::Expression> importedSharedProducers;
+    const Impl::PhysicalOutputs transformed = Impl::detail::transformDynamicExpressionOutputsRecursively(
+        rawOutputs,
+        [&importedSharedProducers](const string& outputName, const Impl::Expression& raw) {
+            const optional<Impl::Expression> shared = Impl::ExpressionInternalAccess::lhsDependency(raw);
+            if (!shared.has_value()) {
+                throw runtime_error("Expected transformed test output to have a logical lhs dependency.");
+            }
+            importedSharedProducers.push_back(*shared);
+            return raw + Impl::Expression::constantScalar(outputName == "exp" ? 1.0 : 2.0);
+        },
+        "graph-scoped transform test");
+
+    ASSERT_EQ(importedSharedProducers.size(), 2u);
+    EXPECT_TRUE(importedSharedProducers[0].isSameLogicalNode(importedSharedProducers[1]));
+    ASSERT_EQ(transformed.outputs.size(), 2u);
+    EXPECT_EQ(transformed.outputs[0].name, "exp");
+    EXPECT_EQ(transformed.outputs[1].name, "tanh");
+    EXPECT_EQ(countNodesOfKind(transformed, Impl::ExprOp::MUL), 1u);
+    EXPECT_EQ(countNodesOfKind(transformed, Impl::ExprOp::SIN), 1u);
+}
 
 TEST(LossWeightDiscipline, DefaultNulloptAndExplicitOneDoNotAddExpressionCompute) {
     const size_t unweightedNodeCount = nodeCountAfterApplyingLossWeight(nullopt);

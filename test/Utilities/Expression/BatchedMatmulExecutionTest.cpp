@@ -109,11 +109,10 @@ void grouped_matmul_cuda_identity_kernel(const float* x, float* y, int64_t n) {
                         .build();
 
     Outputs cuda_outputs = identity.apply({{"x", matmul}});
-    if (cuda_outputs.namedOutputs().size() != 1) {
+    if (cuda_outputs.outputNames().size() != 1) {
         throw std::runtime_error("Expected one CudaKernel output.");
     }
-    const Expression cuda_y =
-        Expression::fromPhysicalNode(cuda_outputs.expression(), cuda_outputs.namedOutputs().front().node_idx);
+    const Expression cuda_y = cuda_outputs.outputExpression(0);
     const Expression z = cuda_y + Expression::constantScalar(1.0);
     return FusedEquation::compile(Expression::outputs({{"z", z}}).physicalOutputs(), 0);
 }

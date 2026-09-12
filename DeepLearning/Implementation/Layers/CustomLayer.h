@@ -122,8 +122,8 @@ class CustomLayer : public TrainableLayer {
         uint64_t accumulateExecutionCount = 0;
     };
 
-    // BR6.5 test-only visibility into the exact generic shared-backward plan
-    // selected by the most recent forward pass for one application. The
+    // Debug-only observability for architecture tests inspecting the exact
+    // generic shared-backward plan selected by the most recent forward pass. The
     // diagnostic exposes physical structure and submission counts separately
     // so tests can distinguish a bloated plan from duplicate runtime execution.
     [[nodiscard]] std::optional<GenericSharedBackwardDebugDiagnostic>

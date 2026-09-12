@@ -9,6 +9,7 @@
 #include "DeepLearning/Implementation/Tensor/RowPartitionDescriptor.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 #include "Utilities/Expression/DropOutPostOp.h"
+#include "Utilities/Expression/ExpressionInternal.h"
 
 #include <cstdint>
 #include <functional>
@@ -153,41 +154,24 @@ std::string dimensionsString(const std::vector<uint64_t>& dimensions) {
     return out.str();
 }
 
-struct ExpressionInputDataTypes {
-    std::optional<DataType> computeDataType;
-    std::optional<DataType> outputDataType;
-};
+using ExpressionInputDataTypes = ThorImplementation::ExpressionInputAnnotations;
 
 ExpressionInputDataTypes expressionInputDataTypes(const ThorImplementation::Expression& expression,
                                                    const std::string& inputName) {
-    const ThorImplementation::PhysicalExpression physicalExpression = expression.expression();
-    std::optional<ExpressionInputDataTypes> resolved;
+    const std::vector<ExpressionInputDataTypes> annotations =
+        ThorImplementation::ExpressionInternalAccess::inputAnnotations(expression, inputName);
+    if (annotations.empty()) {
+        throw std::runtime_error("FullyConnected epilogue expression does not contain expected input '" + inputName + "'.");
+    }
 
-    for (const ThorImplementation::ExprNode& node : physicalExpression.nodes) {
-        if (node.op != ThorImplementation::ExprOp::INPUT) {
-            continue;
-        }
-        if (node.input_slot >= physicalExpression.inputs.size()) {
-            throw std::runtime_error("FullyConnected epilogue input node has an invalid input slot.");
-        }
-        if (physicalExpression.inputs[node.input_slot].name != inputName) {
-            continue;
-        }
-
-        const ExpressionInputDataTypes candidate{node.compute_dtype, node.output_dtype};
-        if (resolved.has_value() &&
-            (resolved->computeDataType != candidate.computeDataType ||
-             resolved->outputDataType != candidate.outputDataType)) {
+    const ExpressionInputDataTypes& resolved = annotations.front();
+    for (const ExpressionInputDataTypes& candidate : annotations) {
+        if (resolved != candidate) {
             throw std::runtime_error("FullyConnected epilogue input '" + inputName +
                                      "' is used with inconsistent dtype annotations.");
         }
-        resolved = candidate;
     }
-
-    if (!resolved.has_value()) {
-        throw std::runtime_error("FullyConnected epilogue expression does not contain expected input '" + inputName + "'.");
-    }
-    return resolved.value();
+    return resolved;
 }
 
 ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t apiLayerId,
@@ -601,11 +585,11 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                             Expression::input(RAGGED_ROW_PARTITION_EXPRESSION_INPUT, offsetsDataType, offsetsDataType));
                     }
                     ThorImplementation::Outputs dropoutOutputs = outputDropout.apply(dropoutInputs);
-                    const auto& namedDropoutOutputs = dropoutOutputs.namedOutputs();
-                    if (namedDropoutOutputs.size() != 1 || namedDropoutOutputs.front().name != "output") {
+                    const std::vector<std::string> dropoutOutputNames = dropoutOutputs.outputNames();
+                    if (dropoutOutputNames.size() != 1 || dropoutOutputNames.front() != "output") {
                         throw std::logic_error("FullyConnected output-dropout kernel produced an unexpected output interface.");
                     }
-                    branch = Expression::fromPhysicalNode(dropoutOutputs.expression(), namedDropoutOutputs.front().node_idx);
+                    branch = dropoutOutputs.outputExpression("output");
                 } else if (flattenedResidual.has_value()) {
                     // Keep the residual add directly adjacent to the affine/activation branch. For the common
                     // Transformer final-projection case (no activation), EquationCompiler can lower this into

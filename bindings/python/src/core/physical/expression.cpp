@@ -2194,13 +2194,7 @@ Args:
             "allow_unsafe_loaded_cuda_kernel_source"_a = false,
             "trusted_cuda_kernel_public_key"_a = "",
             "trusted_cuda_kernel_source_decryption_key"_a = "")
-        .def("output_names", [](const Outputs& self) {
-            std::vector<std::string> names;
-            for (const NamedOutput& output : self.namedOutputs()) {
-                names.push_back(output.name);
-            }
-            return names;
-        })
+        .def("output_names", &Outputs::outputNames)
         .def_static(
             "conditional",
             &Outputs::conditional,

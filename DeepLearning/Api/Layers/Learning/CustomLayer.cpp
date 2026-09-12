@@ -94,22 +94,20 @@ ThorImplementation::ExpressionDefinition addRaggedRuntimeExtents(
         throw std::invalid_argument("Ragged CustomLayer requires a concrete expression graph and metadata for every output.");
     }
 
-    std::unordered_map<std::string, uint32_t> outputNodeByName;
-    for (const auto& output : definition.outputs.outputs) {
-        outputNodeByName.emplace(output.name, output.node_idx);
-    }
+    ThorImplementation::Outputs logicalDefinitionOutputs =
+        ThorImplementation::Outputs::fromPhysicalOutputs(definition.outputs);
+    const std::vector<std::string> definitionOutputNames = logicalDefinitionOutputs.outputNames();
 
     ThorImplementation::Expression offsets = ThorImplementation::Expression::input(offsetsName);
     std::vector<std::pair<std::string, ThorImplementation::Expression>> outputs;
     outputs.reserve(outputNames.size());
     for (size_t outputIndex = 0; outputIndex < outputNames.size(); ++outputIndex) {
         const std::string& outputName = outputNames[outputIndex];
-        auto found = outputNodeByName.find(outputName);
-        if (found == outputNodeByName.end()) {
+        if (std::find(definitionOutputNames.begin(), definitionOutputNames.end(), outputName) ==
+            definitionOutputNames.end()) {
             throw std::invalid_argument("Ragged CustomLayer expression is missing output '" + outputName + "'.");
         }
-        ThorImplementation::Expression value =
-            ThorImplementation::Expression::fromPhysicalNode(definition.outputs.expr, found->second);
+        ThorImplementation::Expression value = logicalDefinitionOutputs.outputExpression(outputName);
         outputs.emplace_back(outputName,
                              value.withRaggedRuntimeExtent(
                                  offsets,

@@ -96,14 +96,19 @@ inline PhysicalOutputs transformDynamicExpressionOutputsRecursively(
         throw std::runtime_error(what + " cannot transform an empty dynamic expression.");
     }
 
-    std::vector<std::pair<std::string, Expression>> transformedOutputs;
-    transformedOutputs.reserve(rawOutputs.outputs.size());
     for (const NamedOutput& output : rawOutputs.outputs) {
         if (output.node_idx >= rawOutputs.expr->nodes.size()) {
             throw std::runtime_error(what + " output node index is out of range for '" + output.name + "'.");
         }
-        Expression raw = Expression::fromPhysicalNode(rawOutputs.expr, output.node_idx);
-        transformedOutputs.emplace_back(output.name, transform(output.name, raw));
+    }
+
+    Outputs logicalRawOutputs = Outputs::fromPhysicalOutputs(rawOutputs);
+    std::vector<std::pair<std::string, Expression>> transformedOutputs;
+    transformedOutputs.reserve(rawOutputs.outputs.size());
+    for (size_t outputIndex = 0; outputIndex < rawOutputs.outputs.size(); ++outputIndex) {
+        const NamedOutput& output = rawOutputs.outputs[outputIndex];
+        transformedOutputs.emplace_back(
+            output.name, transform(output.name, logicalRawOutputs.outputExpression(outputIndex)));
     }
     return Expression::outputs(transformedOutputs).physicalOutputs();
 }

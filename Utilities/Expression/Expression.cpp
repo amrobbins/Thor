@@ -4,6 +4,8 @@
 #include "Utilities/Expression/CudaKernelSecurity.h"
 #include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
+#include "Utilities/Expression/ExpressionInternal.h"
+#include "Utilities/Expression/LogicalExpression.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1090,9 +1092,33 @@ ExprNode exprNodeFromJson(const json& j) {
 Stream& Expression::getNextHelperStream(uint32_t gpu_num) { return helperStreamPool.getNextHelperStream(gpu_num); }
 
 std::set<std::string> Expression::getInputNames() const {
-    if (expr == nullptr)
+    if (!node) {
         return {};
-    return expr->getInputNames();
+    }
+
+    std::set<std::string> names;
+    std::unordered_set<const LogicalExpressionNode*> visited;
+    std::function<void(const LogicalExpression&)> visit = [&](const LogicalExpression& current) {
+        if (!current || !visited.insert(current.get()).second) {
+            return;
+        }
+        if (current->inputBinding()) {
+            names.insert(current->inputBinding()->name);
+        }
+        if (current->raggedRuntimeOffsetsBinding()) {
+            names.insert(current->raggedRuntimeOffsetsBinding()->name);
+        }
+        for (const LogicalDependency& dependency : current->dependencies()) {
+            visit(dependency.node);
+        }
+        if (current->cudaKernelApplication()) {
+            for (const LogicalExpression& input : current->cudaKernelApplication()->inputs()) {
+                visit(input);
+            }
+        }
+    };
+    visit(node);
+    return names;
 }
 
 std::vector<uint64_t> inferBroadcastToOutputDims(const std::vector<uint64_t>& input_dims,
@@ -3026,562 +3052,103 @@ bool Expression::isTernaryOp(const ExprOp op) {
 
 namespace {
 
-uint32_t remapCudaKernelSpecForClone(const PhysicalExpression& src,
-                                     uint32_t src_spec_idx,
-                                     PhysicalExpression& dst,
-                                     std::unordered_map<uint32_t, uint32_t>& cuda_spec_remap) {
-    if (src_spec_idx >= src.cuda_kernel_expressions.size() || !src.cuda_kernel_expressions[src_spec_idx]) {
-        throw std::runtime_error("CudaKernelExpression clone references missing kernel spec.");
-    }
-    auto it = cuda_spec_remap.find(src_spec_idx);
-    if (it != cuda_spec_remap.end()) {
-        return it->second;
-    }
-    const uint32_t dst_spec_idx = static_cast<uint32_t>(dst.cuda_kernel_expressions.size());
-    dst.cuda_kernel_expressions.push_back(src.cuda_kernel_expressions[src_spec_idx]);
-    cuda_spec_remap.emplace(src_spec_idx, dst_spec_idx);
-    return dst_spec_idx;
-}
+class LogicalInputSubstituter {
+   public:
+    LogicalInputSubstituter(std::string input_name, LogicalExpression replacement)
+        : input_name_(std::move(input_name)), replacement_(std::move(replacement)) {}
 
-uint32_t cloneSubtreeImpl(const PhysicalExpression& src,
-                          uint32_t srcNodeIndex,
-                          PhysicalExpression& dst,
-                          std::unordered_map<uint32_t, uint32_t>& oldToNew,
-                          std::unordered_map<uint32_t, uint32_t>& cudaSpecRemap) {
-    auto it = oldToNew.find(srcNodeIndex);
-    if (it != oldToNew.end())
-        return it->second;
+    [[nodiscard]] LogicalExpression transform(const LogicalExpression& source) {
+        if (!source) {
+            throw std::invalid_argument("Cannot substitute through a null logical expression node.");
+        }
+        if (const auto it = node_memo_.find(source.get()); it != node_memo_.end()) {
+            return it->second;
+        }
 
-    const ExprNode& srcNode = src.nodes[srcNodeIndex];
-    ExprNode newNode = srcNode;
+        if (source->inputBinding() && source->inputBinding()->name == input_name_) {
+            node_memo_.emplace(source.get(), replacement_);
+            return replacement_;
+        }
 
-    if (Expression::isUnaryOp(srcNode.op)) {
-        if (srcNode.lhs == UINT32_MAX)
-            throw std::runtime_error("Malformed expression: missing lhs for unary op");
-        newNode.lhs = cloneSubtreeImpl(src, srcNode.lhs, dst, oldToNew, cudaSpecRemap);
-        newNode.rhs = UINT32_MAX;
-        newNode.aux = UINT32_MAX;
-    } else if (Expression::isBinaryOp(srcNode.op)) {
-        if (srcNode.lhs == UINT32_MAX)
-            throw std::runtime_error("Malformed expression: missing lhs for binary op");
-        if (srcNode.rhs == UINT32_MAX)
-            throw std::runtime_error("Malformed expression: missing rhs for binary op");
-        newNode.lhs = cloneSubtreeImpl(src, srcNode.lhs, dst, oldToNew, cudaSpecRemap);
-        newNode.rhs = cloneSubtreeImpl(src, srcNode.rhs, dst, oldToNew, cudaSpecRemap);
-        newNode.aux = UINT32_MAX;
-        if (srcNode.matmul_epilogue_aux != UINT32_MAX) {
-            newNode.matmul_epilogue_aux = cloneSubtreeImpl(src, srcNode.matmul_epilogue_aux, dst, oldToNew, cudaSpecRemap);
+        bool changed = false;
+        std::vector<LogicalDependency> dependencies = source->dependencies();
+        for (LogicalDependency& dependency : dependencies) {
+            LogicalExpression transformed = transform(dependency.node);
+            changed |= transformed.get() != dependency.node.get();
+            dependency.node = std::move(transformed);
         }
-    } else if (Expression::isTernaryOp(srcNode.op)) {
-        if (srcNode.lhs == UINT32_MAX || srcNode.rhs == UINT32_MAX || srcNode.aux == UINT32_MAX)
-            throw std::runtime_error("Malformed expression: missing child for ternary op");
-        newNode.lhs = cloneSubtreeImpl(src, srcNode.lhs, dst, oldToNew, cudaSpecRemap);
-        newNode.rhs = cloneSubtreeImpl(src, srcNode.rhs, dst, oldToNew, cudaSpecRemap);
-        newNode.aux = cloneSubtreeImpl(src, srcNode.aux, dst, oldToNew, cudaSpecRemap);
-        if (srcNode.alpha_node != UINT32_MAX) {
-            newNode.alpha_node = cloneSubtreeImpl(src, srcNode.alpha_node, dst, oldToNew, cudaSpecRemap);
+
+        LogicalCudaKernelApplicationPtr cuda_application = source->cudaKernelApplication();
+        if (cuda_application) {
+            LogicalCudaKernelApplicationPtr transformed_application = transformCudaApplication(cuda_application);
+            changed |= transformed_application.get() != cuda_application.get();
+            cuda_application = std::move(transformed_application);
         }
-        if (srcNode.beta_node != UINT32_MAX) {
-            newNode.beta_node = cloneSubtreeImpl(src, srcNode.beta_node, dst, oldToNew, cudaSpecRemap);
+
+        if (!changed) {
+            node_memo_.emplace(source.get(), source);
+            return source;
         }
-        if (srcNode.matmul_epilogue_aux != UINT32_MAX) {
-            newNode.matmul_epilogue_aux = cloneSubtreeImpl(src, srcNode.matmul_epilogue_aux, dst, oldToNew, cudaSpecRemap);
-        }
-        if (srcNode.attention_use_padding_mask) {
-            if (srcNode.attention_seq_len_q_node == UINT32_MAX || srcNode.attention_seq_len_kv_node == UINT32_MAX) {
-                throw std::runtime_error("Malformed attention expression: missing padding-mask sequence length node while cloning.");
-            }
-            newNode.attention_seq_len_q_node = cloneSubtreeImpl(src, srcNode.attention_seq_len_q_node, dst, oldToNew, cudaSpecRemap);
-            newNode.attention_seq_len_kv_node = cloneSubtreeImpl(src, srcNode.attention_seq_len_kv_node, dst, oldToNew, cudaSpecRemap);
-        }
-        if (srcNode.attention_use_ragged_offsets) {
-            if (srcNode.attention_ragged_offset_q_node == UINT32_MAX || srcNode.attention_ragged_offset_kv_node == UINT32_MAX) {
-                throw std::runtime_error("Malformed attention expression: missing ragged offset node while cloning.");
-            }
-            newNode.attention_ragged_offset_q_node =
-                cloneSubtreeImpl(src, srcNode.attention_ragged_offset_q_node, dst, oldToNew, cudaSpecRemap);
-            newNode.attention_ragged_offset_kv_node =
-                cloneSubtreeImpl(src, srcNode.attention_ragged_offset_kv_node, dst, oldToNew, cudaSpecRemap);
-        }
-        if (srcNode.attention_use_paged_kv_cache) {
-            if (srcNode.attention_page_table_k_node == UINT32_MAX || srcNode.attention_page_table_v_node == UINT32_MAX) {
-                throw std::runtime_error("Malformed attention expression: missing paged KV page-table nodes while cloning.");
-            }
-            newNode.attention_page_table_k_node = cloneSubtreeImpl(src, srcNode.attention_page_table_k_node, dst, oldToNew, cudaSpecRemap);
-            newNode.attention_page_table_v_node = cloneSubtreeImpl(src, srcNode.attention_page_table_v_node, dst, oldToNew, cudaSpecRemap);
-        }
-        if (srcNode.attention_dropout_probability > 0.0f) {
-            if (srcNode.attention_dropout_seed_node == UINT32_MAX || srcNode.attention_dropout_offset_node == UINT32_MAX) {
-                throw std::runtime_error("Malformed attention expression: missing dropout seed/offset node while cloning.");
-            }
-            newNode.attention_dropout_seed_node = cloneSubtreeImpl(src, srcNode.attention_dropout_seed_node, dst, oldToNew, cudaSpecRemap);
-            newNode.attention_dropout_offset_node =
-                cloneSubtreeImpl(src, srcNode.attention_dropout_offset_node, dst, oldToNew, cudaSpecRemap);
-        }
-        if (srcNode.attention_use_fp8_forward_scaling) {
-            if (srcNode.attention_descale_q_node == UINT32_MAX || srcNode.attention_descale_k_node == UINT32_MAX ||
-                srcNode.attention_descale_v_node == UINT32_MAX || srcNode.attention_descale_s_node == UINT32_MAX ||
-                srcNode.attention_scale_s_node == UINT32_MAX || srcNode.attention_scale_o_node == UINT32_MAX ||
-                srcNode.attention_amax_s_node == UINT32_MAX || srcNode.attention_amax_o_node == UINT32_MAX) {
-                throw std::runtime_error("Malformed attention expression: missing FP8 scale/descale/amax node while cloning.");
-            }
-            newNode.attention_descale_q_node = cloneSubtreeImpl(src, srcNode.attention_descale_q_node, dst, oldToNew, cudaSpecRemap);
-            newNode.attention_descale_k_node = cloneSubtreeImpl(src, srcNode.attention_descale_k_node, dst, oldToNew, cudaSpecRemap);
-            newNode.attention_descale_v_node = cloneSubtreeImpl(src, srcNode.attention_descale_v_node, dst, oldToNew, cudaSpecRemap);
-            newNode.attention_descale_s_node = cloneSubtreeImpl(src, srcNode.attention_descale_s_node, dst, oldToNew, cudaSpecRemap);
-            newNode.attention_scale_s_node = cloneSubtreeImpl(src, srcNode.attention_scale_s_node, dst, oldToNew, cudaSpecRemap);
-            newNode.attention_scale_o_node = cloneSubtreeImpl(src, srcNode.attention_scale_o_node, dst, oldToNew, cudaSpecRemap);
-            newNode.attention_amax_s_node = cloneSubtreeImpl(src, srcNode.attention_amax_s_node, dst, oldToNew, cudaSpecRemap);
-            newNode.attention_amax_o_node = cloneSubtreeImpl(src, srcNode.attention_amax_o_node, dst, oldToNew, cudaSpecRemap);
-        }
-    } else if (srcNode.op == ExprOp::CUDA_KERNEL_OUTPUT) {
-        newNode.cuda_kernel_spec_index = remapCudaKernelSpecForClone(src, srcNode.cuda_kernel_spec_index, dst, cudaSpecRemap);
-        newNode.cuda_kernel_input_nodes.clear();
-        newNode.cuda_kernel_input_nodes.reserve(srcNode.cuda_kernel_input_nodes.size());
-        for (uint32_t input_node : srcNode.cuda_kernel_input_nodes) {
-            newNode.cuda_kernel_input_nodes.push_back(cloneSubtreeImpl(src, input_node, dst, oldToNew, cudaSpecRemap));
-        }
-        newNode.lhs = UINT32_MAX;
-        newNode.rhs = UINT32_MAX;
-        newNode.aux = UINT32_MAX;
-    } else if (Expression::isLeafOp(srcNode.op)) {
-        // nothing to recurse into
-    } else {
-        std::string error_message = "Malformed expression: unsupported op in cloneSubtree: " + std::to_string(static_cast<int>(srcNode.op));
-        throw std::runtime_error(error_message.c_str());
+
+        LogicalExpression transformed = LogicalExpressionNode::create(source->semantics(),
+                                                                       std::move(dependencies),
+                                                                       source->inputBinding(),
+                                                                       source->raggedRuntimeOffsetsBinding(),
+                                                                       std::move(cuda_application));
+        node_memo_.emplace(source.get(), transformed);
+        return transformed;
     }
 
-    if (srcNode.op == ExprOp::ROPE && srcNode.rope_effective_sequence_length_node != UINT32_MAX) {
-        newNode.rope_effective_sequence_length_node =
-            cloneSubtreeImpl(src, srcNode.rope_effective_sequence_length_node, dst, oldToNew, cudaSpecRemap);
-    }
-    if (srcNode.op == ExprOp::ROPE && srcNode.rope_position_ids_node != UINT32_MAX) {
-        newNode.rope_position_ids_node =
-            cloneSubtreeImpl(src, srcNode.rope_position_ids_node, dst, oldToNew, cudaSpecRemap);
-    }
-
-    uint32_t newIndex = static_cast<uint32_t>(dst.nodes.size());
-    dst.nodes.push_back(newNode);
-    oldToNew[srcNodeIndex] = newIndex;
-    return newIndex;
-}
-
-uint32_t cloneSubtree(const PhysicalExpression& src,
-                      uint32_t srcNodeIndex,
-                      PhysicalExpression& dst,
-                      std::unordered_map<uint32_t, uint32_t>& oldToNew) {
-    std::unordered_map<uint32_t, uint32_t> cudaSpecRemap;
-    return cloneSubtreeImpl(src, srcNodeIndex, dst, oldToNew, cudaSpecRemap);
-}
-
-uint32_t cloneSubtreeWithMergedInputsImpl(const PhysicalExpression& src,
-                                          uint32_t srcNodeIndex,
-                                          PhysicalExpression& dst,
-                                          std::unordered_map<uint32_t, uint32_t>& oldToNew,
-                                          std::unordered_map<std::string, uint32_t>& dstInputSlotsByName,
-                                          std::unordered_map<uint32_t, uint32_t>& cudaSpecRemap) {
-    auto it = oldToNew.find(srcNodeIndex);
-    if (it != oldToNew.end())
-        return it->second;
-
-    const ExprNode& srcNode = src.nodes.at(srcNodeIndex);
-    ExprNode newNode = srcNode;
-
-    if (srcNode.op == ExprOp::INPUT || srcNode.op == ExprOp::RUNTIME_SCALAR || srcNode.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
-        if (srcNode.input_slot >= src.inputs.size()) {
-            throw std::runtime_error("Input slot out of range while merging expression outputs.");
+   private:
+    [[nodiscard]] LogicalCudaKernelApplicationPtr transformCudaApplication(
+        const LogicalCudaKernelApplicationPtr& application) {
+        if (const auto it = cuda_application_memo_.find(application.get()); it != cuda_application_memo_.end()) {
+            return it->second;
         }
 
-        const std::string& inputName = src.inputs[srcNode.input_slot].name;
-        const NamedInput::Kind inputKind = src.inputs[srcNode.input_slot].kind;
-        auto slotIt = dstInputSlotsByName.find(inputName);
-        uint32_t mergedSlot;
-
-        if (slotIt != dstInputSlotsByName.end()) {
-            mergedSlot = slotIt->second;
-            if (mergedSlot >= dst.inputs.size()) {
-                throw std::runtime_error("Merged input slot out of range while merging expression outputs.");
-            }
-            if (dst.inputs[mergedSlot].kind != inputKind) {
-                throw std::runtime_error("Input kind mismatch while merging expression outputs for input: " + inputName);
-            }
-        } else {
-            mergedSlot = static_cast<uint32_t>(dst.inputs.size());
-            dst.inputs.push_back(NamedInput{inputName, mergedSlot, inputKind});
-            dstInputSlotsByName.emplace(inputName, mergedSlot);
+        bool changed = false;
+        std::vector<LogicalExpression> inputs;
+        inputs.reserve(application->inputs().size());
+        for (const LogicalExpression& input : application->inputs()) {
+            LogicalExpression transformed = transform(input);
+            changed |= transformed.get() != input.get();
+            inputs.push_back(std::move(transformed));
         }
 
-        newNode.input_slot = mergedSlot;
-        newNode.lhs = UINT32_MAX;
-        newNode.rhs = UINT32_MAX;
-        newNode.aux = UINT32_MAX;
-    } else if (Expression::isUnaryOp(srcNode.op)) {
-        if (srcNode.lhs == UINT32_MAX)
-            throw std::runtime_error("Malformed expression: missing lhs for unary op while merging outputs.");
-        newNode.lhs = cloneSubtreeWithMergedInputsImpl(src, srcNode.lhs, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-        newNode.rhs = UINT32_MAX;
-        newNode.aux = UINT32_MAX;
-    } else if (Expression::isBinaryOp(srcNode.op)) {
-        if (srcNode.lhs == UINT32_MAX || srcNode.rhs == UINT32_MAX)
-            throw std::runtime_error("Malformed expression: missing child for binary op while merging outputs.");
-        newNode.lhs = cloneSubtreeWithMergedInputsImpl(src, srcNode.lhs, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-        newNode.rhs = cloneSubtreeWithMergedInputsImpl(src, srcNode.rhs, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-        newNode.aux = UINT32_MAX;
-        if (srcNode.matmul_epilogue_aux != UINT32_MAX) {
-            newNode.matmul_epilogue_aux =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.matmul_epilogue_aux, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
+        LogicalCudaKernelApplicationPtr transformed_application = application;
+        if (changed) {
+            transformed_application = LogicalCudaKernelApplication::create(application->specification(), std::move(inputs));
         }
-    } else if (Expression::isTernaryOp(srcNode.op)) {
-        if (srcNode.lhs == UINT32_MAX || srcNode.rhs == UINT32_MAX || srcNode.aux == UINT32_MAX)
-            throw std::runtime_error("Malformed expression: missing child for ternary op while merging outputs.");
-        newNode.lhs = cloneSubtreeWithMergedInputsImpl(src, srcNode.lhs, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-        newNode.rhs = cloneSubtreeWithMergedInputsImpl(src, srcNode.rhs, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-        newNode.aux = cloneSubtreeWithMergedInputsImpl(src, srcNode.aux, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-        if (srcNode.alpha_node != UINT32_MAX) {
-            newNode.alpha_node =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.alpha_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-        }
-        if (srcNode.beta_node != UINT32_MAX) {
-            newNode.beta_node = cloneSubtreeWithMergedInputsImpl(src, srcNode.beta_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-        }
-        if (srcNode.matmul_epilogue_aux != UINT32_MAX) {
-            newNode.matmul_epilogue_aux =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.matmul_epilogue_aux, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-        }
-        if (srcNode.attention_use_padding_mask) {
-            if (srcNode.attention_seq_len_q_node == UINT32_MAX || srcNode.attention_seq_len_kv_node == UINT32_MAX) {
-                throw std::runtime_error(
-                    "Malformed attention expression: missing padding-mask sequence length node while merging outputs.");
-            }
-            newNode.attention_seq_len_q_node =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_seq_len_q_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-            newNode.attention_seq_len_kv_node =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_seq_len_kv_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-        }
-        if (srcNode.attention_use_ragged_offsets) {
-            if (srcNode.attention_ragged_offset_q_node == UINT32_MAX || srcNode.attention_ragged_offset_kv_node == UINT32_MAX) {
-                throw std::runtime_error("Malformed attention expression: missing ragged offset node while merging outputs.");
-            }
-            newNode.attention_ragged_offset_q_node = cloneSubtreeWithMergedInputsImpl(
-                src, srcNode.attention_ragged_offset_q_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-            newNode.attention_ragged_offset_kv_node = cloneSubtreeWithMergedInputsImpl(
-                src, srcNode.attention_ragged_offset_kv_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-        }
-        if (srcNode.attention_use_paged_kv_cache) {
-            if (srcNode.attention_page_table_k_node == UINT32_MAX || srcNode.attention_page_table_v_node == UINT32_MAX) {
-                throw std::runtime_error("Malformed attention expression: missing paged KV page-table nodes while cloning merged inputs.");
-            }
-            newNode.attention_page_table_k_node = cloneSubtreeWithMergedInputsImpl(
-                src, srcNode.attention_page_table_k_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-            newNode.attention_page_table_v_node = cloneSubtreeWithMergedInputsImpl(
-                src, srcNode.attention_page_table_v_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-        }
-        if (srcNode.attention_dropout_probability > 0.0f) {
-            if (srcNode.attention_dropout_seed_node == UINT32_MAX || srcNode.attention_dropout_offset_node == UINT32_MAX) {
-                throw std::runtime_error("Malformed attention expression: missing dropout seed/offset node while merging outputs.");
-            }
-            newNode.attention_dropout_seed_node = cloneSubtreeWithMergedInputsImpl(
-                src, srcNode.attention_dropout_seed_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-            newNode.attention_dropout_offset_node = cloneSubtreeWithMergedInputsImpl(
-                src, srcNode.attention_dropout_offset_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-        }
-        if (srcNode.attention_use_fp8_forward_scaling) {
-            if (srcNode.attention_descale_q_node == UINT32_MAX || srcNode.attention_descale_k_node == UINT32_MAX ||
-                srcNode.attention_descale_v_node == UINT32_MAX || srcNode.attention_descale_s_node == UINT32_MAX ||
-                srcNode.attention_scale_s_node == UINT32_MAX || srcNode.attention_scale_o_node == UINT32_MAX ||
-                srcNode.attention_amax_s_node == UINT32_MAX || srcNode.attention_amax_o_node == UINT32_MAX) {
-                throw std::runtime_error("Malformed attention expression: missing FP8 scale/descale/amax node while merging outputs.");
-            }
-            newNode.attention_descale_q_node =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_descale_q_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-            newNode.attention_descale_k_node =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_descale_k_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-            newNode.attention_descale_v_node =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_descale_v_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-            newNode.attention_descale_s_node =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_descale_s_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-            newNode.attention_scale_s_node =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_scale_s_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-            newNode.attention_scale_o_node =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_scale_o_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-            newNode.attention_amax_s_node =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_amax_s_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-            newNode.attention_amax_o_node =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_amax_o_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-        }
-    } else if (srcNode.op == ExprOp::CUDA_KERNEL_OUTPUT) {
-        newNode.cuda_kernel_spec_index = remapCudaKernelSpecForClone(src, srcNode.cuda_kernel_spec_index, dst, cudaSpecRemap);
-        newNode.cuda_kernel_input_nodes.clear();
-        newNode.cuda_kernel_input_nodes.reserve(srcNode.cuda_kernel_input_nodes.size());
-        for (uint32_t input_node : srcNode.cuda_kernel_input_nodes) {
-            newNode.cuda_kernel_input_nodes.push_back(
-                cloneSubtreeWithMergedInputsImpl(src, input_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap));
-        }
-        newNode.lhs = UINT32_MAX;
-        newNode.rhs = UINT32_MAX;
-        newNode.aux = UINT32_MAX;
-    } else if (srcNode.op == ExprOp::SCALAR_FP || srcNode.op == ExprOp::FILL) {
-        // nothing to recurse into
-    } else {
-        throw std::runtime_error("Unsupported op while merging expression outputs: " + std::to_string(static_cast<int>(srcNode.op)));
+        cuda_application_memo_.emplace(application.get(), transformed_application);
+        return transformed_application;
     }
 
-    if (srcNode.op == ExprOp::ROPE && srcNode.rope_effective_sequence_length_node != UINT32_MAX) {
-        newNode.rope_effective_sequence_length_node = cloneSubtreeWithMergedInputsImpl(
-            src, srcNode.rope_effective_sequence_length_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-    }
-    if (srcNode.op == ExprOp::ROPE && srcNode.rope_position_ids_node != UINT32_MAX) {
-        newNode.rope_position_ids_node = cloneSubtreeWithMergedInputsImpl(
-            src, srcNode.rope_position_ids_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-    }
-
-    uint32_t newIndex = static_cast<uint32_t>(dst.nodes.size());
-    dst.nodes.push_back(std::move(newNode));
-    oldToNew[srcNodeIndex] = newIndex;
-    return newIndex;
-}
-
-uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
-                                      uint32_t srcNodeIndex,
-                                      PhysicalExpression& dst,
-                                      std::unordered_map<uint32_t, uint32_t>& oldToNew,
-                                      std::unordered_map<std::string, uint32_t>& dstInputSlotsByName) {
-    std::unordered_map<uint32_t, uint32_t> cudaSpecRemap;
-    return cloneSubtreeWithMergedInputsImpl(src, srcNodeIndex, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-}
-
-uint32_t cloneSubtreeWithInputSubstitution(const PhysicalExpression& src,
-                                           uint32_t srcNodeIndex,
-                                           const std::string& substituteInputName,
-                                           uint32_t substituteNodeIndex,
-                                           PhysicalExpression& dst,
-                                           std::unordered_map<uint32_t, uint32_t>& oldToNew) {
-    auto it = oldToNew.find(srcNodeIndex);
-    if (it != oldToNew.end()) {
-        return it->second;
-    }
-    if (srcNodeIndex >= src.nodes.size()) {
-        throw std::runtime_error("Expression substitution source node index is out of range.");
-    }
-
-    const ExprNode& srcNode = src.nodes[srcNodeIndex];
-    ExprNode newNode = srcNode;
-
-    if (srcNode.op == ExprOp::INPUT || srcNode.op == ExprOp::RUNTIME_SCALAR || srcNode.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
-        if (srcNode.input_slot >= src.inputs.size()) {
-            throw std::runtime_error("Expression substitution input slot is out of range.");
-        }
-
-        const NamedInput& input = src.inputs[srcNode.input_slot];
-        if (input.name == substituteInputName) {
-            oldToNew[srcNodeIndex] = substituteNodeIndex;
-            return substituteNodeIndex;
-        }
-
-        const uint32_t dstSlot = dst.getOrCreateInputSlot(input.name, input.kind);
-        newNode.input_slot = dstSlot;
-        newNode.lhs = UINT32_MAX;
-        newNode.rhs = UINT32_MAX;
-        newNode.aux = UINT32_MAX;
-    } else if (Expression::isUnaryOp(srcNode.op)) {
-        if (srcNode.lhs == UINT32_MAX) {
-            throw std::runtime_error("Malformed expression: missing lhs for unary op while substituting input.");
-        }
-        newNode.lhs = cloneSubtreeWithInputSubstitution(src, srcNode.lhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        newNode.rhs = UINT32_MAX;
-        newNode.aux = UINT32_MAX;
-    } else if (Expression::isBinaryOp(srcNode.op)) {
-        if (srcNode.lhs == UINT32_MAX || srcNode.rhs == UINT32_MAX) {
-            throw std::runtime_error("Malformed expression: missing child for binary op while substituting input.");
-        }
-        newNode.lhs = cloneSubtreeWithInputSubstitution(src, srcNode.lhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        newNode.rhs = cloneSubtreeWithInputSubstitution(src, srcNode.rhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        newNode.aux = UINT32_MAX;
-        if (srcNode.matmul_epilogue_aux != UINT32_MAX) {
-            newNode.matmul_epilogue_aux = cloneSubtreeWithInputSubstitution(
-                src, srcNode.matmul_epilogue_aux, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        }
-    } else if (Expression::isTernaryOp(srcNode.op)) {
-        if (srcNode.lhs == UINT32_MAX || srcNode.rhs == UINT32_MAX || srcNode.aux == UINT32_MAX) {
-            throw std::runtime_error("Malformed expression: missing child for ternary op while substituting input.");
-        }
-        newNode.lhs = cloneSubtreeWithInputSubstitution(src, srcNode.lhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        newNode.rhs = cloneSubtreeWithInputSubstitution(src, srcNode.rhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        newNode.aux = cloneSubtreeWithInputSubstitution(src, srcNode.aux, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        if (srcNode.alpha_node != UINT32_MAX) {
-            newNode.alpha_node =
-                cloneSubtreeWithInputSubstitution(src, srcNode.alpha_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        }
-        if (srcNode.beta_node != UINT32_MAX) {
-            newNode.beta_node =
-                cloneSubtreeWithInputSubstitution(src, srcNode.beta_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        }
-        if (srcNode.matmul_epilogue_aux != UINT32_MAX) {
-            newNode.matmul_epilogue_aux = cloneSubtreeWithInputSubstitution(
-                src, srcNode.matmul_epilogue_aux, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        }
-        if (srcNode.attention_use_padding_mask) {
-            if (srcNode.attention_seq_len_q_node == UINT32_MAX || srcNode.attention_seq_len_kv_node == UINT32_MAX) {
-                throw std::runtime_error(
-                    "Malformed attention expression: missing padding-mask sequence length node while substituting input.");
-            }
-            newNode.attention_seq_len_q_node = cloneSubtreeWithInputSubstitution(
-                src, srcNode.attention_seq_len_q_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-            newNode.attention_seq_len_kv_node = cloneSubtreeWithInputSubstitution(
-                src, srcNode.attention_seq_len_kv_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        }
-        if (srcNode.attention_dropout_probability > 0.0f) {
-            if (srcNode.attention_dropout_seed_node == UINT32_MAX || srcNode.attention_dropout_offset_node == UINT32_MAX) {
-                throw std::runtime_error("Malformed attention expression: missing dropout seed/offset node while substituting input.");
-            }
-            newNode.attention_dropout_seed_node = cloneSubtreeWithInputSubstitution(
-                src, srcNode.attention_dropout_seed_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-            newNode.attention_dropout_offset_node = cloneSubtreeWithInputSubstitution(
-                src, srcNode.attention_dropout_offset_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        }
-        if (srcNode.attention_use_ragged_offsets) {
-            if (srcNode.attention_ragged_offset_q_node == UINT32_MAX || srcNode.attention_ragged_offset_kv_node == UINT32_MAX) {
-                throw std::runtime_error("Malformed attention expression: missing ragged offset node while substituting input.");
-            }
-            newNode.attention_ragged_offset_q_node = cloneSubtreeWithInputSubstitution(
-                src, srcNode.attention_ragged_offset_q_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-            newNode.attention_ragged_offset_kv_node = cloneSubtreeWithInputSubstitution(
-                src, srcNode.attention_ragged_offset_kv_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        }
-        if (srcNode.attention_use_paged_kv_cache) {
-            if (srcNode.attention_page_table_k_node == UINT32_MAX || srcNode.attention_page_table_v_node == UINT32_MAX) {
-                throw std::runtime_error("Malformed attention expression: missing paged KV page-table nodes while substituting input.");
-            }
-            newNode.attention_page_table_k_node = cloneSubtreeWithInputSubstitution(
-                src, srcNode.attention_page_table_k_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-            newNode.attention_page_table_v_node = cloneSubtreeWithInputSubstitution(
-                src, srcNode.attention_page_table_v_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        }
-        if (srcNode.attention_use_fp8_forward_scaling) {
-            if (srcNode.attention_descale_q_node == UINT32_MAX || srcNode.attention_descale_k_node == UINT32_MAX ||
-                srcNode.attention_descale_v_node == UINT32_MAX || srcNode.attention_descale_s_node == UINT32_MAX ||
-                srcNode.attention_scale_s_node == UINT32_MAX || srcNode.attention_scale_o_node == UINT32_MAX ||
-                srcNode.attention_amax_s_node == UINT32_MAX || srcNode.attention_amax_o_node == UINT32_MAX) {
-                throw std::runtime_error("Malformed attention expression: missing FP8 scale/descale/amax node while substituting input.");
-            }
-            newNode.attention_descale_q_node = cloneSubtreeWithInputSubstitution(
-                src, srcNode.attention_descale_q_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-            newNode.attention_descale_k_node = cloneSubtreeWithInputSubstitution(
-                src, srcNode.attention_descale_k_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-            newNode.attention_descale_v_node = cloneSubtreeWithInputSubstitution(
-                src, srcNode.attention_descale_v_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-            newNode.attention_descale_s_node = cloneSubtreeWithInputSubstitution(
-                src, srcNode.attention_descale_s_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-            newNode.attention_scale_s_node = cloneSubtreeWithInputSubstitution(
-                src, srcNode.attention_scale_s_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-            newNode.attention_scale_o_node = cloneSubtreeWithInputSubstitution(
-                src, srcNode.attention_scale_o_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-            newNode.attention_amax_s_node = cloneSubtreeWithInputSubstitution(
-                src, srcNode.attention_amax_s_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-            newNode.attention_amax_o_node = cloneSubtreeWithInputSubstitution(
-                src, srcNode.attention_amax_o_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        }
-    } else if (Expression::isLeafOp(srcNode.op)) {
-        // constants/fill nodes have no children and can be copied directly.
-    } else {
-        throw std::runtime_error("Unsupported op while substituting expression input: " + std::to_string(static_cast<int>(srcNode.op)));
-    }
-
-    if (srcNode.op == ExprOp::ROPE && srcNode.rope_effective_sequence_length_node != UINT32_MAX) {
-        newNode.rope_effective_sequence_length_node = cloneSubtreeWithInputSubstitution(
-            src, srcNode.rope_effective_sequence_length_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-    }
-    if (srcNode.op == ExprOp::ROPE && srcNode.rope_position_ids_node != UINT32_MAX) {
-        newNode.rope_position_ids_node = cloneSubtreeWithInputSubstitution(
-            src, srcNode.rope_position_ids_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-    }
-
-    const uint32_t newIndex = static_cast<uint32_t>(dst.nodes.size());
-    dst.nodes.push_back(std::move(newNode));
-    oldToNew[srcNodeIndex] = newIndex;
-    return newIndex;
-}
+    std::string input_name_;
+    LogicalExpression replacement_;
+    std::unordered_map<const LogicalExpressionNode*, LogicalExpression> node_memo_;
+    std::unordered_map<const LogicalCudaKernelApplication*, LogicalCudaKernelApplicationPtr> cuda_application_memo_;
+};
 
 }  // namespace
 
 Expression Expression::input(const std::string& name, std::optional<DataType> compute_dtype, std::optional<DataType> output_dtype) {
     validateUserInputName(name);
-    auto out = std::make_shared<PhysicalExpression>();
-
-    ExprNode node;
-    node.op = ExprOp::INPUT;
-    node.input_slot = out->getOrCreateInputSlot(name, NamedInput::Kind::Tensor);
-
-    // output_dtype means the graph value produced by this input defaults to that dtype,
-    // even though the actual bound runtime tensor may have a different dtype.
-    if (output_dtype.has_value()) {
-        node.output_dtype = output_dtype.value();
-    }
-    if (compute_dtype.has_value()) {
-        node.compute_dtype = compute_dtype.value();
-    }
-
-    out->nodes.push_back(node);
-    out->output_node = 0;
-
-    return Expression(out, 0);
+    return Expression(makeLogicalInput(name, NamedInput::Kind::Tensor, std::nullopt, compute_dtype, output_dtype));
 }
 
 Expression Expression::runtimeScalar(const std::string& name, std::optional<DataType> compute_dtype, std::optional<DataType> output_dtype) {
     validateUserInputName(name);
-    auto out = std::make_shared<PhysicalExpression>();
-
-    ExprNode node;
-    node.op = ExprOp::RUNTIME_SCALAR;
-    node.input_slot = out->getOrCreateInputSlot(name, NamedInput::Kind::RuntimeScalarFp32);
-
-    if (output_dtype.has_value()) {
-        node.output_dtype = output_dtype.value();
-    }
-    if (compute_dtype.has_value()) {
-        node.compute_dtype = compute_dtype.value();
-    }
-
-    out->nodes.push_back(node);
-    out->output_node = 0;
-
-    return Expression(out, 0);
+    return Expression(makeLogicalInput(name, NamedInput::Kind::RuntimeScalarFp32, std::nullopt, compute_dtype, output_dtype));
 }
 
 Expression Expression::tensorRuntimeScalar(const std::string& name,
                                            std::optional<DataType> compute_dtype,
                                            std::optional<DataType> output_dtype) {
     validateUserInputName(name);
-    auto out = std::make_shared<PhysicalExpression>();
-
-    ExprNode node;
-    node.op = ExprOp::TENSOR_RUNTIME_SCALAR;
-    node.input_slot = out->getOrCreateInputSlot(name, NamedInput::Kind::TensorRuntimeScalar);
-
-    if (output_dtype.has_value()) {
-        node.output_dtype = output_dtype.value();
-    }
-    if (compute_dtype.has_value()) {
-        node.compute_dtype = compute_dtype.value();
-    }
-
-    out->nodes.push_back(node);
-    out->output_node = 0;
-
-    return Expression(out, 0);
+    return Expression(makeLogicalInput(name, NamedInput::Kind::TensorRuntimeScalar, std::nullopt, compute_dtype, output_dtype));
 }
 
-Expression::Expression(double value) {
-    expr = std::make_shared<PhysicalExpression>();
-
-    ExprNode node{};
-    node.op = ExprOp::SCALAR_FP;
-    node.scalar_fp = value;
-
-    nodeIndex = static_cast<uint32_t>(expr->nodes.size());
-    expr->nodes.push_back(node);
-    expr->output_node = nodeIndex;
-}
+Expression::Expression(double value) : node(makeLogicalScalar(value)) {}
 
 Expression Expression::constantScalar(double value) { return Expression(value); }
 
@@ -3597,295 +3164,99 @@ Expression Expression::fill(double value,
         }
     }
 
-    auto out = std::make_shared<PhysicalExpression>();
-    ExprNode node{};
-    node.op = ExprOp::FILL;
-    node.scalar_fp = value;
-    node.fill_dims = dims;
-    if (output_dtype.has_value()) {
-        node.output_dtype = output_dtype.value();
-    }
-    out->nodes.push_back(node);
-    out->output_node = 0;
-    return Expression(out, 0);
+    ExprNode semantics{};
+    semantics.op = ExprOp::FILL;
+    semantics.scalar_fp = value;
+    semantics.fill_dims = dims;
+    semantics.output_dtype = output_dtype;
+    return Expression(LogicalExpressionNode::create(std::move(semantics)));
 }
 // Expression Expression::scalar(int64_t value) { return Expression(value); }
 
 PhysicalExpression Expression::expression() const {
-    if (!expr)
+    if (!node) {
         throw std::runtime_error("Expr has no underlying expression");
+    }
 
-    PhysicalExpression out = *expr;
-    out.output_node = nodeIndex;
-    return out;
+    PhysicalOutputs lowered = LogicalExpressionLowerer::lower({LogicalNamedOutput{"expression_root", node, {}}});
+    if (!lowered.expr || lowered.outputs.size() != 1) {
+        throw std::runtime_error("Expression lowering did not produce exactly one physical root.");
+    }
+    lowered.expr->output_node = lowered.outputs.front().node_idx;
+    return *lowered.expr;
 }
 
 Expression Expression::substituteInput(const std::string& input_name, const Expression& replacement) const {
     if (input_name.empty()) {
         throw std::invalid_argument("Expression::substituteInput requires a non-empty input name.");
     }
-    if (!expr) {
+    if (!node) {
         throw std::runtime_error("Expression::substituteInput called on an expression with no underlying graph.");
     }
-    if (!replacement.expr) {
+    if (!replacement.node) {
         throw std::runtime_error("Expression::substituteInput replacement has no underlying graph.");
     }
-    if (replacement.nodeIndex >= replacement.expr->nodes.size()) {
-        throw std::runtime_error("Expression::substituteInput replacement node index is out of range.");
-    }
-    if (nodeIndex >= expr->nodes.size()) {
-        throw std::runtime_error("Expression::substituteInput source node index is out of range.");
-    }
 
-    auto composed = std::make_shared<PhysicalExpression>(*replacement.expr);
-    composed->output_node = replacement.nodeIndex;
-
-    std::unordered_map<uint32_t, uint32_t> oldToNew;
-    const uint32_t composedRoot =
-        cloneSubtreeWithInputSubstitution(*expr, nodeIndex, input_name, replacement.nodeIndex, *composed, oldToNew);
-    composed->output_node = composedRoot;
-    return Expression(std::move(composed), composedRoot);
-}
-
-struct MergeInputsResult {
-    std::vector<NamedInput> mergedInputs;
-    std::vector<uint32_t> lhsSlotRemap;
-    std::vector<uint32_t> rhsSlotRemap;
-};
-
-static MergeInputsResult mergeInputsByName(const PhysicalExpression& lhs, const PhysicalExpression& rhs) {
-    MergeInputsResult result;
-
-    std::unordered_map<std::string, uint32_t> mergedByName;
-    mergedByName.reserve(lhs.inputs.size() + rhs.inputs.size());
-
-    auto getOrCreateMergedSlot = [&](const std::string& name, NamedInput::Kind kind) -> uint32_t {
-        auto it = mergedByName.find(name);
-        if (it != mergedByName.end()) {
-            if (it->second >= result.mergedInputs.size()) {
-                throw std::runtime_error("Merged input slot out of range while combining expressions.");
-            }
-            if (result.mergedInputs[it->second].kind != kind) {
-                throw std::runtime_error("Input kind mismatch while combining expressions for input: " + name);
-            }
-            return it->second;
-        }
-
-        const uint32_t slot = static_cast<uint32_t>(result.mergedInputs.size());
-        mergedByName.emplace(name, slot);
-        result.mergedInputs.push_back(NamedInput{name, slot, kind});
-        return slot;
-    };
-
-    result.lhsSlotRemap.resize(lhs.inputs.size());
-    for (size_t i = 0; i < lhs.inputs.size(); ++i) {
-        result.lhsSlotRemap[i] = getOrCreateMergedSlot(lhs.inputs[i].name, lhs.inputs[i].kind);
-    }
-
-    result.rhsSlotRemap.resize(rhs.inputs.size());
-    for (size_t i = 0; i < rhs.inputs.size(); ++i) {
-        result.rhsSlotRemap[i] = getOrCreateMergedSlot(rhs.inputs[i].name, rhs.inputs[i].kind);
-    }
-
-    return result;
-}
-
-static void remapClonedInputSlots(const PhysicalExpression& sourceExpr,
-                                  const std::unordered_map<uint32_t, uint32_t>& oldToNewNodeMap,
-                                  const std::vector<uint32_t>& slotRemap,
-                                  PhysicalExpression& outExpr) {
-    for (const auto& [oldNodeIndex, newNodeIndex] : oldToNewNodeMap) {
-        const ExprNode& oldNode = sourceExpr.nodes.at(oldNodeIndex);
-        if (oldNode.op != ExprOp::INPUT && oldNode.op != ExprOp::RUNTIME_SCALAR && oldNode.op != ExprOp::TENSOR_RUNTIME_SCALAR)
-            continue;
-
-        if (oldNode.input_slot >= slotRemap.size()) {
-            throw std::runtime_error("Input slot out of range while remapping cloned expression.");
-        }
-
-        ExprNode& newNode = outExpr.nodes.at(newNodeIndex);
-        newNode.input_slot = slotRemap[oldNode.input_slot];
-    }
+    LogicalInputSubstituter substituter(input_name, replacement.node);
+    return Expression(substituter.transform(node));
 }
 
 Expression Expression::binaryOp(const Expression& lhsExpr, const Expression& rhsExpr, ExprOp op) {
-    if (!lhsExpr.expr || !rhsExpr.expr)
+    ExprNode semantics{};
+    semantics.op = op;
+    return binaryOp(lhsExpr, rhsExpr, std::move(semantics));
+}
+
+Expression Expression::binaryOp(const Expression& lhsExpr, const Expression& rhsExpr, ExprNode semantics) {
+    if (!lhsExpr.node || !rhsExpr.node) {
         throw std::runtime_error("Cannot combine empty expressions");
-
-    auto out = std::make_shared<PhysicalExpression>();
-
-    const MergeInputsResult mergedInputs = mergeInputsByName(*lhsExpr.expr, *rhsExpr.expr);
-    out->inputs = mergedInputs.mergedInputs;
-
-    struct CloneState {
-        std::unordered_map<uint32_t, uint32_t> node_map;
-        std::unordered_map<uint32_t, uint32_t> cuda_spec_remap;
-    };
-    std::unordered_map<const PhysicalExpression*, CloneState> clone_states;
-    auto clone_expr = [&](const Expression& expression) -> uint32_t {
-        CloneState& state = clone_states[expression.expr.get()];
-        return cloneSubtreeImpl(*expression.expr, expression.nodeIndex, *out, state.node_map, state.cuda_spec_remap);
-    };
-
-    uint32_t newLhsIndex = clone_expr(lhsExpr);
-    uint32_t newRhsIndex = clone_expr(rhsExpr);
-
-    remapClonedInputSlots(*lhsExpr.expr, clone_states.at(lhsExpr.expr.get()).node_map, mergedInputs.lhsSlotRemap, *out);
-    remapClonedInputSlots(*rhsExpr.expr, clone_states.at(rhsExpr.expr.get()).node_map, mergedInputs.rhsSlotRemap, *out);
-
-    ExprNode node{};
-    node.op = op;
-    node.lhs = newLhsIndex;
-    node.rhs = newRhsIndex;
-
-    uint32_t newIndex = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(node);
-    out->output_node = newIndex;
-
-    return Expression(out, newIndex);
+    }
+    const ExprOp op = semantics.op;
+    return Expression(makeLogicalBinary(op, lhsExpr.node, rhsExpr.node, std::move(semantics)));
 }
 
 Expression Expression::ternaryOp(const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, ExprOp op) {
-    if (!lhsExpr.expr || !rhsExpr.expr || !auxExpr.expr)
-        throw std::runtime_error("Cannot combine empty expressions");
-
-    auto out = std::make_shared<PhysicalExpression>();
-
-    const MergeInputsResult lhs_rhs_inputs = mergeInputsByName(*lhsExpr.expr, *rhsExpr.expr);
-
-    std::unordered_map<std::string, uint32_t> mergedByName;
-    mergedByName.reserve(lhs_rhs_inputs.mergedInputs.size());
-    for (const NamedInput& input : lhs_rhs_inputs.mergedInputs) {
-        mergedByName.emplace(input.name, input.slot);
-    }
-
-    // Reuse the final out expression directly so slot indices stay stable.
-    out->inputs = lhs_rhs_inputs.mergedInputs;
-    for (const NamedInput& input : auxExpr.expr->inputs) {
-        auto it = mergedByName.find(input.name);
-        if (it != mergedByName.end()) {
-            if (out->inputs[it->second].kind != input.kind) {
-                throw std::runtime_error("Input kind mismatch while combining expressions for input: " + input.name);
-            }
-        } else {
-            const uint32_t slot = static_cast<uint32_t>(out->inputs.size());
-            out->inputs.push_back(NamedInput{input.name, slot, input.kind});
-            mergedByName.emplace(input.name, slot);
-        }
-    }
-
-    struct CloneState {
-        std::unordered_map<uint32_t, uint32_t> node_map;
-        std::unordered_map<uint32_t, uint32_t> cuda_spec_remap;
-    };
-    std::unordered_map<const PhysicalExpression*, CloneState> clone_states;
-    auto clone_expr = [&](const Expression& expression) -> uint32_t {
-        CloneState& state = clone_states[expression.expr.get()];
-        return cloneSubtreeImpl(*expression.expr, expression.nodeIndex, *out, state.node_map, state.cuda_spec_remap);
-    };
-
-    uint32_t newLhsIndex = clone_expr(lhsExpr);
-    uint32_t newRhsIndex = clone_expr(rhsExpr);
-    uint32_t newAuxIndex = clone_expr(auxExpr);
-
-    std::vector<uint32_t> lhsSlotRemap(lhsExpr.expr->inputs.size());
-    for (size_t i = 0; i < lhsExpr.expr->inputs.size(); ++i)
-        lhsSlotRemap[i] = mergedByName.at(lhsExpr.expr->inputs[i].name);
-    std::vector<uint32_t> rhsSlotRemap(rhsExpr.expr->inputs.size());
-    for (size_t i = 0; i < rhsExpr.expr->inputs.size(); ++i)
-        rhsSlotRemap[i] = mergedByName.at(rhsExpr.expr->inputs[i].name);
-    std::vector<uint32_t> auxSlotRemap(auxExpr.expr->inputs.size());
-    for (size_t i = 0; i < auxExpr.expr->inputs.size(); ++i)
-        auxSlotRemap[i] = mergedByName.at(auxExpr.expr->inputs[i].name);
-
-    remapClonedInputSlots(*lhsExpr.expr, clone_states.at(lhsExpr.expr.get()).node_map, lhsSlotRemap, *out);
-    remapClonedInputSlots(*rhsExpr.expr, clone_states.at(rhsExpr.expr.get()).node_map, rhsSlotRemap, *out);
-    remapClonedInputSlots(*auxExpr.expr, clone_states.at(auxExpr.expr.get()).node_map, auxSlotRemap, *out);
-
-    ExprNode node{};
-    node.op = op;
-    node.lhs = newLhsIndex;
-    node.rhs = newRhsIndex;
-    node.aux = newAuxIndex;
-
-    uint32_t newIndex = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(node);
-    out->output_node = newIndex;
-
-    return Expression(out, newIndex);
+    ExprNode semantics{};
+    semantics.op = op;
+    return ternaryOp(lhsExpr, rhsExpr, auxExpr, std::move(semantics));
 }
 
-Expression Expression::quaternaryOp(
-    const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, const Expression& fourthExpr, ExprOp op) {
-    if (!lhsExpr.expr || !rhsExpr.expr || !auxExpr.expr || !fourthExpr.expr)
+Expression Expression::ternaryOp(const Expression& lhsExpr,
+                                 const Expression& rhsExpr,
+                                 const Expression& auxExpr,
+                                 ExprNode semantics) {
+    if (!lhsExpr.node || !rhsExpr.node || !auxExpr.node) {
         throw std::runtime_error("Cannot combine empty expressions");
-
-    auto out = std::make_shared<PhysicalExpression>();
-
-    const MergeInputsResult lhs_rhs_inputs = mergeInputsByName(*lhsExpr.expr, *rhsExpr.expr);
-    std::unordered_map<std::string, uint32_t> mergedByName;
-    mergedByName.reserve(lhs_rhs_inputs.mergedInputs.size());
-    for (const NamedInput& input : lhs_rhs_inputs.mergedInputs) {
-        mergedByName.emplace(input.name, input.slot);
     }
+    const ExprOp op = semantics.op;
+    return Expression(makeLogicalTernary(op, lhsExpr.node, rhsExpr.node, auxExpr.node, std::move(semantics)));
+}
 
-    out->inputs = lhs_rhs_inputs.mergedInputs;
-    auto merge_inputs_from = [&](const PhysicalExpression& src) {
-        for (const NamedInput& input : src.inputs) {
-            auto it = mergedByName.find(input.name);
-            if (it != mergedByName.end()) {
-                if (out->inputs[it->second].kind != input.kind) {
-                    throw std::runtime_error("Input kind mismatch while combining expressions for input: " + input.name);
-                }
-            } else {
-                const uint32_t slot = static_cast<uint32_t>(out->inputs.size());
-                out->inputs.push_back(NamedInput{input.name, slot, input.kind});
-                mergedByName.emplace(input.name, slot);
-            }
-        }
+Expression Expression::quaternaryOp(const Expression& lhsExpr,
+                                    const Expression& rhsExpr,
+                                    const Expression& auxExpr,
+                                    const Expression& fourthExpr,
+                                    ExprOp op) {
+    ExprNode semantics{};
+    semantics.op = op;
+    return quaternaryOp(lhsExpr, rhsExpr, auxExpr, fourthExpr, std::move(semantics));
+}
+
+Expression Expression::quaternaryOp(const Expression& lhsExpr,
+                                    const Expression& rhsExpr,
+                                    const Expression& auxExpr,
+                                    const Expression& fourthExpr,
+                                    ExprNode semantics) {
+    if (!lhsExpr.node || !rhsExpr.node || !auxExpr.node || !fourthExpr.node) {
+        throw std::runtime_error("Cannot combine empty expressions");
+    }
+    std::vector<LogicalDependency> dependencies{
+        {LogicalDependencyKind::Lhs, 0, lhsExpr.node},
+        {LogicalDependencyKind::Rhs, 0, rhsExpr.node},
+        {LogicalDependencyKind::Aux, 0, auxExpr.node},
+        {LogicalDependencyKind::Alpha, 0, fourthExpr.node},
     };
-    merge_inputs_from(*auxExpr.expr);
-    merge_inputs_from(*fourthExpr.expr);
-
-    struct CloneState {
-        std::unordered_map<uint32_t, uint32_t> node_map;
-        std::unordered_map<uint32_t, uint32_t> cuda_spec_remap;
-    };
-    std::unordered_map<const PhysicalExpression*, CloneState> clone_states;
-    auto clone_expr = [&](const Expression& expression) -> uint32_t {
-        CloneState& state = clone_states[expression.expr.get()];
-        return cloneSubtreeImpl(*expression.expr, expression.nodeIndex, *out, state.node_map, state.cuda_spec_remap);
-    };
-
-    uint32_t newLhsIndex = clone_expr(lhsExpr);
-    uint32_t newRhsIndex = clone_expr(rhsExpr);
-    uint32_t newAuxIndex = clone_expr(auxExpr);
-    uint32_t newFourthIndex = clone_expr(fourthExpr);
-
-    auto remap_for = [&](const Expression& expression) {
-        const PhysicalExpression& src = *expression.expr;
-        std::vector<uint32_t> slotRemap(src.inputs.size());
-        for (size_t i = 0; i < src.inputs.size(); ++i)
-            slotRemap[i] = mergedByName.at(src.inputs[i].name);
-        remapClonedInputSlots(src, clone_states.at(expression.expr.get()).node_map, slotRemap, *out);
-    };
-    remap_for(lhsExpr);
-    remap_for(rhsExpr);
-    remap_for(auxExpr);
-    remap_for(fourthExpr);
-
-    ExprNode node{};
-    node.op = op;
-    node.lhs = newLhsIndex;
-    node.rhs = newRhsIndex;
-    node.aux = newAuxIndex;
-    node.alpha_node = newFourthIndex;
-
-    uint32_t newIndex = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(node);
-    out->output_node = newIndex;
-
-    return Expression(out, newIndex);
+    return Expression(LogicalExpressionNode::create(std::move(semantics), std::move(dependencies)));
 }
 
 namespace {
@@ -3958,92 +3329,57 @@ static bool isTransposePushThroughBinaryOp(ExprOp op) {
     }
 }
 
-static bool isScalarLikeTransposeOperand(const ExprNode& node) {
-    return node.op == ExprOp::SCALAR_FP || node.op == ExprOp::RUNTIME_SCALAR || node.op == ExprOp::TENSOR_RUNTIME_SCALAR;
+static bool isScalarLikeTransposeOperand(const LogicalExpression& expression) {
+    if (!expression) {
+        return false;
+    }
+    const ExprOp op = expression->op();
+    return op == ExprOp::SCALAR_FP || op == ExprOp::RUNTIME_SCALAR || op == ExprOp::TENSOR_RUNTIME_SCALAR;
 }
 
-static std::optional<uint32_t> tryNormalizeTransposeAtRoot(PhysicalExpression& expr, uint32_t root_idx) {
-    if (root_idx >= expr.nodes.size()) {
-        throw std::runtime_error("tryNormalizeTransposeAtRoot root index out of range.");
+static std::optional<LogicalExpression> tryNormalizeLogicalTransposeAtRoot(const LogicalExpression& root) {
+    if (!root) {
+        throw std::runtime_error("tryNormalizeLogicalTransposeAtRoot requires a non-null logical root.");
     }
 
-    const ExprNode& root = expr.nodes[root_idx];
-    if (root.op == ExprOp::TRANSPOSE) {
-        if (root.lhs == UINT32_MAX || root.lhs >= expr.nodes.size()) {
-            throw std::runtime_error("Malformed transpose expression: missing lhs while normalizing transpose chain.");
-        }
-        return root.lhs;
+    if (root->op() == ExprOp::TRANSPOSE) {
+        return root->dependency(LogicalDependencyKind::Lhs);
     }
 
-    if (isTransposePushThroughUnaryOp(root.op)) {
-        if (root.lhs == UINT32_MAX || root.lhs >= expr.nodes.size()) {
-            throw std::runtime_error("Malformed unary expression while normalizing transpose chain.");
-        }
-        const ExprNode& child = expr.nodes[root.lhs];
-        if (child.op != ExprOp::TRANSPOSE) {
+    if (isTransposePushThroughUnaryOp(root->op())) {
+        const LogicalExpression& child = root->dependency(LogicalDependencyKind::Lhs);
+        if (child->op() != ExprOp::TRANSPOSE) {
             return std::nullopt;
         }
-        if (child.lhs == UINT32_MAX || child.lhs >= expr.nodes.size()) {
-            throw std::runtime_error("Malformed inner transpose expression while normalizing unary transpose chain.");
-        }
-
-        ExprNode normalized = root;
-        normalized.lhs = child.lhs;
-        normalized.rhs = UINT32_MAX;
-        normalized.aux = UINT32_MAX;
-        const uint32_t normalized_idx = static_cast<uint32_t>(expr.nodes.size());
-        expr.nodes.push_back(std::move(normalized));
-        return normalized_idx;
+        const LogicalExpression& untransposed = child->dependency(LogicalDependencyKind::Lhs);
+        return makeLogicalUnary(root->op(), untransposed, root->semantics());
     }
 
-    if (isTransposePushThroughBinaryOp(root.op)) {
-        if (root.lhs == UINT32_MAX || root.rhs == UINT32_MAX || root.lhs >= expr.nodes.size() || root.rhs >= expr.nodes.size()) {
-            throw std::runtime_error("Malformed binary expression while normalizing transpose chain.");
-        }
-
-        auto unwrap_transpose_operand = [&](uint32_t operand_idx, bool& consumed_transpose) -> uint32_t {
-            const ExprNode& operand = expr.nodes[operand_idx];
-            if (operand.op == ExprOp::TRANSPOSE) {
-                if (operand.lhs == UINT32_MAX || operand.lhs >= expr.nodes.size()) {
-                    throw std::runtime_error("Malformed inner transpose expression while normalizing binary transpose chain.");
-                }
-                consumed_transpose = true;
-                return operand.lhs;
-            }
-            return operand_idx;
-        };
+    if (isTransposePushThroughBinaryOp(root->op())) {
+        LogicalExpression lhs = root->dependency(LogicalDependencyKind::Lhs);
+        LogicalExpression rhs = root->dependency(LogicalDependencyKind::Rhs);
 
         bool consumed_lhs_transpose = false;
         bool consumed_rhs_transpose = false;
-        uint32_t normalized_lhs = unwrap_transpose_operand(root.lhs, consumed_lhs_transpose);
-        uint32_t normalized_rhs = unwrap_transpose_operand(root.rhs, consumed_rhs_transpose);
+        if (lhs->op() == ExprOp::TRANSPOSE) {
+            lhs = lhs->dependency(LogicalDependencyKind::Lhs);
+            consumed_lhs_transpose = true;
+        }
+        if (rhs->op() == ExprOp::TRANSPOSE) {
+            rhs = rhs->dependency(LogicalDependencyKind::Lhs);
+            consumed_rhs_transpose = true;
+        }
         if (!consumed_lhs_transpose && !consumed_rhs_transpose) {
             return std::nullopt;
         }
 
-        auto transpose_if_needed = [&](uint32_t operand_idx, bool already_consumed_transpose) -> uint32_t {
-            if (already_consumed_transpose || isScalarLikeTransposeOperand(expr.nodes[operand_idx])) {
-                return operand_idx;
-            }
-
-            ExprNode transpose_node;
-            transpose_node.op = ExprOp::TRANSPOSE;
-            transpose_node.lhs = operand_idx;
-            const uint32_t transpose_idx = static_cast<uint32_t>(expr.nodes.size());
-            expr.nodes.push_back(std::move(transpose_node));
-            return transpose_idx;
-        };
-
-        normalized_lhs = transpose_if_needed(normalized_lhs, consumed_lhs_transpose);
-        normalized_rhs = transpose_if_needed(normalized_rhs, consumed_rhs_transpose);
-
-        ExprNode normalized = root;
-        normalized.lhs = normalized_lhs;
-        normalized.rhs = normalized_rhs;
-        normalized.aux = UINT32_MAX;
-        const uint32_t normalized_idx = static_cast<uint32_t>(expr.nodes.size());
-        expr.nodes.push_back(std::move(normalized));
-        return normalized_idx;
+        if (!consumed_lhs_transpose && !isScalarLikeTransposeOperand(lhs)) {
+            lhs = makeLogicalUnary(ExprOp::TRANSPOSE, lhs);
+        }
+        if (!consumed_rhs_transpose && !isScalarLikeTransposeOperand(rhs)) {
+            rhs = makeLogicalUnary(ExprOp::TRANSPOSE, rhs);
+        }
+        return makeLogicalBinary(root->op(), lhs, rhs, root->semantics());
     }
 
     return std::nullopt;
@@ -4052,32 +3388,25 @@ static std::optional<uint32_t> tryNormalizeTransposeAtRoot(PhysicalExpression& e
 }  // namespace
 
 Expression Expression::unaryOp(const Expression& inputExpr, ExprOp op) {
-    if (!inputExpr.expr)
+    ExprNode semantics{};
+    semantics.op = op;
+    return unaryOp(inputExpr, std::move(semantics));
+}
+
+Expression Expression::unaryOp(const Expression& inputExpr, ExprNode semantics) {
+    if (!inputExpr.node) {
         throw std::runtime_error("Cannot apply unary op to empty expression");
+    }
 
-    auto out = std::make_shared<PhysicalExpression>();
-    out->inputs = inputExpr.expr->inputs;
-
-    std::unordered_map<uint32_t, uint32_t> oldToNew;
-    uint32_t newLhsIndex = cloneSubtree(*inputExpr.expr, inputExpr.nodeIndex, *out, oldToNew);
-
-    if (op == ExprOp::TRANSPOSE) {
-        std::optional<uint32_t> normalized_idx = tryNormalizeTransposeAtRoot(*out, newLhsIndex);
-        if (normalized_idx.has_value()) {
-            out->output_node = normalized_idx.value();
-            return Expression(out, normalized_idx.value());
+    if (semantics.op == ExprOp::TRANSPOSE) {
+        std::optional<LogicalExpression> normalized = tryNormalizeLogicalTransposeAtRoot(inputExpr.node);
+        if (normalized.has_value()) {
+            return Expression(std::move(normalized.value()));
         }
     }
 
-    ExprNode node{};
-    node.op = op;
-    node.lhs = newLhsIndex;
-
-    uint32_t newIndex = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(node);
-    out->output_node = newIndex;
-
-    return Expression(out, newIndex);
+    const ExprOp op = semantics.op;
+    return Expression(makeLogicalUnary(op, inputExpr.node, std::move(semantics)));
 }
 
 Expression Expression::operator+(const Expression& other) const { return binaryOp(*this, other, ExprOp::ADD); }
@@ -4103,13 +3432,13 @@ Expression Expression::logicalOr(const Expression& other) const { return binaryO
 Expression Expression::logicalNot() const { return unaryOp(*this, ExprOp::LOGICAL_NOT); }
 
 Expression Expression::cast(DataType output_dtype) const {
-    Expression result = unaryOp(*this, ExprOp::CAST);
-    ExprNode& node = result.expr->nodes[result.nodeIndex];
-    node.output_dtype = output_dtype;
-    node.compute_dtype = output_dtype;
-    node.backward_output_dtype = output_dtype;
-    node.backward_compute_dtype = output_dtype;
-    return result;
+    ExprNode semantics{};
+    semantics.op = ExprOp::CAST;
+    semantics.output_dtype = output_dtype;
+    semantics.compute_dtype = output_dtype;
+    semantics.backward_output_dtype = output_dtype;
+    semantics.backward_compute_dtype = output_dtype;
+    return unaryOp(*this, std::move(semantics));
 }
 
 Expression Expression::equal(const Expression& lhs, const Expression& rhs) { return lhs.equal(rhs); }
@@ -4171,44 +3500,6 @@ Expression Expression::sqrt(const Expression& expr) { return unaryOp(expr, ExprO
 Expression Expression::tanh() const { return unaryOp(*this, ExprOp::TANH); }
 Expression Expression::normcdf() const { return unaryOp(*this, ExprOp::NORMCDF); }
 
-Expression Expression::gelu() const {
-    if (!expr)
-        throw std::runtime_error("Cannot apply GELU to empty expression");
-    if (nodeIndex >= expr->nodes.size())
-        throw std::runtime_error("GELU input node index is out of range");
-
-    // Exact GELU is x * Phi(x). Build it as one DAG, not as the generic
-    // composition `*this * this->normcdf()`: unaryOp() creates a separate
-    // PhysicalExpression and binaryOp() would then clone the x producer once
-    // for each operand. That is numerically harmless in a forward plan because
-    // EquationCompiler can CSE equivalent producer stages, but AutoDiff works
-    // from the logical graph and would legitimately differentiate both producer
-    // copies. For an affine/conv input that turns one shared activation adjoint
-    // into two dInput/dParameter boundary operations. Clone x exactly once and
-    // let both GELU terms reference that one logical value.
-    auto out = std::make_shared<PhysicalExpression>();
-    out->inputs = expr->inputs;
-
-    std::unordered_map<uint32_t, uint32_t> oldToNew;
-    const uint32_t x = cloneSubtree(*expr, nodeIndex, *out, oldToNew);
-
-    ExprNode cdf{};
-    cdf.op = ExprOp::NORMCDF;
-    cdf.lhs = x;
-    const uint32_t cdfIndex = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(std::move(cdf));
-
-    ExprNode product{};
-    product.op = ExprOp::MUL;
-    product.lhs = x;
-    product.rhs = cdfIndex;
-    const uint32_t productIndex = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(std::move(product));
-    out->output_node = productIndex;
-
-    return Expression(std::move(out), productIndex);
-}
-
 Expression Expression::softmax(cudnnSoftmaxAlgorithm_t algorithm, cudnnSoftmaxMode_t mode) const {
     if (algorithm == CUDNN_SOFTMAX_LOG) {
         throw std::invalid_argument("Expression::softmax computes ordinary softmax; use Expression::logSoftmax for CUDNN_SOFTMAX_LOG.");
@@ -4219,24 +3510,26 @@ Expression Expression::softmax(cudnnSoftmaxAlgorithm_t algorithm, cudnnSoftmaxMo
     if (mode != CUDNN_SOFTMAX_MODE_CHANNEL && mode != CUDNN_SOFTMAX_MODE_INSTANCE) {
         throw std::invalid_argument("Expression::softmax received unsupported cudnnSoftmaxMode_t.");
     }
-    Expression out = unaryOp(*this, ExprOp::SOFTMAX);
-    out.expr->nodes[out.nodeIndex].softmax_algorithm = algorithm;
-    out.expr->nodes[out.nodeIndex].softmax_mode = mode;
-    return out;
+    ExprNode semantics{};
+    semantics.op = ExprOp::SOFTMAX;
+    semantics.softmax_algorithm = algorithm;
+    semantics.softmax_mode = mode;
+    return unaryOp(*this, std::move(semantics));
 }
 
 Expression Expression::logSoftmax(cudnnSoftmaxMode_t mode) const {
     if (mode != CUDNN_SOFTMAX_MODE_CHANNEL && mode != CUDNN_SOFTMAX_MODE_INSTANCE) {
         throw std::invalid_argument("Expression::logSoftmax received unsupported cudnnSoftmaxMode_t.");
     }
-    Expression out = unaryOp(*this, ExprOp::SOFTMAX);
-    out.expr->nodes[out.nodeIndex].softmax_algorithm = CUDNN_SOFTMAX_LOG;
-    out.expr->nodes[out.nodeIndex].softmax_mode = mode;
-    return out;
+    ExprNode semantics{};
+    semantics.op = ExprOp::SOFTMAX;
+    semantics.softmax_algorithm = CUDNN_SOFTMAX_LOG;
+    semantics.softmax_mode = mode;
+    return unaryOp(*this, std::move(semantics));
 }
 
 Expression Expression::reshape(const std::vector<uint64_t>& new_dims) const {
-    if (!expr)
+    if (!node)
         throw std::runtime_error("Cannot reshape an empty expression");
     if (new_dims.empty())
         throw std::invalid_argument("Expression::reshape requires at least one dimension.");
@@ -4249,13 +3542,14 @@ Expression Expression::reshape(const std::vector<uint64_t>& new_dims) const {
     if (infer_dim_count > 1) {
         throw std::invalid_argument("Expression::reshape supports at most one infer-dimension marker.");
     }
-    Expression out = unaryOp(*this, ExprOp::RESHAPE);
-    out.expr->nodes[out.nodeIndex].reshape_dims = new_dims;
-    return out;
+    ExprNode semantics{};
+    semantics.op = ExprOp::RESHAPE;
+    semantics.reshape_dims = new_dims;
+    return unaryOp(*this, std::move(semantics));
 }
 
 Expression Expression::broadcastTo(const std::vector<uint64_t>& target_dims) const {
-    if (!expr) {
+    if (!node) {
         throw std::runtime_error("Cannot broadcast an empty expression");
     }
     if (target_dims.empty()) {
@@ -4267,15 +3561,16 @@ Expression Expression::broadcastTo(const std::vector<uint64_t>& target_dims) con
         }
     }
 
-    Expression out = unaryOp(*this, ExprOp::BROADCAST_TO);
-    out.expr->nodes[out.nodeIndex].broadcast_dims = target_dims;
-    return out;
+    ExprNode semantics{};
+    semantics.op = ExprOp::BROADCAST_TO;
+    semantics.broadcast_dims = target_dims;
+    return unaryOp(*this, std::move(semantics));
 }
 
 Expression Expression::stridedView(const std::vector<uint64_t>& dims,
                                    const std::vector<uint64_t>& strides_elements,
                                    uint64_t element_offset) const {
-    if (!expr)
+    if (!node)
         throw std::runtime_error("Cannot create a strided view from an empty expression");
     if (dims.empty() || dims.size() != strides_elements.size()) {
         throw std::invalid_argument("Expression::stridedView requires dimensions and strides with the same non-zero rank.");
@@ -4284,19 +3579,19 @@ Expression Expression::stridedView(const std::vector<uint64_t>& dims,
         if (d == std::numeric_limits<uint64_t>::max())
             throw std::invalid_argument("Expression::stridedView does not support infer-dimension markers.");
     }
-    Expression out = unaryOp(*this, ExprOp::STRIDED_VIEW);
-    ExprNode& node = out.expr->nodes[out.nodeIndex];
-    node.view_dims = dims;
-    node.view_strides = strides_elements;
-    node.view_element_offset = element_offset;
-    return out;
+    ExprNode semantics{};
+    semantics.op = ExprOp::STRIDED_VIEW;
+    semantics.view_dims = dims;
+    semantics.view_strides = strides_elements;
+    semantics.view_element_offset = element_offset;
+    return unaryOp(*this, std::move(semantics));
 }
 
 Expression Expression::stridedViewBackward(const std::vector<uint64_t>& source_dims,
                                            const std::vector<uint64_t>& view_dims,
                                            const std::vector<uint64_t>& view_strides_elements,
                                            uint64_t view_element_offset) const {
-    if (!expr)
+    if (!node)
         throw std::runtime_error("Cannot create a strided-view backward from an empty expression");
     if (source_dims.empty()) {
         throw std::invalid_argument("Expression::stridedViewBackward requires non-empty source dimensions.");
@@ -4356,37 +3651,41 @@ Expression Expression::stridedViewBackward(const std::vector<uint64_t>& source_d
         throw std::invalid_argument("Expression::stridedViewBackward view exceeds its source storage.");
     }
 
-    Expression out = unaryOp(*this, ExprOp::STRIDED_VIEW_BACKWARD);
-    ExprNode& node = out.expr->nodes[out.nodeIndex];
-    node.fill_dims = source_dims;
-    node.view_dims = view_dims;
-    node.view_strides = view_strides_elements;
-    node.view_element_offset = view_element_offset;
-    return out;
+    ExprNode semantics{};
+    semantics.op = ExprOp::STRIDED_VIEW_BACKWARD;
+    semantics.fill_dims = source_dims;
+    semantics.view_dims = view_dims;
+    semantics.view_strides = view_strides_elements;
+    semantics.view_element_offset = view_element_offset;
+    return unaryOp(*this, std::move(semantics));
 }
 
 Expression Expression::unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const {
-    if (!expr)
+    if (!node)
         throw std::runtime_error("Cannot unsqueeze an empty expression");
 
-    Expression out = unaryOp(*this, ExprOp::UNSQUEEZE);
     std::vector<uint64_t> normalized = unsqueeze_axes;
     std::sort(normalized.begin(), normalized.end());
     normalized.erase(std::unique(normalized.begin(), normalized.end()), normalized.end());
-    out.expr->nodes[out.nodeIndex].unsqueeze_axes = std::move(normalized);
-    return out;
+
+    ExprNode semantics{};
+    semantics.op = ExprOp::UNSQUEEZE;
+    semantics.unsqueeze_axes = std::move(normalized);
+    return unaryOp(*this, std::move(semantics));
 }
 
 Expression Expression::squeeze(const std::vector<uint64_t>& squeeze_axes) const {
-    if (!expr)
+    if (!node)
         throw std::runtime_error("Cannot squeeze an empty expression");
 
-    Expression out = unaryOp(*this, ExprOp::SQUEEZE);
     std::vector<uint64_t> normalized = squeeze_axes;
     std::sort(normalized.begin(), normalized.end());
     normalized.erase(std::unique(normalized.begin(), normalized.end()), normalized.end());
-    out.expr->nodes[out.nodeIndex].squeeze_axes = std::move(normalized);
-    return out;
+
+    ExprNode semantics{};
+    semantics.op = ExprOp::SQUEEZE;
+    semantics.squeeze_axes = std::move(normalized);
+    return unaryOp(*this, std::move(semantics));
 }
 
 Expression Expression::transpose() const { return unaryOp(*this, ExprOp::TRANSPOSE); }
@@ -4397,9 +3696,10 @@ Expression Expression::takeAlongAxis(const Expression& input, const Expression& 
     if (axis < -1) {
         throw std::invalid_argument("Expression::takeAlongAxis currently supports only axis=-1 or an explicit non-negative axis.");
     }
-    Expression out = binaryOp(input, indices, ExprOp::TAKE_ALONG_AXIS);
-    out.expr->nodes[out.nodeIndex].reduction_axes = {static_cast<uint64_t>(axis < 0 ? UINT64_MAX : axis)};
-    return out;
+    ExprNode semantics{};
+    semantics.op = ExprOp::TAKE_ALONG_AXIS;
+    semantics.reduction_axes = {static_cast<uint64_t>(axis < 0 ? UINT64_MAX : axis)};
+    return binaryOp(input, indices, std::move(semantics));
 }
 
 namespace {
@@ -4451,12 +3751,12 @@ Expression Expression::scan(const Expression& input, ScanOp op, int64_t axis, bo
     const ScanMode mode = scanModeFromInclusive(inclusive);
     validateScanAttributes(op, mode, "Expression::scan");
 
-    Expression out = unaryOp(input, ExprOp::SCAN);
-    ExprNode& node = out.expr->nodes[out.nodeIndex];
-    node.scan_op = op;
-    node.scan_mode = mode;
-    node.scan_axis = static_cast<uint64_t>(axis < 0 ? UINT64_MAX : axis);
-    return out;
+    ExprNode semantics{};
+    semantics.op = ExprOp::SCAN;
+    semantics.scan_op = op;
+    semantics.scan_mode = mode;
+    semantics.scan_axis = static_cast<uint64_t>(axis < 0 ? UINT64_MAX : axis);
+    return unaryOp(input, std::move(semantics));
 }
 
 Expression Expression::segmentedScan(const Expression& offsets, ScanOp op, bool inclusive, bool reverse) const {
@@ -4467,13 +3767,13 @@ Expression Expression::segmentedScan(const Expression& input, const Expression& 
     const ScanMode mode = scanModeFromInclusive(inclusive);
     validateScanAttributes(op, mode, "Expression::segmentedScan");
 
-    Expression out = binaryOp(input, offsets, ExprOp::SEGMENTED_SCAN);
-    ExprNode& node = out.expr->nodes[out.nodeIndex];
-    node.scan_op = op;
-    node.scan_mode = mode;
-    node.scan_axis = UINT64_MAX;
-    node.scan_reverse = reverse;
-    return out;
+    ExprNode semantics{};
+    semantics.op = ExprOp::SEGMENTED_SCAN;
+    semantics.scan_op = op;
+    semantics.scan_mode = mode;
+    semantics.scan_axis = UINT64_MAX;
+    semantics.scan_reverse = reverse;
+    return binaryOp(input, offsets, std::move(semantics));
 }
 
 Expression Expression::segmentedScanWithRaggedMetadata(const Expression& input,
@@ -4487,14 +3787,21 @@ Expression Expression::segmentedScanWithRaggedMetadata(const Expression& input,
         throw std::invalid_argument("Segmented scan ragged metadata requires both batch size and max active values, or neither.");
     }
 
-    Expression out = segmentedScan(input, offsets, op, inclusive, reverse);
+    const ScanMode mode = scanModeFromInclusive(inclusive);
+    validateScanAttributes(op, mode, "Expression::segmentedScan");
+
+    ExprNode semantics{};
+    semantics.op = ExprOp::SEGMENTED_SCAN;
+    semantics.scan_op = op;
+    semantics.scan_mode = mode;
+    semantics.scan_axis = UINT64_MAX;
+    semantics.scan_reverse = reverse;
     if (ragged_batch_size != 0) {
-        ExprNode& node = out.expr->nodes.at(out.nodeIndex);
-        node.ragged_runtime_batch_size = ragged_batch_size;
-        node.ragged_runtime_max_active_values = ragged_max_active_values;
-        node.ragged_runtime_elements_per_value = 1;
+        semantics.ragged_runtime_batch_size = ragged_batch_size;
+        semantics.ragged_runtime_max_active_values = ragged_max_active_values;
+        semantics.ragged_runtime_elements_per_value = 1;
     }
-    return out;
+    return binaryOp(input, offsets, std::move(semantics));
 }
 
 Expression Expression::segmentedReduceWithRaggedMetadata(const Expression& input,
@@ -4514,14 +3821,14 @@ Expression Expression::segmentedReduceWithRaggedMetadata(const Expression& input
         throw std::invalid_argument("Segmented reduction ragged elements-per-value metadata must be non-zero.");
     }
 
-    Expression out = binaryOp(input, offsets, op);
+    ExprNode semantics{};
+    semantics.op = op;
     if (ragged_batch_size != 0) {
-        ExprNode& node = out.expr->nodes.at(out.nodeIndex);
-        node.ragged_runtime_batch_size = ragged_batch_size;
-        node.ragged_runtime_max_active_values = ragged_max_active_values;
-        node.ragged_runtime_elements_per_value = ragged_elements_per_value;
+        semantics.ragged_runtime_batch_size = ragged_batch_size;
+        semantics.ragged_runtime_max_active_values = ragged_max_active_values;
+        semantics.ragged_runtime_elements_per_value = ragged_elements_per_value;
     }
-    return out;
+    return binaryOp(input, offsets, std::move(semantics));
 }
 
 Expression Expression::segmentedReduceSum(const Expression& offsets) const { return segmentedReduceSum(*this, offsets); }
@@ -4556,24 +3863,22 @@ Expression Expression::withRaggedRuntimeExtent(const Expression& partition_input
     if (max_active_values == 0 || elements_per_value == 0) {
         throw std::invalid_argument("Expression::withRaggedRuntimeExtent requires non-zero maximum extent metadata.");
     }
-    PhysicalExpression partition_expr = partition_input.expression();
-    const ExprNode& partition_node = partition_expr.nodes.at(partition_expr.output_node);
-    if (partition_node.op != ExprOp::INPUT) {
+    if (ExpressionInternalAccess::rootOp(partition_input) != ExprOp::INPUT) {
         throw std::invalid_argument(
             "Expression::withRaggedRuntimeExtent currently requires the row-partition carrier to be a direct input expression.");
     }
 
-    Expression out = binaryOp(*this, partition_input, ExprOp::RAGGED_VALUEWISE_EXTENT);
-    ExprNode& node = out.expr->nodes.at(out.nodeIndex);
-    node.ragged_runtime_extent_source = source;
-    node.ragged_runtime_batch_size = batch_size;
-    node.ragged_runtime_max_active_values = max_active_values;
-    node.ragged_runtime_elements_per_value = elements_per_value;
-    return out;
+    ExprNode semantics{};
+    semantics.op = ExprOp::RAGGED_VALUEWISE_EXTENT;
+    semantics.ragged_runtime_extent_source = source;
+    semantics.ragged_runtime_batch_size = batch_size;
+    semantics.ragged_runtime_max_active_values = max_active_values;
+    semantics.ragged_runtime_elements_per_value = elements_per_value;
+    return binaryOp(*this, partition_input, std::move(semantics));
 }
 
 std::pair<Expression, Expression> Expression::scanWithIndices(ScanOp op, int64_t axis, bool inclusive) const {
-    if (!expr) {
+    if (!node) {
         throw std::runtime_error("Cannot apply scanWithIndices to an empty expression");
     }
     if (axis < -1) {
@@ -4581,73 +3886,53 @@ std::pair<Expression, Expression> Expression::scanWithIndices(ScanOp op, int64_t
     }
     validateScanWithIndicesOp(op, "Expression::scanWithIndices");
 
-    auto out = std::make_shared<PhysicalExpression>();
-    out->inputs = expr->inputs;
-    std::unordered_map<uint32_t, uint32_t> oldToNew;
-    const uint32_t new_input_idx = cloneSubtree(*expr, nodeIndex, *out, oldToNew);
     const uint64_t normalized_axis = static_cast<uint64_t>(axis < 0 ? UINT64_MAX : axis);
     const ScanMode mode = scanModeFromInclusive(inclusive);
 
-    ExprNode value_node{};
-    value_node.op = ExprOp::SCAN;
-    value_node.lhs = new_input_idx;
-    value_node.scan_op = op;
-    value_node.scan_mode = mode;
-    value_node.scan_axis = normalized_axis;
-    const uint32_t value_idx = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(std::move(value_node));
+    ExprNode value_semantics{};
+    value_semantics.op = ExprOp::SCAN;
+    value_semantics.scan_op = op;
+    value_semantics.scan_mode = mode;
+    value_semantics.scan_axis = normalized_axis;
 
-    ExprNode index_node{};
-    index_node.op = ExprOp::SCAN;
-    index_node.lhs = new_input_idx;
-    index_node.scan_op = indexScanOpForValueScanOp(op);
-    index_node.scan_mode = mode;
-    index_node.scan_axis = normalized_axis;
-    const uint32_t index_idx = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(std::move(index_node));
+    ExprNode index_semantics{};
+    index_semantics.op = ExprOp::SCAN;
+    index_semantics.scan_op = indexScanOpForValueScanOp(op);
+    index_semantics.scan_mode = mode;
+    index_semantics.scan_axis = normalized_axis;
 
-    out->output_node = value_idx;
-    return {Expression(out, value_idx), Expression(out, index_idx)};
+    return {
+        unaryOp(*this, std::move(value_semantics)),
+        unaryOp(*this, std::move(index_semantics)),
+    };
 }
 
 std::pair<Expression, Expression> Expression::segmentedScanWithIndices(const Expression& offsets,
                                                                        ScanOp op,
                                                                        bool inclusive) const {
-    if (!expr || !offsets.expr) {
+    if (!node || !offsets.node) {
         throw std::runtime_error("Cannot apply segmentedScanWithIndices to an empty expression");
     }
     validateScanWithIndicesOp(op, "Expression::segmentedScanWithIndices");
 
-    auto out = std::make_shared<PhysicalExpression>();
-    std::unordered_map<std::string, uint32_t> dst_input_slots_by_name;
-    std::unordered_map<uint32_t, uint32_t> input_old_to_new;
-    std::unordered_map<uint32_t, uint32_t> offsets_old_to_new;
-    const uint32_t new_input_idx = cloneSubtreeWithMergedInputs(*expr, nodeIndex, *out, input_old_to_new, dst_input_slots_by_name);
-    const uint32_t new_offsets_idx = cloneSubtreeWithMergedInputs(*offsets.expr, offsets.nodeIndex, *out, offsets_old_to_new, dst_input_slots_by_name);
     const ScanMode mode = scanModeFromInclusive(inclusive);
 
-    ExprNode value_node{};
-    value_node.op = ExprOp::SEGMENTED_SCAN;
-    value_node.lhs = new_input_idx;
-    value_node.rhs = new_offsets_idx;
-    value_node.scan_op = op;
-    value_node.scan_mode = mode;
-    value_node.scan_axis = UINT64_MAX;
-    const uint32_t value_idx = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(std::move(value_node));
+    ExprNode value_semantics{};
+    value_semantics.op = ExprOp::SEGMENTED_SCAN;
+    value_semantics.scan_op = op;
+    value_semantics.scan_mode = mode;
+    value_semantics.scan_axis = UINT64_MAX;
 
-    ExprNode index_node{};
-    index_node.op = ExprOp::SEGMENTED_SCAN;
-    index_node.lhs = new_input_idx;
-    index_node.rhs = new_offsets_idx;
-    index_node.scan_op = indexScanOpForValueScanOp(op);
-    index_node.scan_mode = mode;
-    index_node.scan_axis = UINT64_MAX;
-    const uint32_t index_idx = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(std::move(index_node));
+    ExprNode index_semantics{};
+    index_semantics.op = ExprOp::SEGMENTED_SCAN;
+    index_semantics.scan_op = indexScanOpForValueScanOp(op);
+    index_semantics.scan_mode = mode;
+    index_semantics.scan_axis = UINT64_MAX;
 
-    out->output_node = value_idx;
-    return {Expression(out, value_idx), Expression(out, index_idx)};
+    return {
+        binaryOp(*this, offsets, std::move(value_semantics)),
+        binaryOp(*this, offsets, std::move(index_semantics)),
+    };
 }
 
 Expression Expression::pow(const Expression& exponent) const { return binaryOp(*this, exponent, ExprOp::POW); }
@@ -4659,15 +3944,10 @@ Expression Expression::matmul(const Expression& lhs,
                               std::optional<DataType> compute_dtype,
                               std::optional<DataType> output_dtype,
                               std::optional<uint64_t> packed_row_capacity) {
-    Expression out = binaryOp(lhs, rhs, ExprOp::MATMUL);
-    ExprNode& node = out.expr->nodes[out.nodeIndex];
-    node.transpose_lhs = transpose_lhs;
-    node.transpose_rhs = transpose_rhs;
-    if (compute_dtype.has_value()) {
-        node.compute_dtype = compute_dtype.value();
-    }
-    if (output_dtype.has_value()) {
-        node.output_dtype = output_dtype.value();
+    // Preserve the historical validation order: operand validity was checked by
+    // binaryOp before packed-row metadata was applied to the newly created root.
+    if (!lhs.node || !rhs.node) {
+        throw std::runtime_error("Cannot combine empty expressions");
     }
     if (packed_row_capacity.has_value()) {
         if (packed_row_capacity.value() == 0) {
@@ -4676,10 +3956,23 @@ Expression Expression::matmul(const Expression& lhs,
         if (transpose_lhs || transpose_rhs) {
             throw std::invalid_argument("Expression::matmul packed-row capacity currently requires a non-transposed row-major projection.");
         }
-        node.matmul_packed_row_binding = MatmulPackedRowBinding::RowsA;
-        node.matmul_packed_row_capacity = packed_row_capacity.value();
     }
-    return out;
+
+    ExprNode semantics{};
+    semantics.op = ExprOp::MATMUL;
+    semantics.transpose_lhs = transpose_lhs;
+    semantics.transpose_rhs = transpose_rhs;
+    if (compute_dtype.has_value()) {
+        semantics.compute_dtype = compute_dtype.value();
+    }
+    if (output_dtype.has_value()) {
+        semantics.output_dtype = output_dtype.value();
+    }
+    if (packed_row_capacity.has_value()) {
+        semantics.matmul_packed_row_binding = MatmulPackedRowBinding::RowsA;
+        semantics.matmul_packed_row_capacity = packed_row_capacity.value();
+    }
+    return binaryOp(lhs, rhs, std::move(semantics));
 }
 
 Expression Expression::rmsNorm(const Expression& input,
@@ -4695,23 +3988,26 @@ Expression Expression::rmsNorm(const Expression& input,
     if (!(epsilon > 0.0)) {
         throw std::invalid_argument("Expression::rmsNorm epsilon must be > 0.");
     }
+    if (!input.node || !scale.node) {
+        throw std::runtime_error("Cannot combine empty expressions");
+    }
+    if (packed_row_capacity.has_value() && packed_row_capacity.value() == 0) {
+        throw std::invalid_argument("Expression::rmsNorm packed_row_capacity must be non-zero when specified.");
+    }
 
-    Expression out = binaryOp(input, scale, ExprOp::RMSNORM);
-    ExprNode& node = out.expr->nodes[out.nodeIndex];
-    node.rms_norm_normalized_feature_count = normalized_feature_count;
-    node.rms_norm_epsilon = epsilon;
-    node.rms_norm_fused_activation = CudnnRmsNormFusedActivation::NONE;
+    ExprNode semantics{};
+    semantics.op = ExprOp::RMSNORM;
+    semantics.rms_norm_normalized_feature_count = normalized_feature_count;
+    semantics.rms_norm_epsilon = epsilon;
+    semantics.rms_norm_fused_activation = CudnnRmsNormFusedActivation::NONE;
     if (packed_row_capacity.has_value()) {
-        if (packed_row_capacity.value() == 0) {
-            throw std::invalid_argument("Expression::rmsNorm packed_row_capacity must be non-zero when specified.");
-        }
-        node.rms_norm_packed_row_capacity = packed_row_capacity.value();
+        semantics.rms_norm_packed_row_capacity = packed_row_capacity.value();
     }
-    node.compute_dtype = compute_dtype.value_or(DataType::FP32);
+    semantics.compute_dtype = compute_dtype.value_or(DataType::FP32);
     if (output_dtype.has_value()) {
-        node.output_dtype = output_dtype.value();
+        semantics.output_dtype = output_dtype.value();
     }
-    return out;
+    return binaryOp(input, scale, std::move(semantics));
 }
 
 Expression Expression::layerNorm(const Expression& input,
@@ -4728,19 +4024,25 @@ Expression Expression::layerNorm(const Expression& input,
     if (!(epsilon > 0.0)) {
         throw std::invalid_argument("Expression::layerNorm epsilon must be > 0.");
     }
-    Expression out = ternaryOp(input, scale, bias, ExprOp::LAYERNORM);
-    ExprNode& node = out.expr->nodes[out.nodeIndex];
-    node.layer_norm_normalized_feature_count = normalized_feature_count;
-    node.layer_norm_epsilon = epsilon;
-    if (packed_row_capacity.has_value()) {
-        if (packed_row_capacity.value() == 0) {
-            throw std::invalid_argument("Expression::layerNorm packed_row_capacity must be non-zero when specified.");
-        }
-        node.layer_norm_packed_row_capacity = packed_row_capacity.value();
+    if (!input.node || !scale.node || !bias.node) {
+        throw std::runtime_error("Cannot combine empty expressions");
     }
-    node.compute_dtype = compute_dtype.value_or(DataType::FP32);
-    if (output_dtype.has_value()) node.output_dtype = output_dtype.value();
-    return out;
+    if (packed_row_capacity.has_value() && packed_row_capacity.value() == 0) {
+        throw std::invalid_argument("Expression::layerNorm packed_row_capacity must be non-zero when specified.");
+    }
+
+    ExprNode semantics{};
+    semantics.op = ExprOp::LAYERNORM;
+    semantics.layer_norm_normalized_feature_count = normalized_feature_count;
+    semantics.layer_norm_epsilon = epsilon;
+    if (packed_row_capacity.has_value()) {
+        semantics.layer_norm_packed_row_capacity = packed_row_capacity.value();
+    }
+    semantics.compute_dtype = compute_dtype.value_or(DataType::FP32);
+    if (output_dtype.has_value()) {
+        semantics.output_dtype = output_dtype.value();
+    }
+    return ternaryOp(input, scale, bias, std::move(semantics));
 }
 
 Expression Expression::mish() const { return *this * this->softplus().tanh(); }
@@ -4764,71 +4066,44 @@ Expression Expression::threshold(double threshold, double value) const {
 
 Expression Expression::swish() const { return *this * this->sigmoid(); }
 
-static uint32_t cloneSubtreeIntoMergedExpression(const Expression& src_expr,
-                                                 PhysicalExpression& dst,
-                                                 std::unordered_map<uint32_t, uint32_t>& old_to_new,
-                                                 std::unordered_map<std::string, uint32_t>& dst_input_slots_by_name) {
-    PhysicalExpression src = src_expr.expression();
-    return cloneSubtreeWithMergedInputs(src, src.output_node, dst, old_to_new, dst_input_slots_by_name);
-}
+namespace {
 
-uint32_t Expression::cloneInto(const PhysicalExpression& src,
-                               PhysicalExpression& dst,
-                               std::unordered_map<std::string, uint32_t>& dst_input_slots_by_name) {
-    if (src.output_node >= src.nodes.size()) {
-        throw std::runtime_error("Expression::cloneInto source output node is out of range.");
-    }
-    std::unordered_map<uint32_t, uint32_t> old_to_new;
-    return cloneSubtreeWithMergedInputs(src, src.output_node, dst, old_to_new, dst_input_slots_by_name);
-}
+struct LogicalGemmScaleEncodingResult {
+    bool success = false;
+    LogicalExpression dynamic_node;
+    double constant_scale = 1.0;
+};
 
-uint32_t Expression::encodeLowerableGemmScaleExpression(const Expression& scale_expr,
-                                                        PhysicalExpression& dst,
-                                                        std::unordered_map<std::string, uint32_t>& dst_input_slots_by_name,
-                                                        double& scale_fp) {
-    PhysicalExpression scale = scale_expr.expression();
-
-    struct SimpleScaleEncodingResult {
-        bool success = false;
-        uint32_t dynamic_node = UINT32_MAX;
-        double constant_scale = 1.0;
-    };
-
-    std::function<SimpleScaleEncodingResult(uint32_t)> try_encode_simple = [&](uint32_t node_idx) -> SimpleScaleEncodingResult {
-        const ExprNode& src_node = scale.nodes.at(node_idx);
-        if (src_node.op == ExprOp::SCALAR_FP) {
-            return SimpleScaleEncodingResult{true, UINT32_MAX, src_node.scalar_fp};
-        }
-        if (src_node.op == ExprOp::INPUT || src_node.op == ExprOp::RUNTIME_SCALAR || src_node.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
-            std::unordered_map<uint32_t, uint32_t> old_to_new;
-            uint32_t cloned =
-                cloneSubtreeIntoMergedExpression(Expression(scale_expr.expr, node_idx), dst, old_to_new, dst_input_slots_by_name);
-            return SimpleScaleEncodingResult{true, cloned, 1.0};
-        }
-        if (src_node.op == ExprOp::MUL) {
-            const SimpleScaleEncodingResult lhs = try_encode_simple(src_node.lhs);
-            const SimpleScaleEncodingResult rhs = try_encode_simple(src_node.rhs);
-            if (!lhs.success || !rhs.success) {
-                return {};
-            }
-            if (lhs.dynamic_node != UINT32_MAX && rhs.dynamic_node != UINT32_MAX) {
-                return {};
-            }
-            return SimpleScaleEncodingResult{
-                true, lhs.dynamic_node != UINT32_MAX ? lhs.dynamic_node : rhs.dynamic_node, lhs.constant_scale * rhs.constant_scale};
-        }
+LogicalGemmScaleEncodingResult tryEncodeLogicalGemmScale(const LogicalExpression& scale) {
+    if (!scale) {
         return {};
-    };
-
-    const SimpleScaleEncodingResult simple = try_encode_simple(scale.output_node);
-    if (simple.success) {
-        scale_fp *= simple.constant_scale;
-        return simple.dynamic_node;
     }
 
-    std::unordered_map<uint32_t, uint32_t> old_to_new;
-    return cloneSubtreeIntoMergedExpression(scale_expr, dst, old_to_new, dst_input_slots_by_name);
+    const ExprNode& semantics = scale->semantics();
+    if (semantics.op == ExprOp::SCALAR_FP) {
+        return LogicalGemmScaleEncodingResult{true, nullptr, semantics.scalar_fp};
+    }
+    if (semantics.op == ExprOp::INPUT || semantics.op == ExprOp::RUNTIME_SCALAR ||
+        semantics.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
+        return LogicalGemmScaleEncodingResult{true, scale, 1.0};
+    }
+    if (semantics.op != ExprOp::MUL) {
+        return {};
+    }
+
+    const LogicalGemmScaleEncodingResult lhs =
+        tryEncodeLogicalGemmScale(scale->dependency(LogicalDependencyKind::Lhs));
+    const LogicalGemmScaleEncodingResult rhs =
+        tryEncodeLogicalGemmScale(scale->dependency(LogicalDependencyKind::Rhs));
+    if (!lhs.success || !rhs.success || (lhs.dynamic_node && rhs.dynamic_node)) {
+        return {};
+    }
+
+    return LogicalGemmScaleEncodingResult{
+        true, lhs.dynamic_node ? lhs.dynamic_node : rhs.dynamic_node, lhs.constant_scale * rhs.constant_scale};
 }
+
+}  // namespace
 
 Expression Expression::gemm(const Expression& lhs,
                             const Expression& rhs,
@@ -4862,51 +4137,51 @@ Expression Expression::gemm(const Expression& lhs,
                             bool transpose_addend,
                             std::optional<DataType> compute_dtype,
                             std::optional<DataType> output_dtype) {
-    if (!lhs.expr || !rhs.expr || !addend.expr || !alpha.expr || !beta.expr) {
+    if (!lhs.node || !rhs.node || !addend.node || !alpha.node || !beta.node) {
         throw std::runtime_error("Cannot build GEMM from empty expressions.");
     }
 
-    auto out = std::make_shared<PhysicalExpression>();
-    std::unordered_map<std::string, uint32_t> merged_by_name;
-
-    auto clone_root = [&](const Expression& src_expr) {
-        std::unordered_map<uint32_t, uint32_t> old_to_new;
-        return cloneSubtreeIntoMergedExpression(src_expr, *out, old_to_new, merged_by_name);
-    };
-
-    const uint32_t new_lhs_index = clone_root(lhs);
-    const uint32_t new_rhs_index = clone_root(rhs);
-    const uint32_t new_aux_index = clone_root(addend);
-
-    ExprNode node{};
-    node.op = ExprOp::GEMM;
-    node.lhs = new_lhs_index;
-    node.rhs = new_rhs_index;
-    node.aux = new_aux_index;
-    node.alpha_fp = 1.0;
-    node.beta_fp = 1.0;
-    node.alpha_node = encodeLowerableGemmScaleExpression(alpha, *out, merged_by_name, node.alpha_fp);
-    node.beta_node = encodeLowerableGemmScaleExpression(beta, *out, merged_by_name, node.beta_fp);
-    node.transpose_lhs = transpose_lhs;
-    node.transpose_rhs = transpose_rhs;
-    node.transpose_aux = transpose_addend;
+    ExprNode semantics{};
+    semantics.op = ExprOp::GEMM;
+    semantics.alpha_fp = 1.0;
+    semantics.beta_fp = 1.0;
+    semantics.transpose_lhs = transpose_lhs;
+    semantics.transpose_rhs = transpose_rhs;
+    semantics.transpose_aux = transpose_addend;
     if (compute_dtype.has_value()) {
-        node.compute_dtype = compute_dtype.value();
+        semantics.compute_dtype = compute_dtype.value();
     }
     if (output_dtype.has_value()) {
-        node.output_dtype = output_dtype.value();
+        semantics.output_dtype = output_dtype.value();
     }
 
-    const uint32_t new_index = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(node);
-    out->output_node = new_index;
-    return Expression(out, new_index);
+    std::vector<LogicalDependency> dependencies = {
+        {LogicalDependencyKind::Lhs, 0, lhs.node},
+        {LogicalDependencyKind::Rhs, 0, rhs.node},
+        {LogicalDependencyKind::Aux, 0, addend.node},
+    };
+
+    auto encode_scale = [&](const Expression& scale_expr, LogicalDependencyKind role, double& scale_fp) {
+        const LogicalGemmScaleEncodingResult simple = tryEncodeLogicalGemmScale(scale_expr.node);
+        if (simple.success) {
+            scale_fp *= simple.constant_scale;
+            if (simple.dynamic_node) {
+                dependencies.push_back({role, 0, simple.dynamic_node});
+            }
+            return;
+        }
+        dependencies.push_back({role, 0, scale_expr.node});
+    };
+
+    encode_scale(alpha, LogicalDependencyKind::Alpha, semantics.alpha_fp);
+    encode_scale(beta, LogicalDependencyKind::Beta, semantics.beta_fp);
+
+    return Expression(LogicalExpressionNode::create(std::move(semantics), std::move(dependencies)));
 }
 
-Expression Expression::rotaryPositionEmbedding(RotaryPositionEmbeddingOptions options) const {
-    if (!expr) {
-        throw std::runtime_error("Cannot build RoPE from an empty expression.");
-    }
+namespace {
+
+ExprNode buildRopeSemantics(const RotaryPositionEmbeddingOptions& options) {
     if (options.base <= 0.0) {
         throw std::runtime_error("RoPE base must be positive.");
     }
@@ -4955,19 +4230,19 @@ Expression Expression::rotaryPositionEmbedding(RotaryPositionEmbeddingOptions op
         }
     }
 
-    Expression out = unaryOp(*this, ExprOp::ROPE);
-    ExprNode& node = out.expr->nodes[out.nodeIndex];
-    node.rope_sequence_axis = options.sequence_axis;
-    node.rope_head_dim_axis = options.head_dim_axis;
-    node.rope_rotary_dim = options.rotary_dim;
-    node.rope_base = options.base;
-    node.rope_position_offset = options.position_offset;
-    node.rope_interleaved = options.interleaved;
-    node.rope_inverse = options.inverse;
-    node.rope_scaling_kind = options.scaling_kind;
-    node.rope_scaling_factor = options.scaling_factor;
-    node.rope_original_max_position_embeddings = options.original_max_position_embeddings;
-    node.rope_attention_factor = [&]() -> double {
+    ExprNode semantics{};
+    semantics.op = ExprOp::ROPE;
+    semantics.rope_sequence_axis = options.sequence_axis;
+    semantics.rope_head_dim_axis = options.head_dim_axis;
+    semantics.rope_rotary_dim = options.rotary_dim;
+    semantics.rope_base = options.base;
+    semantics.rope_position_offset = options.position_offset;
+    semantics.rope_interleaved = options.interleaved;
+    semantics.rope_inverse = options.inverse;
+    semantics.rope_scaling_kind = options.scaling_kind;
+    semantics.rope_scaling_factor = options.scaling_factor;
+    semantics.rope_original_max_position_embeddings = options.original_max_position_embeddings;
+    semantics.rope_attention_factor = [&]() -> double {
         if (options.attention_factor.has_value()) {
             return options.attention_factor.value();
         }
@@ -4982,50 +4257,54 @@ Expression Expression::rotaryPositionEmbedding(RotaryPositionEmbeddingOptions op
         }
         return 1.0;
     }();
-    node.rope_yarn_beta_fast = options.yarn_beta_fast;
-    node.rope_yarn_beta_slow = options.yarn_beta_slow;
-    node.rope_llama3_low_freq_factor = options.llama3_low_freq_factor;
-    node.rope_llama3_high_freq_factor = options.llama3_high_freq_factor;
-    node.rope_long_rope_short_factors = options.long_rope_short_factors;
-    node.rope_long_rope_long_factors = options.long_rope_long_factors;
-    node.rope_allow_in_place_materialization = options.allow_in_place_materialization;
+    semantics.rope_yarn_beta_fast = options.yarn_beta_fast;
+    semantics.rope_yarn_beta_slow = options.yarn_beta_slow;
+    semantics.rope_llama3_low_freq_factor = options.llama3_low_freq_factor;
+    semantics.rope_llama3_high_freq_factor = options.llama3_high_freq_factor;
+    semantics.rope_long_rope_short_factors = options.long_rope_short_factors;
+    semantics.rope_long_rope_long_factors = options.long_rope_long_factors;
+    semantics.rope_allow_in_place_materialization = options.allow_in_place_materialization;
     if (options.output_dtype.has_value()) {
-        node.output_dtype = options.output_dtype.value();
+        semantics.output_dtype = options.output_dtype.value();
     }
     if (options.compute_dtype.has_value()) {
-        node.compute_dtype = options.compute_dtype.value();
+        semantics.compute_dtype = options.compute_dtype.value();
     }
-    return out;
+    return semantics;
+}
+
+}  // namespace
+
+Expression Expression::rotaryPositionEmbedding(RotaryPositionEmbeddingOptions options) const {
+    if (!node) {
+        throw std::runtime_error("Cannot build RoPE from an empty expression.");
+    }
+    return unaryOp(*this, buildRopeSemantics(options));
 }
 
 Expression Expression::rotaryPositionEmbeddingWithEffectiveSequenceLength(
     const Expression& effective_sequence_length, RotaryPositionEmbeddingOptions options) const {
-    if (!effective_sequence_length.expr) {
+    if (!effective_sequence_length.node) {
         throw std::runtime_error("RoPE effective sequence length cannot be an empty expression.");
     }
     // RoPE's scaling formulas consume sequence length as floating-point metadata. Normalize here so callers may supply
     // INT32/UINT32/UINT64 structural metadata without pulling integer inputs into the index-aware RoPE fused stage.
     Expression normalized_effective_sequence_length = effective_sequence_length.cast(DataType::FP32);
-    Expression rope_expr = rotaryPositionEmbedding(std::move(options));
+    if (!node) {
+        throw std::runtime_error("Cannot build RoPE from an empty expression.");
+    }
 
-    auto merged = std::make_shared<PhysicalExpression>();
-    std::unordered_map<std::string, uint32_t> merged_by_name;
-    std::unordered_map<uint32_t, uint32_t> rope_old_to_new;
-    std::unordered_map<uint32_t, uint32_t> length_old_to_new;
-    // Clone metadata first so the RoPE node's structural dependency respects the expression DAG's
-    // earlier-node invariant just like ordinary value dependencies.
-    const uint32_t length_root =
-        cloneSubtreeIntoMergedExpression(normalized_effective_sequence_length, *merged, length_old_to_new, merged_by_name);
-    const uint32_t rope_root =
-        cloneSubtreeIntoMergedExpression(rope_expr, *merged, rope_old_to_new, merged_by_name);
-    merged->nodes.at(rope_root).rope_effective_sequence_length_node = length_root;
-    merged->output_node = rope_root;
-    return Expression(merged, rope_root);
+    ExprNode semantics = buildRopeSemantics(options);
+    std::vector<LogicalDependency> dependencies = {
+        {LogicalDependencyKind::Lhs, 0, node},
+        {LogicalDependencyKind::RopeEffectiveSequenceLength, 0, normalized_effective_sequence_length.node},
+    };
+    return Expression(LogicalExpressionNode::create(std::move(semantics), std::move(dependencies)));
 }
 
 Expression Expression::rotaryPositionEmbeddingWithPositionIds(
     const Expression& position_ids, RotaryPositionEmbeddingOptions options) const {
-    if (!position_ids.expr) {
+    if (!position_ids.node) {
         throw std::runtime_error("RoPE position ids cannot be an empty expression.");
     }
     if (options.position_offset != 0) {
@@ -5033,28 +4312,26 @@ Expression Expression::rotaryPositionEmbeddingWithPositionIds(
     }
 
     Expression normalized_position_ids = position_ids.cast(DataType::FP32);
-    Expression rope_expr = rotaryPositionEmbedding(std::move(options));
+    if (!node) {
+        throw std::runtime_error("Cannot build RoPE from an empty expression.");
+    }
 
-    auto merged = std::make_shared<PhysicalExpression>();
-    std::unordered_map<std::string, uint32_t> merged_by_name;
-    std::unordered_map<uint32_t, uint32_t> positions_old_to_new;
-    std::unordered_map<uint32_t, uint32_t> rope_old_to_new;
-    const uint32_t positions_root =
-        cloneSubtreeIntoMergedExpression(normalized_position_ids, *merged, positions_old_to_new, merged_by_name);
-    const uint32_t rope_root = cloneSubtreeIntoMergedExpression(rope_expr, *merged, rope_old_to_new, merged_by_name);
-    merged->nodes.at(rope_root).rope_position_ids_node = positions_root;
-    merged->output_node = rope_root;
-    return Expression(merged, rope_root);
+    ExprNode semantics = buildRopeSemantics(options);
+    std::vector<LogicalDependency> dependencies = {
+        {LogicalDependencyKind::Lhs, 0, node},
+        {LogicalDependencyKind::RopePositionIds, 0, normalized_position_ids.node},
+    };
+    return Expression(LogicalExpressionNode::create(std::move(semantics), std::move(dependencies)));
 }
 
 Expression Expression::rotaryPositionEmbeddingWithPositionIdsAndEffectiveSequenceLength(
     const Expression& position_ids,
     const Expression& effective_sequence_length,
     RotaryPositionEmbeddingOptions options) const {
-    if (!position_ids.expr) {
+    if (!position_ids.node) {
         throw std::runtime_error("RoPE position ids cannot be an empty expression.");
     }
-    if (!effective_sequence_length.expr) {
+    if (!effective_sequence_length.node) {
         throw std::runtime_error("RoPE effective sequence length cannot be an empty expression.");
     }
     if (options.position_offset != 0) {
@@ -5063,22 +4340,17 @@ Expression Expression::rotaryPositionEmbeddingWithPositionIdsAndEffectiveSequenc
 
     Expression normalized_position_ids = position_ids.cast(DataType::FP32);
     Expression normalized_effective_sequence_length = effective_sequence_length.cast(DataType::FP32);
-    Expression rope_expr = rotaryPositionEmbedding(std::move(options));
+    if (!node) {
+        throw std::runtime_error("Cannot build RoPE from an empty expression.");
+    }
 
-    auto merged = std::make_shared<PhysicalExpression>();
-    std::unordered_map<std::string, uint32_t> merged_by_name;
-    std::unordered_map<uint32_t, uint32_t> positions_old_to_new;
-    std::unordered_map<uint32_t, uint32_t> length_old_to_new;
-    std::unordered_map<uint32_t, uint32_t> rope_old_to_new;
-    const uint32_t positions_root =
-        cloneSubtreeIntoMergedExpression(normalized_position_ids, *merged, positions_old_to_new, merged_by_name);
-    const uint32_t length_root = cloneSubtreeIntoMergedExpression(
-        normalized_effective_sequence_length, *merged, length_old_to_new, merged_by_name);
-    const uint32_t rope_root = cloneSubtreeIntoMergedExpression(rope_expr, *merged, rope_old_to_new, merged_by_name);
-    merged->nodes.at(rope_root).rope_position_ids_node = positions_root;
-    merged->nodes.at(rope_root).rope_effective_sequence_length_node = length_root;
-    merged->output_node = rope_root;
-    return Expression(merged, rope_root);
+    ExprNode semantics = buildRopeSemantics(options);
+    std::vector<LogicalDependency> dependencies = {
+        {LogicalDependencyKind::Lhs, 0, node},
+        {LogicalDependencyKind::RopePositionIds, 0, normalized_position_ids.node},
+        {LogicalDependencyKind::RopeEffectiveSequenceLength, 0, normalized_effective_sequence_length.node},
+    };
+    return Expression(LogicalExpressionNode::create(std::move(semantics), std::move(dependencies)));
 }
 
 namespace {
@@ -5188,14 +4460,14 @@ Expression Expression::attentionWithOptionalMetadata(const Expression& q,
                                                      const Expression* scale_o,
                                                      const Expression* amax_s,
                                                      const Expression* amax_o) {
-    if (!q.expr || !k.expr || !v.expr || (bias != nullptr && !bias->expr) || (q_seq_len != nullptr && !q_seq_len->expr) ||
-        (kv_seq_len != nullptr && !kv_seq_len->expr) || (q_ragged_offsets != nullptr && !q_ragged_offsets->expr) ||
-        (kv_ragged_offsets != nullptr && !kv_ragged_offsets->expr) || (page_table_k != nullptr && !page_table_k->expr) ||
-        (page_table_v != nullptr && !page_table_v->expr) || (dropout_seed != nullptr && !dropout_seed->expr) ||
-        (dropout_offset != nullptr && !dropout_offset->expr) || (descale_q != nullptr && !descale_q->expr) ||
-        (descale_k != nullptr && !descale_k->expr) || (descale_v != nullptr && !descale_v->expr) ||
-        (descale_s != nullptr && !descale_s->expr) || (scale_s != nullptr && !scale_s->expr) || (scale_o != nullptr && !scale_o->expr) ||
-        (amax_s != nullptr && !amax_s->expr) || (amax_o != nullptr && !amax_o->expr)) {
+    if (!q.node || !k.node || !v.node || (bias != nullptr && !bias->node) || (q_seq_len != nullptr && !q_seq_len->node) ||
+        (kv_seq_len != nullptr && !kv_seq_len->node) || (q_ragged_offsets != nullptr && !q_ragged_offsets->node) ||
+        (kv_ragged_offsets != nullptr && !kv_ragged_offsets->node) || (page_table_k != nullptr && !page_table_k->node) ||
+        (page_table_v != nullptr && !page_table_v->node) || (dropout_seed != nullptr && !dropout_seed->node) ||
+        (dropout_offset != nullptr && !dropout_offset->node) || (descale_q != nullptr && !descale_q->node) ||
+        (descale_k != nullptr && !descale_k->node) || (descale_v != nullptr && !descale_v->node) ||
+        (descale_s != nullptr && !descale_s->node) || (scale_s != nullptr && !scale_s->node) || (scale_o != nullptr && !scale_o->node) ||
+        (amax_s != nullptr && !amax_s->node) || (amax_o != nullptr && !amax_o->node)) {
         throw std::runtime_error("Cannot build attention from empty expressions.");
     }
     const bool use_ragged_offsets = q_ragged_offsets != nullptr || kv_ragged_offsets != nullptr;
@@ -5263,66 +4535,42 @@ Expression Expression::attentionWithOptionalMetadata(const Expression& q,
         options.use_fp8_forward_scaling = true;
     }
 
-    auto out = std::make_shared<PhysicalExpression>();
-    std::unordered_map<std::string, uint32_t> merged_by_name;
+    ExprNode semantics{};
+    semantics.op = ExprOp::ATTENTION;
+    semantics.attention_use_ragged_offsets = use_ragged_offsets;
+    applyAttentionOptions(semantics, options, bias != nullptr);
 
-    auto clone_root = [&](const Expression& src_expr) {
-        std::unordered_map<uint32_t, uint32_t> old_to_new;
-        return cloneSubtreeIntoMergedExpression(src_expr, *out, old_to_new, merged_by_name);
+    std::vector<LogicalDependency> dependencies;
+    dependencies.reserve(20);
+    dependencies.push_back({LogicalDependencyKind::Lhs, 0, q.node});
+    dependencies.push_back({LogicalDependencyKind::Rhs, 0, k.node});
+    dependencies.push_back({LogicalDependencyKind::Aux, 0, v.node});
+
+    auto add_optional_dependency = [&](LogicalDependencyKind kind, const Expression* dependency) {
+        if (dependency != nullptr) {
+            dependencies.push_back({kind, 0, dependency->node});
+        }
     };
 
-    const uint32_t q_node = clone_root(q);
-    const uint32_t k_node = clone_root(k);
-    const uint32_t v_node = clone_root(v);
-    const uint32_t bias_node = bias != nullptr ? clone_root(*bias) : UINT32_MAX;
-    const uint32_t q_len_node = q_seq_len != nullptr ? clone_root(*q_seq_len) : UINT32_MAX;
-    const uint32_t kv_len_node = kv_seq_len != nullptr ? clone_root(*kv_seq_len) : UINT32_MAX;
-    const uint32_t q_ragged_node = q_ragged_offsets != nullptr ? clone_root(*q_ragged_offsets) : UINT32_MAX;
-    const uint32_t kv_ragged_node = kv_ragged_offsets != nullptr ? clone_root(*kv_ragged_offsets) : UINT32_MAX;
-    const uint32_t page_table_k_node = page_table_k != nullptr ? clone_root(*page_table_k) : UINT32_MAX;
-    const uint32_t page_table_v_node = page_table_v != nullptr ? clone_root(*page_table_v) : UINT32_MAX;
-    const uint32_t dropout_seed_node = dropout_seed != nullptr ? clone_root(*dropout_seed) : UINT32_MAX;
-    const uint32_t dropout_offset_node = dropout_offset != nullptr ? clone_root(*dropout_offset) : UINT32_MAX;
-    const uint32_t descale_q_node = descale_q != nullptr ? clone_root(*descale_q) : UINT32_MAX;
-    const uint32_t descale_k_node = descale_k != nullptr ? clone_root(*descale_k) : UINT32_MAX;
-    const uint32_t descale_v_node = descale_v != nullptr ? clone_root(*descale_v) : UINT32_MAX;
-    const uint32_t descale_s_node = descale_s != nullptr ? clone_root(*descale_s) : UINT32_MAX;
-    const uint32_t scale_s_node = scale_s != nullptr ? clone_root(*scale_s) : UINT32_MAX;
-    const uint32_t scale_o_node = scale_o != nullptr ? clone_root(*scale_o) : UINT32_MAX;
-    const uint32_t amax_s_node = amax_s != nullptr ? clone_root(*amax_s) : UINT32_MAX;
-    const uint32_t amax_o_node = amax_o != nullptr ? clone_root(*amax_o) : UINT32_MAX;
+    add_optional_dependency(LogicalDependencyKind::Alpha, bias);
+    add_optional_dependency(LogicalDependencyKind::AttentionSeqLenQ, q_seq_len);
+    add_optional_dependency(LogicalDependencyKind::AttentionSeqLenKv, kv_seq_len);
+    add_optional_dependency(LogicalDependencyKind::AttentionRaggedOffsetQ, q_ragged_offsets);
+    add_optional_dependency(LogicalDependencyKind::AttentionRaggedOffsetKv, kv_ragged_offsets);
+    add_optional_dependency(LogicalDependencyKind::AttentionPageTableK, page_table_k);
+    add_optional_dependency(LogicalDependencyKind::AttentionPageTableV, page_table_v);
+    add_optional_dependency(LogicalDependencyKind::AttentionDropoutSeed, dropout_seed);
+    add_optional_dependency(LogicalDependencyKind::AttentionDropoutOffset, dropout_offset);
+    add_optional_dependency(LogicalDependencyKind::AttentionDescaleQ, descale_q);
+    add_optional_dependency(LogicalDependencyKind::AttentionDescaleK, descale_k);
+    add_optional_dependency(LogicalDependencyKind::AttentionDescaleV, descale_v);
+    add_optional_dependency(LogicalDependencyKind::AttentionDescaleS, descale_s);
+    add_optional_dependency(LogicalDependencyKind::AttentionScaleS, scale_s);
+    add_optional_dependency(LogicalDependencyKind::AttentionScaleO, scale_o);
+    add_optional_dependency(LogicalDependencyKind::AttentionAmaxS, amax_s);
+    add_optional_dependency(LogicalDependencyKind::AttentionAmaxO, amax_o);
 
-    ExprNode node{};
-    node.op = ExprOp::ATTENTION;
-    node.lhs = q_node;
-    node.rhs = k_node;
-    node.aux = v_node;
-    node.alpha_node = bias_node;
-    node.attention_seq_len_q_node = q_len_node;
-    node.attention_seq_len_kv_node = kv_len_node;
-    node.attention_use_ragged_offsets = use_ragged_offsets;
-    node.attention_ragged_offset_q_node = q_ragged_node;
-    node.attention_ragged_offset_kv_node = kv_ragged_node;
-    node.attention_use_paged_kv_cache = options.use_paged_kv_cache;
-    node.attention_paged_kv_max_sequence_length = options.paged_kv_max_sequence_length;
-    node.attention_page_table_k_node = page_table_k_node;
-    node.attention_page_table_v_node = page_table_v_node;
-    node.attention_dropout_seed_node = dropout_seed_node;
-    node.attention_dropout_offset_node = dropout_offset_node;
-    node.attention_descale_q_node = descale_q_node;
-    node.attention_descale_k_node = descale_k_node;
-    node.attention_descale_v_node = descale_v_node;
-    node.attention_descale_s_node = descale_s_node;
-    node.attention_scale_s_node = scale_s_node;
-    node.attention_scale_o_node = scale_o_node;
-    node.attention_amax_s_node = amax_s_node;
-    node.attention_amax_o_node = amax_o_node;
-    applyAttentionOptions(node, options, bias != nullptr);
-
-    const uint32_t new_index = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(std::move(node));
-    out->output_node = new_index;
-    return Expression(out, new_index);
+    return Expression(LogicalExpressionNode::create(std::move(semantics), std::move(dependencies)));
 }
 
 
@@ -5330,12 +4578,12 @@ Expression Expression::embeddingLookup(const Expression& indices,
                                        const Expression& weights,
                                        std::optional<uint64_t> padding_index,
                                        std::optional<DataType> output_dtype) {
-    Expression out = binaryOp(indices, weights, ExprOp::EMBEDDING_LOOKUP);
-    ExprNode& node = out.expr->nodes.at(out.nodeIndex);
-    node.embedding_has_padding_index = padding_index.has_value();
-    node.embedding_padding_index = padding_index.value_or(0);
-    node.output_dtype = output_dtype;
-    return out;
+    ExprNode semantics{};
+    semantics.op = ExprOp::EMBEDDING_LOOKUP;
+    semantics.embedding_has_padding_index = padding_index.has_value();
+    semantics.embedding_padding_index = padding_index.value_or(0);
+    semantics.output_dtype = output_dtype;
+    return binaryOp(indices, weights, std::move(semantics));
 }
 
 Expression Expression::scaledDotProductAttention(const Expression& q, const Expression& k, const Expression& v, AttentionOptions options) {
@@ -5637,17 +4885,18 @@ Expression Expression::conv2d(const Expression& input,
     if (groups == 0) {
         throw std::runtime_error("conv2d groups must be positive.");
     }
-    Expression out = binaryOp(input, filter, ExprOp::CONV2D);
-    ExprNode& node = out.expr->nodes[out.nodeIndex];
-    node.conv_spatial_2d = spatial;
-    node.conv_groups = groups;
+
+    ExprNode semantics{};
+    semantics.op = ExprOp::CONV2D;
+    semantics.conv_spatial_2d = spatial;
+    semantics.conv_groups = groups;
     if (compute_dtype.has_value()) {
-        node.compute_dtype = compute_dtype.value();
+        semantics.compute_dtype = compute_dtype.value();
     }
     if (output_dtype.has_value()) {
-        node.output_dtype = output_dtype.value();
+        semantics.output_dtype = output_dtype.value();
     }
-    return out;
+    return binaryOp(input, filter, std::move(semantics));
 }
 
 Expression Expression::conv3d(const Expression& input,
@@ -5670,17 +4919,17 @@ Expression Expression::conv3d(const Expression& input,
         throw std::runtime_error("conv3d groups must be positive.");
     }
 
-    Expression out = binaryOp(input, filter, ExprOp::CONV3D);
-    ExprNode& node = out.expr->nodes[out.nodeIndex];
-    node.conv_spatial_3d = spatial;
-    node.conv_groups = groups;
+    ExprNode semantics{};
+    semantics.op = ExprOp::CONV3D;
+    semantics.conv_spatial_3d = spatial;
+    semantics.conv_groups = groups;
     if (compute_dtype.has_value()) {
-        node.compute_dtype = compute_dtype.value();
+        semantics.compute_dtype = compute_dtype.value();
     }
     if (output_dtype.has_value()) {
-        node.output_dtype = output_dtype.value();
+        semantics.output_dtype = output_dtype.value();
     }
-    return out;
+    return binaryOp(input, filter, std::move(semantics));
 }
 
 Expression Expression::conv3d(const Expression& input,
@@ -5716,17 +4965,23 @@ Expression Expression::reduction(ExprOp op,
                                  const std::vector<uint64_t>& reduction_axes,
                                  const std::vector<uint64_t>& squeeze_axes,
                                  std::optional<DataType> compute_dtype) const {
-    Expression out = unaryOp(*this, op);
-
-    out.expr->nodes[out.nodeIndex].reduction_axes = reduction_axes;
-    out.expr->nodes[out.nodeIndex].squeeze_axes = squeeze_axes;
-    out.expr->nodes[out.nodeIndex].compute_dtype = validate_reduction_compute_type(compute_dtype);
-    if (isArgReductionOp(op)) {
-        out.expr->nodes[out.nodeIndex].output_dtype = DataType::UINT32;
-        out.expr->nodes[out.nodeIndex].backward_output_dtype = DataType::UINT32;
-        out.expr->nodes[out.nodeIndex].backward_compute_dtype = DataType::FP32;
+    // unaryOp historically rejected an empty source before reduction dtype
+    // validation ran on the just-created root. Keep that observable ordering.
+    if (!node) {
+        throw std::runtime_error("Cannot apply unary op to empty expression");
     }
-    return out;
+
+    ExprNode semantics{};
+    semantics.op = op;
+    semantics.reduction_axes = reduction_axes;
+    semantics.squeeze_axes = squeeze_axes;
+    semantics.compute_dtype = validate_reduction_compute_type(compute_dtype);
+    if (isArgReductionOp(op)) {
+        semantics.output_dtype = DataType::UINT32;
+        semantics.backward_output_dtype = DataType::UINT32;
+        semantics.backward_compute_dtype = DataType::FP32;
+    }
+    return unaryOp(*this, std::move(semantics));
 }
 
 Expression Expression::reduce_sum(const std::vector<uint64_t>& reduction_axes,
@@ -5790,27 +5045,22 @@ Expression Expression::reduce_sum_squares(const std::vector<uint64_t>& reduction
 }
 
 Expression Expression::withDTypes(std::optional<DataType> compute_dtype, std::optional<DataType> output_dtype) const {
-    if (!expr)
+    if (!node)
         throw std::runtime_error("Cannot override dtypes on an empty expression");
-    if (nodeIndex >= expr->nodes.size())
-        throw std::runtime_error("Cannot override dtypes on an invalid expression node");
 
-    auto out = std::make_shared<PhysicalExpression>();
-    out->inputs = expr->inputs;
-
-    std::unordered_map<uint32_t, uint32_t> oldToNew;
-    uint32_t newRootIndex = cloneSubtree(*expr, nodeIndex, *out, oldToNew);
-    out->output_node = newRootIndex;
-
-    ExprNode& root = out->nodes[newRootIndex];
+    ExprNode semantics = node->semantics();
     if (compute_dtype.has_value()) {
-        root.compute_dtype = compute_dtype.value();
+        semantics.compute_dtype = compute_dtype.value();
     }
     if (output_dtype.has_value()) {
-        root.output_dtype = output_dtype.value();
+        semantics.output_dtype = output_dtype.value();
     }
 
-    return Expression(out, newRootIndex);
+    return Expression(LogicalExpressionNode::create(std::move(semantics),
+                                                     node->dependencies(),
+                                                     node->inputBinding(),
+                                                     node->raggedRuntimeOffsetsBinding(),
+                                                     node->cudaKernelApplication()));
 }
 
 Expression Expression::withComputeDType(DataType compute_dtype) const { return withDTypes(compute_dtype, std::nullopt); }
@@ -5892,50 +5142,137 @@ uint32_t PhysicalExpression::getOrCreateInputSlot(const std::string& name, Named
     return slot;
 }
 
+PhysicalOutputs Outputs::physicalOutputs() const {
+    if (conditional_outputs) {
+        return PhysicalOutputs{
+            .expr = conditional_expr,
+            .outputs = conditional_named_outputs,
+            .conditional = conditional_outputs,
+        };
+    }
+    if (logical_outputs.empty()) {
+        throw std::runtime_error("Outputs has no logical roots or conditional outputs.");
+    }
+    return LogicalExpressionLowerer::lower(logical_outputs);
+}
+
+Outputs Outputs::fromPhysicalOutputs(PhysicalOutputs physical_outputs) {
+    if (!physical_outputs.expr && !physical_outputs.conditional) {
+        throw std::runtime_error("Outputs::fromPhysicalOutputs requires a non-null PhysicalExpression or conditional outputs.");
+    }
+
+    if (physical_outputs.conditional) {
+        return Outputs(std::move(physical_outputs.expr),
+                       std::move(physical_outputs.outputs),
+                       std::move(physical_outputs.conditional));
+    }
+
+    LogicalExpressionImporter importer(*physical_outputs.expr);
+    return Outputs(importer.importOutputs(physical_outputs.outputs));
+}
+
+std::vector<std::string> Outputs::outputNames() const {
+    std::vector<std::string> names;
+    if (conditional_outputs) {
+        names.reserve(conditional_named_outputs.size());
+        for (const NamedOutput& output : conditional_named_outputs) {
+            names.push_back(output.name);
+        }
+        return names;
+    }
+
+    names.reserve(logical_outputs.size());
+    for (const LogicalNamedOutput& output : logical_outputs) {
+        names.push_back(output.name);
+    }
+    return names;
+}
+
+Expression Outputs::outputExpression(size_t index) const {
+    if (conditional_outputs) {
+        throw std::runtime_error("Conditional Outputs do not have a single logical output Expression.");
+    }
+    if (index >= logical_outputs.size()) {
+        throw std::out_of_range("Outputs::outputExpression index is out of range.");
+    }
+    if (!logical_outputs[index].node) {
+        throw std::runtime_error("Outputs contains a null logical output root.");
+    }
+    return Expression(logical_outputs[index].node);
+}
+
+Expression Outputs::outputExpression(const std::string& name) const {
+    if (conditional_outputs) {
+        throw std::runtime_error("Conditional Outputs do not have a single logical output Expression.");
+    }
+    for (const LogicalNamedOutput& output : logical_outputs) {
+        if (output.name == name) {
+            if (!output.node) {
+                throw std::runtime_error("Outputs contains a null logical output root.");
+            }
+            return Expression(output.node);
+        }
+    }
+    throw std::out_of_range("Outputs has no output named '" + name + "'.");
+}
+
+std::set<std::string> Outputs::getInputNames() const {
+    if (conditional_outputs) {
+        if (!conditional_expr) {
+            throw std::runtime_error("Conditional Outputs has no physical root expression.");
+        }
+        return conditional_expr->getInputNames();
+    }
+
+    std::set<std::string> names;
+    std::unordered_set<const LogicalExpressionNode*> visited;
+    std::function<void(const LogicalExpression&)> visit = [&](const LogicalExpression& logical) {
+        if (!logical || !visited.insert(logical.get()).second) {
+            return;
+        }
+        if (logical->inputBinding()) {
+            names.insert(logical->inputBinding()->name);
+        }
+        if (logical->raggedRuntimeOffsetsBinding()) {
+            names.insert(logical->raggedRuntimeOffsetsBinding()->name);
+        }
+        for (const LogicalDependency& dependency : logical->dependencies()) {
+            visit(dependency.node);
+        }
+        if (logical->cudaKernelApplication()) {
+            for (const LogicalExpression& input : logical->cudaKernelApplication()->inputs()) {
+                visit(input);
+            }
+        }
+    };
+    for (const LogicalNamedOutput& output : logical_outputs) {
+        visit(output.node);
+    }
+    return names;
+}
+
 Outputs Expression::outputs(const std::vector<std::pair<std::string, Expression>>& named_exprs) {
     if (named_exprs.empty()) {
         throw std::runtime_error("Expression::outputs requires at least one named output.");
     }
 
-    auto merged = std::make_shared<PhysicalExpression>();
-    std::vector<NamedOutput> outputs;
-    outputs.reserve(named_exprs.size());
-
+    std::vector<LogicalNamedOutput> logical_outputs;
+    logical_outputs.reserve(named_exprs.size());
     std::unordered_set<std::string> seen_names;
-    std::unordered_map<std::string, uint32_t> mergedInputSlotsByName;
-    std::unordered_map<const PhysicalExpression*, std::unordered_map<uint32_t, uint32_t>> oldToNewBySourceExpression;
-
-    for (const auto& [name, expr] : named_exprs) {
+    for (const auto& [name, expression] : named_exprs) {
         if (name.empty()) {
             throw std::runtime_error("Output name cannot be empty.");
         }
-
         if (!seen_names.insert(name).second) {
             throw std::runtime_error("Duplicate output name: " + name);
         }
-
-        if (!expr.expr) {
-            throw std::runtime_error("Output expression has no backing PhysicalExpression.");
+        if (!expression.node) {
+            throw std::runtime_error("Output expression has no logical root.");
         }
-
-        if (expr.nodeIndex == UINT32_MAX) {
-            throw std::runtime_error("Output expression has invalid node index.");
-        }
-
-        if (expr.nodeIndex >= expr.expr->nodes.size()) {
-            throw std::runtime_error("Output expression node index is out of range.");
-        }
-
-        auto& oldToNew = oldToNewBySourceExpression[expr.expr.get()];
-        uint32_t mergedRoot = cloneSubtreeWithMergedInputs(*expr.expr, expr.nodeIndex, *merged, oldToNew, mergedInputSlotsByName);
-
-        outputs.push_back(NamedOutput{
-            .name = name,
-            .node_idx = mergedRoot,
-        });
+        logical_outputs.push_back(LogicalNamedOutput{name, expression.node, {}});
     }
 
-    return Outputs(std::move(merged), std::move(outputs));
+    return Outputs(std::move(logical_outputs));
 }
 
 Outputs Expression::outputs(std::initializer_list<std::pair<std::string, Expression>> named_exprs) {

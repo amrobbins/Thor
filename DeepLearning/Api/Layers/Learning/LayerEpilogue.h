@@ -134,8 +134,9 @@ class LayerEpilogue {
                                                                                  const std::string& outputName,
                                                                                  const std::string& layerType) {
         validateDefinition(definition, primaryInputName, auxiliaryInputNames, outputName, layerType);
-        const ThorImplementation::NamedOutput& epilogueOutput = definition.outputs.outputs.front();
-        return ThorImplementation::Expression::fromPhysicalNode(definition.outputs.expr, epilogueOutput.node_idx);
+        ThorImplementation::Outputs logicalOutputs =
+            ThorImplementation::Outputs::fromPhysicalOutputs(definition.outputs);
+        return logicalOutputs.outputExpression(outputName);
     }
 
     [[nodiscard]] static ThorImplementation::Expression apply(const ThorImplementation::Expression& input,

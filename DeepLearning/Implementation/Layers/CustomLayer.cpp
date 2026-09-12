@@ -1051,12 +1051,12 @@ BackwardBuildResult CustomLayer::buildBackwardOutputsForApplication(
         upstreamInputDTypesByOutput.emplace(outputName, fused.predictionsTensor.getDataType());
     }
 
-    // BR6.0D: every CustomLayer VJP differentiates the same retention-aware
-    // representation that the real training forward will stamp.  There is no
-    // alternate ordinary-forward/replay-compatible path.  An eligible fused GELU
-    // is therefore represented as a MATMUL/GEMM carrying a forward epilogue-aux
-    // provider, and every computed primal dependency is reported through
-    // ForwardValueRequirement.
+    // Every CustomLayer contribution differentiates the same retention-aware
+    // physical forward graph that the real training forward stamps. There is no
+    // alternate replay graph and no per-downstream-branch AutoDiff invocation.
+    // An eligible fused GELU is therefore represented as a MATMUL/GEMM carrying
+    // a forward epilogue-aux provider, and every computed primal dependency is
+    // reported through ForwardValueRequirement.
     PhysicalOutputs forwardOutputs =
         app.forwardPrepared->equationForVariant(variantId).physicalOutputsForTrainingBackward(
             app.forwardPrepared->stampInputs(), app.forwardPrepared->tensorScalarInputsForVariant(variantId));
@@ -1470,7 +1470,7 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildGenericSharedBackwardWit
 
     const PhysicalOutputs& backwardOutputs = sharedBackwardBuild.outputs;
     if (!backwardOutputs.expr || backwardOutputs.isConditional()) {
-        throw runtime_error("CustomLayer BR6.6 fused shared backward requires one flat backward expression.");
+        throw runtime_error("CustomLayer fused shared backward requires one flat backward expression.");
     }
 
     const std::unordered_set<std::string> fusedParameterSet(
@@ -1484,6 +1484,11 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildGenericSharedBackwardWit
             nonMaterializedParameterNames.insert(parameter->getName());
         }
     }
+
+    // Import the shared physical backward graph once so every selected logical
+    // output retains the source graph's shared ancestry, even when outputs are
+    // routed to different fused/ordinary destinations below.
+    const Outputs logicalBackwardOutputs = Outputs::fromPhysicalOutputs(backwardOutputs);
 
     std::unordered_map<std::string, Expression> gradientsByFusedParameter;
     std::vector<std::pair<std::string, Expression>> combinedOutputs;
@@ -1505,7 +1510,7 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildGenericSharedBackwardWit
         if (parameterName.has_value() && nonMaterializedParameterNames.contains(parameterName.value())) {
             if (fusedParameterSet.contains(parameterName.value())) {
                 gradientsByFusedParameter.emplace(
-                    parameterName.value(), Expression::fromPhysicalNode(backwardOutputs.expr, output.node_idx));
+                    parameterName.value(), logicalBackwardOutputs.outputExpression(output.name));
             }
             // A non-materialized parameter that is inactive in this variant has
             // no optimizer action and therefore no public dParameter destination.
@@ -1515,10 +1520,10 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildGenericSharedBackwardWit
         auto destinationIt = ordinaryPreallocatedOutputs.find(output.name);
         if (destinationIt == ordinaryPreallocatedOutputs.end()) {
             throw runtime_error(
-                "CustomLayer BR6.6 shared backward has no physical destination for retained output '" +
+                "CustomLayer shared backward has no physical destination for retained output '" +
                 output.name + "'.");
         }
-        combinedOutputs.emplace_back(output.name, Expression::fromPhysicalNode(backwardOutputs.expr, output.node_idx));
+        combinedOutputs.emplace_back(output.name, logicalBackwardOutputs.outputExpression(output.name));
         originalMaterializationByOutput.emplace(output.name, output.materialization);
         preallocatedOutputs.emplace(output.name, destinationIt->second);
     }
@@ -1529,7 +1534,7 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildGenericSharedBackwardWit
     }
     if (!sharedBackwardBuild.forward_value_requirements.empty()) {
         if (variant.forward == nullptr) {
-            throw runtime_error("CustomLayer BR6.6 fused shared backward requires the real forward execution plan.");
+            throw runtime_error("CustomLayer fused shared backward requires the real forward execution plan.");
         }
         bindRetainedForwardValues(sharedBackwardBuild, *variant.forward, stampInputs);
     }
@@ -1541,12 +1546,12 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildGenericSharedBackwardWit
         auto gradIt = gradientsByFusedParameter.find(parameterName);
         if (gradIt == gradientsByFusedParameter.end()) {
             throw runtime_error(
-                "CustomLayer BR6.6 could not find expression-local gradient for fused parameter '" + parameterName + "'.");
+                "CustomLayer could not find expression-local gradient for fused parameter '" + parameterName + "'.");
         }
         auto storageIt = optimizerUpdateInputs.find(parameterName);
         if (storageIt == optimizerUpdateInputs.end()) {
             throw runtime_error(
-                "CustomLayer BR6.6 could not find storage for fused parameter '" + parameterName + "'.");
+                "CustomLayer could not find storage for fused parameter '" + parameterName + "'.");
         }
 
         shared_ptr<PhysicalParameter> targetParameter;
@@ -1560,11 +1565,11 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildGenericSharedBackwardWit
         }
         if (targetParameter == nullptr || optimizer == nullptr || !optimizer->supportsDenseUpdateFusion()) {
             throw runtime_error(
-                "CustomLayer BR6.6 optimizer fusion requested for unsupported parameter '" + parameterName + "'.");
+                "CustomLayer optimizer fusion requested for unsupported parameter '" + parameterName + "'.");
         }
         if (optimizer->getWeightsGradient().has_value()) {
             throw runtime_error(
-                "CustomLayer BR6.6 expression-fused parameter unexpectedly owns a materialized dense gradient: '" +
+                "CustomLayer expression-fused parameter unexpectedly owns a materialized dense gradient: '" +
                 parameterName + "'.");
         }
 
@@ -1576,20 +1581,23 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildGenericSharedBackwardWit
         for (const auto& [name, tensor] : updateExpression.inputs) {
             auto [_, inserted] = stampInputs.emplace(name, tensor);
             if (!inserted) {
-                throw runtime_error("CustomLayer BR6.6 fused optimizer input name collision: " + name);
+                throw runtime_error("CustomLayer fused optimizer input name collision: " + name);
             }
         }
 
+        // Optimizers may return several outputs that share internal update
+        // ancestry. Import the complete physical update graph once before
+        // selecting/transforming individual roots (including weights constraints).
+        const Outputs logicalUpdateOutputs = Outputs::fromPhysicalOutputs(updateExpression.outputs);
         for (const NamedOutput& output : updateExpression.outputs.outputs) {
             const std::string uniqueOutputName = optimizerFusionOutputName(parameterName, output.name);
             auto preallocIt = updateExpression.preallocatedOutputs.find(output.name);
             if (preallocIt == updateExpression.preallocatedOutputs.end()) {
                 throw runtime_error(
-                    "CustomLayer BR6.6 fused optimizer missing preallocated output '" + output.name +
+                    "CustomLayer fused optimizer missing preallocated output '" + output.name +
                     "' for parameter '" + parameterName + "'.");
             }
-            Expression outputExpression =
-                Expression::fromPhysicalNode(updateExpression.outputs.expr, output.node_idx);
+            Expression outputExpression = logicalUpdateOutputs.outputExpression(output.name);
             if (output.name == "weights" && targetParameter->hasConstraints() &&
                 targetParameter->supportsDenseExpressionConstraintFusion()) {
                 outputExpression = targetParameter->applyDenseExpressionConstraints(
@@ -1601,7 +1609,7 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildGenericSharedBackwardWit
     }
 
     if (combinedOutputs.empty()) {
-        throw runtime_error("CustomLayer BR6.6 fused shared backward produced no executable outputs.");
+        throw runtime_error("CustomLayer fused shared backward produced no executable outputs.");
     }
 
     PhysicalOutputs physicalOutputs = Expression::outputs(combinedOutputs).physicalOutputs();
@@ -2058,11 +2066,12 @@ void CustomLayer::compileImpl() {
             layerDefinitionExpression.prepare(app.forwardInputsByName, app.forwardOutputsByName, computeStream(applicationIndex)));
         validatePreparedExpressionInputs(*app.forwardPrepared);
 
-        // BR6.6 compile-time policy for this application. A name appears here only
-        // when every backward-capable execution variant that can update it produces
-        // the parameter gradient entirely inside an ordinary fused Expression region.
+        // Expression-local optimizer-fusion policy for this application. A name
+        // appears here only when every backward-capable execution variant that can
+        // update it produces the parameter gradient entirely inside an ordinary
+        // fused Expression region.
         // Stage-boundary gradients and all multi-application cases remain materialized.
-        std::unordered_set<std::string> br66ExpressionFusedOptimizerParameterNames;
+        std::unordered_set<std::string> expressionFusedOptimizerParameterNames;
 
         for (DynamicExpressionVariantId variantId : app.forwardPrepared->executionVariantIds()) {
             const auto inferredOutputShapes = app.forwardPrepared->equationForVariant(variantId).getOutputShapes(
@@ -2093,16 +2102,16 @@ void CustomLayer::compileImpl() {
             }
         }
 
-        // BR6.6 must decide dense-gradient materialization per parameter from the
-        // *actual backward gradient expression*. For the one flat single-application
+        // Decide dense-gradient materialization per parameter from the *actual
+        // backward gradient expression*. For the one flat single-application
         // case where optimizer fusion is even possible, defer optimizer compilation
         // until the downstream-gradient pattern has been captured below. All other
         // cases keep the ordinary materialized-gradient contract immediately.
-        const bool deferOptimizerCompilationForBr66 =
+        const bool deferOptimizerCompilationForExpressionFusion =
             !compiledOptimizers && !isInferenceOnly() && !executesNativeSharedBackwardPlan() &&
             applicationHasAnyDownstreamBackprop(applicationIndex) &&
             canFuseOptimizerUpdatesForApplication(applicationIndex);
-        if (!compiledOptimizers && !deferOptimizerCompilationForBr66) {
+        if (!compiledOptimizers && !deferOptimizerCompilationForExpressionFusion) {
             for (const auto& parameter : parameters) {
                 if (!parameter->isTrainable()) {
                     continue;
@@ -2292,13 +2301,13 @@ void CustomLayer::compileImpl() {
             return targets;
         };
 
-        // Build the one generic clear VJP before deciding optimizer storage. BR6.6
-        // can then classify each flat dParameter directly from the exact combined
-        // VJP that will become the runtime owner; no second AutoDiff invocation is
-        // needed merely to decide whether an optimizer can be grafted onto it.
-        // BR6.7 deliberately includes graph-level conditionals here as well. They
-        // remain ineligible for optimizer fusion, but their one conditional VJP
-        // owns dInput and every materialized dParameter together.
+        // Build the one generic clear VJP before deciding optimizer storage so each
+        // flat dParameter can be classified directly from the exact combined VJP
+        // that becomes the runtime owner; no second AutoDiff invocation is needed
+        // merely to decide whether an optimizer can be grafted onto it. Graph-level
+        // conditionals are included here as well. They remain ineligible for
+        // optimizer fusion, but their one conditional VJP owns dInput and every
+        // materialized dParameter together.
         if (!wantsNativeSharedBackwardPlan() &&
             !app.backwardAdditionalInputsByName.empty() &&
             !allTrainableParameterTargets.empty()) {
@@ -2331,8 +2340,8 @@ void CustomLayer::compileImpl() {
         }
 
         if (!compiledOptimizers) {
-            // BR6.6: restore optimizer fusion only when one application owns the
-            // complete parameter gradient and that dParameter is expression-local.
+            // Restore optimizer fusion only when one application owns the complete
+            // parameter gradient and that dParameter is expression-local.
             // A GEMM/conv/reduction/RMSNorm/custom-CUDA/etc. anywhere in the dParameter
             // dependency subgraph is a physical stage boundary, so that parameter keeps
             // a materialized dW and the optimizer remains downstream of backward.
@@ -2343,13 +2352,13 @@ void CustomLayer::compileImpl() {
                     if (parameter->isTrainingEnabled() && parameter->hasOptimizer() &&
                         parameter->getOptimizer() != nullptr &&
                         parameter->getOptimizer()->supportsDenseUpdateFusion()) {
-                        br66ExpressionFusedOptimizerParameterNames.insert(parameter->getName());
+                        expressionFusedOptimizerParameterNames.insert(parameter->getName());
                     }
                 }
 
                 for (DynamicExpressionVariantId candidateVariantId : executionVariantIds) {
                     const StampedExecutionVariant& candidateVariant = stampedVariant(applicationIndex, candidateVariantId);
-                    if (!candidateVariant.supportsBackward || br66ExpressionFusedOptimizerParameterNames.empty()) {
+                    if (!candidateVariant.supportsBackward || expressionFusedOptimizerParameterNames.empty()) {
                         continue;
                     }
                     if (!candidateVariant.genericSharedBackwardClearBuild.has_value() ||
@@ -2359,7 +2368,7 @@ void CustomLayer::compileImpl() {
                         // execution variant. If any backward-capable variant cannot be
                         // classified from the one shared clear VJP, none of the remaining
                         // candidates may safely omit their materialized gradient buffer.
-                        br66ExpressionFusedOptimizerParameterNames.clear();
+                        expressionFusedOptimizerParameterNames.clear();
                         break;
                     }
 
@@ -2382,18 +2391,18 @@ void CustomLayer::compileImpl() {
                     // can matter for momentum/weight decay even when dW == 0). Therefore
                     // an inactive variant forces that parameter back to materialized dW.
                     std::vector<std::string> candidates(
-                        br66ExpressionFusedOptimizerParameterNames.begin(),
-                        br66ExpressionFusedOptimizerParameterNames.end());
+                        expressionFusedOptimizerParameterNames.begin(),
+                        expressionFusedOptimizerParameterNames.end());
                     for (const std::string& parameterName : candidates) {
                         if (!candidateVariant.activeParameterTargetNames.contains(parameterName)) {
-                            br66ExpressionFusedOptimizerParameterNames.erase(parameterName);
+                            expressionFusedOptimizerParameterNames.erase(parameterName);
                             continue;
                         }
                         const auto gradIt = gradientNodeByParameter.find(parameterName);
                         if (gradIt == gradientNodeByParameter.end() ||
                             expressionSubgraphContainsStageBoundary(
                                 *candidateVariant.genericSharedBackwardClearBuild->outputs.expr, gradIt->second)) {
-                            br66ExpressionFusedOptimizerParameterNames.erase(parameterName);
+                            expressionFusedOptimizerParameterNames.erase(parameterName);
                         }
                     }
                 }
@@ -2404,7 +2413,7 @@ void CustomLayer::compileImpl() {
                     continue;
                 }
                 const bool materializeDenseGradient =
-                    !br66ExpressionFusedOptimizerParameterNames.contains(parameter->getName());
+                    !expressionFusedOptimizerParameterNames.contains(parameter->getName());
                 parameter->compileOptimizer(gradientUpdateStream, isInferenceOnly(), materializeDenseGradient);
             }
             compiledOptimizers = true;
@@ -2450,11 +2459,13 @@ void CustomLayer::compileImpl() {
                     std::unordered_set<std::string>(activeParameterTargets.begin(), activeParameterTargets.end());
             }
 
-            // Construct the production generic shared-VJP builds. The clear
-            // build must establish every
+            // Construct the production generic shared-VJP builds. Each build is
+            // one complete VJP for one application contribution; clear versus
+            // accumulate changes gradient-commit semantics, not VJP cardinality
+            // within that contribution. The clear build must establish every
             // trainable parameter gradient (including an explicit zero for an
             // unreachable/inactive parameter), while the accumulate build only
-            // contributes parameters reachable from this execution variant.  dInput
+            // contributes parameters reachable from this execution variant. dInput
             // always overwrites; only parameter targets accumulate.
             //
             // Native shared-backward specializations already own a one-VJP path.
@@ -2469,14 +2480,14 @@ void CustomLayer::compileImpl() {
                 std::vector<std::string> accumulateParameterTargets;
                 accumulateParameterTargets.reserve(activeParameterTargets.size());
                 for (const std::string& parameterName : activeParameterTargets) {
-                    if (!br66ExpressionFusedOptimizerParameterNames.contains(parameterName)) {
+                    if (!expressionFusedOptimizerParameterNames.contains(parameterName)) {
                         accumulateParameterTargets.push_back(parameterName);
                     }
                 }
                 const std::vector<std::string> accumulateTargets =
                     combinedBackwardTargets(inputTargets, accumulateParameterTargets);
-                // BR6.8: with exactly one physical application, this application
-                // is always the first and only contribution in a backward pass, so an
+                // With exactly one physical application, this application is always
+                // the first and only contribution in a backward pass, so an
                 // accumulate variant is unreachable regardless of how many materialized
                 // parameter gradients it owns. Multi-application layers retain the
                 // clear/accumulate pair.
@@ -2505,7 +2516,7 @@ void CustomLayer::compileImpl() {
                 }
 
                 if (!combinedTargets.empty()) {
-                    // BR6.0A: the native shared VJP participates in the same generic
+                    // The native shared VJP participates in the same generic
                     // retained-forward contract as every other flat backward graph.
                     // Preflight the VJP before stamping the real forward, retain the
                     // exact computed primals it declares, then bind those tensors into
@@ -2658,12 +2669,12 @@ void CustomLayer::compileImpl() {
             }
 
             std::vector<std::string> fusedParameterTargets;
-            // BR6.6: optimizer fusion is restored only for active parameters whose
-            // complete dParameter subgraph was proven expression-local above. The
+            // Optimizer fusion is restored only for active parameters whose complete
+            // dParameter subgraph was proven expression-local above. The
             // optimizer is grafted onto the one shared VJP below; this list must not
             // cause a second differentiated parameter-gradient graph.
             for (const std::string& parameterName : activeParameterTargets) {
-                if (br66ExpressionFusedOptimizerParameterNames.contains(parameterName)) {
+                if (expressionFusedOptimizerParameterNames.contains(parameterName)) {
                     fusedParameterTargets.push_back(parameterName);
                     variant.optimizerUpdateFusedParameterNames.insert(parameterName);
                 }
@@ -2721,8 +2732,8 @@ void CustomLayer::compileImpl() {
             const bool useGenericSharedBackwardOwnership =
                 variant.genericSharedBackwardClearBuild.has_value();
 
-            // BR6.8: generic trainable CustomLayer variants have exactly one
-            // derivative owner: the combined shared VJP. The only remaining split
+            // Generic trainable CustomLayer variants have exactly one derivative
+            // owner: the combined shared VJP. The only remaining split
             // backward build is the parameterless/non-trainable dInput-only path.
             // Preflight it before stamping the real forward so retained primals bind
             // to the one forward plan that will actually execute.
@@ -2839,7 +2850,7 @@ void CustomLayer::compileImpl() {
                 }
 
                 if (variant.genericSharedBackwardClear == nullptr) {
-                    throw runtime_error("CustomLayer BR6.6 failed to stamp the generic shared clear backward plan.");
+                    throw runtime_error("CustomLayer failed to stamp the generic shared clear backward plan.");
                 }
                 onGenericSharedBackwardExecutionVariantStamped(
                     applicationIndex,
@@ -3477,7 +3488,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                     emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
                 if (!runClearSharedPlan && !variant.optimizerUpdateFusedParameterNames.empty()) {
                     throw runtime_error(
-                        "CustomLayer BR6.6 expression-fused optimizer update cannot execute on an accumulate contribution.");
+                        "CustomLayer expression-fused optimizer update cannot execute on an accumulate contribution.");
                 }
 #ifdef THOR_DEBUG
                 if (runClearSharedPlan) {

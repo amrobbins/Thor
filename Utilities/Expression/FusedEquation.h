@@ -750,8 +750,8 @@ struct BackwardEquationConfig {
     std::vector<std::string> wrt_names;
     std::optional<std::unordered_map<std::string, std::string>> upstream_input_names_by_output;
     bool accumulate_grad_outputs = false;
-    // BR6.0E: true when this VJP consumes a computed primal, a graph-level
-    // conditional predicate, or backend-owned forward state (currently
+    // True when this VJP consumes a computed primal, a graph-level conditional
+    // predicate, or backend-owned forward state (currently
     // Attention/RMSNorm). Such an equation is not a self-contained standalone
     // executable; it must be stamped through stampForwardBackwardPair() or a
     // training path that binds the matching real-forward state.
@@ -857,8 +857,8 @@ class FusedEquation {
         const std::unordered_map<std::string, Tensor>& preallocated_backward_outputs = {},
         const std::unordered_map<std::string, std::vector<uint64_t>>& requested_backward_output_shapes = {}) const;
 
-    // BR6.0E: report whether this compiled backward needs the matching real
-    // forward execution. Forward equations and root-only backward VJPs return
+    // Report whether this compiled backward needs the matching real forward
+    // execution. Forward equations and root-only backward VJPs return
     // false. Callers can use this to choose between stamp() and the explicit
     // stampForwardBackwardPair() path without probing by exception.
     [[nodiscard]] bool requiresForwardExecutionForBackward() const {

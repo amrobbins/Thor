@@ -10,6 +10,7 @@
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/DropOutPostOp.h"
+#include "Utilities/Expression/ExpressionInternal.h"
 #include "Utilities/TensorOperations/Scalar/SetScalar.h"
 
 #include <algorithm>
@@ -522,42 +523,25 @@ ThorImplementation::RotaryPositionEmbeddingOptions ropeOptionsFromJson(const jso
     return opts;
 }
 
-struct AttentionEpilogueInputDataTypes {
-    std::optional<DataType> computeDataType;
-    std::optional<DataType> outputDataType;
-};
+using AttentionEpilogueInputDataTypes = ThorImplementation::ExpressionInputAnnotations;
 
 AttentionEpilogueInputDataTypes attentionEpilogueInputDataTypes(
     const ThorImplementation::Expression& expression,
     const std::string& inputName) {
-    const ThorImplementation::PhysicalExpression physicalExpression = expression.expression();
-    std::optional<AttentionEpilogueInputDataTypes> resolved;
+    const std::vector<AttentionEpilogueInputDataTypes> annotations =
+        ThorImplementation::ExpressionInternalAccess::inputAnnotations(expression, inputName);
+    if (annotations.empty()) {
+        throw std::runtime_error("Attention epilogue expression does not contain expected input '" + inputName + "'.");
+    }
 
-    for (const ThorImplementation::ExprNode& node : physicalExpression.nodes) {
-        if (node.op != ThorImplementation::ExprOp::INPUT) {
-            continue;
-        }
-        if (node.input_slot >= physicalExpression.inputs.size()) {
-            throw std::runtime_error("Attention epilogue input node has an invalid input slot.");
-        }
-        if (physicalExpression.inputs[node.input_slot].name != inputName) {
-            continue;
-        }
-
-        const AttentionEpilogueInputDataTypes candidate{node.compute_dtype, node.output_dtype};
-        if (resolved.has_value() &&
-            (resolved->computeDataType != candidate.computeDataType ||
-             resolved->outputDataType != candidate.outputDataType)) {
+    const AttentionEpilogueInputDataTypes& resolved = annotations.front();
+    for (const AttentionEpilogueInputDataTypes& candidate : annotations) {
+        if (resolved != candidate) {
             throw std::runtime_error("Attention epilogue input '" + inputName +
                                      "' is used with inconsistent dtype annotations.");
         }
-        resolved = candidate;
     }
-
-    if (!resolved.has_value()) {
-        throw std::runtime_error("Attention epilogue expression does not contain expected input '" + inputName + "'.");
-    }
-    return resolved.value();
+    return resolved;
 }
 
 ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequenceLength,
@@ -1278,12 +1262,11 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                             Expression::input(kAttentionQueryRowPartitionInputName, queryRowPartitionDType, queryRowPartitionDType));
                     }
                     ThorImplementation::Outputs dropoutOutputs = outputDropout.apply(dropoutInputs);
-                    const auto& namedDropoutOutputs = dropoutOutputs.namedOutputs();
-                    if (namedDropoutOutputs.size() != 1 || namedDropoutOutputs.front().name != "output") {
+                    const std::vector<std::string> dropoutOutputNames = dropoutOutputs.outputNames();
+                    if (dropoutOutputNames.size() != 1 || dropoutOutputNames.front() != "output") {
                         throw std::logic_error("Attention output-dropout kernel produced an unexpected output interface.");
                     }
-                    out = Expression::fromPhysicalNode(
-                        dropoutOutputs.expression(), namedDropoutOutputs.front().node_idx);
+                    out = dropoutOutputs.outputExpression("output");
                 } else if (flattenedResidual.has_value()) {
                     // With no active output dropout this add is intentionally kept adjacent to the
                     // projection so EquationCompiler can lower it into the output GEMM beta/residual path.

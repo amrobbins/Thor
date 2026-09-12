@@ -1,5 +1,7 @@
 #include "Utilities/Expression/RaggedExpression.h"
 
+#include "Utilities/Expression/ExpressionInternal.h"
+
 #include <limits>
 #include <string>
 #include <stdexcept>
@@ -185,16 +187,16 @@ RaggedExpression RaggedExpression::sliceTrailingDimension(uint64_t trailing_axis
     // stride.  Collapse a directly preceding STRIDED_VIEW into the new view by reusing
     // its storage strides and accumulated storage offset.  This also gives autodiff one
     // canonical scatter from the final view directly back into the original source.
-    if (values.expr && values.nodeIndex < values.expr->nodes.size() &&
-        values.expr->nodes.at(values.nodeIndex).op == ExprOp::STRIDED_VIEW) {
-        const ExprNode& prior_view = values.expr->nodes.at(values.nodeIndex);
+    if (ExpressionInternalAccess::rootOp(values) == ExprOp::STRIDED_VIEW) {
+        const ExprNode& prior_view = ExpressionInternalAccess::rootSemantics(values);
+        const std::optional<Expression> prior_source = ExpressionInternalAccess::lhsDependency(values);
         if (prior_view.view_dims != view_dimensions || prior_view.view_strides.size() != view_dimensions.size() ||
-            prior_view.lhs == UINT32_MAX || prior_view.lhs >= values.expr->nodes.size()) {
+            !prior_source.has_value()) {
             throw std::runtime_error("RaggedExpression::sliceTrailingDimension encountered an invalid preceding strided view.");
         }
         view_strides = prior_view.view_strides;
         base_element_offset = prior_view.view_element_offset;
-        view_source = Expression::fromPhysicalNode(values.expr, prior_view.lhs);
+        view_source = prior_source.value();
     } else {
         uint64_t source_stride = 1;
         for (size_t axis = view_dimensions.size(); axis-- > 0;) {
@@ -242,16 +244,16 @@ RaggedExpression RaggedExpression::transposeTrailingDimensions() const {
     // tensor as contiguous storage. This is required for Slice -> Transpose: both
     // operations are aliases of the same original packed values allocation, and the
     // transpose must retain the slice's accumulated storage offset and row stride.
-    if (values.expr && values.nodeIndex < values.expr->nodes.size() &&
-        values.expr->nodes.at(values.nodeIndex).op == ExprOp::STRIDED_VIEW) {
-        const ExprNode& prior_view = values.expr->nodes.at(values.nodeIndex);
+    if (ExpressionInternalAccess::rootOp(values) == ExprOp::STRIDED_VIEW) {
+        const ExprNode& prior_view = ExpressionInternalAccess::rootSemantics(values);
+        const std::optional<Expression> prior_source = ExpressionInternalAccess::lhsDependency(values);
         if (prior_view.view_dims != source_dimensions || prior_view.view_strides.size() != source_dimensions.size() ||
-            prior_view.lhs == UINT32_MAX || prior_view.lhs >= values.expr->nodes.size()) {
+            !prior_source.has_value()) {
             throw std::runtime_error("RaggedExpression::transposeTrailingDimensions encountered an invalid preceding strided view.");
         }
         source_strides = prior_view.view_strides;
         base_element_offset = prior_view.view_element_offset;
-        view_source = Expression::fromPhysicalNode(values.expr, prior_view.lhs);
+        view_source = prior_source.value();
     } else {
         uint64_t stride = 1;
         for (size_t axis = source_dimensions.size(); axis-- > 0;) {
@@ -355,22 +357,23 @@ RaggedExpression RaggedExpression::conv1d(const Expression& filter,
         throw std::invalid_argument("RaggedExpression::conv1d T6A supports only causal padding.");
     }
 
-    Expression output_values = Expression::ternaryOp(values, filter, offsets, ExprOp::RAGGED_CONV1D_CAUSAL);
-    ExprNode& node = output_values.expr->nodes.at(output_values.nodeIndex);
-    node.ragged_conv_spatial_1d = spatial;
-    node.ragged_conv1d_input_channels = trailing.front();
-    node.ragged_conv1d_output_channels = output_channels;
-    node.ragged_conv1d_kernel_width = kernel_width;
-    node.ragged_conv1d_groups = groups;
-    node.ragged_runtime_batch_size = descriptor.getBatchSize();
-    node.ragged_runtime_max_active_values = descriptor.getMaxTotalValues();
-    node.ragged_runtime_max_values_per_row = descriptor.getMaxValuesPerRow();
-    node.ragged_runtime_elements_per_value = output_channels;
-    if (compute_dtype.has_value()) {
-        node.compute_dtype = compute_dtype.value();
-    }
     const DataType values_dtype = output_dtype.value_or(descriptor.getValuesDataType());
-    node.output_dtype = values_dtype;
+    ExprNode semantics{};
+    semantics.op = ExprOp::RAGGED_CONV1D_CAUSAL;
+    semantics.ragged_conv_spatial_1d = spatial;
+    semantics.ragged_conv1d_input_channels = trailing.front();
+    semantics.ragged_conv1d_output_channels = output_channels;
+    semantics.ragged_conv1d_kernel_width = kernel_width;
+    semantics.ragged_conv1d_groups = groups;
+    semantics.ragged_runtime_batch_size = descriptor.getBatchSize();
+    semantics.ragged_runtime_max_active_values = descriptor.getMaxTotalValues();
+    semantics.ragged_runtime_max_values_per_row = descriptor.getMaxValuesPerRow();
+    semantics.ragged_runtime_elements_per_value = output_channels;
+    if (compute_dtype.has_value()) {
+        semantics.compute_dtype = compute_dtype.value();
+    }
+    semantics.output_dtype = values_dtype;
+    Expression output_values = Expression::ternaryOp(values, filter, offsets, std::move(semantics));
     const RaggedTensorDescriptor output_descriptor(values_dtype,
                                                     {output_channels},
                                                     descriptor.getBatchSize(),
@@ -644,16 +647,23 @@ Expression RaggedExpression::segmentDenseBroadcast(const Expression& per_segment
                                                    std::optional<uint64_t> elements_per_value_override) const {
     validateInitialized("segmentDenseBroadcast");
     requireDeviceOffsets("segmentDenseBroadcast");
-    Expression out = Expression::binaryOp(per_segment_values, offsets, ExprOp::SEGMENTED_BROADCAST);
-    ExprNode& node = out.expr->nodes.at(out.nodeIndex);
-    node.ragged_runtime_batch_size = descriptor.getBatchSize();
-    node.ragged_runtime_max_active_values = descriptor.getMaxTotalValues();
-    node.ragged_runtime_elements_per_value = elements_per_value_override.value_or(elementsPerValue(descriptor));
-    if (node.ragged_runtime_elements_per_value == 0) {
+    // binaryOp used to run before the root metadata was populated, so preserve
+    // its empty-operand failure ordering while moving metadata before creation.
+    if (!ExpressionInternalAccess::hasRoot(per_segment_values) || !ExpressionInternalAccess::hasRoot(offsets)) {
+        throw std::runtime_error("Cannot combine empty expressions");
+    }
+    const uint64_t elements_per_value = elements_per_value_override.value_or(elementsPerValue(descriptor));
+    if (elements_per_value == 0) {
         throw std::invalid_argument("RaggedExpression::segmentDenseBroadcast elements-per-value metadata must be non-zero.");
     }
-    node.segmented_broadcast_normalize_by_length = normalize_by_segment_length;
-    return out;
+
+    ExprNode semantics{};
+    semantics.op = ExprOp::SEGMENTED_BROADCAST;
+    semantics.ragged_runtime_batch_size = descriptor.getBatchSize();
+    semantics.ragged_runtime_max_active_values = descriptor.getMaxTotalValues();
+    semantics.ragged_runtime_elements_per_value = elements_per_value;
+    semantics.segmented_broadcast_normalize_by_length = normalize_by_segment_length;
+    return Expression::binaryOp(per_segment_values, offsets, std::move(semantics));
 }
 
 void RaggedExpression::validateInitialized(const char* caller) const {

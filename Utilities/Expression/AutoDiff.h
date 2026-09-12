@@ -28,7 +28,11 @@ using SavedForwardValueInputNames = std::unordered_map<uint32_t, std::string>;
 using GradientAccumulationTargets = std::unordered_set<std::string>;
 
 // A backward expression records every non-root primal value that must be
-// supplied from the real forward execution.
+// supplied from the real forward execution. Requirement identity is the
+// branch-local physical forward node plus kind: one node may legitimately need
+// both NodeOutput and MatmulEpilogueAux, but repeated requests for the same
+// (conditional_branch_path, forward_node_index, kind) reuse one retained
+// artifact/binding.
 enum class ForwardValueRequirementKind : uint8_t {
     NodeOutput = 0,
     MatmulEpilogueAux = 1,

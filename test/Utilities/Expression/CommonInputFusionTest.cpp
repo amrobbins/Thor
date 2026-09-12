@@ -6,6 +6,7 @@
 #include "Utilities/Expression/RaggedExpression.h"
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -707,6 +708,34 @@ TEST(EquationCompiler, ReductionBoundaryCommonSubexpressionDoesNotCreateExtraKer
     ASSERT_EQ(stages.size(), 2);
     ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
     ASSERT_EQ(stages[1].kind, PhysicalExecutionStage::Kind::Reduction);
+
+    // The two separately authored (x + y) roots remain different runtime values,
+    // but common-input execution grouping keeps them in one fused launch. Stage-local
+    // CSE is then free to represent the identical pure ADD implementation once.
+    ASSERT_EQ(stages[0].outputs.size(), 2u);
+    ASSERT_EQ(stages[1].input_value_ids.size(), 1u);
+
+    const auto trunk_output = std::find_if(stages[0].outputs.begin(), stages[0].outputs.end(), [](const CompiledStageOutput& output) {
+        return output.name == "trunk";
+    });
+    ASSERT_NE(trunk_output, stages[0].outputs.end());
+
+    const uint32_t reduction_input_value_id = stages[1].input_value_ids.front();
+    const auto reduction_source_output =
+        std::find_if(stages[0].outputs.begin(), stages[0].outputs.end(), [&](const CompiledStageOutput& output) {
+            return output.value_id == reduction_input_value_id;
+        });
+    ASSERT_NE(reduction_source_output, stages[0].outputs.end());
+    EXPECT_NE(trunk_output->value_id, reduction_source_output->value_id)
+        << "Distinct authored roots must not recover the old structural runtime-value aliasing.";
+    EXPECT_EQ(trunk_output->local_node_idx, reduction_source_output->local_node_idx)
+        << "Stage-local implementation CSE may share the identical pure ADD while runtime values stay distinct.";
+
+    size_t add_count = 0;
+    for (const ExprNode& node : stages[0].expr.nodes) {
+        add_count += node.op == ExprOp::ADD ? 1u : 0u;
+    }
+    EXPECT_EQ(add_count, 1u);
 }
 
 TEST(EquationCompiler, RmsNormIsOwnBoundaryStageAndCompilesDescriptor) {

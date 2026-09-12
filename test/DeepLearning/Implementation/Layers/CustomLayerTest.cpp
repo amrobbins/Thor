@@ -11,6 +11,7 @@
 #include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/ExecutionDiagnostics.h"
 #include "Utilities/Expression/Expression.h"
+#include "Utilities/Expression/ExpressionInternal.h"
 #include "Utilities/Expression/FusedEquation.h"
 
 #include "cuda_fp16.h"
@@ -442,6 +443,26 @@ DynamicExpression buildMatmulGeluSharedBackwardExpression(const TensorPlacement&
     });
 }
 
+DynamicExpression buildMatmulSinCosSharedBackwardExpression(const TensorPlacement& placement) {
+    return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
+                                         const DynamicExpression::TensorMap& outputs,
+                                         Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+        const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+        const Expression weights = Expression::input("weights", DataType::FP32, DataType::FP32);
+        const Expression projection =
+            Expression::matmul(x, weights, false, false, DataType::FP32, DataType::FP32);
+        const Outputs expressionOutputs =
+            Expression::outputs({{"out", projection.sin() + projection.cos()}});
+        return DynamicExpressionBuild{
+            std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            outputs,
+            {}};
+    });
+}
+
 const SharedBackwardInspectableCustomLayer::Build& clearSharedBackwardBuild(
     const SharedBackwardInspectableCustomLayer& layer) {
     const auto& builds = layer.sharedBackwardBuilds();
@@ -464,6 +485,58 @@ const SharedBackwardInspectableCustomLayer::StampedPlan& clearStampedSharedBackw
         throw std::runtime_error("Expected BR6.3B clear shared-backward plan was not stamped.");
     }
     return *it;
+}
+
+
+const SharedBackwardInspectableCustomLayer::Build& sharedBackwardBuildForApplication(
+    const SharedBackwardInspectableCustomLayer& layer,
+    uint32_t applicationIndex,
+    bool accumulate) {
+    const auto& builds = layer.sharedBackwardBuilds();
+    auto it = std::find_if(builds.begin(), builds.end(), [applicationIndex, accumulate](const auto& build) {
+        return build.applicationIndex == applicationIndex &&
+               (accumulate ? !build.accumulateWrtNames.empty() : build.accumulateWrtNames.empty());
+    });
+    if (it == builds.end()) {
+        throw std::runtime_error(
+            std::string("Expected BR6 shared-backward ") + (accumulate ? "accumulate" : "clear") +
+            " build for application " + std::to_string(applicationIndex) + ".");
+    }
+    return *it;
+}
+
+void expectOneSharedMatmulProducerVjp(const BackwardBuildResult& backwardBuild, const std::string& context) {
+    ASSERT_NE(backwardBuild.outputs.expr, nullptr) << context;
+    const PhysicalExpression& expr = *backwardBuild.outputs.expr;
+
+    std::vector<uint32_t> matmulNodes;
+    for (uint32_t nodeIdx = 0; nodeIdx < expr.nodes.size(); ++nodeIdx) {
+        const ExprOp op = expr.nodes[nodeIdx].op;
+        if (op == ExprOp::MATMUL || op == ExprOp::GEMM) {
+            matmulNodes.push_back(nodeIdx);
+        }
+    }
+    ASSERT_EQ(matmulNodes.size(), 2u)
+        << context << ": one authored projection must produce exactly dInput and dWeights matrix multiplies.";
+
+    const ExprNode& first = expr.nodes.at(matmulNodes[0]);
+    const ExprNode& second = expr.nodes.at(matmulNodes[1]);
+    const std::vector<uint32_t> firstOperands{first.lhs, first.rhs};
+    const std::vector<uint32_t> secondOperands{second.lhs, second.rhs};
+    std::vector<uint32_t> sharedOperands;
+    for (uint32_t operand : firstOperands) {
+        if (operand != UINT32_MAX &&
+            std::find(secondOperands.begin(), secondOperands.end(), operand) != secondOperands.end()) {
+            sharedOperands.push_back(operand);
+        }
+    }
+    std::sort(sharedOperands.begin(), sharedOperands.end());
+    sharedOperands.erase(std::unique(sharedOperands.begin(), sharedOperands.end()), sharedOperands.end());
+    ASSERT_EQ(sharedOperands.size(), 1u)
+        << context << ": dInput and dWeights must consume one accumulated activation adjoint.";
+    ASSERT_LT(sharedOperands.front(), expr.nodes.size());
+    EXPECT_EQ(expr.nodes.at(sharedOperands.front()).op, ExprOp::ADD)
+        << context << ": SIN and COS branch adjoints must accumulate before the projection VJP.";
 }
 
 DynamicExpression buildSingleInputSingleOutputExpression(const TensorPlacement& placement) {
@@ -2023,6 +2096,81 @@ TEST(CustomLayer, Br64SharedBackwardSerializesCrossApplicationParameterGradientW
         {&input0, &input1, &rivet0, &rivet1, &bridge0, &bridge1, &custom, &sink0, &sink1});
 }
 
+
+TEST(CustomLayer, GraphScopedBackwardAndOptimizerImportsPreserveSharedAncestry) {
+    const Expression upstream = Expression::input("upstream", DataType::FP32, DataType::FP32);
+    const Expression activation = Expression::input("activation", DataType::FP32, DataType::FP32);
+    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression scale = Expression::input("scale", DataType::FP32, DataType::FP32);
+    const Expression sharedAdjoint = (upstream * activation).sin();
+
+    const PhysicalOutputs physicalBackward = Expression::outputs({
+        {"x_grad", sharedAdjoint * scale},
+        {"scale_grad", sharedAdjoint * x},
+    }).physicalOutputs();
+    const Outputs logicalBackward = Outputs::fromPhysicalOutputs(physicalBackward);
+
+    const Expression ordinaryGradient = logicalBackward.outputExpression("x_grad");
+    const Expression fusedParameterGradient = logicalBackward.outputExpression("scale_grad");
+    const std::optional<Expression> ordinaryShared = ExpressionInternalAccess::lhsDependency(ordinaryGradient);
+    const std::optional<Expression> fusedShared = ExpressionInternalAccess::lhsDependency(fusedParameterGradient);
+    ASSERT_TRUE(ordinaryShared.has_value());
+    ASSERT_TRUE(fusedShared.has_value());
+    EXPECT_TRUE(ordinaryShared->isSameLogicalNode(*fusedShared))
+        << "Routing one imported backward root to the ordinary output path and another to fused-parameter handling "
+           "must not split their shared source ancestry.";
+    EXPECT_NE(ExpressionInternalAccess::rootOp(*ordinaryShared), ExprOp::INPUT);
+    const PhysicalOutputs routedBackward =
+        Expression::outputs({{"x_grad", ordinaryGradient}, {"scale_grad", fusedParameterGradient}}).physicalOutputs();
+    EXPECT_EQ(std::count_if(routedBackward.expr->nodes.begin(),
+                            routedBackward.expr->nodes.end(),
+                            [](const ExprNode& node) { return node.op == ExprOp::SIN; }),
+              1u)
+        << "Lowering the differently routed backward roots together must retain one shared nontrivial producer.";
+
+    const Expression velocityInput = Expression::input("velocity_in", DataType::FP32, DataType::FP32);
+    const Expression weightsInput = Expression::input("weights_in", DataType::FP32, DataType::FP32);
+    const Expression velocityNext = velocityInput + fusedParameterGradient;
+    const PhysicalOutputs physicalUpdate = Expression::outputs({
+        {"weights", weightsInput + velocityNext},
+        {"velocity", velocityNext},
+    }).physicalOutputs();
+    const Outputs logicalUpdate = Outputs::fromPhysicalOutputs(physicalUpdate);
+
+    const Expression importedWeights = logicalUpdate.outputExpression("weights");
+    const Expression importedVelocity = logicalUpdate.outputExpression("velocity");
+    const std::optional<Expression> importedWeightsRhs = ExpressionInternalAccess::rhsDependency(importedWeights);
+    ASSERT_TRUE(importedWeightsRhs.has_value());
+    EXPECT_TRUE(importedWeightsRhs->isSameLogicalNode(importedVelocity))
+        << "All optimizer update roots from one physical graph must share one importer context.";
+
+    auto constrainedParameter = std::make_shared<FixedMatrixParameter>(
+        "constrained", 1, 1, std::vector<float>{1.0f}, true);
+    constrainedParameter->addConstraint(std::make_shared<NonNegativeParameterConstraint>());
+    const Expression constrainedWeights =
+        constrainedParameter->applyDenseExpressionConstraints(importedWeights, "__graph_scoped_constraint__");
+    const std::optional<Expression> unconstrainedDependency =
+        ExpressionInternalAccess::lhsDependency(constrainedWeights);
+    ASSERT_TRUE(unconstrainedDependency.has_value());
+    EXPECT_TRUE(unconstrainedDependency->isSameLogicalNode(importedWeights))
+        << "A weights-only persistent constraint transform must preserve the imported optimizer root unchanged.";
+    const std::optional<Expression> constrainedWeightsRhs =
+        ExpressionInternalAccess::rhsDependency(*unconstrainedDependency);
+    ASSERT_TRUE(constrainedWeightsRhs.has_value());
+    EXPECT_TRUE(constrainedWeightsRhs->isSameLogicalNode(importedVelocity))
+        << "Constraint path-copying must retain the shared optimizer-update ancestry used by the untouched state output.";
+
+    const PhysicalOutputs constrainedUpdate = Expression::outputs({
+        {"weights", constrainedWeights},
+        {"velocity", importedVelocity},
+    }).physicalOutputs();
+    EXPECT_EQ(std::count_if(constrainedUpdate.expr->nodes.begin(),
+                            constrainedUpdate.expr->nodes.end(),
+                            [](const ExprNode& node) { return node.op == ExprOp::ADD; }),
+              2u)
+        << "The constrained weights output and untouched velocity output must lower with one shared velocity-update ADD.";
+}
+
 TEST(CustomLayer, Br66SingleApplicationExpressionLocalGradientFusesOptimizerIntoSharedBackward) {
     const uint64_t batchSize = 2;
     const uint64_t features = 3;
@@ -2041,7 +2189,7 @@ TEST(CustomLayer, Br66SingleApplicationExpressionLocalGradientFusesOptimizerInto
     auto scale = std::make_shared<FixedMatrixParameter>(
         "scale", batchSize, features, initialWeights, true);
     scale->setOptimizer(
-        std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(99104, learningRate, 0.0f, 0.0f, false)));
+        std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(99104, learningRate, 0.0f, 0.5f, false)));
 
     NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
     GradientRivet gradientRivet;
@@ -2093,6 +2241,11 @@ TEST(CustomLayer, Br66SingleApplicationExpressionLocalGradientFusesOptimizerInto
         << "Expression-fused dW must remain an internal value consumed directly by the optimizer.";
     EXPECT_GT(fusedSharedOutputNames.size(), 1u)
         << "The same shared plan must also expose the optimizer's preallocated weight/state outputs.";
+    EXPECT_NE(std::find(fusedSharedOutputNames.begin(),
+                        fusedSharedOutputNames.end(),
+                        "__optimizer_fused_scale__velocity"),
+              fusedSharedOutputNames.end())
+        << "Momentum SGD exercises the multi-output optimizer import path; its velocity output must remain in the fused plan.";
 
     input.forward(input_h, false, batchSize);
     sink.getErrorOutput().value().copyFromAsync(gradient_h, custom.getStreams()[0]);
@@ -2306,6 +2459,175 @@ TEST(CustomLayer, Br68SingleApplicationClearBuildIncludesInactiveParameterAndSki
               scaleB->getOptimizer()->getWeightsGradient().value().getTensorId());
 
     cleanupLayers({&input, &gradientRivet, &bridge, &custom, &backwardSink, &forwardOnlySink});
+}
+
+// Shared-backward cardinality invariant:
+// A generic shared MATMUL producer with two different downstream derivative
+// branches must contribute one accumulated activation adjoint to one producer
+// VJP.  This deliberately avoids GELU so the cardinality rule is sealed at the
+// CustomLayer shared-backward layer rather than only through the historical
+// GELU regression cases.
+TEST(CustomLayer, GenericMatmulFanoutUsesOneProducerVjpInClearPlanAndRuntime) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 8;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    std::vector<float> initialWeights(features * features, 0.125f);
+    auto weights = std::make_shared<FixedMatrixParameter>(
+        "weights", features, features, initialWeights, true);
+    weights->setOptimizer(
+        std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(99301, 0.0f, 0.0f, 0.0f, false)));
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    SharedBackwardInspectableCustomLayer custom(
+        buildMatmulSinCosSharedBackwardExpression(gpuPlacement),
+        {"x"},
+        {"out"},
+        gpuPlacement,
+        {weights},
+        false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    ASSERT_EQ(custom.sharedBackwardBuilds().size(), 1u)
+        << "A single application should only need the clear contribution plan.";
+    const auto& clear = clearSharedBackwardBuild(custom);
+    expectOneSharedMatmulProducerVjp(clear.backwardBuild, "generic shared-clear MATMUL fan-out");
+
+    ASSERT_EQ(custom.stampedSharedBackwardPlans().size(), 1u);
+    const auto& stampedClear = clearStampedSharedBackwardPlan(custom);
+    size_t matmulStages = 0;
+    for (const std::string& stageKind : stampedClear.backwardPlan->stageKindNames()) {
+        matmulStages += stageKind == "Matmul" ? 1u : 0u;
+    }
+    EXPECT_EQ(matmulStages, 2u)
+        << "The stamped shared-clear plan must contain exactly dInput and dWeights MATMUL stages.";
+
+    Tensor featureIn_h(cpuPlacement, descriptor);
+    std::vector<float> featureValues(batchSize * features);
+    for (uint64_t i = 0; i < featureValues.size(); ++i) {
+        featureValues[i] = 0.05f * static_cast<float>(i + 1);
+    }
+    writeCpuTensor(featureIn_h, featureValues);
+
+#ifdef THOR_DEBUG
+    resetExpressionTestExecutionCounters();
+#endif
+    input.forward(featureIn_h, false, batchSize);
+    ASSERT_EQ(sink.forwardCalls, 1);
+#ifdef THOR_DEBUG
+    const ExpressionTestExecutionCounters forwardCounters = expressionTestExecutionCounters();
+    EXPECT_EQ(forwardCounters.matmul.forward, 1u)
+        << "The shared projection must execute exactly once in the real forward pass.";
+    EXPECT_EQ(forwardCounters.matmul.backward_gradient, 0u);
+    resetExpressionTestExecutionCounters();
+#endif
+
+    Tensor gradOut_h(cpuPlacement, descriptor);
+    writeCpuTensor(gradOut_h, std::vector<float>(batchSize * features, 1.0f));
+    sink.getErrorOutput().value().copyFromAsync(gradOut_h, custom.getStreams()[0]);
+    Event gradReady = custom.getStreams()[0].putEvent();
+    gradReady.synchronize();
+
+    sink.backward(sink.getErrorOutput(), batchSize);
+    ASSERT_EQ(bridge.backwardCalls, 1);
+
+    ASSERT_TRUE(weights->getOptimizer()->getWeightsGradient().has_value());
+    Tensor dx_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+    Tensor dw_h = copyTensorToCpu(weights->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
+    for (float value : readCpuTensor(dx_h)) EXPECT_TRUE(std::isfinite(value));
+    for (float value : readCpuTensor(dw_h)) EXPECT_TRUE(std::isfinite(value));
+
+#ifdef THOR_DEBUG
+    const ExpressionTestExecutionCounters backwardCounters = expressionTestExecutionCounters();
+    EXPECT_EQ(backwardCounters.matmul.forward, 0u)
+        << "Generic shared backward must consume retained forward state, not replay the projection.";
+    EXPECT_EQ(backwardCounters.matmul.backward_gradient, 2u)
+        << "One shared projection must execute exactly its dInput/dWeights VJP pair.";
+
+    const auto diagnostic = custom.genericSharedBackwardDebugDiagnostic();
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_EQ(diagnostic->clearExecutionCount, 1u)
+        << "The clear contribution plan must be submitted exactly once.";
+    EXPECT_EQ(diagnostic->accumulateExecutionCount, 0u);
+#endif
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
+// Shared-backward cardinality invariant:
+// Clear versus accumulate selects how a parameter-gradient contribution is
+// committed across applications.  It must not change VJP cardinality inside one
+// contribution: every clear/accumulate build for this shared producer still has
+// one dInput/dWeights pair after the SIN/COS branch adjoints are combined.
+TEST(CustomLayer, ClearAndAccumulatePlansKeepOneProducerVjpPerContribution) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 8;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    auto weights = std::make_shared<FixedMatrixParameter>(
+        "weights", features, features, std::vector<float>(features * features, 0.125f), true);
+    weights->setOptimizer(
+        std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(99302, 0.0f, 0.0f, 0.0f, false)));
+
+    NetworkInput input0(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    NetworkInput input1(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet rivet0, rivet1;
+    CountingPassthrough bridge0, bridge1;
+    SharedBackwardInspectableCustomLayer custom(
+        buildMatmulSinCosSharedBackwardExpression(gpuPlacement),
+        {"x"},
+        {"out"},
+        gpuPlacement,
+        {weights},
+        false);
+    CountingPassthrough sink0, sink1;
+
+    input0.connectToNextLayer(&rivet0);
+    rivet0.connectToNextLayer(&bridge0);
+    input1.connectToNextLayer(&rivet1);
+    rivet1.connectToNextLayer(&bridge1);
+    bridge0.connectToNextLayer(&custom, 0, 0);
+    bridge1.connectToNextLayer(&custom, 0, 1);
+    custom.connectToNextLayer(&sink0, 0, 0);
+    custom.connectToNextLayer(&sink1, 1, 0);
+    compileAndInitialize(
+        {&input0, &input1, &rivet0, &rivet1, &bridge0, &bridge1, &custom, &sink0, &sink1});
+
+    ASSERT_EQ(custom.sharedBackwardBuilds().size(), 4u)
+        << "Two applications should each have a clear and accumulate contribution variant.";
+    for (uint32_t applicationIndex = 0; applicationIndex < 2; ++applicationIndex) {
+        const auto& clear = sharedBackwardBuildForApplication(custom, applicationIndex, false);
+        const auto& accumulate = sharedBackwardBuildForApplication(custom, applicationIndex, true);
+        expectOneSharedMatmulProducerVjp(
+            clear.backwardBuild, "application " + std::to_string(applicationIndex) + " clear");
+        expectOneSharedMatmulProducerVjp(
+            accumulate.backwardBuild, "application " + std::to_string(applicationIndex) + " accumulate");
+        EXPECT_TRUE(clear.accumulateWrtNames.empty());
+        EXPECT_TRUE(accumulate.accumulateWrtNames.contains("weights"));
+    }
+
+    ASSERT_EQ(custom.stampedSharedBackwardPlans().size(), 4u)
+        << "Both contribution variants must remain stampable for both applications.";
+    for (const auto& plan : custom.stampedSharedBackwardPlans()) {
+        size_t matmulStages = 0;
+        for (const std::string& stageKind : plan.backwardPlan->stageKindNames()) {
+            matmulStages += stageKind == "Matmul" ? 1u : 0u;
+        }
+        EXPECT_EQ(matmulStages, 2u)
+            << "Clear/accumulate policy must not multiply producer VJP stages within one contribution.";
+    }
+
+    cleanupLayers(
+        {&input0, &input1, &rivet0, &rivet1, &bridge0, &bridge1, &custom, &sink0, &sink1});
 }
 
 TEST(CustomLayer, Br62CombinedMatmulGeluBuildSharesOneActivationAdjointBeforeDxAndDw) {

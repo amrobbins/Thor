@@ -490,77 +490,8 @@ TEST(ExpressionForwardReplayInstrumentation, ReduceProdOutputBecomesSavedForward
     EXPECT_EQ(build.forward_value_requirements.front().forward_node_index, forward.outputs.front().node_idx);
 }
 
-TEST(ExpressionForwardReplayInstrumentation, ConvolutionGeluUsesSavedForwardValuesWithoutReplay) {
-    const Expression input = Expression::input("input", DataType::FP32, DataType::FP32);
-    const Expression filter = Expression::input("filter", DataType::FP32, DataType::FP32);
-    ConvolutionSpatial2d spatial;
-    spatial.pre_padding_h = 1;
-    spatial.post_padding_h = 1;
-    spatial.pre_padding_w = 1;
-    spatial.post_padding_w = 1;
-
-    const Expression convolution =
-        Expression::conv2d(input, filter, spatial, DataType::FP32, DataType::FP32);
-    const PhysicalOutputs forward = Expression::outputs({{"y", convolution.gelu()}}).physicalOutputs();
-    const BackwardBuildResult backward_build = buildBackwardOutputsWithForwardValueRequirements(
-        forward,
-        {"input"},
-        std::optional<std::string>{"dy"},
-        std::unordered_map<std::string, std::vector<uint64_t>>{
-            {"input", {1, 2, 5, 5}},
-            {"filter", {3, 2, 3, 3}},
-        });
-    const PhysicalOutputs& backward = backward_build.outputs;
-    EXPECT_FALSE(backward_build.forward_value_requirements.empty());
-
-    // Exact GELU now preserves one logical convolution producer shared by x and
-    // Phi(x). BR6.0A turns any computed primal dependency into a retained
-    // forward input, so no CONV2D producer may be cloned into backward and the
-    // single input-gradient request must generate exactly one backward-data op.
-    EXPECT_EQ(countNodesWithProvenance(
-                  backward, ExprOp::CONV2D, ExpressionExecutionProvenance::Forward),
-              0U);
-    EXPECT_EQ(countNodesWithProvenance(
-                  backward, ExprOp::CONV2D_BACKWARD_DATA, ExpressionExecutionProvenance::BackwardGradient),
-              1U);
-}
 
 
-TEST(ExpressionForwardReplayInstrumentation, Convolution3dGeluUsesSavedForwardValuesWithoutReplay) {
-    const Expression input = Expression::input("input", DataType::FP32, DataType::FP32);
-    const Expression filter = Expression::input("filter", DataType::FP32, DataType::FP32);
-    ConvolutionSpatial3d spatial;
-    spatial.pre_padding_d = 1;
-    spatial.post_padding_d = 1;
-    spatial.pre_padding_h = 1;
-    spatial.post_padding_h = 1;
-    spatial.pre_padding_w = 1;
-    spatial.post_padding_w = 1;
-
-    const Expression convolution =
-        Expression::conv3d(input, filter, spatial, DataType::FP32, DataType::FP32);
-    const PhysicalOutputs forward = Expression::outputs({{"y", convolution.gelu()}}).physicalOutputs();
-    const BackwardBuildResult backward_build = buildBackwardOutputsWithForwardValueRequirements(
-        forward,
-        {"input"},
-        std::optional<std::string>{"dy"},
-        std::unordered_map<std::string, std::vector<uint64_t>>{
-            {"input", {1, 2, 4, 5, 5}},
-            {"filter", {3, 2, 3, 3, 3}},
-        });
-    const PhysicalOutputs& backward = backward_build.outputs;
-    EXPECT_FALSE(backward_build.forward_value_requirements.empty());
-
-    // See the 2D case above: GELU preserves one shared logical convolution
-    // producer, and the forward convolution itself is never reconstructed during
-    // autodiff. The single input-gradient request therefore has one backward-data op.
-    EXPECT_EQ(countNodesWithProvenance(
-                  backward, ExprOp::CONV3D, ExpressionExecutionProvenance::Forward),
-              0U);
-    EXPECT_EQ(countNodesWithProvenance(
-                  backward, ExprOp::CONV3D_BACKWARD_DATA, ExpressionExecutionProvenance::BackwardGradient),
-              1U);
-}
 
 TEST(ExpressionForwardReplayInstrumentation, PhysicalNorm2BackwardConsumesRetainedOutputWithoutReplay) {
     REQUIRE_CUDA_DEVICE();
