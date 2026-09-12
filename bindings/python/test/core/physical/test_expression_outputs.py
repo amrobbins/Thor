@@ -730,11 +730,17 @@ def test_graph_conditional_compile_backward_runs_selected_branch_from_python():
     negative_gpu = _clone_to_gpu(negative_cpu, stream)
     stream.synchronize()
 
-    then_plan = backward.stamp({"x": x_gpu, "predicate_value": positive_gpu, "dy": dy_gpu}, stream)
+    then_forward, then_plan = backward.stamp_forward_backward_pair(
+        {"x": x_gpu, "predicate_value": positive_gpu, "dy": dy_gpu}, stream
+    )
+    then_forward.run()
     then_plan.run()
     then_cpu = _clone_to_cpu(then_plan.output("x_grad"), stream)
 
-    else_plan = backward.stamp({"x": x_gpu, "predicate_value": negative_gpu, "dy": dy_gpu}, stream)
+    else_forward, else_plan = backward.stamp_forward_backward_pair(
+        {"x": x_gpu, "predicate_value": negative_gpu, "dy": dy_gpu}, stream
+    )
+    else_forward.run()
     else_plan.run()
     else_cpu = _clone_to_cpu(else_plan.output("x_grad"), stream)
     stream.synchronize()

@@ -415,14 +415,16 @@ void conditional_square_kernel(const float* x, float* y, int64_t n) {
     Tensor positive = makeGpuTensor({1}, {1.0f}, stream);
     Tensor negative = makeGpuTensor({1}, {-1.0f}, stream);
 
-    StampedExecutionPlan cuda_plan = backward_equation.stamp(
+    auto [cuda_forward, cuda_plan] = backward_equation.stampForwardBackwardPair(
         {{"x", x_tensor}, {"predicate_value", positive}, {"dy", dy}}, stream);
+    cuda_forward.run();
     cuda_plan.run();
     expectNear(copyToCpuValues(cuda_plan.output("x_grad"), stream),
                {1.0f, -4.0f, -12.0f, 27.0f, 2.5f, 48.0f});
 
-    StampedExecutionPlan ordinary_plan = backward_equation.stamp(
+    auto [ordinary_forward, ordinary_plan] = backward_equation.stampForwardBackwardPair(
         {{"x", x_tensor}, {"predicate_value", negative}, {"dy", dy}}, stream);
+    ordinary_forward.run();
     ordinary_plan.run();
     expectNear(copyToCpuValues(ordinary_plan.output("x_grad"), stream),
                {1.5f, 3.0f, -6.0f, 9.0f, -0.75f, 12.0f});

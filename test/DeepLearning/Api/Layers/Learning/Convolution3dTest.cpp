@@ -842,21 +842,21 @@ TEST(Convolution3dApi, StampsAsPhysicalCustomLayerAllocatesParametersAndSerializ
 }
 
 #ifdef THOR_DEBUG
-TEST(Convolution3dApi, Br2DefaultGeluBackwardUsesRetainedForwardValuesWithoutConvolutionReplay) {
+TEST(Convolution3dApi, Br65DefaultGeluSharedBackwardExecutesOneAdjointAndTwoGradientConvolutions) {
     constexpr uint32_t batchSize = 1;
     constexpr uint32_t C = 2;
     constexpr uint32_t D = 4;
     constexpr uint32_t H = 4;
     constexpr uint32_t W = 4;
     constexpr uint32_t K = 3;
-    const DataType dataType = DataType::FP16;
+    const DataType dataType = DataType::FP32;
 
     shared_ptr<Api::Sgd> weightsSgd =
         Api::Sgd::Builder().initialLearningRate(0.001f).decay(0.0f).momentum(0.0f).build();
     shared_ptr<Api::Sgd> biasesSgd =
         Api::Sgd::Builder().initialLearningRate(0.001f).decay(0.0f).momentum(0.0f).build();
 
-    Api::Network network("conv3d_br0_default_gelu_forward_replay");
+    Api::Network network("conv3d_br65_default_gelu_shared_backward");
     Api::NetworkInput input = Api::NetworkInput::Builder()
                                   .network(network)
                                   .name("input")
@@ -895,7 +895,12 @@ TEST(Convolution3dApi, Br2DefaultGeluBackwardUsesRetainedForwardValuesWithoutCon
 
     Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, C, D, H, W}));
     writeCpuTensor(featureInHost, vector<float>(batchSize * C * D * H * W, 0.125f));
+    Impl::resetExpressionTestExecutionCounters();
     (void)runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize);
+    const Impl::ExpressionTestExecutionCounters forwardCounters = Impl::expressionTestExecutionCounters();
+    EXPECT_EQ(forwardCounters.convolution.forward, 1U)
+        << "BR6.5 must execute exactly one real forward convolution.";
+    EXPECT_EQ(forwardCounters.convolution.backward_gradient, 0U);
 
     ASSERT_GT(fixture.physicalConvolution->getErrorInputs().size(), 0U);
     ASSERT_TRUE(fixture.physicalConvolution->getErrorInputs()[0].has_value());
@@ -911,8 +916,13 @@ TEST(Convolution3dApi, Br2DefaultGeluBackwardUsesRetainedForwardValuesWithoutCon
     gradientStream.synchronize();
 
     const Impl::ExpressionTestExecutionCounters counters = Impl::expressionTestExecutionCounters();
-    EXPECT_GE(counters.convolution.backward_gradient, 2U)
-        << "Default-GELU Convolution3d backward must execute the legitimate dInput/dWeights convolution operations.";
+    EXPECT_EQ(counters.convolution.forward, 0U)
+        << "BR6.5 backward must not replay the forward convolution.";
+    EXPECT_EQ(counters.convolution.backward_gradient, 2U)
+        << "BR6.5 Convolution3d shared backward must execute only dInput and dWeights convolutions.";
+    EXPECT_EQ(counters.fused_kernel.forward, 0U);
+    EXPECT_EQ(counters.fused_kernel.backward_gradient, 1U)
+        << "BR6.5 Convolution3d dInput and dWeights must share one activation-adjoint prefix.";
 }
 #endif
 
@@ -1029,10 +1039,10 @@ TEST(Convolution3dApi, ThreePassForwardBackwardWithSgdUpdatesWeightsAndBiases) {
         fixture.physicalConvolution->backward(errorInput, batchSize);
 
         Impl::Tensor errorOutputHost = copyTensorToCpu(fixture.physicalConvolution->getErrorOutputs()[0].value(), stream);
-        EXPECT_FALSE(fixture.physicalConvolution->getParameter("weights")->getOptimizer()->getWeightsGradient().has_value())
-            << "Fused Convolution3d CustomLayer update should not allocate a dense weights gradient tensor.";
-        EXPECT_FALSE(fixture.physicalConvolution->getParameter("biases")->getOptimizer()->getWeightsGradient().has_value())
-            << "Fused Convolution3d CustomLayer update should not allocate a dense biases gradient tensor.";
+        EXPECT_TRUE(fixture.physicalConvolution->getParameter("weights")->getOptimizer()->getWeightsGradient().has_value())
+            << "BR6.3A Convolution3d shared-backward preparation must materialize the weights gradient.";
+        EXPECT_TRUE(fixture.physicalConvolution->getParameter("biases")->getOptimizer()->getWeightsGradient().has_value())
+            << "BR6.3A Convolution3d shared-backward preparation must materialize the biases gradient.";
         Impl::Tensor weightsAfterHost =
             copyTensorToCpu(fixture.physicalConvolution->getParameter("weights")->getStorage().value(), gradientStream);
         Impl::Tensor biasesAfterHost =

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -741,11 +742,20 @@ struct PreparedConvenienceRunPlan {
     std::vector<std::string> expected_output_names_in_order;  // stable convenience-run validation order
 };
 
+using ConditionalBranchPath = std::vector<uint8_t>;
+using ConditionalForwardRetentionMap = std::map<ConditionalBranchPath, std::vector<uint32_t>>;
+
 struct BackwardEquationConfig {
     PhysicalOutputs forward_outputs_template;
     std::vector<std::string> wrt_names;
     std::optional<std::unordered_map<std::string, std::string>> upstream_input_names_by_output;
     bool accumulate_grad_outputs = false;
+    // BR6.0E: true when this VJP consumes a computed primal, a graph-level
+    // conditional predicate, or backend-owned forward state (currently
+    // Attention/RMSNorm). Such an equation is not a self-contained standalone
+    // executable; it must be stamped through stampForwardBackwardPair() or a
+    // training path that binds the matching real-forward state.
+    bool requires_real_forward_execution = false;
 };
 
 class FusedEquation {
@@ -803,6 +813,19 @@ class FusedEquation {
         const std::unordered_map<std::string, Tensor>& preallocated_outputs = {},
         const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes = {}) const;
 
+    // Graph-level conditional variant of retained-forward stamping. Keys are
+    // branch paths (0=then, 1=else at each nesting level); node indices remain
+    // local to the leaf/child expression identified by that path. Flat forwards
+    // use the empty path.
+    [[nodiscard]] StampedExecutionPlan stampRetainingForwardValues(
+        const ConditionalForwardRetentionMap& logical_forward_node_indices_by_branch_path,
+        const ConditionalForwardRetentionMap& logical_forward_epilogue_aux_node_indices_by_branch_path,
+        const std::unordered_map<std::string, Tensor>& inputs,
+        const Stream& stream,
+        const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs = {},
+        const std::unordered_map<std::string, Tensor>& preallocated_outputs = {},
+        const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes = {}) const;
+
     // Build the shape/dtype-specialized forward expression AutoDiff should see
     // for training. Eligible GELU epilogues are exposed only when the same
     // physical cuBLASLt operation can emit the auxiliary preactivation; otherwise
@@ -833,6 +856,14 @@ class FusedEquation {
         const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs = {},
         const std::unordered_map<std::string, Tensor>& preallocated_backward_outputs = {},
         const std::unordered_map<std::string, std::vector<uint64_t>>& requested_backward_output_shapes = {}) const;
+
+    // BR6.0E: report whether this compiled backward needs the matching real
+    // forward execution. Forward equations and root-only backward VJPs return
+    // false. Callers can use this to choose between stamp() and the explicit
+    // stampForwardBackwardPair() path without probing by exception.
+    [[nodiscard]] bool requiresForwardExecutionForBackward() const {
+        return backward_config.has_value() && backward_config->requires_real_forward_execution;
+    }
 
     void run(const Tensor& input, Tensor& output, Stream& stream) const;
     void run(const std::unordered_map<std::string, Tensor>& inputs, Tensor& output, Stream& stream) const;
@@ -899,7 +930,9 @@ class FusedEquation {
                            EquationSignature base_signature,
                            std::optional<BackwardEquationConfig> backward_config = std::nullopt,
                            std::vector<uint32_t> retained_forward_value_node_indices = {},
-                           std::vector<uint32_t> retained_forward_epilogue_aux_node_indices = {})
+                           std::vector<uint32_t> retained_forward_epilogue_aux_node_indices = {},
+                           ConditionalForwardRetentionMap conditional_retained_forward_value_node_indices = {},
+                           ConditionalForwardRetentionMap conditional_retained_forward_epilogue_aux_node_indices = {})
         : outputs_template(std::move(outputs_template)),
           root_inputs(this->outputs_template.expr ? this->outputs_template.expr->inputs : std::vector<NamedInput>{}),
           device_num(device_num),
@@ -908,6 +941,9 @@ class FusedEquation {
           backward_config(std::move(backward_config)),
           retained_forward_value_node_indices(std::move(retained_forward_value_node_indices)),
           retained_forward_epilogue_aux_node_indices(std::move(retained_forward_epilogue_aux_node_indices)),
+          conditional_retained_forward_value_node_indices(std::move(conditional_retained_forward_value_node_indices)),
+          conditional_retained_forward_epilogue_aux_node_indices(
+              std::move(conditional_retained_forward_epilogue_aux_node_indices)),
           compiled_outputs_runtime_cache(
               std::make_shared<LruCacheThreadSafe<RuntimeDTypeKey, std::shared_ptr<CompiledOutputs>, RuntimeDTypeKeyHash>>(128)),
           compiled_outputs_shape_cache(
@@ -916,13 +952,23 @@ class FusedEquation {
               std::make_shared<LruCacheThreadSafe<RuntimeShapeKey, std::shared_ptr<PreparedConvenienceRunPlan>, RuntimeShapeKeyHash>>(
                   128)) {}
 
+    [[nodiscard]] StampedExecutionPlan stampRetainingForwardValuesImpl(
+        const ConditionalForwardRetentionMap& logical_forward_node_indices_by_branch_path,
+        const ConditionalForwardRetentionMap& logical_forward_epilogue_aux_node_indices_by_branch_path,
+        const std::unordered_map<std::string, Tensor>& inputs,
+        const Stream& stream,
+        const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
+        const std::unordered_map<std::string, Tensor>& preallocated_outputs,
+        const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes,
+        bool allow_unlinked_backward_for_cross_plan_linking) const;
+
     [[nodiscard]] StampedExecutionPlan stampImpl(
         const std::unordered_map<std::string, Tensor>& inputs,
         const Stream& stream,
         const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
         const std::unordered_map<std::string, Tensor>& preallocated_outputs,
         const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes,
-        bool allow_unlinked_attention_backward_for_cross_plan_linking) const;
+        bool allow_unlinked_backward_for_cross_plan_linking) const;
 
     [[nodiscard]] std::shared_ptr<StampedEquation> stampEquation(const std::shared_ptr<CompiledEquation>& compiledEquation,
                                                                  const std::vector<std::string>& inputNames,
@@ -1124,6 +1170,8 @@ class FusedEquation {
     const std::optional<BackwardEquationConfig> backward_config;
     const std::vector<uint32_t> retained_forward_value_node_indices;
     const std::vector<uint32_t> retained_forward_epilogue_aux_node_indices;
+    const ConditionalForwardRetentionMap conditional_retained_forward_value_node_indices;
+    const ConditionalForwardRetentionMap conditional_retained_forward_epilogue_aux_node_indices;
 
     // Forward equations compile per runtime dtype only. Shape-specialized backward equations
     // compile against runtime shapes so they use a separate cache.

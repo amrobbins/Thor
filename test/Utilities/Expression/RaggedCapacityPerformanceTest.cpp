@@ -1044,12 +1044,13 @@ TEST(RaggedCapacityPerformance, RaggedNormalizationFlopsUseRuntimeActiveValues) 
         0);
 
     Stream stream(0);
-    StampedExecutionPlan rms_plan =
-        rms_equation.stamp({{"tokens.values", values}, {"tokens.offsets", offsets}, {"scale", scale}}, stream);
     StampedExecutionPlan layer_plan = layer_equation.stamp(
         {{"tokens.values", values}, {"tokens.offsets", offsets}, {"scale", scale}, {"bias", bias}}, stream);
     FusedEquation rms_backward_equation = rms_equation.compileBackward({"tokens.values", "scale"}, "dy");
-    StampedExecutionPlan rms_backward_plan = rms_backward_equation.stamp(
+    ASSERT_TRUE(rms_backward_equation.requiresForwardExecutionForBackward());
+    // RMSNorm backward consumes state retained by its matching forward plan.
+    // Pair the plans even though this test only queries FLOPs without running them.
+    auto [rms_plan, rms_backward_plan] = rms_backward_equation.stampForwardBackwardPair(
         {{"tokens.values", values}, {"tokens.offsets", offsets}, {"scale", scale}, {"dy", dy}}, stream);
 
     EXPECT_EQ(rms_plan.flopCount(), 5u * width * 6u);

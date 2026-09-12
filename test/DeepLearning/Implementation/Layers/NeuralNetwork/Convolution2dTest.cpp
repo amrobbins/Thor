@@ -813,8 +813,8 @@ TEST(Convolution2d, DirectBackwardConnectionNumerical) {
         Tensor convErrorOutput_h = convErrorOutput.clone(cpuPlacement);
         convErrorOutput_h.copyFromAsync(convErrorOutput, stream);
 
-        EXPECT_FALSE(adamWeights->getWeightsGradient().has_value())
-            << "Fused Convolution2d weights update should not allocate a dense gradient tensor.";
+        EXPECT_TRUE(adamWeights->getWeightsGradient().has_value())
+            << "BR6.3A Convolution2d must keep the Adam weights gradient materialized.";
         Tensor weightsAfter_h = copyTensorToCpu(conv.getParameter("weights")->getStorage().value(), gradientUpdateStream);
         Tensor weightsM_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("m"), gradientUpdateStream);
         Tensor weightsV_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("v"), gradientUpdateStream);
@@ -824,8 +824,8 @@ TEST(Convolution2d, DirectBackwardConnectionNumerical) {
         std::optional<Tensor> biasesV_h;
         if (hasBias) {
             ASSERT_TRUE(adamBiases != nullptr);
-            EXPECT_FALSE(adamBiases->getWeightsGradient().has_value())
-                << "Fused Convolution2d biases update should not allocate a dense gradient tensor.";
+            EXPECT_TRUE(adamBiases->getWeightsGradient().has_value())
+                << "BR6.3A Convolution2d must keep the Adam biases gradient materialized.";
             biasesAfter_h = copyTensorToCpu(conv.getParameter("biases")->getStorage().value(), gradientUpdateStream);
             biasesM_h = copyTensorToCpu(adamBiases->getOptimizerParameterTensor("m"), gradientUpdateStream);
             biasesV_h = copyTensorToCpu(adamBiases->getOptimizerParameterTensor("v"), gradientUpdateStream);
@@ -1006,8 +1006,8 @@ TEST(Convolution2d, DirectBackwardConnectionNumericalThreePasses) {
             Tensor convErrorOutput_h = convErrorOutput.clone(cpuPlacement);
             convErrorOutput_h.copyFromAsync(convErrorOutput, stream);
 
-            EXPECT_FALSE(adamWeights->getWeightsGradient().has_value())
-                << "Fused Convolution2d weights update should not allocate a dense gradient tensor.";
+            EXPECT_TRUE(adamWeights->getWeightsGradient().has_value())
+                << "BR6.3A Convolution2d must keep the Adam weights gradient materialized.";
             Tensor weightsAfter_h = copyTensorToCpu(conv.getParameter("weights")->getStorage().value(), gradientUpdateStream);
             Tensor weightsM_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("m"), gradientUpdateStream);
             Tensor weightsV_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("v"), gradientUpdateStream);
@@ -1017,8 +1017,8 @@ TEST(Convolution2d, DirectBackwardConnectionNumericalThreePasses) {
             std::optional<Tensor> biasesV_h;
             if (hasBias) {
                 ASSERT_TRUE(adamBiases != nullptr);
-                EXPECT_FALSE(adamBiases->getWeightsGradient().has_value())
-                    << "Fused Convolution2d biases update should not allocate a dense gradient tensor.";
+                EXPECT_TRUE(adamBiases->getWeightsGradient().has_value())
+                    << "BR6.3A Convolution2d must keep the Adam biases gradient materialized.";
                 biasesAfter_h = copyTensorToCpu(conv.getParameter("biases")->getStorage().value(), gradientUpdateStream);
                 biasesM_h = copyTensorToCpu(adamBiases->getOptimizerParameterTensor("m"), gradientUpdateStream);
                 biasesV_h = copyTensorToCpu(adamBiases->getOptimizerParameterTensor("v"), gradientUpdateStream);

@@ -526,9 +526,11 @@ class BackwardGraphBuilder {
     explicit BackwardGraphBuilder(
         const PhysicalExpression& forward_expr,
         const SavedForwardValueInputNames* saved_forward_value_input_names = nullptr,
-        std::vector<ForwardValueRequirement>* forward_value_requirements = nullptr)
+        std::vector<ForwardValueRequirement>* forward_value_requirements = nullptr,
+        std::string saved_forward_input_name_qualifier = {})
         : forward_expr(forward_expr),
           saved_forward_value_input_names(saved_forward_value_input_names),
+          saved_forward_input_name_qualifier(std::move(saved_forward_input_name_qualifier)),
           forward_value_requirements(forward_value_requirements != nullptr ? forward_value_requirements
                                                                            : &owned_forward_value_requirements) {
         grad_expr.inputs = forward_expr.inputs;
@@ -2295,7 +2297,8 @@ class BackwardGraphBuilder {
     }
 
     std::string makeForwardValueInputName(uint32_t forward_node_index) const {
-        const std::string base = "__thor_saved_forward_value_" + std::to_string(forward_node_index);
+        const std::string base = "__thor_saved_forward_value_" + saved_forward_input_name_qualifier +
+                                 std::to_string(forward_node_index);
         auto name_is_available = [&](const std::string& candidate) {
             return std::none_of(grad_expr.inputs.begin(), grad_expr.inputs.end(), [&](const NamedInput& input) {
                 return input.name == candidate;
@@ -2350,7 +2353,8 @@ class BackwardGraphBuilder {
     }
 
     std::string makeForwardEpilogueAuxInputName(uint32_t forward_node_index) const {
-        const std::string base = "__thor_saved_forward_matmul_epilogue_aux_" + std::to_string(forward_node_index);
+        const std::string base = "__thor_saved_forward_matmul_epilogue_aux_" + saved_forward_input_name_qualifier +
+                                 std::to_string(forward_node_index);
         auto name_is_available = [&](const std::string& candidate) {
             return std::none_of(grad_expr.inputs.begin(), grad_expr.inputs.end(), [&](const NamedInput& input) {
                 return input.name == candidate;
@@ -2434,6 +2438,7 @@ class BackwardGraphBuilder {
     const PhysicalExpression& forward_expr;
     const SavedForwardValueInputNames* saved_forward_value_input_names = nullptr;
     std::vector<ForwardValueRequirement> owned_forward_value_requirements;
+    std::string saved_forward_input_name_qualifier;
     std::vector<ForwardValueRequirement>* forward_value_requirements = nullptr;
     PhysicalExpression grad_expr;
     std::unordered_map<uint32_t, uint32_t> forward_value_to_grad_node_map;
@@ -2508,6 +2513,43 @@ std::vector<std::string> normalizeWrtNames(const PhysicalExpression& forward_exp
     }
 
     return normalized;
+}
+
+struct GradientAccumulationPolicy {
+    bool accumulate_all_requested = false;
+    GradientAccumulationTargets accumulate_wrt_names;
+
+    bool accumulates(const std::string& wrt_name) const {
+        return accumulate_all_requested || accumulate_wrt_names.contains(wrt_name);
+    }
+};
+
+GradientAccumulationPolicy legacyGradientAccumulationPolicy(bool accumulate_grad_outputs) {
+    GradientAccumulationPolicy policy;
+    policy.accumulate_all_requested = accumulate_grad_outputs;
+    return policy;
+}
+
+GradientAccumulationPolicy selectiveGradientAccumulationPolicy(
+    const GradientAccumulationTargets& accumulate_wrt_names) {
+    GradientAccumulationPolicy policy;
+    policy.accumulate_wrt_names = accumulate_wrt_names;
+    return policy;
+}
+
+void validateGradientAccumulationPolicy(const std::vector<std::string>& normalized_wrt,
+                                        const GradientAccumulationPolicy& policy) {
+    if (policy.accumulate_all_requested) {
+        return;
+    }
+
+    std::unordered_set<std::string> requested(normalized_wrt.begin(), normalized_wrt.end());
+    for (const std::string& accumulate_name : policy.accumulate_wrt_names) {
+        if (!requested.contains(accumulate_name)) {
+            throw std::runtime_error(
+                "Selective gradient accumulation target is not among the requested wrt inputs: " + accumulate_name);
+        }
+    }
 }
 
 std::optional<std::unordered_map<std::string, std::string>> normalizeUpstreamInputNamesByOutput(
@@ -3869,10 +3911,11 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                                          const std::optional<std::unordered_map<std::string, DataType>>& upstream_input_dtypes_by_output,
                                          const std::optional<std::unordered_map<std::string, uint32_t>>& upstream_node_indices_by_output,
                                          const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
-                                         bool accumulate_grad_outputs,
+                                         const GradientAccumulationPolicy& accumulation_policy,
                                          bool allow_shape_deferred_placeholders = false,
                                          const SavedForwardValueInputNames* saved_forward_value_input_names = nullptr,
-                                         std::vector<ForwardValueRequirement>* forward_value_requirements = nullptr) {
+                                         std::vector<ForwardValueRequirement>* forward_value_requirements = nullptr,
+                                         const std::string& saved_forward_input_name_qualifier = {}) {
     if (!forward_outputs.expr) {
         throw std::runtime_error("buildBackwardOutputs requires non-null forward_outputs.expr.");
     }
@@ -3958,7 +4001,8 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
         }
     }
 
-    BackwardGraphBuilder builder(forward_expr, saved_forward_value_input_names, forward_value_requirements);
+    BackwardGraphBuilder builder(
+        forward_expr, saved_forward_value_input_names, forward_value_requirements, saved_forward_input_name_qualifier);
     builder.initializeAdjoints();
 
     for (const NamedOutput& forward_output : forward_outputs.outputs) {
@@ -6208,8 +6252,9 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                                                 : std::optional<uint32_t>(grad_opt.value());
         }
 
+        const bool accumulate_grad_output = accumulation_policy.accumulates(wrt_name);
         if (!total_grad.has_value()) {
-            if (accumulate_grad_outputs) {
+            if (accumulate_grad_output) {
                 total_grad = builder.input(grad_output_name, grad_dtype);
             } else if (has_forward_dims) {
                 // This is a genuine mathematical zero: the requested forward input
@@ -6220,7 +6265,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 const uint32_t input_clone = builder.forwardValue(first_it->second);
                 total_grad = builder.mul(input_clone, builder.scalar(0.0));
             }
-        } else if (accumulate_grad_outputs) {
+        } else if (accumulate_grad_output) {
             total_grad = builder.add(builder.input(grad_output_name, grad_dtype), total_grad.value());
         } else {
             const auto dbias_only_dtype = attentionBackwardBiasOnlyDType(builder, total_grad.value());
@@ -6357,9 +6402,9 @@ static uint32_t appendBackwardTensorInput(PhysicalExpression& expr,
 static uint32_t appendZeroGradientForMissingConditionalInput(PhysicalExpression& expr,
                                                               const std::string& wrt_name,
                                                               std::optional<DataType> grad_dtype,
-                                                              bool accumulate_grad_outputs) {
+                                                              const GradientAccumulationPolicy& accumulation_policy) {
     const std::string grad_name = wrt_name + "_grad";
-    if (accumulate_grad_outputs) {
+    if (accumulation_policy.accumulates(wrt_name)) {
         return appendBackwardTensorInput(expr, grad_name, grad_dtype);
     }
 
@@ -6468,15 +6513,60 @@ static PhysicalOutputs assembleConditionalBackwardOutputs(const PhysicalOutputs&
     return result;
 }
 
+static std::string conditionalSavedForwardInputQualifier(const std::vector<uint8_t>& branch_path) {
+    if (branch_path.empty()) {
+        return {};
+    }
+    std::string qualifier;
+    for (uint8_t branch : branch_path) {
+        if (branch > 1) {
+            throw std::runtime_error("Conditional saved-forward branch path contains an invalid child selector.");
+        }
+        qualifier += branch == 0 ? "then_" : "else_";
+    }
+    return qualifier;
+}
+
+static std::string conditionalSavedForwardPredicateInputName(const std::vector<uint8_t>& branch_path) {
+    const std::string qualifier = conditionalSavedForwardInputQualifier(branch_path);
+    return "__thor_saved_forward_conditional_predicate_" + (qualifier.empty() ? std::string("root") : qualifier);
+}
+
+static PhysicalOutputs savedConditionalPredicateOutputs(const std::string& input_name,
+                                                       const PhysicalOutputs& original_predicate) {
+    Expression saved_predicate = Expression::input(input_name, DataType::BOOLEAN, DataType::BOOLEAN);
+    PhysicalOutputs outputs = Expression::outputs({{"predicate", saved_predicate}}).physicalOutputs();
+
+    // Preserve the standalone/backward ABI: compileBackward historically keeps
+    // all original forward roots even when a particular VJP does not consume
+    // them. The original predicate roots therefore remain declared, but no node
+    // in the backward predicate expression executes them.
+    if (original_predicate.expr != nullptr) {
+        for (const NamedInput& original_input : original_predicate.expr->inputs) {
+            const bool already_present = std::any_of(
+                outputs.expr->inputs.begin(), outputs.expr->inputs.end(), [&](const NamedInput& existing) {
+                    return existing.name == original_input.name;
+                });
+            if (!already_present) {
+                outputs.expr->inputs.push_back(
+                    NamedInput{original_input.name, static_cast<uint32_t>(outputs.expr->inputs.size()), original_input.kind});
+            }
+        }
+    }
+    return outputs;
+}
+
 static PhysicalOutputs buildConditionalTreeBackwardOutputsImpl(
     const PhysicalOutputs& forward_outputs,
     const std::vector<std::string>& desired_wrt,
     const std::optional<std::unordered_map<std::string, std::string>>& upstream_input_names_by_output,
     const std::optional<std::unordered_map<std::string, DataType>>& upstream_input_dtypes_by_output,
     const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
-    bool accumulate_grad_outputs,
+    const GradientAccumulationPolicy& accumulation_policy,
     bool allow_shape_deferred_placeholders,
-    const std::unordered_map<std::string, std::optional<DataType>>& grad_dtypes) {
+    const std::unordered_map<std::string, std::optional<DataType>>& grad_dtypes,
+    const std::vector<uint8_t>& branch_path,
+    std::vector<ForwardValueRequirement>* forward_value_requirements) {
     if (!forward_outputs.expr) {
         throw std::runtime_error("Conditional autodiff requires non-null expression metadata.");
     }
@@ -6486,25 +6576,53 @@ static PhysicalOutputs buildConditionalTreeBackwardOutputsImpl(
             throw std::runtime_error("Conditional autodiff is missing the conditional payload.");
         }
         const PhysicalConditionalOutputs& conditional = *forward_outputs.conditional;
+        if (conditional.predicate.outputs.size() != 1) {
+            throw std::runtime_error("Conditional autodiff requires exactly one predicate output.");
+        }
+
+        // Backward must make the same branch decision as the real forward without
+        // re-executing the predicate expression. Treat the already-materialized
+        // predicate tensor as saved-forward state, just like any other computed
+        // primal required by a VJP.
+        const std::string saved_predicate_input_name = conditionalSavedForwardPredicateInputName(branch_path);
+        PhysicalOutputs backward_predicate =
+            savedConditionalPredicateOutputs(saved_predicate_input_name, conditional.predicate);
+        if (forward_value_requirements != nullptr) {
+            forward_value_requirements->push_back(ForwardValueRequirement{
+                .forward_node_index = conditional.predicate.outputs.front().node_idx,
+                .backward_input_name = saved_predicate_input_name,
+                .kind = ForwardValueRequirementKind::ConditionalPredicate,
+                .conditional_branch_path = branch_path,
+            });
+        }
+
+        std::vector<uint8_t> then_path = branch_path;
+        then_path.push_back(0);
+        std::vector<uint8_t> else_path = branch_path;
+        else_path.push_back(1);
         PhysicalOutputs then_backward = buildConditionalTreeBackwardOutputsImpl(
             conditional.then_branch,
             desired_wrt,
             upstream_input_names_by_output,
             upstream_input_dtypes_by_output,
             filterForwardInputDimsForOutputs(conditional.then_branch, forward_input_dims),
-            accumulate_grad_outputs,
+            accumulation_policy,
             allow_shape_deferred_placeholders,
-            grad_dtypes);
+            grad_dtypes,
+            then_path,
+            forward_value_requirements);
         PhysicalOutputs else_backward = buildConditionalTreeBackwardOutputsImpl(
             conditional.else_branch,
             desired_wrt,
             upstream_input_names_by_output,
             upstream_input_dtypes_by_output,
             filterForwardInputDimsForOutputs(conditional.else_branch, forward_input_dims),
-            accumulate_grad_outputs,
+            accumulation_policy,
             allow_shape_deferred_placeholders,
-            grad_dtypes);
-        return assembleConditionalBackwardOutputs(conditional.predicate,
+            grad_dtypes,
+            else_path,
+            forward_value_requirements);
+        return assembleConditionalBackwardOutputs(std::move(backward_predicate),
                                                   std::move(then_backward),
                                                   std::move(else_backward),
                                                   desired_wrt);
@@ -6527,14 +6645,24 @@ static PhysicalOutputs buildConditionalTreeBackwardOutputsImpl(
 
     PhysicalOutputs backward;
     if (!active_wrt.empty()) {
+        std::vector<ForwardValueRequirement> branch_requirements;
         backward = buildFlatBackwardOutputsImpl(forward_outputs,
                                                active_wrt,
                                                upstream_input_names_by_output,
                                                upstream_input_dtypes_by_output,
                                                std::nullopt,
                                                forward_input_dims,
-                                               accumulate_grad_outputs,
-                                               allow_shape_deferred_placeholders);
+                                               accumulation_policy,
+                                               allow_shape_deferred_placeholders,
+                                               nullptr,
+                                               forward_value_requirements != nullptr ? &branch_requirements : nullptr,
+                                               conditionalSavedForwardInputQualifier(branch_path));
+        if (forward_value_requirements != nullptr) {
+            for (ForwardValueRequirement& requirement : branch_requirements) {
+                requirement.conditional_branch_path = branch_path;
+                forward_value_requirements->push_back(std::move(requirement));
+            }
+        }
     } else {
         backward.expr = std::make_shared<PhysicalExpression>();
     }
@@ -6556,7 +6684,7 @@ static PhysicalOutputs buildConditionalTreeBackwardOutputsImpl(
         auto dtype_it = grad_dtypes.find(wrt_name);
         const std::optional<DataType> grad_dtype = dtype_it == grad_dtypes.end() ? std::nullopt : dtype_it->second;
         const uint32_t zero_node = appendZeroGradientForMissingConditionalInput(
-            *backward.expr, wrt_name, grad_dtype, accumulate_grad_outputs);
+            *backward.expr, wrt_name, grad_dtype, accumulation_policy);
         NamedOutput zero_output{grad_name, zero_node};
         zero_output.materialization.storage_dtype = grad_dtype;
         ordered_outputs.push_back(std::move(zero_output));
@@ -6575,21 +6703,25 @@ static PhysicalOutputs buildBackwardOutputsImpl(
     const std::optional<std::unordered_map<std::string, DataType>>& upstream_input_dtypes_by_output,
     const std::optional<std::unordered_map<std::string, uint32_t>>& upstream_node_indices_by_output,
     const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
-    bool accumulate_grad_outputs,
+    const GradientAccumulationPolicy& accumulation_policy,
     bool allow_shape_deferred_placeholders = false,
     const SavedForwardValueInputNames* saved_forward_value_input_names = nullptr,
     std::vector<ForwardValueRequirement>* forward_value_requirements = nullptr) {
     if (!forward_outputs.expr) {
         throw std::runtime_error("buildBackwardOutputs requires non-null forward_outputs.expr.");
     }
+
+    const std::vector<std::string> normalized_wrt = normalizeWrtNames(*forward_outputs.expr, wrt_names);
+    validateGradientAccumulationPolicy(normalized_wrt, accumulation_policy);
+
     if (!forward_outputs.isConditional()) {
         return buildFlatBackwardOutputsImpl(forward_outputs,
-                                            wrt_names,
+                                            normalized_wrt,
                                             upstream_input_names_by_output,
                                             upstream_input_dtypes_by_output,
                                             upstream_node_indices_by_output,
                                             forward_input_dims,
-                                            accumulate_grad_outputs,
+                                            accumulation_policy,
                                             allow_shape_deferred_placeholders,
                                             saved_forward_value_input_names,
                                             forward_value_requirements);
@@ -6598,29 +6730,50 @@ static PhysicalOutputs buildBackwardOutputsImpl(
         throw std::runtime_error(
             "Graph-level conditional autodiff does not support upstream seeds by physical node index; use named upstream inputs.");
     }
-    if (forward_value_requirements != nullptr) {
-        throw std::runtime_error(
-            "Forward-value requirements are not yet supported for conditional backward trees.");
-    }
     if (saved_forward_value_input_names != nullptr && !saved_forward_value_input_names->empty()) {
         throw std::runtime_error(
             "Saved forward value bindings are not yet supported for conditional backward trees.");
     }
 
-    const std::vector<std::string> normalized_wrt = normalizeWrtNames(*forward_outputs.expr, wrt_names);
     std::unordered_map<std::string, std::optional<DataType>> grad_dtypes;
     for (const std::string& wrt_name : normalized_wrt) {
         grad_dtypes.emplace(wrt_name, findConditionalInputGradDType(forward_outputs, wrt_name));
     }
 
+    const std::vector<uint8_t> root_branch_path;
     return buildConditionalTreeBackwardOutputsImpl(forward_outputs,
                                                    normalized_wrt,
                                                    upstream_input_names_by_output,
                                                    upstream_input_dtypes_by_output,
                                                    forward_input_dims,
-                                                   accumulate_grad_outputs,
+                                                   accumulation_policy,
                                                    allow_shape_deferred_placeholders,
-                                                   grad_dtypes);
+                                                   grad_dtypes,
+                                                   root_branch_path,
+                                                   forward_value_requirements);
+}
+
+static PhysicalOutputs buildBackwardOutputsImpl(
+    const PhysicalOutputs& forward_outputs,
+    const std::vector<std::string>& wrt_names,
+    const std::optional<std::unordered_map<std::string, std::string>>& upstream_input_names_by_output,
+    const std::optional<std::unordered_map<std::string, DataType>>& upstream_input_dtypes_by_output,
+    const std::optional<std::unordered_map<std::string, uint32_t>>& upstream_node_indices_by_output,
+    const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
+    bool accumulate_grad_outputs,
+    bool allow_shape_deferred_placeholders = false,
+    const SavedForwardValueInputNames* saved_forward_value_input_names = nullptr,
+    std::vector<ForwardValueRequirement>* forward_value_requirements = nullptr) {
+    return buildBackwardOutputsImpl(forward_outputs,
+                                    wrt_names,
+                                    upstream_input_names_by_output,
+                                    upstream_input_dtypes_by_output,
+                                    upstream_node_indices_by_output,
+                                    forward_input_dims,
+                                    legacyGradientAccumulationPolicy(accumulate_grad_outputs),
+                                    allow_shape_deferred_placeholders,
+                                    saved_forward_value_input_names,
+                                    forward_value_requirements);
 }
 
 namespace {
@@ -6629,6 +6782,9 @@ void sortForwardValueRequirements(std::vector<ForwardValueRequirement>& requirem
     std::sort(requirements.begin(),
               requirements.end(),
               [](const ForwardValueRequirement& lhs, const ForwardValueRequirement& rhs) {
+                  if (lhs.conditional_branch_path != rhs.conditional_branch_path) {
+                      return lhs.conditional_branch_path < rhs.conditional_branch_path;
+                  }
                   if (lhs.forward_node_index != rhs.forward_node_index) {
                       return lhs.forward_node_index < rhs.forward_node_index;
                   }
@@ -6642,7 +6798,8 @@ void sortForwardValueRequirements(std::vector<ForwardValueRequirement>& requirem
 bool isExplicitlySatisfiedLegacyRequirement(
     const ForwardValueRequirement& requirement,
     const SavedForwardValueInputNames* saved_forward_value_input_names) {
-    if (saved_forward_value_input_names == nullptr || requirement.kind != ForwardValueRequirementKind::NodeOutput) {
+    if (saved_forward_value_input_names == nullptr || requirement.kind != ForwardValueRequirementKind::NodeOutput ||
+        !requirement.conditional_branch_path.empty()) {
         return false;
     }
     const auto binding = saved_forward_value_input_names->find(requirement.forward_node_index);
@@ -6651,7 +6808,9 @@ bool isExplicitlySatisfiedLegacyRequirement(
 
 [[noreturn]] void throwUnsatisfiedLegacyForwardValueRequirement(const ForwardValueRequirement& requirement) {
     const char* requirement_kind =
-        requirement.kind == ForwardValueRequirementKind::MatmulEpilogueAux ? "matmul epilogue auxiliary" : "node output";
+        requirement.kind == ForwardValueRequirementKind::MatmulEpilogueAux
+            ? "matmul epilogue auxiliary"
+            : requirement.kind == ForwardValueRequirementKind::ConditionalPredicate ? "conditional predicate" : "node output";
     throw std::runtime_error(
         "buildBackwardOutputs discovered a retained real-forward " + std::string(requirement_kind) +
         " requirement for forward node " + std::to_string(requirement.forward_node_index) +
@@ -6681,7 +6840,8 @@ bool hasSyntheticSavedForwardInput(const PhysicalOutputs& outputs, std::string* 
         }
         for (const NamedInput& input : candidate.expr->inputs) {
             const bool is_saved = input.name.rfind("__thor_saved_forward_value_", 0) == 0 ||
-                                  input.name.rfind("__thor_saved_forward_matmul_epilogue_aux_", 0) == 0;
+                                  input.name.rfind("__thor_saved_forward_matmul_epilogue_aux_", 0) == 0 ||
+                                  input.name.rfind("__thor_saved_forward_conditional_predicate_", 0) == 0;
             if (is_saved) {
                 if (first_name != nullptr) {
                     *first_name = input.name;
@@ -6710,8 +6870,8 @@ PhysicalOutputs finishLegacyConditionalBackwardBuild(PhysicalOutputs outputs) {
             "buildBackwardOutputs discovered retained real-forward state in a conditional backward tree "
             "(backward input '" + saved_input_name +
             "'), but the PhysicalOutputs-only API cannot expose branch-local forward-value requirements. "
-            "Conditional retained-forward requirements are not yet supported; backward will not recompute the "
-            "missing forward value.");
+            "Use buildBackwardOutputsWithForwardValueRequirements() and bind every returned branch-qualified "
+            "requirement from the real forward execution; backward will not recompute the missing forward value.");
     }
     return outputs;
 }
@@ -6844,6 +7004,29 @@ BackwardBuildResult buildBackwardOutputsWithForwardValueRequirements(
 BackwardBuildResult buildBackwardOutputsWithForwardValueRequirements(
     const PhysicalOutputs& forward_outputs,
     const std::vector<std::string>& wrt_names,
+    const std::optional<std::string>& upstream_input_name,
+    const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
+    const GradientAccumulationTargets& accumulate_wrt_names,
+    const SavedForwardValueInputNames& saved_forward_value_input_names) {
+    BackwardBuildResult result;
+    result.outputs = buildBackwardOutputsImpl(
+        forward_outputs,
+        wrt_names,
+        normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_name),
+        std::nullopt,
+        std::nullopt,
+        forward_input_dims,
+        selectiveGradientAccumulationPolicy(accumulate_wrt_names),
+        false,
+        saved_forward_value_input_names.empty() ? nullptr : &saved_forward_value_input_names,
+        &result.forward_value_requirements);
+    sortForwardValueRequirements(result.forward_value_requirements);
+    return result;
+}
+
+BackwardBuildResult buildBackwardOutputsWithForwardValueRequirements(
+    const PhysicalOutputs& forward_outputs,
+    const std::vector<std::string>& wrt_names,
     const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
     const std::unordered_map<std::string, DataType>& upstream_input_dtypes_by_output,
     const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
@@ -6858,6 +7041,30 @@ BackwardBuildResult buildBackwardOutputsWithForwardValueRequirements(
         std::nullopt,
         forward_input_dims,
         accumulate_grad_outputs,
+        false,
+        saved_forward_value_input_names.empty() ? nullptr : &saved_forward_value_input_names,
+        &result.forward_value_requirements);
+    sortForwardValueRequirements(result.forward_value_requirements);
+    return result;
+}
+
+BackwardBuildResult buildBackwardOutputsWithForwardValueRequirements(
+    const PhysicalOutputs& forward_outputs,
+    const std::vector<std::string>& wrt_names,
+    const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
+    const std::unordered_map<std::string, DataType>& upstream_input_dtypes_by_output,
+    const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
+    const GradientAccumulationTargets& accumulate_wrt_names,
+    const SavedForwardValueInputNames& saved_forward_value_input_names) {
+    BackwardBuildResult result;
+    result.outputs = buildBackwardOutputsImpl(
+        forward_outputs,
+        wrt_names,
+        normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_names_by_output),
+        upstream_input_dtypes_by_output,
+        std::nullopt,
+        forward_input_dims,
+        selectiveGradientAccumulationPolicy(accumulate_wrt_names),
         false,
         saved_forward_value_input_names.empty() ? nullptr : &saved_forward_value_input_names,
         &result.forward_value_requirements);

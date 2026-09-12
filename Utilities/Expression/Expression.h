@@ -260,6 +260,68 @@ inline bool isReductionOp(ExprOp op) {
 
 inline bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX || op == ExprOp::RAGGED_SOFTMAX_BACKWARD; }
 
+// Operations that terminate an ordinary fused elementwise Expression region and
+// execute as their own physical compiler stage. Keep this definition shared with
+// EquationCompiler so higher-level ownership decisions (for example BR6.6
+// optimizer fusion) use exactly the same boundary semantics as code generation.
+inline bool isExpressionCompilerStageBoundaryOp(ExprOp op) {
+    switch (op) {
+        case ExprOp::REDUCE_SUM:
+        case ExprOp::REDUCE_PROD:
+        case ExprOp::REDUCE_MIN:
+        case ExprOp::REDUCE_MAX:
+        case ExprOp::REDUCE_ARGMIN:
+        case ExprOp::REDUCE_ARGMAX:
+        case ExprOp::REDUCE_AVG:
+        case ExprOp::REDUCE_NORM1:
+        case ExprOp::REDUCE_NORM2:
+        case ExprOp::REDUCE_SUM_SQUARES:
+        case ExprOp::SOFTMAX:
+        case ExprOp::RAGGED_SOFTMAX_BACKWARD:
+        case ExprOp::SCAN:
+        case ExprOp::SEGMENTED_SCAN:
+        case ExprOp::SEGMENTED_REDUCE_SUM:
+        case ExprOp::SEGMENTED_REDUCE_MIN:
+        case ExprOp::SEGMENTED_REDUCE_MAX:
+        case ExprOp::SEGMENTED_REDUCE_MEAN:
+        case ExprOp::SEGMENTED_BROADCAST:
+        case ExprOp::RAGGED_CONV1D_CAUSAL:
+        case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA:
+        case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER:
+        case ExprOp::RMSNORM:
+        case ExprOp::LAYERNORM:
+        case ExprOp::RMSNORM_BACKWARD_X:
+        case ExprOp::RMSNORM_BACKWARD_SCALE:
+        case ExprOp::MATMUL:
+        case ExprOp::GEMM:
+        case ExprOp::ATTENTION:
+        case ExprOp::ATTENTION_BACKWARD_Q:
+        case ExprOp::ATTENTION_BACKWARD_K:
+        case ExprOp::ATTENTION_BACKWARD_V:
+        case ExprOp::ATTENTION_BACKWARD_BIAS:
+        case ExprOp::CONV2D:
+        case ExprOp::CONV2D_BACKWARD_DATA:
+        case ExprOp::CONV2D_BACKWARD_FILTER:
+        case ExprOp::CONV3D:
+        case ExprOp::CONV3D_BACKWARD_DATA:
+        case ExprOp::CONV3D_BACKWARD_FILTER:
+        case ExprOp::REDUCE_MIN_BACKWARD:
+        case ExprOp::REDUCE_MAX_BACKWARD:
+        case ExprOp::SCAN_MIN_BACKWARD:
+        case ExprOp::SCAN_MAX_BACKWARD:
+        case ExprOp::SEGMENTED_SCAN_MIN_BACKWARD:
+        case ExprOp::SEGMENTED_SCAN_MAX_BACKWARD:
+        case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
+        case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
+        case ExprOp::EMBEDDING_LOOKUP:
+        case ExprOp::STRIDED_VIEW:
+        case ExprOp::CUDA_KERNEL_OUTPUT:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Validate ordinary dense broadcasting and return the target dimensions.
 // BROADCAST_TO never carries dtype conversion semantics; it only expands the
 // logical index domain using standard trailing-axis broadcasting rules.
@@ -485,6 +547,78 @@ struct PhysicalExpression {
         return names;
     }
 };
+
+// Return true when the value rooted at output_node depends on any physical
+// stage-boundary operation. This answers a deliberately stronger question than
+// merely checking the output node itself: an elementwise cast/scale applied to
+// a GEMM/reduction gradient still crosses that materialization boundary.
+inline bool expressionSubgraphContainsStageBoundary(const PhysicalExpression& expr, uint32_t output_node) {
+    if (output_node == UINT32_MAX || output_node >= expr.nodes.size()) {
+        return false;
+    }
+
+    std::vector<uint8_t> visit_state(expr.nodes.size(), 0);
+    std::function<bool(uint32_t)> visit = [&](uint32_t node_idx) -> bool {
+        if (node_idx == UINT32_MAX) {
+            return false;
+        }
+        if (node_idx >= expr.nodes.size()) {
+            throw std::runtime_error("Expression subgraph references an out-of-range node.");
+        }
+        if (visit_state[node_idx] == 2) {
+            return false;
+        }
+        if (visit_state[node_idx] == 3) {
+            return true;
+        }
+        if (visit_state[node_idx] == 1) {
+            throw std::runtime_error("Expression subgraph contains a cycle.");
+        }
+
+        const ExprNode& node = expr.nodes[node_idx];
+        if (isExpressionCompilerStageBoundaryOp(node.op)) {
+            visit_state[node_idx] = 3;
+            return true;
+        }
+
+        visit_state[node_idx] = 1;
+        auto parentHasBoundary = [&](uint32_t parent_idx) { return parent_idx != UINT32_MAX && visit(parent_idx); };
+        bool has_boundary = parentHasBoundary(node.lhs) || parentHasBoundary(node.rhs) || parentHasBoundary(node.aux) ||
+                            parentHasBoundary(node.alpha_node) || parentHasBoundary(node.beta_node) ||
+                            parentHasBoundary(node.matmul_epilogue_aux) ||
+                            parentHasBoundary(node.rope_effective_sequence_length_node) ||
+                            parentHasBoundary(node.rope_position_ids_node) ||
+                            parentHasBoundary(node.attention_seq_len_q_node) ||
+                            parentHasBoundary(node.attention_seq_len_kv_node) ||
+                            parentHasBoundary(node.attention_ragged_offset_q_node) ||
+                            parentHasBoundary(node.attention_ragged_offset_kv_node) ||
+                            parentHasBoundary(node.attention_page_table_k_node) ||
+                            parentHasBoundary(node.attention_page_table_v_node) ||
+                            parentHasBoundary(node.attention_dropout_seed_node) ||
+                            parentHasBoundary(node.attention_dropout_offset_node) ||
+                            parentHasBoundary(node.attention_descale_q_node) ||
+                            parentHasBoundary(node.attention_descale_k_node) ||
+                            parentHasBoundary(node.attention_descale_v_node) ||
+                            parentHasBoundary(node.attention_descale_s_node) ||
+                            parentHasBoundary(node.attention_scale_s_node) ||
+                            parentHasBoundary(node.attention_scale_o_node) ||
+                            parentHasBoundary(node.attention_amax_s_node) ||
+                            parentHasBoundary(node.attention_amax_o_node);
+        if (!has_boundary && node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+            for (uint32_t input_node : node.cuda_kernel_input_nodes) {
+                if (parentHasBoundary(input_node)) {
+                    has_boundary = true;
+                    break;
+                }
+            }
+        }
+
+        visit_state[node_idx] = has_boundary ? 3 : 2;
+        return has_boundary;
+    };
+
+    return visit(output_node);
+}
 
 #ifdef THOR_DEBUG
 // Collapse node-level provenance to the provenance of one physical stage.

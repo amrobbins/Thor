@@ -745,14 +745,7 @@ static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
 }
 static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
-static bool isStageBoundaryOp(ExprOp op) {
-    return isReductionOp(op) || isSoftmaxOp(op) || isScanOp(op) || isSegmentedReduceOp(op) || isSegmentedBroadcastOp(op) ||
-           isRaggedConv1dCausalOp(op) || isRaggedConv1dCausalBackwardDataOp(op) ||
-           isRaggedConv1dCausalBackwardFilterOp(op) || isRmsNormOp(op) || isLayerNormOp(op) ||
-           isRmsNormBackwardOp(op) || isMatmulOp(op) || isAttentionOp(op) ||
-           isAttentionBackwardOp(op) || isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isScanMinMaxBackwardOp(op) ||
-           isEmbeddingLookupOp(op) || op == ExprOp::STRIDED_VIEW || op == ExprOp::CUDA_KERNEL_OUTPUT;
-}
+static bool isStageBoundaryOp(ExprOp op) { return isExpressionCompilerStageBoundaryOp(op); }
 
 static bool expressionHasStridedViewOp(const PhysicalExpression& expr) {
     return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) {

@@ -182,6 +182,39 @@ class CustomLayer : public TrainableLayer {
         (void)backwardPlan;
     }
 
+    // BR6.2 scaffolding: generic CustomLayer now also constructs one combined
+    // input+parameter VJP for each flat backward-capable execution variant.
+    // These previews are deliberately not runtime owners yet. BR6.3A provides
+    // materialized parameter-gradient storage, BR6.3B stamps the executable
+    // shared plans, and BR6.4 installs sole runtime ownership. The hook exists so focused structural tests (and future generic
+    // ownership code) can inspect the exact combined derivative DAG without
+    // exposing it as a public layer API.
+    virtual void onGenericSharedBackwardPreviewBuilt(
+        uint32_t applicationIndex,
+        DynamicExpressionVariantId variantId,
+        const BackwardBuildResult& backwardBuild,
+        const GradientAccumulationTargets& accumulateWrtNames) {
+        (void)applicationIndex;
+        (void)variantId;
+        (void)backwardBuild;
+        (void)accumulateWrtNames;
+    }
+
+    // Generic shared-backward stamping hook. BR6.3B introduced these plans as
+    // non-owning scaffolding; BR6.4 makes them the sole runtime owner for flat
+    // generic trainable applications. The hook remains useful for structural
+    // tests and specialization diagnostics.
+    virtual void onGenericSharedBackwardExecutionVariantStamped(
+        uint32_t applicationIndex,
+        DynamicExpressionVariantId variantId,
+        const std::shared_ptr<StampedExecutionPlan>& backwardPlan,
+        const GradientAccumulationTargets& accumulateWrtNames) {
+        (void)applicationIndex;
+        (void)variantId;
+        (void)backwardPlan;
+        (void)accumulateWrtNames;
+    }
+
     void propagateApplicationRowPartitionHostState(uint32_t applicationIndex, uint32_t sourceInputPort);
     void pruneUpstreamErrorOutputsForApplication(uint32_t applicationIndex);
     void setActiveTrainingExecutionVariant(DynamicExpressionVariantId variantId);
@@ -217,6 +250,20 @@ class CustomLayer : public TrainableLayer {
         std::shared_ptr<StampedExecutionPlan> backwardWeightsAccumulate;
         std::shared_ptr<StampedExecutionPlan> backwardWeightsFusedOptimizerUpdate;
         std::shared_ptr<StampedExecutionPlan> nativeSharedBackward;
+
+        // BR6.4: executable generic shared-backward plans are the sole runtime
+        // owner for flat generic trainable variants. The clear plan writes dInput
+        // plus every materialized trainable parameter gradient; the accumulate
+        // plan overwrites dInput while accumulating only active parameter
+        // gradients.
+        std::shared_ptr<StampedExecutionPlan> genericSharedBackwardClear;
+        std::shared_ptr<StampedExecutionPlan> genericSharedBackwardAccumulate;
+
+        // Keep the BR6.2 builds alongside the stamped plans so structural
+        // tests can inspect the exact derivative ownership/accumulation contract.
+        std::optional<BackwardBuildResult> genericSharedBackwardClearPreview;
+        std::optional<BackwardBuildResult> genericSharedBackwardAccumulatePreview;
+        GradientAccumulationTargets genericSharedBackwardAccumulateWrtNames;
 
         std::unordered_set<std::string> optimizerUpdateFusedParameterNames;
         std::unordered_set<std::string> activeParameterTargetNames;
@@ -260,6 +307,13 @@ class CustomLayer : public TrainableLayer {
         std::vector<Event> forwardInputReadyEvents;
         Event errorInputReadyEvent;
         Event backwardErrorReadyEvent;
+
+        // BR6.4: recurring completion edge for this application's contribution
+        // to shared materialized parameter-gradient storage. Generic shared VJPs
+        // record it on their compute stream; deferred legacy paths record it on
+        // gradientUpdateStream. This lets applications serialize writes to the
+        // same dParameter buffers without forcing those buffers onto one stream.
+        Event parameterGradientReadyEvent;
     };
 
     struct DecodedConnection {
@@ -305,15 +359,26 @@ class CustomLayer : public TrainableLayer {
         uint32_t applicationIndex,
         DynamicExpressionVariantId variantId,
         const std::vector<std::string>& wrtNames,
-        bool accumulateGradOutputs,
-        bool useTrainingBackwardPreview,
-        const SavedForwardValueInputNames& savedForwardValueInputNames = {});
+        bool accumulateGradOutputs);
+    BackwardBuildResult buildBackwardOutputsForApplication(
+        uint32_t applicationIndex,
+        DynamicExpressionVariantId variantId,
+        const std::vector<std::string>& wrtNames,
+        const GradientAccumulationTargets& accumulateWrtNames);
     std::shared_ptr<StampedExecutionPlan> stampBackwardForApplication(
         uint32_t applicationIndex,
         DynamicExpressionVariantId variantId,
         const BackwardBuildResult& backwardBuild,
         bool accumulateGradOutputs,
         const PreparedDynamicExpression::TensorMap& preallocatedGradOutputs,
+        Stream& runStream);
+    std::shared_ptr<StampedExecutionPlan> buildGenericSharedBackwardWithFusedOptimizerPlan(
+        uint32_t applicationIndex,
+        DynamicExpressionVariantId variantId,
+        const BackwardBuildResult& sharedBackwardBuild,
+        const std::vector<std::string>& fusedParameterTargets,
+        const PreparedDynamicExpression::TensorMap& ordinaryPreallocatedOutputs,
+        const std::unordered_map<std::string, Tensor>& optimizerUpdateInputs,
         Stream& runStream);
     std::shared_ptr<StampedExecutionPlan> buildFusedOptimizerUpdatePlan(
         uint32_t applicationIndex,
@@ -355,6 +420,13 @@ class CustomLayer : public TrainableLayer {
     DynamicExpressionVariantId activeTrainingVariantId = kPrimaryDynamicExpressionVariant;
 
     bool clearGradientFirstThisBackwardPass = false;
+
+    // Application whose parameter-gradient contribution was most recently
+    // enqueued in the current backward pass. The referenced application's
+    // parameterGradientReadyEvent is the cross-stream ordering edge for the
+    // next contribution. Reset at the start/end of every backward pass.
+    std::optional<uint32_t> lastParameterGradientContributionApplicationThisPass;
+
     uint32_t numBackwardApplications = 0;
     uint32_t numBackwardApplicationsCompletedThisPass = 0;
     std::unordered_map<std::string, uint64_t> effectiveBatchSizeByParameterName;

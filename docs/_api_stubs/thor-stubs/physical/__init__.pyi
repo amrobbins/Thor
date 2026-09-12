@@ -1727,6 +1727,18 @@ class FusedEquation:
             ``(forward_plan, backward_plan)``.
         """
 
+    def requires_forward_execution_for_backward(self) -> bool:
+        """
+        Return whether this compiled backward equation requires its matching real forward execution.
+
+        Returns ``False`` for ordinary forward equations and for backward VJPs that depend only on
+        root inputs plus explicit upstream gradients. Returns ``True`` when backward consumes a
+        computed primal, graph-level conditional predicate, or backend-owned forward state such as
+        Attention/RMSNorm state. Such backward equations must use ``stamp_forward_backward_pair(...)``
+        or a training path that binds the matching real-forward state; plain ``stamp(...)``/``run(...)``
+        is intentionally unsupported.
+        """
+
     @overload
     def run(self, input: PhysicalTensor, output: PhysicalTensor, stream: Stream) -> None:
         """
@@ -1809,7 +1821,8 @@ class FusedEquation:
         materialized primal values or backend state, stamp the returned equation with
         ``stamp_forward_backward_pair(...)`` and execute the returned forward plan before
         the returned backward plan. Plain ``stamp(...)`` remains valid for VJPs that
-        need only root inputs and explicit upstream gradients.
+        need only root inputs and explicit upstream gradients. Call
+        ``requires_forward_execution_for_backward()`` to query that contract without attempting to stamp.
         """
 
     @overload
@@ -1857,7 +1870,8 @@ class FusedEquation:
 
         Backward never reconstructs computed forward values. When this VJP requires
         retained primal values or backend state, use ``stamp_forward_backward_pair(...)``
-        and execute its real forward plan before its backward plan.
+        and execute its real forward plan before its backward plan. Call
+        ``requires_forward_execution_for_backward()`` to query that contract without attempting to stamp.
         """
 
     def output_names(self) -> list[str]:

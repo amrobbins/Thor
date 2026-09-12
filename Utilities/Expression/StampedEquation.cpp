@@ -5998,11 +5998,15 @@ static cudaGraphNode_t appendConditionalPlansIntoGraph(
     Tensor predicate = predicate_plan.output();
     validateConditionalPredicateTensor(predicate);
 
+    // A conditional predicate plan may legitimately contain no executable stages.
+    // This is the normal shape of a backward conditional whose predicate was
+    // retained from the real forward execution: predicate_plan.output() is the
+    // saved BOOLEAN tensor itself, so there is nothing to recompute before the
+    // setter reads it.  In that case predicate_leaves is simply the incoming
+    // dependency set (possibly empty for a top-level conditional), and the
+    // setter kernel is allowed to become a root node of this CUDA graph.
     std::vector<cudaGraphNode_t> predicate_leaves =
         appendPlanSequentiallyIntoGraph(predicate_plan, graph, capture_stream, runtime_scalar_bindings, dependencies);
-    if (predicate_leaves.empty()) {
-        throw std::runtime_error("Graph-level conditional predicate graph produced no CUDA graph nodes.");
-    }
 
     cudaGraphConditionalHandle conditional_handle{};
     CUDA_CHECK(cudaGraphConditionalHandleCreate(&conditional_handle, graph, 0, 0));
@@ -6082,7 +6086,8 @@ StampedConditional::StampedConditional(std::shared_ptr<StampedExecutionPlan> pre
                                        std::shared_ptr<StampedExecutionPlan> then_plan,
                                        std::shared_ptr<StampedExecutionPlan> else_plan,
                                        std::vector<std::string> output_names,
-                                       const Stream& stream)
+                                       const Stream& stream,
+                                       bool defer_graph_build)
     : predicate_plan(std::move(predicate_plan)),
       then_plan(std::move(then_plan)),
       else_plan(std::move(else_plan)),
@@ -6095,8 +6100,14 @@ StampedConditional::StampedConditional(std::shared_ptr<StampedExecutionPlan> pre
         throw std::runtime_error("StampedConditional requires at least one output name.");
     }
 
+    if (!defer_graph_build) {
+        rebuildGraph();
+    }
+}
+
+void StampedConditional::rebuildGraph() {
     BuiltConditionalCudaGraph built =
-        buildConditionalCudaGraph(*this->predicate_plan, *this->then_plan, *this->else_plan, this->stream);
+        buildConditionalCudaGraph(*predicate_plan, *then_plan, *else_plan, stream);
     conditional_graph = std::move(built.executable);
     runtime_scalar_kernel_bindings = std::move(built.runtime_scalar_bindings);
 }
@@ -6133,6 +6144,10 @@ void StampedConditional::run(const std::unordered_map<std::string, float>& runti
 void StampedConditional::runOn(Stream& run_stream) const { runOn(run_stream, {}); }
 
 void StampedConditional::runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const {
+    if (!conditional_graph.isInitialized()) {
+        throw std::runtime_error(
+            "StampedConditional execution graph was deferred for cross-plan state linking but was not rebuilt before runtime.");
+    }
     const std::unordered_set<std::string> expected_names = runtimeScalarNames();
     for (const std::string& name : expected_names) {
         if (!runtime_scalars.contains(name)) {
@@ -6201,6 +6216,68 @@ static std::unordered_set<std::string> runtimeScalarNamesForStage(const StampedE
     return stage_names;
 }
 
+namespace {
+const StampedConditional& retainedStateConditional(const StampedExecutionPlan& plan,
+                                                   const std::vector<StampedExecutionStage>& steps) {
+    (void)plan;
+    if (steps.size() != 1 || steps.front().kind != StampedExecutionStage::Kind::Conditional ||
+        steps.front().conditional == nullptr) {
+        throw std::runtime_error(
+            "Branch-qualified retained-forward lookup requires a graph-level conditional execution plan.");
+    }
+    return *steps.front().conditional;
+}
+}  // namespace
+
+Tensor StampedExecutionPlan::retainedForwardValue(const std::vector<uint8_t>& conditional_branch_path,
+                                                  uint32_t logical_node_index) const {
+    if (conditional_branch_path.empty()) {
+        return retainedForwardValue(logical_node_index);
+    }
+    const StampedConditional& conditional = retainedStateConditional(*this, steps);
+    std::vector<uint8_t> remaining(conditional_branch_path.begin() + 1, conditional_branch_path.end());
+    if (conditional_branch_path.front() == 0) {
+        return conditional.thenPlan().retainedForwardValue(remaining, logical_node_index);
+    }
+    if (conditional_branch_path.front() == 1) {
+        return conditional.elsePlan().retainedForwardValue(remaining, logical_node_index);
+    }
+    throw std::runtime_error("Conditional retained-forward path contains an invalid child selector.");
+}
+
+Tensor StampedExecutionPlan::retainedForwardEpilogueAux(const std::vector<uint8_t>& conditional_branch_path,
+                                                        uint32_t logical_node_index) const {
+    if (conditional_branch_path.empty()) {
+        return retainedForwardEpilogueAux(logical_node_index);
+    }
+    const StampedConditional& conditional = retainedStateConditional(*this, steps);
+    std::vector<uint8_t> remaining(conditional_branch_path.begin() + 1, conditional_branch_path.end());
+    if (conditional_branch_path.front() == 0) {
+        return conditional.thenPlan().retainedForwardEpilogueAux(remaining, logical_node_index);
+    }
+    if (conditional_branch_path.front() == 1) {
+        return conditional.elsePlan().retainedForwardEpilogueAux(remaining, logical_node_index);
+    }
+    throw std::runtime_error("Conditional retained-forward path contains an invalid child selector.");
+}
+
+Tensor StampedExecutionPlan::retainedConditionalPredicate(
+    const std::vector<uint8_t>& conditional_branch_path) const {
+    const StampedConditional& conditional = retainedStateConditional(*this, steps);
+    if (conditional_branch_path.empty()) {
+        return conditional.predicatePlan().output();
+    }
+
+    std::vector<uint8_t> remaining(conditional_branch_path.begin() + 1, conditional_branch_path.end());
+    if (conditional_branch_path.front() == 0) {
+        return conditional.thenPlan().retainedConditionalPredicate(remaining);
+    }
+    if (conditional_branch_path.front() == 1) {
+        return conditional.elsePlan().retainedConditionalPredicate(remaining);
+    }
+    throw std::runtime_error("Conditional retained-forward path contains an invalid child selector.");
+}
+
 std::vector<RetainedAttentionForwardValues> StampedExecutionPlan::retainAttentionForwardValuesForBackward() {
     std::vector<RetainedAttentionForwardValues> retained;
     for (const StampedExecutionStage& stage : steps) {
@@ -6232,6 +6309,12 @@ std::vector<RetainedAttentionForwardValues> StampedExecutionPlan::retainAttentio
 
 void StampedExecutionPlan::linkAttentionBackwardStatesFrom(const StampedExecutionPlan& forward_plan) {
     for (const StampedExecutionStage& backward_stage : steps) {
+        if (backward_stage.kind == StampedExecutionStage::Kind::Conditional && backward_stage.conditional != nullptr) {
+            const StampedConditional& forward_conditional = retainedStateConditional(forward_plan, forward_plan.steps);
+            backward_stage.conditional->thenPlan().linkAttentionBackwardStatesFrom(forward_conditional.thenPlan());
+            backward_stage.conditional->elsePlan().linkAttentionBackwardStatesFrom(forward_conditional.elsePlan());
+            continue;
+        }
         if (backward_stage.kind != StampedExecutionStage::Kind::AttentionBackward ||
             backward_stage.attention_backward == nullptr) {
             continue;
@@ -6255,6 +6338,12 @@ void StampedExecutionPlan::linkAttentionBackwardStatesFrom(const StampedExecutio
 
 void StampedExecutionPlan::linkRmsNormBackwardStatesFrom(const StampedExecutionPlan& forward_plan) {
     for (const StampedExecutionStage& backward_stage : steps) {
+        if (backward_stage.kind == StampedExecutionStage::Kind::Conditional && backward_stage.conditional != nullptr) {
+            const StampedConditional& forward_conditional = retainedStateConditional(forward_plan, forward_plan.steps);
+            backward_stage.conditional->thenPlan().linkRmsNormBackwardStatesFrom(forward_conditional.thenPlan());
+            backward_stage.conditional->elsePlan().linkRmsNormBackwardStatesFrom(forward_conditional.elsePlan());
+            continue;
+        }
         if (backward_stage.kind != StampedExecutionStage::Kind::RmsNormBackward || backward_stage.rms_norm_backward == nullptr) {
             continue;
         }
@@ -6272,6 +6361,17 @@ void StampedExecutionPlan::linkRmsNormBackwardStatesFrom(const StampedExecutionP
             throw std::runtime_error(
                 "RMSNorm backward stage could not find a matching forward RMSNorm state provider in the linked forward plan.");
         }
+    }
+}
+
+void StampedExecutionPlan::rebuildConditionalGraphsAfterCrossPlanLinking() {
+    for (const StampedExecutionStage& stage : steps) {
+        if (stage.kind != StampedExecutionStage::Kind::Conditional || stage.conditional == nullptr) {
+            continue;
+        }
+        stage.conditional->thenPlan().rebuildConditionalGraphsAfterCrossPlanLinking();
+        stage.conditional->elsePlan().rebuildConditionalGraphsAfterCrossPlanLinking();
+        stage.conditional->rebuildGraph();
     }
 }
 

@@ -338,7 +338,7 @@ TEST(AutoDiff, ConditionalDuplicateGradientOwnershipIsPromotedAcrossBranches) {
         Expression::outputs({{"y", lhs + rhs}}),
         Expression::outputs({{"y", lhs * rhs}}));
 
-    PhysicalOutputs backward = buildBackwardOutputs(
+    BackwardBuildResult backward_build = buildBackwardOutputsWithForwardValueRequirements(
         forward.physicalOutputs(),
         {"lhs", "rhs"},
         std::optional<std::string>{"dy"},
@@ -347,6 +347,10 @@ TEST(AutoDiff, ConditionalDuplicateGradientOwnershipIsPromotedAcrossBranches) {
             {"rhs", {4}},
             {"predicate_value", {1}},
         });
+    PhysicalOutputs& backward = backward_build.outputs;
+    ASSERT_EQ(backward_build.forward_value_requirements.size(), 1u);
+    EXPECT_EQ(backward_build.forward_value_requirements[0].kind, ForwardValueRequirementKind::ConditionalPredicate);
+    EXPECT_TRUE(backward_build.forward_value_requirements[0].conditional_branch_path.empty());
 
     ASSERT_TRUE(backward.isConditional());
     ASSERT_NE(backward.conditional, nullptr);

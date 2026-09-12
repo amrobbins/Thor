@@ -1025,13 +1025,22 @@ TEST(FullyConnectedApi, RaggedForwardBackwardSanitizesOnlySelectedConsumerBucket
             }
         }
 
-        // Expression-backed FullyConnected fuses parameter gradients into the
-        // SGD update for this single-application case. Validate dW/db through
-        // the exact resulting parameter update.
+        // BR6.3A deliberately materializes parameter gradients for generic
+        // shared-backward candidates.  Validate the raw dW/db buffers directly
+        // as well as the resulting SGD update.  This also ensures poisoned rows
+        // beyond the selected ragged bucket do not contaminate the materialized
+        // parameter gradients.
         const auto weightsGradient = fixture.physicalFc->getParameter("weights")->getOptimizer()->getWeightsGradient();
         const auto biasesGradient = fixture.physicalFc->getParameter("biases")->getOptimizer()->getWeightsGradient();
-        EXPECT_FALSE(weightsGradient.has_value());
-        EXPECT_FALSE(biasesGradient.has_value());
+        ASSERT_TRUE(weightsGradient.has_value());
+        ASSERT_TRUE(biasesGradient.has_value());
+
+        const vector<float> actualDW =
+            readCpuTensor(copyTensorToCpu(weightsGradient.value(), gradientStream));
+        const vector<float> actualDB =
+            readCpuTensor(copyTensorToCpu(biasesGradient.value(), gradientStream));
+        expectAllClose(actualDW, expectedDW, 2e-4f, 2e-4f, "ragged materialized dW");
+        expectAllClose(actualDB, expectedDB, 2e-4f, 2e-4f, "ragged materialized db");
 
         vector<float> expectedUpdatedWeights = weights;
         vector<float> expectedUpdatedBiases = biases;
@@ -1697,8 +1706,8 @@ TEST(FullyConnectedApi, BackwardFlattensHigherRankFeatureInputWithoutMaterialize
     Stream gradientStream = fixture.physicalFc->getGradientUpdateStream().value();
     Impl::Tensor errorOutputHost = copyTensorToCpu(fixture.physicalFc->getErrorOutputs()[0].value(), stream);
     Impl::Tensor weightsAfterHost = copyTensorToCpu(fixture.physicalFc->getParameter("weights")->getStorage().value(), gradientStream);
-    EXPECT_FALSE(fixture.physicalFc->getParameter("weights")->getOptimizer()->getWeightsGradient().has_value())
-        << "Fused FullyConnected CustomLayer update should not allocate a dense weights gradient tensor.";
+    EXPECT_TRUE(fixture.physicalFc->getParameter("weights")->getOptimizer()->getWeightsGradient().has_value())
+        << "BR6.3A FullyConnected shared-backward preparation must materialize the weights gradient.";
 
     stream.synchronize();
     gradientStream.synchronize();
@@ -1958,13 +1967,35 @@ TEST(FullyConnectedApi, BuilderRejectsUnsupportedMixedInputAndWeightDtypesInstea
 }
 
 #ifdef THOR_DEBUG
-TEST(FullyConnectedApi, Br2DefaultGeluBackwardUsesRetainedForwardValuesWithoutAffineReplay) {
+TEST(FullyConnectedApi, Br65DefaultGeluSharedBackwardExecutesOneAdjointAndTwoGradientMatmuls) {
     constexpr uint32_t batchSize = 2;
     constexpr uint32_t numInputFeatures = 3;
-    constexpr uint32_t numOutputFeatures = 4;
-    const DataType dataType = DataType::FP16;
+    constexpr uint32_t numOutputFeatures = 2;
+    constexpr float learningRate = 0.2f;
+    const DataType dataType = DataType::FP32;
 
-    Api::Network network("fc_br0_default_gelu_forward_replay");
+    // Both rows lie in the nullspace of the chosen weights, so the GELU
+    // preactivation is exactly zero. GELU'(0) = 0.5 for both the exact and the
+    // cuBLASLt approximation, which gives an exact, simple numerical reference
+    // while still exercising the default-GELU retained-forward path.
+    const vector<float> inputValues = {
+        1.0f, 1.0f, 1.0f,
+        2.0f, 2.0f, 2.0f,
+    };
+    const vector<float> weightValues = {
+        1.0f, 0.0f,
+        0.0f, 1.0f,
+       -1.0f,-1.0f,
+    };
+    const vector<float> errorInputValues = {
+         1.0f, 2.0f,
+        -1.0f, 0.5f,
+    };
+    vector<float> activationAdjoint = errorInputValues;
+    for (float& value : activationAdjoint)
+        value *= 0.5f;
+
+    Api::Network network("fc_br65_default_gelu_shared_backward");
     Api::NetworkInput input =
         Api::NetworkInput::Builder().network(network).name("input").dimensions({numInputFeatures}).dataType(dataType).build();
     Api::GradientRivet inputRivet =
@@ -1973,7 +2004,10 @@ TEST(FullyConnectedApi, Br2DefaultGeluBackwardUsesRetainedForwardValuesWithoutAf
                                  .network(network)
                                  .featureInput(inputRivet.getFeatureOutput().value())
                                  .numOutputFeatures(numOutputFeatures)
-                                 .hasBias(true)
+                                 .hasBias(false)
+                                 .weightsDataType(DataType::FP32)
+                                 .computeDataType(DataType::FP32)
+                                 .outputDataType(DataType::FP32)
                                  .build();  // GELU is intentionally the default.
     Api::GradientRivet outputRivet =
         Api::GradientRivet::Builder().network(network).tensor(fc.getFeatureOutput().value()).build();
@@ -1984,41 +2018,68 @@ TEST(FullyConnectedApi, Br2DefaultGeluBackwardUsesRetainedForwardValuesWithoutAf
                                     .dataType(dataType)
                                     .build();
     shared_ptr<Api::Sgd> sgd =
-        Api::Sgd::Builder().network(network).initialLearningRate(0.001f).decay(0.0f).momentum(0.0f).build();
+        Api::Sgd::Builder().network(network).initialLearningRate(learningRate).decay(0.0f).momentum(0.0f).build();
     (void)sgd;
 
     PlacedFullyConnectedFixture fixture = placeSingleFullyConnectedNetwork(network, input, output, fc, batchSize, false);
     ASSERT_TRUE(fixture.physicalFc->getGradientUpdateStream().has_value());
     Stream stream = fixture.physicalFc->getStreams()[0];
     Stream gradientStream = fixture.physicalFc->getGradientUpdateStream().value();
+    setParameterTensor(fixture.physicalFc->getParameter("weights"), weightValues, stream);
+    stream.synchronize();
 
     Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, numInputFeatures}));
-    writeCpuTensor(featureInHost, vector<float>(batchSize * numInputFeatures, 0.25f));
+    writeCpuTensor(featureInHost, inputValues);
     Impl::resetExpressionTestExecutionCounters();
-    (void)runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize);
+    const vector<float> actualForward = runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize);
     const Impl::ExpressionTestExecutionCounters forwardCounters = Impl::expressionTestExecutionCounters();
     EXPECT_EQ(forwardCounters.matmul.forward, 1U)
-        << "BR3 must not turn default-GELU retained prerequisites into a second affine GEMM during the real forward.";
+        << "BR6.5 must execute exactly one real affine GEMM.";
+    EXPECT_EQ(forwardCounters.matmul.backward_gradient, 0U);
+    expectAllClose(actualForward, vector<float>(batchSize * numOutputFeatures, 0.0f), 1e-6f, 1e-6f, "GELU forward");
 
     ASSERT_GT(fixture.physicalFc->getErrorInputs().size(), 0U);
     ASSERT_TRUE(fixture.physicalFc->getErrorInputs()[0].has_value());
+    ASSERT_GT(fixture.physicalFc->getErrorOutputs().size(), 0U);
+    ASSERT_TRUE(fixture.physicalFc->getErrorOutputs()[0].has_value());
+    ASSERT_TRUE(fixture.physicalFc->getParameter("weights")->getOptimizer()->getWeightsGradient().has_value());
+
     Impl::Tensor errorInput = fixture.physicalFc->getErrorInputs()[0].value();
     Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
-    writeCpuTensor(errorInputHost, vector<float>(tensorNumel(errorInputHost), 1.0f));
+    writeCpuTensor(errorInputHost, errorInputValues);
     errorInput.copyFromAsync(errorInputHost, stream);
     stream.synchronize();
 
-    // BR2 still constructs the dInput and parameter-update graphs independently,
-    // but both now consume primal values retained by the one real forward. BR6
-    // will address shared-VJP duplication; this test is specifically about replay.
     Impl::resetExpressionTestExecutionCounters();
     fixture.physicalFc->backward(errorInput, batchSize);
+
+    Impl::Tensor errorOutputHost = copyTensorToCpu(fixture.physicalFc->getErrorOutputs()[0].value(), stream);
+    Impl::Tensor weightsGradientHost = copyTensorToCpu(
+        fixture.physicalFc->getParameter("weights")->getOptimizer()->getWeightsGradient().value(), gradientStream);
+    Impl::Tensor weightsAfterHost =
+        copyTensorToCpu(fixture.physicalFc->getParameter("weights")->getStorage().value(), gradientStream);
     stream.synchronize();
     gradientStream.synchronize();
 
+    const vector<float> expectedErrorOutput = fullyConnectedBackwardErrorReference(
+        activationAdjoint, weightValues, batchSize, numInputFeatures, numOutputFeatures);
+    const vector<float> expectedWeightsGrad = fullyConnectedWeightGradReference(
+        inputValues, activationAdjoint, batchSize, numInputFeatures, numOutputFeatures);
+    const vector<float> expectedWeightsAfter =
+        sgdUpdatedReference(weightValues, expectedWeightsGrad, batchSize, learningRate);
+
+    expectAllClose(readCpuTensor(errorOutputHost), expectedErrorOutput, 1e-5f, 1e-5f, "BR6.5 dInput");
+    expectAllClose(readCpuTensor(weightsGradientHost), expectedWeightsGrad, 1e-5f, 1e-5f, "BR6.5 dWeights");
+    expectAllClose(readCpuTensor(weightsAfterHost), expectedWeightsAfter, 1e-5f, 1e-5f, "BR6.5 weights after");
+
     const Impl::ExpressionTestExecutionCounters counters = Impl::expressionTestExecutionCounters();
-    EXPECT_GE(counters.matmul.backward_gradient, 2U)
-        << "Default-GELU FullyConnected backward must execute the legitimate dInput/dWeights GEMMs.";
+    EXPECT_EQ(counters.matmul.forward, 0U)
+        << "BR6.5 backward must never replay the forward affine GEMM.";
+    EXPECT_EQ(counters.matmul.backward_gradient, 2U)
+        << "BR6.5 shared backward must execute only the legitimate dInput and dWeights GEMMs.";
+    EXPECT_EQ(counters.fused_kernel.forward, 0U);
+    EXPECT_EQ(counters.fused_kernel.backward_gradient, 1U)
+        << "BR6.5 dInput and dWeights must share one physical GELU activation-adjoint prefix.";
 }
 #endif
 
@@ -2083,10 +2144,10 @@ TEST(FullyConnectedApi, BackwardNumericalWithSgdUpdate) {
     Impl::Tensor errorOutputHost = copyTensorToCpu(fixture.physicalFc->getErrorOutputs()[0].value(), stream);
     Impl::Tensor weightsAfterHost = copyTensorToCpu(fixture.physicalFc->getParameter("weights")->getStorage().value(), gradientStream);
     Impl::Tensor biasesAfterHost = copyTensorToCpu(fixture.physicalFc->getParameter("biases")->getStorage().value(), gradientStream);
-    EXPECT_FALSE(fixture.physicalFc->getParameter("weights")->getOptimizer()->getWeightsGradient().has_value())
-        << "Fused FullyConnected CustomLayer update should not allocate a dense weights gradient tensor.";
-    EXPECT_FALSE(fixture.physicalFc->getParameter("biases")->getOptimizer()->getWeightsGradient().has_value())
-        << "Fused FullyConnected CustomLayer update should not allocate a dense biases gradient tensor.";
+    EXPECT_TRUE(fixture.physicalFc->getParameter("weights")->getOptimizer()->getWeightsGradient().has_value())
+        << "BR6.3A FullyConnected shared-backward preparation must materialize the weights gradient.";
+    EXPECT_TRUE(fixture.physicalFc->getParameter("biases")->getOptimizer()->getWeightsGradient().has_value())
+        << "BR6.3A FullyConnected shared-backward preparation must materialize the biases gradient.";
 
     stream.synchronize();
     gradientStream.synchronize();
@@ -2236,8 +2297,8 @@ void runLowPrecisionInputsFp32OutputSgd(DataType operandDataType) {
     expectAllClose(readCpuTensor(biasesAfterHost), expectedBiasesAfter, 2e-4f, 2e-4f,
                    "low-precision/fp32 biases after SGD");
 
-    EXPECT_FALSE(fixture.physicalFc->getParameter("weights")->getOptimizer()->getWeightsGradient().has_value());
-    EXPECT_FALSE(fixture.physicalFc->getParameter("biases")->getOptimizer()->getWeightsGradient().has_value());
+    EXPECT_TRUE(fixture.physicalFc->getParameter("weights")->getOptimizer()->getWeightsGradient().has_value());
+    EXPECT_TRUE(fixture.physicalFc->getParameter("biases")->getOptimizer()->getWeightsGradient().has_value());
 }
 
 TEST(FullyConnectedApi, Bf16InputsAndWeightsFp32OutputTrainWithSgd) {
@@ -2402,8 +2463,8 @@ TEST(FullyConnectedApi, Bf16InputsAndWeightsFp32OutputTrainWithAdamAndFp32State)
     expectAllClose(readCpuTensor(biasesAfterHost), expectedBiasesAfter, 2e-4f, 2e-4f,
                    "bf16/fp32 Adam biases after");
 
-    EXPECT_FALSE(physicalWeightsAdam->getWeightsGradient().has_value());
-    EXPECT_FALSE(physicalBiasesAdam->getWeightsGradient().has_value());
+    EXPECT_TRUE(physicalWeightsAdam->getWeightsGradient().has_value());
+    EXPECT_TRUE(physicalBiasesAdam->getWeightsGradient().has_value());
 }
 
 void runFullyConnectedAdamThreePasses(bool hasBias) {
@@ -2614,8 +2675,8 @@ void runFullyConnectedAdamThreePasses(bool hasBias) {
         Stream gradientStream = fixture.physicalFc->getGradientUpdateStream().value();
 
         Impl::Tensor errorOutputHost = copyTensorToCpu(fixture.physicalFc->getErrorOutputs()[0].value(), stream);
-        EXPECT_FALSE(physicalWeightsAdam->getWeightsGradient().has_value())
-            << "Fused FullyConnected Adam weights update should not allocate a dense gradient tensor.";
+        EXPECT_TRUE(physicalWeightsAdam->getWeightsGradient().has_value())
+            << "BR6.3A FullyConnected must keep the Adam weights gradient materialized.";
         Impl::Tensor weightsAfterHost = copyTensorToCpu(fixture.physicalFc->getParameter("weights")->getStorage().value(), gradientStream);
         Impl::Tensor weightsMHost = copyTensorToCpu(physicalWeightsAdam->getOptimizerParameterTensor("m"), gradientStream);
         Impl::Tensor weightsVHost = copyTensorToCpu(physicalWeightsAdam->getOptimizerParameterTensor("v"), gradientStream);
@@ -2634,8 +2695,8 @@ void runFullyConnectedAdamThreePasses(bool hasBias) {
         if (hasBias) {
             ASSERT_NE(physicalBiasesAdam, nullptr);
 
-            EXPECT_FALSE(physicalBiasesAdam->getWeightsGradient().has_value())
-                << "Fused FullyConnected Adam biases update should not allocate a dense gradient tensor.";
+            EXPECT_TRUE(physicalBiasesAdam->getWeightsGradient().has_value())
+                << "BR6.3A FullyConnected must keep the Adam biases gradient materialized.";
             Impl::Tensor biasesAfterHost =
                 copyTensorToCpu(fixture.physicalFc->getParameter("biases")->getStorage().value(), gradientStream);
             Impl::Tensor biasesMHost = copyTensorToCpu(physicalBiasesAdam->getOptimizerParameterTensor("m"), gradientStream);

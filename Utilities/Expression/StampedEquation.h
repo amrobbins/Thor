@@ -1691,7 +1691,8 @@ class StampedConditional {
                        std::shared_ptr<StampedExecutionPlan> then_plan,
                        std::shared_ptr<StampedExecutionPlan> else_plan,
                        std::vector<std::string> output_names,
-                       const Stream& stream);
+                       const Stream& stream,
+                       bool defer_graph_build = false);
 
     void run();
     void run(const std::unordered_map<std::string, float>& runtime_scalars);
@@ -1700,6 +1701,22 @@ class StampedConditional {
     [[nodiscard]] bool requiresRuntimeScalars() const;
     [[nodiscard]] std::unordered_set<std::string> runtimeScalarNames() const;
     uint32_t gpuNum() const;
+
+    // Graph-level conditional retained-forward state is owned by the exact
+    // stamped child plan that produces it. These accessors let the enclosing
+    // execution plan resolve a branch-qualified retained value recursively.
+    [[nodiscard]] StampedExecutionPlan& predicatePlan() { return *predicate_plan; }
+    [[nodiscard]] const StampedExecutionPlan& predicatePlan() const { return *predicate_plan; }
+    [[nodiscard]] StampedExecutionPlan& thenPlan() { return *then_plan; }
+    [[nodiscard]] const StampedExecutionPlan& thenPlan() const { return *then_plan; }
+    [[nodiscard]] StampedExecutionPlan& elsePlan() { return *else_plan; }
+    [[nodiscard]] const StampedExecutionPlan& elsePlan() const { return *else_plan; }
+
+    // Re-capture the conditional CUDA graph after stamp-time mutation of child
+    // execution state (for example, linking RMSNorm/Attention backward to its
+    // matching real-forward provider). This is a stamping operation; runOn()
+    // never prepares or rebuilds graphs.
+    void rebuildGraph();
 
    private:
     friend struct detail::ConditionalGraphCaptureAccess;
@@ -2454,6 +2471,12 @@ class StampedExecutionPlan {
     // executable/workspace and must consume the retained state at runtime.
     void linkAttentionBackwardStatesFrom(const StampedExecutionPlan& forward_plan);
 
+    // Rebuild every graph-level conditional CUDA graph recursively after child
+    // plans have been mutated by cross-plan forward-state linking. Nested child
+    // graphs are rebuilt before their parent graph is captured. Flat plans are
+    // unchanged.
+    void rebuildConditionalGraphsAfterCrossPlanLinking();
+
     struct AttentionBackwardStateDiagnostic {
         bool linked_forward_state = false;
         uintptr_t linked_forward_state_id = 0;
@@ -2699,6 +2722,12 @@ class StampedExecutionPlan {
         return retained_forward_values;
     }
 
+    // Resolve retained state inside a graph-level conditional. Each path element
+    // selects 0=then or 1=else at one nesting level. An empty path addresses
+    // this plan's ordinary flat retained-value map.
+    [[nodiscard]] Tensor retainedForwardValue(const std::vector<uint8_t>& conditional_branch_path,
+                                              uint32_t logical_node_index) const;
+
     [[nodiscard]] bool hasRetainedForwardEpilogueAux(uint32_t logical_node_index) const {
         return retained_forward_epilogue_aux_values.contains(logical_node_index);
     }
@@ -2716,6 +2745,16 @@ class StampedExecutionPlan {
     [[nodiscard]] const std::unordered_map<uint32_t, Tensor>& retainedForwardEpilogueAuxValues() const {
         return retained_forward_epilogue_aux_values;
     }
+
+    [[nodiscard]] Tensor retainedForwardEpilogueAux(const std::vector<uint8_t>& conditional_branch_path,
+                                                    uint32_t logical_node_index) const;
+
+    // Return the exact boolean predicate tensor produced by the real forward
+    // conditional at conditional_branch_path. An empty path addresses this
+    // plan's root conditional; {0,1}, for example, addresses the conditional in
+    // then->else. This is used by backward to replay the branch decision without
+    // replaying the predicate computation.
+    [[nodiscard]] Tensor retainedConditionalPredicate(const std::vector<uint8_t>& conditional_branch_path) const;
 
    private:
     friend struct detail::ConditionalGraphCaptureAccess;

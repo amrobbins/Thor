@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "Utilities/Expression/Expression.h"
@@ -19,17 +20,38 @@ inline constexpr const char* DEFAULT_BACKWARD_UPSTREAM_INPUT_NAME = "__grad_outp
 // computed primal must be supplied by the real forward execution.
 using SavedForwardValueInputNames = std::unordered_map<uint32_t, std::string>;
 
+// Selective terminal-gradient accumulation. A requested wrt name in this set
+// reads its existing `<wrt>_grad` tensor and adds the newly computed
+// contribution. Requested wrt names not in the set overwrite their gradient
+// output. This lets one multi-target VJP overwrite activation/input gradients
+// while accumulating parameter gradients.
+using GradientAccumulationTargets = std::unordered_set<std::string>;
+
 // A backward expression records every non-root primal value that must be
 // supplied from the real forward execution.
 enum class ForwardValueRequirementKind : uint8_t {
     NodeOutput = 0,
     MatmulEpilogueAux = 1,
+    // Graph-level conditional backward must consume the exact predicate value
+    // produced by the matching real forward rather than re-evaluating the
+    // predicate expression. conditional_branch_path identifies the conditional
+    // whose predicate is required.
+    ConditionalPredicate = 2,
 };
 
 struct ForwardValueRequirement {
     uint32_t forward_node_index = UINT32_MAX;
     std::string backward_input_name;
     ForwardValueRequirementKind kind = ForwardValueRequirementKind::NodeOutput;
+
+    // Empty for an ordinary flat forward expression or for the predicate of a
+    // root conditional. For graph-level conditionals, each element identifies
+    // the selected child at one nesting level: 0 = then, 1 = else. For
+    // NodeOutput/MatmulEpilogueAux the path identifies the branch-local forward
+    // expression containing forward_node_index. For ConditionalPredicate it
+    // identifies the conditional whose already-materialized predicate output is
+    // required.
+    std::vector<uint8_t> conditional_branch_path;
 };
 
 struct BackwardBuildResult {
@@ -85,6 +107,17 @@ BackwardBuildResult buildBackwardOutputsWithForwardValueRequirements(
     bool accumulate_grad_outputs = false,
     const SavedForwardValueInputNames& saved_forward_value_input_names = {});
 
+// Selective-accumulation overload. Only names in accumulate_wrt_names
+// accumulate into caller-provided gradient outputs; every other requested wrt
+// overwrites. accumulate_wrt_names must be a subset of the normalized wrt set.
+BackwardBuildResult buildBackwardOutputsWithForwardValueRequirements(
+    const PhysicalOutputs& forward_outputs,
+    const std::vector<std::string>& wrt_names,
+    const std::optional<std::string>& upstream_input_name,
+    const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
+    const GradientAccumulationTargets& accumulate_wrt_names,
+    const SavedForwardValueInputNames& saved_forward_value_input_names = {});
+
 BackwardBuildResult buildBackwardOutputsWithForwardValueRequirements(
     const PhysicalOutputs& forward_outputs,
     const std::vector<std::string>& wrt_names,
@@ -92,6 +125,15 @@ BackwardBuildResult buildBackwardOutputsWithForwardValueRequirements(
     const std::unordered_map<std::string, DataType>& upstream_input_dtypes_by_output,
     const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims = std::nullopt,
     bool accumulate_grad_outputs = false,
+    const SavedForwardValueInputNames& saved_forward_value_input_names = {});
+
+BackwardBuildResult buildBackwardOutputsWithForwardValueRequirements(
+    const PhysicalOutputs& forward_outputs,
+    const std::vector<std::string>& wrt_names,
+    const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
+    const std::unordered_map<std::string, DataType>& upstream_input_dtypes_by_output,
+    const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
+    const GradientAccumulationTargets& accumulate_wrt_names,
     const SavedForwardValueInputNames& saved_forward_value_input_names = {});
 
 PhysicalOutputs buildBackwardOutputs(

@@ -789,10 +789,6 @@ def test_attention_bshd_strided_packed_qkv_view_backward_scatter_add_rejects_sta
     assert bwd_eq.output_shapes(inputs_gpu) == {
         "qkv_grad": [batch * sequence, total_width]
     }
-    stage_kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
-    assert stage_kinds.count("AttentionBackward") == 1
-    assert stage_kinds.count("FusedKernel") == 1
-    assert stage_kinds.index("AttentionBackward") < stage_kinds.index("FusedKernel")
 
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
@@ -3118,7 +3114,13 @@ def _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, str
     # AttentionBackward consumes output/statistics from the exact forward that
     # actually executed.  A separately stamped compile_backward() plan has no
     # such state provider and must not manufacture one by replaying Attention.
-    with pytest.raises(RuntimeError, match="Standalone Attention backward stamping is unsupported"):
+    assert bwd_eq.requires_forward_execution_for_backward()
+    # Equation stage inspection compiles for execution, so it has the same
+    # linked-forward requirement as stamp(). Physical stage counts belong in
+    # the stamp_forward_backward_pair() execution tests below.
+    with pytest.raises(RuntimeError, match="stamp_forward_backward_pair"):
+        bwd_eq._debug_stage_kinds(inputs_gpu)
+    with pytest.raises(RuntimeError, match="stamp_forward_backward_pair"):
         bwd_eq.stamp(inputs_gpu, stream)
 
 
@@ -3162,7 +3164,6 @@ def test_attention_compile_backward_qkv_uses_single_attention_backward_stage_and
         "k_grad": [1, 2, 64, 64],
         "v_grad": [1, 2, 64, 64],
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
@@ -3234,7 +3235,6 @@ def test_attention_compile_backward_qkv_with_ragged_offsets_bshd_packed_rejects_
         "k_grad": [2, 64, 2, 64],
         "v_grad": [2, 64, 2, 64],
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
@@ -3306,7 +3306,6 @@ def test_attention_compile_backward_qkv_with_ragged_offsets_gqa_bshd_packed_reje
         "k_grad": [2, 64, 2, 64],
         "v_grad": [2, 64, 2, 64],
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
@@ -3380,7 +3379,6 @@ def test_attention_compile_backward_qkv_with_ragged_offsets_causal_top_left_bshd
         "k_grad": [2, 64, 2, 64],
         "v_grad": [2, 64, 2, 64],
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
@@ -3495,7 +3493,6 @@ def test_attention_compile_backward_qkv_with_alibi_causal_mask_rejects_standalon
         "k_grad": [1, 4, 64, 64],
         "v_grad": [1, 4, 64, 64],
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
@@ -3626,7 +3623,6 @@ def test_attention_compile_backward_qkv_with_causal_bottom_right_decode_mask_rej
         "k_grad": [1, 2, 64, 64],
         "v_grad": [1, 2, 64, 64],
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
@@ -3743,7 +3739,6 @@ def test_attention_compile_backward_qkv_with_padding_mask_stays_single_attention
         "k_grad": [1, 2, 64, 64],
         "v_grad": [1, 2, 64, 64],
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
@@ -3808,7 +3803,6 @@ def test_attention_compile_backward_qkv_with_padding_mask_and_additive_bias_reje
         "k_grad": [1, 2, 64, 64],
         "v_grad": [1, 2, 64, 64],
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
@@ -3870,7 +3864,6 @@ def test_attention_compile_backward_qkv_with_padding_mask_and_causal_mask_reject
         "k_grad": [1, 2, 64, 64],
         "v_grad": [1, 2, 64, 64],
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
@@ -5186,9 +5179,6 @@ def test_attention_sequence_broadcast_additive_bias_backward_expands_dense_and_r
     assert output_shapes["k_grad"] == [batch, kv_heads, kv_len, qk_dim]
     assert output_shapes["v_grad"] == [batch, kv_heads, kv_len, v_dim]
     assert output_shapes["bias_grad"] == list(bias_shape)
-    stage_kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
-    assert "AttentionBackward" in stage_kinds
-    assert "Reduction" in stage_kinds
 
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
@@ -6290,7 +6280,6 @@ def test_attention_compile_backward_qkv_with_additive_bias_stays_single_attentio
         "k_grad": [1, 2, 64, 64],
         "v_grad": [1, 2, 64, 64],
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
@@ -6339,7 +6328,6 @@ def test_attention_compile_backward_qkv_and_dbias_with_additive_bias_rejects_sta
         "v_grad": [1, 2, 64, 64],
         "bias_grad": [1, 2, 64, 64],
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
@@ -6389,9 +6377,6 @@ def test_attention_compile_backward_dbias_with_broadcast_additive_bias_shapes_an
     assert bwd_eq.output_shapes(inputs_gpu) == {
         "bias_grad": list(bias_shape)
     }
-    expected_stage_kinds = (
-        ["AttentionBackward"] if bias_shape == (2, 4, 64, 64) else ["AttentionBackward", "Reduction"])
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == expected_stage_kinds
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
@@ -6443,9 +6428,6 @@ def test_attention_compile_backward_qkv_and_dbias_with_broadcast_additive_bias_s
         "v_grad": [2, 2, 64, 64],
         "bias_grad": list(bias_shape),
     }
-    expected_stage_kinds = (
-        ["AttentionBackward"] if bias_shape == (2, 4, 64, 64) else ["AttentionBackward", "Reduction"])
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == expected_stage_kinds
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
@@ -6568,7 +6550,6 @@ def test_attention_compile_backward_dbias_only_with_additive_bias_rejects_standa
     assert bwd_eq.output_shapes(inputs_gpu) == {
         "bias_grad": [1, 2, 64, 64]
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
@@ -6617,7 +6598,6 @@ def test_attention_compile_backward_dbias_gqa_with_additive_bias_rejects_standal
         "v_grad": [1, 2, 64, 64],
         "bias_grad": [1, 4, 64, 64],
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
@@ -6680,7 +6660,6 @@ def test_attention_compile_backward_dbias_with_padding_mask_rejects_standalone_s
     assert bwd_eq.output_shapes(inputs_gpu) == {
         "bias_grad": [2, 2, 64, 64]
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
@@ -6726,7 +6705,6 @@ def test_attention_compile_backward_dbias_with_bf16_inputs_rejects_standalone_st
     assert bwd_eq.output_shapes(inputs_gpu) == {
         "bias_grad": [1, 2, 64, 64]
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
@@ -6944,7 +6922,6 @@ def test_attention_backward_selector_subsets_with_additive_bias_merge_to_one_cud
     assert bwd_eq.output_shapes(inputs_gpu) == {
         name: expected_shapes[name] for name in expected_names
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
@@ -7073,7 +7050,6 @@ def test_attention_compile_backward_dbias_with_alibi_causal_mask_rejects_standal
     assert bwd_eq.output_shapes(inputs_gpu) == {
         "bias_grad": [1, 4, 64, 64]
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
@@ -7123,7 +7099,6 @@ def test_attention_compile_backward_dbias_with_dropout_and_additive_bias_stays_s
         "v_grad": [1, 2, 64, 64],
         "bias_grad": [1, 2, 64, 64],
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
@@ -7557,7 +7532,6 @@ def test_attention_compile_backward_qkv_with_dropout_stays_single_attention_back
         "k_grad": [1, 2, 64, 64],
         "v_grad": [1, 2, 64, 64],
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
@@ -7748,7 +7722,6 @@ def test_attention_compile_backward_qkv_with_dropout_padding_and_bias_stays_sing
         "k_grad": [1, 2, 64, 64],
         "v_grad": [1, 2, 64, 64],
     }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
     _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 

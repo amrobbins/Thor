@@ -153,6 +153,78 @@ TEST(ExpressionForwardReplayInstrumentation, Br60BLegacyPhysicalOutputsApiStillS
     });
 }
 
+TEST(ExpressionForwardReplayInstrumentation, Br60ERootOnlyBackwardRemainsStandaloneCapable) {
+    REQUIRE_CUDA_DEVICE();
+
+    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    const FusedEquation forward = FusedEquation::compile(Expression::outputs({{"y", x * x}}).physicalOutputs(), 0);
+    const FusedEquation backward = forward.compileBackward({"x"}, "dy");
+
+    EXPECT_FALSE(backward.requiresForwardExecutionForBackward());
+}
+
+TEST(ExpressionForwardReplayInstrumentation, Br60EComputedPrimalBackwardRequiresRealForwardExecution) {
+    REQUIRE_CUDA_DEVICE();
+
+    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    const FusedEquation forward = FusedEquation::compile(Expression::outputs({{"y", x.exp()}}).physicalOutputs(), 0);
+    const FusedEquation backward = forward.compileBackward({"x"}, "dy");
+
+    ASSERT_TRUE(backward.requiresForwardExecutionForBackward());
+
+    const TensorPlacement gpu(TensorPlacement::MemDevices::GPU, 0);
+    Tensor x_tensor(gpu, TensorDescriptor(DataType::FP32, {4}));
+    Tensor dy(gpu, TensorDescriptor(DataType::FP32, {4}));
+    Stream stream(0);
+
+    try {
+        (void)backward.stamp({{"x", x_tensor}, {"dy", dy}}, stream);
+        FAIL() << "BR6.0E must reject standalone stamping before a computed-primal backward can execute.";
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("requires retained values and/or backend state"), std::string::npos);
+        EXPECT_NE(message.find("stampForwardBackwardPair()"), std::string::npos);
+    }
+}
+
+TEST(ExpressionForwardReplayInstrumentation, Br60ERmsNormBackendStateRequiresRealForwardEvenWithoutSyntheticSavedInput) {
+    REQUIRE_CUDA_DEVICE();
+
+    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression scale = Expression::input("scale", DataType::FP32, DataType::FP32);
+    const Expression y = Expression::rmsNorm(x, scale, 4, 1.0e-5, DataType::FP32, DataType::FP32);
+    const FusedEquation forward = FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+    const FusedEquation backward = forward.compileBackward({"x"}, "dy");
+
+    ASSERT_NE(backward.physicalOutputs().expr, nullptr);
+    EXPECT_FALSE(std::any_of(
+        backward.physicalOutputs().expr->inputs.begin(),
+        backward.physicalOutputs().expr->inputs.end(),
+        [](const NamedInput& input) {
+            return input.name.rfind("__thor_saved_forward_value_", 0) == 0 ||
+                   input.name.rfind("__thor_saved_forward_matmul_epilogue_aux_", 0) == 0 ||
+                   input.name.rfind("__thor_saved_forward_conditional_predicate_", 0) == 0;
+        }))
+        << "The deferred RMSNorm VJP uses shape placeholders, so BR6.0E must detect its backend-state dependency "
+           "from the real forward DAG.";
+    EXPECT_TRUE(backward.requiresForwardExecutionForBackward());
+}
+
+TEST(ExpressionForwardReplayInstrumentation, Br60EUnrelatedRmsNormDoesNotDisableStandaloneRootOnlyVjp) {
+    REQUIRE_CUDA_DEVICE();
+
+    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression scale = Expression::input("scale", DataType::FP32, DataType::FP32);
+    const Expression z = Expression::input("z", DataType::FP32, DataType::FP32);
+    const Expression normalized = Expression::rmsNorm(x, scale, 4, 1.0e-5, DataType::FP32, DataType::FP32);
+    const FusedEquation forward =
+        FusedEquation::compile(Expression::outputs({{"y", normalized + z}}).physicalOutputs(), 0);
+    const FusedEquation backward = forward.compileBackward({"z"}, "dy");
+
+    EXPECT_FALSE(backward.requiresForwardExecutionForBackward())
+        << "A stateful forward op outside the requested VJP path must not force the linked-forward contract.";
+}
+
 TEST(ExpressionForwardReplayInstrumentation, SavedForwardAutodiffDoesNotRetainRootInputs) {
     const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
     const PhysicalOutputs forward = Expression::outputs({{"y", x * x}}).physicalOutputs();

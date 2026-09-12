@@ -84,6 +84,20 @@ def _host_to_gpu(arr: np.ndarray, dtype: thor.DataType, stream: Stream, gpu_num:
 
 
 @pytest.mark.cuda
+def test_compile_backward_reports_real_forward_execution_contract():
+    x = ex.input("x")
+
+    root_only_forward = ex.compile(x * x, device_num=0)
+    root_only_backward = root_only_forward.compile_backward(["x"], error_input_name="dy")
+    assert root_only_forward.requires_forward_execution_for_backward() is False
+    assert root_only_backward.requires_forward_execution_for_backward() is False
+
+    retained_forward = ex.compile(ex.exp(x), device_num=0)
+    retained_backward = retained_forward.compile_backward(["x"], error_input_name="dy")
+    assert retained_backward.requires_forward_execution_for_backward() is True
+
+
+@pytest.mark.cuda
 @pytest.mark.parametrize("dtype", [thor.DataType.fp16, thor.DataType.bf16, thor.DataType.fp32])
 @pytest.mark.parametrize("inclusive", [True, False])
 def test_compile_backward_sum_scan_uses_reverse_scan_lowering(dtype: thor.DataType, inclusive: bool):
@@ -144,7 +158,8 @@ def test_compile_backward_computed_primal_requires_real_forward_pair():
         upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
 
-    with pytest.raises(RuntimeError, match="retained state from the real forward execution"):
+    assert bwd_eq.requires_forward_execution_for_backward()
+    with pytest.raises(RuntimeError, match="stamp_forward_backward_pair"):
         bwd_eq.stamp(inputs_gpu, stream)
 
     forward_stamped, backward_stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
@@ -2314,12 +2329,14 @@ def test_compile_backward_multi_output_accumulate_grad_outputs_run_numerical(dty
 
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
-def test_compile_backward_accumulate_grad_outputs_stamp_requires_outputs(dtype: thor.DataType):
+@pytest.mark.parametrize("requires_forward", [False, True], ids=["standalone", "linked_forward"])
+def test_compile_backward_accumulate_grad_outputs_stamp_requires_outputs(dtype: thor.DataType, requires_forward: bool):
     x = ex.input("x")
     y = ex.input("y")
     upstream_name = "__grad_output"
 
-    out = (x * y) + ex.exp(x)
+    # Root-only derivatives can stamp standalone; exp needs its real-forward value.
+    out = (x * y) + ex.exp(x) if requires_forward else x * y
     fwd_eq = ex.compile(out, device_num=0)
     bwd_eq = fwd_eq.compile_backward(
         ["x", "y"],
@@ -2339,11 +2356,12 @@ def test_compile_backward_accumulate_grad_outputs_stamp_requires_outputs(dtype: 
         upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
 
-    with pytest.raises(RuntimeError) as excinfo:
-        bwd_eq.stamp(inputs_gpu, stream)
-
-    msg = str(excinfo.value).lower()
-    assert "accumulate" in msg or "gradient output" in msg or "caller-provided" in msg
+    assert bwd_eq.requires_forward_execution_for_backward() == requires_forward
+    with pytest.raises(RuntimeError, match="caller-provided gradient output tensors"):
+        if requires_forward:
+            bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+        else:
+            bwd_eq.stamp(inputs_gpu, stream)
 
 
 @pytest.mark.cuda

@@ -8,6 +8,8 @@
 
 #include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/DynamicExpression.h"
+#include "Utilities/Expression/EquationCompiler.h"
+#include "Utilities/Expression/ExecutionDiagnostics.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
 
@@ -22,6 +24,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 #include "DeepLearning/Implementation/Layers/Optimizers/Adam.h"
@@ -304,6 +307,188 @@ class VariantSelectableCustomLayer : public CustomLayer {
 
     void selectTrainingVariant(DynamicExpressionVariantId variantId) { setActiveTrainingExecutionVariant(variantId); }
 };
+
+class FixedMatrixParameter : public PhysicalParameter {
+   public:
+    FixedMatrixParameter(std::string name,
+                         uint64_t rows,
+                         uint64_t columns,
+                         std::vector<float> initialValues,
+                         bool trainable)
+        : PhysicalParameter(std::move(name), trainable),
+          rows(rows),
+          columns(columns),
+          initialValues(std::move(initialValues)) {
+        if (rows == 0 || columns == 0 || this->initialValues.size() != rows * columns) {
+            throw std::invalid_argument("FixedMatrixParameter dimensions do not match initial values.");
+        }
+    }
+
+    void createStorage(const StorageContext& context) override {
+        const Tensor& primary = context.getInput("x");
+        if (primary.getDataType() != DataType::FP32)
+            throw std::runtime_error("FixedMatrixParameter currently supports FP32 only.");
+
+        storage = Tensor(primary.getPlacement(), TensorDescriptor(primary.getDataType(), {rows, columns}));
+        Tensor init_h(cpuPlacement, TensorDescriptor(primary.getDataType(), {rows, columns}));
+        writeCpuTensor(init_h, initialValues);
+
+        Stream initStream = gradientUpdateStream.has_value() ? gradientUpdateStream.value() : Stream(primary.getPlacement());
+        storage.value().copyFromAsync(init_h, initStream);
+        Event ready = initStream.putEvent();
+        ready.synchronize();
+    }
+
+   private:
+    uint64_t rows;
+    uint64_t columns;
+    std::vector<float> initialValues;
+};
+
+class SharedBackwardPreviewInspectableCustomLayer : public CustomLayer {
+   public:
+    using CustomLayer::CustomLayer;
+
+    struct Preview {
+        uint32_t applicationIndex;
+        DynamicExpressionVariantId variantId;
+        BackwardBuildResult backwardBuild;
+        GradientAccumulationTargets accumulateWrtNames;
+    };
+
+    struct StampedPlan {
+        uint32_t applicationIndex;
+        DynamicExpressionVariantId variantId;
+        std::shared_ptr<StampedExecutionPlan> backwardPlan;
+        GradientAccumulationTargets accumulateWrtNames;
+    };
+
+    const std::vector<Preview>& sharedBackwardPreviews() const { return previews; }
+    const std::vector<StampedPlan>& stampedSharedBackwardPlans() const { return stampedPlans; }
+
+   protected:
+    void onGenericSharedBackwardPreviewBuilt(
+        uint32_t applicationIndex,
+        DynamicExpressionVariantId variantId,
+        const BackwardBuildResult& backwardBuild,
+        const GradientAccumulationTargets& accumulateWrtNames) override {
+        previews.push_back({applicationIndex, variantId, backwardBuild, accumulateWrtNames});
+    }
+
+    void onGenericSharedBackwardExecutionVariantStamped(
+        uint32_t applicationIndex,
+        DynamicExpressionVariantId variantId,
+        const std::shared_ptr<StampedExecutionPlan>& backwardPlan,
+        const GradientAccumulationTargets& accumulateWrtNames) override {
+        stampedPlans.push_back({applicationIndex, variantId, backwardPlan, accumulateWrtNames});
+    }
+
+   private:
+    std::vector<Preview> previews;
+    std::vector<StampedPlan> stampedPlans;
+};
+
+DynamicExpression buildRmsNormSharedBackwardPreviewExpression(const TensorPlacement& placement, uint64_t features) {
+    return DynamicExpression([placement, features](const DynamicExpression::TensorMap& inputs,
+                                                    const DynamicExpression::TensorMap& outputs,
+                                                    Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+        const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+        const Expression scale = Expression::input("scale", DataType::FP32, DataType::FP32);
+        const Expression y = Expression::rmsNorm(x, scale, features, 1.0e-5, DataType::FP32, DataType::FP32);
+        const Outputs expressionOutputs = Expression::outputs({{"out", y}});
+        return DynamicExpressionBuild{
+            std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            outputs,
+            {}};
+    });
+}
+
+DynamicExpression buildTwoOutputIndependentScaleSharedBackwardPreviewExpression(const TensorPlacement& placement) {
+    return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
+                                         const DynamicExpression::TensorMap& outputs,
+                                         Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+        const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+        const Expression scaleA = Expression::input("scale_a", DataType::FP32, DataType::FP32);
+        const Expression scaleB = Expression::input("scale_b", DataType::FP32, DataType::FP32);
+        const Outputs expressionOutputs = Expression::outputs({{"out_a", x * scaleA}, {"out_b", x * scaleB}});
+        return DynamicExpressionBuild{
+            std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            outputs,
+            {}};
+    });
+}
+
+DynamicExpression buildMatmulGeluSharedBackwardPreviewExpression(const TensorPlacement& placement) {
+    return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
+                                         const DynamicExpression::TensorMap& outputs,
+                                         Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+        const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+        const Expression weights = Expression::input("weights", DataType::FP32, DataType::FP32);
+        const Expression affine = Expression::matmul(x, weights, false, false, DataType::FP32, DataType::FP32);
+        const Outputs expressionOutputs = Expression::outputs({{"out", affine.gelu()}});
+        return DynamicExpressionBuild{
+            std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            outputs,
+            {}};
+    });
+}
+
+const SharedBackwardPreviewInspectableCustomLayer::Preview& clearSharedBackwardPreview(
+    const SharedBackwardPreviewInspectableCustomLayer& layer) {
+    const auto& previews = layer.sharedBackwardPreviews();
+    auto it = std::find_if(previews.begin(), previews.end(), [](const auto& preview) {
+        return preview.accumulateWrtNames.empty();
+    });
+    if (it == previews.end()) {
+        throw std::runtime_error("Expected BR6.2 clear shared-backward preview was not built.");
+    }
+    return *it;
+}
+
+const SharedBackwardPreviewInspectableCustomLayer::Preview& accumulateSharedBackwardPreview(
+    const SharedBackwardPreviewInspectableCustomLayer& layer) {
+    const auto& previews = layer.sharedBackwardPreviews();
+    auto it = std::find_if(previews.begin(), previews.end(), [](const auto& preview) {
+        return !preview.accumulateWrtNames.empty();
+    });
+    if (it == previews.end()) {
+        throw std::runtime_error("Expected BR6.2 accumulate shared-backward preview was not built.");
+    }
+    return *it;
+}
+
+const SharedBackwardPreviewInspectableCustomLayer::StampedPlan& clearStampedSharedBackwardPlan(
+    const SharedBackwardPreviewInspectableCustomLayer& layer) {
+    const auto& plans = layer.stampedSharedBackwardPlans();
+    auto it = std::find_if(plans.begin(), plans.end(), [](const auto& plan) {
+        return plan.accumulateWrtNames.empty();
+    });
+    if (it == plans.end()) {
+        throw std::runtime_error("Expected BR6.3B clear shared-backward plan was not stamped.");
+    }
+    return *it;
+}
+
+const SharedBackwardPreviewInspectableCustomLayer::StampedPlan& accumulateStampedSharedBackwardPlan(
+    const SharedBackwardPreviewInspectableCustomLayer& layer) {
+    const auto& plans = layer.stampedSharedBackwardPlans();
+    auto it = std::find_if(plans.begin(), plans.end(), [](const auto& plan) {
+        return !plan.accumulateWrtNames.empty();
+    });
+    if (it == plans.end()) {
+        throw std::runtime_error("Expected BR6.3B accumulate shared-backward plan was not stamped.");
+    }
+    return *it;
+}
 
 DynamicExpression buildSingleInputSingleOutputExpression(const TensorPlacement& placement) {
     return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
@@ -620,6 +805,30 @@ DynamicExpression buildConditionalScaleExpression(const TensorPlacement& placeme
                 Expression::outputs({{"out", x * scale * Expression::constantScalar(2.0)}}));
             return DynamicExpressionBuild{
                 std::make_shared<FusedEquation>(FusedEquation::compile(conditional.physicalOutputs(), placement.getDeviceNum())),
+                inputs,
+                {},
+                outputs,
+                {}};
+        });
+}
+
+DynamicExpression buildConditionalSavedForwardExpression(const TensorPlacement& placement) {
+    return DynamicExpression(
+        {"x"},
+        {"out"},
+        [placement](const DynamicExpression::TensorMap& inputs,
+                    const DynamicExpression::TensorMap& outputs,
+                    Stream& stream) -> DynamicExpressionBuild {
+            (void)stream;
+            auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+            auto predicate = x.reduce_sum().greaterThan(Expression::constantScalar(0.0));
+            Outputs conditional = Outputs::conditional(
+                predicate,
+                Expression::outputs({{"out", x.exp()}}),
+                Expression::outputs({{"out", x.tanh()}}));
+            return DynamicExpressionBuild{
+                std::make_shared<FusedEquation>(
+                    FusedEquation::compile(conditional.physicalOutputs(), placement.getDeviceNum())),
                 inputs,
                 {},
                 outputs,
@@ -997,7 +1206,7 @@ TEST(CustomLayer, ForwardOnlyExecutionVariantCannotBeSelectedForTraining) {
     cleanupLayers({&input, &custom, &sink});
 }
 
-TEST(CustomLayer, BackwardCapableExecutionVariantUsesMatchingFusedOptimizerPlan) {
+TEST(CustomLayer, Br63aBackwardCapableExecutionVariantUsesMatchingMaterializedOptimizerPlan) {
     const uint64_t batchSize = 2;
     const uint64_t features = 2;
     constexpr DynamicExpressionVariantId alternateVariant = 7;
@@ -1023,6 +1232,9 @@ TEST(CustomLayer, BackwardCapableExecutionVariantUsesMatchingFusedOptimizerPlan)
     bridge.connectToNextLayer(&custom);
     custom.connectToNextLayer(&sink);
     compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value())
+        << "BR6.3A must allocate the reusable parameter-gradient bridge before any execution variant runs.";
 
     custom.selectTrainingVariant(alternateVariant);
     input.forward(featureIn_h, false, batchSize);
@@ -1175,6 +1387,58 @@ TEST(CustomLayer, ConditionalCudaBranchBackpropagatesNumericallyThroughCustomLay
     cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
 }
 
+TEST(CustomLayer, ConditionalAutodiffConsumesBranchLocalRetainedForwardValues) {
+    const uint64_t batchSize = 1;
+    const uint64_t features = 4;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    CustomLayer custom(buildConditionalSavedForwardExpression(gpuPlacement), {"x"}, {"out"}, gpuPlacement, {}, false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    auto runPass = [&](const std::vector<float>& inputValues,
+                       const std::vector<float>& outputGradient,
+                       bool thenBranch,
+                       uint32_t expectedCalls) {
+        Tensor x_h(cpuPlacement, descriptor);
+        Tensor grad_h(cpuPlacement, descriptor);
+        writeCpuTensor(x_h, inputValues);
+        writeCpuTensor(grad_h, outputGradient);
+
+        input.forward(x_h, false, batchSize);
+        ASSERT_EQ(sink.forwardCalls, expectedCalls);
+        sink.getErrorOutput().value().copyFromAsync(grad_h, custom.getStreams()[0]);
+        custom.getStreams()[0].synchronize();
+        sink.backward(sink.getErrorOutput(), batchSize);
+        ASSERT_EQ(bridge.backwardCalls, expectedCalls);
+
+        Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+        std::vector<float> expectedGradient(inputValues.size());
+        for (size_t i = 0; i < inputValues.size(); ++i) {
+            if (thenBranch) {
+                expectedGradient[i] = outputGradient[i] * std::exp(inputValues[i]);
+            } else {
+                const float t = std::tanh(inputValues[i]);
+                expectedGradient[i] = outputGradient[i] * (1.0f - t * t);
+            }
+        }
+        expectAllClose(readCpuTensor(xGrad_h), expectedGradient, 4e-5f, 4e-5f);
+    };
+
+    runPass({1.0f, -0.25f, 0.5f, 0.75f}, {0.5f, -2.0f, 1.5f, 3.0f}, true, 1);
+    runPass({-1.0f, -0.5f, -0.25f, -0.75f}, {1.0f, 2.0f, -1.0f, 0.5f}, false, 2);
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
 TEST(CustomLayer, ConditionalTrainingFallsBackToMaterializedCustomLossAndOptimizerGradients) {
     const uint64_t batchSize = 2;
     const uint64_t features = 3;
@@ -1263,7 +1527,721 @@ TEST(CustomLayer, ConditionalTrainingFallsBackToMaterializedCustomLossAndOptimiz
     cleanupLayers({&input, &labelsInput, &gradientRivet, &bridge, &custom, &loss, &lossSink});
 }
 
-TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoSgdUpdate) {
+TEST(CustomLayer, Br62CombinedRmsNormPreviewOwnsDxAndDscaleInOnePhysicalBackwardStage) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 8;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    std::vector<float> initialScale(features, 1.0f);
+    auto scale = std::make_shared<FixedVectorParameter>("scale", initialScale, true);
+    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(99001, 0.0f, 0.0f, 0.0f, false)));
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    SharedBackwardPreviewInspectableCustomLayer custom(
+        buildRmsNormSharedBackwardPreviewExpression(gpuPlacement, features),
+        {"x"},
+        {"out"},
+        gpuPlacement,
+        {scale},
+        false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    ASSERT_EQ(custom.sharedBackwardPreviews().size(), 2u)
+        << "BR6.2 should build clear and accumulate combined VJP previews for one flat trainable variant.";
+
+    const auto& clear = clearSharedBackwardPreview(custom);
+    EXPECT_TRUE(clear.accumulateWrtNames.empty());
+    ASSERT_NE(clear.backwardBuild.outputs.expr, nullptr);
+
+    bool sawDx = false;
+    bool sawDscale = false;
+    for (const NamedOutput& output : clear.backwardBuild.outputs.outputs) {
+        sawDx = sawDx || output.name == "x_grad";
+        sawDscale = sawDscale || output.name == "scale_grad";
+    }
+    EXPECT_TRUE(sawDx);
+    EXPECT_TRUE(sawDscale);
+
+    size_t dxRoutes = 0;
+    size_t dscaleRoutes = 0;
+    for (const ExprNode& node : clear.backwardBuild.outputs.expr->nodes) {
+        dxRoutes += node.op == ExprOp::RMSNORM_BACKWARD_X ? 1u : 0u;
+        dscaleRoutes += node.op == ExprOp::RMSNORM_BACKWARD_SCALE ? 1u : 0u;
+    }
+    EXPECT_EQ(dxRoutes, 1u);
+    EXPECT_EQ(dscaleRoutes, 1u);
+
+    const std::vector<PhysicalExecutionStage> stages =
+        EquationCompiler::splitAtReductionBoundaries(clear.backwardBuild.outputs);
+    size_t rmsBackwardStages = 0;
+    for (const PhysicalExecutionStage& stage : stages) {
+        if (stage.kind == PhysicalExecutionStage::Kind::RmsNormBackward) {
+            ++rmsBackwardStages;
+            EXPECT_EQ(stage.outputs.size(), 2u)
+                << "One physical RmsNormBackward stage should own both dX and dScale.";
+        }
+    }
+    EXPECT_EQ(rmsBackwardStages, 1u)
+        << "BR6.2 combined CustomLayer VJP must collapse RMSNorm dX/dScale into one physical backward stage.";
+
+    const auto& accumulate = accumulateSharedBackwardPreview(custom);
+    EXPECT_TRUE(accumulate.accumulateWrtNames.contains("scale"));
+    EXPECT_FALSE(accumulate.accumulateWrtNames.contains("x"));
+    ASSERT_NE(accumulate.backwardBuild.outputs.expr, nullptr);
+
+    bool consumesExistingScaleGrad = false;
+    bool consumesExistingXGrad = false;
+    for (const NamedInput& inputNode : accumulate.backwardBuild.outputs.expr->inputs) {
+        consumesExistingScaleGrad = consumesExistingScaleGrad || inputNode.name == "scale_grad";
+        consumesExistingXGrad = consumesExistingXGrad || inputNode.name == "x_grad";
+    }
+    EXPECT_TRUE(consumesExistingScaleGrad)
+        << "The BR6.2 accumulate preview must read the existing parameter gradient buffer.";
+    EXPECT_FALSE(consumesExistingXGrad)
+        << "dInput must remain overwrite-only inside the combined accumulate VJP.";
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
+TEST(CustomLayer, Br63bCombinedRmsNormPlansStampAgainstRealDxAndDscaleDestinations) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 8;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    auto scale = std::make_shared<FixedVectorParameter>("scale", std::vector<float>(features, 1.0f), true);
+    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(99101, 0.0f, 0.0f, 0.0f, false)));
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    SharedBackwardPreviewInspectableCustomLayer custom(
+        buildRmsNormSharedBackwardPreviewExpression(gpuPlacement, features),
+        {"x"},
+        {"out"},
+        gpuPlacement,
+        {scale},
+        false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    ASSERT_EQ(custom.stampedSharedBackwardPlans().size(), 2u)
+        << "BR6.3B should stamp clear and accumulate combined VJPs against their real destinations.";
+
+    const auto& clear = clearStampedSharedBackwardPlan(custom);
+    ASSERT_NE(clear.backwardPlan, nullptr);
+    EXPECT_TRUE(clear.accumulateWrtNames.empty());
+
+    size_t clearRmsBackwardStages = 0;
+    for (const std::string& stageKind : clear.backwardPlan->stageKindNames()) {
+        clearRmsBackwardStages += stageKind == "RmsNormBackward" ? 1u : 0u;
+    }
+    EXPECT_EQ(clearRmsBackwardStages, 1u)
+        << "The stamped clear shared plan must preserve the one-physical-RMSNorm-backward structure.";
+
+    ASSERT_EQ(custom.getErrorOutputs().size(), 1u);
+    ASSERT_TRUE(custom.getErrorOutputs()[0].has_value());
+    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value());
+    EXPECT_EQ(clear.backwardPlan->output("x_grad").getTensorId(),
+              custom.getErrorOutputs()[0].value().getTensorId());
+    EXPECT_EQ(clear.backwardPlan->output("scale_grad").getTensorId(),
+              scale->getOptimizer()->getWeightsGradient().value().getTensorId());
+
+    const auto& accumulate = accumulateStampedSharedBackwardPlan(custom);
+    ASSERT_NE(accumulate.backwardPlan, nullptr);
+    EXPECT_TRUE(accumulate.accumulateWrtNames.contains("scale"));
+    EXPECT_FALSE(accumulate.accumulateWrtNames.contains("x"));
+
+    size_t accumulateRmsBackwardStages = 0;
+    for (const std::string& stageKind : accumulate.backwardPlan->stageKindNames()) {
+        accumulateRmsBackwardStages += stageKind == "RmsNormBackward" ? 1u : 0u;
+    }
+    EXPECT_EQ(accumulateRmsBackwardStages, 1u);
+    EXPECT_EQ(accumulate.backwardPlan->output("x_grad").getTensorId(),
+              custom.getErrorOutputs()[0].value().getTensorId());
+    EXPECT_EQ(accumulate.backwardPlan->output("scale_grad").getTensorId(),
+              scale->getOptimizer()->getWeightsGradient().value().getTensorId());
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
+
+TEST(CustomLayer, Br65GenericRmsNormExecutesOneRealForwardAndOneSharedBackward) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 8;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    Tensor featureIn_h(cpuPlacement, descriptor);
+    writeCpuTensor(
+        featureIn_h,
+        {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f,
+         -1.0f, 0.5f, 2.0f, -2.5f, 3.0f, -3.5f, 4.0f, -4.5f});
+
+    auto scale = std::make_shared<FixedVectorParameter>(
+        "scale", std::vector<float>(features, 1.0f), true);
+    scale->setOptimizer(
+        std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(99102, 0.0f, 0.0f, 0.0f, false)));
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    SharedBackwardPreviewInspectableCustomLayer custom(
+        buildRmsNormSharedBackwardPreviewExpression(gpuPlacement, features),
+        {"x"},
+        {"out"},
+        gpuPlacement,
+        {scale},
+        false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    ASSERT_EQ(custom.stampedSharedBackwardPlans().size(), 2u);
+    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value());
+
+#ifdef THOR_DEBUG
+    resetExpressionTestExecutionCounters();
+#endif
+    input.forward(featureIn_h, false, batchSize);
+    ASSERT_EQ(sink.forwardCalls, 1);
+#ifdef THOR_DEBUG
+    const ExpressionTestExecutionCounters forwardCounters = expressionTestExecutionCounters();
+    EXPECT_EQ(forwardCounters.rms_norm.forward, 1u)
+        << "BR6.5 must execute the real RMSNorm forward exactly once.";
+    EXPECT_EQ(forwardCounters.rms_norm.backward_gradient, 0u);
+#endif
+
+    Tensor gradOut_h(cpuPlacement, descriptor);
+    writeCpuTensor(
+        gradOut_h,
+        {1.0f, -0.5f, 0.25f, -1.5f, 2.0f, -2.5f, 3.0f, -3.5f,
+         -1.0f, 0.75f, -0.25f, 1.25f, -1.75f, 2.25f, -2.75f, 3.25f});
+    sink.getErrorOutput().value().copyFromAsync(gradOut_h, custom.getStreams()[0]);
+    Event gradReady = custom.getStreams()[0].putEvent();
+    gradReady.synchronize();
+
+#ifdef THOR_DEBUG
+    resetExpressionTestExecutionCounters();
+#endif
+    sink.backward(sink.getErrorOutput(), batchSize);
+    ASSERT_EQ(bridge.backwardCalls, 1);
+
+    // Force completion of both externally visible shared-plan outputs before
+    // reading the physical-execution counters.
+    Tensor dx_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+    Tensor dscale_h =
+        copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
+    for (float value : readCpuTensor(dx_h)) {
+        EXPECT_TRUE(std::isfinite(value));
+    }
+    for (float value : readCpuTensor(dscale_h)) {
+        EXPECT_TRUE(std::isfinite(value));
+    }
+
+#ifdef THOR_DEBUG
+    const ExpressionTestExecutionCounters counters = expressionTestExecutionCounters();
+    EXPECT_EQ(counters.rms_norm.forward, 0u)
+        << "BR6.5 backward must consume retained RMSNorm state rather than replaying forward.";
+    EXPECT_EQ(counters.rms_norm.backward_gradient, 1u)
+        << "BR6.5 must execute exactly one physical RmsNormBackward for the shared dX+dScale VJP.";
+#endif
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
+
+TEST(CustomLayer, Br64SharedBackwardSerializesCrossApplicationParameterGradientWritesInArrivalOrder) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 3;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    const std::vector<float> x0Values{1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+    const std::vector<float> x1Values{-2.0f, 1.0f, 0.5f, 3.0f, -4.0f, 2.0f};
+    const std::vector<float> grad0Values{1.0f, -0.5f, 2.0f, -1.0f, 0.25f, 0.75f};
+    const std::vector<float> grad1Values{-0.25f, 1.5f, -1.0f, 0.5f, 2.0f, -2.5f};
+
+    Tensor x0_h(cpuPlacement, descriptor);
+    Tensor x1_h(cpuPlacement, descriptor);
+    Tensor grad0_h(cpuPlacement, descriptor);
+    Tensor grad1_h(cpuPlacement, descriptor);
+    writeCpuTensor(x0_h, x0Values);
+    writeCpuTensor(x1_h, x1Values);
+    writeCpuTensor(grad0_h, grad0Values);
+    writeCpuTensor(grad1_h, grad1Values);
+
+    const std::vector<float> scaleValues{2.0f, 3.0f, 4.0f};
+    auto scale = std::make_shared<FixedVectorParameter>("scale", scaleValues, true);
+    scale->setOptimizer(
+        std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(99103, 0.0f, 0.0f, 0.0f, false)));
+
+    NetworkInput input0(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    NetworkInput input1(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet rivet0, rivet1;
+    CountingPassthrough bridge0, bridge1;
+    SharedBackwardPreviewInspectableCustomLayer custom(
+        buildSingleInputScaleExpression(gpuPlacement),
+        {"x"},
+        {"out"},
+        gpuPlacement,
+        {scale},
+        false);
+    CountingPassthrough sink0, sink1;
+
+    input0.connectToNextLayer(&rivet0);
+    rivet0.connectToNextLayer(&bridge0);
+    input1.connectToNextLayer(&rivet1);
+    rivet1.connectToNextLayer(&bridge1);
+    bridge0.connectToNextLayer(&custom, 0, 0);
+    bridge1.connectToNextLayer(&custom, 0, 1);
+    custom.connectToNextLayer(&sink0, 0, 0);
+    custom.connectToNextLayer(&sink1, 1, 0);
+
+    compileAndInitialize(
+        {&input0, &input1, &rivet0, &rivet1, &bridge0, &bridge1, &custom, &sink0, &sink1});
+
+    ASSERT_EQ(custom.stampedSharedBackwardPlans().size(), 4u)
+        << "Each of the two applications should own one clear and one accumulate shared plan.";
+    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value());
+
+    input0.forward(x0_h, false, batchSize);
+    input1.forward(x1_h, false, batchSize);
+    ASSERT_EQ(sink0.forwardCalls, 1);
+    ASSERT_EQ(sink1.forwardCalls, 1);
+
+    sink0.getErrorOutput().value().copyFromAsync(grad0_h, custom.getStreams()[0]);
+    sink1.getErrorOutput().value().copyFromAsync(grad1_h, custom.getStreams()[1]);
+    Event grad0Ready = custom.getStreams()[0].putEvent();
+    Event grad1Ready = custom.getStreams()[1].putEvent();
+    grad0Ready.synchronize();
+    grad1Ready.synchronize();
+
+    // Application 1 intentionally arrives first. Its clear shared plan establishes
+    // the gradient buffer. Application 0 then has to wait for that contribution
+    // before its accumulate shared plan performs the read/add/write.
+    sink1.backward(sink1.getErrorOutput(), batchSize);
+    ASSERT_EQ(bridge1.backwardCalls, 1);
+    ASSERT_EQ(bridge0.backwardCalls, 0);
+
+    sink0.backward(sink0.getErrorOutput(), batchSize);
+    ASSERT_EQ(bridge0.backwardCalls, 1);
+
+    Tensor dx0_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    Tensor dx1_h = copyTensorToCpu(custom.getErrorOutputs()[1].value(), custom.getStreams()[1]);
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+    Tensor dscale_h =
+        copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
+
+    expectAllClose(readCpuTensor(dx0_h), scaleInputGradient(grad0Values, scaleValues));
+    expectAllClose(readCpuTensor(dx1_h), scaleInputGradient(grad1Values, scaleValues));
+    expectAllClose(
+        readCpuTensor(dscale_h),
+        featureWiseScaleGradient({x0Values, x1Values}, {grad0Values, grad1Values}, features));
+
+    cleanupLayers(
+        {&input0, &input1, &rivet0, &rivet1, &bridge0, &bridge1, &custom, &sink0, &sink1});
+}
+
+TEST(CustomLayer, Br66SingleApplicationExpressionLocalGradientFusesOptimizerIntoSharedBackward) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 3;
+    constexpr float learningRate = 4.0f;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    const std::vector<float> inputValues{1.0f, -2.0f, 3.0f, 4.0f, 0.5f, -1.0f};
+    const std::vector<float> gradientValues{0.5f, -1.0f, 2.0f, -0.25f, 3.0f, 1.5f};
+    const std::vector<float> initialWeights{2.0f, 3.0f, -4.0f, 5.0f, -6.0f, 7.0f};
+
+    Tensor input_h(cpuPlacement, descriptor);
+    Tensor gradient_h(cpuPlacement, descriptor);
+    writeCpuTensor(input_h, inputValues);
+    writeCpuTensor(gradient_h, gradientValues);
+
+    auto scale = std::make_shared<FixedMatrixParameter>(
+        "scale", batchSize, features, initialWeights, true);
+    scale->setOptimizer(
+        std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(99104, learningRate, 0.0f, 0.0f, false)));
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    SharedBackwardPreviewInspectableCustomLayer custom(
+        buildSingleInputScaleExpression(gpuPlacement),
+        {"x"},
+        {"out"},
+        gpuPlacement,
+        {scale},
+        false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    ASSERT_TRUE(scale->getStorage().has_value());
+    EXPECT_FALSE(scale->getOptimizer()->getWeightsGradient().has_value())
+        << "BR6.6 expression-local single-application dW must not allocate an optimizer-owned dense gradient.";
+
+    const auto& previews = custom.sharedBackwardPreviews();
+    auto clearIt = std::find_if(previews.begin(), previews.end(), [](const auto& preview) {
+        return preview.accumulateWrtNames.empty();
+    });
+    ASSERT_NE(clearIt, previews.end());
+    ASSERT_NE(clearIt->backwardBuild.outputs.expr, nullptr);
+    std::optional<uint32_t> dWeightNode;
+    for (const NamedOutput& output : clearIt->backwardBuild.outputs.outputs) {
+        if (output.name == "scale_grad") {
+            dWeightNode = output.node_idx;
+            break;
+        }
+    }
+    ASSERT_TRUE(dWeightNode.has_value());
+    EXPECT_FALSE(expressionSubgraphContainsStageBoundary(
+        *clearIt->backwardBuild.outputs.expr, dWeightNode.value()))
+        << "The test parameter gradient must remain entirely inside a fused Expression region.";
+
+    ASSERT_EQ(custom.stampedSharedBackwardPlans().size(), 1u)
+        << "A single-application expression-fused optimizer should be grafted onto the one shared clear plan.";
+    const auto fusedSharedOutputNames = custom.stampedSharedBackwardPlans().front().backwardPlan->outputNames();
+    EXPECT_NE(std::find(fusedSharedOutputNames.begin(), fusedSharedOutputNames.end(), "x_grad"),
+              fusedSharedOutputNames.end());
+    EXPECT_EQ(std::find(fusedSharedOutputNames.begin(), fusedSharedOutputNames.end(), "scale_grad"),
+              fusedSharedOutputNames.end())
+        << "Expression-fused dW must remain an internal value consumed directly by the optimizer.";
+    EXPECT_GT(fusedSharedOutputNames.size(), 1u)
+        << "The same shared plan must also expose the optimizer's preallocated weight/state outputs.";
+
+    input.forward(input_h, false, batchSize);
+    sink.getErrorOutput().value().copyFromAsync(gradient_h, custom.getStreams()[0]);
+    custom.getStreams()[0].synchronize();
+    sink.backward(sink.getErrorOutput(), batchSize);
+    ASSERT_EQ(bridge.backwardCalls, 1);
+
+    std::vector<float> expectedDx(gradientValues.size());
+    std::vector<float> expectedDw(gradientValues.size());
+    for (size_t i = 0; i < gradientValues.size(); ++i) {
+        expectedDx[i] = gradientValues[i] * initialWeights[i];
+        expectedDw[i] = gradientValues[i] * inputValues[i];
+    }
+    const std::vector<float> expectedWeights =
+        applySgdReferenceUpdate(initialWeights, expectedDw, learningRate, batchSize);
+
+    Tensor dx_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+    Tensor weights_h = copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream);
+    expectAllClose(readCpuTensor(dx_h), expectedDx);
+    expectAllClose(readCpuTensor(weights_h), expectedWeights);
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
+TEST(CustomLayer, Br66SingleApplicationStageBoundaryGradientRemainsMaterialized) {
+    const uint64_t batchSize = 2;
+    const uint64_t inputFeatures = 8;
+    const uint64_t outputFeatures = 8;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, inputFeatures});
+    std::vector<float> initialWeights(inputFeatures * outputFeatures, 0.125f);
+    auto weights = std::make_shared<FixedMatrixParameter>(
+        "weights", inputFeatures, outputFeatures, initialWeights, true);
+    weights->setOptimizer(
+        std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(99106, 1.0f, 0.0f, 0.0f, false)));
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    SharedBackwardPreviewInspectableCustomLayer custom(
+        buildMatmulGeluSharedBackwardPreviewExpression(gpuPlacement),
+        {"x"},
+        {"out"},
+        gpuPlacement,
+        {weights},
+        false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    ASSERT_TRUE(weights->getOptimizer()->getWeightsGradient().has_value())
+        << "A stage-boundary dW (Matmul/GEMM here) must remain materialized even with one application.";
+
+    const auto& clear = clearSharedBackwardPreview(custom);
+    ASSERT_NE(clear.backwardBuild.outputs.expr, nullptr);
+    std::optional<uint32_t> dWeightNode;
+    for (const NamedOutput& output : clear.backwardBuild.outputs.outputs) {
+        if (output.name == "weights_grad") {
+            dWeightNode = output.node_idx;
+            break;
+        }
+    }
+    ASSERT_TRUE(dWeightNode.has_value());
+    EXPECT_TRUE(expressionSubgraphContainsStageBoundary(*clear.backwardBuild.outputs.expr, dWeightNode.value()))
+        << "BR6.6 optimizer fusion must stop at the physical Matmul/GEMM backward stage boundary.";
+
+    ASSERT_EQ(custom.stampedSharedBackwardPlans().size(), 2u);
+    const auto& stampedClear = clearStampedSharedBackwardPlan(custom);
+    const auto clearOutputNames = stampedClear.backwardPlan->outputNames();
+    EXPECT_NE(std::find(clearOutputNames.begin(), clearOutputNames.end(), "weights_grad"), clearOutputNames.end())
+        << "The stage-boundary gradient must remain a real shared-plan output bound to the optimizer gradient buffer.";
+    EXPECT_EQ(stampedClear.backwardPlan->output("weights_grad").getTensorId(),
+              weights->getOptimizer()->getWeightsGradient().value().getTensorId());
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
+TEST(CustomLayer, Br66MultipleApplicationsKeepExpressionLocalGradientMaterializedAndAccumulated) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 3;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    const std::vector<float> x0Values{1.0f, 2.0f, -3.0f, 4.0f, -5.0f, 6.0f};
+    const std::vector<float> x1Values{-2.0f, 1.0f, 0.5f, 3.0f, 4.0f, -1.0f};
+    const std::vector<float> grad0Values{0.5f, -1.0f, 2.0f, -0.25f, 0.75f, 1.5f};
+    const std::vector<float> grad1Values{-1.0f, 0.25f, 1.5f, 2.0f, -0.5f, 3.0f};
+    const std::vector<float> initialWeights{2.0f, -3.0f, 4.0f, 5.0f, 6.0f, -7.0f};
+
+    Tensor x0_h(cpuPlacement, descriptor);
+    Tensor x1_h(cpuPlacement, descriptor);
+    Tensor grad0_h(cpuPlacement, descriptor);
+    Tensor grad1_h(cpuPlacement, descriptor);
+    writeCpuTensor(x0_h, x0Values);
+    writeCpuTensor(x1_h, x1Values);
+    writeCpuTensor(grad0_h, grad0Values);
+    writeCpuTensor(grad1_h, grad1Values);
+
+    auto scale = std::make_shared<FixedMatrixParameter>(
+        "scale", batchSize, features, initialWeights, true);
+    scale->setOptimizer(
+        std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(99105, 0.0f, 0.0f, 0.0f, false)));
+
+    NetworkInput input0(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    NetworkInput input1(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet rivet0, rivet1;
+    CountingPassthrough bridge0, bridge1;
+    SharedBackwardPreviewInspectableCustomLayer custom(
+        buildSingleInputScaleExpression(gpuPlacement), {"x"}, {"out"}, gpuPlacement, {scale}, false);
+    CountingPassthrough sink0, sink1;
+
+    input0.connectToNextLayer(&rivet0);
+    rivet0.connectToNextLayer(&bridge0);
+    input1.connectToNextLayer(&rivet1);
+    rivet1.connectToNextLayer(&bridge1);
+    bridge0.connectToNextLayer(&custom, 0, 0);
+    bridge1.connectToNextLayer(&custom, 0, 1);
+    custom.connectToNextLayer(&sink0, 0, 0);
+    custom.connectToNextLayer(&sink1, 1, 0);
+    compileAndInitialize(
+        {&input0, &input1, &rivet0, &rivet1, &bridge0, &bridge1, &custom, &sink0, &sink1});
+
+    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value())
+        << "BR6.6 must not fuse an optimizer into one application when another application still contributes dW.";
+
+    input0.forward(x0_h, false, batchSize);
+    input1.forward(x1_h, false, batchSize);
+    sink1.getErrorOutput().value().copyFromAsync(grad1_h, custom.getStreams()[1]);
+    sink0.getErrorOutput().value().copyFromAsync(grad0_h, custom.getStreams()[0]);
+    custom.getStreams()[0].synchronize();
+    custom.getStreams()[1].synchronize();
+
+    // Deliberately reverse arrival order to exercise clear -> accumulate ordering.
+    sink1.backward(sink1.getErrorOutput(), batchSize);
+    sink0.backward(sink0.getErrorOutput(), batchSize);
+
+    std::vector<float> expectedDw(initialWeights.size());
+    std::vector<float> expectedDx0(initialWeights.size());
+    std::vector<float> expectedDx1(initialWeights.size());
+    for (size_t i = 0; i < expectedDw.size(); ++i) {
+        expectedDw[i] = x0Values[i] * grad0Values[i] + x1Values[i] * grad1Values[i];
+        expectedDx0[i] = grad0Values[i] * initialWeights[i];
+        expectedDx1[i] = grad1Values[i] * initialWeights[i];
+    }
+
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+    expectAllClose(
+        readCpuTensor(copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream)),
+        expectedDw);
+    expectAllClose(
+        readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0])),
+        expectedDx0);
+    expectAllClose(
+        readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[1].value(), custom.getStreams()[1])),
+        expectedDx1);
+
+    cleanupLayers(
+        {&input0, &input1, &rivet0, &rivet1, &bridge0, &bridge1, &custom, &sink0, &sink1});
+}
+
+TEST(CustomLayer, Br62ClearPreviewIncludesInactiveParameterWhileAccumulatePreviewOnlyTargetsActiveParameters) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 4;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    auto scaleA = std::make_shared<FixedVectorParameter>("scale_a", std::vector<float>(features, 1.0f), true);
+    auto scaleB = std::make_shared<FixedVectorParameter>("scale_b", std::vector<float>(features, 2.0f), true);
+    scaleA->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(99003, 0.0f, 0.0f, 0.0f, false)));
+    scaleB->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(99004, 0.0f, 0.0f, 0.0f, false)));
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    SharedBackwardPreviewInspectableCustomLayer custom(
+        buildTwoOutputIndependentScaleSharedBackwardPreviewExpression(gpuPlacement),
+        {"x"},
+        {"out_a", "out_b"},
+        gpuPlacement,
+        {scaleA, scaleB},
+        false);
+    CountingPassthrough backwardSink;
+    ForwardOnlySink forwardOnlySink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&backwardSink, 0, 0);
+    custom.connectToNextLayer(&forwardOnlySink, 1, 0);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &backwardSink, &forwardOnlySink});
+
+    const auto& clear = clearSharedBackwardPreview(custom);
+    std::unordered_set<std::string> clearOutputs;
+    for (const NamedOutput& output : clear.backwardBuild.outputs.outputs) clearOutputs.insert(output.name);
+    EXPECT_TRUE(clearOutputs.contains("x_grad"));
+    EXPECT_TRUE(clearOutputs.contains("scale_a_grad"));
+    EXPECT_TRUE(clearOutputs.contains("scale_b_grad"))
+        << "The first/clear combined VJP must explicitly establish the inactive parameter gradient as zero.";
+
+    const auto& accumulate = accumulateSharedBackwardPreview(custom);
+    EXPECT_TRUE(accumulate.accumulateWrtNames.contains("scale_a"));
+    EXPECT_FALSE(accumulate.accumulateWrtNames.contains("scale_b"));
+    EXPECT_FALSE(accumulate.accumulateWrtNames.contains("x"));
+
+    std::unordered_set<std::string> accumulateOutputs;
+    for (const NamedOutput& output : accumulate.backwardBuild.outputs.outputs) accumulateOutputs.insert(output.name);
+    EXPECT_TRUE(accumulateOutputs.contains("x_grad"));
+    EXPECT_TRUE(accumulateOutputs.contains("scale_a_grad"));
+    EXPECT_FALSE(accumulateOutputs.contains("scale_b_grad"))
+        << "Later contributions should not touch an inactive parameter gradient buffer.";
+
+    ASSERT_EQ(custom.stampedSharedBackwardPlans().size(), 2u);
+    const auto& stampedClear = clearStampedSharedBackwardPlan(custom);
+    const auto& stampedAccumulate = accumulateStampedSharedBackwardPlan(custom);
+    const auto clearOutputNames = stampedClear.backwardPlan->outputNames();
+    const auto accumulateOutputNames = stampedAccumulate.backwardPlan->outputNames();
+    EXPECT_NE(std::find(clearOutputNames.begin(), clearOutputNames.end(), "scale_b_grad"), clearOutputNames.end())
+        << "BR6.3B clear stamping must bind the inactive parameter's explicit zero to its real gradient buffer.";
+    EXPECT_EQ(std::find(accumulateOutputNames.begin(), accumulateOutputNames.end(), "scale_b_grad"),
+              accumulateOutputNames.end())
+        << "BR6.3B accumulate stamping must not bind or touch an inactive parameter gradient.";
+    ASSERT_TRUE(scaleB->getOptimizer()->getWeightsGradient().has_value());
+    EXPECT_EQ(stampedClear.backwardPlan->output("scale_b_grad").getTensorId(),
+              scaleB->getOptimizer()->getWeightsGradient().value().getTensorId());
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &backwardSink, &forwardOnlySink});
+}
+
+TEST(CustomLayer, Br62CombinedMatmulGeluPreviewSharesOneActivationAdjointBeforeDxAndDw) {
+    const uint64_t batchSize = 2;
+    const uint64_t inputFeatures = 8;
+    const uint64_t outputFeatures = 8;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, inputFeatures});
+    std::vector<float> initialWeights(inputFeatures * outputFeatures, 0.125f);
+    auto weights = std::make_shared<FixedMatrixParameter>(
+        "weights", inputFeatures, outputFeatures, initialWeights, true);
+    weights->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(99002, 0.0f, 0.0f, 0.0f, false)));
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    SharedBackwardPreviewInspectableCustomLayer custom(
+        buildMatmulGeluSharedBackwardPreviewExpression(gpuPlacement),
+        {"x"},
+        {"out"},
+        gpuPlacement,
+        {weights},
+        false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    const auto& clear = clearSharedBackwardPreview(custom);
+    ASSERT_NE(clear.backwardBuild.outputs.expr, nullptr);
+    const PhysicalExpression& expr = *clear.backwardBuild.outputs.expr;
+
+    uint32_t dxNode = UINT32_MAX;
+    uint32_t dwNode = UINT32_MAX;
+    for (const NamedOutput& output : clear.backwardBuild.outputs.outputs) {
+        if (output.name == "x_grad") dxNode = output.node_idx;
+        if (output.name == "weights_grad") dwNode = output.node_idx;
+    }
+    ASSERT_NE(dxNode, UINT32_MAX);
+    ASSERT_NE(dwNode, UINT32_MAX);
+    ASSERT_LT(dxNode, expr.nodes.size());
+    ASSERT_LT(dwNode, expr.nodes.size());
+
+    const ExprNode& dx = expr.nodes.at(dxNode);
+    const ExprNode& dw = expr.nodes.at(dwNode);
+    ASSERT_TRUE(dx.op == ExprOp::MATMUL || dx.op == ExprOp::GEMM)
+        << "FP32 dInput should terminate in the legitimate gradient matrix multiply.";
+    ASSERT_TRUE(dw.op == ExprOp::MATMUL || dw.op == ExprOp::GEMM)
+        << "FP32 dWeights should terminate in the legitimate gradient matrix multiply.";
+
+    std::vector<uint32_t> dxOperands{dx.lhs, dx.rhs};
+    std::vector<uint32_t> dwOperands{dw.lhs, dw.rhs};
+    std::vector<uint32_t> sharedOperands;
+    for (uint32_t lhsOperand : dxOperands) {
+        if (lhsOperand != UINT32_MAX &&
+            std::find(dwOperands.begin(), dwOperands.end(), lhsOperand) != dwOperands.end()) {
+            sharedOperands.push_back(lhsOperand);
+        }
+    }
+    std::sort(sharedOperands.begin(), sharedOperands.end());
+    sharedOperands.erase(std::unique(sharedOperands.begin(), sharedOperands.end()), sharedOperands.end());
+    ASSERT_EQ(sharedOperands.size(), 1u)
+        << "dX and dW should fork from one shared post-GELU adjoint value.";
+    ASSERT_LT(sharedOperands.front(), expr.nodes.size());
+    EXPECT_NE(expr.nodes.at(sharedOperands.front()).op, ExprOp::INPUT)
+        << "The shared operand must be the activation adjoint, not merely the raw upstream gradient input.";
+
+    size_t gradientMatmuls = 0;
+    for (const ExprNode& node : expr.nodes) {
+        gradientMatmuls += (node.op == ExprOp::MATMUL || node.op == ExprOp::GEMM) ? 1u : 0u;
+    }
+    EXPECT_EQ(gradientMatmuls, 2u)
+        << "The combined VJP should contain only the legitimate dX and dW matrix multiplies; no affine replay is allowed.";
+
+    const auto& accumulate = accumulateSharedBackwardPreview(custom);
+    EXPECT_TRUE(accumulate.accumulateWrtNames.contains("weights"));
+    EXPECT_FALSE(accumulate.accumulateWrtNames.contains("x"));
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
+TEST(CustomLayer, Br63aSingleInputTrainableParameterUsesMaterializedSgdGradientBridge) {
     const uint64_t batchSize = 2;
     const uint64_t features = 3;
 
@@ -1290,8 +2268,8 @@ TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoSgdUpdate) {
 
     ASSERT_TRUE(custom.getGradientUpdateStream().has_value());
     ASSERT_TRUE(scale->getStorage().has_value());
-    EXPECT_FALSE(scale->getOptimizer()->getWeightsGradient().has_value())
-        << "Fused CustomLayer optimizer update should not allocate a dense gradient tensor.";
+    EXPECT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value())
+        << "BR6.3A generic shared-backward preparation must materialize the SGD gradient buffer.";
 
     Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
 
@@ -1310,17 +2288,19 @@ TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoSgdUpdate) {
     ASSERT_EQ(bridge.backwardCalls, 1);
 
     Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
     Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream);
 
     const std::vector<float> expectedScaleGrad =
         featureWiseScaleGradient({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {1.0f, 0.0f, -1.0f, 2.0f, 1.0f, 0.5f}, features);
     expectAllClose(readCpuTensor(xGrad_h), {2.0f, 0.0f, -4.0f, 4.0f, 3.0f, 2.0f});
+    expectAllClose(readCpuTensor(scaleGrad_h), expectedScaleGrad);
     expectAllClose(readCpuTensor(scaleWeights_h), applySgdReferenceUpdate(initialScale, expectedScaleGrad, learningRate, batchSize));
 
     cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
 }
 
-TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoAdamUpdateAcrossPasses) {
+TEST(CustomLayer, Br63aSingleInputTrainableParameterUsesMaterializedAdamGradientBridgeAcrossPasses) {
     const uint64_t batchSize = 2;
     const uint64_t features = 3;
     const float alpha = 0.2f;
@@ -1349,8 +2329,8 @@ TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoAdamUpdateAcross
 
     ASSERT_TRUE(custom.getGradientUpdateStream().has_value());
     ASSERT_TRUE(scale->getStorage().has_value());
-    EXPECT_FALSE(scale->getOptimizer()->getWeightsGradient().has_value())
-        << "Fused CustomLayer Adam update should not allocate a dense gradient tensor.";
+    EXPECT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value())
+        << "BR6.3A generic shared-backward preparation must materialize the Adam gradient buffer.";
 
     Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
 
@@ -1494,7 +2474,7 @@ TEST(CustomLayer, CustomLossGradientFusesIntoDrivingCustomLayerAndMatchesNumeric
     cleanupLayers({&xInput, &yInput, &labelsInput, &xRivet, &yRivet, &xBridge, &yBridge, &custom, &loss, &lossSink});
 }
 
-TEST(CustomLayer, CustomLossGradientFusionFeedsFusedSgdOptimizerUpdateNumerically) {
+TEST(CustomLayer, Br63aCustomLossGradientFusionFeedsMaterializedSgdOptimizerUpdateNumerically) {
     const uint64_t batchSize = 2;
     const uint64_t features = 3;
     const float learningRate = 0.5f;
@@ -1532,8 +2512,8 @@ TEST(CustomLayer, CustomLossGradientFusionFeedsFusedSgdOptimizerUpdateNumericall
 
     ASSERT_TRUE(loss.isGradientFusedIntoDrivingLayer());
     EXPECT_EQ(custom.getNumFusedCustomLossGradients(), 1u);
-    EXPECT_FALSE(scale->getOptimizer()->getWeightsGradient().has_value())
-        << "Single-input dense SGD should consume the fused loss gradient without materializing a parameter gradient tensor.";
+    EXPECT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value())
+        << "CustomLoss seeding may remain fused, but BR6.3A must materialize the parameter gradient for shared backward.";
 
     std::vector<float> expectedLoss(xValues.size());
     std::vector<float> expectedInputGrad(xValues.size());
@@ -1573,7 +2553,7 @@ TEST(CustomLayer, CustomLossGradientFusionFeedsFusedSgdOptimizerUpdateNumericall
     cleanupLayers({&input, &labelsInput, &gradientRivet, &bridge, &custom, &loss, &lossSink});
 }
 
-void expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(std::shared_ptr<ParameterConstraint> constraint,
+void expectMaterializedSgdOptimizerAppliesConstraintNumericallyDuringBr63a(std::shared_ptr<ParameterConstraint> constraint,
                                                                           const std::vector<float>& labelValues,
                                                                           const std::function<float(float)>& projectValue) {
     const uint64_t batchSize = 2;
@@ -1614,8 +2594,8 @@ void expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(std::s
 
     ASSERT_TRUE(loss.isGradientFusedIntoDrivingLayer());
     EXPECT_EQ(custom.getNumFusedCustomLossGradients(), 1u);
-    EXPECT_FALSE(scale->getOptimizer()->getWeightsGradient().has_value())
-        << "Single-input dense SGD should consume the fused loss gradient without materializing a parameter gradient tensor.";
+    EXPECT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value())
+        << "CustomLoss seeding may remain fused, but BR6.3A must materialize the parameter gradient for shared backward.";
 
     std::vector<float> expectedLoss(xValues.size());
     std::vector<float> expectedInputGrad(xValues.size());
@@ -1658,34 +2638,34 @@ void expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(std::s
     cleanupLayers({&input, &labelsInput, &gradientRivet, &bridge, &custom, &loss, &lossSink});
 }
 
-TEST(CustomLayer, FusedSgdOptimizerAppliesNonNegativeConstraintInsideFusedUpdateNumerically) {
-    expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(
+TEST(CustomLayer, Br63aMaterializedSgdOptimizerAppliesNonNegativeConstraintNumerically) {
+    expectMaterializedSgdOptimizerAppliesConstraintNumericallyDuringBr63a(
         std::make_shared<NonNegativeParameterConstraint>(),
         std::vector<float>({-10.0f, -10.0f, -10.0f, -10.0f, -10.0f, -10.0f}),
         [](float value) { return std::max(value, 0.0f); });
 }
 
-TEST(CustomLayer, FusedSgdOptimizerAppliesNonPositiveConstraintInsideFusedUpdateNumerically) {
-    expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(std::make_shared<NonPositiveParameterConstraint>(),
+TEST(CustomLayer, Br63aMaterializedSgdOptimizerAppliesNonPositiveConstraintNumerically) {
+    expectMaterializedSgdOptimizerAppliesConstraintNumericallyDuringBr63a(std::make_shared<NonPositiveParameterConstraint>(),
                                                                          std::vector<float>({10.0f, 10.0f, 10.0f, 10.0f, 10.0f, 10.0f}),
                                                                          [](float value) { return std::min(value, 0.0f); });
 }
 
-TEST(CustomLayer, FusedSgdOptimizerAppliesMinConstraintInsideFusedUpdateNumerically) {
-    expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(
+TEST(CustomLayer, Br63aMaterializedSgdOptimizerAppliesMinConstraintNumerically) {
+    expectMaterializedSgdOptimizerAppliesConstraintNumericallyDuringBr63a(
         std::make_shared<MinParameterConstraint>(-0.5),
         std::vector<float>({-10.0f, -10.0f, -10.0f, -10.0f, -10.0f, -10.0f}),
         [](float value) { return std::max(value, -0.5f); });
 }
 
-TEST(CustomLayer, FusedSgdOptimizerAppliesMaxConstraintInsideFusedUpdateNumerically) {
-    expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(std::make_shared<MaxParameterConstraint>(0.75),
+TEST(CustomLayer, Br63aMaterializedSgdOptimizerAppliesMaxConstraintNumerically) {
+    expectMaterializedSgdOptimizerAppliesConstraintNumericallyDuringBr63a(std::make_shared<MaxParameterConstraint>(0.75),
                                                                          std::vector<float>({10.0f, 10.0f, 10.0f, 10.0f, 10.0f, 10.0f}),
                                                                          [](float value) { return std::min(value, 0.75f); });
 }
 
-TEST(CustomLayer, FusedSgdOptimizerAppliesMinMaxConstraintInsideFusedUpdateNumerically) {
-    expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(
+TEST(CustomLayer, Br63aMaterializedSgdOptimizerAppliesMinMaxConstraintNumerically) {
+    expectMaterializedSgdOptimizerAppliesConstraintNumericallyDuringBr63a(
         std::make_shared<MinMaxParameterConstraint>(-0.5, 0.75),
         std::vector<float>({-10.0f, 0.25f, 10.0f, -10.0f, 0.25f, 10.0f}),
         [](float value) { return std::min(std::max(value, -0.5f), 0.75f); });
@@ -1729,8 +2709,8 @@ TEST(CustomLayer, CustomLossGradientStaysFusedWhenLossIsMaterializedToNetworkOut
 
     ASSERT_TRUE(loss.isGradientFusedIntoDrivingLayer());
     EXPECT_EQ(custom.getNumFusedCustomLossGradients(), 1u);
-    EXPECT_FALSE(scale->getOptimizer()->getWeightsGradient().has_value())
-        << "Materializing the loss as a NetworkOutput must not disable fused loss-gradient/fused-optimizer update.";
+    EXPECT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value())
+        << "Materializing the loss output must preserve fused loss seeding while BR6.3A keeps dW materialized.";
     ASSERT_TRUE(loss.getLossOutput().has_value());
     ASSERT_TRUE(lossOutput.getFeatureInput().has_value());
     ASSERT_TRUE(lossOutput.getFeatureOutput().has_value());
@@ -1821,8 +2801,8 @@ TEST(CustomLayer, CustomLossGradientFusesThroughForwardOnlyFanoutAndStillMateria
     ASSERT_TRUE(lossSink.getFeatureInput().has_value());
     EXPECT_TRUE(lossSink.getFeatureInput().value() == loss.getLossOutput().value())
         << "The loss forward expression should materialize directly into the loss output tensor consumed by reporting.";
-    EXPECT_FALSE(scale->getOptimizer()->getWeightsGradient().has_value())
-        << "Fanout to a forward-only output must not disable fused loss-gradient/fused-optimizer update.";
+    EXPECT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value())
+        << "Forward-only fanout must preserve fused loss seeding while BR6.3A keeps dW materialized.";
 
     std::vector<float> expectedLoss(xValues.size());
     std::vector<float> expectedInputGrad(xValues.size());
