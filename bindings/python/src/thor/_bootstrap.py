@@ -27,7 +27,17 @@ _CUDA_DISTRIBUTIONS = _CUDA_STACK.distributions
 _INCLUDE_SPECS = _CUDA_STACK.includes
 _LIBRARY_SPECS: tuple[_LibrarySpec, ...] = _CUDA_STACK.libraries
 
+_THOR_DISTRIBUTION = "thor-cuda"
+_CUDA_RUNTIME_DISTRIBUTION = "nvidia-cuda-runtime"
+_CUDA_DEV_ATTR_COMPUTE_CAPABILITY_MAJOR = 75
+_CUDA_DEV_ATTR_COMPUTE_CAPABILITY_MINOR = 76
+_KERNEL_BACKENDS = {
+    89: ("thor-cuda-kernels-sm89", "thor_cuda_kernels/sm89/libThor.so"),
+    120: ("thor-cuda-kernels-sm120", "thor_cuda_kernels/sm120/libThor.so"),
+}
+
 _configured = False
+_kernel_backend_handle: object | None = None
 
 _SOURCE_TREE_BOOTSTRAP_ENV = "THOR_CUDA_BOOTSTRAP_SOURCE_TREE"
 
@@ -268,6 +278,153 @@ def _preload_cuda_user_space_libs() -> None:
         preload(path)
 
 
+def _installed_thor_version() -> str:
+    return _metadata_distribution(_THOR_DISTRIBUTION).version
+
+
+def _validate_kernel_distributions(thor_version: str) -> None:
+    for distribution_name, _library_path in _KERNEL_BACKENDS.values():
+        dist = _metadata_distribution(distribution_name)
+        if dist.version != thor_version:
+            _raise_bootstrap_error(
+                f"distribution {distribution_name!r} has version {dist.version!r}, "
+                f"but {_THOR_DISTRIBUTION!r} has version {thor_version!r}; "
+                "reinstall thor-cuda so all Thor wheel versions match"
+            )
+
+
+def _cuda_runtime_library_path() -> _Path:
+    runtime_specs = [spec for spec in _LIBRARY_SPECS if spec.distribution == _CUDA_RUNTIME_DISTRIBUTION]
+    if len(runtime_specs) != 1:
+        _raise_bootstrap_error(
+            f"internal CUDA manifest error: expected exactly one {_CUDA_RUNTIME_DISTRIBUTION!r} library spec, "
+            f"found {len(runtime_specs)}"
+        )
+    return _resolve_one_distribution_file(
+        runtime_specs[0].distribution,
+        runtime_specs[0].patterns,
+        "CUDA runtime shared library",
+    )
+
+
+def _load_cuda_runtime() -> object:
+    path = _cuda_runtime_library_path()
+    rtld_flags = getattr(_os, "RTLD_GLOBAL", 0) | getattr(_os, "RTLD_NOW", 0)
+    try:
+        runtime = _ctypes.CDLL(str(path), mode=rtld_flags)
+    except OSError as error:
+        _raise_bootstrap_error(f"failed to load CUDA runtime {str(path)!r}: {error}")
+
+    runtime.cudaGetDeviceCount.argtypes = [_ctypes.POINTER(_ctypes.c_int)]
+    runtime.cudaGetDeviceCount.restype = _ctypes.c_int
+    runtime.cudaDeviceGetAttribute.argtypes = [
+        _ctypes.POINTER(_ctypes.c_int),
+        _ctypes.c_int,
+        _ctypes.c_int,
+    ]
+    runtime.cudaDeviceGetAttribute.restype = _ctypes.c_int
+    runtime.cudaGetErrorString.argtypes = [_ctypes.c_int]
+    runtime.cudaGetErrorString.restype = _ctypes.c_char_p
+    return runtime
+
+
+def _cuda_error_string(runtime: object, error_code: int) -> str:
+    try:
+        raw_message = runtime.cudaGetErrorString(error_code)
+    except Exception:
+        raw_message = None
+    if raw_message:
+        try:
+            return raw_message.decode("utf-8", errors="replace")
+        except AttributeError:
+            return str(raw_message)
+    return f"CUDA runtime error {error_code}"
+
+
+def _visible_cuda_compute_capabilities() -> tuple[int, ...]:
+    runtime = _load_cuda_runtime()
+    device_count = _ctypes.c_int()
+    status = int(runtime.cudaGetDeviceCount(_ctypes.byref(device_count)))
+    if status != 0:
+        _raise_bootstrap_error(
+            f"failed to enumerate visible CUDA devices: {_cuda_error_string(runtime, status)} (error {status})"
+        )
+    if device_count.value <= 0:
+        _raise_bootstrap_error("no visible CUDA devices were found")
+
+    compute_capabilities: list[int] = []
+    for device_index in range(device_count.value):
+        major = _ctypes.c_int()
+        minor = _ctypes.c_int()
+        for attribute, output, description in (
+            (_CUDA_DEV_ATTR_COMPUTE_CAPABILITY_MAJOR, major, "major"),
+            (_CUDA_DEV_ATTR_COMPUTE_CAPABILITY_MINOR, minor, "minor"),
+        ):
+            status = int(
+                runtime.cudaDeviceGetAttribute(
+                    _ctypes.byref(output),
+                    attribute,
+                    device_index,
+                )
+            )
+            if status != 0:
+                _raise_bootstrap_error(
+                    f"failed to query compute capability {description} for CUDA device {device_index}: "
+                    f"{_cuda_error_string(runtime, status)} (error {status})"
+                )
+        compute_capabilities.append(major.value * 10 + minor.value)
+
+    return tuple(compute_capabilities)
+
+
+def _select_kernel_backend(compute_capabilities: _Sequence[int]) -> tuple[str, str]:
+    unique_sms = sorted(set(compute_capabilities))
+    if not unique_sms:
+        _raise_bootstrap_error("no visible CUDA devices were found")
+    if len(unique_sms) != 1:
+        rendered_sms = ", ".join(f"sm{sm}" for sm in unique_sms)
+        _raise_bootstrap_error(
+            f"visible CUDA devices use mixed compute capabilities ({rendered_sms}); "
+            "Thor currently requires all visible GPUs in one process to use the same SM architecture. "
+            "Restrict CUDA_VISIBLE_DEVICES to GPUs with one architecture."
+        )
+
+    sm = unique_sms[0]
+    try:
+        return _KERNEL_BACKENDS[sm]
+    except KeyError:
+        supported = ", ".join(f"sm{supported_sm}" for supported_sm in sorted(_KERNEL_BACKENDS))
+        _raise_bootstrap_error(
+            f"visible CUDA devices use unsupported compute capability sm{sm}; supported architectures: {supported}"
+        )
+
+
+def _preload_kernel_backend(thor_version: str) -> None:
+    global _kernel_backend_handle
+
+    compute_capabilities = _visible_cuda_compute_capabilities()
+    distribution_name, relative_library_path = _select_kernel_backend(compute_capabilities)
+    dist = _metadata_distribution(distribution_name)
+    if dist.version != thor_version:
+        _raise_bootstrap_error(
+            f"selected kernel distribution {distribution_name!r} has version {dist.version!r}, "
+            f"but {_THOR_DISTRIBUTION!r} has version {thor_version!r}"
+        )
+
+    library_path = _resolve_one_distribution_file(
+        distribution_name,
+        (relative_library_path, f"**/{relative_library_path}"),
+        f"sm{compute_capabilities[0]} Thor backend library",
+    )
+    rtld_flags = getattr(_os, "RTLD_GLOBAL", 0) | getattr(_os, "RTLD_NOW", 0)
+    try:
+        _kernel_backend_handle = _ctypes.CDLL(str(library_path), mode=rtld_flags)
+    except OSError as error:
+        _raise_bootstrap_error(
+            f"failed to load Thor kernel backend {str(library_path)!r} from {distribution_name!r}: {error}"
+        )
+
+
 def configure() -> None:
     global _configured
     if _configured:
@@ -284,7 +441,10 @@ def configure() -> None:
     # diagnostic rather than a later low-level dynamic linker error.
     for dist in _CUDA_DISTRIBUTIONS:
         _metadata_distribution(dist.name)
+    thor_version = _installed_thor_version()
+    _validate_kernel_distributions(thor_version)
 
     _configure_include_dirs()
     _preload_cuda_user_space_libs()
+    _preload_kernel_backend(thor_version)
     _configured = True

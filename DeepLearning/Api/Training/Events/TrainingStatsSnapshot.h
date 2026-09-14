@@ -62,9 +62,12 @@ struct TrainingStatsSnapshot {
     // stats show cumulative training time. EVALUATE reports request-local time.
     double elapsedSeconds = 0.0;
 
-    // Public throughput rates share the same wall-clock basis as elapsedSeconds.
-    // Native queued training reports EMA-smoothed exact wall-clock interval rates
-    // between same-phase stats snapshots, not CUDA callback/active-kernel rates.
+    // Native queued training reports EMA-smoothed phase-active wall-clock rates.
+    // elapsedSeconds remains total run/evaluation wall time, while throughput
+    // does not charge inactive gaps between occurrences of the reported phase
+    // (for example, validation/model-selection work between TRAIN epochs).
+    // Batch completion timestamps come from CUDA host callbacks so
+    // draining an already-complete queue cannot create artificial rate spikes.
     double samplesPerSecond = 0.0;
     double batchesPerSecond = 0.0;
     uint64_t floatingPointOperationsPerBatch = 0;

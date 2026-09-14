@@ -80,9 +80,19 @@ nanobind_add_module(_thor
 thor_enable_release_host_lto(_thor)
 thor_enable_release_no_semantic_interposition(_thor)
 #target_link_options(_thor PRIVATE "LINKER:-rpath,\$ORIGIN")
-install(TARGETS Thor
-        LIBRARY DESTINATION thor
-)
+# A source-tree install keeps the historical convenience copy of libThor.so next
+# to the Python extension. Wheel builds no longer do: the public thor-cuda wheel
+# contains the Python API/_thor extension, while libThor.so is delivered by the
+# architecture-specific kernel distributions.
+if (NOT DEFINED SKBUILD_PROJECT_NAME)
+    install(TARGETS Thor
+            LIBRARY DESTINATION thor
+    )
+elseif (NOT THOR_PYTHON_WHEEL_ARTIFACT STREQUAL "thor-cuda")
+    message(FATAL_ERROR
+            "bindings/python may only be configured for the thor-cuda wheel artifact; "
+            "kernel wheel artifacts must build with THOR_BUILD_PYTHON=OFF.")
+endif ()
 
 add_dependencies(_thor thor_py_pkg_sync thor_py_nvrtc_headers)
 
@@ -107,6 +117,7 @@ get_target_property(_zng_type ${ZLIBNG_TARGET} TYPE)
 if (_zng_type STREQUAL "SHARED_LIBRARY")
     install(TARGETS ${ZLIBNG_TARGET}
             LIBRARY DESTINATION ${THOR_PYTHON_PACKAGE_DIR}
+            COMPONENT thor_cuda_python_wheel
     )
 endif ()
 
@@ -401,11 +412,13 @@ set(_thor_install_pkg_dir "${THOR_PY_PKG_NAME}")
 # Install the extension into the package directory (thor/_thor*.so)
 install(TARGETS _thor
         LIBRARY DESTINATION "${_thor_install_pkg_dir}"
+        COMPONENT thor_cuda_python_wheel
 )
 
 # Install the pure python package sources into the same package dir
 install(DIRECTORY "${THOR_PY_PKG_SRC_DIR}/"
         DESTINATION "${_thor_install_pkg_dir}"
+        COMPONENT thor_cuda_python_wheel
 )
 
 # If stubs were generated in the build tree, install them too
@@ -415,6 +428,7 @@ if (THOR_PYTHON_STUBS)
             "${THOR_PY_PKG_BUILD_DIR}/__init__.pyi"
             "${THOR_PY_PKG_BUILD_DIR}/py.typed"
             DESTINATION "${_thor_install_pkg_dir}"
+            COMPONENT thor_cuda_python_wheel
     )
 
     # Submodule stubs
@@ -422,6 +436,7 @@ if (THOR_PYTHON_STUBS)
         install(FILES
                 "${THOR_PY_PKG_BUILD_DIR}/${_sm}/__init__.pyi"
                 DESTINATION "${_thor_install_pkg_dir}/${_sm}"
+                COMPONENT thor_cuda_python_wheel
         )
     endforeach ()
 
@@ -430,6 +445,7 @@ if (THOR_PYTHON_STUBS)
         install(FILES
                 "${THOR_PY_PKG_BUILD_DIR}/${_sm_path}/__init__.pyi"
                 DESTINATION "${_thor_install_pkg_dir}/${_sm_path}"
+                COMPONENT thor_cuda_python_wheel
         )
     endforeach ()
 endif ()

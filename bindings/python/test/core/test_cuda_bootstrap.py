@@ -1,21 +1,42 @@
 from __future__ import annotations
 
+import importlib
+import importlib.machinery
 import os
 from pathlib import Path
 import sys
 import tomllib
+import types
 
 import pytest
 
-import thor._bootstrap as bootstrap
-import thor._nvrtc_headers as nvrtc_headers
-import thor._cuda_stack as source_cuda_stack
-import thor._cuda_stack_resolved as resolved_cuda_stack
+# Load Thor's source modules without importing the public ``thor`` package.
+# Importing ``thor._bootstrap`` normally executes ``thor/__init__.py`` first,
+# which immediately imports the native ``_thor`` extension. These tests are
+# unit tests of bootstrap/package-selection logic and must not depend on an
+# installed split-wheel backend merely to collect.
+_SOURCE_THOR_ROOT = Path(__file__).resolve().parents[2] / "src" / "thor"
+_SOURCE_TEST_PACKAGE = "_thor_bootstrap_source"
+_source_package = types.ModuleType(_SOURCE_TEST_PACKAGE)
+_source_package.__path__ = [str(_SOURCE_THOR_ROOT)]
+_source_package.__package__ = _SOURCE_TEST_PACKAGE
+_source_package.__spec__ = importlib.machinery.ModuleSpec(
+    _SOURCE_TEST_PACKAGE,
+    loader=None,
+    is_package=True,
+)
+sys.modules[_SOURCE_TEST_PACKAGE] = _source_package
+
+bootstrap = importlib.import_module(f"{_SOURCE_TEST_PACKAGE}._bootstrap")
+nvrtc_headers = importlib.import_module(f"{_SOURCE_TEST_PACKAGE}._nvrtc_headers")
+source_cuda_stack = importlib.import_module(f"{_SOURCE_TEST_PACKAGE}._cuda_stack")
+resolved_cuda_stack = importlib.import_module(f"{_SOURCE_TEST_PACKAGE}._cuda_stack_resolved")
 
 _BUILD_BACKEND_ROOT = Path(__file__).resolve().parents[2] / "build_backend"
 if str(_BUILD_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BUILD_BACKEND_ROOT))
 
+from thor_build import compiler_environment as build_compiler_environment  # noqa: E402
 from thor_build import cuda_stack as build_cuda_stack  # noqa: E402
 from thor_build import dynamic_metadata as build_dynamic_metadata  # noqa: E402
 
@@ -54,6 +75,50 @@ def test_build_requirements_are_derived_from_single_cuda_version():
     )
     assert "nvidia-cudnn-cu13>=9.23,<10" in requirements
     assert "nvidia-cudnn-frontend>=1.25,<2" in requirements
+
+
+def test_wheel_backend_prefers_gcc14_when_compiler_environment_is_unset(monkeypatch):
+    for name in ("CC", "CXX", "CUDAHOSTCXX"):
+        monkeypatch.delenv(name, raising=False)
+
+    compilers = {
+        "gcc-14": "/usr/bin/gcc-14",
+        "g++-14": "/usr/bin/g++-14",
+    }
+    monkeypatch.setattr(build_compiler_environment.shutil, "which", compilers.get)
+
+    build_compiler_environment.configure_host_compiler_environment()
+
+    assert os.environ["CC"] == "/usr/bin/gcc-14"
+    assert os.environ["CXX"] == "/usr/bin/g++-14"
+    assert os.environ["CUDAHOSTCXX"] == "/usr/bin/g++-14"
+
+
+def test_wheel_backend_preserves_explicit_compiler_environment(monkeypatch):
+    monkeypatch.setenv("CC", "/opt/toolchain/bin/cc")
+    monkeypatch.setenv("CXX", "/opt/toolchain/bin/c++")
+    monkeypatch.setenv("CUDAHOSTCXX", "/opt/cuda-host/bin/c++")
+
+    def unexpected_lookup(_name: str):
+        raise AssertionError("explicit compiler environment must not be replaced")
+
+    monkeypatch.setattr(build_compiler_environment.shutil, "which", unexpected_lookup)
+
+    build_compiler_environment.configure_host_compiler_environment()
+
+    assert os.environ["CC"] == "/opt/toolchain/bin/cc"
+    assert os.environ["CXX"] == "/opt/toolchain/bin/c++"
+    assert os.environ["CUDAHOSTCXX"] == "/opt/cuda-host/bin/c++"
+
+
+def test_wheel_backend_uses_explicit_cxx_as_cuda_host_compiler(monkeypatch):
+    monkeypatch.setenv("CC", "/opt/toolchain/bin/cc")
+    monkeypatch.setenv("CXX", "/opt/toolchain/bin/c++")
+    monkeypatch.delenv("CUDAHOSTCXX", raising=False)
+
+    build_compiler_environment.configure_host_compiler_environment()
+
+    assert os.environ["CUDAHOSTCXX"] == "/opt/toolchain/bin/c++"
 
 
 def test_dynamic_dependencies_freeze_exact_installed_cuda_stack(monkeypatch, tmp_path):
@@ -300,3 +365,160 @@ def test_resolve_one_distribution_file_rejects_missing_library(monkeypatch, tmp_
 
     with pytest.raises(bootstrap.CudaBootstrapError, match="missing required shared library"):
         bootstrap._resolve_one_distribution_file("nvidia-cublas", ("**/libcublasLt.so.13",), "shared library")
+
+
+class _FakeCudaFunction:
+
+    def __init__(self, implementation):
+        self._implementation = implementation
+        self.argtypes = None
+        self.restype = None
+
+    def __call__(self, *args):
+        return self._implementation(*args)
+
+
+class _FakeCudaRuntime:
+
+    def __init__(self, compute_capabilities: tuple[int, ...]):
+        self._compute_capabilities = compute_capabilities
+        self.cudaGetDeviceCount = _FakeCudaFunction(self._get_device_count)
+        self.cudaDeviceGetAttribute = _FakeCudaFunction(self._get_device_attribute)
+        self.cudaGetErrorString = _FakeCudaFunction(lambda error_code: f"fake CUDA error {error_code}".encode())
+
+    @staticmethod
+    def _write_int(pointer, value: int) -> None:
+        bootstrap._ctypes.cast(pointer, bootstrap._ctypes.POINTER(bootstrap._ctypes.c_int))[0] = value
+
+    def _get_device_count(self, output) -> int:
+        self._write_int(output, len(self._compute_capabilities))
+        return 0
+
+    def _get_device_attribute(self, output, attribute: int, device_index: int) -> int:
+        sm = self._compute_capabilities[device_index]
+        if attribute == bootstrap._CUDA_DEV_ATTR_COMPUTE_CAPABILITY_MAJOR:
+            value = sm // 10
+        elif attribute == bootstrap._CUDA_DEV_ATTR_COMPUTE_CAPABILITY_MINOR:
+            value = sm % 10
+        else:
+            return 1
+        self._write_int(output, value)
+        return 0
+
+
+def test_runtime_kernel_backend_map_matches_wheel_dependencies():
+    runtime_distributions = tuple(
+        distribution_name for distribution_name, _library_path in bootstrap._KERNEL_BACKENDS.values()
+    )
+
+    assert runtime_distributions == build_dynamic_metadata._KERNEL_WHEEL_DISTRIBUTIONS
+
+
+def test_visible_cuda_compute_capabilities_queries_runtime_attributes(monkeypatch):
+    runtime = _FakeCudaRuntime((89, 89))
+    monkeypatch.setattr(bootstrap, "_load_cuda_runtime", lambda: runtime)
+
+    assert bootstrap._visible_cuda_compute_capabilities() == (89, 89)
+
+
+def test_visible_cuda_compute_capabilities_rejects_no_visible_devices(monkeypatch):
+    runtime = _FakeCudaRuntime(())
+    monkeypatch.setattr(bootstrap, "_load_cuda_runtime", lambda: runtime)
+
+    with pytest.raises(bootstrap.CudaBootstrapError, match="no visible CUDA devices"):
+        bootstrap._visible_cuda_compute_capabilities()
+
+
+def test_select_kernel_backend_maps_supported_architectures():
+    assert bootstrap._select_kernel_backend((89, 89)) == (
+        "thor-cuda-kernels-sm89",
+        "thor_cuda_kernels/sm89/libThor.so",
+    )
+    assert bootstrap._select_kernel_backend((120,)) == (
+        "thor-cuda-kernels-sm120",
+        "thor_cuda_kernels/sm120/libThor.so",
+    )
+
+
+def test_select_kernel_backend_rejects_mixed_architectures():
+    with pytest.raises(bootstrap.CudaBootstrapError, match=r"mixed compute capabilities \(sm89, sm120\)"):
+        bootstrap._select_kernel_backend((89, 120))
+
+
+def test_select_kernel_backend_rejects_unsupported_architecture():
+    with pytest.raises(
+        bootstrap.CudaBootstrapError,
+        match=r"unsupported compute capability sm90; supported architectures: sm89, sm120",
+    ):
+        bootstrap._select_kernel_backend((90,))
+
+
+def test_validate_kernel_distributions_requires_exact_thor_version(monkeypatch, tmp_path):
+    distributions = {
+        "thor-cuda-kernels-sm89": _dist(tmp_path, "0.0.36"),
+        "thor-cuda-kernels-sm120": _dist(tmp_path, "0.0.35"),
+    }
+    monkeypatch.setattr(bootstrap, "_metadata_distribution", lambda name: distributions[name])
+
+    with pytest.raises(bootstrap.CudaBootstrapError, match="thor-cuda-kernels-sm120.*0.0.35.*0.0.36"):
+        bootstrap._validate_kernel_distributions("0.0.36")
+
+
+def test_preload_kernel_backend_loads_selected_distribution_library(monkeypatch, tmp_path):
+    backend_root = tmp_path / "sm120_dist"
+    relative_library = Path("thor_cuda_kernels/sm120/libThor.so")
+    backend_library = backend_root / relative_library
+    backend_library.parent.mkdir(parents=True)
+    backend_library.write_bytes(b"")
+    distributions = {
+        "thor-cuda-kernels-sm120": _dist(backend_root, "0.0.36", str(relative_library)),
+    }
+    loaded: list[Path] = []
+    sentinel_handle = object()
+
+    monkeypatch.setattr(bootstrap, "_visible_cuda_compute_capabilities", lambda: (120, 120))
+    monkeypatch.setattr(bootstrap, "_metadata_distribution", lambda name: distributions[name])
+
+    def fake_cdll(path: str, mode: int = 0):
+        loaded.append(Path(path))
+        return sentinel_handle
+
+    monkeypatch.setattr(bootstrap._ctypes, "CDLL", fake_cdll)
+    monkeypatch.setattr(bootstrap, "_kernel_backend_handle", None)
+
+    bootstrap._preload_kernel_backend("0.0.36")
+
+    assert loaded == [backend_library.resolve()]
+    assert bootstrap._kernel_backend_handle is sentinel_handle
+
+
+def test_configure_preloads_kernel_backend_after_cuda_stack(monkeypatch):
+    calls: list[str] = []
+
+    monkeypatch.setattr(bootstrap, "_configured", False)
+    monkeypatch.delenv("THOR_CUDA_BOOTSTRAP_SOURCE_TREE", raising=False)
+    monkeypatch.setattr(bootstrap._sys, "argv", ["python"])
+    monkeypatch.setattr(bootstrap, "_CUDA_DISTRIBUTIONS", ())
+    monkeypatch.setattr(
+        bootstrap,
+        "_validate_resolved_manifest_matches_source_selection",
+        lambda: calls.append("manifest"),
+    )
+    monkeypatch.setattr(bootstrap, "_installed_thor_version", lambda: "0.0.36")
+    monkeypatch.setattr(
+        bootstrap,
+        "_validate_kernel_distributions",
+        lambda version: calls.append(f"kernels:{version}"),
+    )
+    monkeypatch.setattr(bootstrap, "_configure_include_dirs", lambda: calls.append("includes"))
+    monkeypatch.setattr(bootstrap, "_preload_cuda_user_space_libs", lambda: calls.append("cuda"))
+    monkeypatch.setattr(
+        bootstrap,
+        "_preload_kernel_backend",
+        lambda version: calls.append(f"backend:{version}"),
+    )
+
+    bootstrap.configure()
+
+    assert bootstrap._configured
+    assert calls == ["manifest", "kernels:0.0.36", "includes", "cuda", "backend:0.0.36"]

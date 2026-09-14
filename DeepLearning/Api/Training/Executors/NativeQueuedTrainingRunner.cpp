@@ -1,4 +1,5 @@
 #include "DeepLearning/Api/Training/Executors/NativeQueuedTrainingRunner.h"
+#include "DeepLearning/Api/Training/Executors/NativeQueuedTrainingRunnerTestHooks.h"
 #include "DeepLearning/Implementation/Data/Sessions/BatchSessionRuntimeAccess.h"
 
 #include "DeepLearning/Api/Data/Batch.h"
@@ -19,6 +20,7 @@
 #include "DeepLearning/Implementation/Diagnostics/TrainingDiagnostics.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
+#include "DeepLearning/Implementation/Training/PhaseWallThroughputTracker.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Expression/CudaHelpers.h"
 
@@ -26,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -61,6 +64,104 @@
 namespace Thor {
 
 namespace {
+
+struct NativeQueuedSchedulerResourceDiagnosticsState {
+    std::mutex mutex;
+    std::atomic<bool> enabled{false};
+    detail::NativeQueuedSchedulerResourceDiagnosticsForTests snapshot;
+    const void* firstExecutionResourceIdentity = nullptr;
+    bool multipleExecutionResourceIdentities = false;
+    std::optional<std::thread::id> firstWorkerThreadId;
+    bool multipleWorkerThreadIds = false;
+};
+
+NativeQueuedSchedulerResourceDiagnosticsState&
+nativeQueuedSchedulerResourceDiagnosticsState() {
+    static NativeQueuedSchedulerResourceDiagnosticsState state;
+    return state;
+}
+
+void recordNativeQueuedSchedulerResourceConstructionForTests() {
+    NativeQueuedSchedulerResourceDiagnosticsState& diagnostics =
+        nativeQueuedSchedulerResourceDiagnosticsState();
+    if (!diagnostics.enabled.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(diagnostics.mutex);
+    diagnostics.snapshot.resourceConstructionCount += 1;
+}
+
+void recordNativeQueuedSchedulerResourceExecutionLaunchForTests(
+    const void* resourceIdentity) {
+    NativeQueuedSchedulerResourceDiagnosticsState& diagnostics =
+        nativeQueuedSchedulerResourceDiagnosticsState();
+    if (!diagnostics.enabled.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(diagnostics.mutex);
+    diagnostics.snapshot.executionLaunchCount += 1;
+    if (diagnostics.firstExecutionResourceIdentity == nullptr) {
+        diagnostics.firstExecutionResourceIdentity = resourceIdentity;
+    } else if (diagnostics.firstExecutionResourceIdentity != resourceIdentity) {
+        diagnostics.multipleExecutionResourceIdentities = true;
+    }
+    diagnostics.snapshot.distinctResourceInstancesObserved =
+        diagnostics.multipleExecutionResourceIdentities ? 2 : 1;
+}
+
+void recordNativeQueuedSchedulerWorkerThreadStartForTests() {
+    NativeQueuedSchedulerResourceDiagnosticsState& diagnostics =
+        nativeQueuedSchedulerResourceDiagnosticsState();
+    if (!diagnostics.enabled.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(diagnostics.mutex);
+    diagnostics.snapshot.workerThreadStartCount += 1;
+    const std::thread::id workerThreadId = std::this_thread::get_id();
+    if (!diagnostics.firstWorkerThreadId.has_value()) {
+        diagnostics.firstWorkerThreadId = workerThreadId;
+    } else if (diagnostics.firstWorkerThreadId.value() != workerThreadId) {
+        diagnostics.multipleWorkerThreadIds = true;
+    }
+    diagnostics.snapshot.distinctWorkerThreadsObserved =
+        diagnostics.multipleWorkerThreadIds ? 2 : 1;
+}
+
+void recordNativeQueuedSchedulerEventReuseForTests(
+    uint64_t processingFinishedEventId,
+    uint64_t completionFinishedEventId) {
+    NativeQueuedSchedulerResourceDiagnosticsState& diagnostics =
+        nativeQueuedSchedulerResourceDiagnosticsState();
+    if (!diagnostics.enabled.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(diagnostics.mutex);
+
+    if (processingFinishedEventId != 0) {
+        if (diagnostics.snapshot.firstProcessingFinishedEventId == 0) {
+            diagnostics.snapshot.firstProcessingFinishedEventId =
+                processingFinishedEventId;
+        } else if (diagnostics.snapshot.firstProcessingFinishedEventId !=
+                   processingFinishedEventId) {
+            diagnostics.snapshot
+                .processingFinishedEventIdStableAcrossExecutions = false;
+        }
+    }
+    if (completionFinishedEventId != 0) {
+        if (diagnostics.snapshot.firstCompletionFinishedEventId == 0) {
+            diagnostics.snapshot.firstCompletionFinishedEventId =
+                completionFinishedEventId;
+        } else if (diagnostics.snapshot.firstCompletionFinishedEventId !=
+                   completionFinishedEventId) {
+            diagnostics.snapshot
+                .completionFinishedEventIdStableAcrossExecutions = false;
+        }
+    }
+}
 
 struct QueuedTrainingState;
 
@@ -106,6 +207,7 @@ struct QueuedBatchSlot {
     uint64_t doneInEpochAtComplete = 0;
     uint64_t validExamplesThroughBatch = 0;
     uint64_t paramsIndex = 0;
+    std::chrono::high_resolution_clock::time_point phaseStartedAt{};
     std::chrono::high_resolution_clock::time_point completionTime{};
     std::vector<ScalarStatSlot> scalarStats;
     std::unordered_map<std::string, MetricBatchStat> metricBatchStats;
@@ -116,6 +218,7 @@ struct QueuedPhaseProgress {
     uint64_t poppedBatches = 0;
     uint64_t completedValidExamples = 0;
     uint64_t poppedValidExamples = 0;
+    std::chrono::high_resolution_clock::time_point schedulingStartedAt{};
 };
 
 struct QueuedTrainingState {
@@ -163,119 +266,6 @@ struct QueuedTrainingState {
     uint64_t numBatchesDoneInEpoch = 0;
     uint64_t numBatchesInEpoch = 0;
 };
-struct WallThroughputEmaState {
-    bool initialized = false;
-    bool ratesInitialized = false;
-    double lastElapsedSeconds = 0.0;
-    uint64_t lastCompletedBatches = 0;
-    uint64_t lastCompletedSamples = 0;
-    double pendingFloatingPointOperations = 0.0;
-    double samplesPerSecond = 0.0;
-    double batchesPerSecond = 0.0;
-    double floatingPointOperationsPerSecond = 0.0;
-};
-
-constexpr double WALL_THROUGHPUT_EMA_ALPHA = 0.25;
-constexpr double WALL_THROUGHPUT_EMA_MIN_INTERVAL_SECONDS = 0.25;
-
-void updateWallThroughputRates(TrainingStatsSnapshot& snapshot,
-                               WallThroughputEmaState& state,
-                               uint64_t completedBatches,
-                               uint64_t completedSamples,
-                               uint64_t floatingPointOperationsThisBatch) {
-    snapshot.floatingPointOperationsPerBatch = floatingPointOperationsThisBatch;
-    if (snapshot.elapsedSeconds <= 0.0 || completedBatches == 0 || completedSamples == 0) {
-        return;
-    }
-
-    auto assignRates = [&](double batchesPerSecond,
-                           double samplesPerSecond,
-                           double floatingPointOperationsPerSecond) {
-        snapshot.batchesPerSecond = batchesPerSecond;
-        snapshot.samplesPerSecond = samplesPerSecond;
-        snapshot.floatingPointOperationsPerSecond = floatingPointOperationsPerSecond;
-    };
-
-    auto assignCurrentRates = [&]() {
-        assignRates(state.batchesPerSecond, state.samplesPerSecond, state.floatingPointOperationsPerSecond);
-    };
-
-    // Throughput is diagnostic-only.  Do not reconstruct a lifetime integer FLOP
-    // total from cumulative epoch/step counters: resumed/multi-phase training can
-    // legitimately begin a phase with a very large reported step, and even a true
-    // lifetime uint64_t FLOP counter would overflow during a sufficiently long run.
-    // Establish a local baseline and accumulate only the work between wall-rate
-    // samples, in double precision because the published rate is a double anyway.
-    if (!state.initialized) {
-        state.initialized = true;
-        state.lastElapsedSeconds = snapshot.elapsedSeconds;
-        state.lastCompletedBatches = completedBatches;
-        state.lastCompletedSamples = completedSamples;
-        state.pendingFloatingPointOperations = 0.0;
-        assignCurrentRates();
-        return;
-    }
-
-    // A caller may rebase cumulative progress (for example across a resumed or
-    // independently-scoped validation population).  Rebaseline diagnostics rather
-    // than allowing stale telemetry state to affect, much less abort, training.
-    if (snapshot.elapsedSeconds <= state.lastElapsedSeconds ||
-        completedBatches <= state.lastCompletedBatches ||
-        completedSamples <= state.lastCompletedSamples) {
-        state.lastElapsedSeconds = snapshot.elapsedSeconds;
-        state.lastCompletedBatches = completedBatches;
-        state.lastCompletedSamples = completedSamples;
-        state.pendingFloatingPointOperations = 0.0;
-        assignCurrentRates();
-        return;
-    }
-
-    state.pendingFloatingPointOperations += static_cast<double>(floatingPointOperationsThisBatch);
-
-    const double intervalSeconds = snapshot.elapsedSeconds - state.lastElapsedSeconds;
-    if (intervalSeconds < WALL_THROUGHPUT_EMA_MIN_INTERVAL_SECONDS) {
-        // Completion callbacks can leave several finished batches queued for the
-        // host to pop back-to-back.  Updating the wall-clock EMA on those tiny
-        // dequeue intervals turns a short drain burst into a visible throughput
-        // spike.  Keep accumulating progress until there is a meaningful wall
-        // interval; the eventual update uses the full elapsed/progress delta.
-        assignCurrentRates();
-        return;
-    }
-
-    const double intervalBatches =
-        static_cast<double>(completedBatches - state.lastCompletedBatches);
-    const double intervalSamples =
-        static_cast<double>(completedSamples - state.lastCompletedSamples);
-    const double intervalFloatingPointOperations = state.pendingFloatingPointOperations;
-    const double intervalBatchesPerSecond = intervalBatches / intervalSeconds;
-    const double intervalSamplesPerSecond = intervalSamples / intervalSeconds;
-    const double intervalFloatingPointOperationsPerSecond =
-        intervalFloatingPointOperations / intervalSeconds;
-
-    if (!state.ratesInitialized) {
-        state.batchesPerSecond = intervalBatchesPerSecond;
-        state.samplesPerSecond = intervalSamplesPerSecond;
-        state.floatingPointOperationsPerSecond = intervalFloatingPointOperationsPerSecond;
-        state.ratesInitialized = true;
-    } else {
-        state.batchesPerSecond = (WALL_THROUGHPUT_EMA_ALPHA * intervalBatchesPerSecond) +
-                                 ((1.0 - WALL_THROUGHPUT_EMA_ALPHA) * state.batchesPerSecond);
-        state.samplesPerSecond = (WALL_THROUGHPUT_EMA_ALPHA * intervalSamplesPerSecond) +
-                                 ((1.0 - WALL_THROUGHPUT_EMA_ALPHA) * state.samplesPerSecond);
-        state.floatingPointOperationsPerSecond =
-            (WALL_THROUGHPUT_EMA_ALPHA * intervalFloatingPointOperationsPerSecond) +
-            ((1.0 - WALL_THROUGHPUT_EMA_ALPHA) * state.floatingPointOperationsPerSecond);
-    }
-
-    state.lastElapsedSeconds = snapshot.elapsedSeconds;
-    state.lastCompletedBatches = completedBatches;
-    state.lastCompletedSamples = completedSamples;
-    state.pendingFloatingPointOperations = 0.0;
-    assignCurrentRates();
-}
-
-
 std::optional<uint64_t> bestEffortCurrentBatchFloatingPointOperations(
     ThorImplementation::StampedNetwork& stampedNetwork,
     TrainingEventPhase phase) noexcept {
@@ -1944,6 +1934,7 @@ struct BatchPopResult {
     uint64_t validExampleCount = 0;
     uint64_t floatingPointOperations = 0;
     uint64_t validExamplesInEpoch = 0;
+    std::chrono::high_resolution_clock::time_point phaseStartedAt{};
     std::chrono::high_resolution_clock::time_point completionTime{};
     std::vector<ScalarStatSlot> scalarStats;
     std::unordered_map<std::string, MetricBatchStat> metricBatchStats;
@@ -1976,6 +1967,7 @@ BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
     result.floatingPointOperations = slot.floatingPointOperations;
     result.validExamplesInEpoch =
         slot.validExamplesThroughBatch;
+    result.phaseStartedAt = slot.phaseStartedAt;
     result.completionTime = slot.completionTime;
     result.batchLease = std::move(params.batchLease);
     result.scalarStats = slot.scalarStats;
@@ -2017,6 +2009,8 @@ BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
     slot.floatingPointOperations = 0;
     slot.doneInEpochAtComplete = 0;
     slot.validExamplesThroughBatch = 0;
+    slot.phaseStartedAt = {};
+    slot.completionTime = {};
     state->headSlot = (state->headSlot + 1) % state->slots.size();
     state->inFlightBatches -= 1;
     result.inFlightAfterPop = state->inFlightBatches;
@@ -2198,45 +2192,85 @@ struct QueuedEpochPhaseWork {
     [[nodiscard]] uint64_t batchesToRun() const { return batchesToRunCount; }
 };
 
-class NativeQueuedEpochScheduler {
-   public:
-    NativeQueuedEpochScheduler(std::shared_ptr<PlacedNetwork> placedNetwork,
-                               std::shared_ptr<BatchSession> batchSession,
-                               std::shared_ptr<const ExecutableTrainingPlan> plan,
-                               const NativeQueuedTrainingOptions& options,
-                               std::shared_ptr<QueuedTrainingState> state,
-                               uint64_t currentEpoch,
-                               TrainingCancellationToken cancellationToken)
+struct NativeQueuedSchedulerResources {
+    NativeQueuedSchedulerResources(
+        std::shared_ptr<PlacedNetwork> placedNetwork,
+        std::shared_ptr<const ExecutableTrainingPlan> plan,
+        const NativeQueuedTrainingOptions& options)
         : placedNetwork(std::move(placedNetwork)),
-          batchSession(std::move(batchSession)),
           plan(std::move(plan)),
           options(options),
-          state(std::move(state)),
-          currentEpoch(currentEpoch),
-          cancellationToken(std::move(cancellationToken)),
           outputReadyEvents(this->placedNetwork->getNumStamps()),
           processingFinishedEvents(options.maxInFlightBatches),
           completionFinishedEvents(options.maxInFlightBatches) {
+        THOR_THROW_IF_FALSE(this->placedNetwork != nullptr);
+        THOR_THROW_IF_FALSE(this->plan != nullptr);
+
         stampGpuNums.reserve(this->placedNetwork->getNumStamps());
         for (uint64_t stamp = 0; stamp < this->placedNetwork->getNumStamps(); ++stamp) {
-            ThorImplementation::StampedNetwork& stampedNetwork = this->placedNetwork->getStampedNetwork(stamp);
-            std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> inputs = stampedNetwork.getInputs();
+            ThorImplementation::StampedNetwork& stampedNetwork =
+                this->placedNetwork->getStampedNetwork(stamp);
+            std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> inputs =
+                stampedNetwork.getInputs();
             THOR_THROW_IF_FALSE(!inputs.empty());
             stampGpuNums.push_back(inputs[0]->getStream().getGpuNum());
         }
 
         // Completion must not serialize all queued slots through one stream: the
         // wait/event/host-callback tail can otherwise cap the native queue below
-        // max_in_flight.  Assign each queue slot a completion stream from the
-        // existing download-stream pool.  getNextDownloadStream already limits
-        // stream fanout and round-robins per device, so slots distribute across
-        // the same streams used for ordinary output-download work instead of
-        // creating private ad-hoc streams here.
+        // max_in_flight. Assign each queue slot a completion stream from the
+        // existing download-stream pool. These streams and the recurring event
+        // banks belong to the placed training run, not to one logical epoch.
         completionStreams.reserve(options.maxInFlightBatches);
-        for (uint64_t slotIndex = 0; slotIndex < options.maxInFlightBatches; ++slotIndex) {
+        for (uint64_t slotIndex = 0; slotIndex < options.maxInFlightBatches;
+             ++slotIndex) {
             const uint64_t stamp = slotIndex % this->placedNetwork->getNumStamps();
-            completionStreams.push_back(Stream::getNextDownloadStream(stampGpuNums[stamp]));
+            completionStreams.push_back(
+                Stream::getNextDownloadStream(stampGpuNums[stamp]));
         }
+
+        recordNativeQueuedSchedulerResourceConstructionForTests();
+    }
+
+    void recordEventReuseForTests() const {
+        const uint64_t processingFinishedEventId =
+            processingFinishedEvents.empty()
+                ? 0
+                : processingFinishedEvents.front().getId();
+        const uint64_t completionFinishedEventId =
+            completionFinishedEvents.empty()
+                ? 0
+                : completionFinishedEvents.front().getId();
+        recordNativeQueuedSchedulerEventReuseForTests(
+            processingFinishedEventId,
+            completionFinishedEventId);
+    }
+
+    std::shared_ptr<PlacedNetwork> placedNetwork;
+    std::shared_ptr<const ExecutableTrainingPlan> plan;
+    NativeQueuedTrainingOptions options;
+    uint64_t nextStampToProcess = 0;
+    std::vector<std::map<std::string, Event>> outputReadyEvents;
+    std::vector<Event> processingFinishedEvents;
+    std::vector<Event> completionFinishedEvents;
+    std::vector<int> stampGpuNums;
+    std::vector<Stream> completionStreams;
+};
+
+class NativeQueuedEpochScheduler {
+   public:
+    NativeQueuedEpochScheduler(
+        std::shared_ptr<NativeQueuedSchedulerResources> resources,
+        std::shared_ptr<BatchSession> batchSession,
+        std::shared_ptr<QueuedTrainingState> state,
+        uint64_t currentEpoch,
+        TrainingCancellationToken cancellationToken)
+        : resources(std::move(resources)),
+          batchSession(std::move(batchSession)),
+          state(std::move(state)),
+          currentEpoch(currentEpoch),
+          cancellationToken(std::move(cancellationToken)) {
+        THOR_THROW_IF_FALSE(this->resources != nullptr);
     }
 
     void operator()(uint64_t initialEpochBatchNum,
@@ -2248,6 +2282,28 @@ class NativeQueuedEpochScheduler {
                     TrainingEventPhase diagnosticPhase) {
         if (batches == 0) {
             return;
+        }
+
+        const std::shared_ptr<PlacedNetwork>& placedNetwork =
+            resources->placedNetwork;
+        const std::shared_ptr<const ExecutableTrainingPlan>& plan =
+            resources->plan;
+        const NativeQueuedTrainingOptions& options = resources->options;
+        uint64_t& nextStampToProcess = resources->nextStampToProcess;
+        std::vector<std::map<std::string, Event>>& outputReadyEvents =
+            resources->outputReadyEvents;
+        std::vector<Event>& processingFinishedEvents =
+            resources->processingFinishedEvents;
+        std::vector<Event>& completionFinishedEvents =
+            resources->completionFinishedEvents;
+        const std::vector<int>& stampGpuNums = resources->stampGpuNums;
+        const std::vector<Stream>& completionStreams =
+            resources->completionStreams;
+
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            phaseProgress(*state, diagnosticPhase).schedulingStartedAt =
+                std::chrono::high_resolution_clock::now();
         }
 
         emitNativeQueueDiagnostic(
@@ -2272,7 +2328,11 @@ class NativeQueuedEpochScheduler {
             const auto scheduleIterationStart = diagnosticNow(collectQueueDiagnostics);
             const uint64_t epochBatchNum = initialEpochBatchNum + batch;
             const auto optimizerStart = diagnosticNow(collectQueueDiagnostics);
-            Optimizer::updateHyperParameters(placedNetwork.get(), currentEpoch, epochBatchNum, batchesPerEpoch);
+            // Hyper-parameter schedules advance with optimizer updates. Validation is
+            // forward-only, so it must neither traverse nor mutate optimizer state.
+            if (!validationPass) {
+                Optimizer::updateHyperParameters(placedNetwork.get(), currentEpoch, epochBatchNum, batchesPerEpoch);
+            }
             const auto optimizerFinish = diagnosticNow(collectQueueDiagnostics);
 
             uint64_t slotIndex = 0;
@@ -2300,6 +2360,7 @@ class NativeQueuedEpochScheduler {
                 slot.doneInEpochAtComplete = 0;
                 slot.validExamplesThroughBatch = 0;
                 slot.paramsIndex = slotIndex;
+                slot.phaseStartedAt = phaseProgress(*state, diagnosticPhase).schedulingStartedAt;
                 slot.completionTime = {};
                 for (ScalarStatSlot& scalarStat : slot.scalarStats) {
                     scalarStat.present = false;
@@ -2673,28 +2734,228 @@ class NativeQueuedEpochScheduler {
     }
 
    private:
-    std::shared_ptr<PlacedNetwork> placedNetwork;
+    std::shared_ptr<NativeQueuedSchedulerResources> resources;
     std::shared_ptr<BatchSession> batchSession;
-    std::shared_ptr<const ExecutableTrainingPlan> plan;
-    NativeQueuedTrainingOptions options;
     std::shared_ptr<QueuedTrainingState> state;
     uint64_t currentEpoch;
     TrainingCancellationToken cancellationToken;
-    uint64_t nextStampToProcess = 0;
-    std::vector<std::map<std::string, Event>> outputReadyEvents;
-    std::vector<Event> processingFinishedEvents;
-    std::vector<Event> completionFinishedEvents;
-    std::vector<int> stampGpuNums;
-    std::vector<Stream> completionStreams;
+};
+
+struct NativeQueuedSchedulerCommandCompletion {
+    void markFinished() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            finished = true;
+        }
+        finishedCondition.notify_all();
+    }
+
+    void wait() const {
+        std::unique_lock<std::mutex> lock(mutex);
+        while (!finished) {
+            finishedCondition.wait(lock);
+        }
+    }
+
+    mutable std::mutex mutex;
+    mutable std::condition_variable finishedCondition;
+    bool finished = false;
+};
+
+struct NativeQueuedSchedulerCommand {
+    std::shared_ptr<BatchSession> batchSession;
+    std::shared_ptr<QueuedTrainingState> state;
+    uint64_t currentEpoch = 0;
+    TrainingCancellationToken cancellationToken;
+    std::vector<QueuedEpochPhaseWork> phaseWorks;
+    std::shared_ptr<NativeQueuedSchedulerCommandCompletion> completion;
+};
+
+// Logical epoch boundaries determine when the control thread may score,
+// checkpoint, or admit the next epoch; they do not require an OS-thread
+// lifetime boundary. Keep one producer worker alive for the placed run and
+// feed it one non-overlapping scheduling command at a time.
+class NativeQueuedSchedulerWorker {
+   public:
+    explicit NativeQueuedSchedulerWorker(
+        std::shared_ptr<NativeQueuedSchedulerResources> resources)
+        : resources(std::move(resources)) {
+        THOR_THROW_IF_FALSE(this->resources != nullptr);
+        worker = std::thread(&NativeQueuedSchedulerWorker::workerLoop, this);
+    }
+
+    ~NativeQueuedSchedulerWorker() { shutdown(); }
+
+    NativeQueuedSchedulerWorker(const NativeQueuedSchedulerWorker&) = delete;
+    NativeQueuedSchedulerWorker& operator=(const NativeQueuedSchedulerWorker&) = delete;
+
+    [[nodiscard]] const std::shared_ptr<NativeQueuedSchedulerResources>&
+    getResources() const {
+        return resources;
+    }
+
+    std::shared_ptr<NativeQueuedSchedulerCommandCompletion> submit(
+        NativeQueuedSchedulerCommand command) {
+        auto completion =
+            std::make_shared<NativeQueuedSchedulerCommandCompletion>();
+        command.completion = completion;
+
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (stopping) {
+                throw std::runtime_error(
+                    "Native queued scheduler worker is stopping.");
+            }
+            if (commandActive || pendingCommand.has_value()) {
+                throw std::runtime_error(
+                    "Native queued scheduler worker received overlapping epoch "
+                    "commands.");
+            }
+            commandActive = true;
+            pendingCommand = std::move(command);
+        }
+        workAvailable.notify_one();
+        return completion;
+    }
+
+    void shutdown() noexcept {
+        std::shared_ptr<QueuedTrainingState> activeState;
+        std::shared_ptr<BatchSession> activeSession;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (stopping) {
+                // Another shutdown path already owns the join below or the
+                // worker has already been joined.
+            } else {
+                stopping = true;
+            }
+            if (pendingCommand.has_value()) {
+                activeState = pendingCommand->state;
+                activeSession = pendingCommand->batchSession;
+            } else {
+                activeState = activeCommandState;
+                activeSession = activeCommandSession;
+            }
+        }
+
+        // Normal shutdown happens while the worker is idle. These two calls are
+        // only a last-resort unwind path for an exception that escapes while a
+        // command is still active; they prevent a producer blocked on queue
+        // capacity or BatchSession acquisition from making destruction hang.
+        if (activeState != nullptr) {
+            requestQueuedTrainingCancellation(activeState);
+        }
+        if (activeSession != nullptr) {
+            try {
+                cancelBatchSession(activeSession);
+            } catch (...) {
+            }
+        }
+
+        workAvailable.notify_all();
+        try {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        } catch (...) {
+        }
+    }
+
+   private:
+    void workerLoop() noexcept {
+        recordNativeQueuedSchedulerWorkerThreadStartForTests();
+        while (true) {
+            std::optional<NativeQueuedSchedulerCommand> command;
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                workAvailable.wait(lock, [this]() {
+                    return stopping || pendingCommand.has_value();
+                });
+                if (!pendingCommand.has_value()) {
+                    return;
+                }
+
+                command.emplace(std::move(pendingCommand.value()));
+                pendingCommand.reset();
+                activeCommandState = command->state;
+                activeCommandSession = command->batchSession;
+            }
+
+            executeCommand(command.value());
+
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                activeCommandState.reset();
+                activeCommandSession.reset();
+                commandActive = false;
+            }
+            command->completion->markFinished();
+        }
+    }
+
+    void executeCommand(NativeQueuedSchedulerCommand& command) noexcept {
+        try {
+            {
+                std::lock_guard<std::mutex> lock(command.state->mutex);
+                if (command.state->failure != nullptr ||
+                    command.state->cancelRequested) {
+                    return;
+                }
+            }
+
+            NativeQueuedEpochScheduler scheduler(
+                resources,
+                command.batchSession,
+                command.state,
+                command.currentEpoch,
+                command.cancellationToken);
+            for (const QueuedEpochPhaseWork& work : command.phaseWorks) {
+                scheduler(
+                    work.initialBatchNum,
+                    work.sessionInitialBatchNum,
+                    work.initialValidExamples,
+                    work.batchesToRun(),
+                    work.batchesPerEpoch,
+                    work.exampleType,
+                    work.phase);
+            }
+            resources->recordEventReuseForTests();
+        } catch (...) {
+            {
+                std::lock_guard<std::mutex> lock(command.state->mutex);
+                if (command.state->failure == nullptr) {
+                    command.state->failure = std::current_exception();
+                }
+                command.state->cancelRequested = true;
+                command.state->numBatchesDoneInEpoch =
+                    command.state->numBatchesInEpoch;
+            }
+            command.state->batchFinished.notify_all();
+            command.state->batchPopped.notify_all();
+        }
+    }
+
+    std::shared_ptr<NativeQueuedSchedulerResources> resources;
+    std::mutex mutex;
+    std::condition_variable workAvailable;
+    bool stopping = false;
+    bool commandActive = false;
+    std::optional<NativeQueuedSchedulerCommand> pendingCommand;
+    std::shared_ptr<QueuedTrainingState> activeCommandState;
+    std::shared_ptr<BatchSession> activeCommandSession;
+    // Start this last from the constructor body so the persistent worker can
+    // never observe partially constructed synchronization/command state.
+    std::thread worker;
 };
 
 struct NativeQueuedEpochExecution {
     std::shared_ptr<QueuedTrainingState> state;
+    std::shared_ptr<NativeQueuedSchedulerCommandCompletion>
+        schedulerCommandCompletion;
     std::vector<QueuedEpochPhaseWork> phaseWorks;
     uint64_t initialCompletedBatches = 0;
     uint64_t initialWarmupCompletionTarget = 0;
     std::chrono::high_resolution_clock::time_point startedAt{};
-    std::thread schedulingThread;
 };
 
 struct QueuedEpochWorkPlan {
@@ -2803,14 +3064,16 @@ QueuedEpochWorkPlan buildQueuedEpochWorkPlan(
 
 NativeQueuedEpochExecution launchNativeQueuedEpochExecution(
     const TrainingRunRequest& request,
-    const std::shared_ptr<PlacedNetwork>& placedNetwork,
+    const std::shared_ptr<NativeQueuedSchedulerWorker>& schedulerWorker,
     const std::shared_ptr<BatchSession>& effectiveSession,
-    std::shared_ptr<const ExecutableTrainingPlan> plan,
-    const NativeQueuedTrainingOptions& options,
     const std::vector<std::string>& scalarTensorNames,
     const std::vector<std::string>& aggregateLossTensorNames,
     uint64_t currentEpoch,
     bool evaluateOnly) {
+    THOR_THROW_IF_FALSE(schedulerWorker != nullptr);
+    const std::shared_ptr<NativeQueuedSchedulerResources>& schedulerResources =
+        schedulerWorker->getResources();
+    THOR_THROW_IF_FALSE(schedulerResources != nullptr);
     QueuedEpochWorkPlan workPlan =
         buildQueuedEpochWorkPlan(request, effectiveSession, evaluateOnly);
 
@@ -2825,7 +3088,7 @@ NativeQueuedEpochExecution launchNativeQueuedEpochExecution(
             uint64_t{1});
     execution.startedAt = std::chrono::high_resolution_clock::now();
     execution.state = std::make_shared<QueuedTrainingState>(
-        options.maxInFlightBatches,
+        schedulerResources->options.maxInFlightBatches,
         scalarTensorNames,
         aggregateLossTensorNames);
     execution.state->numBatchesDoneInEpoch =
@@ -2841,45 +3104,24 @@ NativeQueuedEpochExecution launchNativeQueuedEpochExecution(
         progress.poppedValidExamples = work.initialValidExamples;
     }
 
-    NativeQueuedEpochScheduler scheduler(
-        placedNetwork,
-        effectiveSession,
-        std::move(plan),
-        options,
-        execution.state,
-        currentEpoch,
-        request.cancellationToken);
-    execution.schedulingThread = std::thread(
-        [scheduler = std::move(scheduler),
-         state = execution.state,
-         phaseWorks = execution.phaseWorks]() mutable {
-            try {
-                for (const QueuedEpochPhaseWork& work : phaseWorks) {
-                    scheduler(
-                        work.initialBatchNum,
-                        work.sessionInitialBatchNum,
-                        work.initialValidExamples,
-                        work.batchesToRun(),
-                        work.batchesPerEpoch,
-                        work.exampleType,
-                        work.phase);
-                }
-            } catch (...) {
-                {
-                    std::lock_guard<std::mutex> lock(state->mutex);
-                    if (state->failure == nullptr) {
-                        state->failure = std::current_exception();
-                    }
-                    state->cancelRequested = true;
-                    state->numBatchesDoneInEpoch =
-                        state->numBatchesInEpoch;
-                }
-                state->batchFinished.notify_all();
-                state->batchPopped.notify_all();
-            }
-        });
+    execution.schedulerCommandCompletion = schedulerWorker->submit(
+        NativeQueuedSchedulerCommand{
+            effectiveSession,
+            execution.state,
+            currentEpoch,
+            request.cancellationToken,
+            execution.phaseWorks,
+            nullptr});
+    recordNativeQueuedSchedulerResourceExecutionLaunchForTests(
+        schedulerResources.get());
 
     return execution;
+}
+
+void waitForSchedulerCommandCompletion(
+    const NativeQueuedEpochExecution& execution) {
+    THOR_THROW_IF_FALSE(execution.schedulerCommandCompletion != nullptr);
+    execution.schedulerCommandCompletion->wait();
 }
 
 void waitForInitialQueueCompletion(
@@ -2972,12 +3214,13 @@ bool abortNativeQueuedEpochExecution(
         return false;
     }
     try {
-        if (execution.schedulingThread.joinable()) {
-            execution.schedulingThread.join();
+        if (execution.schedulerCommandCompletion != nullptr) {
+            waitForSchedulerCommandCompletion(execution);
         }
     } catch (...) {
         return false;
     }
+    execution.schedulerCommandCompletion.reset();
 
     const bool submittedWorkDrained =
         drainQueuedTrainingWorkAfterFailure(placedNetwork, deviceNum);
@@ -3000,7 +3243,7 @@ class PendingNativeQueuedEpochExecutionGuard {
 
     ~PendingNativeQueuedEpochExecutionGuard() {
         if (!execution.has_value() ||
-            !execution->schedulingThread.joinable()) {
+            execution->schedulerCommandCompletion == nullptr) {
             return;
         }
         (void)abortNativeQueuedEpochExecution(
@@ -3023,6 +3266,8 @@ class PendingNativeQueuedEpochExecutionGuard {
 struct NativeQueuedStartupState {
     std::shared_ptr<PlacedNetwork> placedNetwork;
     std::shared_ptr<const ExecutableTrainingPlan> plan;
+    std::shared_ptr<NativeQueuedSchedulerResources> schedulerResources;
+    std::shared_ptr<NativeQueuedSchedulerWorker> schedulerWorker;
     std::shared_ptr<BatchSession> sourceSession;
     std::shared_ptr<BatchSession> effectiveSession;
     std::vector<NamedValidationSession> additionalValidationSessions;
@@ -3034,6 +3279,8 @@ struct NativeQueuedStartupState {
 void releaseFailedNativeQueuedStartupAttempt(
     NativeQueuedStartupState& attempt) noexcept {
     attempt.firstEpochExecution.reset();
+    attempt.schedulerWorker.reset();
+    attempt.schedulerResources.reset();
 
     // Session leases may own resident dataset and per-session device tensors.
     // Release them before the placed graph, then destroy the executable plan
@@ -3067,14 +3314,18 @@ void validateFullEpochPhaseCompletion(
 
 TrainingModelSelectionContext evaluateInitialModelSelectionState(
     const TrainingRunRequest& request,
-    const std::shared_ptr<PlacedNetwork>& placedNetwork,
+    const std::shared_ptr<NativeQueuedSchedulerWorker>& schedulerWorker,
     const std::shared_ptr<BatchSession>& defaultValidationSession,
     const std::vector<NamedValidationSession>& additionalValidationSessions,
-    const std::shared_ptr<const ExecutableTrainingPlan>& plan,
-    const NativeQueuedTrainingOptions& options,
     const std::vector<std::string>& scalarTensorNames,
     const std::vector<std::string>& aggregateLossTensorNames,
     uint64_t cumulativeEpoch) {
+    THOR_THROW_IF_FALSE(schedulerWorker != nullptr);
+    const std::shared_ptr<NativeQueuedSchedulerResources>& schedulerResources =
+        schedulerWorker->getResources();
+    THOR_THROW_IF_FALSE(schedulerResources != nullptr);
+    const std::shared_ptr<PlacedNetwork>& placedNetwork =
+        schedulerResources->placedNetwork;
     EpochLossAccumulator losses;
     losses.ensureValidationPopulation(request.defaultValidationPopulation);
     for (const NamedValidationSession& validation : additionalValidationSessions) {
@@ -3095,10 +3346,8 @@ TrainingModelSelectionContext evaluateInitialModelSelectionState(
 
         NativeQueuedEpochExecution execution = launchNativeQueuedEpochExecution(
             validationRequest,
-            placedNetwork,
+            schedulerWorker,
             session,
-            plan,
-            options,
             scalarTensorNames,
             aggregateLossTensorNames,
             cumulativeEpoch,
@@ -3134,9 +3383,7 @@ TrainingModelSelectionContext evaluateInitialModelSelectionState(
                 losses.update(snapshot);
             }
 
-            if (execution.schedulingThread.joinable()) {
-                execution.schedulingThread.join();
-            }
+            waitForSchedulerCommandCompletion(execution);
             throwIfQueuedTrainingStateFailed(state);
             for (const QueuedEpochPhaseWork& work : execution.phaseWorks) {
                 validateFullEpochPhaseCompletion(work, state, session);
@@ -3425,6 +3672,13 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
             ThorImplementation::requireCleanDeviceStartupCudaErrorState(
                 startupDeviceNum);
 
+            attempt.schedulerResources =
+                std::make_shared<NativeQueuedSchedulerResources>(
+                    attempt.placedNetwork, attempt.plan, options);
+            attempt.schedulerWorker =
+                std::make_shared<NativeQueuedSchedulerWorker>(
+                    attempt.schedulerResources);
+
             if (initialModelSelectionArtifacts != nullptr) {
                 // firstModelSelectionEpoch=0 means the exact model entering this
                 // fit/phase is a candidate.  Evaluate and snapshot it before the
@@ -3433,11 +3687,9 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
                     const TrainingModelSelectionContext initialContext =
                         evaluateInitialModelSelectionState(
                             request,
-                            attempt.placedNetwork,
+                            attempt.schedulerWorker,
                             attempt.effectiveSession,
                             attempt.additionalValidationSessions,
-                            attempt.plan,
-                            options,
                             scalarTensorNames,
                             aggregateLossTensorNames,
                             currentEpoch);
@@ -3464,10 +3716,8 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
             attempt.firstEpochExecution.emplace(
                 launchNativeQueuedEpochExecution(
                     request,
-                    attempt.placedNetwork,
+                    attempt.schedulerWorker,
                     attempt.effectiveSession,
-                    attempt.plan,
-                    options,
                     scalarTensorNames,
                     aggregateLossTensorNames,
                     currentEpoch,
@@ -3620,6 +3870,31 @@ void validateFullEpochPhaseCompletion(
 
 }  // namespace
 
+namespace detail {
+
+void resetNativeQueuedSchedulerResourceDiagnosticsForTests() {
+    NativeQueuedSchedulerResourceDiagnosticsState& diagnostics =
+        nativeQueuedSchedulerResourceDiagnosticsState();
+    std::lock_guard<std::mutex> lock(diagnostics.mutex);
+    diagnostics.snapshot = NativeQueuedSchedulerResourceDiagnosticsForTests{};
+    diagnostics.firstExecutionResourceIdentity = nullptr;
+    diagnostics.multipleExecutionResourceIdentities = false;
+    diagnostics.firstWorkerThreadId.reset();
+    diagnostics.multipleWorkerThreadIds = false;
+    diagnostics.enabled.store(true, std::memory_order_relaxed);
+}
+
+NativeQueuedSchedulerResourceDiagnosticsForTests
+nativeQueuedSchedulerResourceDiagnosticsForTests() {
+    NativeQueuedSchedulerResourceDiagnosticsState& diagnostics =
+        nativeQueuedSchedulerResourceDiagnosticsState();
+    std::lock_guard<std::mutex> lock(diagnostics.mutex);
+    diagnostics.enabled.store(false, std::memory_order_relaxed);
+    return diagnostics.snapshot;
+}
+
+}  // namespace detail
+
 void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver& observer, const NativeQueuedTrainingOptions& options) {
     NativeQueuedSigintScope sigintScope;
 
@@ -3749,9 +4024,18 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             initialModelSelectionArtifacts);
     std::shared_ptr<PlacedNetwork> placedNetwork =
         std::move(startup.placedNetwork);
-    std::shared_ptr<const ExecutableTrainingPlan> plan =
-        std::move(startup.plan);
-    THOR_THROW_IF_FALSE(plan != nullptr);
+    std::shared_ptr<NativeQueuedSchedulerResources> schedulerResources =
+        std::move(startup.schedulerResources);
+    std::shared_ptr<NativeQueuedSchedulerWorker> schedulerWorker =
+        std::move(startup.schedulerWorker);
+    THOR_THROW_IF_FALSE(schedulerResources != nullptr);
+    THOR_THROW_IF_FALSE(schedulerWorker != nullptr);
+    THOR_THROW_IF_FALSE(
+        schedulerWorker->getResources().get() == schedulerResources.get());
+    THOR_THROW_IF_FALSE(schedulerResources->plan != nullptr);
+    // The scheduler resource owner now carries the executable plan for the
+    // entire placed run. Drop the startup state's duplicate reference.
+    startup.plan.reset();
     std::shared_ptr<BatchSession> effectiveSession =
         std::move(startup.effectiveSession);
     std::vector<NamedValidationSession> additionalValidationSessions =
@@ -3775,7 +4059,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     const auto runStart = firstEpochExecution->startedAt;
     const double initialElapsedSeconds =
         evaluateOnly ? 0.0 : std::max(0.0, request.initialElapsedSeconds);
-    std::map<TrainingEventPhase, WallThroughputEmaState> throughputByPhase;
+    std::map<TrainingEventPhase, ThorImplementation::PhaseWallThroughputTracker> throughputByPhase;
     std::array<uint64_t, 4> cappedReportedStepsByPhase{};
     std::array<uint64_t, 4> cappedReportedSamplesByPhase{};
     auto cancelAdditionalValidationSessions = [&]() {
@@ -3871,10 +4155,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             request.cancellationToken.throwIfCancellationRequested();
             epochExecution = launchNativeQueuedEpochExecution(
                 request,
-                placedNetwork,
+                schedulerWorker,
                 effectiveSession,
-                plan,
-                options,
                 scalarTensorNames,
                 aggregateLossTensorNames,
                 currentEpoch,
@@ -3928,7 +4210,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             }
         };
 
-        auto cancelAndJoinScheduler = [&](std::exception_ptr failure) {
+        auto cancelEpochScheduling = [&](std::exception_ptr failure) {
             (void)abortNativeQueuedEpochExecution(
                 epochExecution,
                 effectiveSession,
@@ -4028,12 +4310,13 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                     // logical work captured for this submitted batch. In
                     // particular, ragged Attention counts only score pairs from
                     // the published row partitions rather than packed capacity.
-                    const uint64_t completedBatchesForThroughput = snapshot.step;
-                    updateWallThroughputRates(snapshot,
-                                              throughputByPhase[completedBatch.phase],
-                                              completedBatchesForThroughput,
-                                              snapshot.samplesProcessed,
-                                              completedBatch.floatingPointOperations);
+                    throughputByPhase[completedBatch.phase].observeCompletedBatch(
+                        snapshot,
+                        completedBatch.phaseStartedAt,
+                        completedBatch.completionTime,
+                        completedBatch.validExampleCount,
+                        completedBatch.floatingPointOperations,
+                        completedBatch.poppedInEpoch >= completedBatch.batchesInEpoch);
 
                     assignScalarStatsToSnapshot(snapshot,
                                                 state->scalarTensorNames,
@@ -4048,9 +4331,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 emitReadyPhaseLifecycleEvents();
             }
 
-            if (epochExecution.schedulingThread.joinable()) {
-                epochExecution.schedulingThread.join();
-            }
+            waitForSchedulerCommandCompletion(epochExecution);
             throwIfQueuedTrainingStateFailed(state);
             for (const QueuedEpochPhaseWork& work : phaseWorks) {
                 validateFullEpochPhaseCompletion(
@@ -4058,7 +4339,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             }
             emitReadyPhaseLifecycleEvents();
         } catch (...) {
-            cancelAndJoinScheduler(std::current_exception());
+            cancelEpochScheduling(std::current_exception());
             throw;
         }
 
@@ -4075,10 +4356,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             NativeQueuedEpochExecution validationExecution =
                 launchNativeQueuedEpochExecution(
                     namedValidationEvaluationRequest,
-                    placedNetwork,
+                    schedulerWorker,
                     validation.batchSession,
-                    plan,
-                    options,
                     scalarTensorNames,
                     aggregateLossTensorNames,
                     currentEpoch,
@@ -4089,21 +4368,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 validation.batchSession->getNumBatchesPerEpoch(
                     ExampleType::VALIDATE);
 
-            TrainingStatsSnapshot validationStarted = makeBaseSnapshot(
-                TrainingEventPhase::VALIDATE,
-                cumulativeEpoch,
-                batchSize,
-                validationBatches,
-                validationState);
-            validationStarted.datasetName =
-                validation.batchSession->getDatasetName();
-            validationStarted.validationPopulation = validation.name;
-            validationStarted.isDefaultValidationPopulation = false;
-            emitTrainingEvent(
-                observer,
-                TrainingEvent::epochStarted(std::move(validationStarted)));
-
-            WallThroughputEmaState validationThroughput;
+            ThorImplementation::PhaseWallThroughputTracker validationThroughput;
             auto cancelNamedValidation = [&](std::exception_ptr failure) {
                 (void)abortNativeQueuedEpochExecution(
                     validationExecution,
@@ -4114,6 +4379,20 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             };
 
             try {
+                TrainingStatsSnapshot validationStarted = makeBaseSnapshot(
+                    TrainingEventPhase::VALIDATE,
+                    cumulativeEpoch,
+                    batchSize,
+                    validationBatches,
+                    validationState);
+                validationStarted.datasetName =
+                    validation.batchSession->getDatasetName();
+                validationStarted.validationPopulation = validation.name;
+                validationStarted.isDefaultValidationPopulation = false;
+                emitTrainingEvent(
+                    observer,
+                    TrainingEvent::epochStarted(std::move(validationStarted)));
+
                 while (true) {
                     if (request.cancellationToken.isCancellationRequested()) {
                         requestQueuedTrainingCancellation(validationState);
@@ -4162,12 +4441,13 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                     snapshot.samplesProcessed =
                         (currentEpoch * validationExamplesProcessedPerEpoch) +
                         completedBatch.validExamplesInEpoch;
-                    updateWallThroughputRates(
+                    validationThroughput.observeCompletedBatch(
                         snapshot,
-                        validationThroughput,
-                        snapshot.step,
-                        snapshot.samplesProcessed,
-                        completedBatch.floatingPointOperations);
+                        completedBatch.phaseStartedAt,
+                        completedBatch.completionTime,
+                        completedBatch.validExampleCount,
+                        completedBatch.floatingPointOperations,
+                        completedBatch.poppedInEpoch >= completedBatch.batchesInEpoch);
                     assignScalarStatsToSnapshot(
                         snapshot,
                         validationState->scalarTensorNames,
@@ -4180,9 +4460,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                         observer,
                         TrainingEvent::statsUpdated(std::move(snapshot)));
                 }
-                if (validationExecution.schedulingThread.joinable()) {
-                    validationExecution.schedulingThread.join();
-                }
+                waitForSchedulerCommandCompletion(validationExecution);
                 throwIfQueuedTrainingStateFailed(validationState);
                 THOR_THROW_IF_FALSE(
                     validationExecution.phaseWorks.size() == 1);
@@ -4245,6 +4523,12 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             break;
         }
     }
+
+    // All epoch and named-validation commands have crossed their semantic
+    // completion barriers. The scheduler worker is no longer needed for this
+    // run, so stop and join it once while keeping the reusable scheduler
+    // resources alive for final checkpoint/save handoff work.
+    schedulerWorker->shutdown();
 
     request.cancellationToken.throwIfCancellationRequested();
     const uint64_t finalCompletedEpoch = completedEpoch.value_or(currentEpoch);

@@ -249,30 +249,139 @@ if ((NOT DEFINED CMAKE_CUDA_HOST_COMPILER OR "${CMAKE_CUDA_HOST_COMPILER}" STREQ
 endif ()
 
 # ============================================================
+# Python wheel artifact selection
+# ============================================================
+# Wheel builds are intentionally split across the public thor-cuda distribution
+# and one native backend distribution per supported SM. There is no monolithic
+# wheel compatibility mode: every scikit-build wheel configure must identify the
+# concrete release artifact it is producing. Ordinary source-tree CMake builds
+# leave this unset and retain their existing build/install behavior.
+set(
+        THOR_PYTHON_WHEEL_ARTIFACT
+        ""
+        CACHE STRING
+        "Thor Python wheel artifact: thor-cuda, thor-cuda-kernels-sm89, or thor-cuda-kernels-sm120. Empty for non-wheel source builds."
+)
+set_property(
+        CACHE THOR_PYTHON_WHEEL_ARTIFACT
+        PROPERTY STRINGS
+        ""
+        thor-cuda
+        thor-cuda-kernels-sm89
+        thor-cuda-kernels-sm120
+)
+
+set(_thor_python_kernel_wheel_sm "")
+set(_thor_python_release_wheel_bundle OFF)
+if (DEFINED SKBUILD_PROJECT_NAME)
+    if (THOR_PYTHON_WHEEL_ARTIFACT STREQUAL "")
+        message(FATAL_ERROR
+                "Thor scikit-build wheel builds must set THOR_PYTHON_WHEEL_ARTIFACT to one of: "
+                "thor-cuda, thor-cuda-kernels-sm89, thor-cuda-kernels-sm120.")
+    elseif (THOR_PYTHON_WHEEL_ARTIFACT STREQUAL "thor-cuda")
+        # The public wheel build is also Thor's complete release-wheel build.
+        # CMake compiles the shared host implementation once, compiles each
+        # supported SM exactly once, links the sm120 backend as the _thor
+        # build-time provider, and emits the sm89/sm120 kernel wheels alongside
+        # the public thor-cuda wheel.
+        set(_thor_python_release_wheel_bundle ON)
+        set(THOR_BUILD_PYTHON ON CACHE BOOL "Build Python bindings" FORCE)
+    elseif (THOR_PYTHON_WHEEL_ARTIFACT STREQUAL "thor-cuda-kernels-sm89")
+        set(_thor_python_kernel_wheel_sm "89")
+        set(THOR_BUILD_PYTHON OFF CACHE BOOL "Build Python bindings" FORCE)
+    elseif (THOR_PYTHON_WHEEL_ARTIFACT STREQUAL "thor-cuda-kernels-sm120")
+        set(_thor_python_kernel_wheel_sm "120")
+        set(THOR_BUILD_PYTHON OFF CACHE BOOL "Build Python bindings" FORCE)
+    else ()
+        message(FATAL_ERROR
+                "Invalid THOR_PYTHON_WHEEL_ARTIFACT='${THOR_PYTHON_WHEEL_ARTIFACT}'. "
+                "Use thor-cuda, thor-cuda-kernels-sm89, or thor-cuda-kernels-sm120.")
+    endif ()
+elseif (NOT THOR_PYTHON_WHEEL_ARTIFACT STREQUAL "")
+    message(FATAL_ERROR
+            "THOR_PYTHON_WHEEL_ARTIFACT is only valid for scikit-build wheel builds. "
+            "Leave it empty for ordinary source-tree CMake builds.")
+endif ()
+
+# ============================================================
 # CUDA compiler bootstrap
 # ============================================================
 # CUDA 13.x no longer supports some older default probe architectures, and
 # CMake's automatic architecture detection can fail before Thor's normal
-# configuration code runs.
+# configuration code runs. Architecture defaults therefore have to be chosen
+# before project() enables CUDA. Establish the single-config default build type
+# here as well so an otherwise-unspecified build gets the Release architecture
+# policy rather than accidentally taking the Debug/development policy.
 set(THOR_MIN_CUDA_TOOLKIT_VERSION 13.3)
+if (NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif ()
+
+set(_thor_cuda_architectures_was_explicit OFF)
+if (DEFINED THOR_CUDA_ARCHITECTURES AND NOT "${THOR_CUDA_ARCHITECTURES}" STREQUAL "")
+    set(_thor_cuda_architectures_was_explicit ON)
+endif ()
+
+set(_thor_cmake_cuda_architectures_was_explicit OFF)
+if (DEFINED CMAKE_CUDA_ARCHITECTURES AND NOT "${CMAKE_CUDA_ARCHITECTURES}" STREQUAL "")
+    set(_thor_cmake_cuda_architectures_was_explicit ON)
+endif ()
+
 string(TOUPPER "${CMAKE_BUILD_TYPE}" _thor_build_type_upper)
 if (_thor_build_type_upper MATCHES "^(RELEASE|RELWITHDEBINFO|MINSIZEREL)$")
-    set(_thor_default_cuda_architectures "89")
-    #set(_thor_default_cuda_architectures "89;120")
-    #set(_thor_default_cuda_architectures "120")
-    #set(_thor_default_cuda_architectures "89")
+    set(_thor_default_cuda_architectures "89;120")
     set(_thor_default_cuda_architectures_description "sm_89 for NVIDIA L4/Ada and sm_120 for RTX 50-series / Blackwell")
 else ()
     set(_thor_default_cuda_architectures "120")
     set(_thor_default_cuda_architectures_description "sm_120 for RTX 50-series / Blackwell")
 endif ()
 
-set(
-        THOR_CUDA_ARCHITECTURES
-        "${_thor_default_cuda_architectures}"
-        CACHE STRING
-        "CUDA architectures for Thor AOT CUDA compilation. Defaults to ${_thor_default_cuda_architectures_description} for this build type."
-)
+if (NOT _thor_python_kernel_wheel_sm STREQUAL "")
+    # A kernel wheel's distribution identity is also its architecture contract.
+    # Do not permit a stale cache entry or caller override to produce a wheel
+    # whose filename/package name claims one SM while libThor.so contains another.
+    if (_thor_cuda_architectures_was_explicit
+            AND NOT "${THOR_CUDA_ARCHITECTURES}" STREQUAL "${_thor_python_kernel_wheel_sm}")
+        message(FATAL_ERROR
+                "${THOR_PYTHON_WHEEL_ARTIFACT} requires THOR_CUDA_ARCHITECTURES=${_thor_python_kernel_wheel_sm}, "
+                "but the caller explicitly requested '${THOR_CUDA_ARCHITECTURES}'.")
+    endif ()
+    if (_thor_cmake_cuda_architectures_was_explicit
+            AND NOT "${CMAKE_CUDA_ARCHITECTURES}" STREQUAL "${_thor_python_kernel_wheel_sm}")
+        message(FATAL_ERROR
+                "${THOR_PYTHON_WHEEL_ARTIFACT} requires CMAKE_CUDA_ARCHITECTURES=${_thor_python_kernel_wheel_sm}, "
+                "but the caller explicitly requested '${CMAKE_CUDA_ARCHITECTURES}'.")
+    endif ()
+
+    set(
+            THOR_CUDA_ARCHITECTURES
+            "${_thor_python_kernel_wheel_sm}"
+            CACHE STRING
+            "CUDA architectures for Thor AOT CUDA compilation."
+            FORCE
+    )
+    set(CMAKE_CUDA_ARCHITECTURES "${_thor_python_kernel_wheel_sm}" CACHE STRING "CUDA architectures" FORCE)
+    set(_thor_cuda_architecture_policy "${THOR_PYTHON_WHEEL_ARTIFACT} wheel artifact")
+else ()
+    set(
+            THOR_CUDA_ARCHITECTURES
+            "${_thor_default_cuda_architectures}"
+            CACHE STRING
+            "CUDA architectures for Thor AOT CUDA compilation. Defaults to ${_thor_default_cuda_architectures_description} for this build type."
+    )
+
+    if (NOT _thor_cmake_cuda_architectures_was_explicit)
+        set(CMAKE_CUDA_ARCHITECTURES "${THOR_CUDA_ARCHITECTURES}" CACHE STRING "CUDA architectures" FORCE)
+    endif ()
+
+    if (_thor_cmake_cuda_architectures_was_explicit)
+        set(_thor_cuda_architecture_policy "CMAKE_CUDA_ARCHITECTURES override")
+    elseif (_thor_cuda_architectures_was_explicit)
+        set(_thor_cuda_architecture_policy "THOR_CUDA_ARCHITECTURES override")
+    else ()
+        set(_thor_cuda_architecture_policy "${CMAKE_BUILD_TYPE} build-type default")
+    endif ()
+endif ()
 
 set_property(
         CACHE THOR_CUDA_ARCHITECTURES
@@ -281,10 +390,6 @@ set_property(
         120
         "89;120"
 )
-
-if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR "${CMAKE_CUDA_ARCHITECTURES}" STREQUAL "")
-    set(CMAKE_CUDA_ARCHITECTURES "${THOR_CUDA_ARCHITECTURES}" CACHE STRING "CUDA architectures" FORCE)
-endif ()
 
 # Do not require /usr/local/cuda to be a valid symlink. Prefer an explicitly
 # requested compiler, then CUDA_HOME/CUDA_PATH, then the versioned CUDA 13.3
@@ -486,6 +591,13 @@ endif ()
 
 message(STATUS "Thor: CUDA compiler = ${CMAKE_CUDA_COMPILER}")
 message(STATUS "Thor: CUDA compiler version = ${CMAKE_CUDA_COMPILER_VERSION}")
+if (DEFINED SKBUILD_PROJECT_NAME)
+    message(STATUS "Thor: Python wheel artifact = ${THOR_PYTHON_WHEEL_ARTIFACT}")
+    if (_thor_python_release_wheel_bundle)
+        message(STATUS "Thor: release-wheel native graph = shared host objects + sm89 + sm120")
+    endif ()
+endif ()
+message(STATUS "Thor: CUDA architecture policy = ${_thor_cuda_architecture_policy}")
 message(STATUS "Thor: CUDA architectures = ${CMAKE_CUDA_ARCHITECTURES}")
 if (THOR_CUDA_STACK STREQUAL "python")
     message(STATUS "Thor: CUDA user-space stack = ${THOR_PYTHON_CUDA_STACK_NAME} from ${_thor_selected_python}")
@@ -518,10 +630,6 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS ON)
 set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE}")
 
-# Default to Release if not specified
-if (NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
-endif ()
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
 # ============================================================
@@ -897,19 +1005,88 @@ file(GLOB_RECURSE THOR_SOURCES CONFIGURE_DEPENDS
 )
 
 # ============================================================
-# Create shared library
+# Create shared library / release-wheel native graph
 # ============================================================
-#add_library(Thor STATIC ${THOR_SOURCES})
-add_library(Thor SHARED ${THOR_SOURCES})
+# Ordinary source builds retain the historical single Thor target. The public
+# thor-cuda wheel build uses a CMake-native release graph instead: host C++
+# objects are compiled once, CUDA objects are compiled once per supported SM,
+# and the two backend DSOs are linked from those shared host objects. Thor is
+# the sm120 backend so the existing _thor -> Thor link remains unchanged.
+if (_thor_python_release_wheel_bundle)
+    set(THOR_HOST_SOURCES "")
+    set(THOR_CUDA_SOURCES "")
+    foreach (_thor_source IN LISTS THOR_SOURCES)
+        if (_thor_source MATCHES "\\.cu$")
+            list(APPEND THOR_CUDA_SOURCES "${_thor_source}")
+        else ()
+            list(APPEND THOR_HOST_SOURCES "${_thor_source}")
+        endif ()
+    endforeach ()
+
+    add_library(ThorHostObjects OBJECT ${THOR_HOST_SOURCES})
+    add_library(ThorCudaSm89Objects OBJECT ${THOR_CUDA_SOURCES})
+    add_library(ThorCudaSm120Objects OBJECT ${THOR_CUDA_SOURCES})
+
+    set_target_properties(ThorHostObjects PROPERTIES
+            CXX_STANDARD 23
+            POSITION_INDEPENDENT_CODE ON
+    )
+    set_target_properties(ThorCudaSm89Objects PROPERTIES
+            CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
+            CUDA_ARCHITECTURES 89
+            CUDA_SEPARABLE_COMPILATION ON
+            POSITION_INDEPENDENT_CODE ON
+    )
+    set_target_properties(ThorCudaSm120Objects PROPERTIES
+            CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
+            CUDA_ARCHITECTURES 120
+            CUDA_SEPARABLE_COMPILATION ON
+            POSITION_INDEPENDENT_CODE ON
+    )
+
+    add_library(Thor SHARED
+            $<TARGET_OBJECTS:ThorHostObjects>
+            $<TARGET_OBJECTS:ThorCudaSm120Objects>
+    )
+    add_library(ThorKernelSm89 SHARED
+            $<TARGET_OBJECTS:ThorHostObjects>
+            $<TARGET_OBJECTS:ThorCudaSm89Objects>
+    )
+    set_target_properties(ThorKernelSm89 PROPERTIES
+            OUTPUT_NAME Thor
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/wheel_backends/sm89"
+    )
+else ()
+    #add_library(Thor STATIC ${THOR_SOURCES})
+    add_library(Thor SHARED ${THOR_SOURCES})
+endif ()
+
 set_target_properties(Thor PROPERTIES
         CXX_STANDARD 23
         CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
         BUILD_RPATH "\$ORIGIN"
         INSTALL_RPATH "\$ORIGIN"
 )
+if (_thor_python_release_wheel_bundle)
+    set_target_properties(Thor PROPERTIES CUDA_ARCHITECTURES 120)
+    set_target_properties(ThorKernelSm89 PROPERTIES
+            CXX_STANDARD 23
+            CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
+            CUDA_ARCHITECTURES 89
+            BUILD_RPATH "\$ORIGIN"
+            INSTALL_RPATH "\$ORIGIN"
+            LINKER_LANGUAGE CXX
+    )
+endif ()
 if (THOR_CUDA_STACK STREQUAL "python")
     set_property(TARGET Thor PROPERTY CUDA_RUNTIME_LIBRARY None)
     set_property(TARGET Thor APPEND PROPERTY BUILD_RPATH "${THOR_CUDA_RUNTIME_LIBRARY_DIRS}")
+    if (_thor_python_release_wheel_bundle)
+        set_property(TARGET ThorCudaSm89Objects PROPERTY CUDA_RUNTIME_LIBRARY None)
+        set_property(TARGET ThorCudaSm120Objects PROPERTY CUDA_RUNTIME_LIBRARY None)
+        set_property(TARGET ThorKernelSm89 PROPERTY CUDA_RUNTIME_LIBRARY None)
+        set_property(TARGET ThorKernelSm89 APPEND PROPERTY BUILD_RPATH "${THOR_CUDA_RUNTIME_LIBRARY_DIRS}")
+    endif ()
 endif ()
 
 target_include_directories(Thor
@@ -1407,6 +1584,56 @@ target_compile_definitions(Thor PRIVATE
         THOR_ZLIBNG_HAS_CRC32_Z=${THOR_ZLIBNG_HAS_CRC32_Z_INT}
 )
 
+# The release-wheel object libraries intentionally reuse the exact compile
+# contract accumulated on Thor above. Keeping Thor as the contract owner avoids
+# maintaining a second, subtly different set of include paths, definitions,
+# warnings, CUDA flags, and dependency usage requirements for wheel builds.
+if (_thor_python_release_wheel_bundle)
+    function(thor_copy_target_property source_target destination_target property_name)
+        get_target_property(_thor_property_value ${source_target} ${property_name})
+        if (NOT _thor_property_value STREQUAL "_thor_property_value-NOTFOUND")
+            set_property(TARGET ${destination_target} PROPERTY ${property_name} "${_thor_property_value}")
+        endif ()
+    endfunction()
+
+    foreach (_thor_object_target IN ITEMS ThorHostObjects ThorCudaSm89Objects ThorCudaSm120Objects)
+        foreach (_thor_compile_property IN ITEMS
+                INCLUDE_DIRECTORIES
+                COMPILE_DEFINITIONS
+                COMPILE_OPTIONS
+                COMPILE_FEATURES
+                LINK_LIBRARIES
+        )
+            thor_copy_target_property(Thor ${_thor_object_target} ${_thor_compile_property})
+        endforeach ()
+
+        # target_include_directories(Thor SYSTEM PUBLIC ...) records these paths
+        # as system includes for Thor itself, but copying INCLUDE_DIRECTORIES to
+        # an object library loses that classification. Reapply the CUDA stack
+        # include roots as SYSTEM so third-party CUDA/cuDNN warnings do not get
+        # promoted by Thor's -Werror policy.
+        if (THOR_CUDA_INCLUDE_DIRS)
+            target_include_directories(${_thor_object_target} SYSTEM PRIVATE
+                    ${THOR_CUDA_INCLUDE_DIRS}
+            )
+        endif ()
+
+        set_property(TARGET ${_thor_object_target} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    endforeach ()
+
+    # Thor itself is the sm120 backend used to resolve _thor at build time. The
+    # sm89 backend must have an identical host/runtime link contract while using
+    # its independently compiled sm89 CUDA objects.
+    foreach (_thor_link_property IN ITEMS LINK_LIBRARIES LINK_OPTIONS LINK_DIRECTORIES)
+        thor_copy_target_property(Thor ThorKernelSm89 ${_thor_link_property})
+    endforeach ()
+    set_property(TARGET ThorKernelSm89 PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    if (CMAKE_CONFIGURATION_TYPES OR CMAKE_BUILD_TYPE STREQUAL "Release")
+        set_property(TARGET Thor PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+        set_property(TARGET ThorKernelSm89 PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+    endif ()
+endif ()
+
 
 file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS
         "${CMAKE_SOURCE_DIR}/test/*.cpp"
@@ -1871,6 +2098,14 @@ if (NOT DEFINED SKBUILD_PROJECT_NAME)
             ${CMAKE_BINARY_DIR}/ThorConfigVersion.cmake
             DESTINATION lib/cmake/Thor
     )
+elseif (NOT _thor_python_kernel_wheel_sm STREQUAL "")
+    # Kernel distributions intentionally carry a complete single-SM libThor.so.
+    # Keeping the existing Thor ABI intact makes this first packaging split a
+    # distribution/install change rather than a CUDA plugin refactor.
+    install(TARGETS Thor
+            LIBRARY DESTINATION "thor_cuda_kernels/sm${_thor_python_kernel_wheel_sm}"
+            COMPONENT thor_cuda_kernel_backend
+    )
 endif ()
 
 include(CMakePackageConfigHelpers)
@@ -1966,6 +2201,12 @@ add_custom_command(
 
 add_custom_target(ThorHeader ALL DEPENDS ${CMAKE_BINARY_DIR}/generated/Thor.h)
 add_dependencies(Thor ThorHeader)
+if (_thor_python_release_wheel_bundle)
+    add_dependencies(ThorHostObjects ThorHeader)
+    add_dependencies(ThorCudaSm89Objects ThorHeader)
+    add_dependencies(ThorCudaSm120Objects ThorHeader)
+    add_dependencies(ThorKernelSm89 ThorHeader)
+endif ()
 
 # Compile the public umbrella header from an install-shaped include directory.
 # This target deliberately does not inherit Thor's source-tree include path.
@@ -2072,31 +2313,31 @@ target_compile_definitions(thor_installed_public_api_consumer PRIVATE
 )
 
 
-find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
-
-execute_process(
-        COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
-        OUTPUT_VARIABLE nanobind_ROOT
-        RESULT_VARIABLE _thor_nanobind_result
-        ERROR_VARIABLE _thor_nanobind_error
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
-if (NOT _thor_nanobind_result EQUAL 0)
-    message(FATAL_ERROR
-            "Failed to locate nanobind using Python executable:\n"
-            "  ${Python_EXECUTABLE}\n"
-            "stderr:\n"
-            "${_thor_nanobind_error}\n"
-            "Install nanobind into that Python environment."
-    )
-endif ()
-
-list(APPEND CMAKE_PREFIX_PATH "${nanobind_ROOT}")
-find_package(nanobind CONFIG REQUIRED)
-
 option(THOR_BUILD_PYTHON "Build Python bindings" ON)
 if (THOR_BUILD_PYTHON)
+    find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
+
+    execute_process(
+            COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
+            OUTPUT_VARIABLE nanobind_ROOT
+            RESULT_VARIABLE _thor_nanobind_result
+            ERROR_VARIABLE _thor_nanobind_error
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+
+    if (NOT _thor_nanobind_result EQUAL 0)
+        message(FATAL_ERROR
+                "Failed to locate nanobind using Python executable:\n"
+                "  ${Python_EXECUTABLE}\n"
+                "stderr:\n"
+                "${_thor_nanobind_error}\n"
+                "Install nanobind into that Python environment."
+        )
+    endif ()
+
+    list(APPEND CMAKE_PREFIX_PATH "${nanobind_ROOT}")
+    find_package(nanobind CONFIG REQUIRED)
+
     add_subdirectory(bindings/python)
 
     if (TARGET thor_py_deps AND NOT DEFINED SKBUILD_PROJECT_NAME)
@@ -2104,8 +2345,138 @@ if (THOR_BUILD_PYTHON)
     endif ()
 endif ()
 
+# A normal `python -m build --wheel` of thor-cuda is Thor's complete wheel
+# release build. CMake packages the two architecture backends from the same
+# native object graph used to link _thor, so no SM is compiled a second time.
+if (_thor_python_release_wheel_bundle)
+    set(_thor_wheel_output_dir "$ENV{THOR_WHEEL_OUTPUT_DIR}")
+    set(_thor_wheel_platform_tag "$ENV{THOR_WHEEL_PLATFORM_TAG}")
+    if (_thor_wheel_output_dir STREQUAL "")
+        message(FATAL_ERROR
+                "thor-cuda release-wheel builds require THOR_WHEEL_OUTPUT_DIR from the Thor PEP 517 backend.")
+    endif ()
+    if (_thor_wheel_platform_tag STREQUAL "")
+        message(FATAL_ERROR
+                "thor-cuda release-wheel builds require THOR_WHEEL_PLATFORM_TAG from the Thor PEP 517 backend.")
+    endif ()
+
+    set(_thor_kernel_wheel_pack_script "${CMAKE_SOURCE_DIR}/cmake/PackThorKernelWheel.cmake")
+
+    function(thor_add_kernel_sidecar_wheel sm backend_target distribution_name description)
+        add_custom_target(thor_kernel_wheel_sm${sm}
+                COMMAND ${CMAKE_COMMAND}
+                -DTHOR_KERNEL_LIBRARY=$<TARGET_FILE:${backend_target}>
+                -DTHOR_KERNEL_SM=${sm}
+                -DTHOR_KERNEL_DISTRIBUTION=${distribution_name}
+                -DTHOR_KERNEL_VERSION=${THOR_VERSION_FULL}
+                -DTHOR_KERNEL_DESCRIPTION=${description}
+                -DTHOR_WHEEL_PLATFORM_TAG=${_thor_wheel_platform_tag}
+                -DTHOR_WHEEL_OUTPUT_DIR=${_thor_wheel_output_dir}
+                -DTHOR_WHEEL_STAGE_ROOT=${CMAKE_BINARY_DIR}/kernel_wheel_stage
+                -DTHOR_PYTHON_EXECUTABLE=${Python_EXECUTABLE}
+                -DTHOR_LICENSE_FILE=${CMAKE_SOURCE_DIR}/LICENSE
+                -P ${_thor_kernel_wheel_pack_script}
+                DEPENDS ${backend_target} ${_thor_kernel_wheel_pack_script} ${CMAKE_SOURCE_DIR}/LICENSE
+                COMMENT "Thor: packaging ${distribution_name} from the shared release-wheel build"
+                VERBATIM
+        )
+    endfunction()
+
+    thor_add_kernel_sidecar_wheel(
+            89
+            ThorKernelSm89
+            thor-cuda-kernels-sm89
+            "Thor CUDA native backend for NVIDIA sm_89 GPUs"
+    )
+    thor_add_kernel_sidecar_wheel(
+            120
+            Thor
+            thor-cuda-kernels-sm120
+            "Thor CUDA native backend for NVIDIA sm_120 GPUs"
+    )
+
+    # Pipeline architecture builds without ever compiling two SMs at once.
+    # The next SM's CUDA compilation is released as soon as the previous SM's
+    # CUDA objects (and the shared host objects needed by its backend) are
+    # complete.  At that point the previous backend can device-link/link and
+    # package its wheel while the next SM compiles in parallel:
+    #
+    #   stage 0: shared host + CUDA compile sm89
+    #   stage 1: link/package sm89  ||  CUDA compile sm120
+    #   stage 2: link/package sm120 ||  CUDA compile next SM (when added)
+    #
+    # A file-level completion stamp is intentional here.  Ninja's target-level
+    # add_dependencies() ordering is weaker for source compilation, so making
+    # the stamp depend on the actual object files provides the hard compile
+    # barrier required to keep two SM CUDA compilations from overlapping.
+    function(thor_pipeline_cuda_compile_after previous_sm previous_cuda_target next_sm next_cuda_target)
+        set(_thor_compile_complete_stamp
+                "${CMAKE_BINARY_DIR}/wheel_pipeline/sm${previous_sm}_compile_complete.stamp")
+        add_custom_command(
+                OUTPUT "${_thor_compile_complete_stamp}"
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/wheel_pipeline"
+                COMMAND ${CMAKE_COMMAND} -E touch "${_thor_compile_complete_stamp}"
+                DEPENDS
+                $<TARGET_OBJECTS:ThorHostObjects>
+                $<TARGET_OBJECTS:${previous_cuda_target}>
+                COMMAND_EXPAND_LISTS
+                COMMENT "Thor: sm${previous_sm} CUDA compile complete; releasing sm${next_sm} CUDA compile"
+                VERBATIM
+        )
+        add_custom_target(thor_cuda_sm${previous_sm}_compile_complete
+                DEPENDS "${_thor_compile_complete_stamp}")
+        add_dependencies(${next_cuda_target} thor_cuda_sm${previous_sm}_compile_complete)
+    endfunction()
+
+    thor_pipeline_cuda_compile_after(89 ThorCudaSm89Objects 120 ThorCudaSm120Objects)
+
+    # The compile barrier above is deliberately weaker than the stage barrier
+    # below.  sm120 CUDA source compilation may overlap the complete sm89
+    # backend tail (device-link, host link, and wheel packaging), but the sm120
+    # backend itself must not begin its device-link/link until that previous
+    # stage is fully complete.  Attaching the dependency to the final backend
+    # target, rather than ThorCudaSm120Objects, keeps sm120 compilation free to
+    # run while serializing the memory-heavy device-link operations.
+    function(thor_pipeline_backend_after_wheel previous_sm previous_wheel_target next_sm next_backend_target)
+        if (NOT TARGET ${previous_wheel_target})
+            message(FATAL_ERROR
+                    "Thor wheel pipeline: missing sm${previous_sm} wheel target '${previous_wheel_target}'")
+        endif ()
+        if (NOT TARGET ${next_backend_target})
+            message(FATAL_ERROR
+                    "Thor wheel pipeline: missing sm${next_sm} backend target '${next_backend_target}'")
+        endif ()
+        add_dependencies(${next_backend_target} ${previous_wheel_target})
+    endfunction()
+
+    thor_pipeline_backend_after_wheel(89 thor_kernel_wheel_sm89 120 Thor)
+
+    set(_thor_release_wheel_dependencies
+            _thor
+            thor_kernel_wheel_sm89
+            thor_kernel_wheel_sm120
+    )
+    if (TARGET thor_py_stubs_all)
+        list(APPEND _thor_release_wheel_dependencies thor_py_stubs_all)
+    endif ()
+    add_custom_target(thor_release_wheels
+            DEPENDS ${_thor_release_wheel_dependencies}
+            COMMENT "Thor: complete wheel release set (thor-cuda + sm89 + sm120)"
+    )
+
+    # Auditwheel repair and publication happen after scikit-build-core has
+    # finished creating the public thor-cuda wheel.  The PEP 517 build tree
+    # is configured with tools from an isolated temporary environment, so it
+    # is intentionally not reused for post-build release operations.  Invoke
+    # cmake/ThorWheelRelease.cmake from the source tree instead.
+endif ()
+
 # For convenience, rebuild the python bindings before rebuilding the c++ tests
-add_dependencies(thor_tests _thor)
+# when this configuration actually contains the Python extension. Kernel-wheel
+# builds intentionally set THOR_BUILD_PYTHON=OFF and therefore have no _thor.
+if (TARGET _thor)
+    add_dependencies(thor_tests _thor)
+endif ()
 
 # Full M11 gate: the C++ qualification above plus the four ProductTransformer
 # ragged FFN/encoder placement diagnostics that originally exposed the

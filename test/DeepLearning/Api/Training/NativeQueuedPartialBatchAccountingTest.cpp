@@ -13,7 +13,9 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
+#include "DeepLearning/Implementation/Layers/Optimizers/CustomOptimizer.h"
 #include "DeepLearning/Api/Training/Executors/NativeQueuedTrainingRunner.h"
+#include "DeepLearning/Api/Training/Executors/NativeQueuedTrainingRunnerTestHooks.h"
 #include "DeepLearning/Api/Training/Observers/TrainingObserver.h"
 #include "DeepLearning/Api/Training/TrainingInputBinding.h"
 #include "DeepLearning/Implementation/Data/Sessions/BatchSessionRuntimeAccess.h"
@@ -28,10 +30,12 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <memory>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -316,6 +320,72 @@ class DeterministicTrainableBatchSession final : public BatchSession {
     uint64_t nextValidateBatch = 0;
 };
 
+struct HyperParameterUpdateInvocation {
+    uint64_t epoch = 0;
+    uint64_t batch = 0;
+    uint64_t batchesPerEpoch = 0;
+};
+
+struct HyperParameterUpdateRecorder {
+    void record(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
+        std::lock_guard<std::mutex> lock(mutex);
+        invocations.push_back(HyperParameterUpdateInvocation{epoch, batch, batchesPerEpoch});
+    }
+
+    std::vector<HyperParameterUpdateInvocation> snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return invocations;
+    }
+
+    mutable std::mutex mutex;
+    std::vector<HyperParameterUpdateInvocation> invocations;
+};
+
+class CountingHyperParameterOptimizer final : public Optimizer {
+   public:
+    explicit CountingHyperParameterOptimizer(std::shared_ptr<HyperParameterUpdateRecorder> recorder)
+        : recorder(std::move(recorder)) {
+        THOR_THROW_IF_FALSE(this->recorder != nullptr);
+    }
+
+    std::shared_ptr<ThorImplementation::Optimizer> stamp(
+        std::shared_ptr<ThorImplementation::TrainableLayer> trainableLayer) override {
+        (void)trainableLayer;
+        std::shared_ptr<HyperParameterUpdateRecorder> stampedRecorder = recorder;
+        return std::make_shared<ThorImplementation::CustomOptimizer>(
+            getId(),
+            std::vector<ThorImplementation::CustomOptimizerStateSpec>{},
+            [](const ThorImplementation::CustomOptimizerUpdateContext& context) {
+                const ThorImplementation::DataType weightsDType = context.weightsTensor().getDataType();
+                ThorImplementation::Expression weights =
+                    context.weights(ThorImplementation::DataType::FP32, ThorImplementation::DataType::FP32);
+                ThorImplementation::Expression gradient = context.gradient();
+                ThorImplementation::Expression step = ThorImplementation::Expression::constantScalar(0.0001f);
+                return ThorImplementation::CustomOptimizerUpdateExpression{{
+                    {"weights", (weights - step * gradient).withOutputDType(weightsDType)},
+                }};
+            },
+            ThorImplementation::CustomOptimizer::RuntimeScalarBuilder{},
+            /*supportsSparseRowGradients=*/false,
+            [stampedRecorder](uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
+                stampedRecorder->record(epoch, batch, batchesPerEpoch);
+                return std::unordered_map<std::string, float>{};
+            });
+    }
+
+    nlohmann::json architectureJson() const override {
+        return nlohmann::json{{"optimizer_type", "counting_hyper_parameter_optimizer"}, {"version", getVersion()}, {"id", getId()}};
+    }
+
+    std::string getType() const override { return "CountingHyperParameterOptimizer"; }
+
+   protected:
+    std::shared_ptr<Optimizer> clone() const override { return std::make_shared<CountingHyperParameterOptimizer>(*this); }
+
+   private:
+    std::shared_ptr<HyperParameterUpdateRecorder> recorder;
+};
+
 struct TrainableOracleNetwork {
     std::shared_ptr<Network> network;
     uint64_t fullyConnectedLayerId = 0;
@@ -514,6 +584,35 @@ TEST(NativeQueuedPartialBatchAccounting, ExactEpochsReportValidSamplesAndPopulat
     EXPECT_EQ(session->getNextBatchNum(ExampleType::VALIDATE), 0u);
 }
 
+TEST(NativeQueuedPartialBatchAccounting, ValidationDoesNotUpdateOptimizerHyperParameters) {
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    auto session = std::make_shared<DeterministicTrainableBatchSession>();
+    auto recorder = std::make_shared<HyperParameterUpdateRecorder>();
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = session;
+    request.optimizer = std::make_shared<CountingHyperParameterOptimizer>(recorder);
+    request.datasetInputBindings = {TrainingInputBinding("features", "features"), TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 3;
+
+    CapturingObserver observer;
+    runNativeQueuedTraining(
+        request, observer, NativeQueuedTrainingOptions{.maxInFlightBatches = 3, .synchronizeAfterEveryBatch = false});
+
+    const std::vector<HyperParameterUpdateInvocation> invocations = recorder->snapshot();
+    ASSERT_EQ(invocations.size(), 9u);
+    for (uint64_t epoch = 0; epoch < 3; ++epoch) {
+        for (uint64_t batch = 0; batch < 3; ++batch) {
+            const HyperParameterUpdateInvocation& invocation = invocations[epoch * 3 + batch];
+            EXPECT_EQ(invocation.epoch, epoch);
+            EXPECT_EQ(invocation.batch, batch);
+            EXPECT_EQ(invocation.batchesPerEpoch, 3u);
+        }
+    }
+}
+
 TEST(NativeQueuedPartialBatchAccounting, QueuedTrainingMatchesSynchronizedReferenceForParameterUpdates) {
     const TrainableOracleResult reference =
         runTrainableOracle(NativeQueuedTrainingOptions{.maxInFlightBatches = 1, .synchronizeAfterEveryBatch = true});
@@ -529,6 +628,30 @@ TEST(NativeQueuedPartialBatchAccounting, QueuedTrainingMatchesSynchronizedRefere
         EXPECT_NEAR(queued.validateLosses[i], reference.validateLosses[i], 1e-6) << "validate batch " << i;
     }
     EXPECT_NEAR(queued.finalWeight, reference.finalWeight, 1e-6);
+}
+
+TEST(NativeQueuedPartialBatchAccounting, SchedulerResourcesPersistAcrossEpochExecutions) {
+    detail::resetNativeQueuedSchedulerResourceDiagnosticsForTests();
+
+    (void)runTrainableOracle(
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 3,
+                                    .synchronizeAfterEveryBatch = false});
+
+    const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
+        detail::nativeQueuedSchedulerResourceDiagnosticsForTests();
+    EXPECT_EQ(diagnostics.resourceConstructionCount, 1u);
+    EXPECT_EQ(diagnostics.executionLaunchCount, 3u);
+    // Three epoch commands must execute on one run-scoped scheduler worker;
+    // logical epoch boundaries are not OS-thread lifetime boundaries.
+    EXPECT_EQ(diagnostics.workerThreadStartCount, 1u);
+    EXPECT_EQ(diagnostics.distinctWorkerThreadsObserved, 1u);
+    EXPECT_EQ(diagnostics.distinctResourceInstancesObserved, 1u);
+    EXPECT_NE(diagnostics.firstProcessingFinishedEventId, 0u);
+    EXPECT_NE(diagnostics.firstCompletionFinishedEventId, 0u);
+    EXPECT_TRUE(
+        diagnostics.processingFinishedEventIdStableAcrossExecutions);
+    EXPECT_TRUE(
+        diagnostics.completionFinishedEventIdStableAcrossExecutions);
 }
 
 TEST(NativeQueuedPartialBatchAccounting, FullBatchOnlyLayerFallsBackToContinuousWrappedEpochs) {

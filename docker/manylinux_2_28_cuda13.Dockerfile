@@ -56,7 +56,7 @@ RUN dnf install -y \
     && rm -rf /var/cache/dnf
 
 ENV CUDA_HOME=/usr/local/cuda-${CUDA_MAJOR}.${CUDA_MINOR}
-ENV PATH="${CUDA_HOME}/bin:${PATH}"
+ENV PATH="/opt/python/cp312-cp312/bin:${CUDA_HOME}/bin:${PATH}"
 ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
 
 RUN nvcc --version && \
@@ -110,13 +110,13 @@ RUN git config --global --add safe.directory /io
 #/opt/python/cp312-cp312/bin/python -m pip install \
 #  nvidia-cuda-runtime==13.3.29 \
 #  nvidia-cuda-nvrtc==13.3.33 \
-#  nvidia-nvjitlink==13.3.33 \
+#  nvidia-nvjitlink==13.4.52 \
 #  nvidia-cublas==13.6.0.2 \
 #  nvidia-cusparse==12.8.2.51 \
 #  nvidia-cusolver==12.2.6.9 \
 #  nvidia-cuda-cccl==13.3.3.4.1 \
-#  nvidia-cudnn-cu13==9.23.2.1 \
-#  nvidia-cudnn-frontend==1.25.0
+#  nvidia-cudnn-cu13==9.26.0.51 \
+#  nvidia-cudnn-frontend==1.29.0
 #export CMAKE_GENERATOR=Ninja
 #export CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release \
 #    -DTHOR_USE_PROJECT_VENV=OFF \
@@ -137,30 +137,27 @@ RUN git config --global --add safe.directory /io
 #/opt/python/cp312-cp312/bin/python -m build --wheel
 #export TWINE_USERNAME=__token__
 #export TWINE_PASSWORD='pypi-redacted'
+## One PEP 517 build produces the complete raw release set:
+##   thor-cuda, thor-cuda-kernels-sm89, thor-cuda-kernels-sm120.
 #/opt/python/cp312-cp312/bin/python -m twine check dist/*
-#/opt/python/cp312-cp312/bin/python -m auditwheel show dist/*.whl
-#/opt/python/cp312-cp312/bin/python -m auditwheel repair \
-#  --plat manylinux_2_28_x86_64 \
-#  --exclude libcublas.so.13 \
-#  --exclude libcublasLt.so.13 \
-#  --exclude libnvJitLink.so.13 \
-#  --exclude libnvrtc.so.13 \
-#  --exclude libcudart.so.13 \
-#  --exclude libcudnn.so.9 \
-#  --exclude libcusolver.so.12 \
-#  --exclude libcusparse.so.12 \
-#  -w wheelhouse \
-#  dist/*.whl
-#ls -ltr wheelhouse/
-#/opt/python/cp312-cp312/bin/python -m auditwheel show wheelhouse/*.whl
-#/opt/python/cp312-cp312/bin/python -m twine check wheelhouse/*
+#ls -lh dist/*.whl
+#
+## Repair and verify the three wheels as one release unit.  The CMake release
+## gate excludes NVIDIA user-space libraries from every wheel and excludes
+## libThor.so from thor-cuda because the selected kernel wheel supplies it at
+## runtime.  It also enforces payload boundaries, exact kernel dependencies,
+## manylinux_2_28 tags, and the per-file PyPI size ceiling.
+#cd /io
+#cmake -DTHOR_RELEASE_ACTION=repair -P cmake/ThorWheelRelease.cmake
+#cd /io/bindings/python
+#ls -lh wheelhouse/*.whl
 #
 ## Test the wheel
 #python - <<'PY'
 #from pathlib import Path
 #import zipfile
 #
-#wheel = next(Path("wheelhouse").glob("*.whl"))
+#wheel = next(Path("wheelhouse").glob("thor_cuda-*.whl"))
 #with zipfile.ZipFile(wheel) as z:
 #    metadata_name = next(n for n in z.namelist() if n.endswith(".dist-info/METADATA"))
 #    metadata = z.read(metadata_name).decode()
@@ -190,6 +187,14 @@ RUN git config --global --add safe.directory /io
 #deactivate
 #
 #cd /io/bindings/python
-#/opt/python/cp312-cp312/bin/python -m auditwheel show wheelhouse/*.whl
-#/opt/python/cp312-cp312/bin/python -m twine check wheelhouse/*
-#/opt/python/cp312-cp312/bin/python -m twine upload wheelhouse/*
+#
+## Publish only after the installed-wheel test passes.  The CMake target
+## re-verifies the wheelhouse and uploads in dependency order:
+##   1. thor-cuda-kernels-sm89
+##   2. thor-cuda-kernels-sm120
+##   3. thor-cuda
+## Credentials remain ordinary Twine environment/configuration.  For TestPyPI
+## additionally export THOR_TWINE_REPOSITORY=testpypi.
+#export THOR_PUBLISH_CONFIRM=YES
+#cd /io
+#cmake -DTHOR_RELEASE_ACTION=publish -P cmake/ThorWheelRelease.cmake
