@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/Layers/Loss/RaggedLossShaper.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 #include "gtest/gtest.h"
@@ -405,4 +406,54 @@ TEST(RaggedLossShaper, InputsMustAgreeOnLogicalBatchCardinality) {
 
     fixture.shaper.forward(values, false, 1);
     EXPECT_THROW(fixture.shaper.forward(offsets, false, 2), std::invalid_argument);
+}
+
+
+TEST(RaggedLossShaper, Lwa4e3LogicalBytesUseActivePartitionAndIgnoreUnusedPackedCapacity) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batchSize = 3;
+
+    auto workForCapacity = [&](uint64_t capacity, RaggedLossShaper::OutputLossType type) {
+        Stream stream(0);
+        Tensor values(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, 2}));
+        Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+        RowPartitionRuntime::publishHostState(
+            offsets,
+            RowPartitionDescriptor(batchSize, capacity, DataType::UINT32),
+            offsets.getTensorId(),
+            {0, 2, 2, 5});
+
+        ShaperFixture fixture(type, batchSize, capacity, values, offsets, stream);
+        const uint64_t full = fixture.shaper.logicalByteCountForward(0);
+        const uint64_t partial = fixture.shaper.logicalByteCountForward(2);
+        EXPECT_EQ(fixture.shaper.logicalByteCountBackward(0), 0U);
+
+        if (type == RaggedLossShaper::OutputLossType::RAW) {
+            EXPECT_EQ(full, 0U);
+            EXPECT_EQ(partial, 0U);
+        } else {
+            EXPECT_GT(full, partial);
+            EXPECT_GT(partial, 0U);
+        }
+
+        // Empty packed rows still produce one numerical per-example zero for
+        // each valid logical row; only RAW remains a zero-work structural alias.
+        RowPartitionRuntime::publishHostState(
+            offsets,
+            RowPartitionDescriptor(batchSize, capacity, DataType::UINT32),
+            offsets.getTensorId(),
+            {0, 0, 0, 0});
+        if (type == RaggedLossShaper::OutputLossType::RAW)
+            EXPECT_EQ(fixture.shaper.logicalByteCountForward(0), 0U);
+        else
+            EXPECT_GT(fixture.shaper.logicalByteCountForward(0), 0U);
+
+        return std::vector<uint64_t>{full, partial};
+    };
+
+    for (RaggedLossShaper::OutputLossType type : {RaggedLossShaper::OutputLossType::RAW,
+                                                   RaggedLossShaper::OutputLossType::PER_EXAMPLE,
+                                                   RaggedLossShaper::OutputLossType::BATCH}) {
+        EXPECT_EQ(workForCapacity(8, type), workForCapacity(16, type));
+    }
 }

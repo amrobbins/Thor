@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/TensorOperations/Ragged/RaggedGather.h"
 
 #include <cstdint>
@@ -9,6 +10,7 @@
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -213,7 +215,93 @@ class RaggedGather : public MultiConnectionLayer {
         if (!newErrorInput.has_value()) pruneUpstreamSourceGradient();
     }
 
+    // Logical gather traffic follows the semantic Q partition: each active index
+    // reads one index and one selected source value, then writes one output value.
+    // Backward additionally produces the complete active P-partition source gradient.
+    // Row offsets remain structural metadata and are never counted.
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override {
+        try {
+            if (featureInputs.size() < inputPortCount || !featureInputs[0].has_value() || !featureInputs[1].has_value() ||
+                featureOutputs.empty() || !featureOutputs[0].has_value()) return 0;
+            const std::optional<uint64_t> outputActive =
+                logicalActiveValues(featureInputs[1].value(), indicesDescriptor, validExampleCount);
+            if (!outputActive.has_value()) return 0;
+
+            uint64_t bytes = logicalValueBytes(featureInputs[1].value(), indicesDescriptor.getMaxTotalValues(),
+                                               *outputActive, "RaggedGather forward indices");
+            bytes = checkedLogicalByteAdd(
+                bytes, logicalValueBytes(featureInputs[0].value(), sourceDescriptor.getMaxTotalValues(),
+                                         *outputActive, "RaggedGather forward selected source"),
+                "RaggedGather forward source");
+            bytes = checkedLogicalByteAdd(
+                bytes, logicalValueBytes(featureOutputs[0].value(), outputDescriptor.getMaxTotalValues(),
+                                         *outputActive, "RaggedGather forward output"),
+                "RaggedGather forward output");
+            return bytes;
+        } catch (...) {
+            return 0;
+        }
+    }
+
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override {
+        try {
+            if (errorInputs.empty() || !errorInputs[0].has_value() || errorOutputs.empty() ||
+                !errorOutputs[0].has_value() || featureInputs.size() < inputPortCount ||
+                !featureInputs[0].has_value() || !featureInputs[1].has_value()) return 0;
+            const std::optional<uint64_t> sourceActive =
+                logicalActiveValues(featureInputs[0].value(), sourceDescriptor, validExampleCount);
+            const std::optional<uint64_t> outputActive =
+                logicalActiveValues(featureInputs[1].value(), indicesDescriptor, validExampleCount);
+            if (!sourceActive.has_value() || !outputActive.has_value()) return 0;
+
+            uint64_t bytes = logicalValueBytes(featureInputs[1].value(), indicesDescriptor.getMaxTotalValues(),
+                                               *outputActive, "RaggedGather backward indices");
+            bytes = checkedLogicalByteAdd(
+                bytes, logicalValueBytes(errorInputs[0].value(), outputDescriptor.getMaxTotalValues(),
+                                         *outputActive, "RaggedGather backward upstream"),
+                "RaggedGather backward upstream");
+            bytes = checkedLogicalByteAdd(
+                bytes, logicalValueBytes(errorOutputs[0].value(), sourceDescriptor.getMaxTotalValues(),
+                                         *sourceActive, "RaggedGather backward source gradient"),
+                "RaggedGather backward source gradient");
+            return bytes;
+        } catch (...) {
+            return 0;
+        }
+    }
+
    private:
+    [[nodiscard]] static std::optional<uint64_t> logicalActiveValues(
+        const Tensor& carrier, const RaggedTensorDescriptor& descriptor, uint64_t validExampleCount) noexcept {
+        try {
+            if (validExampleCount == 0) {
+                const auto active = RowPartitionRuntime::getPublishedHostActiveValueCountIfAvailable(carrier);
+                if (!active.has_value() || *active > descriptor.getMaxTotalValues()) return std::nullopt;
+                return active;
+            }
+            if (validExampleCount > descriptor.getBatchSize()) return std::nullopt;
+            const auto active = RowPartitionRuntime::getPublishedHostOffsetIfAvailable(carrier, validExampleCount);
+            if (!active.has_value() || *active > descriptor.getMaxTotalValues()) return std::nullopt;
+            return active;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    [[nodiscard]] static uint64_t logicalValueBytes(const Tensor& tensor,
+                                                    uint64_t valueCapacity,
+                                                    uint64_t activeValues,
+                                                    const char* where) {
+        if (valueCapacity == 0 || activeValues > valueCapacity) return 0;
+        const uint64_t capacityBytes = tensor.getArraySizeInBytes();
+        if (capacityBytes % valueCapacity != 0) return 0;
+        const uint64_t bytesPerValue = capacityBytes / valueCapacity;
+        if (bytesPerValue != 0 && activeValues > std::numeric_limits<uint64_t>::max() / bytesPerValue) {
+            throw std::overflow_error(std::string(where) + " logical byte count overflow.");
+        }
+        return activeValues * bytesPerValue;
+    }
+
     void ensureOutputAllocated() {
         if (featureOutputs[0].has_value()) return;
         std::optional<Tensor> firstInput = getFirstPresentTensor(featureInputs);

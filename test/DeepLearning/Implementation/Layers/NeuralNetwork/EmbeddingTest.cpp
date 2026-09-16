@@ -4,6 +4,7 @@
 #include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingKernels.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingSparseGradient.h"
@@ -717,6 +718,50 @@ TEST(EmbeddingRaggedRuntimeTest, SparseGradientMapsInactiveCapacityToSentinelWit
         values.resize(4);
         expectAllClose(values, {6.0f, 8.0f, 3.0f, 4.0f});
     }
+}
+
+TEST(EmbeddingRaggedRuntimeTest, Lwa4e3LogicalBytesUseActivePrefixAndSelectedRowsOnly) {
+    constexpr uint64_t vocabularySize = 6;
+    constexpr uint64_t embeddingDim = 2;
+    constexpr uint32_t batchSize = 3;
+
+    auto workForCapacity = [&](uint64_t capacity) {
+        RaggedEmbeddingNetworkFixture f = makeRaggedEmbeddingNetwork(vocabularySize,
+                                                                     embeddingDim,
+                                                                     capacity,
+                                                                     batchSize,
+                                                                     DataType::UINT32,
+                                                                     /*paddingIndex=*/0,
+                                                                     /*learningRate=*/0.1f);
+        EXPECT_TRUE(f.activeCountInput->getFeatureOutput().has_value());
+        if (!f.activeCountInput->getFeatureOutput().has_value()) return std::vector<uint64_t>{};
+        Tensor carrier = f.activeCountInput->getFeatureOutput().value();
+        const RowPartitionDescriptor descriptor(batchSize, capacity, DataType::UINT32);
+        RowPartitionRuntime::publishHostState(carrier, descriptor, carrier.getTensorId(), {0, 1, 1, 3});
+
+        EXPECT_EQ(f.embedding->logicalByteCountForward(0), 60U);
+        EXPECT_EQ(f.embedding->logicalByteCountBackward(0), 60U);
+        EXPECT_EQ(f.embedding->logicalByteCountForward(2), 20U);
+        EXPECT_EQ(f.embedding->logicalByteCountBackward(2), 20U);
+        const std::vector<uint64_t> work{f.embedding->logicalByteCountForward(0),
+                                         f.embedding->logicalByteCountBackward(0),
+                                         f.embedding->logicalByteCountForward(2),
+                                         f.embedding->logicalByteCountBackward(2)};
+
+        // Sparse row ids are representation metadata; an all-empty partition has
+        // no selected embedding rows and therefore no logical tensor traffic.
+        RowPartitionRuntime::publishHostState(carrier, descriptor, carrier.getTensorId(), {0, 0, 0, 0});
+        EXPECT_EQ(f.embedding->logicalByteCountForward(0), 0U);
+        EXPECT_EQ(f.embedding->logicalByteCountBackward(0), 0U);
+
+        f.sink->cleanup();
+        f.embedding->cleanup();
+        f.activeCountInput->cleanup();
+        f.valuesInput->cleanup();
+        return work;
+    };
+
+    EXPECT_EQ(workForCapacity(6), workForCapacity(12));
 }
 
 TEST(EmbeddingRaggedRuntimeTest, EndToEndSparseTrainingReusesCapturedGraphAcrossChangingActiveExtent) {

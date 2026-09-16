@@ -440,6 +440,25 @@ void RaggedCustomLoss::initialize() {
     batchCardinalitySet = false;
 }
 
+uint64_t RaggedCustomLoss::logicalByteCountForward(uint64_t validExampleCount) {
+    // The wrapped expression is the semantic loss operation. Its runtime-ragged
+    // sidecars already count only the authoritative active prefix and exclude
+    // the DEVICE_ACTIVE_COUNT carrier itself, so reuse that single source of
+    // truth rather than duplicating every possible custom loss expression here.
+    if (lossStamped == nullptr) return 0;
+    return lossStamped->logicalByteCount(validExampleCount);
+}
+
+uint64_t RaggedCustomLoss::logicalByteCountBackward(uint64_t validExampleCount) {
+    // Gradient expressions may consume predictions, labels, optional packed row
+    // weights, and any number of secondary differentiable inputs. Delegating to
+    // the stamped authored expression keeps those operand/result semantics exact
+    // and automatically excludes structural active-count metadata. A pruned or
+    // inference-only loss authors no model backward work.
+    if (!trainingActive || isInferenceOnly() || gradientStamped == nullptr) return 0;
+    return gradientStamped->logicalByteCount(validExampleCount);
+}
+
 void RaggedCustomLoss::cleanup() {
     lossStamped.reset();
     lossPrepared.reset();

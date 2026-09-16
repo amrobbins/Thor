@@ -1,9 +1,11 @@
 #pragma once
 
 #include "DeepLearning/Api/Training/Events/TrainingStatsSnapshot.h"
+#include "Utilities/LogicalWork.h"
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 
 namespace ThorImplementation {
 
@@ -17,6 +19,13 @@ namespace ThorImplementation {
  * its rate.  Progress is accumulated until a
  * useful wall interval has elapsed, except that the final batch of every phase
  * forces a sample so short phases still publish a meaningful rate.
+ *
+ * Logical FLOP/s and logical bytes/s are accumulated from the same completed
+ * batches over the same active wall interval and receive the same EMA update.
+ * Arithmetic intensity is derived from those paired rates. If any completed
+ * batch in an interval lacks logical-work telemetry, that interval is ignored
+ * for logical-work rates rather than treating unavailable work as zero; ordinary
+ * samples/s and batches/s throughput remains available.
  */
 class PhaseWallThroughputTracker {
    public:
@@ -27,15 +36,19 @@ class PhaseWallThroughputTracker {
                                TimePoint phaseStartedAt,
                                TimePoint completedAt,
                                uint64_t validExamples,
-                               uint64_t floatingPointOperations,
+                               const std::optional<LogicalWorkCount>& logicalWork,
                                bool forceSample) noexcept {
-        snapshot.floatingPointOperationsPerBatch = floatingPointOperations;
+        snapshot.floatingPointOperationsPerBatch =
+            logicalWork.has_value() ? logicalWork->floatingPointOperations : 0;
+        snapshot.logicalBytesPerBatch = logicalWork.has_value() ? logicalWork->bytes : 0;
 
         auto assignCurrentRates = [&]() {
             snapshot.batchesPerSecond = batchesPerSecond;
             snapshot.samplesPerSecond = samplesPerSecond;
             snapshot.floatingPointOperationsPerSecond =
                 floatingPointOperationsPerSecond;
+            snapshot.logicalBytesPerSecond = logicalBytesPerSecond;
+            snapshot.logicalArithmeticIntensity = logicalArithmeticIntensity;
         };
 
         if (validExamples == 0 || phaseStartedAt == TimePoint{} ||
@@ -62,8 +75,15 @@ class PhaseWallThroughputTracker {
 
         pendingBatches += 1.0;
         pendingSamples += static_cast<double>(validExamples);
-        pendingFloatingPointOperations +=
-            static_cast<double>(floatingPointOperations);
+        if (logicalWork.has_value() && pendingLogicalWorkComplete) {
+            pendingFloatingPointOperations +=
+                static_cast<double>(logicalWork->floatingPointOperations);
+            pendingLogicalBytes += static_cast<double>(logicalWork->bytes);
+        } else if (!logicalWork.has_value()) {
+            // One unavailable batch makes the logical-work numerator incomplete
+            // for this whole wall-time sample. Do not publish a partial rate.
+            pendingLogicalWorkComplete = false;
+        }
 
         if (!forceSample &&
             pendingActiveSeconds < MIN_SAMPLE_INTERVAL_SECONDS) {
@@ -80,14 +100,10 @@ class PhaseWallThroughputTracker {
             pendingBatches / pendingActiveSeconds;
         const double intervalSamplesPerSecond =
             pendingSamples / pendingActiveSeconds;
-        const double intervalFloatingPointOperationsPerSecond =
-            pendingFloatingPointOperations / pendingActiveSeconds;
 
         if (!ratesInitialized) {
             batchesPerSecond = intervalBatchesPerSecond;
             samplesPerSecond = intervalSamplesPerSecond;
-            floatingPointOperationsPerSecond =
-                intervalFloatingPointOperationsPerSecond;
             ratesInitialized = true;
         } else {
             batchesPerSecond =
@@ -96,15 +112,40 @@ class PhaseWallThroughputTracker {
             samplesPerSecond =
                 (EMA_ALPHA * intervalSamplesPerSecond) +
                 ((1.0 - EMA_ALPHA) * samplesPerSecond);
-            floatingPointOperationsPerSecond =
-                (EMA_ALPHA * intervalFloatingPointOperationsPerSecond) +
-                ((1.0 - EMA_ALPHA) * floatingPointOperationsPerSecond);
+        }
+
+        if (pendingLogicalWorkComplete) {
+            const double intervalFloatingPointOperationsPerSecond =
+                pendingFloatingPointOperations / pendingActiveSeconds;
+            const double intervalLogicalBytesPerSecond =
+                pendingLogicalBytes / pendingActiveSeconds;
+
+            if (!logicalWorkRatesInitialized) {
+                floatingPointOperationsPerSecond =
+                    intervalFloatingPointOperationsPerSecond;
+                logicalBytesPerSecond = intervalLogicalBytesPerSecond;
+                logicalWorkRatesInitialized = true;
+            } else {
+                floatingPointOperationsPerSecond =
+                    (EMA_ALPHA * intervalFloatingPointOperationsPerSecond) +
+                    ((1.0 - EMA_ALPHA) * floatingPointOperationsPerSecond);
+                logicalBytesPerSecond =
+                    (EMA_ALPHA * intervalLogicalBytesPerSecond) +
+                    ((1.0 - EMA_ALPHA) * logicalBytesPerSecond);
+            }
+
+            logicalArithmeticIntensity =
+                logicalBytesPerSecond > 0.0
+                    ? floatingPointOperationsPerSecond / logicalBytesPerSecond
+                    : 0.0;
         }
 
         pendingActiveSeconds = 0.0;
         pendingBatches = 0.0;
         pendingSamples = 0.0;
         pendingFloatingPointOperations = 0.0;
+        pendingLogicalBytes = 0.0;
+        pendingLogicalWorkComplete = true;
         assignCurrentRates();
     }
 
@@ -114,6 +155,7 @@ class PhaseWallThroughputTracker {
 
     bool activeIntervalInitialized = false;
     bool ratesInitialized = false;
+    bool logicalWorkRatesInitialized = false;
     TimePoint activeIntervalStartedAt{};
     TimePoint previousCompletionAt{};
 
@@ -121,10 +163,14 @@ class PhaseWallThroughputTracker {
     double pendingBatches = 0.0;
     double pendingSamples = 0.0;
     double pendingFloatingPointOperations = 0.0;
+    double pendingLogicalBytes = 0.0;
+    bool pendingLogicalWorkComplete = true;
 
     double samplesPerSecond = 0.0;
     double batchesPerSecond = 0.0;
     double floatingPointOperationsPerSecond = 0.0;
+    double logicalBytesPerSecond = 0.0;
+    double logicalArithmeticIntensity = 0.0;
 };
 
 }  // namespace ThorImplementation

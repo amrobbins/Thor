@@ -12,6 +12,7 @@
 #include "DeepLearning/Implementation/Layers/Metric.h"
 #include "Utilities/Common/Event.h"
 #include "Utilities/Common/Stream.h"
+#include "Utilities/LogicalWork.h"
 
 #include <vector>
 #include <optional>
@@ -119,6 +120,11 @@ class StampedNetwork {
         return c;
     }
 
+    [[nodiscard]] LogicalWorkCount getLogicalWorkCurrentBatch(
+        uint64_t validExampleCount,
+        bool includeForward,
+        bool includeBackward);
+
    public:
     uint32_t getGpuNum() const { return gpuNum; }
     uint64_t getFloatingPointOperationsPerExampleForward() const { return floatingPointOperationsPerExampleForward; }
@@ -129,10 +135,29 @@ class StampedNetwork {
     // Batch-local logical FLOP totals. Trainable layers expose their stamped
     // execution-plan counts directly, which lets ragged Attention replace its
     // capacity estimate with the row lengths published for the current batch.
-    // Non-trainable layers retain their existing fixed per-example accounting.
-    [[nodiscard]] uint64_t getFloatingPointOperationsCurrentBatchForward();
-    [[nodiscard]] uint64_t getFloatingPointOperationsCurrentBatchBackward();
-    [[nodiscard]] uint64_t getFloatingPointOperationsCurrentBatchTraining();
+    // Ordinary non-trainable layers retain fixed per-example accounting, but
+    // scale it by the submitted semantic example count rather than stamped
+    // storage capacity. Callers already know this count while submitting a
+    // batch; passing it explicitly avoids mutable per-stamp telemetry state and
+    // any device observation.
+    [[nodiscard]] uint64_t getFloatingPointOperationsCurrentBatchForward(uint64_t validExampleCount);
+    [[nodiscard]] uint64_t getFloatingPointOperationsCurrentBatchBackward(uint64_t validExampleCount);
+    [[nodiscard]] uint64_t getFloatingPointOperationsCurrentBatchTraining(uint64_t validExampleCount);
+
+    // Combined batch-local logical work. The hot queued-training path uses this
+    // surface so FLOPs and logical bytes are collected during one network-layer
+    // traversal instead of independently walking the stamp twice. Training
+    // includes forward + backward; validation/test callers use forward only.
+    [[nodiscard]] LogicalWorkCount getLogicalWorkCurrentBatchForward(uint64_t validExampleCount);
+    [[nodiscard]] LogicalWorkCount getLogicalWorkCurrentBatchBackward(uint64_t validExampleCount);
+    [[nodiscard]] LogicalWorkCount getLogicalWorkCurrentBatchTraining(uint64_t validExampleCount);
+
+    // Batch-local logical tensor bytes. These use the same submitted semantic
+    // example count as logical FLOPs and are still a sidecar in LWA-3D; queued
+    // training/rate reporting is plumbed in LWA-5.
+    [[nodiscard]] uint64_t getLogicalBytesCurrentBatchForward(uint64_t validExampleCount);
+    [[nodiscard]] uint64_t getLogicalBytesCurrentBatchBackward(uint64_t validExampleCount);
+    [[nodiscard]] uint64_t getLogicalBytesCurrentBatchTraining(uint64_t validExampleCount);
     struct RaggedInputBinding {
         std::string valuesInputName;
         std::optional<std::string> partitionInputName;

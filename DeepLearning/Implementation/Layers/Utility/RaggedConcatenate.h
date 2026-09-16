@@ -296,7 +296,92 @@ class RaggedConcatenate : public MultiConnectionLayer {
         return errorOutputs[inputIndex];
     }
 
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override {
+        const std::optional<uint64_t> activeRows = logicalActiveRows(validExampleCount);
+        if (!activeRows.has_value()) return 0;
+
+        try {
+            uint64_t bytes = 0;
+            for (uint32_t i = 0; i < valueInputCount; ++i) {
+                if (!featureInputs[i].has_value()) return 0;
+                const std::optional<uint64_t> contribution = logicalBytesForActiveRows(featureInputs[i].value(), *activeRows);
+                if (!contribution.has_value()) return 0;
+                bytes = checkedLogicalByteAdd(bytes, *contribution, "RaggedConcatenate forward input");
+            }
+            if (featureOutputs.size() != 1 || !featureOutputs[0].has_value()) return 0;
+            const std::optional<uint64_t> outputBytes = logicalBytesForActiveRows(featureOutputs[0].value(), *activeRows);
+            if (!outputBytes.has_value()) return 0;
+            return checkedLogicalByteAdd(bytes, *outputBytes, "RaggedConcatenate forward output");
+        } catch (...) {
+            // Logical-work telemetry is best-effort and must not fail submitted model work.
+            return 0;
+        }
+    }
+
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override {
+        const std::optional<uint64_t> activeRows = logicalActiveRows(validExampleCount);
+        if (!activeRows.has_value()) return 0;
+
+        try {
+            if (errorInputs.empty() || !errorInputs[0].has_value()) return 0;
+            const std::optional<uint64_t> inputBytes = logicalBytesForActiveRows(errorInputs[0].value(), *activeRows);
+            if (!inputBytes.has_value()) return 0;
+            uint64_t bytes = *inputBytes;
+            // The physical split kernel may write discarded buffers for pruned
+            // branches. Those are implementation artifacts, not authored logical
+            // gradient results, so count only the error outputs that remain connected.
+            for (uint32_t i = 0; i < valueInputCount; ++i) {
+                if (!errorOutputs[i].has_value()) continue;
+                const std::optional<uint64_t> outputBytes = logicalBytesForActiveRows(errorOutputs[i].value(), *activeRows);
+                if (!outputBytes.has_value()) return 0;
+                bytes = checkedLogicalByteAdd(bytes, *outputBytes, "RaggedConcatenate backward output");
+            }
+            return bytes;
+        } catch (...) {
+            return 0;
+        }
+    }
+
    private:
+    [[nodiscard]] std::optional<uint64_t> logicalActiveRows(uint64_t validExampleCount) const noexcept {
+        try {
+            if (featureInputs.size() <= partitionInputIndex || featureInputs.empty() || !featureInputs[0].has_value() ||
+                !featureInputs[partitionInputIndex].has_value()) {
+                return std::nullopt;
+            }
+            const Tensor& carrier = featureInputs[partitionInputIndex].value();
+            if (validExampleCount == 0) {
+                const std::optional<uint64_t> active =
+                    RowPartitionRuntime::getPublishedHostActiveValueCountIfAvailable(carrier);
+                if (!active.has_value() || *active > featureInputs[0]->getDimensions()[0]) return std::nullopt;
+                return active;
+            }
+            if (validExampleCount > batchSize) return std::nullopt;
+            const std::optional<uint64_t> active =
+                RowPartitionRuntime::getPublishedHostOffsetIfAvailable(carrier, validExampleCount);
+            if (!active.has_value() || *active > featureInputs[0]->getDimensions()[0]) return std::nullopt;
+            return active;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    [[nodiscard]] static std::optional<uint64_t> logicalBytesForActiveRows(
+        const Tensor& tensor, uint64_t activeRows) noexcept {
+        try {
+            const std::vector<uint64_t> dimensions = tensor.getDimensions();
+            if (dimensions.empty() || dimensions[0] == 0 || activeRows > dimensions[0]) return std::nullopt;
+            const uint64_t totalBytes = tensor.getArraySizeInBytes();
+            if (totalBytes % dimensions[0] != 0) return std::nullopt;
+            const uint64_t bytesPerRow = totalBytes / dimensions[0];
+            if (bytesPerRow != 0 && activeRows > std::numeric_limits<uint64_t>::max() / bytesPerRow) {
+                return std::nullopt;
+            }
+            return activeRows * bytesPerRow;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
     struct ValueInputMemoryArrayRefreshArgs : public HostFunctionArgsBase { std::vector<void*> pointers; };
     static void releaseValueInputMemoryArrayRefresh(void*) {}
 

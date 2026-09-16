@@ -53,6 +53,10 @@ class Embedding final : public TrainableLayer {
     std::string getLayerType() override { return "Embedding"; }
     uint64_t flopCountForward() override { return 0; }
     uint64_t flopCountBackward() override { return 0; }
+    uint64_t logicalByteCountForward() override;
+    uint64_t logicalByteCountBackward() override;
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override;
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override;
 
    private:
     Tensor weights() const;

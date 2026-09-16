@@ -44,7 +44,6 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -69,8 +68,12 @@ struct NativeQueuedSchedulerResourceDiagnosticsState {
     std::mutex mutex;
     std::atomic<bool> enabled{false};
     detail::NativeQueuedSchedulerResourceDiagnosticsForTests snapshot;
-    const void* firstExecutionResourceIdentity = nullptr;
-    bool multipleExecutionResourceIdentities = false;
+    const void* firstSchedulingWindowResourceIdentity = nullptr;
+    bool multipleSchedulingWindowResourceIdentities = false;
+    const void* firstSchedulingWindowRunStateIdentity = nullptr;
+    bool multipleSchedulingWindowRunStateIdentities = false;
+    const void* firstSchedulingWindowSlotStorageIdentity = nullptr;
+    bool multipleSchedulingWindowSlotStorageIdentities = false;
     std::optional<std::thread::id> firstWorkerThreadId;
     bool multipleWorkerThreadIds = false;
 };
@@ -92,8 +95,7 @@ void recordNativeQueuedSchedulerResourceConstructionForTests() {
     diagnostics.snapshot.resourceConstructionCount += 1;
 }
 
-void recordNativeQueuedSchedulerResourceExecutionLaunchForTests(
-    const void* resourceIdentity) {
+void recordNativeQueuedRunStateConstructionForTests() {
     NativeQueuedSchedulerResourceDiagnosticsState& diagnostics =
         nativeQueuedSchedulerResourceDiagnosticsState();
     if (!diagnostics.enabled.load(std::memory_order_relaxed)) {
@@ -101,14 +103,74 @@ void recordNativeQueuedSchedulerResourceExecutionLaunchForTests(
     }
 
     std::lock_guard<std::mutex> lock(diagnostics.mutex);
-    diagnostics.snapshot.executionLaunchCount += 1;
-    if (diagnostics.firstExecutionResourceIdentity == nullptr) {
-        diagnostics.firstExecutionResourceIdentity = resourceIdentity;
-    } else if (diagnostics.firstExecutionResourceIdentity != resourceIdentity) {
-        diagnostics.multipleExecutionResourceIdentities = true;
+    diagnostics.snapshot.runStateConstructionCount += 1;
+}
+
+void recordNativeQueuedSchedulingWindowLaunchForTests(
+    const void* resourceIdentity,
+    const void* runStateIdentity,
+    const void* slotStorageIdentity) {
+    NativeQueuedSchedulerResourceDiagnosticsState& diagnostics =
+        nativeQueuedSchedulerResourceDiagnosticsState();
+    if (!diagnostics.enabled.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(diagnostics.mutex);
+    diagnostics.snapshot.schedulingWindowCount += 1;
+    if (diagnostics.firstSchedulingWindowResourceIdentity == nullptr) {
+        diagnostics.firstSchedulingWindowResourceIdentity = resourceIdentity;
+    } else if (diagnostics.firstSchedulingWindowResourceIdentity !=
+               resourceIdentity) {
+        diagnostics.multipleSchedulingWindowResourceIdentities = true;
     }
     diagnostics.snapshot.distinctResourceInstancesObserved =
-        diagnostics.multipleExecutionResourceIdentities ? 2 : 1;
+        diagnostics.multipleSchedulingWindowResourceIdentities ? 2 : 1;
+
+    if (diagnostics.firstSchedulingWindowRunStateIdentity == nullptr) {
+        diagnostics.firstSchedulingWindowRunStateIdentity = runStateIdentity;
+    } else if (diagnostics.firstSchedulingWindowRunStateIdentity !=
+               runStateIdentity) {
+        diagnostics.multipleSchedulingWindowRunStateIdentities = true;
+    }
+    diagnostics.snapshot.distinctRunStateInstancesObserved =
+        diagnostics.multipleSchedulingWindowRunStateIdentities ? 2 : 1;
+
+    if (diagnostics.firstSchedulingWindowSlotStorageIdentity == nullptr) {
+        diagnostics.firstSchedulingWindowSlotStorageIdentity = slotStorageIdentity;
+    } else if (diagnostics.firstSchedulingWindowSlotStorageIdentity !=
+               slotStorageIdentity) {
+        diagnostics.multipleSchedulingWindowSlotStorageIdentities = true;
+    }
+    diagnostics.snapshot.slotStorageStableAcrossSchedulingWindows =
+        !diagnostics.multipleSchedulingWindowSlotStorageIdentities;
+}
+
+void recordNativeQueuedHostDecisionBarrierForTests() {
+    NativeQueuedSchedulerResourceDiagnosticsState& diagnostics =
+        nativeQueuedSchedulerResourceDiagnosticsState();
+    if (!diagnostics.enabled.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(diagnostics.mutex);
+    diagnostics.snapshot.hostDecisionBarrierCount += 1;
+}
+
+void recordNativeQueuedBatchSubmissionForTests(uint64_t optimizerEpoch) {
+    NativeQueuedSchedulerResourceDiagnosticsState& diagnostics =
+        nativeQueuedSchedulerResourceDiagnosticsState();
+    if (!diagnostics.enabled.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(diagnostics.mutex);
+    diagnostics.snapshot.submittedBatchCount += 1;
+    if (!diagnostics.snapshot.hasSubmittedBatch ||
+        optimizerEpoch > diagnostics.snapshot.maxOptimizerEpochSubmitted) {
+        diagnostics.snapshot.maxOptimizerEpochSubmitted = optimizerEpoch;
+    }
+    diagnostics.snapshot.hasSubmittedBatch = true;
 }
 
 void recordNativeQueuedSchedulerWorkerThreadStartForTests() {
@@ -148,7 +210,7 @@ void recordNativeQueuedSchedulerEventReuseForTests(
         } else if (diagnostics.snapshot.firstProcessingFinishedEventId !=
                    processingFinishedEventId) {
             diagnostics.snapshot
-                .processingFinishedEventIdStableAcrossExecutions = false;
+                .processingFinishedEventIdStableAcrossSchedulingWindows = false;
         }
     }
     if (completionFinishedEventId != 0) {
@@ -158,12 +220,13 @@ void recordNativeQueuedSchedulerEventReuseForTests(
         } else if (diagnostics.snapshot.firstCompletionFinishedEventId !=
                    completionFinishedEventId) {
             diagnostics.snapshot
-                .completionFinishedEventIdStableAcrossExecutions = false;
+                .completionFinishedEventIdStableAcrossSchedulingWindows = false;
         }
     }
 }
 
-struct QueuedTrainingState;
+struct NativeQueuedSchedulingWindowState;
+struct QueuedWorkSegmentState;
 
 struct ScalarStatSlot {
     bool present = false;
@@ -177,16 +240,14 @@ enum class ScalarStatSource {
 };
 
 struct NativeBatchCompletionParams {
-    std::shared_ptr<QueuedTrainingState> state;
+    std::shared_ptr<NativeQueuedSchedulingWindowState> state;
+    std::shared_ptr<QueuedWorkSegmentState> segment;
     bool completionCallbackLaunched = false;
     bool completionCallbackFinished = false;
-    ExampleType exampleType = ExampleType::TRAIN;
-    TrainingEventPhase phase = TrainingEventPhase::TRAIN;
-    uint64_t currentEpoch = 0;
     uint64_t epochBatchNum = 0;
-    uint64_t batchesInEpoch = 0;
     uint64_t validExampleCount = 0;
-    uint64_t floatingPointOperations = 0;
+    std::optional<ThorImplementation::LogicalWorkCount> logicalWork =
+        ThorImplementation::LogicalWorkCount{};
     uint64_t slotIndex = 0;
     BatchLease batchLease;
     std::map<std::string, ThorImplementation::Tensor> batchOutput;
@@ -199,11 +260,11 @@ struct NativeBatchCompletionParams {
 struct QueuedBatchSlot {
     bool occupied = false;
     bool ready = false;
-    TrainingEventPhase phase = TrainingEventPhase::TRAIN;
+    std::shared_ptr<QueuedWorkSegmentState> segment;
     uint64_t epochBatchNum = 0;
-    uint64_t batchesInEpoch = 0;
     uint64_t validExampleCount = 0;
-    uint64_t floatingPointOperations = 0;
+    std::optional<ThorImplementation::LogicalWorkCount> logicalWork =
+        ThorImplementation::LogicalWorkCount{};
     uint64_t doneInEpochAtComplete = 0;
     uint64_t validExamplesThroughBatch = 0;
     uint64_t paramsIndex = 0;
@@ -213,7 +274,32 @@ struct QueuedBatchSlot {
     std::unordered_map<std::string, MetricBatchStat> metricBatchStats;
 };
 
-struct QueuedPhaseProgress {
+// One ordered logical unit of native queued work.  Segment identity and
+// progress travel with queued batches instead of being recovered from a
+// global phase lookup. A scheduling window may contain segments from multiple
+// epochs while each slot still updates exactly one segment.
+struct QueuedWorkSegmentState {
+    std::shared_ptr<BatchSession> batchSession;
+    ExampleType exampleType = ExampleType::TRAIN;
+    TrainingEventPhase phase = TrainingEventPhase::TRAIN;
+    uint64_t optimizerEpoch = 0;
+    uint64_t reportedEpoch = 0;
+    std::optional<std::string> validationPopulation;
+    bool isDefaultValidationPopulation = false;
+    std::optional<uint64_t> maxBatchesToRun;
+
+    // Mutable BatchSession cursor-derived fields are intentionally resolved by
+    // the scheduler worker immediately before this segment is scheduled. Do not
+    // freeze them while a future scheduling window is built on the control thread.
+    bool prepared = false;
+    uint64_t initialBatchNum = 0;
+    uint64_t sessionInitialBatchNum = 0;
+    uint64_t batchesToRunCount = 0;
+    uint64_t batchesPerEpoch = 0;
+    uint64_t initialValidExamples = 0;
+    uint64_t validExamplesPerEpoch = 0;
+    bool requiresEpochBoundaryValidation = true;
+
     uint64_t completedBatches = 0;
     uint64_t poppedBatches = 0;
     uint64_t completedValidExamples = 0;
@@ -221,10 +307,13 @@ struct QueuedPhaseProgress {
     std::chrono::high_resolution_clock::time_point schedulingStartedAt{};
 };
 
-struct QueuedTrainingState {
-    QueuedTrainingState(uint64_t maxInFlightBatches,
-                        std::vector<std::string> scalarTensorNames,
-                        std::vector<std::string> aggregateLossTensorNames)
+// Queue-slot storage is a placed-run resource. Scheduling windows borrow this
+// ring. Commands remain non-overlapping, but a single command may span ordinary
+// epoch boundaries without draining the ring between them.
+struct NativeQueuedRunState {
+    NativeQueuedRunState(uint64_t maxInFlightBatches,
+                         std::vector<std::string> scalarTensorNames,
+                         std::vector<std::string> aggregateLossTensorNames)
         : scalarTensorNames(std::move(scalarTensorNames)),
           aggregateLossTensorNames(std::move(aggregateLossTensorNames)),
           slots(maxInFlightBatches),
@@ -243,6 +332,7 @@ struct QueuedTrainingState {
                 this->scalarTensorNames.size(),
                 ScalarStatSource::UNRESOLVED);
         }
+        recordNativeQueuedRunStateConstructionForTests();
     }
 
     std::mutex mutex;
@@ -252,29 +342,52 @@ struct QueuedTrainingState {
     std::vector<std::string> scalarTensorNames;
     std::unordered_map<std::string, size_t> scalarTensorIndexByName;
     std::vector<std::string> aggregateLossTensorNames;
-    std::array<QueuedPhaseProgress, 4> phaseProgress{};
     std::vector<QueuedBatchSlot> slots;
     std::vector<NativeBatchCompletionParams> completionParams;
     uint64_t headSlot = 0;
     uint64_t tailSlot = 0;
     uint64_t inFlightBatches = 0;
 
+    // Failure/cancellation terminate the placed run, so they belong to the
+    // same run-scoped state as the queue rather than to one logical epoch.
     std::exception_ptr failure;
     bool cancelRequested = false;
     bool interruptRequested = false;
-
-    uint64_t numBatchesDoneInEpoch = 0;
-    uint64_t numBatchesInEpoch = 0;
 };
-std::optional<uint64_t> bestEffortCurrentBatchFloatingPointOperations(
+
+struct NativeQueuedSchedulingWindowState {
+    explicit NativeQueuedSchedulingWindowState(
+        std::shared_ptr<NativeQueuedRunState> runState)
+        : runState(std::move(runState)) {
+        THOR_THROW_IF_FALSE(this->runState != nullptr);
+    }
+
+    std::shared_ptr<NativeQueuedRunState> runState;
+    std::vector<std::shared_ptr<QueuedWorkSegmentState>> segments;
+    uint64_t completedBatchCallbacks = 0;
+    bool schedulingFinished = false;
+};
+
+NativeQueuedRunState& queuedRunState(NativeQueuedSchedulingWindowState& state) {
+    THOR_THROW_IF_FALSE(state.runState != nullptr);
+    return *state.runState;
+}
+
+const NativeQueuedRunState& queuedRunState(
+    const NativeQueuedSchedulingWindowState& state) {
+    THOR_THROW_IF_FALSE(state.runState != nullptr);
+    return *state.runState;
+}
+std::optional<ThorImplementation::LogicalWorkCount> bestEffortCurrentBatchLogicalWork(
     ThorImplementation::StampedNetwork& stampedNetwork,
-    TrainingEventPhase phase) noexcept {
+    TrainingEventPhase phase,
+    uint64_t validExampleCount) noexcept {
     try {
         return phase == TrainingEventPhase::TRAIN
-            ? stampedNetwork.getFloatingPointOperationsCurrentBatchTraining()
-            : stampedNetwork.getFloatingPointOperationsCurrentBatchForward();
+            ? stampedNetwork.getLogicalWorkCurrentBatchTraining(validExampleCount)
+            : stampedNetwork.getLogicalWorkCurrentBatchForward(validExampleCount);
     } catch (...) {
-        // FLOP accounting is telemetry.  A counting overflow or any other
+        // Logical-work accounting is telemetry. A counting overflow or any other
         // diagnostic-only failure must never turn a successfully submitted batch
         // into a failed training job.
         return std::nullopt;
@@ -282,16 +395,16 @@ std::optional<uint64_t> bestEffortCurrentBatchFloatingPointOperations(
 }
 
 
-void requestQueuedTrainingCancellation(const std::shared_ptr<QueuedTrainingState>& state) {
+void requestQueuedTrainingCancellation(const std::shared_ptr<NativeQueuedSchedulingWindowState>& state) {
     if (state == nullptr) {
         return;
     }
     {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        state->cancelRequested = true;
+        std::lock_guard<std::mutex> lock(state->runState->mutex);
+        state->runState->cancelRequested = true;
     }
-    state->batchFinished.notify_all();
-    state->batchPopped.notify_all();
+    state->runState->batchFinished.notify_all();
+    state->runState->batchPopped.notify_all();
 }
 
 std::set<std::string> networkOutputNames(Network& network) {
@@ -453,14 +566,6 @@ size_t queuedPhaseIndex(TrainingEventPhase phase) {
     const size_t index = static_cast<size_t>(phase);
     THOR_THROW_IF_FALSE(index < 4);
     return index;
-}
-
-QueuedPhaseProgress& phaseProgress(QueuedTrainingState& state, TrainingEventPhase phase) {
-    return state.phaseProgress[queuedPhaseIndex(phase)];
-}
-
-const QueuedPhaseProgress& phaseProgress(const QueuedTrainingState& state, TrainingEventPhase phase) {
-    return state.phaseProgress[queuedPhaseIndex(phase)];
 }
 
 #if THOR_ENABLE_TRAINING_QUEUE_DIAGNOSTICS
@@ -1745,23 +1850,27 @@ Batch bindBatchInputs(const StepExecutable& step, const Batch& batchInput) {
 
 void CUDART_CB completeNativeQueuedBatch(void* data) {
     NativeBatchCompletionParams* params = static_cast<NativeBatchCompletionParams*>(data);
-    std::shared_ptr<QueuedTrainingState> state = params->state;
+    std::shared_ptr<NativeQueuedSchedulingWindowState> state = params->state;
     if (state == nullptr) {
         return;
     }
-    const TrainingEventPhase phase = params->phase;
+    const std::shared_ptr<QueuedWorkSegmentState> segment = params->segment;
+    if (segment == nullptr) {
+        return;
+    }
+    const TrainingEventPhase phase = segment->phase;
     const uint64_t epochBatchNum = params->epochBatchNum;
     const uint64_t slotIndex = params->slotIndex;
 
     try {
-        THOR_THROW_IF_FALSE(params->scalarStats.size() == state->scalarTensorNames.size());
+        THOR_THROW_IF_FALSE(params->scalarStats.size() == state->runState->scalarTensorNames.size());
         THOR_THROW_IF_FALSE(
-            params->scalarStatSources.size() == state->scalarTensorNames.size());
-        for (size_t i = 0; i < state->scalarTensorNames.size(); ++i) {
+            params->scalarStatSources.size() == state->runState->scalarTensorNames.size());
+        for (size_t i = 0; i < state->runState->scalarTensorNames.size(); ++i) {
             if (params->scalarStats[i].present) {
                 continue;
             }
-            const std::string& tensorName = state->scalarTensorNames[i];
+            const std::string& tensorName = state->runState->scalarTensorNames[i];
             if (params->scalarStatSources[i] == ScalarStatSource::INPUT) {
                 THOR_THROW_IF_FALSE(!params->batchLease.empty());
                 params->scalarStats[i].value = copyInputScalarStatTensor(
@@ -1771,7 +1880,7 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
                 params->scalarStats[i].value = copyOutputScalarStatTensor(
                     params->batchOutput,
                     tensorName,
-                    state->aggregateLossTensorNames);
+                    state->runState->aggregateLossTensorNames);
             } else {
                 throw std::runtime_error(
                     "Training stat tensor '" + tensorName +
@@ -1782,8 +1891,8 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
 
         params->metricBatchStats.clear();
         for (const auto& [metricName, tensors] : params->metricStatisticTensors) {
-            const auto scalarIndex = state->scalarTensorIndexByName.find(metricName);
-            THOR_THROW_IF_FALSE(scalarIndex != state->scalarTensorIndexByName.end());
+            const auto scalarIndex = state->runState->scalarTensorIndexByName.find(metricName);
+            THOR_THROW_IF_FALSE(scalarIndex != state->runState->scalarTensorIndexByName.end());
             THOR_THROW_IF_FALSE(params->scalarStats[scalarIndex->second].present);
 
             MetricBatchStat statistic;
@@ -1835,20 +1944,18 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
         uint64_t doneAtComplete = 0;
         uint64_t totalAtComplete = 0;
         {
-            std::lock_guard<std::mutex> lock(state->mutex);
-            THOR_THROW_IF_FALSE(slotIndex < state->slots.size());
-            QueuedBatchSlot& slot = state->slots[slotIndex];
+            std::lock_guard<std::mutex> lock(state->runState->mutex);
+            THOR_THROW_IF_FALSE(slotIndex < state->runState->slots.size());
+            QueuedBatchSlot& slot = state->runState->slots[slotIndex];
             THOR_THROW_IF_FALSE(slot.occupied);
-            THOR_THROW_IF_FALSE(slot.phase == phase);
+            THOR_THROW_IF_FALSE(slot.segment.get() == segment.get());
             THOR_THROW_IF_FALSE(slot.epochBatchNum == epochBatchNum);
-            THOR_THROW_IF_FALSE(slot.batchesInEpoch == params->batchesInEpoch);
             THOR_THROW_IF_FALSE(slot.validExampleCount == params->validExampleCount);
             THOR_THROW_IF_FALSE(slot.validExampleCount > 0);
             THOR_THROW_IF_FALSE(slot.scalarStats.size() == params->scalarStats.size());
-            QueuedPhaseProgress& progress = phaseProgress(*state, phase);
-            progress.completedBatches += 1;
-            progress.completedValidExamples += slot.validExampleCount;
-            slot.doneInEpochAtComplete = progress.completedBatches;
+            segment->completedBatches += 1;
+            segment->completedValidExamples += slot.validExampleCount;
+            slot.doneInEpochAtComplete = segment->completedBatches;
             slot.scalarStats = params->scalarStats;
             slot.metricBatchStats = params->metricBatchStats;
             // Timestamp the batch when the completion callback has actually observed the
@@ -1858,16 +1965,16 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
             // impossible end-of-epoch rate spikes.
             slot.completionTime = std::chrono::high_resolution_clock::now();
             slot.ready = true;
-            state->numBatchesDoneInEpoch += 1;
+            state->completedBatchCallbacks += 1;
             params->completionCallbackFinished = true;
-            inFlightAtComplete = state->inFlightBatches;
+            inFlightAtComplete = state->runState->inFlightBatches;
             doneAtComplete = slot.doneInEpochAtComplete;
-            totalAtComplete = slot.batchesInEpoch;
+            totalAtComplete = segment->batchesPerEpoch;
         }
         if (shouldEmitQueueDiagnostic(doneAtComplete)) {
             emitNativeQueueDiagnostic("complete",
                                       phase,
-                                      params->currentEpoch,
+                                      segment->optimizerEpoch,
                                       epochBatchNum,
                                       slotIndex,
                                       inFlightAtComplete,
@@ -1878,50 +1985,53 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
         // Never let exceptions escape a CUDA host callback: doing so terminates the process.
         // Store the failure and mark the slot ready so the consumer thread can return
         // batchSession-owned tensors and rethrow the error through Trainer.fit(...).
-        std::lock_guard<std::mutex> lock(state->mutex);
-        if (state->failure == nullptr) {
-            state->failure = std::current_exception();
+        std::lock_guard<std::mutex> lock(state->runState->mutex);
+        if (state->runState->failure == nullptr) {
+            state->runState->failure = std::current_exception();
         }
-        if (slotIndex < state->slots.size()) {
-            QueuedBatchSlot& slot = state->slots[slotIndex];
-            if (slot.occupied && slot.phase == phase && slot.epochBatchNum == epochBatchNum) {
-                QueuedPhaseProgress& progress = phaseProgress(*state, phase);
-                progress.completedBatches += 1;
-                progress.completedValidExamples += slot.validExampleCount;
-                slot.doneInEpochAtComplete = progress.completedBatches;
+        if (slotIndex < state->runState->slots.size()) {
+            QueuedBatchSlot& slot = state->runState->slots[slotIndex];
+            if (slot.occupied && slot.segment.get() == segment.get() &&
+                slot.epochBatchNum == epochBatchNum) {
+                segment->completedBatches += 1;
+                segment->completedValidExamples += slot.validExampleCount;
+                slot.doneInEpochAtComplete = segment->completedBatches;
                 slot.completionTime = std::chrono::high_resolution_clock::now();
                 slot.ready = true;
             }
         }
-        state->numBatchesDoneInEpoch += 1;
+        state->completedBatchCallbacks += 1;
         params->completionCallbackFinished = true;
     }
-    state->batchFinished.notify_all();
+    state->runState->batchFinished.notify_all();
 }
 
-bool isBatchDataReadyUnlocked(const QueuedTrainingState& state) {
-    if (state.inFlightBatches == 0) {
+bool isBatchDataReadyUnlocked(const NativeQueuedSchedulingWindowState& state) {
+    const NativeQueuedRunState& runState = queuedRunState(state);
+    if (runState.inFlightBatches == 0) {
         return false;
     }
-    const QueuedBatchSlot& slot = state.slots[state.headSlot];
+    const QueuedBatchSlot& slot = runState.slots[runState.headSlot];
     return slot.occupied && slot.ready;
 }
 
-void waitForBatchDataUnlocked(QueuedTrainingState& state, std::unique_lock<std::mutex>& lock) {
-    while (state.failure == nullptr && !isBatchDataReadyUnlocked(state)) {
-        if (state.cancelRequested && state.inFlightBatches == 0) {
+void waitForBatchDataUnlocked(NativeQueuedSchedulingWindowState& state, std::unique_lock<std::mutex>& lock) {
+    NativeQueuedRunState& runState = queuedRunState(state);
+    while (runState.failure == nullptr && !isBatchDataReadyUnlocked(state)) {
+        if (runState.cancelRequested && runState.inFlightBatches == 0) {
             return;
         }
-        if (state.numBatchesDoneInEpoch == state.numBatchesInEpoch && state.inFlightBatches == 0) {
+        if (state.schedulingFinished && runState.inFlightBatches == 0) {
             return;
         }
-        state.batchFinished.wait_for(lock, std::chrono::milliseconds(50));
+        runState.batchFinished.wait_for(lock, std::chrono::milliseconds(50));
     }
 }
 
 struct BatchPopResult {
     bool hasBatch = false;
     BatchLease batchLease;
+    std::shared_ptr<QueuedWorkSegmentState> segment;
     ExampleType exampleType = ExampleType::TRAIN;
     TrainingEventPhase phase = TrainingEventPhase::TRAIN;
     uint64_t currentEpoch = 0;
@@ -1932,7 +2042,7 @@ struct BatchPopResult {
     uint64_t poppedInEpoch = 0;
     uint64_t batchesInEpoch = 0;
     uint64_t validExampleCount = 0;
-    uint64_t floatingPointOperations = 0;
+    std::optional<ThorImplementation::LogicalWorkCount> logicalWork{};
     uint64_t validExamplesInEpoch = 0;
     std::chrono::high_resolution_clock::time_point phaseStartedAt{};
     std::chrono::high_resolution_clock::time_point completionTime{};
@@ -1940,31 +2050,44 @@ struct BatchPopResult {
     std::unordered_map<std::string, MetricBatchStat> metricBatchStats;
 };
 
-BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
-    std::unique_lock<std::mutex> lock(state->mutex);
+BatchPopResult popBatchData(
+    const std::shared_ptr<NativeQueuedSchedulingWindowState>& state,
+    std::optional<uint64_t> maximumReportedEpoch = std::nullopt) {
+    std::unique_lock<std::mutex> lock(state->runState->mutex);
     waitForBatchDataUnlocked(*state, lock);
 
     if (!isBatchDataReadyUnlocked(*state)) {
-        if (state->failure != nullptr) {
-            std::rethrow_exception(state->failure);
+        if (state->runState->failure != nullptr) {
+            std::rethrow_exception(state->runState->failure);
         }
         return {};
     }
 
-    QueuedBatchSlot& slot = state->slots[state->headSlot];
-    NativeBatchCompletionParams& params = state->completionParams[slot.paramsIndex];
+    QueuedBatchSlot& slot = state->runState->slots[state->runState->headSlot];
+    const std::shared_ptr<QueuedWorkSegmentState> segment = slot.segment;
+    THOR_THROW_IF_FALSE(segment != nullptr);
+    if (maximumReportedEpoch.has_value() &&
+        segment->reportedEpoch > maximumReportedEpoch.value()) {
+        // The FIFO head already belongs to a later logical epoch. Leave it in
+        // the persistent ring so the consumer can finalize the current epoch
+        // while the scheduler/GPU continue ahead inside the same window.
+        return {};
+    }
+    NativeBatchCompletionParams& params = state->runState->completionParams[slot.paramsIndex];
+    THOR_THROW_IF_FALSE(params.segment.get() == segment.get());
 
     BatchPopResult result;
     result.hasBatch = true;
-    result.exampleType = params.exampleType;
-    result.phase = slot.phase;
-    result.currentEpoch = params.currentEpoch;
+    result.segment = segment;
+    result.exampleType = segment->exampleType;
+    result.phase = segment->phase;
+    result.currentEpoch = segment->reportedEpoch;
     result.epochBatchNum = slot.epochBatchNum;
-    result.slotIndex = state->headSlot;
+    result.slotIndex = state->runState->headSlot;
     result.doneInEpoch = slot.doneInEpochAtComplete;
-    result.batchesInEpoch = slot.batchesInEpoch;
+    result.batchesInEpoch = segment->batchesPerEpoch;
     result.validExampleCount = slot.validExampleCount;
-    result.floatingPointOperations = slot.floatingPointOperations;
+    result.logicalWork = slot.logicalWork;
     result.validExamplesInEpoch =
         slot.validExamplesThroughBatch;
     result.phaseStartedAt = slot.phaseStartedAt;
@@ -1979,7 +2102,8 @@ BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
     params.completionCallbackLaunched = false;
     params.completionCallbackFinished = false;
     params.validExampleCount = 0;
-    params.floatingPointOperations = 0;
+    params.logicalWork = ThorImplementation::LogicalWorkCount{};
+    params.segment.reset();
     params.state.reset();
     for (ScalarStatSlot& scalarStat : slot.scalarStats) {
         scalarStat.present = false;
@@ -1993,47 +2117,46 @@ BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
     for (ScalarStatSource& scalarStatSource : params.scalarStatSources) {
         scalarStatSource = ScalarStatSource::UNRESOLVED;
     }
-    QueuedPhaseProgress& progress = phaseProgress(*state, slot.phase);
-    progress.poppedBatches += 1;
-    progress.poppedValidExamples += slot.validExampleCount;
-    result.poppedInEpoch = progress.poppedBatches;
+    segment->poppedBatches += 1;
+    segment->poppedValidExamples += slot.validExampleCount;
+    result.poppedInEpoch = segment->poppedBatches;
     THOR_THROW_IF_FALSE(
-        result.validExamplesInEpoch == progress.poppedValidExamples);
+        result.validExamplesInEpoch == segment->poppedValidExamples);
 
     slot.ready = false;
     slot.occupied = false;
-    slot.phase = TrainingEventPhase::TRAIN;
+    slot.segment.reset();
     slot.epochBatchNum = 0;
-    slot.batchesInEpoch = 0;
     slot.validExampleCount = 0;
-    slot.floatingPointOperations = 0;
+    slot.logicalWork = ThorImplementation::LogicalWorkCount{};
     slot.doneInEpochAtComplete = 0;
     slot.validExamplesThroughBatch = 0;
     slot.phaseStartedAt = {};
     slot.completionTime = {};
-    state->headSlot = (state->headSlot + 1) % state->slots.size();
-    state->inFlightBatches -= 1;
-    result.inFlightAfterPop = state->inFlightBatches;
+    state->runState->headSlot = (state->runState->headSlot + 1) % state->runState->slots.size();
+    state->runState->inFlightBatches -= 1;
+    result.inFlightAfterPop = state->runState->inFlightBatches;
 
     lock.unlock();
-    state->batchPopped.notify_all();
+    state->runState->batchPopped.notify_all();
     return result;
 }
 
-uint64_t outstandingBatchCount(const std::shared_ptr<QueuedTrainingState>& state) {
-    std::lock_guard<std::mutex> lock(state->mutex);
-    return state->inFlightBatches;
+uint64_t outstandingBatchCount(const std::shared_ptr<NativeQueuedSchedulingWindowState>& state) {
+    std::lock_guard<std::mutex> lock(state->runState->mutex);
+    return state->runState->inFlightBatches;
 }
 
-void throwIfQueuedTrainingStateFailed(const std::shared_ptr<QueuedTrainingState>& state) {
+void throwIfSchedulingWindowStateFailed(
+    const std::shared_ptr<NativeQueuedSchedulingWindowState>& state) {
     std::exception_ptr failure;
     bool cancelRequested = false;
     bool interruptRequested = false;
     {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        failure = state->failure;
-        cancelRequested = state->cancelRequested;
-        interruptRequested = state->interruptRequested;
+        std::lock_guard<std::mutex> lock(state->runState->mutex);
+        failure = state->runState->failure;
+        cancelRequested = state->runState->cancelRequested;
+        interruptRequested = state->runState->interruptRequested;
     }
 
     if (failure != nullptr) {
@@ -2047,8 +2170,10 @@ void throwIfQueuedTrainingStateFailed(const std::shared_ptr<QueuedTrainingState>
     }
 }
 
-bool queuedCompletionCallbacksPendingUnlocked(const QueuedTrainingState& state) {
-    for (const NativeBatchCompletionParams& params : state.completionParams) {
+bool queuedCompletionCallbacksPendingUnlocked(
+    const NativeQueuedSchedulingWindowState& state) {
+    for (const NativeBatchCompletionParams& params :
+         queuedRunState(state).completionParams) {
         if (params.completionCallbackLaunched && !params.completionCallbackFinished) {
             return true;
         }
@@ -2056,27 +2181,29 @@ bool queuedCompletionCallbacksPendingUnlocked(const QueuedTrainingState& state) 
     return false;
 }
 
-void releaseQueuedTrainingStateReferencesAfterAbort(const std::shared_ptr<QueuedTrainingState>& state, bool submittedWorkDrained) {
+void releaseSchedulingWindowStateReferencesAfterAbort(
+    const std::shared_ptr<NativeQueuedSchedulingWindowState>& state,
+    bool submittedWorkDrained) {
     if (state == nullptr) {
         return;
     }
 
     std::vector<BatchLease> leasesToRelease;
 
-    std::unique_lock<std::mutex> lock(state->mutex);
+    std::unique_lock<std::mutex> lock(state->runState->mutex);
     if (!submittedWorkDrained && queuedCompletionCallbacksPendingUnlocked(*state)) {
         // If CUDA synchronization failed, a launched host callback may still hold
-        // a raw pointer into state->completionParams. Do not break those references
-        // here; preserving the old leak behavior is safer than risking a UAF in an
+        // a raw pointer into the run-scoped completionParams storage. Do not break
+        // those references here; preserving them is safer than risking a UAF in an
         // already-failing CUDA context. Normal trainer failures reach this path with
         // submittedWorkDrained=true and are cleaned up below.
         return;
     }
     while (queuedCompletionCallbacksPendingUnlocked(*state)) {
-        state->batchFinished.wait_for(lock, std::chrono::milliseconds(50));
+        state->runState->batchFinished.wait_for(lock, std::chrono::milliseconds(50));
     }
 
-    for (NativeBatchCompletionParams& params : state->completionParams) {
+    for (NativeBatchCompletionParams& params : state->runState->completionParams) {
         if (!params.batchLease.empty()) {
             leasesToRelease.push_back(std::move(params.batchLease));
         }
@@ -2093,18 +2220,18 @@ void releaseQueuedTrainingStateReferencesAfterAbort(const std::shared_ptr<Queued
         params.completionCallbackLaunched = false;
         params.completionCallbackFinished = false;
         params.validExampleCount = 0;
-        params.floatingPointOperations = 0;
+        params.logicalWork = ThorImplementation::LogicalWorkCount{};
+        params.segment.reset();
         params.state.reset();
     }
 
-    for (QueuedBatchSlot& slot : state->slots) {
+    for (QueuedBatchSlot& slot : state->runState->slots) {
         slot.occupied = false;
         slot.ready = false;
-        slot.phase = TrainingEventPhase::TRAIN;
+        slot.segment.reset();
         slot.epochBatchNum = 0;
-        slot.batchesInEpoch = 0;
         slot.validExampleCount = 0;
-        slot.floatingPointOperations = 0;
+        slot.logicalWork = ThorImplementation::LogicalWorkCount{};
         slot.doneInEpochAtComplete = 0;
         slot.validExamplesThroughBatch = 0;
         slot.paramsIndex = 0;
@@ -2115,13 +2242,13 @@ void releaseQueuedTrainingStateReferencesAfterAbort(const std::shared_ptr<Queued
         }
         slot.metricBatchStats.clear();
     }
-    state->headSlot = 0;
-    state->tailSlot = 0;
-    state->inFlightBatches = 0;
+    state->runState->headSlot = 0;
+    state->runState->tailSlot = 0;
+    state->runState->inFlightBatches = 0;
     lock.unlock();
 
     leasesToRelease.clear();
-    state->batchPopped.notify_all();
+    state->runState->batchPopped.notify_all();
 }
 
 void emitTrainingEvent(TrainingObserver& observer, const TrainingEvent& event) {
@@ -2178,19 +2305,9 @@ void assignScalarStatsToSnapshot(TrainingStatsSnapshot& snapshot,
     }
 }
 
-struct QueuedEpochPhaseWork {
-    ExampleType exampleType = ExampleType::TRAIN;
-    TrainingEventPhase phase = TrainingEventPhase::TRAIN;
-    uint64_t initialBatchNum = 0;
-    uint64_t sessionInitialBatchNum = 0;
-    uint64_t batchesToRunCount = 0;
-    uint64_t batchesPerEpoch = 0;
-    uint64_t initialValidExamples = 0;
-    uint64_t validExamplesPerEpoch = 0;
-    bool requiresEpochBoundaryValidation = true;
-
-    [[nodiscard]] uint64_t batchesToRun() const { return batchesToRunCount; }
-};
+void prepareQueuedWorkSegmentForScheduling(
+    const std::shared_ptr<NativeQueuedSchedulingWindowState>& state,
+    const std::shared_ptr<QueuedWorkSegmentState>& segment);
 
 struct NativeQueuedSchedulerResources {
     NativeQueuedSchedulerResources(
@@ -2257,29 +2374,36 @@ struct NativeQueuedSchedulerResources {
     std::vector<Stream> completionStreams;
 };
 
-class NativeQueuedEpochScheduler {
+class NativeQueuedSegmentScheduler {
    public:
-    NativeQueuedEpochScheduler(
+    NativeQueuedSegmentScheduler(
         std::shared_ptr<NativeQueuedSchedulerResources> resources,
-        std::shared_ptr<BatchSession> batchSession,
-        std::shared_ptr<QueuedTrainingState> state,
-        uint64_t currentEpoch,
+        std::shared_ptr<NativeQueuedSchedulingWindowState> state,
         TrainingCancellationToken cancellationToken)
         : resources(std::move(resources)),
-          batchSession(std::move(batchSession)),
           state(std::move(state)),
-          currentEpoch(currentEpoch),
           cancellationToken(std::move(cancellationToken)) {
         THOR_THROW_IF_FALSE(this->resources != nullptr);
     }
 
-    void operator()(uint64_t initialEpochBatchNum,
-                    uint64_t initialSessionBatchNum,
-                    uint64_t initialValidExamples,
-                    uint64_t batches,
-                    uint64_t batchesPerEpoch,
-                    ExampleType exampleType,
-                    TrainingEventPhase diagnosticPhase) {
+    void operator()(const std::shared_ptr<QueuedWorkSegmentState>& segment) {
+        THOR_THROW_IF_FALSE(segment != nullptr);
+        if (cancellationToken.isCancellationRequested()) {
+            requestQueuedTrainingCancellation(state);
+            return;
+        }
+        prepareQueuedWorkSegmentForScheduling(state, segment);
+
+        const uint64_t initialEpochBatchNum = segment->initialBatchNum;
+        const uint64_t initialSessionBatchNum = segment->sessionInitialBatchNum;
+        const uint64_t initialValidExamples = segment->initialValidExamples;
+        const uint64_t batches = segment->batchesToRunCount;
+        const uint64_t batchesPerEpoch = segment->batchesPerEpoch;
+        const ExampleType exampleType = segment->exampleType;
+        const TrainingEventPhase diagnosticPhase = segment->phase;
+        const uint64_t currentEpoch = segment->optimizerEpoch;
+        const std::shared_ptr<BatchSession>& batchSession = segment->batchSession;
+
         if (batches == 0) {
             return;
         }
@@ -2299,12 +2423,6 @@ class NativeQueuedEpochScheduler {
         const std::vector<int>& stampGpuNums = resources->stampGpuNums;
         const std::vector<Stream>& completionStreams =
             resources->completionStreams;
-
-        {
-            std::lock_guard<std::mutex> lock(state->mutex);
-            phaseProgress(*state, diagnosticPhase).schedulingStartedAt =
-                std::chrono::high_resolution_clock::now();
-        }
 
         emitNativeQueueDiagnostic(
             "phase_schedule_start", diagnosticPhase, currentEpoch, initialEpochBatchNum, 0, 0, initialEpochBatchNum, batchesPerEpoch);
@@ -2339,37 +2457,36 @@ class NativeQueuedEpochScheduler {
             uint64_t inFlightAfterReserve = 0;
             const auto reserveStart = diagnosticNow(collectQueueDiagnostics);
             {
-                std::unique_lock<std::mutex> lock(state->mutex);
-                while (state->failure == nullptr && !state->cancelRequested && state->inFlightBatches >= options.maxInFlightBatches) {
-                    state->batchPopped.wait(lock);
+                std::unique_lock<std::mutex> lock(state->runState->mutex);
+                while (state->runState->failure == nullptr && !state->runState->cancelRequested && state->runState->inFlightBatches >= options.maxInFlightBatches) {
+                    state->runState->batchPopped.wait(lock);
                 }
-                if (state->failure != nullptr || state->cancelRequested) {
+                if (state->runState->failure != nullptr || state->runState->cancelRequested) {
                     return;
                 }
 
-                slotIndex = state->tailSlot;
-                QueuedBatchSlot& slot = state->slots[slotIndex];
+                slotIndex = state->runState->tailSlot;
+                QueuedBatchSlot& slot = state->runState->slots[slotIndex];
                 THOR_THROW_IF_FALSE(!slot.occupied);
                 slot.occupied = true;
                 slot.ready = false;
-                slot.phase = diagnosticPhase;
+                slot.segment = segment;
                 slot.epochBatchNum = epochBatchNum;
-                slot.batchesInEpoch = batchesPerEpoch;
                 slot.validExampleCount = 0;
-                slot.floatingPointOperations = 0;
+                slot.logicalWork = ThorImplementation::LogicalWorkCount{};
                 slot.doneInEpochAtComplete = 0;
                 slot.validExamplesThroughBatch = 0;
                 slot.paramsIndex = slotIndex;
-                slot.phaseStartedAt = phaseProgress(*state, diagnosticPhase).schedulingStartedAt;
+                slot.phaseStartedAt = segment->schedulingStartedAt;
                 slot.completionTime = {};
                 for (ScalarStatSlot& scalarStat : slot.scalarStats) {
                     scalarStat.present = false;
                     scalarStat.value = 0.0f;
                 }
                 slot.metricBatchStats.clear();
-                state->tailSlot = (state->tailSlot + 1) % state->slots.size();
-                state->inFlightBatches += 1;
-                inFlightAfterReserve = state->inFlightBatches;
+                state->runState->tailSlot = (state->runState->tailSlot + 1) % state->runState->slots.size();
+                state->runState->inFlightBatches += 1;
+                inFlightAfterReserve = state->runState->inFlightBatches;
             }
             const auto reserveFinish = diagnosticNow(collectQueueDiagnostics);
             if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1)) {
@@ -2383,17 +2500,14 @@ class NativeQueuedEpochScheduler {
                                           batchesPerEpoch);
             }
 
-            NativeBatchCompletionParams* params = &state->completionParams[slotIndex];
+            NativeBatchCompletionParams* params = &state->runState->completionParams[slotIndex];
             params->state = state;
-            params->exampleType = exampleType;
-            params->phase = diagnosticPhase;
+            params->segment = segment;
             params->completionCallbackLaunched = false;
             params->completionCallbackFinished = false;
-            params->currentEpoch = currentEpoch;
             params->epochBatchNum = epochBatchNum;
-            params->batchesInEpoch = batchesPerEpoch;
             params->validExampleCount = 0;
-            params->floatingPointOperations = 0;
+            params->logicalWork = ThorImplementation::LogicalWorkCount{};
             params->slotIndex = slotIndex;
             params->batchLease.reset();
             params->batchOutput.clear();
@@ -2420,8 +2534,8 @@ class NativeQueuedEpochScheduler {
                     "BatchSession returned an invalid valid-example count.");
             }
             {
-                std::lock_guard<std::mutex> lock(state->mutex);
-                QueuedBatchSlot& slot = state->slots[slotIndex];
+                std::lock_guard<std::mutex> lock(state->runState->mutex);
+                QueuedBatchSlot& slot = state->runState->slots[slotIndex];
                 THOR_THROW_IF_FALSE(slot.occupied);
                 slot.validExampleCount = params->validExampleCount;
                 validExamplesScheduled += params->validExampleCount;
@@ -2450,7 +2564,6 @@ class NativeQueuedEpochScheduler {
             uint64_t coordinatorSetGpuMicros = 0;
             uint64_t coordinatorExecMicros = 0;
             uint64_t coordinatorRoundtripMicros = 0;
-            bool floatingPointOperationsAvailable = true;
             ThorImplementation::BatchSubmissionTiming submitTiming;
             for (const StepExecutable& step : steps) {
                 for (uint32_t repeat = 0; repeat < step.getRepeatCount(); ++repeat) {
@@ -2511,21 +2624,24 @@ class NativeQueuedEpochScheduler {
                     if (collectQueueDiagnostics) {
                         ThorImplementation::accumulateBatchSubmissionTiming(submitTiming, singleSubmitTiming);
                     }
-                    if (floatingPointOperationsAvailable) {
+                    if (params->logicalWork.has_value()) {
                         ThorImplementation::StampedNetwork& submittedStamp =
                             placedNetwork->getStampedNetwork(nextStampToProcess);
-                        const std::optional<uint64_t> submitFlops =
-                            bestEffortCurrentBatchFloatingPointOperations(submittedStamp, diagnosticPhase);
-                        if (!submitFlops.has_value() ||
-                            submitFlops.value() >
-                                std::numeric_limits<uint64_t>::max() - params->floatingPointOperations) {
+                        const std::optional<ThorImplementation::LogicalWorkCount> submitLogicalWork =
+                            bestEffortCurrentBatchLogicalWork(
+                                submittedStamp, diagnosticPhase, params->validExampleCount);
+                        const std::optional<ThorImplementation::LogicalWorkCount> accumulatedLogicalWork =
+                            submitLogicalWork.has_value()
+                                ? ThorImplementation::LogicalWorkCount::tryAdd(
+                                      params->logicalWork.value(), submitLogicalWork.value())
+                                : std::nullopt;
+                        if (!accumulatedLogicalWork.has_value()) {
                             // The batch has already been submitted successfully.
-                            // Drop FLOP telemetry for this batch instead of making
+                            // Drop logical-work telemetry for this batch instead of making
                             // an accounting limitation fatal to model training.
-                            params->floatingPointOperations = 0;
-                            floatingPointOperationsAvailable = false;
+                            params->logicalWork.reset();
                         } else {
-                            params->floatingPointOperations += submitFlops.value();
+                            params->logicalWork = accumulatedLogicalWork;
                         }
                     }
                     submitCalls += 1;
@@ -2533,10 +2649,10 @@ class NativeQueuedEpochScheduler {
             }
 
             {
-                std::lock_guard<std::mutex> lock(state->mutex);
-                QueuedBatchSlot& slot = state->slots[slotIndex];
+                std::lock_guard<std::mutex> lock(state->runState->mutex);
+                QueuedBatchSlot& slot = state->runState->slots[slotIndex];
                 THOR_THROW_IF_FALSE(slot.occupied);
-                slot.floatingPointOperations = params->floatingPointOperations;
+                slot.logicalWork = params->logicalWork;
             }
             const auto submitFinish = diagnosticNow(collectQueueDiagnostics);
 
@@ -2549,7 +2665,7 @@ class NativeQueuedEpochScheduler {
                         nextStampToProcess,
                         static_cast<uint32_t>(slotIndex));
             for (const auto& [metricName, tensors] : availableMetricStatistics) {
-                if (state->scalarTensorIndexByName.count(metricName) == 0) {
+                if (state->runState->scalarTensorIndexByName.count(metricName) == 0) {
                     continue;
                 }
                 THOR_THROW_IF_FALSE(
@@ -2560,14 +2676,14 @@ class NativeQueuedEpochScheduler {
             // it no longer reads its session-owned source. Snapshot CPU input
             // statistics now, before those source slots are released; output
             // statistics remain deferred until the normal completion callback.
-            THOR_THROW_IF_FALSE(params->scalarStats.size() == state->scalarTensorNames.size());
+            THOR_THROW_IF_FALSE(params->scalarStats.size() == state->runState->scalarTensorNames.size());
             THOR_THROW_IF_FALSE(
-                params->scalarStatSources.size() == state->scalarTensorNames.size());
+                params->scalarStatSources.size() == state->runState->scalarTensorNames.size());
             const bool fullySourceTracked =
                 params->batchLease.get().allFieldsHaveSourceReferences();
             std::set<std::string> retainedSourceFields;
-            for (size_t i = 0; i < state->scalarTensorNames.size(); ++i) {
-                const std::string& scalarTensorName = state->scalarTensorNames[i];
+            for (size_t i = 0; i < state->runState->scalarTensorNames.size(); ++i) {
+                const std::string& scalarTensorName = state->runState->scalarTensorNames[i];
                 if (!params->batchLease.get().contains(scalarTensorName)) {
                     params->scalarStatSources[i] = ScalarStatSource::OUTPUT;
                     continue;
@@ -2636,14 +2752,14 @@ class NativeQueuedEpochScheduler {
 
             const auto hostFuncStart = diagnosticNow(collectQueueDiagnostics);
             {
-                std::lock_guard<std::mutex> lock(state->mutex);
+                std::lock_guard<std::mutex> lock(state->runState->mutex);
                 params->completionCallbackLaunched = true;
                 params->completionCallbackFinished = false;
             }
             try {
                 CUDA_CHECK(cudaLaunchHostFunc(completionStream, completeNativeQueuedBatch, params));
             } catch (...) {
-                std::lock_guard<std::mutex> lock(state->mutex);
+                std::lock_guard<std::mutex> lock(state->runState->mutex);
                 params->completionCallbackLaunched = false;
                 params->completionCallbackFinished = false;
                 throw;
@@ -2671,6 +2787,7 @@ class NativeQueuedEpochScheduler {
                 static_cast<uint32_t>(slotIndex));
             const auto extendOutputsFinish = diagnosticNow(collectQueueDiagnostics);
             const auto completionSetupFinish = extendOutputsFinish;
+            recordNativeQueuedBatchSubmissionForTests(currentEpoch);
 
             if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1)) {
                 emitNativeQueueCompletionTimingDiagnostic(diagnosticPhase,
@@ -2731,13 +2848,18 @@ class NativeQueuedEpochScheduler {
             nextStampToProcess += 1;
             nextStampToProcess %= placedNetwork->getNumStamps();
         }
+
+        if (segment->requiresEpochBoundaryValidation &&
+            batchSession->getNextBatchNum(exampleType) != 0) {
+            throw std::runtime_error(
+                "Native queued " + phaseName(segment->phase) +
+                " segment did not finish at its batch-session epoch boundary.");
+        }
     }
 
    private:
     std::shared_ptr<NativeQueuedSchedulerResources> resources;
-    std::shared_ptr<BatchSession> batchSession;
-    std::shared_ptr<QueuedTrainingState> state;
-    uint64_t currentEpoch;
+    std::shared_ptr<NativeQueuedSchedulingWindowState> state;
     TrainingCancellationToken cancellationToken;
 };
 
@@ -2763,24 +2885,24 @@ struct NativeQueuedSchedulerCommandCompletion {
 };
 
 struct NativeQueuedSchedulerCommand {
-    std::shared_ptr<BatchSession> batchSession;
-    std::shared_ptr<QueuedTrainingState> state;
-    uint64_t currentEpoch = 0;
+    std::shared_ptr<NativeQueuedSchedulingWindowState> state;
     TrainingCancellationToken cancellationToken;
-    std::vector<QueuedEpochPhaseWork> phaseWorks;
+    std::vector<std::shared_ptr<QueuedWorkSegmentState>> segments;
     std::shared_ptr<NativeQueuedSchedulerCommandCompletion> completion;
 };
 
-// Logical epoch boundaries determine when the control thread may score,
-// checkpoint, or admit the next epoch; they do not require an OS-thread
-// lifetime boundary. Keep one producer worker alive for the placed run and
-// feed it one non-overlapping scheduling command at a time.
+// Keep one producer worker alive for the placed run and feed it one
+// non-overlapping scheduling-window command at a time. Ordinary epoch/phase
+// boundaries may live inside a command; a new command is reserved for a true
+// host-side decision boundary or an explicitly isolated scheduling operation.
 class NativeQueuedSchedulerWorker {
    public:
-    explicit NativeQueuedSchedulerWorker(
-        std::shared_ptr<NativeQueuedSchedulerResources> resources)
-        : resources(std::move(resources)) {
+    NativeQueuedSchedulerWorker(
+        std::shared_ptr<NativeQueuedSchedulerResources> resources,
+        std::shared_ptr<NativeQueuedRunState> runState)
+        : resources(std::move(resources)), runState(std::move(runState)) {
         THOR_THROW_IF_FALSE(this->resources != nullptr);
+        THOR_THROW_IF_FALSE(this->runState != nullptr);
         worker = std::thread(&NativeQueuedSchedulerWorker::workerLoop, this);
     }
 
@@ -2794,8 +2916,15 @@ class NativeQueuedSchedulerWorker {
         return resources;
     }
 
+    [[nodiscard]] const std::shared_ptr<NativeQueuedRunState>&
+    getRunState() const {
+        return runState;
+    }
+
     std::shared_ptr<NativeQueuedSchedulerCommandCompletion> submit(
         NativeQueuedSchedulerCommand command) {
+        THOR_THROW_IF_FALSE(command.state != nullptr);
+        THOR_THROW_IF_FALSE(command.state->runState.get() == runState.get());
         auto completion =
             std::make_shared<NativeQueuedSchedulerCommandCompletion>();
         command.completion = completion;
@@ -2808,7 +2937,7 @@ class NativeQueuedSchedulerWorker {
             }
             if (commandActive || pendingCommand.has_value()) {
                 throw std::runtime_error(
-                    "Native queued scheduler worker received overlapping epoch "
+                    "Native queued scheduler worker received overlapping scheduling-window "
                     "commands.");
             }
             commandActive = true;
@@ -2819,8 +2948,8 @@ class NativeQueuedSchedulerWorker {
     }
 
     void shutdown() noexcept {
-        std::shared_ptr<QueuedTrainingState> activeState;
-        std::shared_ptr<BatchSession> activeSession;
+        std::shared_ptr<NativeQueuedSchedulingWindowState> activeState;
+        std::vector<std::shared_ptr<BatchSession>> activeSessions;
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (stopping) {
@@ -2831,10 +2960,15 @@ class NativeQueuedSchedulerWorker {
             }
             if (pendingCommand.has_value()) {
                 activeState = pendingCommand->state;
-                activeSession = pendingCommand->batchSession;
+                for (const std::shared_ptr<QueuedWorkSegmentState>& segment :
+                     pendingCommand->segments) {
+                    if (segment != nullptr && segment->batchSession != nullptr) {
+                        activeSessions.push_back(segment->batchSession);
+                    }
+                }
             } else {
                 activeState = activeCommandState;
-                activeSession = activeCommandSession;
+                activeSessions = activeCommandSessions;
             }
         }
 
@@ -2845,7 +2979,14 @@ class NativeQueuedSchedulerWorker {
         if (activeState != nullptr) {
             requestQueuedTrainingCancellation(activeState);
         }
-        if (activeSession != nullptr) {
+        std::set<BatchSession*> cancelledSessions;
+        for (const std::shared_ptr<BatchSession>& activeSession : activeSessions) {
+            if (activeSession == nullptr) {
+                continue;
+            }
+            if (!cancelledSessions.insert(activeSession.get()).second) {
+                continue;
+            }
             try {
                 cancelBatchSession(activeSession);
             } catch (...) {
@@ -2878,7 +3019,13 @@ class NativeQueuedSchedulerWorker {
                 command.emplace(std::move(pendingCommand.value()));
                 pendingCommand.reset();
                 activeCommandState = command->state;
-                activeCommandSession = command->batchSession;
+                activeCommandSessions.clear();
+                for (const std::shared_ptr<QueuedWorkSegmentState>& segment :
+                     command->segments) {
+                    if (segment != nullptr && segment->batchSession != nullptr) {
+                        activeCommandSessions.push_back(segment->batchSession);
+                    }
+                }
             }
 
             executeCommand(command.value());
@@ -2886,7 +3033,7 @@ class NativeQueuedSchedulerWorker {
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 activeCommandState.reset();
-                activeCommandSession.reset();
+                activeCommandSessions.clear();
                 commandActive = false;
             }
             command->completion->markFinished();
@@ -2896,73 +3043,68 @@ class NativeQueuedSchedulerWorker {
     void executeCommand(NativeQueuedSchedulerCommand& command) noexcept {
         try {
             {
-                std::lock_guard<std::mutex> lock(command.state->mutex);
-                if (command.state->failure != nullptr ||
-                    command.state->cancelRequested) {
+                std::lock_guard<std::mutex> lock(command.state->runState->mutex);
+                if (command.state->runState->failure != nullptr ||
+                    command.state->runState->cancelRequested) {
+                    command.state->schedulingFinished = true;
+                    command.state->runState->batchFinished.notify_all();
                     return;
                 }
             }
 
-            NativeQueuedEpochScheduler scheduler(
+            NativeQueuedSegmentScheduler scheduler(
                 resources,
-                command.batchSession,
                 command.state,
-                command.currentEpoch,
                 command.cancellationToken);
-            for (const QueuedEpochPhaseWork& work : command.phaseWorks) {
-                scheduler(
-                    work.initialBatchNum,
-                    work.sessionInitialBatchNum,
-                    work.initialValidExamples,
-                    work.batchesToRun(),
-                    work.batchesPerEpoch,
-                    work.exampleType,
-                    work.phase);
+            for (const std::shared_ptr<QueuedWorkSegmentState>& segment :
+                 command.segments) {
+                scheduler(segment);
             }
+            {
+                std::lock_guard<std::mutex> lock(command.state->runState->mutex);
+                command.state->schedulingFinished = true;
+            }
+            command.state->runState->batchFinished.notify_all();
             resources->recordEventReuseForTests();
         } catch (...) {
             {
-                std::lock_guard<std::mutex> lock(command.state->mutex);
-                if (command.state->failure == nullptr) {
-                    command.state->failure = std::current_exception();
+                std::lock_guard<std::mutex> lock(command.state->runState->mutex);
+                if (command.state->runState->failure == nullptr) {
+                    command.state->runState->failure = std::current_exception();
                 }
-                command.state->cancelRequested = true;
-                command.state->numBatchesDoneInEpoch =
-                    command.state->numBatchesInEpoch;
+                command.state->runState->cancelRequested = true;
+                command.state->schedulingFinished = true;
             }
-            command.state->batchFinished.notify_all();
-            command.state->batchPopped.notify_all();
+            command.state->runState->batchFinished.notify_all();
+            command.state->runState->batchPopped.notify_all();
         }
     }
 
     std::shared_ptr<NativeQueuedSchedulerResources> resources;
+    std::shared_ptr<NativeQueuedRunState> runState;
     std::mutex mutex;
     std::condition_variable workAvailable;
     bool stopping = false;
     bool commandActive = false;
     std::optional<NativeQueuedSchedulerCommand> pendingCommand;
-    std::shared_ptr<QueuedTrainingState> activeCommandState;
-    std::shared_ptr<BatchSession> activeCommandSession;
+    std::shared_ptr<NativeQueuedSchedulingWindowState> activeCommandState;
+    std::vector<std::shared_ptr<BatchSession>> activeCommandSessions;
     // Start this last from the constructor body so the persistent worker can
     // never observe partially constructed synchronization/command state.
     std::thread worker;
 };
 
-struct NativeQueuedEpochExecution {
-    std::shared_ptr<QueuedTrainingState> state;
+struct NativeQueuedSchedulingWindowExecution {
+    std::shared_ptr<NativeQueuedSchedulingWindowState> state;
     std::shared_ptr<NativeQueuedSchedulerCommandCompletion>
         schedulerCommandCompletion;
-    std::vector<QueuedEpochPhaseWork> phaseWorks;
-    uint64_t initialCompletedBatches = 0;
-    uint64_t initialWarmupCompletionTarget = 0;
+    std::vector<std::shared_ptr<QueuedWorkSegmentState>> segments;
     std::chrono::high_resolution_clock::time_point startedAt{};
 };
 
-struct QueuedEpochWorkPlan {
-    std::vector<QueuedEpochPhaseWork> phaseWorks;
-    uint64_t initiallyCompletedBatches = 0;
-    uint64_t totalBatchesAcrossPhases = 0;
-    uint64_t remainingBatchesAcrossPhases = 0;
+struct QueuedValidationPopulationMetadata {
+    std::string name;
+    bool isDefault = false;
 };
 
 uint64_t validExamplesBeforeBatch(
@@ -2976,168 +3118,369 @@ uint64_t validExamplesBeforeBatch(
     return std::min(populationSize, batchNum * physicalBatchSize);
 }
 
-QueuedEpochWorkPlan buildQueuedEpochWorkPlan(
-    const TrainingRunRequest& request,
-    const std::shared_ptr<BatchSession>& effectiveSession,
-    bool evaluateOnly) {
-    QueuedEpochWorkPlan workPlan;
+void prepareQueuedWorkSegmentForScheduling(
+    const std::shared_ptr<NativeQueuedSchedulingWindowState>& state,
+    const std::shared_ptr<QueuedWorkSegmentState>& segment) {
+    THOR_THROW_IF_FALSE(state != nullptr);
+    THOR_THROW_IF_FALSE(segment != nullptr);
+    THOR_THROW_IF_FALSE(segment->batchSession != nullptr);
 
-    std::vector<std::pair<ExampleType, TrainingEventPhase>> phaseSpecs;
-    if (evaluateOnly) {
-        phaseSpecs.emplace_back(
-            request.evaluationExampleType, request.evaluationPhase);
-    } else {
-        phaseSpecs.emplace_back(
-            ExampleType::TRAIN, TrainingEventPhase::TRAIN);
-        phaseSpecs.emplace_back(
-            ExampleType::VALIDATE, TrainingEventPhase::VALIDATE);
+    const std::shared_ptr<BatchSession>& batchSession = segment->batchSession;
+    const ExampleType exampleType = segment->exampleType;
+    const TrainingEventPhase phase = segment->phase;
+    const uint64_t sessionBatchNum = batchSession->getNextBatchNum(exampleType);
+    const uint64_t sessionBatchesPerEpoch =
+        batchSession->getNumBatchesPerEpoch(exampleType);
+    if (sessionBatchNum > sessionBatchesPerEpoch) {
+        throw std::runtime_error(
+            "BatchSession returned next batch number beyond batches per epoch for " +
+            phaseName(phase) + ".");
     }
 
-    workPlan.phaseWorks.reserve(phaseSpecs.size());
-    for (const auto& phaseSpec : phaseSpecs) {
-        request.cancellationToken.throwIfCancellationRequested();
-        const ExampleType exampleType = phaseSpec.first;
-        const TrainingEventPhase phase = phaseSpec.second;
-        const uint64_t sessionBatchNum =
-            effectiveSession->getNextBatchNum(exampleType);
-        const uint64_t sessionBatchesPerEpoch =
-            effectiveSession->getNumBatchesPerEpoch(exampleType);
-        if (sessionBatchNum > sessionBatchesPerEpoch) {
-            throw std::runtime_error(
-                "BatchSession returned next batch number beyond batches per "
-                "epoch for " +
-                phaseName(phase) + ".");
-        }
+    const uint64_t populationSize = batchSession->getNumExamples(exampleType);
+    const uint64_t physicalBatchSize = batchSession->getBatchSize();
+    const bool wrapsTail =
+        ThorImplementation::BatchSessionRuntimeAccess::getTailMode(*batchSession) ==
+        ThorImplementation::BatchTailMode::WRAP;
+    const uint64_t examplesProcessedPerEpoch =
+        ThorImplementation::BatchSessionRuntimeAccess::examplesProcessedPerEpoch(
+            *batchSession, exampleType);
+    const uint64_t initialValidExamples = wrapsTail
+        ? sessionBatchNum * physicalBatchSize
+        : validExamplesBeforeBatch(
+              sessionBatchNum, populationSize, physicalBatchSize);
 
-        const uint64_t populationSize =
-            effectiveSession->getNumExamples(exampleType);
-        const uint64_t physicalBatchSize = effectiveSession->getBatchSize();
-        const bool wrapsTail =
-            ThorImplementation::BatchSessionRuntimeAccess::getTailMode(*effectiveSession) ==
-            ThorImplementation::BatchTailMode::WRAP;
-        const uint64_t examplesProcessedPerEpoch =
-            ThorImplementation::BatchSessionRuntimeAccess::examplesProcessedPerEpoch(
-                *effectiveSession, exampleType);
-        const uint64_t initialValidExamples = wrapsTail
-            ? sessionBatchNum * physicalBatchSize
-            : validExamplesBeforeBatch(
-                  sessionBatchNum, populationSize, physicalBatchSize);
-
-        uint64_t publicInitialBatchNum = sessionBatchNum;
-        uint64_t publicBatchesPerEpoch = sessionBatchesPerEpoch;
-        uint64_t batchesToRun = sessionBatchesPerEpoch - sessionBatchNum;
-        uint64_t publicInitialValidExamples = initialValidExamples;
-        uint64_t publicValidExamplesPerEpoch = examplesProcessedPerEpoch;
-        bool requiresEpochBoundaryValidation = true;
-        if (!evaluateOnly && phase == TrainingEventPhase::TRAIN &&
-            request.maxTrainingBatchesPerEpoch.has_value() &&
-            sessionBatchesPerEpoch >
-                request.maxTrainingBatchesPerEpoch.value()) {
-            // A capped public training epoch is a fixed-size work quantum. It
-            // may end before the population boundary and therefore deliberately
-            // does not claim exact-population epoch semantics.
-            batchesToRun = request.maxTrainingBatchesPerEpoch.value();
-            publicInitialBatchNum = 0;
-            publicBatchesPerEpoch = batchesToRun;
-            publicInitialValidExamples = 0;
-            publicValidExamplesPerEpoch = 0;
-            requiresEpochBoundaryValidation = false;
-        }
-
-        workPlan.phaseWorks.push_back(QueuedEpochPhaseWork{
-            exampleType,
-            phase,
-            publicInitialBatchNum,
-            sessionBatchNum,
-            batchesToRun,
-            publicBatchesPerEpoch,
-            publicInitialValidExamples,
-            publicValidExamplesPerEpoch,
-            requiresEpochBoundaryValidation});
-        workPlan.initiallyCompletedBatches += publicInitialBatchNum;
-        workPlan.totalBatchesAcrossPhases += publicBatchesPerEpoch;
-        workPlan.remainingBatchesAcrossPhases += batchesToRun;
+    uint64_t publicInitialBatchNum = sessionBatchNum;
+    uint64_t publicBatchesPerEpoch = sessionBatchesPerEpoch;
+    uint64_t batchesToRun = sessionBatchesPerEpoch - sessionBatchNum;
+    uint64_t publicInitialValidExamples = initialValidExamples;
+    uint64_t publicValidExamplesPerEpoch = examplesProcessedPerEpoch;
+    bool requiresEpochBoundaryValidation = true;
+    if (segment->maxBatchesToRun.has_value() &&
+        sessionBatchesPerEpoch > segment->maxBatchesToRun.value()) {
+        // A capped public training epoch is a fixed-size work quantum. It may
+        // end before the population boundary and therefore deliberately does
+        // not claim exact-population epoch semantics.
+        batchesToRun = segment->maxBatchesToRun.value();
+        publicInitialBatchNum = 0;
+        publicBatchesPerEpoch = batchesToRun;
+        publicInitialValidExamples = 0;
+        publicValidExamplesPerEpoch = 0;
+        requiresEpochBoundaryValidation = false;
     }
 
-    return workPlan;
+    {
+        std::lock_guard<std::mutex> lock(state->runState->mutex);
+        THOR_THROW_IF_FALSE(!segment->prepared);
+        segment->initialBatchNum = publicInitialBatchNum;
+        segment->sessionInitialBatchNum = sessionBatchNum;
+        segment->batchesToRunCount = batchesToRun;
+        segment->batchesPerEpoch = publicBatchesPerEpoch;
+        segment->initialValidExamples = publicInitialValidExamples;
+        segment->validExamplesPerEpoch = publicValidExamplesPerEpoch;
+        segment->requiresEpochBoundaryValidation =
+            requiresEpochBoundaryValidation;
+        segment->completedBatches = publicInitialBatchNum;
+        segment->poppedBatches = publicInitialBatchNum;
+        segment->completedValidExamples = publicInitialValidExamples;
+        segment->poppedValidExamples = publicInitialValidExamples;
+        segment->schedulingStartedAt =
+            std::chrono::high_resolution_clock::now();
+        segment->prepared = true;
+    }
+    state->runState->batchFinished.notify_all();
 }
 
-NativeQueuedEpochExecution launchNativeQueuedEpochExecution(
+std::vector<std::shared_ptr<QueuedWorkSegmentState>>
+buildQueuedSchedulingWindowSegments(
+    const TrainingRunRequest& request,
+    const std::shared_ptr<BatchSession>& effectiveSession,
+    const std::vector<NamedValidationSession>& additionalValidationSessions,
+    uint64_t firstOptimizerEpoch,
+    uint64_t firstReportedEpoch,
+    bool evaluateOnly,
+    uint32_t epochsToSchedule,
+    const std::optional<QueuedValidationPopulationMetadata>&
+        validationPopulationMetadata) {
+    THOR_THROW_IF_FALSE(epochsToSchedule >= 1);
+    if (evaluateOnly) {
+        THOR_THROW_IF_FALSE(epochsToSchedule == 1);
+    }
+
+    std::vector<std::shared_ptr<QueuedWorkSegmentState>> segments;
+    const size_t baseSegmentsPerEpoch = evaluateOnly ? 1 : 2;
+    segments.reserve(
+        (baseSegmentsPerEpoch + additionalValidationSessions.size()) *
+        epochsToSchedule);
+
+    auto appendSegment = [&](const std::shared_ptr<BatchSession>& batchSession,
+                             ExampleType exampleType,
+                             TrainingEventPhase phase,
+                             uint64_t optimizerEpoch,
+                             uint64_t reportedEpoch,
+                             const std::optional<QueuedValidationPopulationMetadata>&
+                                 populationMetadata) {
+        THOR_THROW_IF_FALSE(batchSession != nullptr);
+        request.cancellationToken.throwIfCancellationRequested();
+        auto segment = std::make_shared<QueuedWorkSegmentState>();
+        segment->batchSession = batchSession;
+        segment->exampleType = exampleType;
+        segment->phase = phase;
+        segment->optimizerEpoch = optimizerEpoch;
+        segment->reportedEpoch = reportedEpoch;
+        if (!evaluateOnly && phase == TrainingEventPhase::TRAIN &&
+            request.maxTrainingBatchesPerEpoch.has_value()) {
+            segment->maxBatchesToRun = request.maxTrainingBatchesPerEpoch;
+        }
+        if (phase == TrainingEventPhase::VALIDATE) {
+            if (populationMetadata.has_value()) {
+                segment->validationPopulation = populationMetadata->name;
+                segment->isDefaultValidationPopulation =
+                    populationMetadata->isDefault;
+            } else {
+                segment->validationPopulation = request.defaultValidationPopulation;
+                segment->isDefaultValidationPopulation = true;
+            }
+        }
+        segments.push_back(std::move(segment));
+    };
+
+    for (uint32_t epochOffset = 0; epochOffset < epochsToSchedule; ++epochOffset) {
+        const uint64_t optimizerEpoch = firstOptimizerEpoch + epochOffset;
+        const uint64_t reportedEpoch = firstReportedEpoch + epochOffset;
+        if (evaluateOnly) {
+            appendSegment(effectiveSession,
+                          request.evaluationExampleType,
+                          request.evaluationPhase,
+                          optimizerEpoch,
+                          reportedEpoch,
+                          validationPopulationMetadata);
+        } else {
+            appendSegment(effectiveSession,
+                          ExampleType::TRAIN,
+                          TrainingEventPhase::TRAIN,
+                          optimizerEpoch,
+                          reportedEpoch,
+                          std::nullopt);
+            appendSegment(effectiveSession,
+                          ExampleType::VALIDATE,
+                          TrainingEventPhase::VALIDATE,
+                          optimizerEpoch,
+                          reportedEpoch,
+                          QueuedValidationPopulationMetadata{
+                              request.defaultValidationPopulation,
+                              /*isDefault=*/true});
+        }
+
+        // Additional validation populations are just more ordered validation
+        // segments over different example sets. Keep them in the same stream so
+        // ordinary batch ordering guarantees they all observe the same checkpoint
+        // without a host-side queue drain between populations.
+        for (const NamedValidationSession& validation :
+             additionalValidationSessions) {
+            appendSegment(validation.batchSession,
+                          ExampleType::VALIDATE,
+                          TrainingEventPhase::VALIDATE,
+                          optimizerEpoch,
+                          reportedEpoch,
+                          QueuedValidationPopulationMetadata{
+                              validation.name,
+                              /*isDefault=*/false});
+        }
+    }
+
+    return segments;
+}
+
+std::vector<std::shared_ptr<QueuedWorkSegmentState>>
+queuedSegmentsForReportedEpoch(
+    const NativeQueuedSchedulingWindowExecution& execution,
+    uint64_t reportedEpoch) {
+    std::vector<std::shared_ptr<QueuedWorkSegmentState>> segments;
+    for (const std::shared_ptr<QueuedWorkSegmentState>& segment :
+         execution.segments) {
+        THOR_THROW_IF_FALSE(segment != nullptr);
+        if (segment->reportedEpoch == reportedEpoch) {
+            segments.push_back(segment);
+        }
+    }
+    return segments;
+}
+
+bool queuedSegmentsFullyPopped(
+    const std::shared_ptr<NativeQueuedSchedulingWindowState>& state,
+    const std::vector<std::shared_ptr<QueuedWorkSegmentState>>& segments) {
+    THOR_THROW_IF_FALSE(state != nullptr);
+    std::lock_guard<std::mutex> lock(state->runState->mutex);
+    for (const std::shared_ptr<QueuedWorkSegmentState>& segment : segments) {
+        THOR_THROW_IF_FALSE(segment != nullptr);
+        if (!segment->prepared ||
+            segment->poppedBatches < segment->batchesPerEpoch) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool schedulingWindowHasLaterReportedEpoch(
+    const NativeQueuedSchedulingWindowExecution& execution,
+    uint64_t reportedEpoch) {
+    for (const std::shared_ptr<QueuedWorkSegmentState>& segment :
+         execution.segments) {
+        THOR_THROW_IF_FALSE(segment != nullptr);
+        if (segment->reportedEpoch > reportedEpoch) {
+            return true;
+        }
+    }
+    return false;
+}
+
+uint64_t firstTrainedModelSelectionEpochForRequest(
+    const TrainingRunRequest& request) {
+    THOR_THROW_IF_FALSE(request.checkBestModelEveryEpochs > 0);
+    // Epoch zero is the phase-entry incumbent when requested. Trained
+    // candidates retain the historical cadence: firstModelSelectionEpoch=0
+    // means the first post-update candidate is checked at the normal cadence.
+    return request.firstModelSelectionEpoch == 0
+        ? request.checkBestModelEveryEpochs
+        : request.firstModelSelectionEpoch;
+}
+
+bool isTrainedModelSelectionDecisionEpoch(
+    const TrainingRunRequest& request,
+    uint64_t cumulativeEpoch) {
+    if (request.checkBestModelEveryEpochs == 0) {
+        return false;
+    }
+    THOR_THROW_IF_FALSE(cumulativeEpoch >= request.initialCompletedEpochs);
+    const uint64_t phaseLocalEpoch =
+        cumulativeEpoch - request.initialCompletedEpochs;
+    const uint64_t firstTrainedModelSelectionEpoch =
+        firstTrainedModelSelectionEpochForRequest(request);
+    return phaseLocalEpoch >= firstTrainedModelSelectionEpoch &&
+           ((phaseLocalEpoch - firstTrainedModelSelectionEpoch) %
+                request.checkBestModelEveryEpochs ==
+            0);
+}
+
+uint32_t schedulingWindowEpochCountThroughNextHostDecision(
+    const TrainingRunRequest& request,
+    bool evaluateOnly,
+    uint64_t currentCompletedEpoch,
+    uint32_t remainingEpochs) {
+    THOR_THROW_IF_FALSE(remainingEpochs >= 1);
+    if (evaluateOnly) {
+        return 1;
+    }
+
+    // Epoch/phase transitions are not barriers. Keep submitting through the
+    // persistent ring until validation results are actually needed by the host
+    // to decide whether future optimizer work is allowed to proceed. Today that
+    // semantic barrier is a trained model-selection / early-completion decision.
+    if (request.checkBestModelEveryEpochs == 0) {
+        return remainingEpochs;
+    }
+
+    for (uint32_t epochOffset = 1; epochOffset <= remainingEpochs; ++epochOffset) {
+        if (isTrainedModelSelectionDecisionEpoch(
+                request, currentCompletedEpoch + epochOffset)) {
+            return epochOffset;
+        }
+    }
+    return remainingEpochs;
+}
+
+NativeQueuedSchedulingWindowExecution launchNativeQueuedSchedulingWindow(
     const TrainingRunRequest& request,
     const std::shared_ptr<NativeQueuedSchedulerWorker>& schedulerWorker,
     const std::shared_ptr<BatchSession>& effectiveSession,
-    const std::vector<std::string>& scalarTensorNames,
-    const std::vector<std::string>& aggregateLossTensorNames,
     uint64_t currentEpoch,
-    bool evaluateOnly) {
+    bool evaluateOnly,
+    std::optional<QueuedValidationPopulationMetadata>
+        validationPopulationMetadata = std::nullopt,
+    std::optional<uint64_t> reportedEpochOverride = std::nullopt,
+    uint32_t epochsToSchedule = 1,
+    const std::vector<NamedValidationSession>* additionalValidationSessions =
+        nullptr) {
     THOR_THROW_IF_FALSE(schedulerWorker != nullptr);
+    THOR_THROW_IF_FALSE(epochsToSchedule >= 1);
+    if (evaluateOnly) {
+        THOR_THROW_IF_FALSE(epochsToSchedule == 1);
+    }
     const std::shared_ptr<NativeQueuedSchedulerResources>& schedulerResources =
         schedulerWorker->getResources();
+    const std::shared_ptr<NativeQueuedRunState>& runState =
+        schedulerWorker->getRunState();
     THOR_THROW_IF_FALSE(schedulerResources != nullptr);
-    QueuedEpochWorkPlan workPlan =
-        buildQueuedEpochWorkPlan(request, effectiveSession, evaluateOnly);
-
-    NativeQueuedEpochExecution execution;
-    execution.phaseWorks = std::move(workPlan.phaseWorks);
-    execution.initialCompletedBatches =
-        workPlan.initiallyCompletedBatches;
-    execution.initialWarmupCompletionTarget =
-        workPlan.initiallyCompletedBatches +
-        std::min<uint64_t>(
-            workPlan.remainingBatchesAcrossPhases,
-            uint64_t{1});
-    execution.startedAt = std::chrono::high_resolution_clock::now();
-    execution.state = std::make_shared<QueuedTrainingState>(
-        schedulerResources->options.maxInFlightBatches,
-        scalarTensorNames,
-        aggregateLossTensorNames);
-    execution.state->numBatchesDoneInEpoch =
-        workPlan.initiallyCompletedBatches;
-    execution.state->numBatchesInEpoch =
-        workPlan.totalBatchesAcrossPhases;
-    for (const QueuedEpochPhaseWork& work : execution.phaseWorks) {
-        QueuedPhaseProgress& progress =
-            phaseProgress(*execution.state, work.phase);
-        progress.completedBatches = work.initialBatchNum;
-        progress.poppedBatches = work.initialBatchNum;
-        progress.completedValidExamples = work.initialValidExamples;
-        progress.poppedValidExamples = work.initialValidExamples;
+    THOR_THROW_IF_FALSE(runState != nullptr);
+    {
+        std::lock_guard<std::mutex> lock(runState->mutex);
+        // Commands remain non-overlapping, but one command may now span many
+        // ordinary epochs. Cross-epoch flow happens inside this scheduling
+        // window while the one persistent ring provides backpressure.
+        THOR_THROW_IF_FALSE(runState->inFlightBatches == 0);
+        THOR_THROW_IF_FALSE(runState->failure == nullptr);
+        THOR_THROW_IF_FALSE(!runState->cancelRequested);
     }
+
+    const uint64_t firstReportedEpoch =
+        reportedEpochOverride.value_or(currentEpoch + 1);
+    static const std::vector<NamedValidationSession> noAdditionalValidationSessions;
+    const std::vector<NamedValidationSession>& namedValidationSessions =
+        additionalValidationSessions != nullptr
+            ? *additionalValidationSessions
+            : noAdditionalValidationSessions;
+    std::vector<std::shared_ptr<QueuedWorkSegmentState>> segments =
+        buildQueuedSchedulingWindowSegments(
+        request,
+        effectiveSession,
+        namedValidationSessions,
+        currentEpoch,
+        firstReportedEpoch,
+        evaluateOnly,
+        epochsToSchedule,
+        validationPopulationMetadata);
+
+    NativeQueuedSchedulingWindowExecution execution;
+    execution.segments = std::move(segments);
+    execution.startedAt = std::chrono::high_resolution_clock::now();
+    execution.state = std::make_shared<NativeQueuedSchedulingWindowState>(runState);
+    execution.state->segments = execution.segments;
 
     execution.schedulerCommandCompletion = schedulerWorker->submit(
         NativeQueuedSchedulerCommand{
-            effectiveSession,
             execution.state,
-            currentEpoch,
             request.cancellationToken,
-            execution.phaseWorks,
+            execution.segments,
             nullptr});
-    recordNativeQueuedSchedulerResourceExecutionLaunchForTests(
-        schedulerResources.get());
+    recordNativeQueuedSchedulingWindowLaunchForTests(
+        schedulerResources.get(),
+        runState.get(),
+        runState->slots.data());
 
     return execution;
 }
 
 void waitForSchedulerCommandCompletion(
-    const NativeQueuedEpochExecution& execution) {
+    const NativeQueuedSchedulingWindowExecution& execution) {
     THOR_THROW_IF_FALSE(execution.schedulerCommandCompletion != nullptr);
     execution.schedulerCommandCompletion->wait();
 }
 
 void waitForInitialQueueCompletion(
-    const NativeQueuedEpochExecution& execution) {
-    std::unique_lock<std::mutex> lock(execution.state->mutex);
-    while (execution.state->failure == nullptr &&
-           !execution.state->cancelRequested &&
-           execution.state->numBatchesDoneInEpoch <
-               execution.initialWarmupCompletionTarget) {
-        execution.state->batchFinished.wait_for(
+    const NativeQueuedSchedulingWindowExecution& execution) {
+    std::unique_lock<std::mutex> lock(execution.state->runState->mutex);
+    while (execution.state->runState->failure == nullptr &&
+           !execution.state->runState->cancelRequested &&
+           execution.state->completedBatchCallbacks == 0 &&
+           !execution.state->schedulingFinished) {
+        execution.state->runState->batchFinished.wait_for(
             lock, std::chrono::milliseconds(50));
     }
 
-    const std::exception_ptr failure = execution.state->failure;
-    const bool cancelRequested = execution.state->cancelRequested;
-    const bool interruptRequested = execution.state->interruptRequested;
+    const std::exception_ptr failure = execution.state->runState->failure;
+    const bool cancelRequested = execution.state->runState->cancelRequested;
+    const bool interruptRequested = execution.state->runState->interruptRequested;
     lock.unlock();
 
     if (failure != nullptr) {
@@ -3186,9 +3529,8 @@ bool drainQueuedTrainingWorkAfterFailure(
     }
 }
 
-bool abortNativeQueuedEpochExecution(
-    NativeQueuedEpochExecution& execution,
-    const std::shared_ptr<BatchSession>& effectiveSession,
+bool abortNativeQueuedSchedulingWindowExecution(
+    NativeQueuedSchedulingWindowExecution& execution,
     const std::shared_ptr<PlacedNetwork>& placedNetwork,
     std::exception_ptr failure,
     int deviceNum) noexcept {
@@ -3197,21 +3539,30 @@ bool abortNativeQueuedEpochExecution(
     }
 
     {
-        std::lock_guard<std::mutex> lock(execution.state->mutex);
-        if (execution.state->failure == nullptr) {
-            execution.state->failure = failure;
+        std::lock_guard<std::mutex> lock(execution.state->runState->mutex);
+        if (execution.state->runState->failure == nullptr) {
+            execution.state->runState->failure = failure;
         }
-        execution.state->cancelRequested = true;
-        execution.state->numBatchesDoneInEpoch =
-            execution.state->numBatchesInEpoch;
+        execution.state->runState->cancelRequested = true;
+        execution.state->schedulingFinished = true;
     }
-    execution.state->batchFinished.notify_all();
-    execution.state->batchPopped.notify_all();
+    execution.state->runState->batchFinished.notify_all();
+    execution.state->runState->batchPopped.notify_all();
 
-    try {
-        cancelBatchSession(effectiveSession);
-    } catch (...) {
-        return false;
+    std::set<BatchSession*> cancelledSessions;
+    for (const std::shared_ptr<QueuedWorkSegmentState>& segment :
+         execution.segments) {
+        if (segment == nullptr || segment->batchSession == nullptr) {
+            continue;
+        }
+        if (!cancelledSessions.insert(segment->batchSession.get()).second) {
+            continue;
+        }
+        try {
+            cancelBatchSession(segment->batchSession);
+        } catch (...) {
+            return false;
+        }
     }
     try {
         if (execution.schedulerCommandCompletion != nullptr) {
@@ -3224,41 +3575,37 @@ bool abortNativeQueuedEpochExecution(
 
     const bool submittedWorkDrained =
         drainQueuedTrainingWorkAfterFailure(placedNetwork, deviceNum);
-    releaseQueuedTrainingStateReferencesAfterAbort(
+    releaseSchedulingWindowStateReferencesAfterAbort(
         execution.state, submittedWorkDrained);
     return submittedWorkDrained;
 }
 
-class PendingNativeQueuedEpochExecutionGuard {
+class PendingNativeQueuedSchedulingWindowGuard {
    public:
-    PendingNativeQueuedEpochExecutionGuard(
-        std::optional<NativeQueuedEpochExecution>& execution,
-        const std::shared_ptr<BatchSession>& effectiveSession,
+    PendingNativeQueuedSchedulingWindowGuard(
+        std::optional<NativeQueuedSchedulingWindowExecution>& execution,
         const std::shared_ptr<PlacedNetwork>& placedNetwork,
         int deviceNum)
         : execution(execution),
-          effectiveSession(effectiveSession),
           placedNetwork(placedNetwork),
           deviceNum(deviceNum) {}
 
-    ~PendingNativeQueuedEpochExecutionGuard() {
+    ~PendingNativeQueuedSchedulingWindowGuard() {
         if (!execution.has_value() ||
             execution->schedulerCommandCompletion == nullptr) {
             return;
         }
-        (void)abortNativeQueuedEpochExecution(
+        (void)abortNativeQueuedSchedulingWindowExecution(
             execution.value(),
-            effectiveSession,
             placedNetwork,
             std::make_exception_ptr(std::runtime_error(
-                "Native queued training exited before consuming its admitted "
-                "first-epoch queue.")),
+                "Native queued training exited before consuming its active "
+                "scheduling window.")),
             deviceNum);
     }
 
    private:
-    std::optional<NativeQueuedEpochExecution>& execution;
-    const std::shared_ptr<BatchSession>& effectiveSession;
+    std::optional<NativeQueuedSchedulingWindowExecution>& execution;
     const std::shared_ptr<PlacedNetwork>& placedNetwork;
     int deviceNum;
 };
@@ -3267,19 +3614,21 @@ struct NativeQueuedStartupState {
     std::shared_ptr<PlacedNetwork> placedNetwork;
     std::shared_ptr<const ExecutableTrainingPlan> plan;
     std::shared_ptr<NativeQueuedSchedulerResources> schedulerResources;
+    std::shared_ptr<NativeQueuedRunState> runState;
     std::shared_ptr<NativeQueuedSchedulerWorker> schedulerWorker;
     std::shared_ptr<BatchSession> sourceSession;
     std::shared_ptr<BatchSession> effectiveSession;
     std::vector<NamedValidationSession> additionalValidationSessions;
     DeviceDatasetStorageReport deviceDatasetStorageReport;
-    std::optional<NativeQueuedEpochExecution> firstEpochExecution;
+    std::optional<NativeQueuedSchedulingWindowExecution> firstSchedulingWindowExecution;
     std::optional<double> initialModelSelectionScore{};
 };
 
 void releaseFailedNativeQueuedStartupAttempt(
     NativeQueuedStartupState& attempt) noexcept {
-    attempt.firstEpochExecution.reset();
+    attempt.firstSchedulingWindowExecution.reset();
     attempt.schedulerWorker.reset();
+    attempt.runState.reset();
     attempt.schedulerResources.reset();
 
     // Session leases may own resident dataset and per-session device tensors.
@@ -3308,17 +3657,13 @@ void releaseFailedNativeQueuedStartupAttempt(
 }
 
 void validateFullEpochPhaseCompletion(
-    const QueuedEpochPhaseWork& work,
-    const std::shared_ptr<QueuedTrainingState>& state,
-    const std::shared_ptr<BatchSession>& batchSession);
+    const std::shared_ptr<QueuedWorkSegmentState>& segment);
 
 TrainingModelSelectionContext evaluateInitialModelSelectionState(
     const TrainingRunRequest& request,
     const std::shared_ptr<NativeQueuedSchedulerWorker>& schedulerWorker,
     const std::shared_ptr<BatchSession>& defaultValidationSession,
     const std::vector<NamedValidationSession>& additionalValidationSessions,
-    const std::vector<std::string>& scalarTensorNames,
-    const std::vector<std::string>& aggregateLossTensorNames,
     uint64_t cumulativeEpoch) {
     THOR_THROW_IF_FALSE(schedulerWorker != nullptr);
     const std::shared_ptr<NativeQueuedSchedulerResources>& schedulerResources =
@@ -3344,15 +3689,17 @@ TrainingModelSelectionContext evaluateInitialModelSelectionState(
                 "' has a null BatchSession.");
         }
 
-        NativeQueuedEpochExecution execution = launchNativeQueuedEpochExecution(
+        NativeQueuedSchedulingWindowExecution execution = launchNativeQueuedSchedulingWindow(
             validationRequest,
             schedulerWorker,
             session,
-            scalarTensorNames,
-            aggregateLossTensorNames,
             cumulativeEpoch,
-            /*evaluateOnly=*/true);
-        const std::shared_ptr<QueuedTrainingState> state = execution.state;
+            /*evaluateOnly=*/true,
+            QueuedValidationPopulationMetadata{
+                population,
+                population == request.defaultValidationPopulation},
+            cumulativeEpoch);
+        const std::shared_ptr<NativeQueuedSchedulingWindowState> state = execution.state;
 
         try {
             while (true) {
@@ -3375,23 +3722,23 @@ TrainingModelSelectionContext evaluateInitialModelSelectionState(
                 snapshot.validExamplesInBatch = completedBatch.validExampleCount;
                 assignScalarStatsToSnapshot(
                     snapshot,
-                    state->scalarTensorNames,
+                    state->runState->scalarTensorNames,
                     completedBatch.scalarStats,
-                    state->aggregateLossTensorNames);
+                    state->runState->aggregateLossTensorNames);
                 snapshot.metricBatchStats =
                     std::move(completedBatch.metricBatchStats);
                 losses.update(snapshot);
             }
 
             waitForSchedulerCommandCompletion(execution);
-            throwIfQueuedTrainingStateFailed(state);
-            for (const QueuedEpochPhaseWork& work : execution.phaseWorks) {
-                validateFullEpochPhaseCompletion(work, state, session);
+            throwIfSchedulingWindowStateFailed(state);
+            for (const std::shared_ptr<QueuedWorkSegmentState>& segment :
+                 execution.segments) {
+                validateFullEpochPhaseCompletion(segment);
             }
         } catch (...) {
-            (void)abortNativeQueuedEpochExecution(
+            (void)abortNativeQueuedSchedulingWindowExecution(
                 execution,
-                session,
                 placedNetwork,
                 std::current_exception(),
                 placedNetwork->getStampedNetwork(0).getGpuNum());
@@ -3431,6 +3778,39 @@ std::shared_ptr<BatchSession> reopenNativeQueuedBatchSessionForRetry(
             "different batch size while retrying GPU startup.");
     }
     return session;
+}
+
+std::vector<NamedValidationSession>
+reopenNativeQueuedNamedValidationSessionsForRetry(
+    const TrainingRunRequest& request,
+    uint64_t expectedBatchSize) {
+    std::vector<NamedValidationSession> reopened;
+    reopened.reserve(request.additionalValidationSessions.size());
+    for (const NamedValidationSession& configured :
+         request.additionalValidationSessions) {
+        if (!configured.batchSessionFactory) {
+            throw std::runtime_error(
+                "Native queued startup consumed named validation population '" +
+                configured.name +
+                "' before a retryable GPU out-of-memory failure, but no "
+                "batchSessionFactory was supplied for that population.");
+        }
+        NamedValidationSession validation = configured;
+        validation.batchSession = configured.batchSessionFactory();
+        if (validation.batchSession == nullptr) {
+            throw std::runtime_error(
+                "Named validation batchSessionFactory returned null for population '" +
+                configured.name + "' while retrying GPU startup.");
+        }
+        if (validation.batchSession->getBatchSize() != expectedBatchSize) {
+            throw std::runtime_error(
+                "Named validation batchSessionFactory returned a different batch size "
+                "while retrying GPU startup for population '" + configured.name +
+                "'.");
+        }
+        reopened.push_back(std::move(validation));
+    }
+    return reopened;
 }
 
 NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
@@ -3481,6 +3861,8 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
     bool forceSourceSession = false;
     bool deviceDatasetFallbackAlreadyUsed = false;
     std::shared_ptr<BatchSession> nextSourceSession = request.batchSession;
+    std::vector<NamedValidationSession> nextAdditionalValidationSessions =
+        request.additionalValidationSessions;
     bool wrappedTailFallbackWarningEmitted = false;
 
     for (;;) {
@@ -3496,7 +3878,10 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
         NativeQueuedStartupState attempt;
         attempt.sourceSession = nextSourceSession;
         attempt.effectiveSession = attempt.sourceSession;
-        attempt.additionalValidationSessions = request.additionalValidationSessions;
+        attempt.additionalValidationSessions = nextAdditionalValidationSessions;
+        const std::vector<NamedValidationSession>
+            sourceAdditionalValidationSessions =
+                attempt.additionalValidationSessions;
         attempt.deviceDatasetStorageReport = request.deviceDatasetStorageReport;
 
         std::exception_ptr startupFailure;
@@ -3635,7 +4020,7 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
                         // obtain the same resident-session class as the default.
                         attempt.effectiveSession = attempt.sourceSession;
                         attempt.additionalValidationSessions =
-                            request.additionalValidationSessions;
+                            sourceAdditionalValidationSessions;
                         attempt.deviceDatasetStorageReport.used = false;
                         attempt.deviceDatasetStorageReport.reason =
                             "named_validation_population_fallback:" +
@@ -3675,9 +4060,13 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
             attempt.schedulerResources =
                 std::make_shared<NativeQueuedSchedulerResources>(
                     attempt.placedNetwork, attempt.plan, options);
+            attempt.runState = std::make_shared<NativeQueuedRunState>(
+                options.maxInFlightBatches,
+                scalarTensorNames,
+                aggregateLossTensorNames);
             attempt.schedulerWorker =
                 std::make_shared<NativeQueuedSchedulerWorker>(
-                    attempt.schedulerResources);
+                    attempt.schedulerResources, attempt.runState);
 
             if (initialModelSelectionArtifacts != nullptr) {
                 // firstModelSelectionEpoch=0 means the exact model entering this
@@ -3690,9 +4079,8 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
                             attempt.schedulerWorker,
                             attempt.effectiveSession,
                             attempt.additionalValidationSessions,
-                            scalarTensorNames,
-                            aggregateLossTensorNames,
                             currentEpoch);
+                    recordNativeQueuedHostDecisionBarrierForTests();
                     const std::optional<double> initialScore =
                         request.modelSelectionScore.evaluate(initialContext);
                     attempt.initialModelSelectionScore = initialScore;
@@ -3708,23 +4096,31 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
             }
 
             // Admission is not complete merely because placement and slot
-            // preallocation succeeded. Start the actual first epoch while this
-            // FIFO startup turn is still held and wait for one real batch to
-            // complete successfully. That proves the forward/backward/update
+            // preallocation succeeded. Start the first scheduling window while
+            // this FIFO startup turn is still held and wait for one real batch
+            // to complete successfully. That proves the forward/backward/update
             // path and lazy allocations work. The scheduler continues filling
             // the remaining queue depth concurrently after admission.
-            attempt.firstEpochExecution.emplace(
-                launchNativeQueuedEpochExecution(
+            const uint32_t startupSchedulingWindowEpochs =
+                schedulingWindowEpochCountThroughNextHostDecision(
+                    request,
+                    evaluateOnly,
+                    currentEpoch,
+                    request.epochs);
+            attempt.firstSchedulingWindowExecution.emplace(
+                launchNativeQueuedSchedulingWindow(
                     request,
                     attempt.schedulerWorker,
                     attempt.effectiveSession,
-                    scalarTensorNames,
-                    aggregateLossTensorNames,
                     currentEpoch,
-                    evaluateOnly));
+                    evaluateOnly,
+                    std::nullopt,
+                    std::nullopt,
+                    startupSchedulingWindowEpochs,
+                    &attempt.additionalValidationSessions));
             sessionWasConsumed = true;
             waitForInitialQueueCompletion(
-                attempt.firstEpochExecution.value());
+                attempt.firstSchedulingWindowExecution.value());
             ThorImplementation::requireCleanDeviceStartupCudaErrorState(
                 startupDeviceNum);
 
@@ -3734,10 +4130,9 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
         } catch (...) {
             startupFailure = std::current_exception();
 
-            if (attempt.firstEpochExecution.has_value()) {
-                cleanupDrained = abortNativeQueuedEpochExecution(
-                    attempt.firstEpochExecution.value(),
-                    attempt.effectiveSession,
+            if (attempt.firstSchedulingWindowExecution.has_value()) {
+                cleanupDrained = abortNativeQueuedSchedulingWindowExecution(
+                    attempt.firstSchedulingWindowExecution.value(),
                     attempt.placedNetwork,
                     startupFailure,
                     startupDeviceNum);
@@ -3786,6 +4181,9 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
             if (sessionWasConsumed) {
                 nextSourceSession = reopenNativeQueuedBatchSessionForRetry(
                     request, batchSize);
+                nextAdditionalValidationSessions =
+                    reopenNativeQueuedNamedValidationSessionsForRetry(
+                        request, batchSize);
             }
         };
 
@@ -3842,29 +4240,22 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
 }
 
 void validateFullEpochPhaseCompletion(
-    const QueuedEpochPhaseWork& work,
-    const std::shared_ptr<QueuedTrainingState>& state,
-    const std::shared_ptr<BatchSession>& batchSession) {
-    if (!work.requiresEpochBoundaryValidation) {
+    const std::shared_ptr<QueuedWorkSegmentState>& segment) {
+    THOR_THROW_IF_FALSE(segment != nullptr);
+    THOR_THROW_IF_FALSE(segment->batchSession != nullptr);
+    if (!segment->requiresEpochBoundaryValidation) {
         return;
     }
 
-    const QueuedPhaseProgress& progress =
-        phaseProgress(*state, work.phase);
-    if (progress.completedValidExamples != work.validExamplesPerEpoch ||
-        progress.poppedValidExamples != work.validExamplesPerEpoch) {
+    if (segment->completedValidExamples != segment->validExamplesPerEpoch ||
+        segment->poppedValidExamples != segment->validExamplesPerEpoch) {
         throw std::runtime_error(
-            "Native queued " + phaseName(work.phase) +
+            "Native queued " + phaseName(segment->phase) +
             " epoch completed/popped " +
-            std::to_string(progress.completedValidExamples) + "/" +
-            std::to_string(progress.poppedValidExamples) +
-            " valid examples, but the execution epoch expected " +
-            std::to_string(work.validExamplesPerEpoch) + ".");
-    }
-    if (batchSession->getNextBatchNum(work.exampleType) != 0) {
-        throw std::runtime_error(
-            "Native queued " + phaseName(work.phase) +
-            " epoch did not finish at the execution-epoch batch boundary.");
+            std::to_string(segment->completedValidExamples) + "/" +
+            std::to_string(segment->poppedValidExamples) +
+            " valid examples, but the segment expected " +
+            std::to_string(segment->validExamplesPerEpoch) + ".");
     }
 }
 
@@ -3877,11 +4268,23 @@ void resetNativeQueuedSchedulerResourceDiagnosticsForTests() {
         nativeQueuedSchedulerResourceDiagnosticsState();
     std::lock_guard<std::mutex> lock(diagnostics.mutex);
     diagnostics.snapshot = NativeQueuedSchedulerResourceDiagnosticsForTests{};
-    diagnostics.firstExecutionResourceIdentity = nullptr;
-    diagnostics.multipleExecutionResourceIdentities = false;
+    diagnostics.firstSchedulingWindowResourceIdentity = nullptr;
+    diagnostics.multipleSchedulingWindowResourceIdentities = false;
+    diagnostics.firstSchedulingWindowRunStateIdentity = nullptr;
+    diagnostics.multipleSchedulingWindowRunStateIdentities = false;
+    diagnostics.firstSchedulingWindowSlotStorageIdentity = nullptr;
+    diagnostics.multipleSchedulingWindowSlotStorageIdentities = false;
     diagnostics.firstWorkerThreadId.reset();
     diagnostics.multipleWorkerThreadIds = false;
     diagnostics.enabled.store(true, std::memory_order_relaxed);
+}
+
+NativeQueuedSchedulerResourceDiagnosticsForTests
+peekNativeQueuedSchedulerResourceDiagnosticsForTests() {
+    NativeQueuedSchedulerResourceDiagnosticsState& diagnostics =
+        nativeQueuedSchedulerResourceDiagnosticsState();
+    std::lock_guard<std::mutex> lock(diagnostics.mutex);
+    return diagnostics.snapshot;
 }
 
 NativeQueuedSchedulerResourceDiagnosticsForTests
@@ -4026,12 +4429,17 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         std::move(startup.placedNetwork);
     std::shared_ptr<NativeQueuedSchedulerResources> schedulerResources =
         std::move(startup.schedulerResources);
+    std::shared_ptr<NativeQueuedRunState> runState =
+        std::move(startup.runState);
     std::shared_ptr<NativeQueuedSchedulerWorker> schedulerWorker =
         std::move(startup.schedulerWorker);
     THOR_THROW_IF_FALSE(schedulerResources != nullptr);
+    THOR_THROW_IF_FALSE(runState != nullptr);
     THOR_THROW_IF_FALSE(schedulerWorker != nullptr);
     THOR_THROW_IF_FALSE(
         schedulerWorker->getResources().get() == schedulerResources.get());
+    THOR_THROW_IF_FALSE(
+        schedulerWorker->getRunState().get() == runState.get());
     THOR_THROW_IF_FALSE(schedulerResources->plan != nullptr);
     // The scheduler resource owner now carries the executable plan for the
     // entire placed run. Drop the startup state's duplicate reference.
@@ -4044,22 +4452,20 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         std::move(startup.deviceDatasetStorageReport);
     const std::optional<double> initialModelSelectionScore =
         startup.initialModelSelectionScore;
-    std::optional<NativeQueuedEpochExecution> firstEpochExecution =
-        std::move(startup.firstEpochExecution);
-    TrainingRunRequest namedValidationEvaluationRequest = request;
-    namedValidationEvaluationRequest.evaluationExampleType = ExampleType::VALIDATE;
-    namedValidationEvaluationRequest.evaluationPhase = TrainingEventPhase::VALIDATE;
-    PendingNativeQueuedEpochExecutionGuard pendingFirstEpochGuard(
-        firstEpochExecution,
-        effectiveSession,
+    std::optional<NativeQueuedSchedulingWindowExecution> firstSchedulingWindowExecution =
+        std::move(startup.firstSchedulingWindowExecution);
+    PendingNativeQueuedSchedulingWindowGuard pendingFirstSchedulingWindowGuard(
+        firstSchedulingWindowExecution,
         placedNetwork,
         placedNetwork->getStampedNetwork(0).getGpuNum());
 
-    THOR_THROW_IF_FALSE(firstEpochExecution.has_value());
-    const auto runStart = firstEpochExecution->startedAt;
+    THOR_THROW_IF_FALSE(firstSchedulingWindowExecution.has_value());
+    const auto runStart = firstSchedulingWindowExecution->startedAt;
     const double initialElapsedSeconds =
         evaluateOnly ? 0.0 : std::max(0.0, request.initialElapsedSeconds);
     std::map<TrainingEventPhase, ThorImplementation::PhaseWallThroughputTracker> throughputByPhase;
+    std::map<std::string, ThorImplementation::PhaseWallThroughputTracker>
+        validationThroughputByPopulation;
     std::array<uint64_t, 4> cappedReportedStepsByPhase{};
     std::array<uint64_t, 4> cappedReportedSamplesByPhase{};
     auto cancelAdditionalValidationSessions = [&]() {
@@ -4086,16 +4492,11 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                                 uint64_t epoch,
                                 uint64_t batchSize,
                                 uint64_t batchesPerEpoch,
-                                const std::shared_ptr<QueuedTrainingState>& state) {
+                                const std::shared_ptr<NativeQueuedSchedulingWindowState>& state) {
         TrainingStatsSnapshot snapshot;
         snapshot.networkName = placedNetwork->getNetworkName();
         snapshot.datasetName = effectiveSession->getDatasetName();
         snapshot.phase = phase;
-        if (phase == TrainingEventPhase::VALIDATE &&
-            namedValidationPopulationMetadataEnabled) {
-            snapshot.validationPopulation = request.defaultValidationPopulation;
-            snapshot.isDefaultValidationPopulation = true;
-        }
         snapshot.epoch = epoch;
         snapshot.epochs = totalRequestedEpochs;
         snapshot.batchSize = batchSize;
@@ -4106,13 +4507,40 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         return snapshot;
     };
 
-    // Epoch zero is handled above as the phase-entry incumbent.  Trained
-    // candidates retain the historical cadence: with firstModelSelectionEpoch=0
-    // the first post-update candidate is still checked at the normal cadence.
-    const uint64_t firstTrainedModelSelectionEpoch =
-        request.firstModelSelectionEpoch == 0
-            ? request.checkBestModelEveryEpochs
-            : request.firstModelSelectionEpoch;
+    auto makeSegmentSnapshot = [&](
+                                   const std::shared_ptr<QueuedWorkSegmentState>& segment,
+                                   const std::shared_ptr<NativeQueuedSchedulingWindowState>& state) {
+        THOR_THROW_IF_FALSE(segment != nullptr);
+        THOR_THROW_IF_FALSE(segment->batchSession != nullptr);
+        TrainingStatsSnapshot snapshot = makeBaseSnapshot(
+            segment->phase,
+            segment->reportedEpoch,
+            batchSize,
+            segment->batchesPerEpoch,
+            state);
+        snapshot.datasetName = segment->batchSession->getDatasetName();
+        if (segment->phase == TrainingEventPhase::VALIDATE &&
+            namedValidationPopulationMetadataEnabled &&
+            segment->validationPopulation.has_value()) {
+            snapshot.validationPopulation = segment->validationPopulation.value();
+            snapshot.isDefaultValidationPopulation =
+                segment->isDefaultValidationPopulation;
+        }
+        return snapshot;
+    };
+
+    auto throughputTrackerForSegment = [&](
+                                            const std::shared_ptr<QueuedWorkSegmentState>& segment)
+        -> ThorImplementation::PhaseWallThroughputTracker& {
+        THOR_THROW_IF_FALSE(segment != nullptr);
+        if (segment->phase == TrainingEventPhase::VALIDATE &&
+            segment->validationPopulation.has_value()) {
+            return validationThroughputByPopulation[
+                segment->validationPopulation.value()];
+        }
+        return throughputByPhase[segment->phase];
+    };
+
     bool runEarlyCompleted = false;
     std::optional<uint64_t> completedEpoch{};
     std::optional<double> latestModelSelectionScore = initialModelSelectionScore;
@@ -4127,16 +4555,22 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             TrainingEvent::runStarted(makeBaseSnapshot(
                 TrainingEventPhase::UNKNOWN, 0, batchSize, 0, nullptr)));
     } catch (...) {
-        if (firstEpochExecution.has_value()) {
-            (void)abortNativeQueuedEpochExecution(
-                firstEpochExecution.value(),
-                effectiveSession,
+        if (firstSchedulingWindowExecution.has_value()) {
+            (void)abortNativeQueuedSchedulingWindowExecution(
+                firstSchedulingWindowExecution.value(),
                 placedNetwork,
                 std::current_exception(),
                 placedNetwork->getStampedNetwork(0).getGpuNum());
         }
         throw;
     }
+
+    std::optional<NativeQueuedSchedulingWindowExecution>
+        activeSchedulingWindowExecution;
+    PendingNativeQueuedSchedulingWindowGuard activeSchedulingWindowGuard(
+        activeSchedulingWindowExecution,
+        placedNetwork,
+        placedNetwork->getStampedNetwork(0).getGpuNum());
 
     for (uint32_t epochOffset = 0; epochOffset < request.epochs; ++epochOffset) {
         const uint64_t cumulativeEpoch = currentEpoch + 1;
@@ -4146,43 +4580,83 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             epochLosses.ensureValidationPopulation(validation.name);
         }
 
-        NativeQueuedEpochExecution epochExecution;
-        if (epochOffset == 0) {
-            THOR_THROW_IF_FALSE(firstEpochExecution.has_value());
-            epochExecution = std::move(firstEpochExecution.value());
-            firstEpochExecution.reset();
-        } else {
-            request.cancellationToken.throwIfCancellationRequested();
-            epochExecution = launchNativeQueuedEpochExecution(
-                request,
-                schedulerWorker,
-                effectiveSession,
-                scalarTensorNames,
-                aggregateLossTensorNames,
-                currentEpoch,
-                evaluateOnly);
+        if (!activeSchedulingWindowExecution.has_value()) {
+            if (epochOffset == 0) {
+                THOR_THROW_IF_FALSE(firstSchedulingWindowExecution.has_value());
+                activeSchedulingWindowExecution.emplace(
+                    std::move(firstSchedulingWindowExecution.value()));
+                firstSchedulingWindowExecution.reset();
+            } else {
+                request.cancellationToken.throwIfCancellationRequested();
+                const uint32_t remainingEpochs =
+                    request.epochs - epochOffset;
+                const uint32_t epochsToSchedule =
+                    schedulingWindowEpochCountThroughNextHostDecision(
+                        request,
+                        evaluateOnly,
+                        currentEpoch,
+                        remainingEpochs);
+                activeSchedulingWindowExecution.emplace(
+                    launchNativeQueuedSchedulingWindow(
+                        request,
+                        schedulerWorker,
+                        effectiveSession,
+                        currentEpoch,
+                        evaluateOnly,
+                        std::nullopt,
+                        std::nullopt,
+                        epochsToSchedule,
+                        &additionalValidationSessions));
+            }
         }
 
-        std::shared_ptr<QueuedTrainingState> state = epochExecution.state;
-        const std::vector<QueuedEpochPhaseWork>& phaseWorks =
-            epochExecution.phaseWorks;
+        NativeQueuedSchedulingWindowExecution& schedulingWindowExecution =
+            activeSchedulingWindowExecution.value();
+        std::shared_ptr<NativeQueuedSchedulingWindowState> state =
+            schedulingWindowExecution.state;
+        std::vector<std::shared_ptr<QueuedWorkSegmentState>> segments =
+            queuedSegmentsForReportedEpoch(
+                schedulingWindowExecution, cumulativeEpoch);
+        if (segments.empty()) {
+            throw std::runtime_error(
+                "Native queued scheduling window does not contain requested epoch " +
+                std::to_string(cumulativeEpoch) + ".");
+        }
+        const bool schedulingWindowContinuesPastEpoch =
+            schedulingWindowHasLaterReportedEpoch(
+                schedulingWindowExecution, cumulativeEpoch);
 
-        std::array<bool, 4> phaseStarted{};
-        std::array<bool, 4> phaseFinished{};
-        size_t lifecyclePhaseIndex = 0;
+        std::vector<bool> segmentStarted(segments.size(), false);
+        std::vector<bool> segmentFinished(segments.size(), false);
+        size_t lifecycleSegmentIndex = 0;
         auto emitReadyPhaseLifecycleEvents = [&]() {
-            while (lifecyclePhaseIndex < phaseWorks.size()) {
-                const QueuedEpochPhaseWork& work = phaseWorks[lifecyclePhaseIndex];
-                const size_t index = queuedPhaseIndex(work.phase);
-                if (!phaseStarted[index]) {
-                    phaseStarted[index] = true;
+            while (lifecycleSegmentIndex < segments.size()) {
+                const std::shared_ptr<QueuedWorkSegmentState>& segment =
+                    segments[lifecycleSegmentIndex];
+                THOR_THROW_IF_FALSE(segment != nullptr);
+                {
+                    std::unique_lock<std::mutex> lock(state->runState->mutex);
+                    while (state->runState->failure == nullptr &&
+                           !state->runState->cancelRequested &&
+                           !segment->prepared &&
+                           !state->schedulingFinished) {
+                        state->runState->batchFinished.wait_for(
+                            lock, std::chrono::milliseconds(50));
+                    }
+                    if (!segment->prepared) {
+                        return;
+                    }
+                }
+
+                if (!segmentStarted[lifecycleSegmentIndex]) {
+                    segmentStarted[lifecycleSegmentIndex] = true;
                     TrainingStatsSnapshot startedStats =
-                        makeBaseSnapshot(work.phase, cumulativeEpoch, batchSize, work.batchesPerEpoch, state);
-                    // Model-selection scoring happens after an epoch's validation
-                    // phases complete. Carry that latest completed score on the next
-                    // TRAIN epoch lifecycle event so live reporters can show it beside
-                    // the epoch that is now in progress without treating it as a batch metric.
-                    if (work.phase == TrainingEventPhase::TRAIN &&
+                        makeSegmentSnapshot(segment, state);
+                    // Model-selection scoring happens after a decision epoch's
+                    // validation phases complete. Carry that latest completed score
+                    // on the next TRAIN lifecycle event without making lifecycle
+                    // delivery a scheduler synchronization point.
+                    if (segment->phase == TrainingEventPhase::TRAIN &&
                         latestModelSelectionScore.has_value() &&
                         std::isfinite(latestModelSelectionScore.value()) &&
                         trainingArtifacts.getBestEpoch().has_value() &&
@@ -4195,25 +4669,24 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                     emitTrainingEvent(observer, TrainingEvent::epochStarted(std::move(startedStats)));
                 }
 
-                const QueuedPhaseProgress& progress = phaseProgress(*state, work.phase);
-                if (progress.poppedBatches < work.batchesPerEpoch) {
+                if (segment->poppedBatches < segment->batchesPerEpoch) {
                     break;
                 }
 
-                if (!phaseFinished[index]) {
-                    phaseFinished[index] = true;
-                    emitTrainingEvent(observer,
-                                      TrainingEvent::epochFinished(
-                                          makeBaseSnapshot(work.phase, cumulativeEpoch, batchSize, work.batchesPerEpoch, state)));
+                if (!segmentFinished[lifecycleSegmentIndex]) {
+                    segmentFinished[lifecycleSegmentIndex] = true;
+                    emitTrainingEvent(
+                        observer,
+                        TrainingEvent::epochFinished(
+                            makeSegmentSnapshot(segment, state)));
                 }
-                lifecyclePhaseIndex += 1;
+                lifecycleSegmentIndex += 1;
             }
         };
 
-        auto cancelEpochScheduling = [&](std::exception_ptr failure) {
-            (void)abortNativeQueuedEpochExecution(
-                epochExecution,
-                effectiveSession,
+        auto cancelSchedulingWindow = [&](std::exception_ptr failure) {
+            (void)abortNativeQueuedSchedulingWindowExecution(
+                schedulingWindowExecution,
                 placedNetwork,
                 failure,
                 placedNetwork->getStampedNetwork(0).getGpuNum());
@@ -4227,12 +4700,12 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             }
             if (sigintScope.interrupted()) {
                 {
-                    std::lock_guard<std::mutex> lock(state->mutex);
-                    state->cancelRequested = true;
-                    state->interruptRequested = true;
+                    std::lock_guard<std::mutex> lock(state->runState->mutex);
+                    state->runState->cancelRequested = true;
+                    state->runState->interruptRequested = true;
                 }
-                state->batchFinished.notify_all();
-                state->batchPopped.notify_all();
+                state->runState->batchFinished.notify_all();
+                state->runState->batchPopped.notify_all();
                 cancelBatchSession(effectiveSession);
                 cancelAdditionalValidationSessions();
             }
@@ -4242,11 +4715,18 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             request.cancellationToken.throwIfCancellationRequested();
             emitReadyPhaseLifecycleEvents();
 
-            while (true) {
+            while (!queuedSegmentsFullyPopped(state, segments)) {
                 requestExternalCancel();
-                BatchPopResult completedBatch = popBatchData(state);
+                BatchPopResult completedBatch =
+                    popBatchData(state, cumulativeEpoch);
                 if (!completedBatch.hasBatch) {
-                    break;
+                    throwIfSchedulingWindowStateFailed(state);
+                    if (queuedSegmentsFullyPopped(state, segments)) {
+                        break;
+                    }
+                    throw std::runtime_error(
+                        "Native queued scheduling window reached a later epoch "
+                        "before the current epoch was fully consumed.");
                 }
 
                 if (shouldEmitQueueDiagnostic(completedBatch.poppedInEpoch)) {
@@ -4263,8 +4743,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 {
                     std::exception_ptr failure;
                     {
-                        std::lock_guard<std::mutex> lock(state->mutex);
-                        failure = state->failure;
+                        std::lock_guard<std::mutex> lock(state->runState->mutex);
+                        failure = state->runState->failure;
                     }
                     if (failure != nullptr) {
                         std::rethrow_exception(failure);
@@ -4272,8 +4752,11 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 }
 
                 {
+                    THOR_THROW_IF_FALSE(completedBatch.segment != nullptr);
+                    const std::shared_ptr<QueuedWorkSegmentState>& completedSegment =
+                        completedBatch.segment;
                     TrainingStatsSnapshot snapshot =
-                        makeBaseSnapshot(completedBatch.phase, cumulativeEpoch, batchSize, completedBatch.batchesInEpoch, state);
+                        makeSegmentSnapshot(completedSegment, state);
                     snapshot.inFlightBatches = completedBatch.inFlightAfterPop;
                     snapshot.stepInEpoch = completedBatch.epochBatchNum + 1;
                     const size_t phaseIndex =
@@ -4300,28 +4783,31 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                     } else {
                         const uint64_t examplesProcessedPerEpoch =
                             ThorImplementation::BatchSessionRuntimeAccess::examplesProcessedPerEpoch(
-                                *effectiveSession, completedBatch.exampleType);
+                                *completedSegment->batchSession,
+                                completedBatch.exampleType);
                         snapshot.samplesProcessed =
                             (currentEpoch * examplesProcessedPerEpoch) +
                             completedBatch.validExamplesInEpoch;
                     }
 
-                    // Samples use the exact valid-example count. FLOPs use the
-                    // logical work captured for this submitted batch. In
-                    // particular, ragged Attention counts only score pairs from
-                    // the published row partitions rather than packed capacity.
-                    throughputByPhase[completedBatch.phase].observeCompletedBatch(
+                    // Samples use the exact valid-example count. Logical FLOPs
+                    // and bytes use the paired work captured for this exact
+                    // submitted batch, so both rates share one active-phase wall
+                    // interval and one EMA update. In particular, ragged
+                    // Attention counts only score pairs from the published row
+                    // partitions rather than packed capacity.
+                    throughputTrackerForSegment(completedSegment).observeCompletedBatch(
                         snapshot,
                         completedBatch.phaseStartedAt,
                         completedBatch.completionTime,
                         completedBatch.validExampleCount,
-                        completedBatch.floatingPointOperations,
+                        completedBatch.logicalWork,
                         completedBatch.poppedInEpoch >= completedBatch.batchesInEpoch);
 
                     assignScalarStatsToSnapshot(snapshot,
-                                                state->scalarTensorNames,
+                                                state->runState->scalarTensorNames,
                                                 completedBatch.scalarStats,
-                                                state->aggregateLossTensorNames);
+                                                state->runState->aggregateLossTensorNames);
                     snapshot.metricBatchStats =
                         std::move(completedBatch.metricBatchStats);
                     epochLosses.update(snapshot);
@@ -4331,168 +4817,36 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 emitReadyPhaseLifecycleEvents();
             }
 
-            waitForSchedulerCommandCompletion(epochExecution);
-            throwIfQueuedTrainingStateFailed(state);
-            for (const QueuedEpochPhaseWork& work : phaseWorks) {
-                validateFullEpochPhaseCompletion(
-                    work, state, effectiveSession);
+            // A scheduling window may already be submitting later epochs. Do
+            // not wait for the command or drain the persistent ring merely to
+            // finalize this logical epoch. Only the last epoch in a window owns
+            // the command-completion wait.
+            if (!schedulingWindowContinuesPastEpoch) {
+                waitForSchedulerCommandCompletion(schedulingWindowExecution);
+                throwIfSchedulingWindowStateFailed(state);
+            }
+            for (const std::shared_ptr<QueuedWorkSegmentState>& segment : segments) {
+                validateFullEpochPhaseCompletion(segment);
             }
             emitReadyPhaseLifecycleEvents();
         } catch (...) {
-            cancelEpochScheduling(std::current_exception());
+            cancelSchedulingWindow(std::current_exception());
             throw;
         }
 
-        // Evaluate every non-default validation population against the exact
-        // same placed checkpoint before model-selection scoring. Each population
-        // owns an independent session/cursor but shares the dataset and model.
-        for (NamedValidationSession& validation : additionalValidationSessions) {
-            request.cancellationToken.throwIfCancellationRequested();
-            if (validation.batchSession == nullptr) {
-                throw std::runtime_error("Named validation population '" + validation.name +
-                                         "' has a null BatchSession.");
-            }
-
-            NativeQueuedEpochExecution validationExecution =
-                launchNativeQueuedEpochExecution(
-                    namedValidationEvaluationRequest,
-                    schedulerWorker,
-                    validation.batchSession,
-                    scalarTensorNames,
-                    aggregateLossTensorNames,
-                    currentEpoch,
-                    /*evaluateOnly=*/true);
-            std::shared_ptr<QueuedTrainingState> validationState =
-                validationExecution.state;
-            const uint64_t validationBatches =
-                validation.batchSession->getNumBatchesPerEpoch(
-                    ExampleType::VALIDATE);
-
-            ThorImplementation::PhaseWallThroughputTracker validationThroughput;
-            auto cancelNamedValidation = [&](std::exception_ptr failure) {
-                (void)abortNativeQueuedEpochExecution(
-                    validationExecution,
-                    validation.batchSession,
-                    placedNetwork,
-                    failure,
-                    placedNetwork->getStampedNetwork(0).getGpuNum());
-            };
-
-            try {
-                TrainingStatsSnapshot validationStarted = makeBaseSnapshot(
-                    TrainingEventPhase::VALIDATE,
-                    cumulativeEpoch,
-                    batchSize,
-                    validationBatches,
-                    validationState);
-                validationStarted.datasetName =
-                    validation.batchSession->getDatasetName();
-                validationStarted.validationPopulation = validation.name;
-                validationStarted.isDefaultValidationPopulation = false;
-                emitTrainingEvent(
-                    observer,
-                    TrainingEvent::epochStarted(std::move(validationStarted)));
-
-                while (true) {
-                    if (request.cancellationToken.isCancellationRequested()) {
-                        requestQueuedTrainingCancellation(validationState);
-                        cancelBatchSession(validation.batchSession);
-                    }
-                    if (sigintScope.interrupted()) {
-                        {
-                            std::lock_guard<std::mutex> lock(validationState->mutex);
-                            validationState->cancelRequested = true;
-                            validationState->interruptRequested = true;
-                        }
-                        validationState->batchFinished.notify_all();
-                        validationState->batchPopped.notify_all();
-                        cancelBatchSession(validation.batchSession);
-                    }
-                    BatchPopResult completedBatch =
-                        popBatchData(validationState);
-                    if (!completedBatch.hasBatch) {
-                        break;
-                    }
-
-                    TrainingStatsSnapshot snapshot = makeBaseSnapshot(
-                        TrainingEventPhase::VALIDATE,
-                        cumulativeEpoch,
-                        batchSize,
-                        completedBatch.batchesInEpoch,
-                        validationState);
-                    snapshot.datasetName =
-                        validation.batchSession->getDatasetName();
-                    snapshot.validationPopulation = validation.name;
-                    snapshot.isDefaultValidationPopulation = false;
-                    snapshot.inFlightBatches =
-                        completedBatch.inFlightAfterPop;
-                    snapshot.stepInEpoch =
-                        completedBatch.epochBatchNum + 1;
-                    snapshot.step =
-                        (currentEpoch * completedBatch.batchesInEpoch) +
-                        snapshot.stepInEpoch;
-                    snapshot.validExamplesInBatch =
-                        completedBatch.validExampleCount;
-                    snapshot.samplesProcessedInEpoch =
-                        completedBatch.validExamplesInEpoch;
-                    const uint64_t validationExamplesProcessedPerEpoch =
-                        ThorImplementation::BatchSessionRuntimeAccess::examplesProcessedPerEpoch(
-                            *validation.batchSession, ExampleType::VALIDATE);
-                    snapshot.samplesProcessed =
-                        (currentEpoch * validationExamplesProcessedPerEpoch) +
-                        completedBatch.validExamplesInEpoch;
-                    validationThroughput.observeCompletedBatch(
-                        snapshot,
-                        completedBatch.phaseStartedAt,
-                        completedBatch.completionTime,
-                        completedBatch.validExampleCount,
-                        completedBatch.floatingPointOperations,
-                        completedBatch.poppedInEpoch >= completedBatch.batchesInEpoch);
-                    assignScalarStatsToSnapshot(
-                        snapshot,
-                        validationState->scalarTensorNames,
-                        completedBatch.scalarStats,
-                        validationState->aggregateLossTensorNames);
-                    snapshot.metricBatchStats =
-                        std::move(completedBatch.metricBatchStats);
-                    epochLosses.update(snapshot);
-                    emitTrainingEvent(
-                        observer,
-                        TrainingEvent::statsUpdated(std::move(snapshot)));
-                }
-                waitForSchedulerCommandCompletion(validationExecution);
-                throwIfQueuedTrainingStateFailed(validationState);
-                THOR_THROW_IF_FALSE(
-                    validationExecution.phaseWorks.size() == 1);
-                validateFullEpochPhaseCompletion(
-                    validationExecution.phaseWorks.front(),
-                    validationState,
-                    validation.batchSession);
-            } catch (...) {
-                cancelNamedValidation(std::current_exception());
-                throw;
-            }
-
-            TrainingStatsSnapshot validationFinished = makeBaseSnapshot(
-                TrainingEventPhase::VALIDATE,
-                cumulativeEpoch,
-                batchSize,
-                validationBatches,
-                validationState);
-            validationFinished.datasetName =
-                validation.batchSession->getDatasetName();
-            validationFinished.validationPopulation = validation.name;
-            validationFinished.isDefaultValidationPopulation = false;
-            emitTrainingEvent(
-                observer,
-                TrainingEvent::epochFinished(std::move(validationFinished)));
-        }
+        // Default and named validation populations for this logical epoch are
+        // already part of the scheduling window and have been consumed above in
+        // submission order. No host-side queue drain or standalone named
+        // validation command is required here.
 
         bool earlyCompletionRequested = false;
-        const uint64_t phaseLocalEpoch = cumulativeEpoch - request.initialCompletedEpochs;
-        const bool modelSelectionEligible = modelSelectionEnabled && phaseLocalEpoch >= firstTrainedModelSelectionEpoch &&
-                                            ((phaseLocalEpoch - firstTrainedModelSelectionEpoch) % request.checkBestModelEveryEpochs == 0);
+        const bool modelSelectionEligible =
+            modelSelectionEnabled &&
+            isTrainedModelSelectionDecisionEpoch(request, cumulativeEpoch);
         if (modelSelectionEligible) {
+            if (epochOffset + 1 < request.epochs) {
+                recordNativeQueuedHostDecisionBarrierForTests();
+            }
             const TrainingModelSelectionContext currentSelectionContext =
                 epochLosses.modelSelectionContext(
                     cumulativeEpoch, request.defaultValidationPopulation);
@@ -4517,6 +4871,9 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             cumulativeEpoch, request.defaultValidationPopulation);
         latestEpochSelectionContextValid = true;
         currentEpoch += 1;
+        if (!schedulingWindowContinuesPastEpoch) {
+            activeSchedulingWindowExecution.reset();
+        }
         if (earlyCompletionRequested) {
             runEarlyCompleted = true;
             completedEpoch = cumulativeEpoch;
@@ -4524,8 +4881,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         }
     }
 
-    // All epoch and named-validation commands have crossed their semantic
-    // completion barriers. The scheduler worker is no longer needed for this
+    // All scheduling windows have crossed their semantic completion barriers.
+    // The scheduler worker is no longer needed for this
     // run, so stop and join it once while keeping the reusable scheduler
     // resources alive for final checkpoint/save handoff work.
     schedulerWorker->shutdown();
@@ -4534,7 +4891,10 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     const uint64_t finalCompletedEpoch = completedEpoch.value_or(currentEpoch);
     const char* finalCompletionReason = runEarlyCompleted ? "early_completed" : "completed";
     const uint64_t finalCompletedPhaseEpoch = finalCompletedEpoch - request.initialCompletedEpochs;
-    const bool finalModelSelectionEligible = modelSelectionEnabled && finalCompletedPhaseEpoch >= firstTrainedModelSelectionEpoch;
+    const bool finalModelSelectionEligible =
+        modelSelectionEnabled &&
+        finalCompletedPhaseEpoch >=
+            firstTrainedModelSelectionEpochForRequest(request);
     if (finalModelSelectionEligible) {
         // The final/latest state is the handoff and deployment boundary. If best
         // candidate tracking is enabled and the fit has reached the model-selection

@@ -62,6 +62,13 @@ uint64_t checkedFlopMul(uint64_t lhs, uint64_t rhs, const char* where) {
     return lhs * rhs;
 }
 
+uint64_t checkedLogicalByteAdd(uint64_t lhs, uint64_t rhs, const char* where) {
+    if (rhs > std::numeric_limits<uint64_t>::max() - lhs) {
+        throw std::runtime_error(std::string(where) + " logical byte count overflow.");
+    }
+    return lhs + rhs;
+}
+
 }  // namespace
 
 std::shared_ptr<Layer> StampedNetwork::selectRowPartitionDrivingLayer(
@@ -218,42 +225,143 @@ void StampedNetwork::auditRowPartitionPhysicalizations() const {
     }
 }
 
-uint64_t StampedNetwork::getFloatingPointOperationsCurrentBatchForward() {
+uint64_t StampedNetwork::getFloatingPointOperationsCurrentBatchForward(uint64_t validExampleCount) {
     uint64_t total = 0;
     for (ThorImplementation::TrainableLayer* layer : trainableLayers) {
         THOR_THROW_IF_FALSE(layer != nullptr);
-        total = checkedFlopAdd(total, layer->flopCountForward(), "StampedNetwork forward");
+        total = checkedFlopAdd(total, layer->flopCountForward(validExampleCount), "StampedNetwork forward");
     }
     for (ThorImplementation::Layer* layer : otherLayers) {
         THOR_THROW_IF_FALSE(layer != nullptr);
         total = checkedFlopAdd(
             total,
-            checkedFlopMul(layer->floatingPointOperationsPerExampleForward(), batchSize, "StampedNetwork forward"),
+            checkedFlopMul(
+                layer->floatingPointOperationsPerExampleForward(), validExampleCount, "StampedNetwork forward"),
             "StampedNetwork forward");
     }
     return total;
 }
 
-uint64_t StampedNetwork::getFloatingPointOperationsCurrentBatchBackward() {
+uint64_t StampedNetwork::getFloatingPointOperationsCurrentBatchBackward(uint64_t validExampleCount) {
     uint64_t total = 0;
     for (ThorImplementation::TrainableLayer* layer : trainableLayers) {
         THOR_THROW_IF_FALSE(layer != nullptr);
-        total = checkedFlopAdd(total, layer->flopCountBackward(), "StampedNetwork backward");
+        total = checkedFlopAdd(total, layer->flopCountBackward(validExampleCount), "StampedNetwork backward");
     }
     for (ThorImplementation::Layer* layer : otherLayers) {
         THOR_THROW_IF_FALSE(layer != nullptr);
         total = checkedFlopAdd(
             total,
-            checkedFlopMul(layer->floatingPointOperationsPerExampleBackward(), batchSize, "StampedNetwork backward"),
+            checkedFlopMul(
+                layer->floatingPointOperationsPerExampleBackward(), validExampleCount, "StampedNetwork backward"),
             "StampedNetwork backward");
     }
     return total;
 }
 
-uint64_t StampedNetwork::getFloatingPointOperationsCurrentBatchTraining() {
-    return checkedFlopAdd(getFloatingPointOperationsCurrentBatchForward(),
-                          getFloatingPointOperationsCurrentBatchBackward(),
+uint64_t StampedNetwork::getFloatingPointOperationsCurrentBatchTraining(uint64_t validExampleCount) {
+    return checkedFlopAdd(getFloatingPointOperationsCurrentBatchForward(validExampleCount),
+                          getFloatingPointOperationsCurrentBatchBackward(validExampleCount),
                           "StampedNetwork training");
+}
+
+LogicalWorkCount StampedNetwork::getLogicalWorkCurrentBatch(
+    uint64_t validExampleCount,
+    bool includeForward,
+    bool includeBackward) {
+    THOR_THROW_IF_FALSE(includeForward || includeBackward);
+
+    LogicalWorkCount total;
+    const char* where = includeForward && includeBackward
+        ? "StampedNetwork training"
+        : (includeForward ? "StampedNetwork forward" : "StampedNetwork backward");
+
+    auto addFlops = [&](uint64_t contribution) {
+        total.floatingPointOperations =
+            checkedFlopAdd(total.floatingPointOperations, contribution, where);
+    };
+    auto addBytes = [&](uint64_t contribution) {
+        total.bytes = checkedLogicalByteAdd(total.bytes, contribution, where);
+    };
+
+    for (ThorImplementation::TrainableLayer* layer : trainableLayers) {
+        THOR_THROW_IF_FALSE(layer != nullptr);
+        if (includeForward) {
+            addFlops(layer->flopCountForward(validExampleCount));
+            addBytes(layer->logicalByteCountForward(validExampleCount));
+        }
+        if (includeBackward) {
+            addFlops(layer->flopCountBackward(validExampleCount));
+            addBytes(layer->logicalByteCountBackward(validExampleCount));
+        }
+    }
+    for (ThorImplementation::Layer* layer : otherLayers) {
+        THOR_THROW_IF_FALSE(layer != nullptr);
+        if (includeForward) {
+            addFlops(checkedFlopMul(
+                layer->floatingPointOperationsPerExampleForward(),
+                validExampleCount,
+                where));
+            addBytes(layer->logicalByteCountForward(validExampleCount));
+        }
+        if (includeBackward) {
+            addFlops(checkedFlopMul(
+                layer->floatingPointOperationsPerExampleBackward(),
+                validExampleCount,
+                where));
+            addBytes(layer->logicalByteCountBackward(validExampleCount));
+        }
+    }
+
+    return total;
+}
+
+LogicalWorkCount StampedNetwork::getLogicalWorkCurrentBatchForward(uint64_t validExampleCount) {
+    return getLogicalWorkCurrentBatch(validExampleCount, /*includeForward=*/true, /*includeBackward=*/false);
+}
+
+LogicalWorkCount StampedNetwork::getLogicalWorkCurrentBatchBackward(uint64_t validExampleCount) {
+    return getLogicalWorkCurrentBatch(validExampleCount, /*includeForward=*/false, /*includeBackward=*/true);
+}
+
+LogicalWorkCount StampedNetwork::getLogicalWorkCurrentBatchTraining(uint64_t validExampleCount) {
+    return getLogicalWorkCurrentBatch(validExampleCount, /*includeForward=*/true, /*includeBackward=*/true);
+}
+
+uint64_t StampedNetwork::getLogicalBytesCurrentBatchForward(uint64_t validExampleCount) {
+    uint64_t total = 0;
+    for (ThorImplementation::TrainableLayer* layer : trainableLayers) {
+        THOR_THROW_IF_FALSE(layer != nullptr);
+        total = checkedLogicalByteAdd(
+            total, layer->logicalByteCountForward(validExampleCount), "StampedNetwork forward");
+    }
+    for (ThorImplementation::Layer* layer : otherLayers) {
+        THOR_THROW_IF_FALSE(layer != nullptr);
+        total = checkedLogicalByteAdd(
+            total, layer->logicalByteCountForward(validExampleCount), "StampedNetwork forward");
+    }
+    return total;
+}
+
+uint64_t StampedNetwork::getLogicalBytesCurrentBatchBackward(uint64_t validExampleCount) {
+    uint64_t total = 0;
+    for (ThorImplementation::TrainableLayer* layer : trainableLayers) {
+        THOR_THROW_IF_FALSE(layer != nullptr);
+        total = checkedLogicalByteAdd(
+            total, layer->logicalByteCountBackward(validExampleCount), "StampedNetwork backward");
+    }
+    for (ThorImplementation::Layer* layer : otherLayers) {
+        THOR_THROW_IF_FALSE(layer != nullptr);
+        total = checkedLogicalByteAdd(
+            total, layer->logicalByteCountBackward(validExampleCount), "StampedNetwork backward");
+    }
+    return total;
+}
+
+uint64_t StampedNetwork::getLogicalBytesCurrentBatchTraining(uint64_t validExampleCount) {
+    return checkedLogicalByteAdd(getLogicalBytesCurrentBatchForward(validExampleCount),
+                                 getLogicalBytesCurrentBatchBackward(validExampleCount),
+                                 "StampedNetwork training");
 }
 
 

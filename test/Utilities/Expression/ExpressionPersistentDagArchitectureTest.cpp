@@ -1973,6 +1973,413 @@ TEST(ExpressionPersistentDagInvariant, StageLocalCsePreservesDistinctRuntimeValu
     EXPECT_EQ(stage.expr.nodes[*exp_parent].op, ExprOp::SIN);
 }
 
+TEST(ExpressionPersistentDagInvariant, LogicalFlopsCountAuthoredOperationsBeforeStageLocalCse) {
+    const Expression x = Expression::input("logical_flops_cse_x", DataType::FP32, DataType::FP32);
+    const Expression a = x.sin().exp();
+    const Expression b = x.sin().cos();
+
+    PhysicalOutputs physical = Expression::outputs({{"a", a}, {"b", b}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32});
+    ASSERT_TRUE(physical.expr);
+    ASSERT_EQ(countNodesOfKind(physical, ExprOp::SIN), 2u);
+
+    detail::EquationCompilerPlanForTests plan = detail::planEquationCompilerForTests(physical);
+    const auto fused_stage_it =
+        std::find_if(plan.stages.begin(), plan.stages.end(), [](const PhysicalExecutionStage& stage) {
+            return stage.kind == PhysicalExecutionStage::Kind::FusedKernel;
+        });
+    ASSERT_NE(fused_stage_it, plan.stages.end());
+    const PhysicalExecutionStage& stage = *fused_stage_it;
+
+    ASSERT_EQ(stage.logical_node_multiplicities.size(), stage.expr.nodes.size());
+    size_t physical_sin_count = 0;
+    std::optional<uint32_t> sin_multiplicity;
+    for (size_t i = 0; i < stage.expr.nodes.size(); ++i) {
+        if (stage.expr.nodes[i].op == ExprOp::SIN) {
+            ++physical_sin_count;
+            sin_multiplicity = stage.logical_node_multiplicities[i];
+        }
+    }
+    ASSERT_EQ(physical_sin_count, 1u);
+    ASSERT_TRUE(sin_multiplicity.has_value());
+    EXPECT_EQ(*sin_multiplicity, 2u)
+        << "One physical SIN represents two independently authored logical SIN operations.";
+
+    constexpr uint64_t element_count = 64;
+    const detail::FusedStageFlopCountsForTests flops =
+        detail::fusedStageFlopCountsForTests(stage, {{element_count}});
+    EXPECT_EQ(flops.physical_flops, element_count * 30u);
+    EXPECT_EQ(flops.logical_flops, element_count * 40u)
+        << "Logical FLOPs must retain authored operation multiplicity even when physical CSE executes one SIN.";
+}
+
+TEST(ExpressionPersistentDagInvariant, LogicalFlopsDoNotDoubleCountSharedAuthoredDagAncestry) {
+    const Expression x = Expression::input("logical_flops_shared_x", DataType::FP32, DataType::FP32);
+    const Expression shared = x.sin();
+    const Expression a = shared.exp();
+    const Expression b = shared.cos();
+
+    PhysicalOutputs physical = Expression::outputs({{"a", a}, {"b", b}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32});
+    ASSERT_TRUE(physical.expr);
+    ASSERT_EQ(countNodesOfKind(physical, ExprOp::SIN), 1u);
+
+    detail::EquationCompilerPlanForTests plan = detail::planEquationCompilerForTests(physical);
+    const auto fused_stage_it =
+        std::find_if(plan.stages.begin(), plan.stages.end(), [](const PhysicalExecutionStage& stage) {
+            return stage.kind == PhysicalExecutionStage::Kind::FusedKernel;
+        });
+    ASSERT_NE(fused_stage_it, plan.stages.end());
+    const PhysicalExecutionStage& stage = *fused_stage_it;
+    ASSERT_EQ(stage.logical_node_multiplicities.size(), stage.expr.nodes.size());
+
+    size_t physical_sin_count = 0;
+    for (size_t i = 0; i < stage.expr.nodes.size(); ++i) {
+        if (stage.expr.nodes[i].op == ExprOp::SIN) {
+            ++physical_sin_count;
+            EXPECT_EQ(stage.logical_node_multiplicities[i], 1u);
+        }
+    }
+    ASSERT_EQ(physical_sin_count, 1u);
+
+    constexpr uint64_t element_count = 64;
+    const detail::FusedStageFlopCountsForTests flops =
+        detail::fusedStageFlopCountsForTests(stage, {{element_count}});
+    EXPECT_EQ(flops.physical_flops, element_count * 30u);
+    EXPECT_EQ(flops.logical_flops, element_count * 30u)
+        << "A shared authored DAG node is one logical operation even when multiple consumers reuse it.";
+}
+
+TEST(ExpressionPersistentDagInvariant, Lwa3aLogicalBytesCountAuthoredOperationsBeforeStageLocalCse) {
+    const Expression x = Expression::input("logical_bytes_cse_x", DataType::FP32, DataType::FP32);
+    const Expression a = x.sin().exp();
+    const Expression b = x.sin().cos();
+
+    PhysicalOutputs physical = Expression::outputs({{"a", a}, {"b", b}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32});
+    detail::EquationCompilerPlanForTests plan = detail::planEquationCompilerForTests(physical);
+    const auto fused_stage_it =
+        std::find_if(plan.stages.begin(), plan.stages.end(), [](const PhysicalExecutionStage& stage) {
+            return stage.kind == PhysicalExecutionStage::Kind::FusedKernel;
+        });
+    ASSERT_NE(fused_stage_it, plan.stages.end());
+    const PhysicalExecutionStage& stage = *fused_stage_it;
+
+    size_t physical_sin_count = 0;
+    std::optional<uint32_t> sin_multiplicity;
+    for (size_t i = 0; i < stage.expr.nodes.size(); ++i) {
+        if (stage.expr.nodes[i].op == ExprOp::SIN) {
+            ++physical_sin_count;
+            sin_multiplicity = stage.logical_node_multiplicities.at(i);
+        }
+    }
+    ASSERT_EQ(physical_sin_count, 1u);
+    ASSERT_TRUE(sin_multiplicity.has_value());
+    ASSERT_EQ(*sin_multiplicity, 2u);
+
+    constexpr uint64_t element_count = 64;
+    const LogicalWorkCount work = detail::fusedStageLogicalWorkForTests(stage, {{element_count}});
+    constexpr uint64_t tensor_bytes = element_count * sizeof(float);
+    EXPECT_EQ(work.bytes, tensor_bytes * 8u)
+        << "Two authored SIN operations each logically read x and write their result; EXP and COS each read/write once.";
+}
+
+TEST(ExpressionPersistentDagInvariant, Lwa3aLogicalBytesDoNotDoubleCountSharedAuthoredDagAncestry) {
+    const Expression x = Expression::input("logical_bytes_shared_x", DataType::FP32, DataType::FP32);
+    const Expression shared = x.sin();
+    const Expression a = shared.exp();
+    const Expression b = shared.cos();
+
+    PhysicalOutputs physical = Expression::outputs({{"a", a}, {"b", b}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32});
+    detail::EquationCompilerPlanForTests plan = detail::planEquationCompilerForTests(physical);
+    const auto fused_stage_it =
+        std::find_if(plan.stages.begin(), plan.stages.end(), [](const PhysicalExecutionStage& stage) {
+            return stage.kind == PhysicalExecutionStage::Kind::FusedKernel;
+        });
+    ASSERT_NE(fused_stage_it, plan.stages.end());
+    const PhysicalExecutionStage& stage = *fused_stage_it;
+
+    constexpr uint64_t element_count = 64;
+    const LogicalWorkCount work = detail::fusedStageLogicalWorkForTests(stage, {{element_count}});
+    constexpr uint64_t tensor_bytes = element_count * sizeof(float);
+    EXPECT_EQ(work.bytes, tensor_bytes * 6u)
+        << "One authored shared SIN is one logical read/write even though EXP and COS both consume its result.";
+}
+
+TEST(ExpressionPersistentDagInvariant, Lwa3aPureStructuralViewAddsNoLogicalBytes) {
+    const Expression x = Expression::input("logical_bytes_view_x", DataType::FP32, DataType::FP32);
+    const Expression y = x.reshape({8, 8}).sin();
+
+    PhysicalOutputs physical = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32});
+    detail::EquationCompilerPlanForTests plan = detail::planEquationCompilerForTests(physical);
+    const auto fused_stage_it =
+        std::find_if(plan.stages.begin(), plan.stages.end(), [](const PhysicalExecutionStage& stage) {
+            return stage.kind == PhysicalExecutionStage::Kind::FusedKernel;
+        });
+    ASSERT_NE(fused_stage_it, plan.stages.end());
+
+    constexpr uint64_t element_count = 64;
+    constexpr uint64_t tensor_bytes = element_count * sizeof(float);
+    const LogicalWorkCount work = detail::fusedStageLogicalWorkForTests(*fused_stage_it, {{element_count}});
+    EXPECT_EQ(work.bytes, tensor_bytes * 2u)
+        << "RESHAPE is a logical alias; only SIN's tensor read and tensor result write count.";
+}
+
+TEST(ExpressionPersistentDagInvariant, Lwa3aExplicitBroadcastAliasMatchesImplicitBroadcastLogicalBytes) {
+    auto logical_bytes = [](bool explicit_broadcast) {
+        const Expression x = Expression::input("logical_bytes_broadcast_x", DataType::FP32, DataType::FP32);
+        const Expression bias = Expression::input("logical_bytes_broadcast_bias", DataType::FP32, DataType::FP32);
+        const Expression rhs = explicit_broadcast ? bias.broadcastTo({4, 8}) : bias;
+        const Expression y = x + rhs;
+
+        PhysicalOutputs physical = Expression::outputs({{"y", y}}).physicalOutputs();
+        resolveOutputsDTypesInPlace(physical, {DataType::FP32, DataType::FP32});
+        detail::EquationCompilerPlanForTests plan = detail::planEquationCompilerForTests(physical);
+        const auto fused_stage_it =
+            std::find_if(plan.stages.begin(), plan.stages.end(), [](const PhysicalExecutionStage& stage) {
+                return stage.kind == PhysicalExecutionStage::Kind::FusedKernel;
+            });
+        if (fused_stage_it == plan.stages.end()) {
+            throw std::runtime_error("Expected fused stage in LWA-3A broadcast accounting test.");
+        }
+
+        std::vector<std::vector<uint64_t>> input_dims(fused_stage_it->expr.inputs.size());
+        for (const NamedInput& input : fused_stage_it->expr.inputs) {
+            if (input.name == "logical_bytes_broadcast_x") {
+                input_dims.at(input.slot) = {4, 8};
+            } else if (input.name == "logical_bytes_broadcast_bias") {
+                input_dims.at(input.slot) = {8};
+            } else {
+                throw std::runtime_error("Unexpected input in LWA-3A broadcast accounting test: " + input.name);
+            }
+        }
+        return detail::fusedStageLogicalWorkForTests(*fused_stage_it, input_dims).bytes;
+    };
+
+    constexpr uint64_t expected_bytes = (4u * 8u * 4u) + (8u * 4u) + (4u * 8u * 4u);
+    EXPECT_EQ(logical_bytes(false), expected_bytes);
+    EXPECT_EQ(logical_bytes(true), expected_bytes)
+        << "Explicit zero-copy BROADCAST_TO must not inflate logical bytes relative to equivalent implicit broadcasting.";
+}
+
+TEST(ExpressionPersistentDagInvariant, Lwa3aLogicalBytesScaleWithTensorStorageDType) {
+    auto logical_bytes_for_dtype = [](DataType dtype) {
+        const Expression x = Expression::input("logical_bytes_dtype_x", DataType::FP32, dtype);
+        const Expression y = x.sin() + x.cos();
+        PhysicalOutputs physical = Expression::outputs({{"y", y}}).physicalOutputs();
+        resolveOutputsDTypesInPlace(physical, {dtype});
+        detail::EquationCompilerPlanForTests plan = detail::planEquationCompilerForTests(physical);
+        const auto fused_stage_it =
+            std::find_if(plan.stages.begin(), plan.stages.end(), [](const PhysicalExecutionStage& stage) {
+                return stage.kind == PhysicalExecutionStage::Kind::FusedKernel;
+            });
+        if (fused_stage_it == plan.stages.end()) {
+            throw std::runtime_error("Expected fused stage in LWA-3A dtype accounting test.");
+        }
+        constexpr uint64_t element_count = 64;
+        return detail::fusedStageLogicalWorkForTests(*fused_stage_it, {{element_count}}).bytes;
+    };
+
+    constexpr uint64_t element_count = 64;
+    // SIN: read+write, COS: read+write, ADD: two reads+write = seven
+    // logical tensor payloads. Compute precision does not change storage bytes.
+    EXPECT_EQ(logical_bytes_for_dtype(DataType::FP32), element_count * 4u * 7u);
+    EXPECT_EQ(logical_bytes_for_dtype(DataType::FP16), element_count * 2u * 7u);
+    EXPECT_EQ(logical_bytes_for_dtype(DataType::BF16), element_count * 2u * 7u);
+}
+
+TEST(ExpressionPersistentDagInvariant, Lwa3bReductionLogicalBytesAreInputReadPlusResultWrite) {
+    const Expression x = Expression::input("lwa3b_reduction_x", DataType::FP32, DataType::FP32);
+    PhysicalOutputs physical = Expression::outputs({{"y", x.reduce_sum({1}, {}, DataType::FP32)}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32});
+
+    detail::EquationCompilerPlanForTests plan = detail::planEquationCompilerForTests(physical);
+    const auto stage_it = std::find_if(plan.stages.begin(), plan.stages.end(), [](const PhysicalExecutionStage& stage) {
+        return stage.kind == PhysicalExecutionStage::Kind::Reduction;
+    });
+    ASSERT_NE(stage_it, plan.stages.end());
+
+    auto compiled_reduction = EquationCompiler::compileReduction(stage_it->expr);
+    CompiledExecutionStage stage(
+        compiled_reduction, stage_it->input_value_ids, stage_it->outputs, stage_it->parameter_fan_overrides);
+
+    const LogicalWorkCount work =
+        detail::dedicatedStageLogicalWorkForTests(stage, {{4, 8}}, {DataType::FP32});
+    EXPECT_EQ(work.bytes, (4u * 8u + 4u) * sizeof(float))
+        << "A dense reduction logically reads its input tensor once and writes its reduced result once.";
+}
+
+TEST(ExpressionPersistentDagInvariant, Lwa3bMatmulLogicalBytesCountOperandsAndDeclaredResultNotKernelWorkspace) {
+    const Expression lhs = Expression::input("lwa3b_matmul_lhs", DataType::FP32, DataType::FP32);
+    const Expression rhs = Expression::input("lwa3b_matmul_rhs", DataType::FP32, DataType::FP32);
+    PhysicalOutputs physical =
+        Expression::outputs({{"y", Expression::matmul(lhs, rhs, false, false, DataType::FP32, DataType::FP32)}})
+            .physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32, DataType::FP32});
+
+    detail::EquationCompilerPlanForTests plan = detail::planEquationCompilerForTests(physical);
+    const auto stage_it = std::find_if(plan.stages.begin(), plan.stages.end(), [](const PhysicalExecutionStage& stage) {
+        return stage.kind == PhysicalExecutionStage::Kind::Matmul;
+    });
+    ASSERT_NE(stage_it, plan.stages.end());
+
+    auto compiled_matmul = EquationCompiler::compileMatmul(stage_it->expr, stage_it->outputs);
+    CompiledExecutionStage stage(
+        compiled_matmul, stage_it->input_value_ids, stage_it->outputs, stage_it->parameter_fan_overrides);
+
+    const LogicalWorkCount work = detail::dedicatedStageLogicalWorkForTests(
+        stage, {{2, 3}, {3, 4}}, {DataType::FP32, DataType::FP32});
+    EXPECT_EQ(work.floatingPointOperations, 2u * 2u * 3u * 4u);
+    EXPECT_EQ(work.bytes, (2u * 3u + 3u * 4u + 2u * 4u) * sizeof(float))
+        << "Logical matmul bytes are A+B reads plus C write; cuBLASLt workspace/tiling/cache traffic is not model work.";
+}
+
+TEST(ExpressionPersistentDagInvariant, Lwa6ComputeHeavyMatmulHasHigherLogicalArithmeticIntensityThanPointwiseAdd) {
+    const Expression lhs = Expression::input("lwa6_intensity_lhs", DataType::FP32, DataType::FP32);
+    const Expression rhs = Expression::input("lwa6_intensity_rhs", DataType::FP32, DataType::FP32);
+    PhysicalOutputs matmul_physical =
+        Expression::outputs({{"y", Expression::matmul(lhs, rhs, false, false, DataType::FP32, DataType::FP32)}})
+            .physicalOutputs();
+    resolveOutputsDTypesInPlace(matmul_physical, {DataType::FP32, DataType::FP32});
+
+    detail::EquationCompilerPlanForTests matmul_plan = detail::planEquationCompilerForTests(matmul_physical);
+    const auto matmul_stage_it =
+        std::find_if(matmul_plan.stages.begin(), matmul_plan.stages.end(), [](const PhysicalExecutionStage& stage) {
+            return stage.kind == PhysicalExecutionStage::Kind::Matmul;
+        });
+    ASSERT_NE(matmul_stage_it, matmul_plan.stages.end());
+    auto compiled_matmul = EquationCompiler::compileMatmul(matmul_stage_it->expr, matmul_stage_it->outputs);
+    CompiledExecutionStage matmul_stage(
+        compiled_matmul, matmul_stage_it->input_value_ids, matmul_stage_it->outputs, matmul_stage_it->parameter_fan_overrides);
+    const LogicalWorkCount matmul_work = detail::dedicatedStageLogicalWorkForTests(
+        matmul_stage, {{128, 128}, {128, 128}}, {DataType::FP32, DataType::FP32});
+
+    const Expression x = Expression::input("lwa6_intensity_pointwise_x", DataType::FP32, DataType::FP32);
+    PhysicalOutputs pointwise_physical = Expression::outputs({{"y", x + x}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(pointwise_physical, {DataType::FP32});
+    detail::EquationCompilerPlanForTests pointwise_plan = detail::planEquationCompilerForTests(pointwise_physical);
+    const auto pointwise_stage_it =
+        std::find_if(pointwise_plan.stages.begin(), pointwise_plan.stages.end(), [](const PhysicalExecutionStage& stage) {
+            return stage.kind == PhysicalExecutionStage::Kind::FusedKernel;
+        });
+    ASSERT_NE(pointwise_stage_it, pointwise_plan.stages.end());
+    const LogicalWorkCount pointwise_work =
+        detail::fusedStageLogicalWorkForTests(*pointwise_stage_it, {{128u * 128u}});
+
+    ASSERT_GT(matmul_work.bytes, 0u);
+    ASSERT_GT(pointwise_work.bytes, 0u);
+    const double matmul_intensity = static_cast<double>(matmul_work.floatingPointOperations) /
+                                    static_cast<double>(matmul_work.bytes);
+    const double pointwise_intensity = static_cast<double>(pointwise_work.floatingPointOperations) /
+                                       static_cast<double>(pointwise_work.bytes);
+
+    EXPECT_GT(matmul_intensity, 20.0) << "A 128x128 GEMM should be compute-heavy in logical F/B.";
+    EXPECT_LT(pointwise_intensity, 1.0) << "A pointwise add should be bandwidth-heavy in logical F/B.";
+    EXPECT_GT(matmul_intensity, pointwise_intensity);
+}
+
+TEST(ExpressionPersistentDagInvariant, Lwa3bEmbeddingLookupCountsSelectedRowsNotWholeParameterTable) {
+    auto compiled = std::make_shared<CompiledEmbeddingLookup>();
+    compiled->index_dtype = DataType::UINT32;
+    compiled->weights_dtype = DataType::FP32;
+    compiled->output_dtype = DataType::FP32;
+
+    CompiledExecutionStage stage(
+        compiled,
+        std::vector<uint32_t>{0, 1},
+        std::vector<CompiledStageOutput>{{"y", 0, 2}},
+        {});
+
+    const LogicalWorkCount work = detail::dedicatedStageLogicalWorkForTests(
+        stage,
+        {{3}, {1000, 8}},
+        {DataType::UINT32, DataType::FP32});
+    EXPECT_EQ(work.bytes, 3u * sizeof(uint32_t) + 3u * 8u * sizeof(float) + 3u * 8u * sizeof(float))
+        << "Embedding lookup charges indices, selected rows, and result writes; unused vocabulary capacity is not logical traffic.";
+}
+
+TEST(ExpressionPersistentDagInvariant, Lwa3bDenseRmsNormExcludesWorkspaceAndRetainedBackendStatistics) {
+    const Expression x = Expression::input("lwa3b_rms_x", DataType::FP32, DataType::FP32);
+    const Expression scale = Expression::input("lwa3b_rms_scale", DataType::FP32, DataType::FP32);
+    PhysicalOutputs physical =
+        Expression::outputs({{"y", Expression::rmsNorm(x, scale, 4, 1.0e-5, DataType::FP32, DataType::FP32)}})
+            .physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32, DataType::FP32});
+
+    detail::EquationCompilerPlanForTests plan = detail::planEquationCompilerForTests(physical);
+    const auto stage_it = std::find_if(plan.stages.begin(), plan.stages.end(), [](const PhysicalExecutionStage& stage) {
+        return stage.kind == PhysicalExecutionStage::Kind::RmsNorm;
+    });
+    ASSERT_NE(stage_it, plan.stages.end());
+
+    auto compiled_rms = EquationCompiler::compileRmsNorm(stage_it->expr);
+    CompiledExecutionStage stage(
+        compiled_rms, stage_it->input_value_ids, stage_it->outputs, stage_it->parameter_fan_overrides);
+
+    const LogicalWorkCount work = detail::dedicatedStageLogicalWorkForTests(
+        stage, {{2, 4}, {4}}, {DataType::FP32, DataType::FP32});
+    EXPECT_EQ(work.bytes, (2u * 4u + 4u + 2u * 4u) * sizeof(float))
+        << "Dense RMSNorm charges x/scale reads and y write only; cuDNN workspace and saved inv-variance are implementation state.";
+}
+
+
+TEST(ExpressionPersistentDagInvariant, Lwa3bRmsNormBackwardCountsSemanticOperandsAndRequestedGradients) {
+    auto compiled = std::make_shared<CompiledRmsNormBackward>();
+    compiled->normalized_feature_count = 4;
+    compiled->input_dtype = DataType::FP16;
+    compiled->scale_dtype = DataType::FP32;
+    compiled->dy_dtype = DataType::FP16;
+    compiled->dx_dtype = DataType::FP16;
+    compiled->dscale_dtype = DataType::FP32;
+
+    PhysicalExpression expr;
+    ExprNode dx{};
+    dx.op = ExprOp::RMSNORM_BACKWARD_X;
+    ExprNode dscale{};
+    dscale.op = ExprOp::RMSNORM_BACKWARD_SCALE;
+    expr.nodes = {dx, dscale};
+
+    CompiledExecutionStage stage(
+        expr,
+        compiled,
+        std::vector<uint32_t>{0, 1, 2},
+        std::vector<CompiledStageOutput>{{"dx", 0, 3}, {"dscale", 1, 4}},
+        {});
+
+    const LogicalWorkCount work = detail::dedicatedStageLogicalWorkForTests(
+        stage,
+        {{2, 4}, {4}, {2, 4}},
+        {DataType::FP16, DataType::FP32, DataType::FP16});
+    EXPECT_EQ(work.bytes, 80u)
+        << "Backward logically reads x/scale/dY and writes requested dX/dScale; retained inv-variance is backend state.";
+}
+
+TEST(ExpressionPersistentDagInvariant, Lwa3bRuntimeActiveRaggedDedicatedStageDefersBytesUntilLwa4) {
+    auto compiled_rms = std::make_shared<CompiledRmsNorm>();
+    compiled_rms->normalized_feature_count = 4;
+    compiled_rms->packed_row_capacity = 8;
+    compiled_rms->ragged_offsets_input_slot = 2;
+    compiled_rms->ragged_batch_size = 8;
+    compiled_rms->input_dtype = DataType::FP16;
+    compiled_rms->scale_dtype = DataType::FP32;
+    compiled_rms->output_dtype = DataType::FP16;
+
+    CompiledExecutionStage stage(
+        compiled_rms,
+        std::vector<uint32_t>{0, 1, 2},
+        std::vector<CompiledStageOutput>{{"y", 0, 3}},
+        {});
+
+    const LogicalWorkCount work = detail::dedicatedStageLogicalWorkForTests(
+        stage,
+        {{64, 4}, {4}, {9}},
+        {DataType::FP16, DataType::FP32, DataType::UINT32});
+    EXPECT_EQ(work.bytes, 0u)
+        << "LWA-3B must not substitute packed capacity for runtime-active ragged logical bytes; LWA-4 supplies that extent.";
+}
+
 // PERSISTENT-DAG INVARIANT:
 // Stage-local CSE is allowed to merge only semantics-complete equivalent operations.
 // RESHAPE target dimensions are part of operation semantics, so two reshapes of the

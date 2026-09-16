@@ -143,6 +143,38 @@ class Loss : public Layer {
         return events;
     }
 
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override {
+        uint64_t bytes = Layer::logicalByteCountForward(validExampleCount);
+        if (!labelsInput.has_value() || !featureInput.has_value()) return bytes;
+        bytes = checkedLogicalByteAdd(
+            bytes,
+            logicalTensorBytesForBatch(labelsInput.value(),
+                                       validExampleCount,
+                                       logicalBatchCapacityFromTensor(featureInput.value())),
+            "Loss forward");
+        return bytes;
+    }
+
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override {
+        if (!featureInput.has_value()) return 0;
+        const uint64_t physicalBatchCapacity = logicalBatchCapacityFromTensor(featureInput.value());
+        uint64_t bytes = 0;
+        if (labelsInput.has_value()) {
+            bytes = checkedLogicalByteAdd(
+                bytes, logicalTensorBytesForBatch(labelsInput.value(), validExampleCount, physicalBatchCapacity),
+                "Loss backward");
+        }
+        bytes = checkedLogicalByteAdd(
+            bytes, logicalTensorBytesForBatch(featureInput.value(), validExampleCount, physicalBatchCapacity),
+            "Loss backward");
+        if (errorOutput.has_value()) {
+            bytes = checkedLogicalByteAdd(
+                bytes, logicalTensorBytesForBatch(errorOutput.value(), validExampleCount, physicalBatchCapacity),
+                "Loss backward");
+        }
+        return bytes;
+    }
+
     void initialize() override {
         Layer::initialize();
         featureInputReceived = false;

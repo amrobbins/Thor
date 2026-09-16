@@ -893,10 +893,17 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
         }
         NamedValidationSession namedValidation;
         namedValidation.name = validationName;
-        namedValidation.batchSession = fitTrainingData->openValidationSession(
-            validationName,
-            sessionMaxInFlightBatches,
-            requiredDatasetFieldRequirements);
+        namedValidation.batchSessionFactory =
+            [fitTrainingData,
+             validationName,
+             sessionMaxInFlightBatches,
+             requiredDatasetFieldRequirements]() {
+                return fitTrainingData->openValidationSession(
+                    validationName,
+                    sessionMaxInFlightBatches,
+                    requiredDatasetFieldRequirements);
+            };
+        namedValidation.batchSession = namedValidation.batchSessionFactory();
         request.additionalValidationSessions.push_back(std::move(namedValidation));
     }
     request.optimizer = optimizer;

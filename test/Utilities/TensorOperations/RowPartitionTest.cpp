@@ -192,6 +192,104 @@ TEST(RowPartition, HostPartitionPublicationPropagatesAcrossPartitionPreservingVa
     EXPECT_EQ(propagated.requireHostMaxActiveRowLength(), 4U);
 }
 
+TEST(RowPartition, LogicalWorkNonEmptySummaryIsOptInExactAndTracksPublications) {
+    const RowPartitionDescriptor descriptor(4, 12, DataType::UINT32);
+    Tensor offsets(cpuPlacement, descriptor.getOffsetsDescriptor());
+    RowPartitionRuntime partition(offsets, descriptor);
+    partition.setHostOffsets({0, 2, 2, 5, 6});  // lengths [2, 0, 3, 1]
+
+    // Unused logical-work summaries are not maintained for unrelated ragged
+    // partitions. Registration derives the already-published state once.
+    EXPECT_FALSE(RowPartitionRuntime::getPublishedHostNonEmptyRowCountIfAvailable(offsets).has_value());
+    EXPECT_FALSE(RowPartitionRuntime::getPublishedHostNonEmptyRowCountForPrefixIfAvailable(offsets, 2).has_value());
+    RowPartitionRuntime::registerLogicalWorkNonEmptyRowCount(offsets);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostNonEmptyRowCountIfAvailable(offsets), 3U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostNonEmptyRowCountForPrefixIfAvailable(offsets, 0), 0U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostNonEmptyRowCountForPrefixIfAvailable(offsets, 1), 1U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostNonEmptyRowCountForPrefixIfAvailable(offsets, 2), 1U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostNonEmptyRowCountForPrefixIfAvailable(offsets, 3), 2U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostNonEmptyRowCountForPrefixIfAvailable(offsets, 4), 3U);
+
+    // Subsequent publications fold the exact count and every row prefix into
+    // the validation pass; telemetry only performs an O(1) indexed lookup.
+    partition.setHostOffsets({0, 0, 4, 4, 7});  // lengths [0, 4, 0, 3]
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostNonEmptyRowCountIfAvailable(offsets), 2U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostNonEmptyRowCountForPrefixIfAvailable(offsets, 1), 0U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostNonEmptyRowCountForPrefixIfAvailable(offsets, 2), 1U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostNonEmptyRowCountForPrefixIfAvailable(offsets, 3), 1U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostNonEmptyRowCountForPrefixIfAvailable(offsets, 4), 2U);
+
+    // Normal training stamps before the first batch publishes offsets. Prefix
+    // storage is allocated at registration time, then populated by publication
+    // without a telemetry-driven allocation or second scan.
+    Tensor futureOffsets(cpuPlacement, descriptor.getOffsetsDescriptor());
+    RowPartitionRuntime future(futureOffsets, descriptor);
+    RowPartitionRuntime::registerLogicalWorkNonEmptyRowCount(futureOffsets);
+    EXPECT_FALSE(RowPartitionRuntime::getPublishedHostNonEmptyRowCountForPrefixIfAvailable(futureOffsets, 2).has_value());
+    future.setHostOffsets({0, 1, 1, 5, 5});  // lengths [1, 0, 4, 0]
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostNonEmptyRowCountIfAvailable(futureOffsets), 2U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostNonEmptyRowCountForPrefixIfAvailable(futureOffsets, 1), 1U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostNonEmptyRowCountForPrefixIfAvailable(futureOffsets, 2), 1U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostNonEmptyRowCountForPrefixIfAvailable(futureOffsets, 3), 2U);
+}
+
+TEST(RowPartition, LogicalWorkPairSummaryIsExactDeduplicatedAndTracksBothPartitions) {
+    const RowPartitionDescriptor descriptor(4, 12, DataType::UINT32);
+    Tensor firstOffsets(cpuPlacement, descriptor.getOffsetsDescriptor());
+    Tensor secondOffsets(cpuPlacement, descriptor.getOffsetsDescriptor());
+    RowPartitionRuntime first(firstOffsets, descriptor);
+    RowPartitionRuntime second(secondOffsets, descriptor);
+
+    first.setHostOffsets({0, 2, 2, 5, 6});   // lengths [2, 0, 3, 1]
+    second.setHostOffsets({0, 1, 4, 4, 6});  // lengths [1, 3, 0, 2]
+
+    // Self-attention uses sum(length^2); cross-attention uses sum(q_i * k_i).
+    RowPartitionRuntime::registerLogicalWorkRowPartitionPair(firstOffsets, firstOffsets);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostSumSquaredRowLengthsIfAvailable(firstOffsets), 14U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostRowLengthProductSumIfAvailable(firstOffsets, firstOffsets), 14U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostRowLengthProductSumForPrefixIfAvailable(firstOffsets, firstOffsets, 0), 0U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostRowLengthProductSumForPrefixIfAvailable(firstOffsets, firstOffsets, 2), 4U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostRowLengthProductSumForPrefixIfAvailable(firstOffsets, firstOffsets, 3), 13U);
+
+    RowPartitionRuntime::registerLogicalWorkRowPartitionPair(firstOffsets, secondOffsets);
+    RowPartitionRuntime::registerLogicalWorkRowPartitionPair(firstOffsets, secondOffsets);  // deduplicated
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostRowLengthProductSumIfAvailable(firstOffsets, secondOffsets), 4U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostRowLengthProductSumForPrefixIfAvailable(firstOffsets, secondOffsets, 1), 2U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostRowLengthProductSumForPrefixIfAvailable(firstOffsets, secondOffsets, 3), 2U);
+
+    // Updating only one side refreshes an exact pairing against the partner's
+    // current publication without a later telemetry scan.
+    first.setHostOffsets({0, 1, 3, 3, 7});  // lengths [1, 2, 0, 4]
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostSumSquaredRowLengthsIfAvailable(firstOffsets), 21U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostRowLengthProductSumIfAvailable(firstOffsets, secondOffsets), 15U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostRowLengthProductSumForPrefixIfAvailable(firstOffsets, secondOffsets, 2), 7U);
+
+    // Updating the partner invalidates the first side's older generation; the
+    // newly published side carries the exact current pair summary instead.
+    second.setHostOffsets({0, 2, 3, 6, 6});  // lengths [2, 1, 3, 0]
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostRowLengthProductSumIfAvailable(firstOffsets, secondOffsets), 4U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostRowLengthProductSumForPrefixIfAvailable(firstOffsets, secondOffsets, 2), 4U);
+
+    // Normal training stamps before the first batch publishes host metadata. A
+    // pre-registered pair becomes exact as soon as both partitions arrive.
+    Tensor futureFirstOffsets(cpuPlacement, descriptor.getOffsetsDescriptor());
+    Tensor futureSecondOffsets(cpuPlacement, descriptor.getOffsetsDescriptor());
+    RowPartitionRuntime futureFirst(futureFirstOffsets, descriptor);
+    RowPartitionRuntime futureSecond(futureSecondOffsets, descriptor);
+    RowPartitionRuntime::registerLogicalWorkRowPartitionPair(futureFirstOffsets, futureSecondOffsets);
+    futureFirst.setHostOffsets({0, 3, 3, 4, 6});   // lengths [3, 0, 1, 2]
+    EXPECT_FALSE(RowPartitionRuntime::getPublishedHostRowLengthProductSumIfAvailable(
+                     futureFirstOffsets, futureSecondOffsets)
+                     .has_value());
+    futureSecond.setHostOffsets({0, 1, 3, 6, 6});  // lengths [1, 2, 3, 0]
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostRowLengthProductSumIfAvailable(
+                  futureFirstOffsets, futureSecondOffsets),
+              6U);
+    EXPECT_EQ(RowPartitionRuntime::getPublishedHostRowLengthProductSumForPrefixIfAvailable(
+                  futureFirstOffsets, futureSecondOffsets, 2),
+              3U);
+}
+
 TEST(RowPartition, CanonicalAndBackendOffsetDTypePoliciesAreExplicitlyDistinct) {
     EXPECT_EQ(kDefaultRowPartitionOffsetDataType, DataType::UINT32);
     EXPECT_TRUE(isCanonicalRowPartitionOffsetDataType(DataType::UINT32));

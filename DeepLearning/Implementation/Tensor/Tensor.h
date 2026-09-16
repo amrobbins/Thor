@@ -204,12 +204,24 @@ class Tensor {
         std::vector<uint64_t> offsets;
         uint64_t activeValueCount = 0;
         uint64_t maxActiveRowLength = 0;
+
+        // Logical-work summaries are derived while authoritative host offsets
+        // are already being validated/published. They let telemetry answer the
+        // corresponding whole-partition queries in O(1), without re-walking
+        // offsets on every submitted batch. These fields are opt-in; a missing
+        // value means either no stamped consumer requested it or the telemetry-
+        // only accumulator overflowed. Neither case may fail row publication.
+        std::optional<uint64_t> nonEmptyRowCount;
+        std::optional<uint64_t> sumSquaredRowLengths;
+        uint64_t publicationGeneration = 0;
     };
 
-    void setRowPartitionHostOffsets(uint64_t rowPartitionId,
-                                    std::vector<uint64_t> hostOffsets,
-                                    uint64_t activeValueCount,
-                                    uint64_t maxActiveRowLength) {
+    uint64_t setRowPartitionHostOffsets(uint64_t rowPartitionId,
+                                        std::vector<uint64_t> hostOffsets,
+                                        uint64_t activeValueCount,
+                                        uint64_t maxActiveRowLength,
+                                        std::optional<uint64_t> nonEmptyRowCount,
+                                        std::optional<uint64_t> sumSquaredRowLengths) {
         THOR_THROW_IF_FALSE(!uninitialized());
         THOR_THROW_IF_FALSE(rowPartitionId != 0);
         auto nextState = std::make_shared<RowPartitionHostState>();
@@ -217,7 +229,15 @@ class Tensor {
         nextState->offsets = std::move(hostOffsets);
         nextState->activeValueCount = activeValueCount;
         nextState->maxActiveRowLength = maxActiveRowLength;
+        nextState->nonEmptyRowCount = nonEmptyRowCount;
+        nextState->sumSquaredRowLengths = sumSquaredRowLengths;
+        nextState->publicationGeneration =
+            backingMemory->rowPartitionHostState == nullptr
+                ? 1
+                : backingMemory->rowPartitionHostState->publicationGeneration + 1;
+        const uint64_t publicationGeneration = nextState->publicationGeneration;
         backingMemory->rowPartitionHostState = std::move(nextState);
+        return publicationGeneration;
     }
     [[nodiscard]] std::optional<uint64_t> getRowPartitionHostId() const {
         THOR_THROW_IF_FALSE(!uninitialized());
@@ -246,6 +266,16 @@ class Tensor {
         if (backingMemory->rowPartitionHostState == nullptr) return std::nullopt;
         return backingMemory->rowPartitionHostState->maxActiveRowLength;
     }
+    [[nodiscard]] std::optional<uint64_t> getRowPartitionHostNonEmptyRowCount() const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        if (backingMemory->rowPartitionHostState == nullptr) return std::nullopt;
+        return backingMemory->rowPartitionHostState->nonEmptyRowCount;
+    }
+    [[nodiscard]] std::optional<uint64_t> getRowPartitionHostSumSquaredRowLengths() const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        if (backingMemory->rowPartitionHostState == nullptr) return std::nullopt;
+        return backingMemory->rowPartitionHostState->sumSquaredRowLengths;
+    }
     TensorPlacement placement;
     struct BackingMemory {
         explicit BackingMemory(TensorPlacement placement) : placement(placement) {}
@@ -253,10 +283,63 @@ class Tensor {
 
         void releaseChecked();
 
+        struct RowPartitionLogicalWorkState {
+            struct PairSummary {
+                std::weak_ptr<BackingMemory> partner;
+                uint64_t localPublicationGeneration = 0;
+                uint64_t partnerPublicationGeneration = 0;
+                std::optional<uint64_t> sumRowLengthProducts;
+
+                // LWA-4C1: exact prefix sums for this unique row-partition
+                // pairing. Both symmetric PairSummary entries share the same
+                // allocation, so memory grows with unique live partition pairs
+                // rather than attention-layer count. Storage is allocated only
+                // while stamping/registration, never during batch publication.
+                std::shared_ptr<std::vector<uint64_t>> rowLengthProductPrefix;
+
+                // Scratch used only while the owner is already walking a newly
+                // published partition. Keeping it inline avoids telemetry-driven
+                // per-batch heap allocation. It is never dereferenced outside that
+                // publication call.
+                const RowPartitionHostState* pendingPartnerState = nullptr;
+                uint64_t pendingPartnerGeneration = 0;
+                uint64_t pendingSumRowLengthProducts = 0;
+                bool pendingSummaryAvailable = false;
+            };
+
+            bool needsNonEmptyRowCount = false;
+            bool needsSquaredRowLengthSum = false;
+
+            // LWA-4C1: self-attention prefix sum(sum row_length^2). Like the
+            // segmented-mean prefix below, storage is allocated during
+            // registration and only filled during the existing publication
+            // validation pass.
+            std::vector<uint64_t> squaredRowLengthPrefix;
+            uint64_t squaredRowLengthPrefixPublicationGeneration = 0;
+
+            // LWA-4B2: reusable exact prefix summary for segmented mean.
+            // Storage is allocated best-effort while stamping/registering, never
+            // during per-batch host publication. Index i is the number of
+            // non-empty rows in [0, i). The generation gate prevents telemetry
+            // from observing a prefix from an older host publication.
+            std::vector<uint64_t> nonEmptyRowCountPrefix;
+            uint64_t nonEmptyRowCountPrefixPublicationGeneration = 0;
+
+            // Deduplicated by partner BackingMemory. LWA-4C1 adds one shared
+            // [B+1] prefix table per unique live pairing, so memory is
+            // O(B * unique partition pairs), never O(B * attention layers).
+            std::vector<PairSummary> pairs;
+        };
+
         TensorPlacement placement;
         void *mem = nullptr;
         bool cpuMemPinnedViaCudaHostRegister = false;
         std::shared_ptr<RowPartitionHostState> rowPartitionHostState;
+
+        // Most tensor allocations are not row-partition telemetry carriers.
+        // Allocate this only when stamping discovers a consumer that needs one
+        // of the exact cached summaries.
+        std::unique_ptr<RowPartitionLogicalWorkState> rowPartitionLogicalWorkState;
     };
 
     std::shared_ptr<BackingMemory> backingMemory;

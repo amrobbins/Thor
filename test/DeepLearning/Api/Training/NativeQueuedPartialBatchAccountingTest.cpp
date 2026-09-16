@@ -29,12 +29,17 @@
 #include "gtest/gtest.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -254,7 +259,12 @@ std::shared_ptr<Network> makeInputLossNetwork(bool requiresFullBatch = false) {
 
 class DeterministicTrainableBatchSession final : public BatchSession {
    public:
-    DeterministicTrainableBatchSession() : BatchSession("native_queue_trainable_oracle") { batchSize = 2; }
+    explicit DeterministicTrainableBatchSession(
+        std::function<void(ExampleType)> nextBatchObserver = {})
+        : BatchSession("native_queue_trainable_oracle"),
+          nextBatchObserver(std::move(nextBatchObserver)) {
+        batchSize = 2;
+    }
 
     uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override {
         return exampleType == ExampleType::TRAIN ? 3 : (exampleType == ExampleType::VALIDATE ? 2 : 0);
@@ -263,6 +273,9 @@ class DeterministicTrainableBatchSession final : public BatchSession {
     uint64_t getNumExamples(ExampleType exampleType) override { return getNumBatchesPerEpoch(exampleType) * batchSize; }
 
     uint64_t getNextBatchNum(ExampleType exampleType) override {
+        if (nextBatchObserver) {
+            nextBatchObserver(exampleType);
+        }
         if (exampleType == ExampleType::TRAIN)
             return nextTrainBatch;
         if (exampleType == ExampleType::VALIDATE)
@@ -318,6 +331,7 @@ class DeterministicTrainableBatchSession final : public BatchSession {
 
     uint64_t nextTrainBatch = 0;
     uint64_t nextValidateBatch = 0;
+    std::function<void(ExampleType)> nextBatchObserver;
 };
 
 struct HyperParameterUpdateInvocation {
@@ -613,6 +627,127 @@ TEST(NativeQueuedPartialBatchAccounting, ValidationDoesNotUpdateOptimizerHyperPa
     }
 }
 
+TEST(NativeQueuedPartialBatchAccounting, SegmentStatePreservesLifecycleEventOrdering) {
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    auto session = std::make_shared<DeterministicTrainableBatchSession>();
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = session;
+    request.optimizer = Sgd::Builder()
+                            .initialLearningRate(0.01f)
+                            .decay(0.0f)
+                            .momentum(0.0f)
+                            .build();
+    request.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 2;
+
+    CapturingObserver observer;
+    runNativeQueuedTraining(
+        request,
+        observer,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 3,
+                                    .synchronizeAfterEveryBatch = false});
+
+    std::vector<const TrainingEvent*> lifecycle;
+    for (const TrainingEvent& event : observer.events) {
+        if (event.type == TrainingEventType::EPOCH_STARTED ||
+            event.type == TrainingEventType::EPOCH_FINISHED) {
+            lifecycle.push_back(&event);
+        }
+    }
+
+    ASSERT_EQ(lifecycle.size(), 8u);
+    auto expectLifecycle = [&](size_t index,
+                               TrainingEventType type,
+                               TrainingEventPhase phase,
+                               uint64_t epoch,
+                               uint64_t stepsPerEpoch) {
+        ASSERT_LT(index, lifecycle.size());
+        EXPECT_EQ(lifecycle[index]->type, type) << "lifecycle event " << index;
+        EXPECT_EQ(lifecycle[index]->stats.phase, phase) << "lifecycle event " << index;
+        EXPECT_EQ(lifecycle[index]->stats.epoch, epoch) << "lifecycle event " << index;
+        EXPECT_EQ(lifecycle[index]->stats.stepsPerEpoch, stepsPerEpoch)
+            << "lifecycle event " << index;
+    };
+
+    expectLifecycle(0, TrainingEventType::EPOCH_STARTED, TrainingEventPhase::TRAIN, 1, 3);
+    expectLifecycle(1, TrainingEventType::EPOCH_FINISHED, TrainingEventPhase::TRAIN, 1, 3);
+    expectLifecycle(2, TrainingEventType::EPOCH_STARTED, TrainingEventPhase::VALIDATE, 1, 2);
+    expectLifecycle(3, TrainingEventType::EPOCH_FINISHED, TrainingEventPhase::VALIDATE, 1, 2);
+    expectLifecycle(4, TrainingEventType::EPOCH_STARTED, TrainingEventPhase::TRAIN, 2, 3);
+    expectLifecycle(5, TrainingEventType::EPOCH_FINISHED, TrainingEventPhase::TRAIN, 2, 3);
+    expectLifecycle(6, TrainingEventType::EPOCH_STARTED, TrainingEventPhase::VALIDATE, 2, 2);
+    expectLifecycle(7, TrainingEventType::EPOCH_FINISHED, TrainingEventPhase::VALIDATE, 2, 2);
+
+    const std::vector<TrainingStatsSnapshot> train =
+        observer.stats(TrainingEventPhase::TRAIN);
+    const std::vector<TrainingStatsSnapshot> validate =
+        observer.stats(TrainingEventPhase::VALIDATE);
+    ASSERT_EQ(train.size(), 6u);
+    ASSERT_EQ(validate.size(), 4u);
+    EXPECT_EQ(fieldValues(train, &TrainingStatsSnapshot::stepsPerEpoch),
+              (std::vector<uint64_t>{3, 3, 3, 3, 3, 3}));
+    EXPECT_EQ(fieldValues(validate, &TrainingStatsSnapshot::stepsPerEpoch),
+              (std::vector<uint64_t>{2, 2, 2, 2}));
+    EXPECT_EQ(fieldValues(train, &TrainingStatsSnapshot::epoch),
+              (std::vector<uint64_t>{1, 1, 1, 2, 2, 2}));
+    EXPECT_EQ(fieldValues(validate, &TrainingStatsSnapshot::epoch),
+              (std::vector<uint64_t>{1, 1, 2, 2}));
+}
+
+TEST(NativeQueuedPartialBatchAccounting, SegmentCursorIsResolvedOnSchedulerWorker) {
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    const std::thread::id callerThread = std::this_thread::get_id();
+    std::mutex observationMutex;
+    std::optional<std::thread::id> firstTrainCursorThread;
+    std::optional<std::thread::id> firstValidateCursorThread;
+    auto session = std::make_shared<DeterministicTrainableBatchSession>(
+        [&](ExampleType exampleType) {
+            std::lock_guard<std::mutex> lock(observationMutex);
+            std::optional<std::thread::id>* destination = nullptr;
+            if (exampleType == ExampleType::TRAIN) {
+                destination = &firstTrainCursorThread;
+            } else if (exampleType == ExampleType::VALIDATE) {
+                destination = &firstValidateCursorThread;
+            }
+            if (destination != nullptr && !destination->has_value()) {
+                destination->emplace(std::this_thread::get_id());
+            }
+        });
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = session;
+    request.optimizer = Sgd::Builder()
+                            .initialLearningRate(0.01f)
+                            .decay(0.0f)
+                            .momentum(0.0f)
+                            .build();
+    request.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 1;
+
+    CapturingObserver observer;
+    runNativeQueuedTraining(
+        request,
+        observer,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 3,
+                                    .synchronizeAfterEveryBatch = false});
+
+    std::lock_guard<std::mutex> lock(observationMutex);
+    ASSERT_TRUE(firstTrainCursorThread.has_value());
+    ASSERT_TRUE(firstValidateCursorThread.has_value());
+    EXPECT_NE(firstTrainCursorThread.value(), callerThread);
+    EXPECT_NE(firstValidateCursorThread.value(), callerThread);
+    EXPECT_EQ(firstTrainCursorThread.value(), firstValidateCursorThread.value());
+}
+
 TEST(NativeQueuedPartialBatchAccounting, QueuedTrainingMatchesSynchronizedReferenceForParameterUpdates) {
     const TrainableOracleResult reference =
         runTrainableOracle(NativeQueuedTrainingOptions{.maxInFlightBatches = 1, .synchronizeAfterEveryBatch = true});
@@ -630,28 +765,515 @@ TEST(NativeQueuedPartialBatchAccounting, QueuedTrainingMatchesSynchronizedRefere
     EXPECT_NEAR(queued.finalWeight, reference.finalWeight, 1e-6);
 }
 
-TEST(NativeQueuedPartialBatchAccounting, SchedulerResourcesPersistAcrossEpochExecutions) {
+TEST(NativeQueuedPartialBatchAccounting, SchedulerResourcesPersistAcrossSchedulingWindows) {
     detail::resetNativeQueuedSchedulerResourceDiagnosticsForTests();
 
-    (void)runTrainableOracle(
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    auto session = std::make_shared<DeterministicTrainableBatchSession>();
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = session;
+    request.optimizer = Sgd::Builder()
+                            .initialLearningRate(0.01f)
+                            .decay(0.0f)
+                            .momentum(0.0f)
+                            .build();
+    request.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 2;
+    request.checkBestModelEveryEpochs = 1;
+    request.firstModelSelectionEpoch = 1;
+    request.modelSelectionScore = TrainingModelSelectionScore(
+        [](const TrainingModelSelectionContext& context) {
+            return context.validationLoss();
+        });
+
+    CapturingObserver observer;
+    runNativeQueuedTraining(
+        request,
+        observer,
         NativeQueuedTrainingOptions{.maxInFlightBatches = 3,
                                     .synchronizeAfterEveryBatch = false});
 
     const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
         detail::nativeQueuedSchedulerResourceDiagnosticsForTests();
     EXPECT_EQ(diagnostics.resourceConstructionCount, 1u);
-    EXPECT_EQ(diagnostics.executionLaunchCount, 3u);
-    // Three epoch commands must execute on one run-scoped scheduler worker;
-    // logical epoch boundaries are not OS-thread lifetime boundaries.
+    EXPECT_EQ(diagnostics.runStateConstructionCount, 1u);
+    EXPECT_EQ(diagnostics.schedulingWindowCount, 2u);
+    EXPECT_EQ(diagnostics.hostDecisionBarrierCount, 1u);
     EXPECT_EQ(diagnostics.workerThreadStartCount, 1u);
     EXPECT_EQ(diagnostics.distinctWorkerThreadsObserved, 1u);
     EXPECT_EQ(diagnostics.distinctResourceInstancesObserved, 1u);
+    EXPECT_EQ(diagnostics.distinctRunStateInstancesObserved, 1u);
+    EXPECT_TRUE(diagnostics.slotStorageStableAcrossSchedulingWindows);
     EXPECT_NE(diagnostics.firstProcessingFinishedEventId, 0u);
     EXPECT_NE(diagnostics.firstCompletionFinishedEventId, 0u);
     EXPECT_TRUE(
-        diagnostics.processingFinishedEventIdStableAcrossExecutions);
+        diagnostics.processingFinishedEventIdStableAcrossSchedulingWindows);
     EXPECT_TRUE(
-        diagnostics.completionFinishedEventIdStableAcrossExecutions);
+        diagnostics.completionFinishedEventIdStableAcrossSchedulingWindows);
+}
+
+TEST(NativeQueuedPartialBatchAccounting, HundredEpochRunUsesOneWindowWithoutHostDecisionBarriers) {
+    detail::resetNativeQueuedSchedulerResourceDiagnosticsForTests();
+
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    auto session = std::make_shared<DeterministicTrainableBatchSession>();
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = session;
+    request.optimizer = Sgd::Builder()
+                            .initialLearningRate(0.01f)
+                            .decay(0.0f)
+                            .momentum(0.0f)
+                            .build();
+    request.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 100;
+
+    CapturingObserver observer;
+    runNativeQueuedTraining(
+        request,
+        observer,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                    .synchronizeAfterEveryBatch = false});
+
+    const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
+        detail::nativeQueuedSchedulerResourceDiagnosticsForTests();
+    EXPECT_EQ(diagnostics.resourceConstructionCount, 1u);
+    EXPECT_EQ(diagnostics.runStateConstructionCount, 1u);
+    EXPECT_EQ(diagnostics.workerThreadStartCount, 1u);
+    EXPECT_EQ(diagnostics.schedulingWindowCount, 1u);
+    EXPECT_EQ(diagnostics.hostDecisionBarrierCount, 0u);
+    EXPECT_EQ(diagnostics.distinctWorkerThreadsObserved, 1u);
+    EXPECT_EQ(diagnostics.distinctResourceInstancesObserved, 1u);
+    EXPECT_EQ(diagnostics.distinctRunStateInstancesObserved, 1u);
+    EXPECT_TRUE(diagnostics.slotStorageStableAcrossSchedulingWindows);
+    ASSERT_TRUE(diagnostics.hasSubmittedBatch);
+    EXPECT_EQ(diagnostics.submittedBatchCount, 500u);
+    EXPECT_EQ(diagnostics.maxOptimizerEpochSubmitted, 99u);
+}
+
+TEST(NativeQueuedPartialBatchAccounting, OrdinaryEpochBoundaryDoesNotDrainSchedulingWindow) {
+    detail::resetNativeQueuedSchedulerResourceDiagnosticsForTests();
+
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    auto session = std::make_shared<DeterministicTrainableBatchSession>();
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = session;
+    request.optimizer = Sgd::Builder()
+                            .initialLearningRate(0.01f)
+                            .decay(0.0f)
+                            .momentum(0.0f)
+                            .build();
+    request.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 2;
+
+    class CrossEpochObserver final : public TrainingObserver {
+       public:
+        void onTrainingEvent(const TrainingEvent& event) override {
+            if (event.type != TrainingEventType::EPOCH_FINISHED ||
+                event.stats.phase != TrainingEventPhase::VALIDATE ||
+                event.stats.epoch != 1) {
+                return;
+            }
+            // Give the persistent producer a bounded opportunity to get ahead.
+            // If EPOCH_FINISHED is accidentally a scheduler barrier, the producer
+            // cannot satisfy this condition until this callback returns.
+            const auto deadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            do {
+                const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
+                    detail::peekNativeQueuedSchedulerResourceDiagnosticsForTests();
+                if (diagnostics.hasSubmittedBatch &&
+                    diagnostics.maxOptimizerEpochSubmitted >= 1) {
+                    epochTwoSubmittedBeforeEpochOneValidationFinished = true;
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            } while (std::chrono::steady_clock::now() < deadline);
+        }
+
+        bool epochTwoSubmittedBeforeEpochOneValidationFinished = false;
+    } observer;
+
+    runNativeQueuedTraining(
+        request,
+        observer,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                    .synchronizeAfterEveryBatch = false});
+
+    EXPECT_TRUE(observer.epochTwoSubmittedBeforeEpochOneValidationFinished);
+    const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
+        detail::nativeQueuedSchedulerResourceDiagnosticsForTests();
+    EXPECT_EQ(diagnostics.schedulingWindowCount, 1u);
+    EXPECT_EQ(diagnostics.hostDecisionBarrierCount, 0u);
+    EXPECT_TRUE(diagnostics.hasSubmittedBatch);
+    EXPECT_GE(diagnostics.maxOptimizerEpochSubmitted, 1u);
+}
+
+TEST(NativeQueuedPartialBatchAccounting, NamedValidationPopulationsShareContinuousSchedulingWindow) {
+    detail::resetNativeQueuedSchedulerResourceDiagnosticsForTests();
+
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    auto defaultSession = std::make_shared<DeterministicTrainableBatchSession>();
+    auto namedSession = std::make_shared<DeterministicTrainableBatchSession>();
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = defaultSession;
+    request.defaultValidationPopulation = "unseen_sku";
+    request.additionalValidationSessions.push_back(
+        NamedValidationSession{"seen_sku", namedSession});
+    request.optimizer = Sgd::Builder()
+                            .initialLearningRate(0.01f)
+                            .decay(0.0f)
+                            .momentum(0.0f)
+                            .build();
+    request.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 2;
+
+    class NamedPopulationObserver final : public TrainingObserver {
+       public:
+        void onTrainingEvent(const TrainingEvent& event) override {
+            if (event.type == TrainingEventType::STATS &&
+                event.stats.phase == TrainingEventPhase::VALIDATE &&
+                event.stats.loss.has_value()) {
+                losses[{event.stats.epoch, event.stats.validationPopulation}]
+                    .push_back(event.stats.loss.value());
+            }
+            if (event.type != TrainingEventType::EPOCH_FINISHED ||
+                event.stats.phase != TrainingEventPhase::VALIDATE ||
+                event.stats.epoch != 1 ||
+                event.stats.validationPopulation != "seen_sku") {
+                return;
+            }
+
+            // The named population is the last segment in logical epoch one.
+            // Lifecycle delivery is a notification only: with spare slots the
+            // producer must already be allowed to submit epoch-two TRAIN work.
+            const auto deadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            do {
+                const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
+                    detail::peekNativeQueuedSchedulerResourceDiagnosticsForTests();
+                if (diagnostics.hasSubmittedBatch &&
+                    diagnostics.maxOptimizerEpochSubmitted >= 1) {
+                    epochTwoSubmittedBeforeNamedValidationFinished = true;
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            } while (std::chrono::steady_clock::now() < deadline);
+        }
+
+        std::map<std::pair<uint64_t, std::string>, std::vector<double>> losses;
+        bool epochTwoSubmittedBeforeNamedValidationFinished = false;
+    } observer;
+
+    runNativeQueuedTraining(
+        request,
+        observer,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                    .synchronizeAfterEveryBatch = false});
+
+    for (uint64_t epoch = 1; epoch <= 2; ++epoch) {
+        const auto defaultIt = observer.losses.find({epoch, "unseen_sku"});
+        const auto namedIt = observer.losses.find({epoch, "seen_sku"});
+        ASSERT_NE(defaultIt, observer.losses.end());
+        ASSERT_NE(namedIt, observer.losses.end());
+        ASSERT_EQ(defaultIt->second.size(), namedIt->second.size());
+        ASSERT_FALSE(defaultIt->second.empty());
+        for (size_t batch = 0; batch < defaultIt->second.size(); ++batch) {
+            // Both sessions expose identical validation examples. Equal losses
+            // prove both populations observed the same model checkpoint; an
+            // intervening epoch-two optimizer update would change this oracle.
+            EXPECT_NEAR(defaultIt->second[batch], namedIt->second[batch], 1e-6)
+                << "epoch " << epoch << " validation batch " << batch;
+        }
+    }
+
+    EXPECT_TRUE(observer.epochTwoSubmittedBeforeNamedValidationFinished);
+    const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
+        detail::nativeQueuedSchedulerResourceDiagnosticsForTests();
+    EXPECT_EQ(diagnostics.schedulingWindowCount, 1u);
+    EXPECT_EQ(diagnostics.hostDecisionBarrierCount, 0u);
+    EXPECT_EQ(diagnostics.workerThreadStartCount, 1u);
+}
+
+TEST(NativeQueuedPartialBatchAccounting, NamedValidationPopulationFeedsModelSelectionInsideDecisionWindow) {
+    detail::resetNativeQueuedSchedulerResourceDiagnosticsForTests();
+
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    auto defaultSession = std::make_shared<DeterministicTrainableBatchSession>();
+    auto namedSession = std::make_shared<DeterministicTrainableBatchSession>();
+    std::vector<TrainingModelSelectionContext> selectionContexts;
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = defaultSession;
+    request.defaultValidationPopulation = "unseen_sku";
+    request.additionalValidationSessions.push_back(
+        NamedValidationSession{"seen_sku", namedSession});
+    request.optimizer = Sgd::Builder()
+                            .initialLearningRate(0.01f)
+                            .decay(0.0f)
+                            .momentum(0.0f)
+                            .build();
+    request.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 1;
+    request.checkBestModelEveryEpochs = 1;
+    request.firstModelSelectionEpoch = 1;
+    request.modelSelectionScore = TrainingModelSelectionScore(
+        [&selectionContexts](const TrainingModelSelectionContext& context) {
+            selectionContexts.push_back(context);
+            return context.validation("seen_sku").loss;
+        });
+
+    CapturingObserver observer;
+    runNativeQueuedTraining(
+        request,
+        observer,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                    .synchronizeAfterEveryBatch = false});
+
+    ASSERT_FALSE(selectionContexts.empty());
+    for (const TrainingModelSelectionContext& context : selectionContexts) {
+        EXPECT_EQ(context.defaultValidationPopulation, "unseen_sku");
+        ASSERT_TRUE(context.validation("unseen_sku").loss.has_value());
+        ASSERT_TRUE(context.validation("seen_sku").loss.has_value());
+        EXPECT_NEAR(context.validation("unseen_sku").loss.value(),
+                    context.validation("seen_sku").loss.value(),
+                    1e-6);
+    }
+
+    const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
+        detail::nativeQueuedSchedulerResourceDiagnosticsForTests();
+    // Named validation is a segment inside the one decision window, not a
+    // standalone scheduler command.
+    EXPECT_EQ(diagnostics.schedulingWindowCount, 1u);
+    // This one-epoch fit evaluates model selection, but there is no later
+    // training window for that decision to gate.
+    EXPECT_EQ(diagnostics.hostDecisionBarrierCount, 0u);
+}
+
+TEST(NativeQueuedPartialBatchAccounting, ModelSelectionRetainsSchedulingWindowBarrier) {
+    detail::resetNativeQueuedSchedulerResourceDiagnosticsForTests();
+
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    auto session = std::make_shared<DeterministicTrainableBatchSession>();
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = session;
+    request.optimizer = Sgd::Builder()
+                            .initialLearningRate(0.01f)
+                            .decay(0.0f)
+                            .momentum(0.0f)
+                            .build();
+    request.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 2;
+    request.checkBestModelEveryEpochs = 1;
+    // Avoid a phase-entry validation command so this test observes only the
+    // trained-candidate decision barrier between epochs one and two.
+    request.firstModelSelectionEpoch = 1;
+    request.modelSelectionScore = TrainingModelSelectionScore(
+        [](const TrainingModelSelectionContext& context) {
+            return context.validationLoss();
+        });
+
+    class DecisionBarrierObserver final : public TrainingObserver {
+       public:
+        void onTrainingEvent(const TrainingEvent& event) override {
+            if (event.type != TrainingEventType::EPOCH_FINISHED ||
+                event.stats.phase != TrainingEventPhase::VALIDATE ||
+                event.stats.epoch != 1) {
+                return;
+            }
+            const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
+                detail::peekNativeQueuedSchedulerResourceDiagnosticsForTests();
+            epochTwoWasSubmittedBeforeEpochOneDecision =
+                diagnostics.hasSubmittedBatch &&
+                diagnostics.maxOptimizerEpochSubmitted >= 1;
+        }
+
+        bool epochTwoWasSubmittedBeforeEpochOneDecision = false;
+    } observer;
+
+    runNativeQueuedTraining(
+        request,
+        observer,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                    .synchronizeAfterEveryBatch = false});
+
+    EXPECT_FALSE(observer.epochTwoWasSubmittedBeforeEpochOneDecision);
+    const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
+        detail::nativeQueuedSchedulerResourceDiagnosticsForTests();
+    EXPECT_EQ(diagnostics.schedulingWindowCount, 2u);
+    // Epoch one gates epoch two. The final epoch's selection has no subsequent
+    // optimizer work to hold back, so it is not a scheduling barrier.
+    EXPECT_EQ(diagnostics.hostDecisionBarrierCount, 1u);
+    EXPECT_TRUE(diagnostics.hasSubmittedBatch);
+    EXPECT_GE(diagnostics.maxOptimizerEpochSubmitted, 1u);
+}
+
+TEST(NativeQueuedPartialBatchAccounting, ModelSelectionCadenceStreamsUntilDecisionEpoch) {
+    detail::resetNativeQueuedSchedulerResourceDiagnosticsForTests();
+
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    auto session = std::make_shared<DeterministicTrainableBatchSession>();
+    bool epochFourSubmittedBeforeEpochThreeDecision = false;
+    bool observedEpochThreeDecision = false;
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = session;
+    request.optimizer = Sgd::Builder()
+                            .initialLearningRate(0.01f)
+                            .decay(0.0f)
+                            .momentum(0.0f)
+                            .build();
+    request.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 4;
+    request.checkBestModelEveryEpochs = 3;
+    request.firstModelSelectionEpoch = 3;
+    request.modelSelectionScore = TrainingModelSelectionScore(
+        [&](const TrainingModelSelectionContext& context) {
+            if (context.epoch == 3) {
+                observedEpochThreeDecision = true;
+                const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
+                    detail::peekNativeQueuedSchedulerResourceDiagnosticsForTests();
+                epochFourSubmittedBeforeEpochThreeDecision =
+                    diagnostics.hasSubmittedBatch &&
+                    diagnostics.maxOptimizerEpochSubmitted >= 3;
+            }
+            return context.validationLoss();
+        });
+
+    class CadenceObserver final : public TrainingObserver {
+       public:
+        void onTrainingEvent(const TrainingEvent& event) override {
+            if (event.type != TrainingEventType::EPOCH_FINISHED ||
+                event.stats.phase != TrainingEventPhase::VALIDATE ||
+                event.stats.epoch != 1) {
+                return;
+            }
+
+            // Epochs 1 and 2 are not host-decision boundaries. With enough
+            // slots, the producer should be able to submit all the way through
+            // epoch 3 before this lifecycle notification returns.
+            const auto deadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            do {
+                const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
+                    detail::peekNativeQueuedSchedulerResourceDiagnosticsForTests();
+                if (diagnostics.hasSubmittedBatch &&
+                    diagnostics.maxOptimizerEpochSubmitted >= 2) {
+                    epochThreeSubmittedBeforeEpochOneFinished = true;
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            } while (std::chrono::steady_clock::now() < deadline);
+        }
+
+        bool epochThreeSubmittedBeforeEpochOneFinished = false;
+    } observer;
+
+    runNativeQueuedTraining(
+        request,
+        observer,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                    .synchronizeAfterEveryBatch = false});
+
+    EXPECT_TRUE(observer.epochThreeSubmittedBeforeEpochOneFinished);
+    EXPECT_TRUE(observedEpochThreeDecision);
+    EXPECT_FALSE(epochFourSubmittedBeforeEpochThreeDecision);
+
+    const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
+        detail::nativeQueuedSchedulerResourceDiagnosticsForTests();
+    // Epochs 1..3 form the first window through the decision epoch. Epoch 4 is
+    // submitted only after that decision returns, in a second window.
+    EXPECT_EQ(diagnostics.schedulingWindowCount, 2u);
+    EXPECT_EQ(diagnostics.hostDecisionBarrierCount, 1u);
+    EXPECT_TRUE(diagnostics.hasSubmittedBatch);
+    EXPECT_GE(diagnostics.maxOptimizerEpochSubmitted, 3u);
+}
+
+TEST(NativeQueuedPartialBatchAccounting, EarlyCompletionDecisionDoesNotSubmitNextWindow) {
+    detail::resetNativeQueuedSchedulerResourceDiagnosticsForTests();
+
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    auto session = std::make_shared<DeterministicTrainableBatchSession>();
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = session;
+    request.optimizer = Sgd::Builder()
+                            .initialLearningRate(0.01f)
+                            .decay(0.0f)
+                            .momentum(0.0f)
+                            .build();
+    request.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 5;
+    request.checkBestModelEveryEpochs = 3;
+    request.firstModelSelectionEpoch = 3;
+    request.modelSelectionScore = TrainingModelSelectionScore(
+        [](const TrainingModelSelectionContext& context) {
+            return context.validationLoss();
+        });
+    request.earlyCompletionPolicies = {
+        TrainingEarlyCompletionPolicy(
+            [](double, double, uint64_t currentEpoch, uint64_t) {
+                return currentEpoch == 3;
+            })};
+
+    CapturingObserver observer;
+    runNativeQueuedTraining(
+        request,
+        observer,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                    .synchronizeAfterEveryBatch = false});
+
+    uint64_t maxTrainEpochObserved = 0;
+    for (const TrainingStatsSnapshot& snapshot :
+         observer.stats(TrainingEventPhase::TRAIN)) {
+        maxTrainEpochObserved = std::max(maxTrainEpochObserved, snapshot.epoch);
+    }
+    EXPECT_EQ(maxTrainEpochObserved, 3u);
+
+    const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
+        detail::nativeQueuedSchedulerResourceDiagnosticsForTests();
+    // The first window ends at the epoch-3 decision. Early completion prevents
+    // any second window, so epoch-4 optimizer work is never even submitted.
+    EXPECT_EQ(diagnostics.schedulingWindowCount, 1u);
+    EXPECT_EQ(diagnostics.hostDecisionBarrierCount, 1u);
+    ASSERT_TRUE(diagnostics.hasSubmittedBatch);
+    EXPECT_EQ(diagnostics.maxOptimizerEpochSubmitted, 2u);
 }
 
 TEST(NativeQueuedPartialBatchAccounting, FullBatchOnlyLayerFallsBackToContinuousWrappedEpochs) {
@@ -724,6 +1346,50 @@ TEST(NativeQueuedPartialBatchAccounting, CappedTrainingWorkQuantaContinueAcrossP
     EXPECT_EQ(fieldValues(train, &TrainingStatsSnapshot::samplesProcessed), (std::vector<uint64_t>{4, 8, 10, 14}));
     EXPECT_EQ(session->getNextBatchNum(ExampleType::TRAIN), 1u);
     EXPECT_EQ(session->getNextBatchNum(ExampleType::VALIDATE), 0u);
+}
+
+TEST(NativeQueuedPartialBatchAccounting, LogicalWorkPairFeedsCoherentPhaseWallRates) {
+    auto session = std::make_shared<ExactPopulationBatchSession>(4, 4, 4);
+
+    TrainingRunRequest request;
+    request.network = makeInputLossNetwork();
+    request.batchSession = session;
+    request.optimizer = Sgd::Builder().initialLearningRate(0.01f).build();
+    request.datasetInputBindings = {TrainingInputBinding("predictions", "predictions"),
+                                    TrainingInputBinding("labels", "labels"),
+                                    TrainingInputBinding("weights", "weights")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 1;
+
+    CapturingObserver observer;
+    runNativeQueuedTraining(
+        request,
+        observer,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 2, .synchronizeAfterEveryBatch = false});
+
+    const std::vector<TrainingStatsSnapshot> train = observer.stats(TrainingEventPhase::TRAIN);
+    const std::vector<TrainingStatsSnapshot> validate = observer.stats(TrainingEventPhase::VALIDATE);
+    ASSERT_EQ(train.size(), 1u);
+    ASSERT_EQ(validate.size(), 1u);
+
+    auto expectCoherentLogicalRates = [](const TrainingStatsSnapshot& stats) {
+        EXPECT_GT(stats.floatingPointOperationsPerBatch, 0u);
+        EXPECT_GT(stats.logicalBytesPerBatch, 0u);
+        EXPECT_GT(stats.floatingPointOperationsPerSecond, 0.0);
+        EXPECT_GT(stats.logicalBytesPerSecond, 0.0);
+        EXPECT_NEAR(stats.logicalArithmeticIntensity,
+                    stats.floatingPointOperationsPerSecond / stats.logicalBytesPerSecond,
+                    1e-12);
+    };
+
+    expectCoherentLogicalRates(train.front());
+    expectCoherentLogicalRates(validate.front());
+
+    // TRAIN accounts forward + backward model work; VALIDATE accounts forward
+    // only. Optimizer updates remain outside both logical-work totals.
+    EXPECT_GT(train.front().floatingPointOperationsPerBatch,
+              validate.front().floatingPointOperationsPerBatch);
+    EXPECT_GT(train.front().logicalBytesPerBatch, validate.front().logicalBytesPerBatch);
 }
 
 TEST(NativeQueuedPartialBatchAccounting, LargeInitialEpochCannotMakeThroughputFlopAccountingFatal) {

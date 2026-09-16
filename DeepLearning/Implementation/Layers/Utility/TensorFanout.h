@@ -392,6 +392,15 @@ class TensorFanout : public MultiConnectionLayer {
     void *errorInputArray_d = nullptr;
     Event inputReadyEvent;
     std::vector<Event> backwardInputReadyEvents;
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override {
+        (void)validExampleCount;
+        return 0;
+    }
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override {
+        (void)validExampleCount;
+        return 0;
+    }
+
 };
 
 }  // namespace ThorImplementation

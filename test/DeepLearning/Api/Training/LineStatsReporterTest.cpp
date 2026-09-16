@@ -31,6 +31,8 @@ TrainingStatsSnapshot makeStats(double elapsedSeconds,
     stats.batchesPerSecond = 8.0;
     stats.floatingPointOperationsPerBatch = 1250000000;
     stats.floatingPointOperationsPerSecond = 2500000000000.0;
+    stats.logicalBytesPerSecond = 125000000000.0;
+    stats.logicalArithmeticIntensity = 20.0;
     stats.inFlightBatches = 32;
     stats.elapsedSeconds = elapsedSeconds;
     return stats;
@@ -89,7 +91,7 @@ std::string stripAnsiSequences(const std::string& output) {
 
 const char* alignedColorStatsLineWithoutAnsi() {
     return "INFO trainer: phase=train    epoch=      1/3 batch=        7/100 step=        17 loss= 1.250000 accuracy=0.7500 "
-           "lr=3.000e-04 samples/s=1.02K batches/s= 8.00 flops/s=2.500T in_flight=   32 elapsed= 00:01:05";
+           "lr=3.000e-04 samples/s=1.02K batches/s= 8.00 logical_flops/s=2.500T logical_bandwidth= 125GB/s logical_arithmetic_intensity=20.0F/B in_flight=   32 elapsed= 00:01:05";
 }
 
 bool tokenHasAnsiStyle(const std::string& output, const std::string& token, bool requireBold) {
@@ -158,17 +160,24 @@ TEST(LineStatsReporter, ReportsWindowedDevicePersistingL2Telemetry) {
     EXPECT_NE(line.find("window_l2_hit_ratio=1.000"), std::string::npos);
 }
 
-TEST(LineStatsReporter, FormatsFlopsRateWithFixedFiveCharacterNumber) {
+TEST(LineStatsReporter, FormatsLogicalWorkRatesAndArithmeticIntensity) {
     TrainingStatsSnapshot stats = makeStats(65.0);
 
     stats.floatingPointOperationsPerSecond = 857.0e9;
-    EXPECT_NE(LineStatsReporter::formatStatsLine(stats).find("flops/s=857.0G"), std::string::npos);
+    EXPECT_NE(LineStatsReporter::formatStatsLine(stats).find("logical_flops/s=857.0G"), std::string::npos);
 
     stats.floatingPointOperationsPerSecond = 1.14e12;
-    EXPECT_NE(LineStatsReporter::formatStatsLine(stats).find("flops/s=1.140T"), std::string::npos);
+    EXPECT_NE(LineStatsReporter::formatStatsLine(stats).find("logical_flops/s=1.140T"), std::string::npos);
 
     stats.floatingPointOperationsPerSecond = 29.7e12;
-    EXPECT_NE(LineStatsReporter::formatStatsLine(stats).find("flops/s=29.70T"), std::string::npos);
+    EXPECT_NE(LineStatsReporter::formatStatsLine(stats).find("logical_flops/s=29.70T"), std::string::npos);
+
+    stats.logicalBytesPerSecond = 1.42e12;
+    stats.logicalArithmeticIntensity = 20.9;
+    const std::string line = LineStatsReporter::formatStatsLine(stats);
+    EXPECT_NE(line.find("logical_bandwidth=1.42TB/s"), std::string::npos);
+    EXPECT_NE(line.find("logical_arithmetic_intensity=20.9F/B"), std::string::npos);
+    EXPECT_EQ(line.find(" flops/s="), std::string::npos);
 }
 
 
@@ -264,12 +273,16 @@ TEST(LineStatsReporter, ColorModeAlwaysAddsAnsi) {
     EXPECT_NE(output.find("INFO"), std::string::npos);
     EXPECT_NE(output.find("loss"), std::string::npos);
     EXPECT_NE(output.find("1.250000"), std::string::npos);
-    EXPECT_NE(output.find("flops/s"), std::string::npos);
+    EXPECT_NE(output.find("logical_flops/s"), std::string::npos);
+    EXPECT_NE(output.find("logical_bandwidth"), std::string::npos);
+    EXPECT_NE(output.find("logical_arithmetic_intensity"), std::string::npos);
     EXPECT_NE(output.find("2.500T"), std::string::npos);
     EXPECT_TRUE(tokenHasAnsiStyle(output, "train", true));
     EXPECT_TRUE(tokenHasAnsiStyle(output, "1.02K", true));
     EXPECT_TRUE(tokenHasAnsiStyle(output, "8.00", true));
     EXPECT_TRUE(tokenHasAnsiStyle(output, "2.500T", true));
+    EXPECT_TRUE(tokenHasAnsiStyle(output, "125GB/s", true));
+    EXPECT_TRUE(tokenHasAnsiStyle(output, "20.0F/B", true));
     EXPECT_TRUE(tokenHasAnsiStyle(output, "1.250000", false));
     EXPECT_TRUE(tokenHasAnsiStyle(output, "00:01:05", false));
     EXPECT_EQ(stripAnsiSequences(output), LineStatsReporter::formatStatsLine(makeStats(65.0)) + "\n");

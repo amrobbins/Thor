@@ -612,6 +612,10 @@ TEST(DropOut, RaggedTrainingUsesOnlyActivePrefixAndBackwardReusesForwardMask) {
     packedInput.copyFromAsync(sourceCpu, stream);
     dropOutLayer->forward(packedInput, false);
     dropOutLayer->forward(rowPartitionGpu, false);
+    const uint64_t fullLogicalDropoutBytes = activeRows * elementsPerValue * sizeof(float) * 2U;
+    const uint64_t firstRowLogicalDropoutBytes = (activeRows / 2) * elementsPerValue * sizeof(float) * 2U;
+    EXPECT_EQ(dropOutLayer->logicalByteCountForward(0), fullLogicalDropoutBytes);
+    EXPECT_EQ(dropOutLayer->logicalByteCountForward(1), firstRowLogicalDropoutBytes);
     stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
     Tensor outputCpu(cpuPlacement, descriptor);
     outputCpu.copyFromAsync(dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput().value(), stream);
@@ -640,6 +644,8 @@ TEST(DropOut, RaggedTrainingUsesOnlyActivePrefixAndBackwardReusesForwardMask) {
         errorInputValues, activeElements, totalElements, ThorTest::RaggedInactivePoison::NegativeFinite);
     errorInput.copyFromAsync(errorInputCpu, stream);
     dropOutLayer->backward(errorInput);
+    EXPECT_EQ(dropOutLayer->logicalByteCountBackward(0), fullLogicalDropoutBytes);
+    EXPECT_EQ(dropOutLayer->logicalByteCountBackward(1), firstRowLogicalDropoutBytes);
 
     Tensor errorOutputCpu(cpuPlacement, descriptor);
     errorOutputCpu.copyFromAsync(errorOutput, stream);

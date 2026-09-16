@@ -188,6 +188,41 @@ class RaggedAccuracyMetric : public CustomMetric {
 
     bool supportsPartialBatches() const override { return true; }
 
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override {
+        if (!featureInput.has_value() || !labelsInput.has_value() || !featureOutput.has_value() ||
+            !partitionCarrierInput.has_value() || maxTotalValues == 0) {
+            return 0;
+        }
+        const uint64_t validRows = validExampleCount == 0 ? batchSize : validExampleCount;
+        if (validRows > batchSize) return 0;
+        const std::optional<uint64_t> activeValues =
+            validRows == batchSize
+                ? RowPartitionRuntime::getPublishedHostActiveValueCountIfAvailable(partitionCarrierInput.value())
+                : RowPartitionRuntime::getPublishedHostOffsetIfAvailable(partitionCarrierInput.value(), validRows);
+        if (!activeValues.has_value() || activeValues.value() > maxTotalValues) return 0;
+
+        auto activeBytes = [&](const Tensor& tensor) -> std::optional<uint64_t> {
+            if (tensor.getArraySizeInBytes() % maxTotalValues != 0) return std::nullopt;
+            const uint64_t bytesPerValue = tensor.getArraySizeInBytes() / maxTotalValues;
+            if (bytesPerValue != 0 && activeValues.value() > std::numeric_limits<uint64_t>::max() / bytesPerValue)
+                return std::nullopt;
+            return activeValues.value() * bytesPerValue;
+        };
+        const auto predictionBytes = activeBytes(featureInput.value());
+        const auto labelBytes = activeBytes(labelsInput.value());
+        if (!predictionBytes.has_value() || !labelBytes.has_value()) return 0;
+        uint64_t bytes = checkedLogicalByteAdd(
+            predictionBytes.value(), labelBytes.value(), "Ragged accuracy active inputs");
+        // Hidden aggregation statistics/workspaces are reporting implementation
+        // details. The semantic metric result is the public scalar output.
+        return checkedLogicalByteAdd(bytes, featureOutput->getArraySizeInBytes(), "Ragged accuracy output");
+    }
+
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override {
+        (void)validExampleCount;
+        return 0;
+    }
+
     std::optional<Tensor> connectToPreviousLayer(Layer* previousLayer,
                                                  std::optional<Tensor> input,
                                                  Stream inputStream,

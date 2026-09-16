@@ -7,6 +7,12 @@
 
 namespace Thor {
 
+// Training events preserve logical submission/result order, but observer
+// callbacks are notifications rather than scheduler synchronization points.
+// In queued execution, later batches or epochs may already have been submitted
+// when EPOCH_STARTED/EPOCH_FINISHED/STATS is delivered. Throwing from an
+// observer requests the normal abort/unwind path; it does not retroactively
+// prevent already-submitted GPU work.
 class TrainingObserver {
    public:
     virtual ~TrainingObserver() = default;

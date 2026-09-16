@@ -410,6 +410,15 @@ class Layer {
 
     virtual uint64_t floatingPointOperationsPerExampleBackward() { return 0; }
 
+    // Batch-local logical tensor movement for this layer's semantic operation.
+    // The default implementation counts feature/error tensor operands and
+    // results, scaled to validExampleCount when they use the layer's stamped
+    // leading batch extent. Structural/view layers and operations with extra
+    // semantic operands override this surface. Physical workspace, staging,
+    // synchronization, and device-transfer traffic are not logical bytes.
+    virtual uint64_t logicalByteCountForward(uint64_t validExampleCount);
+    virtual uint64_t logicalByteCountBackward(uint64_t validExampleCount);
+
     virtual std::string getType() { return "Layer"; }
 
     static cudnnTensorDescriptor_t createCudnnTensorDescriptor(std::vector<unsigned long> featureInputDimensions,
@@ -440,6 +449,12 @@ class Layer {
     }
 
    protected:
+    static uint64_t checkedLogicalByteAdd(uint64_t lhs, uint64_t rhs, const char* where);
+    static uint64_t logicalTensorBytesForBatch(const Tensor& tensor,
+                                               uint64_t validExampleCount,
+                                               uint64_t physicalBatchCapacity);
+    static uint64_t logicalBatchCapacityFromTensor(const Tensor& tensor);
+
     static void appendSynchronizeEvent(std::vector<Event> &events,
                                        std::set<uint64_t> &synchronizedStreamIds,
                                        const Stream &stream) {

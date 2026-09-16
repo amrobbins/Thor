@@ -100,7 +100,9 @@ _TRAINER_STATS_RE = re.compile(
     r"batch=\s*(?P<batch>\d+)/(?:\d+)\s+"
     r"step=\s*(?P<step>\d+)\s+"
     r"loss=\s*(?P<loss>[-+0-9.eE]+).*?"
-    r"flops/s=\s*(?P<flops>[-+0-9.eE]+[KMGTPE]?)"
+    r"logical_flops/s=\s*(?P<logical_flops>[-+0-9.eE]+[KMGTPE]?)\s+"
+    r"logical_bandwidth=\s*(?P<logical_bandwidth>[-+0-9.eE]+[KMGTPE]?B/s)\s+"
+    r"logical_arithmetic_intensity=\s*(?P<logical_arithmetic_intensity>[-+0-9.eE]+F/B)"
 )
 
 
@@ -192,7 +194,9 @@ def _captured_trainer_stats(captured_text: str):
                 "step": int(match.group("step")),
                 "batch": int(match.group("batch")),
                 "loss": float(match.group("loss")),
-                "flops_per_s": match.group("flops"),
+                "logical_flops_per_s": match.group("logical_flops"),
+                "logical_bandwidth": match.group("logical_bandwidth"),
+                "logical_arithmetic_intensity": match.group("logical_arithmetic_intensity"),
             }
         )
     return stats
@@ -1170,6 +1174,8 @@ def test_queued_trainer_trains_byte_level_transformer_lm_on_fineweb_edu(capfd):
         )
         stats = _fit_and_capture_stats(trainer, epochs=BYTE_LM_EPOCHS)
         _assert_finite_positive_losses(stats, model_name="fineweb_edu_byte_transformer_lm")
-        assert max(_flops_value(entry["flops_per_s"]) for entry in stats) > 0.0
+        assert max(_flops_value(entry["logical_flops_per_s"]) for entry in stats) > 0.0
+        assert max(_flops_value(entry["logical_bandwidth"][:-3]) for entry in stats) > 0.0
+        assert max(float(entry["logical_arithmetic_intensity"][:-3]) for entry in stats) > 0.0
         if BYTE_LM_SAVE_DIR is not None:
             assert (BYTE_LM_SAVE_DIR / f"{network.get_network_name()}.thor.tar").exists()

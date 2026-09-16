@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/Layers/Loss/SparseCategoricalCrossEntropyWithLogits.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 #include "gtest/gtest.h"
@@ -181,6 +182,20 @@ TEST(SparseCategoricalCrossEntropyWithLogits, RaggedManagedActiveCountUsesPacked
                          .has_value());
         loss.connectToNextLayer(&lossSink);
         loss.compile();
+
+        // Logical-work telemetry follows authoritative host partition metadata,
+        // not the managed active-count scalar payload. These three logical rows
+        // contain 2, 0, and 3 packed tokens.
+        RowPartitionRuntime::publishHostState(
+            activeCount,
+            RowPartitionDescriptor(logicalBatchSize, rowCapacity, activeCountDataType),
+            activeCount.getTensorId(),
+            {0, 2, 2, 5});
+        EXPECT_EQ(loss.logicalByteCountForward(0), 125U);
+        EXPECT_EQ(loss.logicalByteCountBackward(0), 185U);
+        EXPECT_EQ(loss.logicalByteCountForward(2), 50U);
+        EXPECT_EQ(loss.logicalByteCountBackward(2), 74U);
+
         loss.initialize();
 
         ASSERT_TRUE(loss.getFeatureOutput().has_value());

@@ -70,8 +70,17 @@ struct TrainingStatsSnapshot {
     // draining an already-complete queue cannot create artificial rate spikes.
     double samplesPerSecond = 0.0;
     double batchesPerSecond = 0.0;
+    // Logical model work for the exact submitted/completed batch. The FLOP
+    // field retains its established name for source compatibility; both fields
+    // describe reference logical work rather than measured physical GPU work.
     uint64_t floatingPointOperationsPerBatch = 0;
+    uint64_t logicalBytesPerBatch = 0;
     double floatingPointOperationsPerSecond = 0.0;
+    double logicalBytesPerSecond = 0.0;
+    // Derived from the two logical work rates above, which share one timing
+    // interval and one EMA update. Units are logical floating-point operations
+    // per logical tensor byte (F/B).
+    double logicalArithmeticIntensity = 0.0;
 
     std::optional<double> loss{};
     std::optional<double> accuracy{};

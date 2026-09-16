@@ -230,6 +230,15 @@ class NetworkOutput : public Layer {
     uint32_t activeOutputSlot = 0;
     std::vector<OutputSlot> outputSlots;
     std::optional<Stream> outputStream;
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override {
+        (void)validExampleCount;
+        return 0;
+    }
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override {
+        (void)validExampleCount;
+        return 0;
+    }
+
 };
 
 }  // namespace ThorImplementation

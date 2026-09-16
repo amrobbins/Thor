@@ -82,6 +82,15 @@ class Reshape : public Layer {
         // No op
     }
 
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override {
+        (void)validExampleCount;
+        return 0;
+    }
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override {
+        (void)validExampleCount;
+        return 0;
+    }
+
    private:
     void fuseBackwardAliasThroughMetadataOnlyReshape() {
         // errorInput is the downstream gradient tensor whose descriptor matches

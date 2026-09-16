@@ -53,6 +53,42 @@ class RowPartitionRuntime {
     // the carrier payload and is intentionally safe before the first batch.
     [[nodiscard]] static bool hasPublishedHostState(const Tensor& carrier);
 
+    // O(1) read-only access to already-published authoritative host extent.
+    // These helpers never inspect the carrier payload, copy the full offsets
+    // vector, or synchronize with the device. They are intended for consumers
+    // whose semantic work depends only on the complete active-value count or
+    // one valid-row prefix boundary.
+    [[nodiscard]] static std::optional<uint64_t> getPublishedHostActiveValueCountIfAvailable(
+        const Tensor& carrier);
+    [[nodiscard]] static std::optional<uint64_t> getPublishedHostOffsetIfAvailable(
+        const Tensor& carrier, uint64_t row);
+    [[nodiscard]] static std::optional<uint64_t> getPublishedHostNonEmptyRowCountIfAvailable(
+        const Tensor& carrier);
+    [[nodiscard]] static std::optional<uint64_t> getPublishedHostNonEmptyRowCountForPrefixIfAvailable(
+        const Tensor& carrier, uint64_t validRowCount);
+    [[nodiscard]] static std::optional<uint64_t> getPublishedHostSumSquaredRowLengthsIfAvailable(
+        const Tensor& carrier);
+
+    // Opt in to exact non-empty-row accounting for consumers such as segmented
+    // mean. Registration allocates one reusable [B+1] prefix table best-effort
+    // while stamping; subsequent publications fill it inside their existing
+    // row-validation pass, so telemetry reads any valid-row prefix in O(1).
+    static void registerLogicalWorkNonEmptyRowCount(const Tensor& carrier) noexcept;
+
+    // Attention logical work depends on the exact per-row Q/K length product.
+    // Register that pairing while stamping so later host publications can fold
+    // both the exact total and an exact [B+1] prefix table into the publication
+    // pass that is already walking rows. Pair storage is deduplicated by the two
+    // partition identities, not by attention layer. Registration is best-effort
+    // and never makes model stamping fail merely because telemetry metadata
+    // could not be cached.
+    static void registerLogicalWorkRowPartitionPair(const Tensor& firstCarrier,
+                                                    const Tensor& secondCarrier) noexcept;
+    [[nodiscard]] static std::optional<uint64_t> getPublishedHostRowLengthProductSumIfAvailable(
+        const Tensor& firstCarrier, const Tensor& secondCarrier) noexcept;
+    [[nodiscard]] static std::optional<uint64_t> getPublishedHostRowLengthProductSumForPrefixIfAvailable(
+        const Tensor& firstCarrier, const Tensor& secondCarrier, uint64_t validRowCount) noexcept;
+
     // Publish authoritative host partition state with an explicit logical id on
     // any physical carrier. The carrier payload is untouched.
     static void publishHostState(Tensor carrier,
@@ -111,7 +147,10 @@ class RowPartitionRuntime {
     bool sharesRuntimeStateWith(const RowPartitionRuntime &rhs) const;
 
    private:
-    [[nodiscard]] uint64_t maxActiveRowLengthFromHostOffsets(const std::vector<uint64_t>& hostOffsets) const;
+    static void publishValidatedHostState(Tensor carrier,
+                                          RowPartitionDescriptor descriptor,
+                                          RowPartitionId rowPartitionId,
+                                          std::vector<uint64_t> hostOffsets);
     void validateHostOffsets(const std::vector<uint64_t> &hostOffsets) const;
 
     Tensor offsets;

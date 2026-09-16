@@ -15,6 +15,7 @@
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -351,7 +352,103 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         if (!newErrorInput.has_value()) pruneUpstreamValueGradients();
     }
 
+    // Sequence concatenate preserves every active input value exactly once. The
+    // output partition therefore has the sum of the active input extents. Backward
+    // counts only slices whose input-gradient routes are actually authored. Every
+    // extent query is O(1) in batch size because values tensors carry authoritative
+    // host partition state; this loop is only over the fixed layer input arity.
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override {
+        try {
+            if (featureOutputs.empty() || !featureOutputs[0].has_value() || featureInputs.size() < valueInputCount) return 0;
+            const std::optional<uint64_t> outputActive = logicalActiveValues(
+                featureOutputs[0].value(), outputDescriptor.getBatchSize(), outputDescriptor.getMaxTotalValues(), validExampleCount);
+            if (!outputActive.has_value()) return 0;
+
+            uint64_t bytes = 0;
+            uint64_t summedInputActive = 0;
+            for (uint32_t i = 0; i < valueInputCount; ++i) {
+                if (!featureInputs[i].has_value()) return 0;
+                const uint64_t inputCapacity = featureInputs[i]->getDimensions().empty() ? 0 : featureInputs[i]->getDimensions()[0];
+                const std::optional<uint64_t> inputActive = logicalActiveValues(
+                    featureInputs[i].value(), outputDescriptor.getBatchSize(), inputCapacity, validExampleCount);
+                if (!inputActive.has_value()) return 0;
+                if (summedInputActive > std::numeric_limits<uint64_t>::max() - *inputActive) return 0;
+                summedInputActive += *inputActive;
+                bytes = checkedLogicalByteAdd(
+                    bytes, logicalValueBytes(featureInputs[i].value(), inputCapacity, *inputActive,
+                                             "RaggedSequenceConcatenate forward input"),
+                    "RaggedSequenceConcatenate forward inputs");
+            }
+            if (summedInputActive != *outputActive) return 0;
+            return checkedLogicalByteAdd(
+                bytes, logicalValueBytes(featureOutputs[0].value(), outputDescriptor.getMaxTotalValues(),
+                                         *outputActive, "RaggedSequenceConcatenate forward output"),
+                "RaggedSequenceConcatenate forward");
+        } catch (...) {
+            return 0;
+        }
+    }
+
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override {
+        try {
+            if (errorInputs.empty() || !errorInputs[0].has_value() || featureInputs.size() < valueInputCount ||
+                errorOutputs.size() < valueInputCount) return 0;
+            uint64_t bytes = 0;
+            for (uint32_t i = 0; i < valueInputCount; ++i) {
+                if (!errorOutputs[i].has_value()) continue;
+                if (!featureInputs[i].has_value()) return 0;
+                const uint64_t inputCapacity = featureInputs[i]->getDimensions().empty() ? 0 : featureInputs[i]->getDimensions()[0];
+                const std::optional<uint64_t> inputActive = logicalActiveValues(
+                    featureInputs[i].value(), outputDescriptor.getBatchSize(), inputCapacity, validExampleCount);
+                if (!inputActive.has_value()) return 0;
+                bytes = checkedLogicalByteAdd(
+                    bytes, logicalValueBytes(errorInputs[0].value(), outputDescriptor.getMaxTotalValues(),
+                                             *inputActive, "RaggedSequenceConcatenate backward upstream slice"),
+                    "RaggedSequenceConcatenate backward upstream");
+                bytes = checkedLogicalByteAdd(
+                    bytes, logicalValueBytes(errorOutputs[i].value(), inputCapacity, *inputActive,
+                                             "RaggedSequenceConcatenate backward input gradient"),
+                    "RaggedSequenceConcatenate backward input gradient");
+            }
+            return bytes;
+        } catch (...) {
+            return 0;
+        }
+    }
+
    private:
+    [[nodiscard]] static std::optional<uint64_t> logicalActiveValues(
+        const Tensor& carrier, uint64_t batchSize, uint64_t valueCapacity, uint64_t validExampleCount) noexcept {
+        try {
+            if (valueCapacity == 0) return std::nullopt;
+            if (validExampleCount == 0) {
+                const auto active = RowPartitionRuntime::getPublishedHostActiveValueCountIfAvailable(carrier);
+                if (!active.has_value() || *active > valueCapacity) return std::nullopt;
+                return active;
+            }
+            if (validExampleCount > batchSize) return std::nullopt;
+            const auto active = RowPartitionRuntime::getPublishedHostOffsetIfAvailable(carrier, validExampleCount);
+            if (!active.has_value() || *active > valueCapacity) return std::nullopt;
+            return active;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    [[nodiscard]] static uint64_t logicalValueBytes(const Tensor& tensor,
+                                                    uint64_t valueCapacity,
+                                                    uint64_t activeValues,
+                                                    const char* where) {
+        if (valueCapacity == 0 || activeValues > valueCapacity) return 0;
+        const uint64_t capacityBytes = tensor.getArraySizeInBytes();
+        if (capacityBytes % valueCapacity != 0) return 0;
+        const uint64_t bytesPerValue = capacityBytes / valueCapacity;
+        if (bytesPerValue != 0 && activeValues > std::numeric_limits<uint64_t>::max() / bytesPerValue) {
+            throw std::overflow_error(std::string(where) + " logical byte count overflow.");
+        }
+        return activeValues * bytesPerValue;
+    }
+
     struct PointerRefreshArgs : public HostFunctionArgsBase {
         std::vector<void *> valuePointers;
         std::vector<void *> gradientPointers;

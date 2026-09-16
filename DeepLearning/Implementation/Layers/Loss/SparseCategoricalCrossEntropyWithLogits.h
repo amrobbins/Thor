@@ -40,6 +40,8 @@ class SparseCategoricalCrossEntropyWithLogits : public Loss {
     void backProp(std::optional<Tensor> labels, std::optional<Tensor> logits, std::optional<Tensor> lossGradient, Stream stream) override;
     void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t validExampleCount = 0) override;
     void backward(std::optional<Tensor> errorInput, uint32_t validExampleCount = 0) override;
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override;
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override;
     void ensureNoDeviceCrossing() override;
     std::string getType() override;
     std::vector<Stream> getProcessingStreams() override;

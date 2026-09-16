@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/Layers/Loss/CtcLoss.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 
 #include "gtest/gtest.h"
@@ -372,6 +373,36 @@ TEST(CtcLossImplementationLayer, CreatesPerSampleLossAndPredictionGradientDescri
     EXPECT_EQ(network.ctcLoss->getErrorOutput().value().getDescriptor(), TensorDescriptor(DataType::FP32, {2, 4, 3}));
     ASSERT_TRUE(network.ctcLoss->getGeneratedLabelLengthsForTesting().has_value());
     EXPECT_EQ(network.ctcLoss->getGeneratedLabelLengthsForTesting()->getDescriptor(), TensorDescriptor(DataType::INT32, {2}));
+
+    LayerTestHelper::tearDownNetwork(network.layers);
+}
+
+TEST(CtcLossImplementationLayer, Lwa4e3LogicalBytesUsePackedLabelPrefixAndValidDenseRows) {
+    CtcLayerNetwork network = makeTinyCtcNetwork(false);
+    LayerTestHelper::initializeNetwork(network.layers);
+
+    ASSERT_TRUE(network.ctcLoss->getLabelOffsetsInput().has_value());
+    Tensor offsetsCarrier = network.ctcLoss->getLabelOffsetsInput().value();
+    RowPartitionRuntime::publishHostState(
+        offsetsCarrier,
+        RowPartitionDescriptor(/*batchSize=*/2, /*maxTotalValues=*/4, offsetsCarrier.getDataType()),
+        offsetsCarrier.getTensorId(),
+        {0, 1, 3});
+
+    EXPECT_EQ(network.ctcLoss->logicalByteCountForward(0), 116U);
+    EXPECT_EQ(network.ctcLoss->logicalByteCountBackward(0), 204U);
+    EXPECT_EQ(network.ctcLoss->logicalByteCountForward(1), 56U);
+    EXPECT_EQ(network.ctcLoss->logicalByteCountBackward(1), 100U);
+
+    // Label offsets, input lengths, and generated label-length/error-bit work are
+    // structural implementation metadata and therefore are not part of logical bytes.
+    RowPartitionRuntime::publishHostState(
+        offsetsCarrier,
+        RowPartitionDescriptor(/*batchSize=*/2, /*maxTotalValues=*/4, offsetsCarrier.getDataType()),
+        offsetsCarrier.getTensorId(),
+        {0, 0, 0});
+    EXPECT_EQ(network.ctcLoss->logicalByteCountForward(0), 104U);
+    EXPECT_EQ(network.ctcLoss->logicalByteCountBackward(0), 192U);
 
     LayerTestHelper::tearDownNetwork(network.layers);
 }

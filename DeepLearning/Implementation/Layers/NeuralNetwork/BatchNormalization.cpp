@@ -250,6 +250,66 @@ uint64_t BatchNormalization::flopCountBackward() {
     return maybeInput.value().getTotalNumElements() * 16;
 }
 
+uint64_t BatchNormalization::logicalByteCountForward() {
+    if (featureInputs.empty()) return 0;
+    uint64_t bytes = 0;
+    const uint64_t weightsBytes = weights.getArraySizeInBytes();
+    const uint64_t biasesBytes = biases.getArraySizeInBytes();
+    const uint64_t runningMeanBytes = resultRunningMean.getArraySizeInBytes();
+    const uint64_t runningVarianceBytes = resultRunningVariance.getArraySizeInBytes();
+    for (size_t i = 0; i < featureInputs.size(); ++i) {
+        if (!featureInputs[i].has_value()) continue;
+        bytes = checkedLogicalByteAdd(bytes, featureInputs[i]->getArraySizeInBytes(), "BatchNormalization forward");
+        if (i < featureOutputs.size() && featureOutputs[i].has_value()) {
+            bytes = checkedLogicalByteAdd(bytes, featureOutputs[i]->getArraySizeInBytes(), "BatchNormalization forward");
+        }
+        bytes = checkedLogicalByteAdd(bytes, weightsBytes, "BatchNormalization forward");
+        bytes = checkedLogicalByteAdd(bytes, biasesBytes, "BatchNormalization forward");
+        bytes = checkedLogicalByteAdd(bytes, runningMeanBytes, "BatchNormalization forward");
+        bytes = checkedLogicalByteAdd(bytes, runningVarianceBytes, "BatchNormalization forward");
+        const bool updatesRunningStatistics =
+            i < forwardUsedTrainingStatistics.size() && forwardUsedTrainingStatistics[i];
+        if (updatesRunningStatistics) {
+            // Running statistics are model state, not backend workspace. A
+            // training-statistics forward logically reads and updates them.
+            bytes = checkedLogicalByteAdd(bytes, runningMeanBytes, "BatchNormalization forward");
+            bytes = checkedLogicalByteAdd(bytes, runningVarianceBytes, "BatchNormalization forward");
+        }
+    }
+    return bytes;
+}
+
+uint64_t BatchNormalization::logicalByteCountBackward() {
+    uint64_t bytes = 0;
+    const uint64_t weightsBytes = weights.getArraySizeInBytes();
+    const uint64_t biasesBytes = biases.getArraySizeInBytes();
+    const uint64_t runningVarianceBytes = resultRunningVariance.getArraySizeInBytes();
+    const bool weightsTraining = hasParameter("weights") && getParameter("weights")->isTrainingEnabled();
+    const bool biasesTraining = hasParameter("biases") && getParameter("biases")->isTrainingEnabled();
+    for (size_t i = 0; i < errorInputs.size(); ++i) {
+        if (!errorInputs[i].has_value()) continue;
+        bytes = checkedLogicalByteAdd(bytes, errorInputs[i]->getArraySizeInBytes(), "BatchNormalization backward");
+        if (i < featureInputs.size() && featureInputs[i].has_value()) {
+            bytes = checkedLogicalByteAdd(bytes, featureInputs[i]->getArraySizeInBytes(), "BatchNormalization backward");
+        }
+        bytes = checkedLogicalByteAdd(bytes, weightsBytes, "BatchNormalization backward");
+        if (i < errorOutputs.size() && errorOutputs[i].has_value()) {
+            bytes = checkedLogicalByteAdd(bytes, errorOutputs[i]->getArraySizeInBytes(), "BatchNormalization backward");
+        }
+        const bool usedTrainingStatistics =
+            i < forwardUsedTrainingStatistics.size() && forwardUsedTrainingStatistics[i];
+        if (usedTrainingStatistics) {
+            if (weightsTraining) bytes = checkedLogicalByteAdd(bytes, weightsBytes, "BatchNormalization backward");
+            if (biasesTraining) bytes = checkedLogicalByteAdd(bytes, biasesBytes, "BatchNormalization backward");
+        } else {
+            // Frozen/partial-batch backward uses fixed running variance and does
+            // not produce BatchNorm parameter gradients.
+            bytes = checkedLogicalByteAdd(bytes, runningVarianceBytes, "BatchNormalization backward");
+        }
+    }
+    return bytes;
+}
+
 void BatchNormalization::compileImpl() {
     TrainableLayer::compileImpl();
 

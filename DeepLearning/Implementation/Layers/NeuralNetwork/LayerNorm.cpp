@@ -182,6 +182,44 @@ uint64_t LayerNorm::flopCountBackward() {
     return maybeInput.value().getTotalNumElements() * 16;
 }
 
+uint64_t LayerNorm::logicalByteCountForward() {
+    uint64_t bytes = 0;
+    const uint64_t weightsBytes = weights.getArraySizeInBytes();
+    const uint64_t biasesBytes = biases.getArraySizeInBytes();
+    for (size_t i = 0; i < featureInputs.size(); ++i) {
+        if (!featureInputs[i].has_value()) continue;
+        bytes = checkedLogicalByteAdd(bytes, featureInputs[i]->getArraySizeInBytes(), "LayerNorm forward");
+        bytes = checkedLogicalByteAdd(bytes, weightsBytes, "LayerNorm forward");
+        bytes = checkedLogicalByteAdd(bytes, biasesBytes, "LayerNorm forward");
+        if (i < featureOutputs.size() && featureOutputs[i].has_value()) {
+            bytes = checkedLogicalByteAdd(bytes, featureOutputs[i]->getArraySizeInBytes(), "LayerNorm forward");
+        }
+    }
+    return bytes;
+}
+
+uint64_t LayerNorm::logicalByteCountBackward() {
+    uint64_t bytes = 0;
+    const uint64_t weightsBytes = weights.getArraySizeInBytes();
+    const uint64_t biasesBytes = biases.getArraySizeInBytes();
+    const bool weightsTraining = hasParameter("weights") && getParameter("weights")->isTrainingEnabled();
+    const bool biasesTraining = hasParameter("biases") && getParameter("biases")->isTrainingEnabled();
+    for (size_t i = 0; i < errorInputs.size(); ++i) {
+        if (!errorInputs[i].has_value()) continue;
+        bytes = checkedLogicalByteAdd(bytes, errorInputs[i]->getArraySizeInBytes(), "LayerNorm backward");
+        if (i < featureInputs.size() && featureInputs[i].has_value()) {
+            bytes = checkedLogicalByteAdd(bytes, featureInputs[i]->getArraySizeInBytes(), "LayerNorm backward");
+        }
+        bytes = checkedLogicalByteAdd(bytes, weightsBytes, "LayerNorm backward");
+        if (i < errorOutputs.size() && errorOutputs[i].has_value()) {
+            bytes = checkedLogicalByteAdd(bytes, errorOutputs[i]->getArraySizeInBytes(), "LayerNorm backward");
+        }
+        if (weightsTraining) bytes = checkedLogicalByteAdd(bytes, weightsBytes, "LayerNorm backward");
+        if (biasesTraining) bytes = checkedLogicalByteAdd(bytes, biasesBytes, "LayerNorm backward");
+    }
+    return bytes;
+}
+
 void LayerNorm::compileImpl() {
     TrainableLayer::compileImpl();
 

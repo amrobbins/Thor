@@ -163,6 +163,18 @@ std::string formatCompactFlopsRateString(double value) {
     }
 }
 
+std::string formatCompactBandwidthRateString(double value) {
+    return formatCompactRateString(value) + "B/s";
+}
+
+std::string formatLogicalArithmeticIntensityString(double value) {
+    const double absValue = std::abs(value);
+    const int precision = absValue >= 100.0 ? 0 : (absValue >= 10.0 ? 1 : 2);
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%.*fF/B", precision, value);
+    return std::string(buffer);
+}
+
 std::string formatUnsigned(uint64_t value) { return std::to_string(value); }
 
 std::string formatRatio(uint64_t numerator, uint64_t denominator) { return std::to_string(numerator) + "/" + std::to_string(denominator); }
@@ -179,6 +191,8 @@ void appendPadded(std::string& line, const std::string& value, size_t width, Pad
 
 constexpr size_t RATE_FIELD_WIDTH = 5;
 constexpr size_t FLOPS_RATE_FIELD_WIDTH = 6;
+constexpr size_t BANDWIDTH_FIELD_WIDTH = 8;
+constexpr size_t ARITHMETIC_INTENSITY_FIELD_WIDTH = 7;
 constexpr size_t TRAIN_LOSS_FIELD_WIDTH = sizeof(" train_loss=0.000000") - 1;
 constexpr size_t VALIDATE_LOSS_FIELD_WIDTH = sizeof(" validate_loss=0.000000") - 1;
 constexpr size_t RUN_PROGRESS_FIELDS_WIDTH = sizeof(" epoch=     20/20 batch=        24/24 step=       480") - 1;
@@ -434,8 +448,16 @@ std::string formatRunsStatsLineBase(const TrainingStatsSnapshot& stats,
         appendStyledPadded(line, formatCompactRateString(stats.batchesPerSecond), RATE_FIELD_WIDTH, SummaryAnsi::throughput, useColor);
     }
     if (stats.floatingPointOperationsPerSecond > 0.0) {
-        appendSummaryDimKey(line, "flops/s", useColor);
+        appendSummaryDimKey(line, "logical_flops/s", useColor);
         appendStyledPadded(line, formatCompactFlopsRateString(stats.floatingPointOperationsPerSecond), FLOPS_RATE_FIELD_WIDTH, SummaryAnsi::throughput, useColor);
+    }
+    if (stats.logicalBytesPerSecond > 0.0) {
+        appendSummaryDimKey(line, "logical_bandwidth", useColor);
+        appendStyledPadded(line, formatCompactBandwidthRateString(stats.logicalBytesPerSecond), BANDWIDTH_FIELD_WIDTH, SummaryAnsi::throughput, useColor);
+    }
+    if (stats.logicalArithmeticIntensity > 0.0) {
+        appendSummaryDimKey(line, "logical_arithmetic_intensity", useColor);
+        appendStyledPadded(line, formatLogicalArithmeticIntensityString(stats.logicalArithmeticIntensity), ARITHMETIC_INTENSITY_FIELD_WIDTH, SummaryAnsi::throughput, useColor);
     }
     if (stats.inFlightBatches > 0) {
         appendSummaryDimKey(line, "in_flight", useColor);

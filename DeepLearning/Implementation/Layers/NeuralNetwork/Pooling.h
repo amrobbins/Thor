@@ -214,6 +214,21 @@ class Pooling : public Layer {
     uint32_t getOutputHeight() { return outputHeight; }
     uint32_t getOutputWidth() { return outputWidth; }
 
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override {
+        uint64_t bytes = Layer::logicalByteCountBackward(validExampleCount);
+        if (!featureInput.has_value()) return bytes;
+        const uint64_t physicalBatchCapacity = logicalBatchCapacityFromTensor(featureInput.value());
+        bytes = checkedLogicalByteAdd(
+            bytes, logicalTensorBytesForBatch(featureInput.value(), validExampleCount, physicalBatchCapacity),
+            "Pooling backward");
+        if (featureOutput.has_value()) {
+            bytes = checkedLogicalByteAdd(
+                bytes, logicalTensorBytesForBatch(featureOutput.value(), validExampleCount, physicalBatchCapacity),
+                "Pooling backward");
+        }
+        return bytes;
+    }
+
    private:
     static const float ALPHA_NO_SCALE;
     static const float BETA_CLEAR;

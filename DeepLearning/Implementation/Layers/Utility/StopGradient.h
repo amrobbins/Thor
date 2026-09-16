@@ -37,6 +37,15 @@ class StopGradient : public Layer {
     }
 
     std::string getType() override { return "StopGradient"; }
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override {
+        (void)validExampleCount;
+        return 0;
+    }
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override {
+        (void)validExampleCount;
+        return 0;
+    }
+
 };
 
 }  // namespace ThorImplementation

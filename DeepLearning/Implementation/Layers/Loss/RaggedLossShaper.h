@@ -65,6 +65,9 @@ class RaggedLossShaper : public Layer {
     std::string getType() override { return "RaggedLossShaper"; }
     bool supportsPartialBatches() const override { return true; }
 
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override;
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override;
+
    private:
     using TensorMap = DynamicExpression::TensorMap;
 

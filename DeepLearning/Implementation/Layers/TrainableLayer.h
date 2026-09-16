@@ -321,6 +321,39 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     virtual uint64_t flopCountForward() = 0;
     virtual uint64_t flopCountBackward() = 0;
 
+    // LWA-4A: trainable layers may own runtime-active logical extents whose
+    // semantic work depends on the valid row prefix of a partial batch. Default
+    // implementations preserve their existing batch-local count; runtime-active
+    // implementations can override these overloads without changing execution.
+    virtual uint64_t flopCountForward(uint64_t validExampleCount) {
+        (void)validExampleCount;
+        return flopCountForward();
+    }
+    virtual uint64_t flopCountBackward(uint64_t validExampleCount) {
+        (void)validExampleCount;
+        return flopCountBackward();
+    }
+
+    // Trainable layers already own batch-local stamped execution state, so
+    // their logical-byte surfaces are expressed for the whole current batch.
+    // LWA-4 may override the valid-example overload for runtime-active/ragged
+    // specialization; fixed-shape implementations delegate to the no-argument
+    // semantic count here.
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override {
+        (void)validExampleCount;
+        return logicalByteCountForward();
+    }
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override {
+        (void)validExampleCount;
+        return logicalByteCountBackward();
+    }
+    virtual uint64_t logicalByteCountForward() {
+        return MultiConnectionLayer::logicalByteCountForward(0);
+    }
+    virtual uint64_t logicalByteCountBackward() {
+        return MultiConnectionLayer::logicalByteCountBackward(0);
+    }
+
    public:
     bool isBackPropStub() override {
         // A trainable layer still requires a downstream error tensor when it has

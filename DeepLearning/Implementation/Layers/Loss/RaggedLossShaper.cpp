@@ -196,6 +196,40 @@ void RaggedLossShaper::compileImpl() {
     }
 }
 
+uint64_t RaggedLossShaper::logicalByteCountForward(uint64_t validExampleCount) {
+    if (outputLossType == OutputLossType::RAW) {
+        // RAW is a structural alias of the packed raw-loss values. The consumer
+        // of that alias accounts for its read; the shaper itself performs no
+        // numerical tensor operation.
+        return 0;
+    }
+    if (perExampleStamped == nullptr) return 0;
+
+    uint64_t bytes = perExampleStamped->logicalByteCount(validExampleCount);
+    if (outputLossType != OutputLossType::BATCH) return bytes;
+    if (!perExampleWorkspace.has_value() || !featureOutput.has_value() || batchSize == 0) return 0;
+
+    const uint64_t validRows = validExampleCount == 0 ? batchSize : validExampleCount;
+    if (validRows > batchSize) return 0;
+    const uint64_t workspaceBytes = perExampleWorkspace->getArraySizeInBytes();
+    if (workspaceBytes % batchSize != 0) return 0;
+    const uint64_t bytesPerRow = workspaceBytes / batchSize;
+    if (bytesPerRow != 0 && validRows > std::numeric_limits<uint64_t>::max() / bytesPerRow) return 0;
+
+    // BATCH performs one additional logical reduction over the valid per-example
+    // values. Empty valid rows still contribute their zero per-example result and
+    // therefore remain part of the reduction/denominator semantics.
+    bytes = checkedLogicalByteAdd(bytes, validRows * bytesPerRow, "RaggedLossShaper batch reduction input");
+    bytes = checkedLogicalByteAdd(bytes, featureOutput->getArraySizeInBytes(), "RaggedLossShaper batch reduction output");
+    return bytes;
+}
+
+uint64_t RaggedLossShaper::logicalByteCountBackward(uint64_t validExampleCount) {
+    (void)validExampleCount;
+    // Reporting shapers are inference-only and intentionally prune backprop.
+    return 0;
+}
+
 void RaggedLossShaper::initialize() {
     Layer::initialize();
     valuesReceived = false;

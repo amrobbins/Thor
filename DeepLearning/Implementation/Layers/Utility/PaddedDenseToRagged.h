@@ -178,7 +178,81 @@ class PaddedDenseToRagged : public MultiConnectionLayer {
         if (!newErrorInput.has_value()) pruneUpstreamDenseGradient();
     }
 
+    // Dense adapter padding is structural capacity, not logical model payload.
+    // Count only numerical values inside the authoritative active ragged prefix;
+    // physical padding fill/zeroing and row-partition metadata are excluded.
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override {
+        const std::optional<uint64_t> activeValues = logicalActiveValues(validExampleCount);
+        if (!activeValues.has_value() || featureInputs.size() < 2 || !featureInputs[0].has_value() ||
+            featureOutputs.size() != 1 || !featureOutputs[0].has_value()) return 0;
+        return logicalAdapterBytes(featureInputs[0].value(), denseLogicalValueCapacity(),
+                                   featureOutputs[0].value(), outputDescriptor.getMaxTotalValues(), *activeValues,
+                                   "PaddedDenseToRagged forward");
+    }
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override {
+        const std::optional<uint64_t> activeValues = logicalActiveValues(validExampleCount);
+        if (!activeValues.has_value()) return 0;
+        if (errorInputs.empty() || !errorInputs[0].has_value() || errorOutputs.empty() || !errorOutputs[0].has_value()) return 0;
+        return logicalAdapterBytes(errorInputs[0].value(), outputDescriptor.getMaxTotalValues(),
+                                   errorOutputs[0].value(), denseLogicalValueCapacity(), *activeValues,
+                                   "PaddedDenseToRagged backward");
+    }
+
    private:
+    [[nodiscard]] std::optional<uint64_t> logicalActiveValues(uint64_t validExampleCount) const noexcept {
+        try {
+            if (featureInputs.size() < 2 || !featureInputs[1].has_value()) return std::nullopt;
+            const Tensor& carrier = featureInputs[1].value();
+            if (validExampleCount == 0) {
+                const auto active = RowPartitionRuntime::getPublishedHostActiveValueCountIfAvailable(carrier);
+                if (!active.has_value() || *active > outputDescriptor.getMaxTotalValues()) return std::nullopt;
+                return active;
+            }
+            if (validExampleCount > partitionDescriptor.getBatchSize()) return std::nullopt;
+            const auto active = RowPartitionRuntime::getPublishedHostOffsetIfAvailable(carrier, validExampleCount);
+            if (!active.has_value() || *active > outputDescriptor.getMaxTotalValues()) return std::nullopt;
+            return active;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    [[nodiscard]] uint64_t denseLogicalValueCapacity() const noexcept {
+        try {
+            const std::vector<uint64_t> dims = denseInputDescriptor.getDimensions();
+            if (dims.size() < 2 || dims[0] != partitionDescriptor.getBatchSize()) return 0;
+            if (dims[0] != 0 && dims[1] > std::numeric_limits<uint64_t>::max() / dims[0]) return 0;
+            return dims[0] * dims[1];
+        } catch (...) {
+            return 0;
+        }
+    }
+
+    [[nodiscard]] static uint64_t logicalAdapterBytes(const Tensor& first,
+                                                       uint64_t firstValueCapacity,
+                                                       const Tensor& second,
+                                                       uint64_t secondValueCapacity,
+                                                       uint64_t activeValues,
+                                                       const char* where) noexcept {
+        try {
+            if (firstValueCapacity == 0 || secondValueCapacity == 0 || activeValues > firstValueCapacity ||
+                activeValues > secondValueCapacity) return 0;
+            const uint64_t firstBytes = first.getArraySizeInBytes();
+            const uint64_t secondBytes = second.getArraySizeInBytes();
+            if (firstBytes % firstValueCapacity != 0 || secondBytes % secondValueCapacity != 0) return 0;
+            const uint64_t firstBytesPerValue = firstBytes / firstValueCapacity;
+            const uint64_t secondBytesPerValue = secondBytes / secondValueCapacity;
+            if (firstBytesPerValue != 0 && activeValues > std::numeric_limits<uint64_t>::max() / firstBytesPerValue) return 0;
+            if (secondBytesPerValue != 0 && activeValues > std::numeric_limits<uint64_t>::max() / secondBytesPerValue) return 0;
+            const uint64_t firstActiveBytes = activeValues * firstBytesPerValue;
+            const uint64_t secondActiveBytes = activeValues * secondBytesPerValue;
+            if (secondActiveBytes > std::numeric_limits<uint64_t>::max() - firstActiveBytes) return 0;
+            (void)where;
+            return firstActiveBytes + secondActiveBytes;
+        } catch (...) {
+            return 0;
+        }
+    }
     uint32_t resolveBatchCardinality(uint32_t runtimeBatchSize) {
         const uint32_t resolved = resolvedRuntimeBatch(runtimeBatchSize);
         if (batchCardinalitySet) {

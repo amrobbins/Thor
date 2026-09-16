@@ -294,6 +294,46 @@ class MultiConnectionLayer : public Layer {
     uint64_t getFanIn() override { return 1; }
 
     // compute the fan out for one element of a batch
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override {
+        const std::optional<Tensor> reference = getFirstPresentTensor(featureInputs);
+        const uint64_t physicalBatchCapacity =
+            reference.has_value() ? logicalBatchCapacityFromTensor(reference.value()) : 0;
+        uint64_t bytes = 0;
+        for (const auto& tensor : featureInputs) {
+            if (!tensor.has_value()) continue;
+            bytes = checkedLogicalByteAdd(
+                bytes, logicalTensorBytesForBatch(tensor.value(), validExampleCount, physicalBatchCapacity),
+                "MultiConnectionLayer forward");
+        }
+        for (const auto& tensor : featureOutputs) {
+            if (!tensor.has_value()) continue;
+            bytes = checkedLogicalByteAdd(
+                bytes, logicalTensorBytesForBatch(tensor.value(), validExampleCount, physicalBatchCapacity),
+                "MultiConnectionLayer forward");
+        }
+        return bytes;
+    }
+
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override {
+        const std::optional<Tensor> reference = getFirstPresentTensor(featureInputs);
+        const uint64_t physicalBatchCapacity =
+            reference.has_value() ? logicalBatchCapacityFromTensor(reference.value()) : 0;
+        uint64_t bytes = 0;
+        for (const auto& tensor : errorInputs) {
+            if (!tensor.has_value()) continue;
+            bytes = checkedLogicalByteAdd(
+                bytes, logicalTensorBytesForBatch(tensor.value(), validExampleCount, physicalBatchCapacity),
+                "MultiConnectionLayer backward");
+        }
+        for (const auto& tensor : errorOutputs) {
+            if (!tensor.has_value()) continue;
+            bytes = checkedLogicalByteAdd(
+                bytes, logicalTensorBytesForBatch(tensor.value(), validExampleCount, physicalBatchCapacity),
+                "MultiConnectionLayer backward");
+        }
+        return bytes;
+    }
+
     uint64_t getFanOut() override {
         std::optional<Tensor> aFeatureInput = getFirstPresentTensor(featureInputs);
         std::optional<Tensor> aFeatureOutput = getFirstPresentTensor(featureOutputs);

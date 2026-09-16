@@ -192,6 +192,44 @@ uint64_t InstanceNorm::flopCountBackward() {
     return maybeInput.value().getTotalNumElements() * 16;
 }
 
+uint64_t InstanceNorm::logicalByteCountForward() {
+    uint64_t bytes = 0;
+    const uint64_t weightsBytes = weights.getArraySizeInBytes();
+    const uint64_t biasesBytes = biases.getArraySizeInBytes();
+    for (size_t i = 0; i < featureInputs.size(); ++i) {
+        if (!featureInputs[i].has_value()) continue;
+        bytes = checkedLogicalByteAdd(bytes, featureInputs[i]->getArraySizeInBytes(), "InstanceNorm forward");
+        bytes = checkedLogicalByteAdd(bytes, weightsBytes, "InstanceNorm forward");
+        bytes = checkedLogicalByteAdd(bytes, biasesBytes, "InstanceNorm forward");
+        if (i < featureOutputs.size() && featureOutputs[i].has_value()) {
+            bytes = checkedLogicalByteAdd(bytes, featureOutputs[i]->getArraySizeInBytes(), "InstanceNorm forward");
+        }
+    }
+    return bytes;
+}
+
+uint64_t InstanceNorm::logicalByteCountBackward() {
+    uint64_t bytes = 0;
+    const uint64_t weightsBytes = weights.getArraySizeInBytes();
+    const uint64_t biasesBytes = biases.getArraySizeInBytes();
+    const bool weightsTraining = hasParameter("weights") && getParameter("weights")->isTrainingEnabled();
+    const bool biasesTraining = hasParameter("biases") && getParameter("biases")->isTrainingEnabled();
+    for (size_t i = 0; i < errorInputs.size(); ++i) {
+        if (!errorInputs[i].has_value()) continue;
+        bytes = checkedLogicalByteAdd(bytes, errorInputs[i]->getArraySizeInBytes(), "InstanceNorm backward");
+        if (i < featureInputs.size() && featureInputs[i].has_value()) {
+            bytes = checkedLogicalByteAdd(bytes, featureInputs[i]->getArraySizeInBytes(), "InstanceNorm backward");
+        }
+        bytes = checkedLogicalByteAdd(bytes, weightsBytes, "InstanceNorm backward");
+        if (i < errorOutputs.size() && errorOutputs[i].has_value()) {
+            bytes = checkedLogicalByteAdd(bytes, errorOutputs[i]->getArraySizeInBytes(), "InstanceNorm backward");
+        }
+        if (weightsTraining) bytes = checkedLogicalByteAdd(bytes, weightsBytes, "InstanceNorm backward");
+        if (biasesTraining) bytes = checkedLogicalByteAdd(bytes, biasesBytes, "InstanceNorm backward");
+    }
+    return bytes;
+}
+
 void InstanceNorm::compileImpl() {
     TrainableLayer::compileImpl();
 

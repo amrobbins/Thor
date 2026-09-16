@@ -191,6 +191,39 @@ uint64_t RMSNorm::flopCountBackward() {
     return maybeInput.value().getTotalNumElements() * 12;
 }
 
+uint64_t RMSNorm::logicalByteCountForward() {
+    uint64_t bytes = 0;
+    const uint64_t weightsBytes = weights.getArraySizeInBytes();
+    for (size_t i = 0; i < featureInputs.size(); ++i) {
+        if (!featureInputs[i].has_value()) continue;
+        bytes = checkedLogicalByteAdd(bytes, featureInputs[i]->getArraySizeInBytes(), "RMSNorm forward");
+        bytes = checkedLogicalByteAdd(bytes, weightsBytes, "RMSNorm forward");
+        if (i < featureOutputs.size() && featureOutputs[i].has_value()) {
+            bytes = checkedLogicalByteAdd(bytes, featureOutputs[i]->getArraySizeInBytes(), "RMSNorm forward");
+        }
+    }
+    return bytes;
+}
+
+uint64_t RMSNorm::logicalByteCountBackward() {
+    uint64_t bytes = 0;
+    const uint64_t weightsBytes = weights.getArraySizeInBytes();
+    const bool weightsTraining = hasParameter("weights") && getParameter("weights")->isTrainingEnabled();
+    for (size_t i = 0; i < errorInputs.size(); ++i) {
+        if (!errorInputs[i].has_value()) continue;
+        bytes = checkedLogicalByteAdd(bytes, errorInputs[i]->getArraySizeInBytes(), "RMSNorm backward");
+        if (i < featureInputs.size() && featureInputs[i].has_value()) {
+            bytes = checkedLogicalByteAdd(bytes, featureInputs[i]->getArraySizeInBytes(), "RMSNorm backward");
+        }
+        bytes = checkedLogicalByteAdd(bytes, weightsBytes, "RMSNorm backward");
+        if (i < errorOutputs.size() && errorOutputs[i].has_value()) {
+            bytes = checkedLogicalByteAdd(bytes, errorOutputs[i]->getArraySizeInBytes(), "RMSNorm backward");
+        }
+        if (weightsTraining) bytes = checkedLogicalByteAdd(bytes, weightsBytes, "RMSNorm backward");
+    }
+    return bytes;
+}
+
 void RMSNorm::compileImpl() {
     TrainableLayer::compileImpl();
 

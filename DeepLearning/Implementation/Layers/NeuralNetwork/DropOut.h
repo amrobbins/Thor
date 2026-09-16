@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <optional>
 #include <random>
 #include <stdexcept>
@@ -208,6 +209,8 @@ class DropOut : public Layer, public TrainingDropoutControllable {
     void cleanup() override {
         nativeForwardSequenceForBackward.reset();
         raggedActiveValueCountForBackward.reset();
+        lastForwardAppliedDropoutForLogicalWorkAccounting = false;
+        lastBackwardAppliedDropoutForLogicalWorkAccounting = false;
         Layer::cleanup();
     }
 
@@ -272,6 +275,7 @@ class DropOut : public Layer, public TrainingDropoutControllable {
     void backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream) override {
         if (!errorOut.has_value()) {
             applyDropoutForBackward = false;
+            lastBackwardAppliedDropoutForLogicalWorkAccounting = false;
             nativeForwardSequenceForBackward.reset();
             raggedActiveValueCountForBackward.reset();
             return;
@@ -281,6 +285,7 @@ class DropOut : public Layer, public TrainingDropoutControllable {
 
         const bool applyDropout = applyDropoutForBackward;
         applyDropoutForBackward = false;
+        lastBackwardAppliedDropoutForLogicalWorkAccounting = applyDropout;
 
         if (raggedConfiguration.has_value()) {
             if (probabilityOfDroppingOut == 0.0f) {
@@ -354,9 +359,68 @@ class DropOut : public Layer, public TrainingDropoutControllable {
 
     bool isTrainingMode() { return training; }
 
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override {
+        if (!lastForwardAppliedDropoutForLogicalWorkAccounting) return 0;
+        if (raggedConfiguration.has_value()) {
+            return raggedLogicalByteCount(featureInput, featureOutput, validExampleCount);
+        }
+        return Layer::logicalByteCountForward(validExampleCount);
+    }
+
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override {
+        if (!lastBackwardAppliedDropoutForLogicalWorkAccounting) return 0;
+        if (raggedConfiguration.has_value()) {
+            return raggedLogicalByteCount(errorInput, errorOutput, validExampleCount);
+        }
+        return Layer::logicalByteCountBackward(validExampleCount);
+    }
+
     float getDropOutRate() const { return probabilityOfDroppingOut; }
 
    private:
+    [[nodiscard]] uint64_t raggedLogicalByteCount(const std::optional<Tensor>& input,
+                                                   const std::optional<Tensor>& output,
+                                                   uint64_t validExampleCount) const noexcept {
+        try {
+            if (!raggedConfiguration.has_value() || !rowPartitionInput.has_value() ||
+                !input.has_value() || !output.has_value()) return 0;
+
+            std::optional<uint64_t> activeValues;
+            if (validExampleCount == 0) {
+                activeValues = RowPartitionRuntime::getPublishedHostActiveValueCountIfAvailable(rowPartitionInput.value());
+            } else {
+                activeValues = RowPartitionRuntime::getPublishedHostOffsetIfAvailable(rowPartitionInput.value(), validExampleCount);
+            }
+            if (!activeValues.has_value() || *activeValues > raggedConfiguration->fullCapacityRows) return 0;
+
+            const auto tensorBytesForActiveValues = [&](const Tensor& tensor) -> std::optional<uint64_t> {
+                const uint64_t totalElements = tensor.getTotalNumElements();
+                if (raggedConfiguration->fullCapacityRows == 0 || raggedConfiguration->elementsPerValue == 0) return std::nullopt;
+                if (raggedConfiguration->fullCapacityRows > std::numeric_limits<uint64_t>::max() /
+                        raggedConfiguration->elementsPerValue) return std::nullopt;
+                const uint64_t capacityElements =
+                    raggedConfiguration->fullCapacityRows * raggedConfiguration->elementsPerValue;
+                if (totalElements != capacityElements) return std::nullopt;
+                const uint64_t totalBytes = tensor.getArraySizeInBytes();
+                if (totalBytes % capacityElements != 0) return std::nullopt;
+                const uint64_t bytesPerElement = totalBytes / capacityElements;
+                if (*activeValues > std::numeric_limits<uint64_t>::max() / raggedConfiguration->elementsPerValue) return std::nullopt;
+                const uint64_t activeElements = *activeValues * raggedConfiguration->elementsPerValue;
+                if (bytesPerElement != 0 && activeElements > std::numeric_limits<uint64_t>::max() / bytesPerElement) return std::nullopt;
+                return activeElements * bytesPerElement;
+            };
+
+            const std::optional<uint64_t> inputBytes = tensorBytesForActiveValues(input.value());
+            const std::optional<uint64_t> outputBytes = tensorBytesForActiveValues(output.value());
+            if (!inputBytes.has_value() || !outputBytes.has_value() ||
+                *outputBytes > std::numeric_limits<uint64_t>::max() - *inputBytes) return 0;
+            // In-place dropout still logically reads and writes the active value.
+            return *inputBytes + *outputBytes;
+        } catch (...) {
+            return 0;
+        }
+    }
+
     void validateRaggedTensorShape(const Tensor& tensor) const {
         THOR_THROW_IF_FALSE(raggedConfiguration.has_value());
         const uint64_t totalElements = tensor.getTotalNumElements();
@@ -399,6 +463,7 @@ class DropOut : public Layer, public TrainingDropoutControllable {
             applyDropoutThisForward = previousApplyDropout;
             throw;
         }
+        lastForwardAppliedDropoutForLogicalWorkAccounting = applyDropout;
         if (training && !validationPass) {
             applyDropoutForBackward = applyDropout;
         }
@@ -425,6 +490,8 @@ class DropOut : public Layer, public TrainingDropoutControllable {
     bool trainingDropoutEnabled = true;
     bool applyDropoutThisForward = false;
     bool applyDropoutForBackward = false;
+    bool lastForwardAppliedDropoutForLogicalWorkAccounting = false;
+    bool lastBackwardAppliedDropoutForLogicalWorkAccounting = false;
 
     uint64_t randomSeed = 0;
     uint64_t nativeForwardSequence = 0;

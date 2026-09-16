@@ -151,6 +151,12 @@ struct CompiledExecutionStage {
     const std::vector<uint32_t> input_value_ids;
     const std::vector<CompiledStageOutput> outputs;
 
+    // Fused stages retain how many distinct authored logical nodes each
+    // post-CSE physical node represents. This is accounting metadata only; it
+    // must not affect compilation, cache identity, or execution. Non-fused
+    // stages leave it empty.
+    const std::vector<uint32_t> logical_node_multiplicities = {};
+
     [[nodiscard]] DataType outputDType(size_t output_idx) const {
         if (output_idx >= outputs.size()) {
             throw std::runtime_error("CompiledExecutionStage::outputDType output index out of range for stage kind " + kindToString(kind) +
@@ -377,12 +383,14 @@ struct CompiledExecutionStage {
                            const std::shared_ptr<CompiledEquation>& flat,
                            std::vector<uint32_t> input_value_ids,
                            std::vector<CompiledStageOutput> outputs,
-                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {},
+                           std::vector<uint32_t> logical_node_multiplicities = {})
         : kind(Kind::FusedKernel),
           expr(expr),
           flat(flat),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
+          logical_node_multiplicities(std::move(logical_node_multiplicities)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
 
     CompiledExecutionStage(const PhysicalExpression& expr,

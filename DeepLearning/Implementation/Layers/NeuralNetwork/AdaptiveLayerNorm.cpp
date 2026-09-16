@@ -487,13 +487,64 @@ bool AdaptiveLayerNorm::isBackPropStub() { return !anyErrorOutput(); }
 uint64_t AdaptiveLayerNorm::floatingPointOperationsPerExampleForward() {
     if (!adaptiveFeatureInputs[DATA].has_value())
         return 0;
-    return adaptiveFeatureInputs[DATA].value().getTotalNumElements() * 8;
+    const uint64_t physicalBatchCapacity = computeBatchSize(adaptiveFeatureInputs[DATA].value());
+    THOR_THROW_IF_FALSE(physicalBatchCapacity > 0);
+    return (adaptiveFeatureInputs[DATA].value().getTotalNumElements() / physicalBatchCapacity) * 8;
 }
 
 uint64_t AdaptiveLayerNorm::floatingPointOperationsPerExampleBackward() {
     if (!adaptiveFeatureInputs[DATA].has_value())
         return 0;
-    return adaptiveFeatureInputs[DATA].value().getTotalNumElements() * 16;
+    const uint64_t physicalBatchCapacity = computeBatchSize(adaptiveFeatureInputs[DATA].value());
+    THOR_THROW_IF_FALSE(physicalBatchCapacity > 0);
+    return (adaptiveFeatureInputs[DATA].value().getTotalNumElements() / physicalBatchCapacity) * 16;
+}
+
+uint64_t AdaptiveLayerNorm::logicalByteCountForward(uint64_t validExampleCount) {
+    if (!adaptiveFeatureInputs[DATA].has_value()) return 0;
+    const uint64_t physicalBatchCapacity = computeBatchSize(adaptiveFeatureInputs[DATA].value());
+    uint64_t bytes = 0;
+    for (const auto& tensor : adaptiveFeatureInputs) {
+        if (!tensor.has_value()) continue;
+        bytes = checkedLogicalByteAdd(
+            bytes, logicalTensorBytesForBatch(tensor.value(), validExampleCount, physicalBatchCapacity),
+            "AdaptiveLayerNorm forward");
+    }
+    if (featureOutput.has_value()) {
+        bytes = checkedLogicalByteAdd(
+            bytes, logicalTensorBytesForBatch(featureOutput.value(), validExampleCount, physicalBatchCapacity),
+            "AdaptiveLayerNorm forward");
+    }
+    return bytes;
+}
+
+uint64_t AdaptiveLayerNorm::logicalByteCountBackward(uint64_t validExampleCount) {
+    if (!adaptiveFeatureInputs[DATA].has_value()) return 0;
+    const uint64_t physicalBatchCapacity = computeBatchSize(adaptiveFeatureInputs[DATA].value());
+    uint64_t bytes = 0;
+    if (errorInput.has_value()) {
+        bytes = checkedLogicalByteAdd(
+            bytes, logicalTensorBytesForBatch(errorInput.value(), validExampleCount, physicalBatchCapacity),
+            "AdaptiveLayerNorm backward");
+    }
+    // x and scale are semantic backward operands. Bias affects only its own
+    // gradient and its value is not needed by the derivative. Saved cuDNN
+    // mean/inv-variance and workspaces remain physical implementation state.
+    bytes = checkedLogicalByteAdd(
+        bytes, logicalTensorBytesForBatch(adaptiveFeatureInputs[DATA].value(), validExampleCount, physicalBatchCapacity),
+        "AdaptiveLayerNorm backward");
+    if (adaptiveFeatureInputs[SCALE].has_value()) {
+        bytes = checkedLogicalByteAdd(
+            bytes, logicalTensorBytesForBatch(adaptiveFeatureInputs[SCALE].value(), validExampleCount, physicalBatchCapacity),
+            "AdaptiveLayerNorm backward");
+    }
+    for (const auto& tensor : adaptiveErrorOutputs) {
+        if (!tensor.has_value()) continue;
+        bytes = checkedLogicalByteAdd(
+            bytes, logicalTensorBytesForBatch(tensor.value(), validExampleCount, physicalBatchCapacity),
+            "AdaptiveLayerNorm backward");
+    }
+    return bytes;
 }
 
 void AdaptiveLayerNorm::infer(optional<Tensor> inputTensor, optional<Tensor> outputTensor, Stream stream) {

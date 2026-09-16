@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/Layers/Loss/RaggedCustomLoss.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
@@ -381,6 +382,79 @@ void runActivePrefixCase(DataType predictionDType, DataType labelDType, DataType
     EXPECT_EQ(lossSink.lastForwardBatchSize, batchSize);
     EXPECT_EQ(predictionsSource.lastBackwardBatchSize, batchSize);
     loss.cleanup();
+}
+
+
+TEST(RaggedCustomLoss, Lwa4e3LogicalBytesUseAuthoredStampedExpressionsAndActiveHostPrefix) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batchSize = 3;
+    constexpr uint64_t width = 2;
+
+    auto workForCapacity = [&](uint64_t capacity) {
+        Stream stream(0);
+        Tensor predictions(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, width}));
+        Tensor labels(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, width}));
+        Tensor activeCount(gpuPlacement, TensorDescriptor(DataType::UINT32, {1}));
+        RowPartitionRuntime::publishHostState(
+            activeCount,
+            RowPartitionDescriptor(batchSize, capacity, DataType::UINT32),
+            activeCount.getTensorId(),
+            {0, 2, 2, 5});
+
+        RaggedCustomLoss loss(makeSquaredErrorLossExpression(DataType::FP32),
+                              makeSquaredErrorGradientExpression(),
+                              batchSize,
+                              capacity);
+        PassiveEndpoint predictionsSource, labelsSource, activeCountSource, lossSink;
+        EXPECT_TRUE(loss.connectToPreviousLayer(
+                            &predictionsSource,
+                            predictions,
+                            stream,
+                            true,
+                            static_cast<int>(RaggedCustomLoss::InputConnection::PREDICTIONS))
+                        .has_value());
+        EXPECT_FALSE(loss.connectToPreviousLayer(
+                             &labelsSource,
+                             labels,
+                             stream,
+                             false,
+                             static_cast<int>(RaggedCustomLoss::InputConnection::LABELS))
+                         .has_value());
+        EXPECT_FALSE(loss.connectToPreviousLayer(
+                             &activeCountSource,
+                             activeCount,
+                             stream,
+                             false,
+                             static_cast<int>(RaggedCustomLoss::InputConnection::OFFSETS))
+                         .has_value());
+        loss.connectToNextLayer(&lossSink);
+        loss.compile();
+
+        const uint64_t fullForward = loss.logicalByteCountForward(0);
+        const uint64_t partialForward = loss.logicalByteCountForward(2);
+        const uint64_t fullBackward = loss.logicalByteCountBackward(0);
+        const uint64_t partialBackward = loss.logicalByteCountBackward(2);
+        EXPECT_GT(fullForward, partialForward);
+        EXPECT_GT(partialForward, 0U);
+        EXPECT_GT(fullBackward, partialBackward);
+        EXPECT_GT(partialBackward, 0U);
+
+        // Device scalar contents are irrelevant to accounting. Re-publishing an
+        // all-empty authoritative partition must make the authored valuewise loss
+        // and gradient contribute zero bytes without inspecting the device payload.
+        RowPartitionRuntime::publishHostState(
+            activeCount,
+            RowPartitionDescriptor(batchSize, capacity, DataType::UINT32),
+            activeCount.getTensorId(),
+            {0, 0, 0, 0});
+        EXPECT_EQ(loss.logicalByteCountForward(0), 0U);
+        EXPECT_EQ(loss.logicalByteCountBackward(0), 0U);
+
+        loss.cleanup();
+        return std::vector<uint64_t>{fullForward, partialForward, fullBackward, partialBackward};
+    };
+
+    EXPECT_EQ(workForCapacity(8), workForCapacity(16));
 }
 
 }  // namespace

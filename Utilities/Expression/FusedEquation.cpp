@@ -3787,6 +3787,7 @@ static PhysicalExecutionStage toPhysicalFusedStage(const CompiledExecutionStage&
         .expr = stage.expr,
         .input_value_ids = stage.input_value_ids,
         .outputs = stage.outputs,
+        .logical_node_multiplicities = stage.logical_node_multiplicities,
     };
 }
 
@@ -5090,7 +5091,11 @@ static uint64_t computeFusedStageNodeFlops(const PhysicalExpression& expr,
 
 static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
                                        const std::vector<std::vector<uint64_t>>& stage_input_dims,
-                                       const std::vector<CompiledStageOutput>& outputs) {
+                                       const std::vector<CompiledStageOutput>& outputs,
+                                       const std::vector<uint32_t>& logical_node_multiplicities = {}) {
+    if (!logical_node_multiplicities.empty() && logical_node_multiplicities.size() != expr.nodes.size()) {
+        throw std::runtime_error("Fused-stage logical node multiplicity metadata does not match the physical node count.");
+    }
     std::unordered_set<uint32_t> reachable_nodes;
     for (const CompiledStageOutput& out : outputs) {
         collectReachableLocalNodes(expr, out.local_node_idx, reachable_nodes);
@@ -5104,9 +5109,354 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
         if (!reachable_nodes.contains(static_cast<uint32_t>(i))) {
             continue;
         }
-        total = checkedAddU64(total, computeFusedStageNodeFlops(expr, node_dims, i), "computeFusedStageFlops");
+        const uint64_t node_flops = computeFusedStageNodeFlops(expr, node_dims, i);
+        const uint64_t multiplicity = logical_node_multiplicities.empty() ? 1u : logical_node_multiplicities[i];
+        const uint64_t logical_node_flops = checkedMulU64(node_flops, multiplicity, "computeFusedStageFlops");
+        total = checkedAddU64(total, logical_node_flops, "computeFusedStageFlops");
     }
     return total;
+}
+
+static bool fusedStageNodeIsPureStructuralAlias(ExprOp op) {
+    switch (op) {
+        case ExprOp::RAGGED_VALUEWISE_EXTENT:
+        case ExprOp::RESHAPE:
+        case ExprOp::STRIDED_VIEW:
+        case ExprOp::UNSQUEEZE:
+        case ExprOp::SQUEEZE:
+        case ExprOp::TRANSPOSE:
+        case ExprOp::BROADCAST_TO:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static std::vector<bool> inferFusedStageTensorValueFlags(const PhysicalExpression& expr,
+                                                         const std::unordered_set<uint32_t>& reachable_nodes) {
+    std::vector<bool> is_tensor_value(expr.nodes.size(), false);
+    for (size_t i = 0; i < expr.nodes.size(); ++i) {
+        if (!reachable_nodes.contains(static_cast<uint32_t>(i))) {
+            continue;
+        }
+
+        const ExprNode& node = expr.nodes[i];
+        switch (node.op) {
+            case ExprOp::INPUT:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
+            case ExprOp::FILL:
+                is_tensor_value[i] = true;
+                continue;
+            case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::SCALAR_FP:
+                is_tensor_value[i] = false;
+                continue;
+            default:
+                break;
+        }
+
+        if (fusedStageNodeIsPureStructuralAlias(node.op)) {
+            // These APIs define tensor-shaped logical values even when their
+            // source is a scalar expression (for example scalar broadcast_to).
+            // They remain zero-byte operations themselves; a downstream
+            // consumer charges the logical tensor read.
+            is_tensor_value[i] = true;
+            continue;
+        }
+
+        auto inherits_tensor_value = [&](uint32_t parent_idx) {
+            return parent_idx != UINT32_MAX && parent_idx < i && is_tensor_value[parent_idx];
+        };
+        bool tensor_result = inherits_tensor_value(node.lhs);
+        if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
+            tensor_result = tensor_result || inherits_tensor_value(node.rhs);
+        }
+        if (Expression::isTernaryOp(node.op)) {
+            tensor_result = tensor_result || inherits_tensor_value(node.aux);
+        }
+        is_tensor_value[i] = tensor_result;
+    }
+    return is_tensor_value;
+}
+
+static uint64_t fusedStageLogicalTensorValueBytes(const PhysicalExpression& expr,
+                                                  const std::vector<std::vector<uint64_t>>& node_dims,
+                                                  const std::vector<bool>& is_tensor_value,
+                                                  uint32_t node_idx) {
+    if (node_idx == UINT32_MAX || node_idx >= expr.nodes.size() || node_idx >= node_dims.size() ||
+        node_idx >= is_tensor_value.size()) {
+        throw std::runtime_error("Fused-stage logical-byte accounting node index is out of range.");
+    }
+    if (!is_tensor_value[node_idx]) {
+        return 0;
+    }
+
+    const ExprNode& value_node = expr.nodes[node_idx];
+    if (value_node.op == ExprOp::BROADCAST_TO) {
+        if (value_node.lhs == UINT32_MAX) {
+            throw std::runtime_error("Fused-stage logical-byte broadcast alias is missing its source.");
+        }
+        // BROADCAST_TO is a zero-copy logical alias. Charge a consumer for the
+        // distinct source payload once, matching ordinary implicit broadcasting,
+        // rather than pretending the expanded index domain was materialized.
+        return fusedStageLogicalTensorValueBytes(expr, node_dims, is_tensor_value, value_node.lhs);
+    }
+
+    const std::optional<DataType> storage_dtype =
+        value_node.op == ExprOp::TENSOR_RUNTIME_SCALAR && value_node.input_tensor_dtype.has_value()
+            ? value_node.input_tensor_dtype
+            : materializedValueStorageDType(expr, node_idx);
+    if (!storage_dtype.has_value()) {
+        throw std::runtime_error("Fused-stage logical-byte accounting could not resolve tensor storage dtype.");
+    }
+    const float element_size_float = TensorDescriptor::getElementSizeInBytes(storage_dtype.value());
+    const uint64_t element_size_bytes = static_cast<uint64_t>(element_size_float);
+    if (element_size_bytes == 0 || static_cast<float>(element_size_bytes) != element_size_float) {
+        throw std::runtime_error("Fused-stage logical-byte accounting requires a whole-byte tensor storage dtype.");
+    }
+    return checkedMulU64(
+        numelFromDims(node_dims[node_idx]), element_size_bytes, "fusedStageLogicalTensorValueBytes");
+}
+
+static uint64_t computeFusedStageNodeLogicalBytes(const PhysicalExpression& expr,
+                                                  const std::vector<std::vector<uint64_t>>& node_dims,
+                                                  const std::vector<bool>& is_tensor_value,
+                                                  size_t node_idx) {
+    if (node_idx >= expr.nodes.size() || node_idx >= node_dims.size() || node_idx >= is_tensor_value.size()) {
+        throw std::runtime_error("Fused-stage logical-byte accounting node index is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+    switch (node.op) {
+        case ExprOp::INPUT:
+        case ExprOp::RUNTIME_SCALAR:
+        case ExprOp::TENSOR_RUNTIME_SCALAR:
+        case ExprOp::SCALAR_FP:
+            // Source values are charged when a logical operation consumes them.
+            return 0;
+        case ExprOp::FILL:
+            // FILL has no tensor operand but logically produces a tensor result.
+            return fusedStageLogicalTensorValueBytes(
+                expr, node_dims, is_tensor_value, static_cast<uint32_t>(node_idx));
+        default:
+            break;
+    }
+
+    // Reshape/transpose/view/broadcast operations describe logical aliases or
+    // index-domain views. They do not themselves create a logical tensor read
+    // or write. A downstream authored operation charges a read of the aliased
+    // logical value using that value's resolved shape and storage dtype.
+    if (fusedStageNodeIsPureStructuralAlias(node.op)) {
+        return 0;
+    }
+
+    // Count each authored tensor operand once at its logical payload size and
+    // count the authored result once. This models model-level tensor movement,
+    // not repeated physical loads caused by indexing, tiling, cache misses, or
+    // another implementation detail. Repeated operand positions remain repeated
+    // logical reads (for example x + x).
+    uint64_t total = 0;
+    auto add_operand = [&](uint32_t operand_idx) {
+        if (operand_idx == UINT32_MAX) {
+            return;
+        }
+        total = checkedAddU64(
+            total,
+            fusedStageLogicalTensorValueBytes(expr, node_dims, is_tensor_value, operand_idx),
+            "computeFusedStageNodeLogicalBytes");
+    };
+
+    add_operand(node.lhs);
+    if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
+        add_operand(node.rhs);
+    }
+    if (Expression::isTernaryOp(node.op)) {
+        add_operand(node.aux);
+    }
+
+    // RoPE has optional semantic tensor inputs that are not represented by the
+    // ordinary lhs/rhs/aux arity. They affect the authored computation and are
+    // therefore logical operand reads when tensor-backed.
+    if (node.op == ExprOp::ROPE) {
+        if (node.rope_effective_sequence_length_node != UINT32_MAX) {
+            add_operand(node.rope_effective_sequence_length_node);
+        }
+        if (node.rope_position_ids_node != UINT32_MAX) {
+            add_operand(node.rope_position_ids_node);
+        }
+    }
+
+    total = checkedAddU64(
+        total,
+        fusedStageLogicalTensorValueBytes(
+            expr, node_dims, is_tensor_value, static_cast<uint32_t>(node_idx)),
+        "computeFusedStageNodeLogicalBytes");
+    return total;
+}
+
+static uint64_t computeFusedStageLogicalBytes(
+    const PhysicalExpression& expr,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims,
+    const std::vector<CompiledStageOutput>& outputs,
+    const std::vector<uint32_t>& logical_node_multiplicities = {}) {
+    if (!logical_node_multiplicities.empty() && logical_node_multiplicities.size() != expr.nodes.size()) {
+        throw std::runtime_error("Fused-stage logical node multiplicity metadata does not match the physical node count.");
+    }
+
+    std::unordered_set<uint32_t> reachable_nodes;
+    for (const CompiledStageOutput& out : outputs) {
+        collectReachableLocalNodes(expr, out.local_node_idx, reachable_nodes);
+    }
+    const std::vector<std::vector<uint64_t>> node_dims =
+        inferFusedStageNodeDimsForReachable(expr, stage_input_dims, reachable_nodes);
+    const std::vector<bool> is_tensor_value = inferFusedStageTensorValueFlags(expr, reachable_nodes);
+
+    uint64_t total = 0;
+    for (size_t i = 0; i < expr.nodes.size(); ++i) {
+        if (!reachable_nodes.contains(static_cast<uint32_t>(i))) {
+            continue;
+        }
+        const uint64_t node_bytes = computeFusedStageNodeLogicalBytes(expr, node_dims, is_tensor_value, i);
+        const uint64_t multiplicity = logical_node_multiplicities.empty() ? 1u : logical_node_multiplicities[i];
+        const uint64_t authored_node_bytes =
+            checkedMulU64(node_bytes, multiplicity, "computeFusedStageLogicalBytes");
+        total = checkedAddU64(total, authored_node_bytes, "computeFusedStageLogicalBytes");
+    }
+    return total;
+}
+
+struct RaggedFusedStageByteModelSpec {
+    uint32_t offsets_input_slot = UINT32_MAX;
+    uint64_t batch_size = 0;
+    uint64_t max_active_values = 0;
+    uint64_t bytes_per_active_value = 0;
+    uint64_t fixed_bytes_when_nonempty = 0;
+};
+
+static std::optional<RaggedFusedStageByteModelSpec> computeActiveExtentFusedStageLogicalByteModel(
+    const PhysicalExpression& expr,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims,
+    const std::vector<CompiledStageOutput>& outputs,
+    uint64_t max_active_values,
+    const std::unordered_set<uint32_t>& active_extent_input_slots,
+    const std::vector<uint32_t>& logical_node_multiplicities = {}) {
+    if (!logical_node_multiplicities.empty() && logical_node_multiplicities.size() != expr.nodes.size()) {
+        throw std::runtime_error(
+            "Active-extent fused logical-byte node multiplicity metadata does not match the physical node count.");
+    }
+    if (max_active_values == 0 || active_extent_input_slots.empty()) {
+        return std::nullopt;
+    }
+
+    std::unordered_set<uint32_t> reachable_nodes;
+    for (const CompiledStageOutput& out : outputs) {
+        collectReachableLocalNodes(expr, out.local_node_idx, reachable_nodes);
+    }
+    const std::vector<std::vector<uint64_t>> node_dims =
+        inferFusedStageNodeDimsForReachable(expr, stage_input_dims, reachable_nodes);
+    const std::vector<bool> is_tensor_value = inferFusedStageTensorValueFlags(expr, reachable_nodes);
+
+    std::vector<bool> active_extent_node(expr.nodes.size(), false);
+    for (size_t i = 0; i < expr.nodes.size(); ++i) {
+        if (!reachable_nodes.contains(static_cast<uint32_t>(i))) {
+            continue;
+        }
+        const ExprNode& node = expr.nodes[i];
+        if (node.op == ExprOp::INPUT) {
+            active_extent_node[i] = active_extent_input_slots.contains(node.input_slot);
+            continue;
+        }
+        if (node.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+            // The marker preserves the active packed domain for downstream
+            // fused operations. Canonical RaggedExpression value inputs are
+            // seeded through active_extent_input_slots; the structural marker
+            // itself contributes no logical tensor bytes.
+            active_extent_node[i] = true;
+            continue;
+        }
+        auto inherit = [&](uint32_t input_node) {
+            return input_node != UINT32_MAX && input_node < i && active_extent_node[input_node];
+        };
+        active_extent_node[i] = inherit(node.lhs) || inherit(node.rhs) || inherit(node.aux);
+    }
+
+    uint64_t bytes_per_active_value = 0;
+    uint64_t fixed_bytes_when_nonempty = 0;
+    bool valid_model = true;
+
+    auto add_value = [&](uint32_t value_idx, uint64_t multiplicity) {
+        if (!valid_model || value_idx == UINT32_MAX) {
+            return;
+        }
+        const uint64_t bytes = fusedStageLogicalTensorValueBytes(expr, node_dims, is_tensor_value, value_idx);
+        if (bytes == 0) {
+            return;
+        }
+        const uint64_t authored_bytes =
+            checkedMulU64(bytes, multiplicity, "computeActiveExtentFusedStageLogicalByteModel");
+        if (active_extent_node[value_idx]) {
+            if (authored_bytes % max_active_values != 0) {
+                valid_model = false;
+                return;
+            }
+            bytes_per_active_value = checkedAddU64(
+                bytes_per_active_value,
+                authored_bytes / max_active_values,
+                "computeActiveExtentFusedStageLogicalByteModel");
+        } else {
+            fixed_bytes_when_nonempty = checkedAddU64(
+                fixed_bytes_when_nonempty,
+                authored_bytes,
+                "computeActiveExtentFusedStageLogicalByteModel");
+        }
+    };
+
+    for (size_t i = 0; i < expr.nodes.size() && valid_model; ++i) {
+        if (!reachable_nodes.contains(static_cast<uint32_t>(i))) {
+            continue;
+        }
+        const ExprNode& node = expr.nodes[i];
+        const uint64_t multiplicity = logical_node_multiplicities.empty() ? 1u : logical_node_multiplicities[i];
+        switch (node.op) {
+            case ExprOp::INPUT:
+            case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
+            case ExprOp::SCALAR_FP:
+                continue;
+            case ExprOp::FILL:
+                add_value(static_cast<uint32_t>(i), multiplicity);
+                continue;
+            default:
+                break;
+        }
+        if (fusedStageNodeIsPureStructuralAlias(node.op)) {
+            continue;
+        }
+
+        add_value(node.lhs, multiplicity);
+        if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
+            add_value(node.rhs, multiplicity);
+        }
+        if (Expression::isTernaryOp(node.op)) {
+            add_value(node.aux, multiplicity);
+        }
+        if (node.op == ExprOp::ROPE) {
+            add_value(node.rope_effective_sequence_length_node, multiplicity);
+            add_value(node.rope_position_ids_node, multiplicity);
+        }
+        add_value(static_cast<uint32_t>(i), multiplicity);
+    }
+
+    if (!valid_model) {
+        return std::nullopt;
+    }
+    return RaggedFusedStageByteModelSpec{
+        .offsets_input_slot = UINT32_MAX,
+        .batch_size = 0,
+        .max_active_values = max_active_values,
+        .bytes_per_active_value = bytes_per_active_value,
+        .fixed_bytes_when_nonempty = fixed_bytes_when_nonempty,
+    };
 }
 
 struct RaggedFusedStageFlopModelSpec {
@@ -5122,7 +5472,11 @@ static std::optional<RaggedFusedStageFlopModelSpec> computeActiveExtentFusedStag
     const std::vector<std::vector<uint64_t>>& stage_input_dims,
     const std::vector<CompiledStageOutput>& outputs,
     uint64_t max_active_values,
-    const std::unordered_set<uint32_t>& active_extent_input_slots) {
+    const std::unordered_set<uint32_t>& active_extent_input_slots,
+    const std::vector<uint32_t>& logical_node_multiplicities = {}) {
+    if (!logical_node_multiplicities.empty() && logical_node_multiplicities.size() != expr.nodes.size()) {
+        throw std::runtime_error("Active-extent fused logical node multiplicity metadata does not match the physical node count.");
+    }
     if (max_active_values == 0 || active_extent_input_slots.empty()) {
         return std::nullopt;
     }
@@ -5169,7 +5523,10 @@ static std::optional<RaggedFusedStageFlopModelSpec> computeActiveExtentFusedStag
             active_extent_node[i] = inherit(node.lhs) || inherit(node.rhs) || inherit(node.aux);
         }
 
-        const uint64_t node_flops = computeFusedStageNodeFlops(expr, node_dims, i);
+        const uint64_t physical_node_flops = computeFusedStageNodeFlops(expr, node_dims, i);
+        const uint64_t multiplicity = logical_node_multiplicities.empty() ? 1u : logical_node_multiplicities[i];
+        const uint64_t node_flops =
+            checkedMulU64(physical_node_flops, multiplicity, "computeActiveExtentFusedStageFlopModel");
         if (node_flops == 0) {
             continue;
         }
@@ -5208,7 +5565,8 @@ static std::optional<RaggedFusedStageFlopModelSpec> computeActiveExtentFusedStag
 static std::optional<RaggedFusedStageFlopModelSpec> computeRaggedFusedStageFlopModel(
     const PhysicalExpression& expr,
     const std::vector<std::vector<uint64_t>>& stage_input_dims,
-    const std::vector<CompiledStageOutput>& outputs) {
+    const std::vector<CompiledStageOutput>& outputs,
+    const std::vector<uint32_t>& logical_node_multiplicities = {}) {
     struct MarkerMetadata {
         uint32_t partition_input_slot = UINT32_MAX;
         RaggedRuntimeExtentSource source = RaggedRuntimeExtentSource::DEVICE_OFFSETS;
@@ -5291,24 +5649,129 @@ static std::optional<RaggedFusedStageFlopModelSpec> computeRaggedFusedStageFlopM
         if (dims.empty()) {
             continue;
         }
-        if (dims.size() >= 2 && dims.front() == metadata.max_active_values) {
-            active_extent_input_slots.insert(input_slot);
-            continue;
-        }
-        if (dims.size() == 1) {
-            for (uint64_t elements_per_value : metadata.elements_per_value) {
-                const uint64_t packed_numel = checkedMulU64(
-                    metadata.max_active_values, elements_per_value, "computeRaggedFusedStageFlopModel");
-                if (dims.front() == packed_numel) {
-                    active_extent_input_slots.insert(input_slot);
-                    break;
-                }
+        const uint64_t input_numel = numelFromDims(dims);
+        for (uint64_t elements_per_value : metadata.elements_per_value) {
+            const uint64_t packed_numel = checkedMulU64(
+                metadata.max_active_values, elements_per_value, "computeRaggedFusedStageFlopModel");
+            if (input_numel == packed_numel) {
+                active_extent_input_slots.insert(input_slot);
+                break;
             }
         }
     }
 
     std::optional<RaggedFusedStageFlopModelSpec> model = computeActiveExtentFusedStageFlopModel(
-        expr, stage_input_dims, outputs, metadata.max_active_values, active_extent_input_slots);
+        expr,
+        stage_input_dims,
+        outputs,
+        metadata.max_active_values,
+        active_extent_input_slots,
+        logical_node_multiplicities);
+    if (!model.has_value()) {
+        return std::nullopt;
+    }
+    model->offsets_input_slot = metadata.partition_input_slot;
+    model->batch_size = metadata.batch_size;
+    return model;
+}
+
+static std::optional<RaggedFusedStageByteModelSpec> computeRaggedFusedStageLogicalByteModel(
+    const PhysicalExpression& expr,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims,
+    const std::vector<CompiledStageOutput>& outputs,
+    const std::vector<uint32_t>& logical_node_multiplicities = {}) {
+    struct MarkerMetadata {
+        uint32_t partition_input_slot = UINT32_MAX;
+        RaggedRuntimeExtentSource source = RaggedRuntimeExtentSource::DEVICE_OFFSETS;
+        uint64_t batch_size = 0;
+        uint64_t max_active_values = 0;
+        std::unordered_set<uint64_t> elements_per_value;
+    };
+
+    std::optional<MarkerMetadata> marker_metadata;
+    for (const ExprNode& node : expr.nodes) {
+        if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT) {
+            continue;
+        }
+        if (node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
+            throw std::runtime_error("Ragged fused logical-byte accounting encountered an invalid runtime-extent marker.");
+        }
+        const ExprNode& partition_node = expr.nodes[node.rhs];
+        if (partition_node.op != ExprOp::INPUT || partition_node.input_slot >= stage_input_dims.size()) {
+            throw std::runtime_error("Ragged fused logical-byte accounting requires a direct partition input.");
+        }
+        if (node.ragged_runtime_batch_size == 0 || node.ragged_runtime_max_active_values == 0 ||
+            node.ragged_runtime_elements_per_value == 0) {
+            throw std::runtime_error("Ragged fused logical-byte accounting requires non-zero runtime-extent metadata.");
+        }
+
+        if (!marker_metadata.has_value()) {
+            marker_metadata = MarkerMetadata{
+                .partition_input_slot = partition_node.input_slot,
+                .source = node.ragged_runtime_extent_source,
+                .batch_size = node.ragged_runtime_batch_size,
+                .max_active_values = node.ragged_runtime_max_active_values,
+                .elements_per_value = {},
+            };
+        } else if (marker_metadata->partition_input_slot != partition_node.input_slot ||
+                   marker_metadata->source != node.ragged_runtime_extent_source ||
+                   marker_metadata->batch_size != node.ragged_runtime_batch_size ||
+                   marker_metadata->max_active_values != node.ragged_runtime_max_active_values) {
+            return std::nullopt;
+        }
+        marker_metadata->elements_per_value.insert(node.ragged_runtime_elements_per_value);
+    }
+
+    if (!marker_metadata.has_value()) {
+        return std::nullopt;
+    }
+    const MarkerMetadata& metadata = marker_metadata.value();
+    if (metadata.source == RaggedRuntimeExtentSource::HOST_EXTENT) {
+        // Generic fused HOST_EXTENT markers are metadata-only and can alias a
+        // non-partition tensor. Retained padded-ragged pointwise stages have a
+        // dedicated host-state carrier and are modeled separately below.
+        return std::nullopt;
+    }
+    if (metadata.source == RaggedRuntimeExtentSource::DEVICE_OFFSETS) {
+        if (metadata.batch_size == std::numeric_limits<uint64_t>::max() ||
+            stage_input_dims.at(metadata.partition_input_slot) != std::vector<uint64_t>{metadata.batch_size + 1}) {
+            throw std::runtime_error("Ragged fused logical-byte accounting DEVICE_OFFSETS carrier shape mismatch.");
+        }
+    } else if (metadata.source == RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT) {
+        if (stage_input_dims.at(metadata.partition_input_slot) != std::vector<uint64_t>{1}) {
+            throw std::runtime_error("Ragged fused logical-byte accounting DEVICE_ACTIVE_COUNT carrier shape mismatch.");
+        }
+    }
+
+    std::unordered_set<uint32_t> active_extent_input_slots;
+    for (uint32_t input_slot = 0; input_slot < stage_input_dims.size(); ++input_slot) {
+        if (input_slot == metadata.partition_input_slot) {
+            continue;
+        }
+        const std::vector<uint64_t>& dims = stage_input_dims[input_slot];
+        if (dims.empty()) {
+            continue;
+        }
+        const uint64_t input_numel = numelFromDims(dims);
+        for (uint64_t elements_per_value : metadata.elements_per_value) {
+            const uint64_t packed_numel = checkedMulU64(
+                metadata.max_active_values,
+                elements_per_value,
+                "computeRaggedFusedStageLogicalByteModel");
+            if (input_numel == packed_numel) {
+                active_extent_input_slots.insert(input_slot);
+                break;
+            }
+        }
+    }
+
+    std::optional<RaggedFusedStageByteModelSpec> model = computeActiveExtentFusedStageLogicalByteModel(
+        expr,
+        stage_input_dims,
+        outputs,
+        metadata.max_active_values,
+        active_extent_input_slots,
+        logical_node_multiplicities);
     if (!model.has_value()) {
         return std::nullopt;
     }
@@ -5716,6 +6179,278 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
     throw std::runtime_error("Unknown stage kind while computing FLOPs.");
 }
 
+static uint64_t computeLogicalStageFlops(
+    const CompiledExecutionStage& stage,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
+        return computeFusedStageFlops(
+            stage.expr, stage_input_dims, stage.outputs, stage.logical_node_multiplicities);
+    }
+    return computeStageFlops(stage, stage_input_dims);
+}
+
+static uint64_t bestEffortComputeLogicalStageFlops(
+    const CompiledExecutionStage& stage,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims) noexcept {
+    try {
+        return computeLogicalStageFlops(stage, stage_input_dims);
+    } catch (...) {
+        // Logical-work telemetry is diagnostic only. Never make plan stamping
+        // or execution fail because an accounting estimate cannot be derived.
+        return 0;
+    }
+}
+
+
+static std::vector<uint64_t> resolveOutputDimsForStageOutput(
+    const CompiledExecutionStage& stage,
+    size_t output_idx,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims);
+
+static uint64_t logicalTensorBytesForShape(const std::vector<uint64_t>& dims, DataType dtype, const char* where) {
+    return checkedMulU64(numelFromDims(dims), dataTypeSizeBytes(dtype), where);
+}
+
+static uint64_t computeDedicatedStageLogicalBytes(
+    const CompiledExecutionStage& stage,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims,
+    const std::vector<std::optional<DataType>>& stage_input_dtypes) {
+    if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
+        throw std::runtime_error("Dedicated-stage logical byte accounting received a fused stage.");
+    }
+    if (stage_input_dims.size() != stage_input_dtypes.size()) {
+        throw std::runtime_error("Dedicated-stage logical byte accounting input shape/dtype count mismatch.");
+    }
+
+    // This helper builds only the fixed-shape sidecar. Any stage whose
+    // semantics depend on a runtime row partition remains deliberately zero
+    // here; its stamped runtime sidecar uses authoritative host extent instead.
+    // Returning a padded-capacity byte count here would violate the contract.
+    if (stage.raggedPartitionRequirement() != RaggedPartitionRequirement::NONE) {
+        return 0;
+    }
+
+    uint64_t total = 0;
+    auto add_input = [&](size_t input_idx) {
+        if (input_idx >= stage_input_dims.size()) {
+            throw std::runtime_error("Dedicated-stage logical byte accounting input index is out of range.");
+        }
+        if (!stage_input_dtypes[input_idx].has_value()) {
+            // Host runtime scalars are not tensor traffic.
+            return;
+        }
+        total = checkedAddU64(
+            total,
+            logicalTensorBytesForShape(
+                stage_input_dims[input_idx], stage_input_dtypes[input_idx].value(), "computeDedicatedStageLogicalBytes"),
+            "computeDedicatedStageLogicalBytes");
+    };
+    auto add_all_outputs = [&]() {
+        for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+            total = checkedAddU64(
+                total,
+                logicalTensorBytesForShape(
+                    resolveOutputDimsForStageOutput(stage, output_idx, stage_input_dims),
+                    stage.outputDType(output_idx),
+                    "computeDedicatedStageLogicalBytes"),
+                "computeDedicatedStageLogicalBytes");
+        }
+    };
+    auto add_all_tensor_inputs = [&]() {
+        for (size_t input_idx = 0; input_idx < stage_input_dims.size(); ++input_idx) {
+            add_input(input_idx);
+        }
+    };
+
+    switch (stage.kind) {
+        case CompiledExecutionStage::Kind::CudaKernel:
+            // A custom CUDA application is one authored logical operation.
+            // Its tensor ABI is the semantic boundary: tensor/tensor-scalar
+            // operands are reads and declared tensor outputs are writes.
+            add_all_tensor_inputs();
+            add_all_outputs();
+            return total;
+
+        case CompiledExecutionStage::Kind::Reduction:
+        case CompiledExecutionStage::Kind::ArgMinMax:
+        case CompiledExecutionStage::Kind::Scan:
+        case CompiledExecutionStage::Kind::Softmax:
+        case CompiledExecutionStage::Kind::Matmul:
+        case CompiledExecutionStage::Kind::InPlaceRope:
+        case CompiledExecutionStage::Kind::Convolution:
+        case CompiledExecutionStage::Kind::ConvolutionBackward:
+        case CompiledExecutionStage::Kind::ReduceMinMaxBackward:
+        case CompiledExecutionStage::Kind::ScanMinMaxBackward:
+            add_all_tensor_inputs();
+            add_all_outputs();
+            return total;
+
+        case CompiledExecutionStage::Kind::EmbeddingLookup: {
+            if (!stage.embedding_lookup || stage_input_dims.size() < 2 || !stage_input_dtypes[0].has_value() ||
+                !stage_input_dtypes[1].has_value() || stage.outputs.size() != 1) {
+                throw std::runtime_error("EmbeddingLookup logical byte accounting contract mismatch.");
+            }
+            // Embedding lookup does not logically read the entire parameter
+            // table. It reads one index per lookup and one selected embedding
+            // row per output row, then writes the result. Counting the full
+            // weights operand would make logical bytes depend on vocabulary
+            // capacity rather than submitted model work. Padding-index
+            // short-circuiting is an execution optimization, so reference work
+            // still charges one selected row per requested lookup.
+            add_input(0);
+            const std::vector<uint64_t> output_dims =
+                resolveOutputDimsForStageOutput(stage, 0, stage_input_dims);
+            const uint64_t output_elements = numelFromDims(output_dims);
+            total = checkedAddU64(
+                total,
+                checkedMulU64(
+                    output_elements,
+                    dataTypeSizeBytes(stage_input_dtypes[1].value()),
+                    "computeDedicatedStageLogicalBytes embedding selected-weight reads"),
+                "computeDedicatedStageLogicalBytes embedding selected-weight reads");
+            total = checkedAddU64(
+                total,
+                logicalTensorBytesForShape(
+                    output_dims, stage.outputDType(0), "computeDedicatedStageLogicalBytes embedding output"),
+                "computeDedicatedStageLogicalBytes embedding output");
+            return total;
+        }
+
+        case CompiledExecutionStage::Kind::RmsNorm:
+            // x + scale -> y. cuDNN workspace and retained inverse-variance
+            // state are implementation details, not logical tensor traffic.
+            add_input(0);
+            add_input(1);
+            add_all_outputs();
+            return total;
+
+        case CompiledExecutionStage::Kind::LayerNorm:
+            // x + scale + bias -> y. Saved backend statistics/workspace are
+            // excluded because equivalent implementations need not materialize
+            // them.
+            add_input(0);
+            add_input(1);
+            add_input(2);
+            add_all_outputs();
+            return total;
+
+        case CompiledExecutionStage::Kind::RmsNormBackward:
+            // x + scale + dY -> requested dX/dScale results. A retained
+            // forward statistic is a backend optimization and is not charged.
+            add_input(0);
+            add_input(1);
+            add_input(2);
+            add_all_outputs();
+            return total;
+
+        case CompiledExecutionStage::Kind::Attention: {
+            if (!stage.attention) {
+                throw std::runtime_error("Attention stage missing payload while computing logical bytes.");
+            }
+            // q/k/v and optional bias are semantic tensor operands. Sequence
+            // lengths, page tables, and dropout RNG carriers are structural
+            // control metadata and intentionally excluded. FP8 scale/descale
+            // and amax tensors are numerical operands/results, so each counts
+            // one logical tensor movement.
+            add_input(0);
+            add_input(1);
+            add_input(2);
+            size_t next = 3;
+            if (stage.attention->use_bias) {
+                add_input(next++);
+            }
+            if (stage.attention->use_padding_mask) {
+                next += 2;
+            }
+            if (stage.attention->use_paged_kv_cache) {
+                next += 2;
+            }
+            if (stage.attention->dropout_probability > 0.0f) {
+                next += 2;
+            }
+            if (stage.attention->use_fp8_forward_scaling) {
+                for (size_t i = 0; i < 8; ++i) {
+                    add_input(next++);
+                }
+            }
+            if (next != stage_input_dims.size()) {
+                throw std::runtime_error("Attention logical byte accounting input contract mismatch.");
+            }
+            add_all_outputs();
+            return total;
+        }
+
+        case CompiledExecutionStage::Kind::AttentionBackward: {
+            if (!stage.attention_backward) {
+                throw std::runtime_error("Attention-backward stage missing payload while computing logical bytes.");
+            }
+            // q/k/v/dO and optional bias are the semantic data operands.
+            // Sequence-length and dropout RNG carriers are structural metadata;
+            // retained cuDNN forward statistics are implementation state.
+            add_input(0);
+            add_input(1);
+            add_input(2);
+            add_input(3);
+            size_t next = 4;
+            if (stage.attention_backward->use_bias) {
+                add_input(next++);
+            }
+            if (stage.attention_backward->use_padding_mask) {
+                next += 2;
+            }
+            if (stage.attention_backward->dropout_probability > 0.0f) {
+                next += 2;
+            }
+            if (next != stage_input_dims.size()) {
+                throw std::runtime_error("Attention-backward logical byte accounting input contract mismatch.");
+            }
+            add_all_outputs();
+            return total;
+        }
+
+        case CompiledExecutionStage::Kind::SegmentedReduction:
+        case CompiledExecutionStage::Kind::SegmentedBroadcast:
+        case CompiledExecutionStage::Kind::RaggedConv1dCausal:
+        case CompiledExecutionStage::Kind::RaggedConv1dCausalBackwardData:
+        case CompiledExecutionStage::Kind::RaggedConv1dCausalBackwardFilter:
+            // Runtime-active extent is supplied by their stamped stage accounting.
+            return 0;
+
+        case CompiledExecutionStage::Kind::FusedKernel:
+            break;
+    }
+    throw std::runtime_error("Unknown dedicated stage kind while computing logical bytes.");
+}
+
+static uint64_t bestEffortComputeLogicalStageBytes(
+    const CompiledExecutionStage& stage,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims,
+    const std::vector<std::optional<DataType>>& stage_input_dtypes) noexcept {
+    if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
+        if (std::any_of(stage.expr.nodes.begin(), stage.expr.nodes.end(), [](const ExprNode& node) {
+                return node.op == ExprOp::RAGGED_VALUEWISE_EXTENT;
+            })) {
+            // Do not publish a padded-capacity byte count for runtime-active
+            // ragged work. The stamped runtime sidecar provides exact extent.
+            return 0;
+        }
+        try {
+            return computeFusedStageLogicalBytes(
+                stage.expr, stage_input_dims, stage.outputs, stage.logical_node_multiplicities);
+        } catch (...) {
+            return 0;
+        }
+    }
+
+    try {
+        return computeDedicatedStageLogicalBytes(stage, stage_input_dims, stage_input_dtypes);
+    } catch (...) {
+        // Logical-work telemetry is diagnostic only. Accounting must never make
+        // plan stamping or execution fail.
+        return 0;
+    }
+}
+
 static uint64_t bestEffortComputeStageFlops(
     const CompiledExecutionStage& stage,
     const std::vector<std::vector<uint64_t>>& stage_input_dims) noexcept {
@@ -5733,10 +6468,16 @@ static std::optional<RaggedFusedStageFlopModelSpec> bestEffortComputeActiveExten
     const std::vector<std::vector<uint64_t>>& stage_input_dims,
     const std::vector<CompiledStageOutput>& outputs,
     uint64_t max_active_values,
-    const std::unordered_set<uint32_t>& active_extent_input_slots) noexcept {
+    const std::unordered_set<uint32_t>& active_extent_input_slots,
+    const std::vector<uint32_t>& logical_node_multiplicities = {}) noexcept {
     try {
         return computeActiveExtentFusedStageFlopModel(
-            expr, stage_input_dims, outputs, max_active_values, active_extent_input_slots);
+            expr,
+            stage_input_dims,
+            outputs,
+            max_active_values,
+            active_extent_input_slots,
+            logical_node_multiplicities);
     } catch (...) {
         return std::nullopt;
     }
@@ -5745,12 +6486,87 @@ static std::optional<RaggedFusedStageFlopModelSpec> bestEffortComputeActiveExten
 static std::optional<RaggedFusedStageFlopModelSpec> bestEffortComputeRaggedFusedStageFlopModel(
     const PhysicalExpression& expr,
     const std::vector<std::vector<uint64_t>>& stage_input_dims,
-    const std::vector<CompiledStageOutput>& outputs) noexcept {
+    const std::vector<CompiledStageOutput>& outputs,
+    const std::vector<uint32_t>& logical_node_multiplicities = {}) noexcept {
     try {
-        return computeRaggedFusedStageFlopModel(expr, stage_input_dims, outputs);
+        return computeRaggedFusedStageFlopModel(
+            expr, stage_input_dims, outputs, logical_node_multiplicities);
     } catch (...) {
         return std::nullopt;
     }
+}
+
+static std::optional<RaggedFusedStageByteModelSpec> bestEffortComputeActiveExtentFusedStageLogicalByteModel(
+    const PhysicalExpression& expr,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims,
+    const std::vector<CompiledStageOutput>& outputs,
+    uint64_t max_active_values,
+    const std::unordered_set<uint32_t>& active_extent_input_slots,
+    const std::vector<uint32_t>& logical_node_multiplicities = {}) noexcept {
+    try {
+        return computeActiveExtentFusedStageLogicalByteModel(
+            expr,
+            stage_input_dims,
+            outputs,
+            max_active_values,
+            active_extent_input_slots,
+            logical_node_multiplicities);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+static std::optional<RaggedFusedStageByteModelSpec> bestEffortComputeRaggedFusedStageLogicalByteModel(
+    const PhysicalExpression& expr,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims,
+    const std::vector<CompiledStageOutput>& outputs,
+    const std::vector<uint32_t>& logical_node_multiplicities = {}) noexcept {
+    try {
+        return computeRaggedFusedStageLogicalByteModel(
+            expr, stage_input_dims, outputs, logical_node_multiplicities);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+detail::FusedStageFlopCountsForTests detail::fusedStageFlopCountsForTests(
+    const PhysicalExecutionStage& stage,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
+        throw std::runtime_error("fusedStageFlopCountsForTests requires a fused physical stage.");
+    }
+    return detail::FusedStageFlopCountsForTests{
+        .physical_flops = computeFusedStageFlops(stage.expr, stage_input_dims, stage.outputs),
+        .logical_flops =
+            computeFusedStageFlops(stage.expr, stage_input_dims, stage.outputs, stage.logical_node_multiplicities),
+    };
+}
+
+LogicalWorkCount detail::fusedStageLogicalWorkForTests(
+    const PhysicalExecutionStage& stage,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
+        throw std::runtime_error("fusedStageLogicalWorkForTests requires a fused physical stage.");
+    }
+    return LogicalWorkCount{
+        .floatingPointOperations =
+            computeFusedStageFlops(stage.expr, stage_input_dims, stage.outputs, stage.logical_node_multiplicities),
+        .bytes =
+            computeFusedStageLogicalBytes(stage.expr, stage_input_dims, stage.outputs, stage.logical_node_multiplicities),
+    };
+}
+
+LogicalWorkCount detail::dedicatedStageLogicalWorkForTests(
+    const CompiledExecutionStage& stage,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims,
+    const std::vector<std::optional<DataType>>& stage_input_dtypes) {
+    if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
+        throw std::runtime_error("dedicatedStageLogicalWorkForTests requires a non-fused compiled stage.");
+    }
+    return LogicalWorkCount{
+        .floatingPointOperations = computeLogicalStageFlops(stage, stage_input_dims),
+        .bytes = computeDedicatedStageLogicalBytes(stage, stage_input_dims, stage_input_dtypes),
+    };
 }
 
 static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecutionStage& stage,
@@ -11745,6 +12561,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                     }
                 }
                 const uint64_t stage_flops = bestEffortComputeStageFlops(stage, logical_input_dims);
+                const uint64_t logical_stage_flops = bestEffortComputeLogicalStageFlops(stage, logical_input_dims);
                 std::unordered_set<uint32_t> padded_value_input_slots;
                 for (uint32_t input_idx = 0; input_idx < input_access.size(); ++input_idx) {
                     if (input_access[input_idx] == PaddedRaggedPointwiseInputAccess::PaddedValue) {
@@ -11757,6 +12574,20 @@ StampedExecutionPlan FusedEquation::stampImpl(
                                                                      stage.outputs,
                                                                      anchor_layout.max_total_values,
                                                                      padded_value_input_slots);
+                const std::optional<RaggedFusedStageFlopModelSpec> logical_ragged_flop_model =
+                    bestEffortComputeActiveExtentFusedStageFlopModel(stage.expr,
+                                                                     logical_input_dims,
+                                                                     stage.outputs,
+                                                                     anchor_layout.max_total_values,
+                                                                     padded_value_input_slots,
+                                                                     stage.logical_node_multiplicities);
+                const std::optional<RaggedFusedStageByteModelSpec> logical_ragged_byte_model =
+                    bestEffortComputeActiveExtentFusedStageLogicalByteModel(stage.expr,
+                                                                            logical_input_dims,
+                                                                            stage.outputs,
+                                                                            anchor_layout.max_total_values,
+                                                                            padded_value_input_slots,
+                                                                            stage.logical_node_multiplicities);
                 std::optional<RuntimeRaggedFusedFlopAccounting> runtime_flop_accounting;
                 if (ragged_flop_model.has_value()) {
                     runtime_flop_accounting = RuntimeRaggedFusedFlopAccounting{
@@ -11765,6 +12596,27 @@ StampedExecutionPlan FusedEquation::stampImpl(
                         .max_active_values = anchor_layout.max_total_values,
                         .flops_per_active_value = ragged_flop_model->flops_per_active_value,
                         .fixed_flops_when_nonempty = ragged_flop_model->fixed_flops_when_nonempty,
+                    };
+                }
+
+                std::optional<RuntimeRaggedFusedFlopAccounting> logical_runtime_flop_accounting;
+                if (logical_ragged_flop_model.has_value()) {
+                    logical_runtime_flop_accounting = RuntimeRaggedFusedFlopAccounting{
+                        .row_partition_offsets = offsets_tensor,
+                        .batch_size = anchor_layout.batch_size,
+                        .max_active_values = anchor_layout.max_total_values,
+                        .flops_per_active_value = logical_ragged_flop_model->flops_per_active_value,
+                        .fixed_flops_when_nonempty = logical_ragged_flop_model->fixed_flops_when_nonempty,
+                    };
+                }
+                std::optional<RuntimeRaggedFusedByteAccounting> logical_runtime_byte_accounting;
+                if (logical_ragged_byte_model.has_value()) {
+                    logical_runtime_byte_accounting = RuntimeRaggedFusedByteAccounting{
+                        .row_partition_offsets = offsets_tensor,
+                        .batch_size = anchor_layout.batch_size,
+                        .max_active_values = anchor_layout.max_total_values,
+                        .bytes_per_active_value = logical_ragged_byte_model->bytes_per_active_value,
+                        .fixed_bytes_when_nonempty = logical_ragged_byte_model->fixed_bytes_when_nonempty,
                     };
                 }
 
@@ -11778,8 +12630,13 @@ StampedExecutionPlan FusedEquation::stampImpl(
                                                                   padded_outputs,
                                                                   anchor_representation.width_capacities,
                                                                   stream);
-                stampedStages.emplace_back(
-                    stamped_pointwise, std::move(dependencies), stage_flops, std::move(runtime_flop_accounting));
+                stampedStages.emplace_back(stamped_pointwise,
+                                             std::move(dependencies),
+                                             stage_flops,
+                                             std::move(runtime_flop_accounting),
+                                             logical_stage_flops,
+                                             std::move(logical_runtime_flop_accounting),
+                                             std::move(logical_runtime_byte_accounting));
 #ifdef THOR_DEBUG
                 stampedStages.back().execution_provenance = stage.execution_provenance;
 #endif
@@ -11881,8 +12738,17 @@ StampedExecutionPlan FusedEquation::stampImpl(
 
         std::vector<std::vector<uint64_t>> stage_input_dims;
         stage_input_dims.reserve(stageInputs.size());
+        std::vector<std::optional<DataType>> stage_input_dtypes;
+        stage_input_dtypes.reserve(stageInputs.size());
         for (const RuntimeInputValue& input : stageInputs) {
             stage_input_dims.push_back(runtimeInputDims(input));
+            if (runtimeInputIsTensor(input)) {
+                stage_input_dtypes.push_back(runtimeInputTensor(input).getDataType());
+            } else if (runtimeInputIsTensorScalarBinding(input)) {
+                stage_input_dtypes.push_back(runtimeInputTensorScalarBinding(input).sourceDType);
+            } else {
+                stage_input_dtypes.push_back(std::nullopt);
+            }
         }
         if (stage.kind == CompiledExecutionStage::Kind::RaggedConv1dCausal) {
             if (!stage.ragged_conv1d_causal || stage_input_dims.size() != 3) {
@@ -11934,9 +12800,17 @@ StampedExecutionPlan FusedEquation::stampImpl(
         }
 
         const uint64_t stage_flops = bestEffortComputeStageFlops(stage, stage_input_dims);
+        const uint64_t logical_stage_flops = bestEffortComputeLogicalStageFlops(stage, stage_input_dims);
+        const uint64_t logical_stage_bytes = bestEffortComputeLogicalStageBytes(stage, stage_input_dims, stage_input_dtypes);
         std::optional<RaggedFusedStageFlopModelSpec> ragged_fused_flop_model;
+        std::optional<RaggedFusedStageFlopModelSpec> logical_ragged_fused_flop_model;
+        std::optional<RaggedFusedStageByteModelSpec> logical_ragged_fused_byte_model;
         if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
             ragged_fused_flop_model = bestEffortComputeRaggedFusedStageFlopModel(stage.expr, stage_input_dims, stage.outputs);
+            logical_ragged_fused_flop_model = bestEffortComputeRaggedFusedStageFlopModel(
+                stage.expr, stage_input_dims, stage.outputs, stage.logical_node_multiplicities);
+            logical_ragged_fused_byte_model = bestEffortComputeRaggedFusedStageLogicalByteModel(
+                stage.expr, stage_input_dims, stage.outputs, stage.logical_node_multiplicities);
         }
 
         switch (stage.kind) {
@@ -12062,8 +12936,42 @@ StampedExecutionPlan FusedEquation::stampImpl(
                         .fixed_flops_when_nonempty = ragged_fused_flop_model->fixed_flops_when_nonempty,
                     };
                 }
-                stampedStages.emplace_back(
-                    stampedKernel, std::move(dependency_stage_indices), stage_flops, std::move(runtime_flop_accounting));
+                std::optional<RuntimeRaggedFusedFlopAccounting> logical_runtime_flop_accounting;
+                if (logical_ragged_fused_flop_model.has_value()) {
+                    const uint32_t offsets_slot = logical_ragged_fused_flop_model->offsets_input_slot;
+                    if (offsets_slot >= stageInputs.size() || !runtimeInputIsTensor(stageInputs[offsets_slot])) {
+                        throw std::runtime_error("Logical ragged fused FLOP accounting could not bind the runtime offsets tensor.");
+                    }
+                    logical_runtime_flop_accounting = RuntimeRaggedFusedFlopAccounting{
+                        .row_partition_offsets = runtimeInputTensor(stageInputs[offsets_slot]),
+                        .batch_size = logical_ragged_fused_flop_model->batch_size,
+                        .max_active_values = logical_ragged_fused_flop_model->max_active_values,
+                        .flops_per_active_value = logical_ragged_fused_flop_model->flops_per_active_value,
+                        .fixed_flops_when_nonempty = logical_ragged_fused_flop_model->fixed_flops_when_nonempty,
+                    };
+                }
+                std::optional<RuntimeRaggedFusedByteAccounting> logical_runtime_byte_accounting;
+                if (logical_ragged_fused_byte_model.has_value()) {
+                    const uint32_t offsets_slot = logical_ragged_fused_byte_model->offsets_input_slot;
+                    if (offsets_slot >= stageInputs.size() || !runtimeInputIsTensor(stageInputs[offsets_slot])) {
+                        throw std::runtime_error("Logical ragged fused byte accounting could not bind the runtime partition carrier.");
+                    }
+                    logical_runtime_byte_accounting = RuntimeRaggedFusedByteAccounting{
+                        .row_partition_offsets = runtimeInputTensor(stageInputs[offsets_slot]),
+                        .batch_size = logical_ragged_fused_byte_model->batch_size,
+                        .max_active_values = logical_ragged_fused_byte_model->max_active_values,
+                        .bytes_per_active_value = logical_ragged_fused_byte_model->bytes_per_active_value,
+                        .fixed_bytes_when_nonempty = logical_ragged_fused_byte_model->fixed_bytes_when_nonempty,
+                    };
+                }
+                stampedStages.emplace_back(stampedKernel,
+                                           std::move(dependency_stage_indices),
+                                           stage_flops,
+                                           std::move(runtime_flop_accounting),
+                                           logical_stage_flops,
+                                           std::move(logical_runtime_flop_accounting),
+                                           logical_stage_bytes,
+                                           std::move(logical_runtime_byte_accounting));
                 break;
             }
             case CompiledExecutionStage::Kind::CudaKernel: {
@@ -12142,7 +13050,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                     producer_stage_by_value_id[stage_output.value_id] = cuda_kernel_stage_idx;
                 }
 
-                stampedStages.emplace_back(stampedCudaKernel, std::move(dependency_stage_indices), stage_flops);
+                stampedStages.emplace_back(stampedCudaKernel, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
 
@@ -12180,7 +13088,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
 
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedReduction, std::move(dependency_stage_indices), stage_flops);
+                stampedStages.emplace_back(stampedReduction, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
             case CompiledExecutionStage::Kind::ArgMinMax: {
@@ -12217,7 +13125,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
 
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedArgMinMax, std::move(dependency_stage_indices), stage_flops);
+                stampedStages.emplace_back(stampedArgMinMax, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
             case CompiledExecutionStage::Kind::SegmentedReduction: {
@@ -12760,7 +13668,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                     values[stageOutput.value_id] = outputTensors[output_idx];
                     producer_stage_by_value_id[stageOutput.value_id] = producer_stage_idx;
                 }
-                stampedStages.emplace_back(stampedScan, std::move(dependency_stage_indices), stage_flops);
+                stampedStages.emplace_back(stampedScan, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
             case CompiledExecutionStage::Kind::Softmax: {
@@ -12800,7 +13708,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
 
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedSoftmax, std::move(dependency_stage_indices), stage_flops);
+                stampedStages.emplace_back(stampedSoftmax, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
             case CompiledExecutionStage::Kind::RmsNorm: {
@@ -12854,7 +13762,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
 
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedRmsNorm, std::move(dependency_stage_indices), stage_flops);
+                stampedStages.emplace_back(stampedRmsNorm, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
             case CompiledExecutionStage::Kind::LayerNorm: {
@@ -12886,7 +13794,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                 Tensor outputTensor = stampedLayerNorm->getOutputTensor();
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedLayerNorm, std::move(dependency_stage_indices), stage_flops);
+                stampedStages.emplace_back(stampedLayerNorm, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
             case CompiledExecutionStage::Kind::RmsNormBackward: {
@@ -12962,7 +13870,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                     values[stageOutput.value_id] = semanticOutputs.at(semantic_idx);
                     producer_stage_by_value_id[stageOutput.value_id] = producer_stage_idx;
                 }
-                stampedStages.emplace_back(stampedRmsNormBackward, std::move(dependency_stage_indices), stage_flops);
+                stampedStages.emplace_back(stampedRmsNormBackward, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
             case CompiledExecutionStage::Kind::EmbeddingLookup: {
@@ -13009,7 +13917,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                                                              std::move(epilogueInputs));
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedEmbeddingLookup, std::move(dependency_stage_indices), stage_flops);
+                stampedStages.emplace_back(stampedEmbeddingLookup, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
             case CompiledExecutionStage::Kind::Matmul: {
@@ -13220,7 +14128,9 @@ StampedExecutionPlan FusedEquation::stampImpl(
 
                             const uint32_t barrier_stage_idx = static_cast<uint32_t>(stampedStages.size());
                             stampedStages.emplace_back(StampedExecutionStage::dependencyBarrier(
-                                lhsTensor.getPlacement().getDeviceNum(), std::move(group_stage_indices)));
+                                lhsTensor.getPlacement().getDeviceNum(),
+                                std::move(group_stage_indices),
+                                logical_stage_bytes));
 
                             values[matrixStageOutput.value_id] = fullOutput;
                             producer_stage_by_value_id[matrixStageOutput.value_id] = barrier_stage_idx;
@@ -13299,7 +14209,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                     producer_stage_by_value_id[stage.outputs[1].value_id] = static_cast<uint32_t>(stampedStages.size());
                 }
 
-                stampedStages.emplace_back(stampedMatmul, std::move(dependency_stage_indices), stage_flops);
+                stampedStages.emplace_back(stampedMatmul, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
             case CompiledExecutionStage::Kind::InPlaceRope: {
@@ -13329,7 +14239,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                     values[stage.outputs[i].value_id] = stampedRope->outputTensor(i);
                     producer_stage_by_value_id[stage.outputs[i].value_id] = rope_stage_idx;
                 }
-                stampedStages.emplace_back(stampedRope, std::move(dependency_stage_indices), stage_flops);
+                stampedStages.emplace_back(stampedRope, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
             case CompiledExecutionStage::Kind::Attention: {
@@ -13438,7 +14348,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                 const uint32_t attention_stage_idx = static_cast<uint32_t>(stampedStages.size());
                 producer_stage_by_value_id[stageOutput.value_id] = attention_stage_idx;
                 attention_forward_state_by_stage_idx[attention_stage_idx] = std::move(forwardState);
-                stampedStages.emplace_back(stampedAttention, std::move(dependency_stage_indices), stage_flops);
+                stampedStages.emplace_back(stampedAttention, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
             case CompiledExecutionStage::Kind::AttentionBackward: {
@@ -13633,7 +14543,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                     values[direct_it->second.packed_value_id] = directPackedOutput.value();
                     producer_stage_by_value_id[direct_it->second.packed_value_id] = static_cast<uint32_t>(stampedStages.size());
                 }
-                stampedStages.emplace_back(stampedAttentionBackward, std::move(dependency_stage_indices), stage_flops);
+                stampedStages.emplace_back(stampedAttentionBackward, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
             case CompiledExecutionStage::Kind::Convolution: {
@@ -13663,7 +14573,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                 }
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedConvolution, std::move(dependency_stage_indices), stage_flops);
+                stampedStages.emplace_back(stampedConvolution, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
             case CompiledExecutionStage::Kind::ConvolutionBackward: {
@@ -13694,7 +14604,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                 }
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedConvolutionBackward, std::move(dependency_stage_indices), stage_flops);
+                stampedStages.emplace_back(stampedConvolutionBackward, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
             case CompiledExecutionStage::Kind::ReduceMinMaxBackward: {
@@ -13730,7 +14640,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                         stage.reduce_minmax_backward, inputTensor, gradOutputTensor, offsetsTensor, outputTensor, stream);
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedReduceMinMaxBackward, std::move(dependency_stage_indices), stage_flops);
+                stampedStages.emplace_back(stampedReduceMinMaxBackward, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
             case CompiledExecutionStage::Kind::ScanMinMaxBackward: {
@@ -13764,7 +14674,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                     stampScanMinMaxBackward(stage.scan_minmax_backward, inputTensor, gradOutputTensor, offsetsTensor, outputTensor, stream);
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedScanMinMaxBackward, std::move(dependency_stage_indices), stage_flops);
+                stampedStages.emplace_back(stampedScanMinMaxBackward, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
         }

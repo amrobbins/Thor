@@ -123,6 +123,9 @@ class RaggedCustomLoss : public Loss {
         return secondaryInputs[index].errorOutput;
     }
 
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override;
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override;
+
    protected:
     void advanceDataIfReady(bool validationPass) override;
 

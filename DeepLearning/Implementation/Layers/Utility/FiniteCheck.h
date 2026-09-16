@@ -84,6 +84,18 @@ class FiniteCheck : public Layer {
     // Normal execution serializes host submission per stamp. Keep the diagnostic
     // workspace/result one-at-a-time defensively without imposing a mutex on every Layer.
     std::mutex checkMutex;
+    // FiniteCheck is an optional runtime diagnostic, not part of the authored
+    // model computation. Its reads/workspace are intentionally excluded from
+    // logical model bytes in both dense and ragged forms.
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override {
+        (void)validExampleCount;
+        return 0;
+    }
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override {
+        (void)validExampleCount;
+        return 0;
+    }
+
 };
 
 }  // namespace ThorImplementation

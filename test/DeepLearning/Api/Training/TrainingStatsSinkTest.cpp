@@ -340,6 +340,8 @@ TEST(TrainingRunsStatsReporter, ValidationStatsUpdateValidationLossWithoutReplac
     trainStats.samplesPerSecond = 300000.0;
     trainStats.batchesPerSecond = 147.0;
     trainStats.floatingPointOperationsPerSecond = 91.32e12;
+    trainStats.logicalBytesPerSecond = 1.42e12;
+    trainStats.logicalArithmeticIntensity = 64.3;
 
     TrainingStatsSnapshot validateStats = makeStats(TrainingEventPhase::VALIDATE, 0.20);
     validateStats.epoch = 20;
@@ -350,6 +352,8 @@ TEST(TrainingRunsStatsReporter, ValidationStatsUpdateValidationLossWithoutReplac
     validateStats.samplesPerSecond = 1710000.0;
     validateStats.batchesPerSecond = 834.0;
     validateStats.floatingPointOperationsPerSecond = 105.8e12;
+    validateStats.logicalBytesPerSecond = 3.10e12;
+    validateStats.logicalArithmeticIntensity = 34.1;
 
     reporter.markRunStarting("fold_0");
     reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(trainStats), "fold_0"));
@@ -363,6 +367,10 @@ TEST(TrainingRunsStatsReporter, ValidationStatsUpdateValidationLossWithoutReplac
     EXPECT_TRUE(hasTokenWithValue(line, "step", "480")) << line;
     EXPECT_FALSE(hasTokenWithValue(line, "batch", "1/6")) << line;
     EXPECT_FALSE(hasTokenWithValue(line, "step", "115")) << line;
+    EXPECT_TRUE(hasTokenWithValue(line, "logical_flops/s", "91.32T")) << line;
+    EXPECT_TRUE(hasTokenWithValue(line, "logical_bandwidth", "1.42TB/s")) << line;
+    EXPECT_TRUE(hasTokenWithValue(line, "logical_arithmetic_intensity", "64.3F/B")) << line;
+    EXPECT_EQ(line.find(" flops/s="), std::string::npos) << line;
 }
 
 TEST(TrainingRunsStatsReporter, ReportsAdditionalNamedValidationPopulationsWithoutDuplicatingDefault) {

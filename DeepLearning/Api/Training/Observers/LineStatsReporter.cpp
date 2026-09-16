@@ -199,6 +199,18 @@ std::string formatCompactFlopsRateString(double value) {
     }
 }
 
+std::string formatCompactBandwidthRateString(double value) {
+    return formatCompactRateString(value) + "B/s";
+}
+
+std::string formatLogicalArithmeticIntensityString(double value) {
+    const double absValue = std::abs(value);
+    const int precision = absValue >= 100.0 ? 0 : (absValue >= 10.0 ? 1 : 2);
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%.*fF/B", precision, value);
+    return std::string(buffer);
+}
+
 std::string formatElapsedString(double elapsedSeconds) {
     const uint64_t roundedSeconds = static_cast<uint64_t>(std::max(0.0, elapsedSeconds));
     const uint64_t hours = roundedSeconds / 3600;
@@ -512,6 +524,8 @@ void appendColorDeviceDatasetStorage(LineBuffer& out, const DeviceDatasetStorage
 
 constexpr size_t RATE_FIELD_WIDTH = 5;
 constexpr size_t FLOPS_RATE_FIELD_WIDTH = 6;
+constexpr size_t BANDWIDTH_FIELD_WIDTH = 8;
+constexpr size_t ARITHMETIC_INTENSITY_FIELD_WIDTH = 7;
 
 void appendPlainStatsLine(LineBuffer& out,
                           const TrainingStatsSnapshot& stats,
@@ -583,8 +597,16 @@ void appendPlainStatsLine(LineBuffer& out,
         appendPadded(out, formatCompactRateString(stats.batchesPerSecond), RATE_FIELD_WIDTH);
     }
     if (stats.floatingPointOperationsPerSecond > 0.0) {
-        appendPlainDimKey(out, "flops/s");
+        appendPlainDimKey(out, "logical_flops/s");
         appendPadded(out, formatCompactFlopsRateString(stats.floatingPointOperationsPerSecond), FLOPS_RATE_FIELD_WIDTH);
+    }
+    if (stats.logicalBytesPerSecond > 0.0) {
+        appendPlainDimKey(out, "logical_bandwidth");
+        appendPadded(out, formatCompactBandwidthRateString(stats.logicalBytesPerSecond), BANDWIDTH_FIELD_WIDTH);
+    }
+    if (stats.logicalArithmeticIntensity > 0.0) {
+        appendPlainDimKey(out, "logical_arithmetic_intensity");
+        appendPadded(out, formatLogicalArithmeticIntensityString(stats.logicalArithmeticIntensity), ARITHMETIC_INTENSITY_FIELD_WIDTH);
     }
     if (stats.inFlightBatches > 0) {
         appendPlainDimKey(out, "in_flight");
@@ -674,8 +696,16 @@ void appendColorStatsLine(LineBuffer& out,
         appendStyledPadded(out, Ansi::throughput, formatCompactRateString(stats.batchesPerSecond), RATE_FIELD_WIDTH);
     }
     if (stats.floatingPointOperationsPerSecond > 0.0) {
-        appendDimKey(out, "flops/s");
+        appendDimKey(out, "logical_flops/s");
         appendStyledPadded(out, Ansi::throughput, formatCompactFlopsRateString(stats.floatingPointOperationsPerSecond), FLOPS_RATE_FIELD_WIDTH);
+    }
+    if (stats.logicalBytesPerSecond > 0.0) {
+        appendDimKey(out, "logical_bandwidth");
+        appendStyledPadded(out, Ansi::throughput, formatCompactBandwidthRateString(stats.logicalBytesPerSecond), BANDWIDTH_FIELD_WIDTH);
+    }
+    if (stats.logicalArithmeticIntensity > 0.0) {
+        appendDimKey(out, "logical_arithmetic_intensity");
+        appendStyledPadded(out, Ansi::throughput, formatLogicalArithmeticIntensityString(stats.logicalArithmeticIntensity), ARITHMETIC_INTENSITY_FIELD_WIDTH);
     }
     if (stats.inFlightBatches > 0) {
         appendDimKey(out, "in_flight");

@@ -34,6 +34,8 @@ class LayerNorm : public TrainableLayer {
 
     uint64_t flopCountForward() override;
     uint64_t flopCountBackward() override;
+    uint64_t logicalByteCountForward() override;
+    uint64_t logicalByteCountBackward() override;
 
     void cleanup() override;
 

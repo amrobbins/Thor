@@ -93,6 +93,12 @@ class CustomLayer : public TrainableLayer {
 
     uint64_t flopCountForward() override;
     uint64_t flopCountBackward() override;
+    uint64_t flopCountForward(uint64_t validExampleCount) override;
+    uint64_t flopCountBackward(uint64_t validExampleCount) override;
+    uint64_t logicalByteCountForward() override;
+    uint64_t logicalByteCountBackward() override;
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override;
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override;
     uint64_t floatingPointOperationsPerExampleForward() override;
     uint64_t floatingPointOperationsPerExampleBackward() override;
 
@@ -274,6 +280,14 @@ class CustomLayer : public TrainableLayer {
         GradientAccumulationTargets genericSharedBackwardAccumulateWrtNames;
 
         std::unordered_set<std::string> optimizerUpdateFusedParameterNames;
+        // Logical model-work accounting excludes optimizer updates and parameter
+        // constraints even when they are physically grafted into the shared
+        // backward execution plan. These are the fixed-shape logical work
+        // counts of those grafted optimizer/constraint expressions, captured
+        // once at compile time and subtracted from the fused plan's logical
+        // model-work counts.
+        uint64_t fusedOptimizerLogicalFlopCount = 0;
+        uint64_t fusedOptimizerLogicalByteCount = 0;
         std::unordered_set<std::string> activeParameterTargetNames;
         std::vector<FusedOptimizerRuntimeScalarBinding> fusedOptimizerRuntimeScalarBindings;
         std::unordered_map<std::string, float> fusedOptimizerRuntimeScalars;
@@ -306,6 +320,14 @@ class CustomLayer : public TrainableLayer {
         std::unordered_map<DynamicExpressionVariantId, StampedExecutionVariant> stampedVariants;
         std::optional<DynamicExpressionVariantId> evaluationVariantId;
         std::optional<DynamicExpressionVariantId> forwardVariantThisPass;
+        // Validation/inference and forward-only applications clear
+        // forwardVariantThisPass immediately after emitting their outputs because
+        // no backward pass will drain that state.  Keep only the variant id that
+        // actually ran so post-submit logical-work telemetry can still account the
+        // submitted forward rather than falling back to the primary variant.
+        // Training applications do not write this field on the hot path; their
+        // forwardVariantThisPass remains authoritative through backward.
+        std::optional<DynamicExpressionVariantId> lastForwardOnlyVariantForLogicalWorkAccounting;
 
         std::unordered_map<std::string, Tensor> forwardInputsByName;
         std::unordered_map<std::string, Tensor> forwardOutputsByName;

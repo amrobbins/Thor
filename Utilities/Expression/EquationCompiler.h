@@ -54,6 +54,14 @@ struct PhysicalExecutionStage {
     PhysicalExpression expr;
     std::vector<uint32_t> input_value_ids;
     std::vector<CompiledStageOutput> outputs;
+
+    // For fused stages, one entry per post-CSE stage node describing how many
+    // distinct authored logical nodes that physical node represents. Shared
+    // authored DAG ancestry contributes once; stage-local implementation CSE
+    // may increase a node's multiplicity above one. Empty for non-fused stages.
+    // This metadata is telemetry-only and does not participate in codegen.
+    std::vector<uint32_t> logical_node_multiplicities;
+
     std::vector<ParameterFanOverride> parameter_fan_overrides;
 };
 

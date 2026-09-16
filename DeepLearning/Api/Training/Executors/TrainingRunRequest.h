@@ -50,6 +50,10 @@ using TrainingRunStatusCallback = std::function<void(TrainingRunStatus)>;
 struct NamedValidationSession {
     std::string name{};
     std::shared_ptr<BatchSession> batchSession = nullptr;
+    // Startup retry may have already consumed/cancelled this mutable session
+    // once named validation participates in the same queued scheduling stream.
+    // Trainer supplies a factory so a retry starts from a fresh cursor/backend.
+    std::function<std::shared_ptr<BatchSession>()> batchSessionFactory{};
 };
 
 struct TrainingRunRequest {
@@ -65,8 +69,10 @@ struct TrainingRunRequest {
     // before the first batch is acquired.
     std::function<std::shared_ptr<BatchSession>()> batchSessionFactory{};
 
-    // Additional named validation populations are evaluated forward-only after
-    // the default validation pass and before model-selection scoring.
+    // Additional named validation populations are forward-only segments ordered
+    // after the default validation segment for each logical epoch. They share the
+    // same queued scheduling stream so every population observes the same model
+    // checkpoint without requiring a host-side drain between populations.
     std::string defaultValidationPopulation{"validate"};
     std::vector<NamedValidationSession> additionalValidationSessions{};
 

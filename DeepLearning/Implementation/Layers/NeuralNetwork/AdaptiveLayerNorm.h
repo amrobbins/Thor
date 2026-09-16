@@ -52,6 +52,8 @@ class AdaptiveLayerNorm : public Layer {
 
     uint64_t floatingPointOperationsPerExampleForward() override;
     uint64_t floatingPointOperationsPerExampleBackward() override;
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override;
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override;
 
     void initialize() override;
     void cleanup() override;

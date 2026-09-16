@@ -826,6 +826,15 @@ class NetworkInput : public Layer {
     Stream loadStream;
     Mode mode = Mode::ExternalLoad;
     bool aliasSamePlacementInputs = false;
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override {
+        (void)validExampleCount;
+        return 0;
+    }
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override {
+        (void)validExampleCount;
+        return 0;
+    }
+
 };
 
 }  // namespace ThorImplementation

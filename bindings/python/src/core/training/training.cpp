@@ -2943,7 +2943,10 @@ Multiple windowed fields may reference the same persisted sequence.
     training_stats_snapshot.def_ro("samples_per_second", &TrainingStatsSnapshot::samplesPerSecond);
     training_stats_snapshot.def_ro("batches_per_second", &TrainingStatsSnapshot::batchesPerSecond);
     training_stats_snapshot.def_ro("floating_point_operations_per_batch", &TrainingStatsSnapshot::floatingPointOperationsPerBatch);
+    training_stats_snapshot.def_ro("logical_bytes_per_batch", &TrainingStatsSnapshot::logicalBytesPerBatch);
     training_stats_snapshot.def_ro("floating_point_operations_per_second", &TrainingStatsSnapshot::floatingPointOperationsPerSecond);
+    training_stats_snapshot.def_ro("logical_bytes_per_second", &TrainingStatsSnapshot::logicalBytesPerSecond);
+    training_stats_snapshot.def_ro("logical_arithmetic_intensity", &TrainingStatsSnapshot::logicalArithmeticIntensity);
     training_stats_snapshot.def_prop_ro("loss", [](const TrainingStatsSnapshot& self) { return optionalDouble(self.loss); });
     training_stats_snapshot.def_prop_ro("accuracy", [](const TrainingStatsSnapshot& self) { return optionalDouble(self.accuracy); });
     training_stats_snapshot.def_prop_ro("learning_rate",

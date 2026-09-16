@@ -3,6 +3,7 @@
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/Common/ScopedGpu.h"
 
 #include <algorithm>
@@ -377,6 +378,74 @@ void CtcLoss::forward(optional<Tensor> inputTensor, bool validationPass, uint32_
 
     THOR_THROW_IF_FALSE(previousLayer.has_value());
     backward(nullopt, currentValidExampleCount);
+}
+
+uint64_t CtcLoss::logicalByteCountForward(uint64_t validExampleCount) {
+    if (!featureInput.has_value() || !labelsInput.has_value() || !labelOffsetsInput.has_value() ||
+        !inputLengthsInput.has_value() || !featureOutput.has_value() || ctcBatchSize == 0) {
+        return 0;
+    }
+    const uint64_t validRows = validExampleCount == 0 ? ctcBatchSize : validExampleCount;
+    if (validRows > ctcBatchSize) return 0;
+    const std::optional<uint64_t> activeLabels =
+        validRows == ctcBatchSize
+            ? RowPartitionRuntime::getPublishedHostActiveValueCountIfAvailable(labelOffsetsInput.value())
+            : RowPartitionRuntime::getPublishedHostOffsetIfAvailable(labelOffsetsInput.value(), validRows);
+    if (!activeLabels.has_value() || activeLabels.value() > maxTotalLabelValues) return 0;
+
+    auto densePrefixBytes = [&](const Tensor& tensor) -> std::optional<uint64_t> {
+        if (tensor.getArraySizeInBytes() % ctcBatchSize != 0) return std::nullopt;
+        const uint64_t bytesPerRow = tensor.getArraySizeInBytes() / ctcBatchSize;
+        if (bytesPerRow != 0 && validRows > std::numeric_limits<uint64_t>::max() / bytesPerRow) return std::nullopt;
+        return validRows * bytesPerRow;
+    };
+    if (labelsInput->getArraySizeInBytes() % maxTotalLabelValues != 0) return 0;
+    const uint64_t labelBytesPerValue = labelsInput->getArraySizeInBytes() / maxTotalLabelValues;
+    if (labelBytesPerValue != 0 && activeLabels.value() > std::numeric_limits<uint64_t>::max() / labelBytesPerValue)
+        return 0;
+
+    const auto logitsBytes = densePrefixBytes(featureInput.value());
+    const auto lossBytes = densePrefixBytes(featureOutput.value());
+    if (!logitsBytes.has_value() || !lossBytes.has_value()) return 0;
+    // Label offsets and input lengths are structural sequence metadata, like
+    // ragged offsets/attention sequence lengths, and therefore are not model
+    // logical tensor bytes.
+    uint64_t bytes = checkedLogicalByteAdd(
+        logitsBytes.value(), activeLabels.value() * labelBytesPerValue, "CTC forward labels");
+    return checkedLogicalByteAdd(bytes, lossBytes.value(), "CTC forward loss");
+}
+
+uint64_t CtcLoss::logicalByteCountBackward(uint64_t validExampleCount) {
+    if (!trainingActive || isInferenceOnly()) return 0;
+    if (!featureInput.has_value() || !labelsInput.has_value() || !labelOffsetsInput.has_value() ||
+        !inputLengthsInput.has_value() || !errorOutput.has_value() || ctcBatchSize == 0) {
+        return 0;
+    }
+    const uint64_t validRows = validExampleCount == 0 ? ctcBatchSize : validExampleCount;
+    if (validRows > ctcBatchSize) return 0;
+    const std::optional<uint64_t> activeLabels =
+        validRows == ctcBatchSize
+            ? RowPartitionRuntime::getPublishedHostActiveValueCountIfAvailable(labelOffsetsInput.value())
+            : RowPartitionRuntime::getPublishedHostOffsetIfAvailable(labelOffsetsInput.value(), validRows);
+    if (!activeLabels.has_value() || activeLabels.value() > maxTotalLabelValues) return 0;
+
+    auto densePrefixBytes = [&](const Tensor& tensor) -> std::optional<uint64_t> {
+        if (tensor.getArraySizeInBytes() % ctcBatchSize != 0) return std::nullopt;
+        const uint64_t bytesPerRow = tensor.getArraySizeInBytes() / ctcBatchSize;
+        if (bytesPerRow != 0 && validRows > std::numeric_limits<uint64_t>::max() / bytesPerRow) return std::nullopt;
+        return validRows * bytesPerRow;
+    };
+    if (labelsInput->getArraySizeInBytes() % maxTotalLabelValues != 0) return 0;
+    const uint64_t labelBytesPerValue = labelsInput->getArraySizeInBytes() / maxTotalLabelValues;
+    if (labelBytesPerValue != 0 && activeLabels.value() > std::numeric_limits<uint64_t>::max() / labelBytesPerValue)
+        return 0;
+
+    const auto logitsBytes = densePrefixBytes(featureInput.value());
+    const auto gradientBytes = densePrefixBytes(errorOutput.value());
+    if (!logitsBytes.has_value() || !gradientBytes.has_value()) return 0;
+    uint64_t bytes = checkedLogicalByteAdd(
+        logitsBytes.value(), activeLabels.value() * labelBytesPerValue, "CTC backward labels");
+    return checkedLogicalByteAdd(bytes, gradientBytes.value(), "CTC backward gradient");
 }
 
 void CtcLoss::advanceDataIfReady(bool validationPass) {

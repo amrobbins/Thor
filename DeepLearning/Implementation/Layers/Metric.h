@@ -147,6 +147,22 @@ class Metric : public Layer {
 
     ~Metric() override {}
 
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override {
+        uint64_t bytes = Layer::logicalByteCountForward(validExampleCount);
+        if (!requiresLabelsInput() || !labelsInput.has_value() || !featureInput.has_value()) return bytes;
+        return checkedLogicalByteAdd(
+            bytes,
+            logicalTensorBytesForBatch(labelsInput.value(),
+                                       validExampleCount,
+                                       logicalBatchCapacityFromTensor(featureInput.value())),
+            "Metric forward");
+    }
+
+    uint64_t logicalByteCountBackward(uint64_t validExampleCount) override {
+        (void)validExampleCount;
+        return 0;
+    }
+
     void initialize() override {
         Layer::initialize();
         featureInputReceived = false;

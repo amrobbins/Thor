@@ -19,6 +19,7 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <limits>
 #include <optional>
 #include <set>
 #include <string>
@@ -662,13 +663,17 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     return key;
 }
 
-static void deduplicateFusedStageExpr(PhysicalExpression& stage_expr, std::vector<CompiledStageOutput>& stage_outputs) {
+static void deduplicateFusedStageExpr(PhysicalExpression& stage_expr,
+                                        std::vector<CompiledStageOutput>& stage_outputs,
+                                        std::vector<uint32_t>& logical_node_multiplicities) {
     if (stage_outputs.empty()) {
         throw std::runtime_error("deduplicateFusedStageExpr requires at least one stage output.");
     }
 
     std::vector<ExprNode> dedup_nodes;
     dedup_nodes.reserve(stage_expr.nodes.size());
+    logical_node_multiplicities.clear();
+    logical_node_multiplicities.reserve(stage_expr.nodes.size());
 
     std::unordered_map<StageNodeKey, uint32_t, StageNodeKeyHash> key_to_new_idx;
     std::vector<uint32_t> old_to_new(stage_expr.nodes.size(), UINT32_MAX);
@@ -716,12 +721,17 @@ static void deduplicateFusedStageExpr(PhysicalExpression& stage_expr, std::vecto
             StageNodeKey key = makeStageNodeKey(n);
             auto it = key_to_new_idx.find(key);
             if (it != key_to_new_idx.end()) {
+                if (logical_node_multiplicities.at(it->second) == std::numeric_limits<uint32_t>::max()) {
+                    throw std::runtime_error("Fused-stage logical node multiplicity overflow.");
+                }
+                ++logical_node_multiplicities[it->second];
                 old_to_new[old_idx] = it->second;
                 return it->second;
             }
 
             uint32_t new_idx = static_cast<uint32_t>(dedup_nodes.size());
             dedup_nodes.push_back(std::move(n));
+            logical_node_multiplicities.push_back(1);
             key_to_new_idx.emplace(std::move(key), new_idx);
             old_to_new[old_idx] = new_idx;
             return new_idx;
@@ -731,6 +741,7 @@ static void deduplicateFusedStageExpr(PhysicalExpression& stage_expr, std::vecto
         // identity until their complete codegen semantics are audited into the key.
         uint32_t new_idx = static_cast<uint32_t>(dedup_nodes.size());
         dedup_nodes.push_back(std::move(n));
+        logical_node_multiplicities.push_back(1);
         old_to_new[old_idx] = new_idx;
         return new_idx;
     };
@@ -2984,6 +2995,8 @@ shared_ptr<CompiledRmsNormBackward> EquationCompiler::compileRmsNormBackward(con
     if (!saw_dx_route && !saw_dscale_route) {
         throw std::runtime_error("RMSNorm-backward stage contains no backward output route.");
     }
+    compiled->produces_dx = saw_dx_route;
+    compiled->produces_dscale = saw_dscale_route;
 
     // Validate the dtype/configuration contract independent of the eventual outer dimension.
     CudnnRmsNormDescriptor descriptor;
@@ -3682,6 +3695,28 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
     compiled->dQ_dtype = q_dtype;
     compiled->dK_dtype = k_dtype;
     compiled->dV_dtype = v_dtype;
+    for (const ExprNode& route_node : expr.nodes) {
+        switch (route_node.op) {
+            case ExprOp::ATTENTION_BACKWARD_Q:
+                compiled->logical_produces_dq = true;
+                break;
+            case ExprOp::ATTENTION_BACKWARD_K:
+                compiled->logical_produces_dk = true;
+                break;
+            case ExprOp::ATTENTION_BACKWARD_V:
+                compiled->logical_produces_dv = true;
+                break;
+            case ExprOp::ATTENTION_BACKWARD_BIAS:
+                compiled->logical_produces_dbias = true;
+                break;
+            default:
+                break;
+        }
+    }
+    if (!compiled->logical_produces_dq && !compiled->logical_produces_dk && !compiled->logical_produces_dv &&
+        !compiled->logical_produces_dbias) {
+        throw std::runtime_error("Attention-backward stage has no authored logical gradient output routes.");
+    }
     return compiled;
 }
 
@@ -4418,7 +4453,8 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
         stage_expr.output_node = stage_outputs.front().local_node_idx;
     }
 
-    deduplicateFusedStageExpr(stage_expr, stage_outputs);
+    std::vector<uint32_t> logical_node_multiplicities;
+    deduplicateFusedStageExpr(stage_expr, stage_outputs, logical_node_multiplicities);
     compactFusedStageInputs(stage_expr, stage_input_value_ids);
 
     return PhysicalExecutionStage{
@@ -4426,6 +4462,7 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
         .expr = std::move(stage_expr),
         .input_value_ids = std::move(stage_input_value_ids),
         .outputs = std::move(stage_outputs),
+        .logical_node_multiplicities = std::move(logical_node_multiplicities),
     };
 }
 
@@ -8799,7 +8836,12 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
         switch (stage.kind) {
             case PhysicalExecutionStage::Kind::FusedKernel:
                 flat = compileFusedStage(stage, sig);
-                compiled->stages.emplace_back(stage.expr, flat, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                compiled->stages.emplace_back(stage.expr,
+                                              flat,
+                                              stage.input_value_ids,
+                                              stage.outputs,
+                                              stage.parameter_fan_overrides,
+                                              stage.logical_node_multiplicities);
                 break;
             case PhysicalExecutionStage::Kind::CudaKernel: {
                 if (stage.expr.cuda_kernel_expressions.size() != 1 || !stage.expr.cuda_kernel_expressions[0]) {

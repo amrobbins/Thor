@@ -3,6 +3,7 @@
 #include <limits>
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/Common/ScopedGpu.h"
 
 using namespace ThorImplementation;
@@ -363,6 +364,77 @@ void SparseCategoricalCrossEntropyWithLogits::backward(optional<Tensor> errorInp
         previousLayer.value()->backward(errorOutput, resolved);
 }
 
+
+uint64_t SparseCategoricalCrossEntropyWithLogits::logicalByteCountForward(uint64_t validExampleCount) {
+    if (!usesRaggedActiveCount()) return Loss::logicalByteCountForward(validExampleCount);
+    if (!activeCountInput.has_value() || !featureInput.has_value() || !labelsInput.has_value() ||
+        !featureOutput.has_value() || numRows == 0) {
+        return 0;
+    }
+    const uint64_t validRows = validExampleCount == 0 ? raggedBatchSize.value() : validExampleCount;
+    if (validRows > raggedBatchSize.value()) return 0;
+    const std::optional<uint64_t> activeRows =
+        validRows == raggedBatchSize.value()
+            ? RowPartitionRuntime::getPublishedHostActiveValueCountIfAvailable(activeCountInput.value())
+            : RowPartitionRuntime::getPublishedHostOffsetIfAvailable(activeCountInput.value(), validRows);
+    if (!activeRows.has_value() || activeRows.value() > numRows) return 0;
+
+    auto activeBytes = [&](const Tensor& tensor) -> std::optional<uint64_t> {
+        if (tensor.getArraySizeInBytes() % numRows != 0) return std::nullopt;
+        const uint64_t bytesPerRow = tensor.getArraySizeInBytes() / numRows;
+        if (bytesPerRow != 0 && activeRows.value() > std::numeric_limits<uint64_t>::max() / bytesPerRow)
+            return std::nullopt;
+        return activeRows.value() * bytesPerRow;
+    };
+
+    const auto logitsBytes = activeBytes(featureInput.value());
+    const auto labelsBytes = activeBytes(labelsInput.value());
+    const auto lossBytes = activeBytes(featureOutput.value());
+    if (!logitsBytes.has_value() || !labelsBytes.has_value() || !lossBytes.has_value()) return 0;
+    uint64_t bytes = checkedLogicalByteAdd(logitsBytes.value(), labelsBytes.value(), "Ragged sparse CE forward inputs");
+    if (maskInput.has_value()) {
+        const auto maskBytes = activeBytes(maskInput.value());
+        if (!maskBytes.has_value()) return 0;
+        bytes = checkedLogicalByteAdd(bytes, maskBytes.value(), "Ragged sparse CE forward mask");
+    }
+    return checkedLogicalByteAdd(bytes, lossBytes.value(), "Ragged sparse CE forward output");
+}
+
+uint64_t SparseCategoricalCrossEntropyWithLogits::logicalByteCountBackward(uint64_t validExampleCount) {
+    if (!usesRaggedActiveCount()) return Loss::logicalByteCountBackward(validExampleCount);
+    if (!trainingActive || isInferenceOnly()) return 0;
+    if (!activeCountInput.has_value() || !featureInput.has_value() || !labelsInput.has_value() ||
+        !errorOutput.has_value() || numRows == 0) {
+        return 0;
+    }
+    const uint64_t validRows = validExampleCount == 0 ? raggedBatchSize.value() : validExampleCount;
+    if (validRows > raggedBatchSize.value()) return 0;
+    const std::optional<uint64_t> activeRows =
+        validRows == raggedBatchSize.value()
+            ? RowPartitionRuntime::getPublishedHostActiveValueCountIfAvailable(activeCountInput.value())
+            : RowPartitionRuntime::getPublishedHostOffsetIfAvailable(activeCountInput.value(), validRows);
+    if (!activeRows.has_value() || activeRows.value() > numRows) return 0;
+
+    auto activeBytes = [&](const Tensor& tensor) -> std::optional<uint64_t> {
+        if (tensor.getArraySizeInBytes() % numRows != 0) return std::nullopt;
+        const uint64_t bytesPerRow = tensor.getArraySizeInBytes() / numRows;
+        if (bytesPerRow != 0 && activeRows.value() > std::numeric_limits<uint64_t>::max() / bytesPerRow)
+            return std::nullopt;
+        return activeRows.value() * bytesPerRow;
+    };
+
+    const auto logitsBytes = activeBytes(featureInput.value());
+    const auto labelsBytes = activeBytes(labelsInput.value());
+    const auto gradientBytes = activeBytes(errorOutput.value());
+    if (!logitsBytes.has_value() || !labelsBytes.has_value() || !gradientBytes.has_value()) return 0;
+    uint64_t bytes = checkedLogicalByteAdd(logitsBytes.value(), labelsBytes.value(), "Ragged sparse CE backward inputs");
+    if (maskInput.has_value()) {
+        const auto maskBytes = activeBytes(maskInput.value());
+        if (!maskBytes.has_value()) return 0;
+        bytes = checkedLogicalByteAdd(bytes, maskBytes.value(), "Ragged sparse CE backward mask");
+    }
+    return checkedLogicalByteAdd(bytes, gradientBytes.value(), "Ragged sparse CE backward output");
+}
 
 void SparseCategoricalCrossEntropyWithLogits::advanceDataIfReady(bool validationPass) {
     if (featureInputReceived && labelsReceived && (!maskInput.has_value() || maskReceived) &&

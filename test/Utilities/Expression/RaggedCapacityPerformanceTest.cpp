@@ -2,11 +2,13 @@
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/RaggedExpression.h"
+#include "Utilities/TensorOperations/Ragged/PaddedRaggedSequence.h"
 
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -206,6 +208,37 @@ TEST(RaggedCapacityPerformance, RepresentativeExpressionChainsContainOnlyLogical
     }
 }
 
+TEST(RaggedCapacityPerformance, SegmentedMeanFlopsUseCachedExactNonEmptyRowCount) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batch_size = 4;
+    constexpr uint64_t capacity = 12;
+
+    Tensor values(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity}));
+    Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+    RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+    partition.setHostOffsets({0, 2, 2, 5, 6});  // 6 values, 3 non-empty rows.
+
+    const RaggedTensorDescriptor descriptor(
+        DataType::FP32, {}, batch_size, capacity, DataType::UINT32);
+    const RaggedExpression input = RaggedExpression::input("tokens", descriptor);
+    FusedEquation equation =
+        FusedEquation::compile(Expression::outputs({{"y", input.segment_mean()}}).physicalOutputs(), 0);
+    Stream stream(0);
+    StampedExecutionPlan plan =
+        equation.stamp({{"tokens.values", values}, {"tokens.offsets", offsets}}, stream);
+
+    // One reduction FLOP per active scalar plus one division for each non-empty
+    // row: 6 + 3 = 9. The non-empty-row term is cached at publication time.
+    EXPECT_EQ(plan.flopCount(), 9U);
+    // First two valid rows have lengths [2, 0]: 2 active values + 1 division.
+    EXPECT_EQ(plan.logicalFlopCount(2), 3U);
+
+    partition.setHostOffsets({0, 0, 1, 1, 1});  // 1 value, 1 non-empty row.
+    EXPECT_EQ(plan.flopCount(), 2U);
+    // First two valid rows have lengths [0, 1]: 1 active value + 1 division.
+    EXPECT_EQ(plan.logicalFlopCount(2), 2U);
+}
+
 TEST(RaggedCapacityPerformance, RaggedAttentionFlopsUseRuntimeLogicalRowPairs) {
     REQUIRE_CUDA_DEVICE();
     constexpr uint64_t batch_size = 2;
@@ -256,7 +289,12 @@ TEST(RaggedCapacityPerformance, RaggedAttentionFlopsUseRuntimeLogicalRowPairs) {
     // capacities: 2*4 + 3*1 = 11. The existing Attention convention charges
     // 2*D for QK, 2*D for PV, and 5 softmax/mask/scale FLOPs per score.
     constexpr uint64_t flops_per_score = (2 * head_dim) + (2 * head_dim) + 5;
+    constexpr uint64_t bytes_per_token = heads * head_dim * sizeof(uint16_t);
     EXPECT_EQ(plan.flopCount(), 11u * heads * flops_per_score);
+    EXPECT_EQ(plan.logicalFlopCount(), 11u * heads * flops_per_score);
+    EXPECT_EQ(plan.logicalByteCount(), (5u + 5u + 5u + 5u) * bytes_per_token);
+    EXPECT_EQ(plan.logicalFlopCount(1), 8u * heads * flops_per_score);
+    EXPECT_EQ(plan.logicalByteCount(1), (2u + 4u + 4u + 2u) * bytes_per_token);
 
     // FLOP accounting is runtime metadata, not a stamp-time constant. Reuse the
     // same plan with a different logical partition and require the count to move
@@ -264,6 +302,10 @@ TEST(RaggedCapacityPerformance, RaggedAttentionFlopsUseRuntimeLogicalRowPairs) {
     q_partition.setHostOffsets({0, 1, 2});       // lengths [1, 1]
     kv_partition.setHostOffsets({0, 1, 3});      // lengths [1, 2]
     EXPECT_EQ(plan.flopCount(), 3u * heads * flops_per_score);
+    EXPECT_EQ(plan.logicalFlopCount(), 3u * heads * flops_per_score);
+    EXPECT_EQ(plan.logicalByteCount(), (2u + 3u + 3u + 2u) * bytes_per_token);
+    EXPECT_EQ(plan.logicalFlopCount(1), 1u * heads * flops_per_score);
+    EXPECT_EQ(plan.logicalByteCount(1), (1u + 1u + 1u + 1u) * bytes_per_token);
 }
 
 TEST(RaggedCapacityPerformance, MixedDenseQueryRaggedKvAttentionFlopsUseRuntimeLogicalRowPairs) {
@@ -317,7 +359,132 @@ TEST(RaggedCapacityPerformance, MixedDenseQueryRaggedKvAttentionFlopsUseRuntimeL
     // dense-Q / ragged-KV case; K/V packed capacity must not enter the logical
     // FLOP count.
     constexpr uint64_t flops_per_score = (2 * head_dim) + (2 * head_dim) + 5;
+    constexpr uint64_t bytes_per_token = heads * head_dim * sizeof(uint16_t);
     EXPECT_EQ(plan.flopCount(), 10u * heads * flops_per_score);
+    EXPECT_EQ(plan.logicalFlopCount(), 10u * heads * flops_per_score);
+    EXPECT_EQ(plan.logicalByteCount(), (4u + 5u + 5u + 4u) * bytes_per_token);
+    EXPECT_EQ(plan.logicalFlopCount(1), 8u * heads * flops_per_score);
+    EXPECT_EQ(plan.logicalByteCount(1), (2u + 4u + 4u + 2u) * bytes_per_token);
+}
+
+TEST(RaggedCapacityPerformance, Lwa4c1RaggedAttentionForwardLogicalWorkIsPrefixExactAndCapacityInvariant) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t heads = 1;
+    constexpr uint64_t head_dim = 8;
+    constexpr uint64_t valid_rows = 1;
+    constexpr uint64_t flops_per_score = (2 * head_dim) + (2 * head_dim) + 5;
+    constexpr uint64_t bytes_per_token = heads * head_dim * sizeof(uint16_t);
+
+    auto logical_work_for_capacity = [&](uint64_t capacity) {
+        Tensor q(gpuPlacement, TensorDescriptor(DataType::FP16, {capacity, heads, head_dim}));
+        Tensor k(gpuPlacement, TensorDescriptor(DataType::FP16, {capacity, heads, head_dim}));
+        Tensor v(gpuPlacement, TensorDescriptor(DataType::FP16, {capacity, heads, head_dim}));
+        Tensor q_offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+        Tensor kv_offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+
+        // Device payloads remain deliberately untouched. Logical-work telemetry
+        // must use only the authoritative host publications below.
+        RowPartitionRuntime q_partition(
+            q_offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+        RowPartitionRuntime kv_partition(
+            kv_offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+        q_partition.setHostOffsets({0, 2, 5});       // lengths [2, 3]
+        kv_partition.setHostOffsets({0, 4, 5});      // lengths [4, 1]
+
+        const Expression q_expr = Expression::input("q", DataType::FP32, DataType::FP16);
+        const Expression k_expr = Expression::input("k", DataType::FP32, DataType::FP16);
+        const Expression v_expr = Expression::input("v", DataType::FP32, DataType::FP16);
+        const Expression q_offsets_expr = Expression::input("q_offsets", DataType::UINT32, DataType::UINT32);
+        const Expression kv_offsets_expr = Expression::input("kv_offsets", DataType::UINT32, DataType::UINT32);
+
+        AttentionOptions options;
+        options.q_layout = AttentionTensorLayout::BSHD;
+        options.k_layout = AttentionTensorLayout::BSHD;
+        options.v_layout = AttentionTensorLayout::BSHD;
+        options.o_layout = AttentionTensorLayout::BSHD;
+        options.compute_dtype = DataType::FP32;
+        options.output_dtype = DataType::FP16;
+
+        const Expression attention = Expression::scaledDotProductAttentionRagged(
+            q_expr, k_expr, v_expr, q_offsets_expr, kv_offsets_expr, options);
+        FusedEquation equation =
+            FusedEquation::compile(Expression::outputs({{"y", attention}}).physicalOutputs(), 0);
+        Stream stream(0);
+        StampedExecutionPlan plan = equation.stamp({{"q", q},
+                                                    {"k", k},
+                                                    {"v", v},
+                                                    {"q_offsets", q_offsets},
+                                                    {"kv_offsets", kv_offsets}},
+                                                   stream);
+
+        const std::array<uint64_t, 4> initial{
+            plan.logicalFlopCount(),
+            plan.logicalByteCount(),
+            plan.logicalFlopCount(valid_rows),
+            plan.logicalByteCount(valid_rows)};
+        EXPECT_EQ(initial[0], 11u * heads * flops_per_score);
+        EXPECT_EQ(initial[1], (5u + 5u + 5u + 5u) * bytes_per_token);
+        EXPECT_EQ(initial[2], 8u * heads * flops_per_score);
+        EXPECT_EQ(initial[3], (2u + 4u + 4u + 2u) * bytes_per_token);
+
+        // Preserve the same total active token counts but change row geometry.
+        // Logical bytes stay fixed while exact score-pair FLOPs move from
+        // 2*4 + 3*1 = 11 to 1*1 + 4*4 = 17.
+        q_partition.setHostOffsets({0, 1, 5});
+        kv_partition.setHostOffsets({0, 1, 5});
+        EXPECT_EQ(plan.logicalFlopCount(), 17u * heads * flops_per_score);
+        EXPECT_EQ(plan.logicalByteCount(), initial[1]);
+        EXPECT_EQ(plan.logicalFlopCount(valid_rows), 1u * heads * flops_per_score);
+        EXPECT_EQ(plan.logicalByteCount(valid_rows), (1u + 1u + 1u + 1u) * bytes_per_token);
+
+        return initial;
+    };
+
+    EXPECT_EQ(logical_work_for_capacity(8), logical_work_for_capacity(16));
+}
+
+TEST(RaggedCapacityPerformance, Lwa4c1SelfAttentionUsesExactPrefixSquaredRowGeometry) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t capacity = 10;
+    constexpr uint64_t heads = 1;
+    constexpr uint64_t head_dim = 8;
+    constexpr uint64_t flops_per_score = (2 * head_dim) + (2 * head_dim) + 5;
+    constexpr uint64_t bytes_per_token = heads * head_dim * sizeof(uint16_t);
+
+    Tensor q(gpuPlacement, TensorDescriptor(DataType::FP16, {capacity, heads, head_dim}));
+    Tensor k(gpuPlacement, TensorDescriptor(DataType::FP16, {capacity, heads, head_dim}));
+    Tensor v(gpuPlacement, TensorDescriptor(DataType::FP16, {capacity, heads, head_dim}));
+    Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+    RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+    partition.setHostOffsets({0, 2, 2, 5});  // lengths [2, 0, 3], squares sum to 13.
+
+    const Expression q_expr = Expression::input("q", DataType::FP32, DataType::FP16);
+    const Expression k_expr = Expression::input("k", DataType::FP32, DataType::FP16);
+    const Expression v_expr = Expression::input("v", DataType::FP32, DataType::FP16);
+    const Expression offsets_expr = Expression::input("offsets", DataType::UINT32, DataType::UINT32);
+    AttentionOptions options;
+    options.q_layout = AttentionTensorLayout::BSHD;
+    options.k_layout = AttentionTensorLayout::BSHD;
+    options.v_layout = AttentionTensorLayout::BSHD;
+    options.o_layout = AttentionTensorLayout::BSHD;
+    options.compute_dtype = DataType::FP32;
+    options.output_dtype = DataType::FP16;
+
+    const Expression attention = Expression::scaledDotProductAttentionRagged(
+        q_expr, k_expr, v_expr, offsets_expr, offsets_expr, options);
+    FusedEquation equation =
+        FusedEquation::compile(Expression::outputs({{"y", attention}}).physicalOutputs(), 0);
+    Stream stream(0);
+    StampedExecutionPlan plan =
+        equation.stamp({{"q", q}, {"k", k}, {"v", v}, {"offsets", offsets}}, stream);
+
+    EXPECT_EQ(plan.logicalFlopCount(), 13u * heads * flops_per_score);
+    EXPECT_EQ(plan.logicalByteCount(), (5u + 5u + 5u + 5u) * bytes_per_token);
+    // First two rows have lengths [2,0], so score pairs are exactly 4.
+    EXPECT_EQ(plan.logicalFlopCount(2), 4u * heads * flops_per_score);
+    EXPECT_EQ(plan.logicalByteCount(2), (2u + 2u + 2u + 2u) * bytes_per_token);
 }
 
 TEST(RaggedCapacityPerformance, PackedMatmulFlopsUseRuntimeActiveRowsForForwardDgradAndWgrad) {
@@ -374,6 +541,102 @@ TEST(RaggedCapacityPerformance, PackedMatmulFlopsUseRuntimeActiveRowsForForwardD
     EXPECT_EQ(forward_plan.flopCount(), 0u);
     EXPECT_EQ(dgrad_plan.flopCount(), 0u);
     EXPECT_EQ(wgrad_plan.flopCount(), 0u);
+}
+
+TEST(RaggedCapacityPerformance, Lwa4b3PackedMatmulLogicalWorkUsesOneRuntimeMknGeometry) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t input_width = 4;
+    constexpr uint64_t output_width = 6;
+    constexpr uint64_t valid_rows = 1;
+    const std::vector<uint64_t> host_offsets{0, 2, 5};
+
+    auto logical_work_for_capacity = [&](uint64_t capacity) {
+        Tensor x(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, input_width}));
+        Tensor w(gpuPlacement, TensorDescriptor(DataType::FP32, {input_width, output_width}));
+        Tensor dy(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, output_width}));
+        // Keep the device carrier stale. LWA telemetry must use only the
+        // authoritative host partition published below.
+        Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+        RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+        partition.setHostOffsets(host_offsets);
+
+        const Expression x_expr = Expression::input("x", DataType::FP32, DataType::FP32);
+        const Expression w_expr = Expression::input("w", DataType::FP32, DataType::FP32);
+        const Expression offsets_expr = Expression::input("offsets", DataType::UINT32, DataType::UINT32);
+        const Expression y = Expression::matmul(packedExtent(x_expr, offsets_expr, capacity, input_width),
+                                                w_expr,
+                                                false,
+                                                false,
+                                                DataType::FP32,
+                                                DataType::FP32,
+                                                capacity);
+
+        FusedEquation forward = FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+        FusedEquation dgrad = forward.compileBackward({"x"}, "dy");
+        FusedEquation wgrad = forward.compileBackward({"w"}, "dy");
+
+        Stream stream(0);
+        StampedExecutionPlan forward_plan =
+            forward.stamp({{"x", x}, {"w", w}, {"offsets", offsets}}, stream);
+        StampedExecutionPlan dgrad_plan =
+            dgrad.stamp({{"x", x}, {"w", w}, {"offsets", offsets}, {"dy", dy}}, stream);
+        StampedExecutionPlan wgrad_plan =
+            wgrad.stamp({{"x", x}, {"w", w}, {"offsets", offsets}, {"dy", dy}}, stream);
+
+        // These three plans exercise the production packed-row geometries:
+        //   forward: RowsA,           M=active, K=input,  N=output
+        //   dgrad:   RowsA + rhs^T,   M=active, K=output, N=input
+        //   wgrad:   RowsAAndRowsB + lhs^T,
+        //                              M=input,  K=active, N=output
+        constexpr uint64_t full_active_rows = 5;
+        constexpr uint64_t prefix_active_rows = 2;
+        constexpr uint64_t full_flops = full_active_rows * input_width * output_width * 2;
+        constexpr uint64_t prefix_flops = prefix_active_rows * input_width * output_width * 2;
+        constexpr uint64_t full_bytes =
+            (full_active_rows * input_width + input_width * output_width +
+             full_active_rows * output_width) * sizeof(float);
+        constexpr uint64_t prefix_bytes =
+            (prefix_active_rows * input_width + input_width * output_width +
+             prefix_active_rows * output_width) * sizeof(float);
+
+        for (const StampedExecutionPlan* plan : {&forward_plan, &dgrad_plan, &wgrad_plan}) {
+            EXPECT_EQ(plan->logicalFlopCount(), full_flops);
+            EXPECT_EQ(plan->logicalByteCount(), full_bytes);
+            EXPECT_EQ(plan->logicalFlopCount(valid_rows), prefix_flops);
+            EXPECT_EQ(plan->logicalByteCount(valid_rows), prefix_bytes);
+        }
+
+        // Tail rows beyond validExampleCount must not perturb prefix work.
+        partition.setHostOffsets({0, 2, 7});
+        for (const StampedExecutionPlan* plan : {&forward_plan, &dgrad_plan, &wgrad_plan}) {
+            EXPECT_EQ(plan->logicalFlopCount(valid_rows), prefix_flops);
+            EXPECT_EQ(plan->logicalByteCount(valid_rows), prefix_bytes);
+        }
+
+        partition.setHostOffsets(host_offsets);
+        std::vector<uint64_t> work{
+            forward_plan.logicalFlopCount(), forward_plan.logicalByteCount(),
+            dgrad_plan.logicalFlopCount(), dgrad_plan.logicalByteCount(),
+            wgrad_plan.logicalFlopCount(), wgrad_plan.logicalByteCount(),
+            forward_plan.logicalFlopCount(valid_rows), forward_plan.logicalByteCount(valid_rows),
+            dgrad_plan.logicalFlopCount(valid_rows), dgrad_plan.logicalByteCount(valid_rows),
+            wgrad_plan.logicalFlopCount(valid_rows), wgrad_plan.logicalByteCount(valid_rows)};
+
+        // With no active rows, forward/dgrad have no logical output. Wgrad still
+        // produces the fixed-size zero parameter gradient, so only that output
+        // write remains in logical bytes.
+        partition.setHostOffsets({0, 0, 0});
+        EXPECT_EQ(forward_plan.logicalFlopCount(), 0U);
+        EXPECT_EQ(forward_plan.logicalByteCount(), 0U);
+        EXPECT_EQ(dgrad_plan.logicalFlopCount(), 0U);
+        EXPECT_EQ(dgrad_plan.logicalByteCount(), 0U);
+        EXPECT_EQ(wgrad_plan.logicalFlopCount(), 0U);
+        EXPECT_EQ(wgrad_plan.logicalByteCount(), input_width * output_width * sizeof(float));
+        return work;
+    };
+
+    EXPECT_EQ(logical_work_for_capacity(8), logical_work_for_capacity(16));
 }
 
 TEST(RaggedCapacityPerformance, RaggedCausalConv1dFlopsUseRuntimeActiveValuesForForwardDgradAndWgrad) {
@@ -442,6 +705,161 @@ TEST(RaggedCapacityPerformance, RaggedCausalConv1dFlopsUseRuntimeActiveValuesFor
     EXPECT_EQ(forward_plan.flopCount(), 0u);
     EXPECT_EQ(dgrad_plan.flopCount(), 0u);
     EXPECT_EQ(wgrad_plan.flopCount(), 0u);
+}
+
+TEST(RaggedCapacityPerformance, Lwa4dRaggedCausalConv1dLogicalWorkUsesSemanticPackedExtentNotPaddedWidth) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t input_channels = 4;
+    constexpr uint64_t output_channels = 6;
+    constexpr uint64_t kernel_width = 3;
+    constexpr uint64_t groups = 2;
+    constexpr uint64_t valid_rows = 2;
+    const std::vector<uint64_t> host_offsets{0, 2, 5, 7};
+
+    auto logical_work_for_capacity = [&](uint64_t capacity,
+                                         uint64_t max_values_per_row,
+                                         uint64_t selected_width) {
+        Stream stream(0);
+        // Deliberately leave the device payload stale. Logical-work telemetry
+        // must use only the authoritative host publication below.
+        Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+        RowPartitionRuntime partition(
+            offsets,
+            RowPartitionDescriptor(batch_size, capacity, DataType::UINT32, max_values_per_row));
+        partition.setHostOffsets(host_offsets);
+
+        Tensor filter(gpuPlacement,
+                      TensorDescriptor(DataType::FP32,
+                                       {output_channels, input_channels / groups, kernel_width}));
+        Tensor dw(gpuPlacement,
+                  TensorDescriptor(DataType::FP32,
+                                   {output_channels, input_channels / groups, kernel_width}));
+
+        const PaddedRaggedSequencePlan x_plan =
+            preparePaddedRaggedSequencePlan(partition, input_channels, DataType::FP32, selected_width);
+        const PaddedRaggedSequencePlan y_plan =
+            preparePaddedRaggedSequencePlan(partition, output_channels, DataType::FP32, selected_width);
+        auto padded_x =
+            std::make_shared<PaddedRaggedSequence>(x_plan, offsets, gpuPlacement, max_values_per_row);
+        auto padded_y =
+            std::make_shared<PaddedRaggedSequence>(y_plan, offsets, gpuPlacement, max_values_per_row);
+        auto padded_dy =
+            std::make_shared<PaddedRaggedSequence>(y_plan, offsets, gpuPlacement, max_values_per_row);
+        auto padded_dx =
+            std::make_shared<PaddedRaggedSequence>(x_plan, offsets, gpuPlacement, max_values_per_row);
+
+        auto compiled_forward = std::make_shared<CompiledRaggedConv1dCausal>(DataType::FP32,
+                                                                             DataType::FP32,
+                                                                             DataType::FP32,
+                                                                             DataType::FP32,
+                                                                             DataType::UINT32,
+                                                                             batch_size,
+                                                                             capacity,
+                                                                             max_values_per_row,
+                                                                             input_channels,
+                                                                             output_channels,
+                                                                             kernel_width,
+                                                                             groups,
+                                                                             /*dilation=*/2);
+        auto compiled_dgrad = std::make_shared<CompiledRaggedConv1dCausalBackwardData>(DataType::FP32,
+                                                                                       DataType::FP32,
+                                                                                       DataType::FP32,
+                                                                                       DataType::FP32,
+                                                                                       DataType::UINT32,
+                                                                                       batch_size,
+                                                                                       capacity,
+                                                                                       max_values_per_row,
+                                                                                       input_channels,
+                                                                                       output_channels,
+                                                                                       kernel_width,
+                                                                                       groups,
+                                                                                       /*dilation=*/2);
+        auto compiled_wgrad = std::make_shared<CompiledRaggedConv1dCausalBackwardFilter>(DataType::FP32,
+                                                                                         DataType::FP32,
+                                                                                         DataType::FP32,
+                                                                                         DataType::FP32,
+                                                                                         DataType::UINT32,
+                                                                                         batch_size,
+                                                                                         capacity,
+                                                                                         max_values_per_row,
+                                                                                         input_channels,
+                                                                                         output_channels,
+                                                                                         kernel_width,
+                                                                                         groups,
+                                                                                         /*dilation=*/2);
+
+        auto forward = std::make_shared<StampedRaggedConv1dCausal>(
+            compiled_forward, padded_x, filter, offsets, padded_y, stream);
+        auto dgrad = std::make_shared<StampedRaggedConv1dCausalBackwardData>(
+            compiled_dgrad, filter, padded_dy, offsets, padded_dx, stream);
+        auto wgrad = std::make_shared<StampedRaggedConv1dCausalBackwardFilter>(
+            compiled_wgrad, padded_x, padded_dy, offsets, dw, stream);
+        StampedExecutionStage forward_stage(forward);
+        StampedExecutionStage dgrad_stage(dgrad);
+        StampedExecutionStage wgrad_stage(wgrad);
+
+        // These two configurations have identical semantic rows but explicitly
+        // different physical padded widths. The constructors build the whole
+        // cuDNN plan family but must preserve the selected prepared width.
+        EXPECT_EQ(forward->diagnostic().active_values, 7u);
+        EXPECT_EQ(forward->diagnostic().selected_width_capacity, selected_width);
+        EXPECT_EQ(dgrad->diagnostic().selected_width_capacity, selected_width);
+        EXPECT_EQ(wgrad->diagnostic().selected_width_capacity, selected_width);
+
+        constexpr uint64_t filter_elements =
+            output_channels * (input_channels / groups) * kernel_width;
+        constexpr uint64_t flops_per_active_value = filter_elements * 2;
+        constexpr uint64_t bytes_per_active_value =
+            (input_channels + output_channels) * sizeof(float);
+        constexpr uint64_t filter_bytes = filter_elements * sizeof(float);
+
+        auto expect_work = [&](uint64_t valid_example_count, uint64_t active_values) {
+            const uint64_t expected_flops = active_values * flops_per_active_value;
+            const uint64_t expected_forward_or_dgrad_bytes =
+                active_values == 0 ? 0 : active_values * bytes_per_active_value + filter_bytes;
+            const uint64_t expected_wgrad_bytes = active_values * bytes_per_active_value + filter_bytes;
+
+            EXPECT_EQ(forward_stage.logicalFlopCount(valid_example_count), expected_flops);
+            EXPECT_EQ(dgrad_stage.logicalFlopCount(valid_example_count), expected_flops);
+            EXPECT_EQ(wgrad_stage.logicalFlopCount(valid_example_count), expected_flops);
+            EXPECT_EQ(forward_stage.logicalByteCount(valid_example_count), expected_forward_or_dgrad_bytes);
+            EXPECT_EQ(dgrad_stage.logicalByteCount(valid_example_count), expected_forward_or_dgrad_bytes);
+            EXPECT_EQ(wgrad_stage.logicalByteCount(valid_example_count), expected_wgrad_bytes);
+        };
+
+        expect_work(/*valid_example_count=*/0, /*active_values=*/7);
+        expect_work(valid_rows, /*active_values=*/5);
+
+        // Changing only rows beyond validExampleCount must not alter prefix
+        // accounting, while the full-batch logical extent follows the new
+        // authoritative host publication. No padded representation is touched.
+        partition.setHostOffsets({0, 2, 5, 8});
+        expect_work(valid_rows, /*active_values=*/5);
+        expect_work(/*valid_example_count=*/0, /*active_values=*/8);
+
+        partition.setHostOffsets(host_offsets);
+        const std::array<uint64_t, 12> work{
+            forward_stage.logicalFlopCount(), forward_stage.logicalByteCount(),
+            dgrad_stage.logicalFlopCount(), dgrad_stage.logicalByteCount(),
+            wgrad_stage.logicalFlopCount(), wgrad_stage.logicalByteCount(),
+            forward_stage.logicalFlopCount(valid_rows), forward_stage.logicalByteCount(valid_rows),
+            dgrad_stage.logicalFlopCount(valid_rows), dgrad_stage.logicalByteCount(valid_rows),
+            wgrad_stage.logicalFlopCount(valid_rows), wgrad_stage.logicalByteCount(valid_rows)};
+
+        // No semantic positions means no forward/dgrad tensor traffic. Wgrad
+        // still produces the fixed-size zero parameter-gradient tensor.
+        partition.setHostOffsets({0, 0, 0, 0});
+        expect_work(/*valid_example_count=*/0, /*active_values=*/0);
+        return work;
+    };
+
+    // max_values_per_row=6 allows an explicitly selected padded width of 6;
+    // max_values_per_row=16 allows width 8. Both carry the exact same semantic
+    // rows [2,3,2], proving logical work is invariant to unused packed capacity
+    // and to the selected physical padded implementation width.
+    EXPECT_EQ(logical_work_for_capacity(/*capacity=*/8, /*max_values_per_row=*/6, /*selected_width=*/6),
+              logical_work_for_capacity(/*capacity=*/16, /*max_values_per_row=*/16, /*selected_width=*/8));
 }
 
 TEST(RaggedCapacityPerformance, PackedConsumerSanitationAccountingTracksSelectedBucketNotFullCapacity) {
@@ -1066,4 +1484,120 @@ TEST(RaggedCapacityPerformance, RaggedNormalizationFlopsUseRuntimeActiveValues) 
     EXPECT_EQ(rms_plan.flopCount(), 0u);
     EXPECT_EQ(layer_plan.flopCount(), 0u);
     EXPECT_EQ(rms_backward_plan.flopCount(), 0u);
+}
+
+TEST(RaggedCapacityPerformance, Lwa4c2RaggedAttentionBackwardLogicalWorkUsesRequestedRoutesAndActivePrefix) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t heads = 1;
+    constexpr uint64_t head_dim = 8;
+    constexpr uint64_t valid_rows = 1;
+    constexpr uint64_t bytes_per_token = heads * head_dim * sizeof(uint16_t);
+
+    auto logical_work_for_capacity = [&](uint64_t capacity) {
+        Tensor q(gpuPlacement, TensorDescriptor(DataType::FP16, {capacity, heads, head_dim}));
+        Tensor k(gpuPlacement, TensorDescriptor(DataType::FP16, {capacity, heads, head_dim}));
+        Tensor v(gpuPlacement, TensorDescriptor(DataType::FP16, {capacity, heads, head_dim}));
+        Tensor dy(gpuPlacement, TensorDescriptor(DataType::FP16, {capacity, heads, head_dim}));
+        Tensor q_offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+        Tensor kv_offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+
+        // Keep device offset payloads stale. Logical-work queries must consume
+        // only authoritative host publications and must never synchronize to
+        // inspect these device tensors.
+        RowPartitionRuntime q_partition(
+            q_offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+        RowPartitionRuntime kv_partition(
+            kv_offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+        q_partition.setHostOffsets({0, 2, 5});   // lengths [2, 3]
+        kv_partition.setHostOffsets({0, 4, 5});  // lengths [4, 1]
+
+        const Expression q_expr = Expression::input("q", DataType::FP32, DataType::FP16);
+        const Expression k_expr = Expression::input("k", DataType::FP32, DataType::FP16);
+        const Expression v_expr = Expression::input("v", DataType::FP32, DataType::FP16);
+        const Expression q_offsets_expr = Expression::input("q_offsets", DataType::UINT32, DataType::UINT32);
+        const Expression kv_offsets_expr = Expression::input("kv_offsets", DataType::UINT32, DataType::UINT32);
+
+        AttentionOptions options;
+        options.q_layout = AttentionTensorLayout::BSHD;
+        options.k_layout = AttentionTensorLayout::BSHD;
+        options.v_layout = AttentionTensorLayout::BSHD;
+        options.o_layout = AttentionTensorLayout::BSHD;
+        options.compute_dtype = DataType::FP32;
+        options.output_dtype = DataType::FP16;
+
+        const Expression attention = Expression::scaledDotProductAttentionRagged(
+            q_expr, k_expr, v_expr, q_offsets_expr, kv_offsets_expr, options);
+        FusedEquation forward =
+            FusedEquation::compile(Expression::outputs({{"y", attention}}).physicalOutputs(), 0);
+
+        auto backward_work = [&](const std::vector<std::string>& wrt) {
+            FusedEquation backward = forward.compileBackward(wrt, "dy");
+            Stream stream(0);
+            auto [forward_plan, backward_plan] = backward.stampForwardBackwardPair(
+                {{"q", q},
+                 {"k", k},
+                 {"v", v},
+                 {"q_offsets", q_offsets},
+                 {"kv_offsets", kv_offsets},
+                 {"dy", dy}},
+                stream);
+            return std::array<uint64_t, 4>{backward_plan.logicalFlopCount(),
+                                           backward_plan.logicalByteCount(),
+                                           backward_plan.logicalFlopCount(valid_rows),
+                                           backward_plan.logicalByteCount(valid_rows)};
+        };
+
+        // Per score pair: dP=dO*V^T is 2*Dv and softmax backward is 5.
+        // dQ and dK each add 2*Dqk; dV adds 2*Dv. Shared score-gradient
+        // work must count once when both dQ and dK are authored.
+        constexpr uint64_t score_gradient_flops = (2 * head_dim) + 5;
+        constexpr uint64_t qk_gradient_flops = 2 * head_dim;
+        constexpr uint64_t v_gradient_flops = 2 * head_dim;
+        constexpr uint64_t full_score_pairs = 11;    // 2*4 + 3*1
+        constexpr uint64_t prefix_score_pairs = 8;   // first row: 2*4
+
+        const auto dq = backward_work({"q"});
+        EXPECT_EQ(dq[0], full_score_pairs * heads * (score_gradient_flops + qk_gradient_flops));
+        EXPECT_EQ(dq[1], (5u + 5u + 5u + 5u + 5u) * bytes_per_token);  // q/k/v/dO reads + dQ write
+        EXPECT_EQ(dq[2], prefix_score_pairs * heads * (score_gradient_flops + qk_gradient_flops));
+        EXPECT_EQ(dq[3], (2u + 4u + 4u + 2u + 2u) * bytes_per_token);
+
+        const auto dv = backward_work({"v"});
+        EXPECT_EQ(dv[0], full_score_pairs * heads * v_gradient_flops);
+        EXPECT_EQ(dv[1], (5u + 5u + 5u + 5u + 5u) * bytes_per_token);  // q/k/v/dO reads + dV write
+        EXPECT_EQ(dv[2], prefix_score_pairs * heads * v_gradient_flops);
+        EXPECT_EQ(dv[3], (2u + 4u + 4u + 2u + 4u) * bytes_per_token);
+
+        const auto all = backward_work({"q", "k", "v"});
+        constexpr uint64_t all_gradient_flops =
+            score_gradient_flops + qk_gradient_flops + qk_gradient_flops + v_gradient_flops;
+        EXPECT_EQ(all[0], full_score_pairs * heads * all_gradient_flops);
+        EXPECT_EQ(all[1], (5u + 5u + 5u + 5u + 5u + 5u + 5u) * bytes_per_token);
+        EXPECT_EQ(all[2], prefix_score_pairs * heads * all_gradient_flops);
+        EXPECT_EQ(all[3], (2u + 4u + 4u + 2u + 2u + 4u + 4u) * bytes_per_token);
+
+        // Same token totals, different row geometry: bytes stay identical while
+        // exact score-pair work changes from 11 to 17. This also proves the
+        // backward path reuses the cached Q/K prefix geometry rather than a
+        // capacity-based estimate.
+        q_partition.setHostOffsets({0, 1, 5});
+        kv_partition.setHostOffsets({0, 1, 5});
+        const auto all_redistributed = backward_work({"q", "k", "v"});
+        EXPECT_EQ(all_redistributed[0], 17u * heads * all_gradient_flops);
+        EXPECT_EQ(all_redistributed[1], all[1]);
+        EXPECT_EQ(all_redistributed[2], 1u * heads * all_gradient_flops);
+        EXPECT_EQ(all_redistributed[3], (1u + 1u + 1u + 1u + 1u + 1u + 1u) * bytes_per_token);
+
+        q_partition.setHostOffsets({0, 0, 0});
+        kv_partition.setHostOffsets({0, 0, 0});
+        const auto all_empty = backward_work({"q", "k", "v"});
+        EXPECT_EQ(all_empty, (std::array<uint64_t, 4>{0u, 0u, 0u, 0u}));
+
+        return std::array<uint64_t, 12>{dq[0], dq[1], dq[2], dq[3],
+                                        dv[0], dv[1], dv[2], dv[3],
+                                        all[0], all[1], all[2], all[3]};
+    };
+
+    EXPECT_EQ(logical_work_for_capacity(8), logical_work_for_capacity(16));
 }

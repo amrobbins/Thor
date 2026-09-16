@@ -103,7 +103,9 @@ _TRAINER_STATS_RE = re.compile(
     r"batch=\s*(?P<batch>\d+)/(?:\d+)\s+"
     r"step=\s*(?P<step>\d+)\s+"
     r"loss=\s*(?P<loss>[-+0-9.eE]+).*?"
-    r"flops/s=\s*(?P<flops>[-+0-9.eE]+[KMGTPE]?)")
+    r"logical_flops/s=\s*(?P<logical_flops>[-+0-9.eE]+[KMGTPE]?)\s+"
+    r"logical_bandwidth=\s*(?P<logical_bandwidth>[-+0-9.eE]+[KMGTPE]?B/s)\s+"
+    r"logical_arithmetic_intensity=\s*(?P<logical_arithmetic_intensity>[-+0-9.eE]+F/B)")
 _RUN_STATUS_RE = re.compile(
     r"INFO runs\[(?P<run>[^\]|]+)(?:\|[^\]]+)?\]:.*\bstatus=(?P<status>completed|failed|cancelled|interrupted|oom|running|starting|not_started)\b"
 )
@@ -226,7 +228,9 @@ def _captured_trainer_stats(captured_text: str):
                 "step": int(match.group("step")),
                 "batch": int(match.group("batch")),
                 "loss": float(match.group("loss")),
-                "flops_per_s": match.group("flops"),
+                "logical_flops_per_s": match.group("logical_flops"),
+                "logical_bandwidth": match.group("logical_bandwidth"),
+                "logical_arithmetic_intensity": match.group("logical_arithmetic_intensity"),
             })
     return stats
 
@@ -279,7 +283,7 @@ def _stats_phase_counts(stats):
     return counts
 
 
-def _assert_finite_positive_losses_and_flops(stats, *, model_name: str):
+def _assert_finite_positive_losses_and_logical_work_rates(stats, *, model_name: str):
     losses = [entry["loss"] for entry in stats]
     phase_counts = _stats_phase_counts(stats)
     assert losses, f"{model_name}: no losses were reported; phase_counts={phase_counts}"
@@ -287,9 +291,13 @@ def _assert_finite_positive_losses_and_flops(stats, *, model_name: str):
         assert math.isfinite(loss), f"{model_name}: non-finite loss reported: {loss}; phase_counts={phase_counts}"
         assert loss > 0.0, f"{model_name}: non-positive loss reported: {loss}; phase_counts={phase_counts}"
 
-    flops_values = [_flops_value(entry["flops_per_s"]) for entry in stats]
-    assert flops_values, f"{model_name}: no FLOP/s values were reported; phase_counts={phase_counts}"
-    assert max(flops_values) > 0.0, f"{model_name}: all reported FLOP/s values were zero; stats={stats}"
+    flops_values = [_flops_value(entry["logical_flops_per_s"]) for entry in stats]
+    bandwidth_values = [_flops_value(entry["logical_bandwidth"][:-3]) for entry in stats]
+    intensity_values = [float(entry["logical_arithmetic_intensity"][:-3]) for entry in stats]
+    assert flops_values, f"{model_name}: no logical FLOP/s values were reported; phase_counts={phase_counts}"
+    assert max(flops_values) > 0.0, f"{model_name}: all reported logical FLOP/s values were zero; stats={stats}"
+    assert max(bandwidth_values) > 0.0, f"{model_name}: all reported logical bandwidth values were zero; stats={stats}"
+    assert max(intensity_values) > 0.0, f"{model_name}: all reported logical arithmetic intensity values were zero; stats={stats}"
     assert any(
         entry["phase"] == "train"
         for entry in stats), f"{model_name}: no train stats reported; phase_counts={phase_counts}"
@@ -770,7 +778,7 @@ def test_queued_trainer_trains_really_large_deep_fp16_dense_digits_network(capfd
             stats_color=DIGITS_DENSE_STATS_COLOR,
         )
         stats = _fit_and_capture_stats(trainer, epochs=DIGITS_DENSE_EPOCHS)
-        _assert_finite_positive_losses_and_flops(stats, model_name="really_large_deep_dense_fp16_digits")
+        _assert_finite_positive_losses_and_logical_work_rates(stats, model_name="really_large_deep_dense_fp16_digits")
 
 
 @pytest.mark.digits_dense_cv5_integration

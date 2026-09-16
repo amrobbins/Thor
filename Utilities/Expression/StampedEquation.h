@@ -312,6 +312,11 @@ struct CompiledRmsNormBackward {
     DataType dx_dtype = DataType::FP16;
     DataType dscale_dtype = DataType::FP32;
     DataType compute_dtype = DataType::FP32;
+    // Logical output routes authored for this backward operation. cuDNN may
+    // physically materialize both gradients, but logical-work accounting must
+    // charge only the requested model results.
+    bool produces_dx = false;
+    bool produces_dscale = false;
     std::string debug_name = "thor_expr_rms_norm_backward";
 
     [[nodiscard]] constexpr RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
@@ -427,6 +432,13 @@ struct CompiledAttentionBackward {
     DataType dQ_dtype = DataType::FP16;
     DataType dK_dtype = DataType::FP16;
     DataType dV_dtype = DataType::FP16;
+    // Logical gradient routes authored by the reverse-mode graph. cuDNN's
+    // physical backward ABI always exposes dQ/dK/dV, but logical model work
+    // must charge only results the authored graph requests.
+    bool logical_produces_dq = false;
+    bool logical_produces_dk = false;
+    bool logical_produces_dv = false;
+    bool logical_produces_dbias = false;
     std::string debug_name = "thor_expr_attention_backward";
 
     [[nodiscard]] constexpr RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
@@ -671,7 +683,8 @@ class StampedSegmentedReduction {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
-    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount(uint64_t valid_example_count = 0) const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
 
     StampedSegmentedReduction(std::shared_ptr<CompiledSegmentedReduction> compiled,
                               const Tensor& input,
@@ -696,7 +709,8 @@ class StampedSegmentedBroadcast {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
-    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount(uint64_t valid_example_count = 0) const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
 
     StampedSegmentedBroadcast(std::shared_ptr<CompiledSegmentedBroadcast> compiled,
                               const Tensor& per_segment_values,
@@ -864,7 +878,8 @@ class StampedRaggedConv1dCausal {
 
     uint32_t gpuNum() const;
 
-    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount(uint64_t valid_example_count = 0) const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
 
     [[nodiscard]] RaggedConv1dStageDiagnostic diagnostic() const;
 
@@ -890,7 +905,8 @@ class StampedRaggedConv1dCausalBackwardData {
 
     uint32_t gpuNum() const;
 
-    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount(uint64_t valid_example_count = 0) const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
 
     [[nodiscard]] RaggedConv1dStageDiagnostic diagnostic() const;
 
@@ -916,7 +932,8 @@ class StampedRaggedConv1dCausalBackwardFilter {
 
     uint32_t gpuNum() const;
 
-    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount(uint64_t valid_example_count = 0) const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
 
     [[nodiscard]] RaggedConv1dStageDiagnostic diagnostic() const;
 
@@ -944,7 +961,9 @@ class StampedScan {
 
     Tensor getOutputTensor() const { return output; }
     Tensor getValueOutputTensor() const { return value_output; }
-    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalElementCount(uint64_t valid_example_count = 0) const noexcept;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount(uint64_t valid_example_count = 0) const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
 
     StampedScan(std::shared_ptr<CompiledScan> compiled,
                 const Tensor& input,
@@ -980,6 +999,8 @@ class StampedSoftmax {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount(uint64_t valid_example_count = 0) const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
 
     StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
                    std::unique_ptr<BuiltSoftmax> built,
@@ -1031,7 +1052,8 @@ class StampedLayerNorm {
     void runOn(Stream& run_stream) const;
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
     Tensor getOutputTensor() const { return output; }
-    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount(uint64_t valid_example_count = 0) const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
     [[nodiscard]] uintptr_t executablePlanId() const;
     [[nodiscard]] CudnnFrontendPlanSelection planSelection() const;
     [[nodiscard]] size_t executablePlanCount() const noexcept { return forward_executable_plans.size(); }
@@ -1103,7 +1125,8 @@ class StampedRmsNorm {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
-    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount(uint64_t valid_example_count = 0) const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
     std::shared_ptr<RmsNormForwardState> getForwardState() const { return forward_state; }
     [[nodiscard]] uint64_t workspaceSizeInBytes() const {
         return workspace.has_value() ? workspace->getArraySizeInBytes() : 0;
@@ -1161,7 +1184,8 @@ class StampedRmsNormBackward {
     uint32_t gpuNum() const { return dX.getPlacement().getDeviceNum(); }
     const std::vector<Tensor>& getOutputTensors() const { return outputs; }
 
-    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount(uint64_t valid_example_count = 0) const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
     [[nodiscard]] uint64_t backwardWorkspaceSizeInBytes() const {
         return backward_workspace.has_value() ? backward_workspace->getArraySizeInBytes() : 0;
     }
@@ -1270,7 +1294,8 @@ class StampedMatmul {
     // physical cuBLASLt consumer may execute a larger selected capacity bucket,
     // but reporting counts only matrix work over the batch's active logical rows.
     // Dense MATMUL/GEMM keeps using the existing static FLOP estimate.
-    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount(uint64_t valid_example_count = 0) const noexcept;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
 
     [[nodiscard]] StampedMatmulKernelDiagnostic kernelDiagnostic() const;
     [[nodiscard]] std::optional<PackedRowConsumerDiagnostic> packedRowConsumerDiagnostic() const;
@@ -1336,7 +1361,8 @@ class StampedAttention {
     // known while stamping.  Once a batch has published its row-partition host
     // mirrors, report only score pairs belonging to logical rows.  Dense
     // Attention deliberately keeps using the existing static accounting.
-    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount(uint64_t valid_example_count = 0) const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
 
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
@@ -1437,7 +1463,11 @@ class StampedAttentionBackward {
     void run();
     void runOn(Stream& run_stream) const;
 
-    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+    // Physical/runtime estimate preserves the cuDNN full-backward convention;
+    // logical work below follows only gradient routes authored by the graph.
+    [[nodiscard]] std::optional<uint64_t> runtimePhysicalFlopCount() const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount(uint64_t valid_example_count = 0) const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
 
     uint32_t gpuNum() const { return dQ.getPlacement().getDeviceNum(); }
 
@@ -1581,7 +1611,8 @@ class StampedScanMinMaxBackward {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
-    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount(uint64_t valid_example_count = 0) const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
 
     StampedScanMinMaxBackward(std::shared_ptr<CompiledScanMinMaxBackward> compiled,
                               std::shared_ptr<StampedScan> arg_scan,
@@ -1611,7 +1642,8 @@ class StampedReduceMinMaxBackward {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
-    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount(uint64_t valid_example_count = 0) const;
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
 
     StampedReduceMinMaxBackward(std::shared_ptr<BuiltReduction> built,
                                 const Tensor& input,
@@ -1737,7 +1769,24 @@ struct RuntimeRaggedFusedFlopAccounting {
     uint64_t flops_per_active_value = 0;
     uint64_t fixed_flops_when_nonempty = 0;
 
-    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+    // valid_example_count==0 means the complete logical row partition.  A
+    // non-zero prefix uses authoritative hostOffsets[valid_example_count]; no
+    // device payload is inspected for telemetry.
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount(uint64_t valid_example_count = 0) const noexcept;
+};
+
+struct RuntimeRaggedFusedByteAccounting {
+    Tensor row_partition_offsets;
+    uint64_t batch_size = 0;
+    uint64_t max_active_values = 0;
+    uint64_t bytes_per_active_value = 0;
+    uint64_t fixed_bytes_when_nonempty = 0;
+
+    // Mirrors RuntimeRaggedFusedFlopAccounting over logical tensor bytes.  The
+    // runtime extent is resolved exclusively from authoritative host row-
+    // partition metadata, so this accounting never introduces D2H traffic or a
+    // synchronization point.
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
 };
 
 struct StampedExecutionStage {
@@ -1845,6 +1894,25 @@ struct StampedExecutionStage {
     const uint32_t gpu_num;
     const uint64_t flop_count = 0;
     const std::optional<RuntimeRaggedFusedFlopAccounting> runtime_ragged_fused_flop_accounting = std::nullopt;
+
+    // LWA-2A sidecar: pre-CSE logical FLOPs for the authored model
+    // computation represented by this physical stage. Existing flopCount()
+    // remains the post-CSE physical-plan estimate until the later telemetry
+    // migration explicitly switches consumers.
+    const std::optional<uint64_t> logical_flop_count = std::nullopt;
+    const std::optional<RuntimeRaggedFusedFlopAccounting> logical_runtime_ragged_fused_flop_accounting = std::nullopt;
+
+    // LWA-4A sidecar: runtime-active authored logical bytes for fused/valuewise
+    // ragged work.  The fixed logical_byte_count remains the fallback for dense
+    // work or when no authoritative host partition has been published.
+    const std::optional<RuntimeRaggedFusedByteAccounting> logical_runtime_ragged_fused_byte_accounting = std::nullopt;
+
+    // LWA-3A/3B sidecar: authored fixed-shape logical tensor bytes for fused
+    // and dedicated expression work. Runtime-active ragged stages override this
+    // fallback using authoritative host semantic extent. This is model-work
+    // accounting, not physical memory traffic; workspace/scratch/cache effects
+    // do not belong here.
+    const uint64_t logical_byte_count = 0;
 #ifdef THOR_DEBUG
     // BR0: provenance is stamped from the source PhysicalExpression after the
     // stage object is constructed. It is diagnostic-only and intentionally
@@ -1882,42 +1950,57 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedScanMinMaxBackward> scan_minmax_backward = nullptr;
     const std::shared_ptr<StampedConditional> conditional = nullptr;
 
-    explicit StampedExecutionStage(const std::shared_ptr<StampedEquation>& fused,
-                                   std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0,
-                                   std::optional<RuntimeRaggedFusedFlopAccounting> runtime_ragged_fused_flop_accounting = std::nullopt)
+    explicit StampedExecutionStage(
+        const std::shared_ptr<StampedEquation>& fused,
+        std::vector<uint32_t> dependency_stage_indices = {},
+        uint64_t flop_count = 0,
+        std::optional<RuntimeRaggedFusedFlopAccounting> runtime_ragged_fused_flop_accounting = std::nullopt,
+        std::optional<uint64_t> logical_flop_count = std::nullopt,
+        std::optional<RuntimeRaggedFusedFlopAccounting> logical_runtime_ragged_fused_flop_accounting = std::nullopt,
+        uint64_t logical_byte_count = 0,
+        std::optional<RuntimeRaggedFusedByteAccounting> logical_runtime_ragged_fused_byte_accounting = std::nullopt)
         : kind(Kind::FusedKernel),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(fused->gpuNum()),
           flop_count(flop_count),
           runtime_ragged_fused_flop_accounting(std::move(runtime_ragged_fused_flop_accounting)),
+          logical_flop_count(logical_flop_count),
+          logical_runtime_ragged_fused_flop_accounting(std::move(logical_runtime_ragged_fused_flop_accounting)),
+          logical_runtime_ragged_fused_byte_accounting(std::move(logical_runtime_ragged_fused_byte_accounting)),
+          logical_byte_count(logical_byte_count),
           kernel(fused) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedCudaKernel>& cuda_kernel,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
         : kind(Kind::CudaKernel),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(cuda_kernel->gpuNum()),
           flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
           cuda_kernel(cuda_kernel) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedReduction>& reduction,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
         : kind(Kind::Reduction),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(reduction->gpuNum()),
           flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
           reduction(reduction) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedArgMinMax>& arg_minmax,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
         : kind(Kind::ArgMinMax),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(arg_minmax->gpuNum()),
           flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
           arg_minmax(arg_minmax) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedSegmentedReduction>& segmented_reduction,
@@ -1947,15 +2030,22 @@ struct StampedExecutionStage {
           flop_count(flop_count),
           padded_ragged_pack(padded_ragged_pack) {}
 
-    explicit StampedExecutionStage(const std::shared_ptr<StampedPaddedRaggedPointwise>& padded_ragged_pointwise,
-                                   std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0,
-                                   std::optional<RuntimeRaggedFusedFlopAccounting> runtime_ragged_fused_flop_accounting = std::nullopt)
+    explicit StampedExecutionStage(
+        const std::shared_ptr<StampedPaddedRaggedPointwise>& padded_ragged_pointwise,
+        std::vector<uint32_t> dependency_stage_indices = {},
+        uint64_t flop_count = 0,
+        std::optional<RuntimeRaggedFusedFlopAccounting> runtime_ragged_fused_flop_accounting = std::nullopt,
+        std::optional<uint64_t> logical_flop_count = std::nullopt,
+        std::optional<RuntimeRaggedFusedFlopAccounting> logical_runtime_ragged_fused_flop_accounting = std::nullopt,
+        std::optional<RuntimeRaggedFusedByteAccounting> logical_runtime_ragged_fused_byte_accounting = std::nullopt)
         : kind(Kind::PaddedRaggedPointwise),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(padded_ragged_pointwise->gpuNum()),
           flop_count(flop_count),
           runtime_ragged_fused_flop_accounting(std::move(runtime_ragged_fused_flop_accounting)),
+          logical_flop_count(logical_flop_count),
+          logical_runtime_ragged_fused_flop_accounting(std::move(logical_runtime_ragged_fused_flop_accounting)),
+          logical_runtime_ragged_fused_byte_accounting(std::move(logical_runtime_ragged_fused_byte_accounting)),
           padded_ragged_pointwise(padded_ragged_pointwise) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedRaggedConv1dCausal>& ragged_conv1d_causal,
@@ -1998,20 +2088,24 @@ struct StampedExecutionStage {
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedScan>& scan,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
         : kind(Kind::Scan),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(scan->gpuNum()),
           flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
           scan(scan) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedSoftmax>& softmax,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
         : kind(Kind::Softmax),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(softmax->gpuNum()),
           flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
           softmax(softmax) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedSanitizePackedTail>& sanitize_packed_tail,
@@ -2031,115 +2125,141 @@ struct StampedExecutionStage {
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedRmsNorm>& rms_norm,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
         : kind(Kind::RmsNorm),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(rms_norm->gpuNum()),
           flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
           rms_norm(rms_norm) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedLayerNorm>& layer_norm,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
         : kind(Kind::LayerNorm),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(layer_norm->gpuNum()),
           flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
           layer_norm(layer_norm) {}
 
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedRmsNormBackward>& rms_norm_backward,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
         : kind(Kind::RmsNormBackward),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(rms_norm_backward->gpuNum()),
           flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
           rms_norm_backward(rms_norm_backward) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedEmbeddingLookup>& embedding_lookup,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
         : kind(Kind::EmbeddingLookup),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(embedding_lookup->gpuNum()),
           flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
           embedding_lookup(embedding_lookup) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedMatmul>& matmul,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
         : kind(Kind::Matmul),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(matmul->gpuNum()),
           flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
           matmul(matmul) {}
 
-    static StampedExecutionStage dependencyBarrier(uint32_t gpu_num, std::vector<uint32_t> dependency_stage_indices) {
-        return StampedExecutionStage(gpu_num, std::move(dependency_stage_indices));
+    static StampedExecutionStage dependencyBarrier(uint32_t gpu_num,
+                                                   std::vector<uint32_t> dependency_stage_indices,
+                                                   uint64_t logical_byte_count = 0) {
+        return StampedExecutionStage(gpu_num, std::move(dependency_stage_indices), logical_byte_count);
     }
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedInPlaceRope>& in_place_rope,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
         : kind(Kind::InPlaceRope),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(in_place_rope->gpuNum()),
           flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
           in_place_rope(in_place_rope) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedAttention>& attention,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
         : kind(Kind::Attention),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(attention->gpuNum()),
           flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
           attention(attention) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedAttentionBackward>& attention_backward,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
         : kind(Kind::AttentionBackward),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(attention_backward->gpuNum()),
           flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
           attention_backward(attention_backward) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedConvolution>& convolution,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
         : kind(Kind::Convolution),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(convolution->gpuNum()),
           flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
           convolution(convolution) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedConvolutionBackward>& convolution_backward,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
         : kind(Kind::ConvolutionBackward),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(convolution_backward->gpuNum()),
           flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
           convolution_backward(convolution_backward) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedReduceMinMaxBackward>& reduce_minmax_backward,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
         : kind(Kind::ReduceMinMaxBackward),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(reduce_minmax_backward->gpuNum()),
           flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
           reduce_minmax_backward(reduce_minmax_backward) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedScanMinMaxBackward>& scan_minmax_backward,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
         : kind(Kind::ScanMinMaxBackward),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(scan_minmax_backward->gpuNum()),
           flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
           scan_minmax_backward(scan_minmax_backward) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedConditional>& conditional,
@@ -2152,11 +2272,14 @@ struct StampedExecutionStage {
           conditional(conditional) {}
 
    private:
-    explicit StampedExecutionStage(uint32_t barrier_gpu_num, std::vector<uint32_t> barrier_dependencies)
+    explicit StampedExecutionStage(uint32_t barrier_gpu_num,
+                                   std::vector<uint32_t> barrier_dependencies,
+                                   uint64_t logical_byte_count)
         : kind(Kind::DependencyBarrier),
           dependency_stage_indices(std::move(barrier_dependencies)),
           gpu_num(barrier_gpu_num),
-          flop_count(0) {}
+          flop_count(0),
+          logical_byte_count(logical_byte_count) {}
 
    public:
     [[nodiscard]] uint64_t flopCount() const {
@@ -2212,7 +2335,8 @@ struct StampedExecutionStage {
             }
         }
         if (kind == Kind::AttentionBackward && attention_backward != nullptr) {
-            if (const std::optional<uint64_t> runtime_flops = attention_backward->runtimeLogicalFlopCount(); runtime_flops.has_value()) {
+            if (const std::optional<uint64_t> runtime_flops = attention_backward->runtimePhysicalFlopCount();
+                runtime_flops.has_value()) {
                 return runtime_flops.value();
             }
         }
@@ -2240,6 +2364,227 @@ struct StampedExecutionStage {
             }
         }
         return flop_count;
+    }
+
+    [[nodiscard]] uint64_t logicalFlopCount(uint64_t valid_example_count = 0) const {
+        if (logical_runtime_ragged_fused_flop_accounting.has_value()) {
+            if (const std::optional<uint64_t> runtime_flops =
+                    logical_runtime_ragged_fused_flop_accounting->runtimeLogicalFlopCount(valid_example_count);
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::LayerNorm && layer_norm != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = layer_norm->runtimeLogicalFlopCount(valid_example_count);
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::RmsNorm && rms_norm != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = rms_norm->runtimeLogicalFlopCount(valid_example_count);
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::RmsNormBackward && rms_norm_backward != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = rms_norm_backward->runtimeLogicalFlopCount(valid_example_count);
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::SegmentedReduction && segmented_reduction != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops =
+                    segmented_reduction->runtimeLogicalFlopCount(valid_example_count);
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::SegmentedBroadcast && segmented_broadcast != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops =
+                    segmented_broadcast->runtimeLogicalFlopCount(valid_example_count);
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::Scan && scan != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = scan->runtimeLogicalFlopCount(valid_example_count);
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::Softmax && softmax != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = softmax->runtimeLogicalFlopCount(valid_example_count);
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::ReduceMinMaxBackward && reduce_minmax_backward != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops =
+                    reduce_minmax_backward->runtimeLogicalFlopCount(valid_example_count);
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::ScanMinMaxBackward && scan_minmax_backward != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops =
+                    scan_minmax_backward->runtimeLogicalFlopCount(valid_example_count);
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::Matmul && matmul != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = matmul->runtimeLogicalFlopCount(valid_example_count);
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::Attention && attention != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = attention->runtimeLogicalFlopCount(valid_example_count);
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::AttentionBackward && attention_backward != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops =
+                    attention_backward->runtimeLogicalFlopCount(valid_example_count);
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::RaggedConv1dCausal && ragged_conv1d_causal != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops =
+                    ragged_conv1d_causal->runtimeLogicalFlopCount(valid_example_count);
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::RaggedConv1dCausalBackwardData && ragged_conv1d_causal_backward_data != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops =
+                    ragged_conv1d_causal_backward_data->runtimeLogicalFlopCount(valid_example_count);
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::RaggedConv1dCausalBackwardFilter && ragged_conv1d_causal_backward_filter != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops =
+                    ragged_conv1d_causal_backward_filter->runtimeLogicalFlopCount(valid_example_count);
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (logical_flop_count.has_value()) {
+            return logical_flop_count.value();
+        }
+        return flopCount();
+    }
+
+    [[nodiscard]] uint64_t logicalByteCount(uint64_t valid_example_count = 0) const noexcept {
+        if (logical_runtime_ragged_fused_byte_accounting.has_value()) {
+            if (const std::optional<uint64_t> runtime_bytes =
+                    logical_runtime_ragged_fused_byte_accounting->runtimeLogicalByteCount(valid_example_count);
+                runtime_bytes.has_value()) {
+                return runtime_bytes.value();
+            }
+        }
+        if (kind == Kind::LayerNorm && layer_norm != nullptr) {
+            if (const std::optional<uint64_t> runtime_bytes = layer_norm->runtimeLogicalByteCount(valid_example_count);
+                runtime_bytes.has_value()) {
+                return runtime_bytes.value();
+            }
+        }
+        if (kind == Kind::RmsNorm && rms_norm != nullptr) {
+            if (const std::optional<uint64_t> runtime_bytes = rms_norm->runtimeLogicalByteCount(valid_example_count);
+                runtime_bytes.has_value()) {
+                return runtime_bytes.value();
+            }
+        }
+        if (kind == Kind::RmsNormBackward && rms_norm_backward != nullptr) {
+            if (const std::optional<uint64_t> runtime_bytes = rms_norm_backward->runtimeLogicalByteCount(valid_example_count);
+                runtime_bytes.has_value()) {
+                return runtime_bytes.value();
+            }
+        }
+        if (kind == Kind::SegmentedReduction && segmented_reduction != nullptr) {
+            if (const std::optional<uint64_t> runtime_bytes =
+                    segmented_reduction->runtimeLogicalByteCount(valid_example_count);
+                runtime_bytes.has_value()) {
+                return runtime_bytes.value();
+            }
+        }
+        if (kind == Kind::SegmentedBroadcast && segmented_broadcast != nullptr) {
+            if (const std::optional<uint64_t> runtime_bytes =
+                    segmented_broadcast->runtimeLogicalByteCount(valid_example_count);
+                runtime_bytes.has_value()) {
+                return runtime_bytes.value();
+            }
+        }
+        if (kind == Kind::Scan && scan != nullptr) {
+            if (const std::optional<uint64_t> runtime_bytes = scan->runtimeLogicalByteCount(valid_example_count);
+                runtime_bytes.has_value()) {
+                return runtime_bytes.value();
+            }
+        }
+        if (kind == Kind::Softmax && softmax != nullptr) {
+            if (const std::optional<uint64_t> runtime_bytes = softmax->runtimeLogicalByteCount(valid_example_count);
+                runtime_bytes.has_value()) {
+                return runtime_bytes.value();
+            }
+        }
+        if (kind == Kind::ReduceMinMaxBackward && reduce_minmax_backward != nullptr) {
+            if (const std::optional<uint64_t> runtime_bytes =
+                    reduce_minmax_backward->runtimeLogicalByteCount(valid_example_count);
+                runtime_bytes.has_value()) {
+                return runtime_bytes.value();
+            }
+        }
+        if (kind == Kind::ScanMinMaxBackward && scan_minmax_backward != nullptr) {
+            if (const std::optional<uint64_t> runtime_bytes =
+                    scan_minmax_backward->runtimeLogicalByteCount(valid_example_count);
+                runtime_bytes.has_value()) {
+                return runtime_bytes.value();
+            }
+        }
+        if (kind == Kind::Matmul && matmul != nullptr) {
+            if (const std::optional<uint64_t> runtime_bytes = matmul->runtimeLogicalByteCount(valid_example_count);
+                runtime_bytes.has_value()) {
+                return runtime_bytes.value();
+            }
+        }
+        if (kind == Kind::Attention && attention != nullptr) {
+            if (const std::optional<uint64_t> runtime_bytes = attention->runtimeLogicalByteCount(valid_example_count);
+                runtime_bytes.has_value()) {
+                return runtime_bytes.value();
+            }
+        }
+        if (kind == Kind::AttentionBackward && attention_backward != nullptr) {
+            if (const std::optional<uint64_t> runtime_bytes =
+                    attention_backward->runtimeLogicalByteCount(valid_example_count);
+                runtime_bytes.has_value()) {
+                return runtime_bytes.value();
+            }
+        }
+        if (kind == Kind::RaggedConv1dCausal && ragged_conv1d_causal != nullptr) {
+            if (const std::optional<uint64_t> runtime_bytes =
+                    ragged_conv1d_causal->runtimeLogicalByteCount(valid_example_count);
+                runtime_bytes.has_value()) {
+                return runtime_bytes.value();
+            }
+        }
+        if (kind == Kind::RaggedConv1dCausalBackwardData && ragged_conv1d_causal_backward_data != nullptr) {
+            if (const std::optional<uint64_t> runtime_bytes =
+                    ragged_conv1d_causal_backward_data->runtimeLogicalByteCount(valid_example_count);
+                runtime_bytes.has_value()) {
+                return runtime_bytes.value();
+            }
+        }
+        if (kind == Kind::RaggedConv1dCausalBackwardFilter && ragged_conv1d_causal_backward_filter != nullptr) {
+            if (const std::optional<uint64_t> runtime_bytes =
+                    ragged_conv1d_causal_backward_filter->runtimeLogicalByteCount(valid_example_count);
+                runtime_bytes.has_value()) {
+                return runtime_bytes.value();
+            }
+        }
+        return logical_byte_count;
     }
 
     // Thor gives operation-local cuDNN Frontend convolution plans stamping-stream
@@ -2524,6 +2869,30 @@ class StampedExecutionPlan {
                 throw std::runtime_error("StampedExecutionPlan::flopCount overflow.");
             }
             total += f;
+        }
+        return total;
+    }
+
+    [[nodiscard]] uint64_t logicalFlopCount(uint64_t valid_example_count = 0) const {
+        uint64_t total = 0;
+        for (const StampedExecutionStage& step : steps) {
+            const uint64_t f = step.logicalFlopCount(valid_example_count);
+            if (std::numeric_limits<uint64_t>::max() - total < f) {
+                throw std::runtime_error("StampedExecutionPlan::logicalFlopCount overflow.");
+            }
+            total += f;
+        }
+        return total;
+    }
+
+    [[nodiscard]] uint64_t logicalByteCount(uint64_t valid_example_count = 0) const {
+        uint64_t total = 0;
+        for (const StampedExecutionStage& step : steps) {
+            const uint64_t bytes = step.logicalByteCount(valid_example_count);
+            if (std::numeric_limits<uint64_t>::max() - total < bytes) {
+                throw std::runtime_error("StampedExecutionPlan::logicalByteCount overflow.");
+            }
+            total += bytes;
         }
         return total;
     }

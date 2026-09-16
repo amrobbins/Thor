@@ -15,6 +15,7 @@
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/Expression/AutoDiff.h"
+#include "Utilities/LogicalWork.h"
 using namespace std;
 
 namespace ThorImplementation {
@@ -46,6 +47,60 @@ std::string optimizerFusionNamePrefix(const std::string& parameterName) { return
 
 std::string optimizerFusionOutputName(const std::string& parameterName, const std::string& outputName) {
     return optimizerFusionNamePrefix(parameterName) + outputName;
+}
+
+// Dense optimizer fusion physically appends optimizer/constraint math to the
+// model's shared backward expression.  Logical model work deliberately excludes
+// that appended work.  Build the same optimizer expression against a synthetic
+// materialized gradient input, stamp it once during layer compilation, and keep
+// only its logical FLOP/byte counts.  The accounting plan is never executed and
+// does not survive this call, so this adds no per-batch work or telemetry-driven
+// GPU synchronization.  Optimizer tensors are fixed-shape; aliasing the weights
+// tensor as the synthetic gradient binding avoids a potentially large temporary
+// allocation and cannot affect the authored expression's logical work count.
+LogicalWorkCount logicalWorkForFusedDenseOptimizer(const std::shared_ptr<PhysicalParameter>& parameter,
+                                                   const std::shared_ptr<Optimizer>& optimizer,
+                                                   const Tensor& weights,
+                                                   const std::string& namePrefix,
+                                                   Stream& stream) {
+    if (parameter == nullptr || optimizer == nullptr) {
+        throw runtime_error("CustomLayer logical optimizer accounting requires a parameter and optimizer.");
+    }
+
+    const std::string gradientInputName = namePrefix + "logical_accounting_gradient";
+    const Expression gradientInput = Expression::input(gradientInputName, DataType::FP32, DataType::FP32);
+    DenseOptimizerExpression updateExpression =
+        optimizer->toDenseUpdateExpression(weights, gradientInput, namePrefix);
+
+    const Outputs logicalUpdateOutputs = Outputs::fromPhysicalOutputs(updateExpression.outputs);
+    std::vector<std::pair<std::string, Expression>> accountingOutputs;
+    accountingOutputs.reserve(updateExpression.outputs.outputs.size());
+    for (const NamedOutput& output : updateExpression.outputs.outputs) {
+        Expression outputExpression = logicalUpdateOutputs.outputExpression(output.name);
+        if (output.name == "weights" && parameter->hasConstraints() &&
+            parameter->supportsDenseExpressionConstraintFusion()) {
+            outputExpression = parameter->applyDenseExpressionConstraints(outputExpression, namePrefix + "constraints__");
+        }
+        accountingOutputs.emplace_back(output.name, std::move(outputExpression));
+    }
+
+    if (accountingOutputs.empty()) {
+        return {};
+    }
+
+    PhysicalOutputs physicalOutputs = Expression::outputs(accountingOutputs).physicalOutputs();
+    PreparedDynamicExpression::TensorMap stampInputs = updateExpression.inputs;
+    const auto [_, inserted] = stampInputs.emplace(gradientInputName, weights);
+    if (!inserted) {
+        throw runtime_error("CustomLayer logical optimizer FLOP accounting gradient input name collision.");
+    }
+
+    FusedEquation equation = FusedEquation::compile(physicalOutputs, weights.getPlacement().getDeviceNum());
+    StampedExecutionPlan accountingPlan = equation.stamp(stampInputs, stream, {}, updateExpression.preallocatedOutputs);
+    return LogicalWorkCount{
+        .floatingPointOperations = accountingPlan.logicalFlopCount(),
+        .bytes = accountingPlan.logicalByteCount(),
+    };
 }
 
 #if THOR_ENABLE_TRAINING_UPDATE_DIAGNOSTICS
@@ -1467,6 +1522,8 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildGenericSharedBackwardWit
     Stream& runStream) {
     ApplicationState& app = applications[applicationIndex];
     StampedExecutionVariant& variant = stampedVariant(applicationIndex, variantId);
+    variant.fusedOptimizerLogicalFlopCount = 0;
+    variant.fusedOptimizerLogicalByteCount = 0;
 
     const PhysicalOutputs& backwardOutputs = sharedBackwardBuild.outputs;
     if (!backwardOutputs.expr || backwardOutputs.isConditional()) {
@@ -1577,6 +1634,19 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildGenericSharedBackwardWit
         variant.fusedOptimizerRuntimeScalarBindings.push_back({parameterName, optimizer, prefix});
         DenseOptimizerExpression updateExpression =
             optimizer->toDenseUpdateExpression(storageIt->second, gradIt->second, prefix);
+
+        const LogicalWorkCount optimizerLogicalWork = logicalWorkForFusedDenseOptimizer(
+            targetParameter, optimizer, storageIt->second, prefix, runStream);
+        if (optimizerLogicalWork.floatingPointOperations >
+            std::numeric_limits<uint64_t>::max() - variant.fusedOptimizerLogicalFlopCount) {
+            throw runtime_error("CustomLayer fused optimizer logical FLOP accounting overflow.");
+        }
+        if (optimizerLogicalWork.bytes >
+            std::numeric_limits<uint64_t>::max() - variant.fusedOptimizerLogicalByteCount) {
+            throw runtime_error("CustomLayer fused optimizer logical byte accounting overflow.");
+        }
+        variant.fusedOptimizerLogicalFlopCount += optimizerLogicalWork.floatingPointOperations;
+        variant.fusedOptimizerLogicalByteCount += optimizerLogicalWork.bytes;
 
         for (const auto& [name, tensor] : updateExpression.inputs) {
             auto [_, inserted] = stampInputs.emplace(name, tensor);
@@ -2141,6 +2211,7 @@ void CustomLayer::compileImpl() {
         app.stampedVariants.clear();
         app.evaluationVariantId = app.forwardPrepared->evaluationVariantId();
         app.forwardVariantThisPass.reset();
+        app.lastForwardOnlyVariantForLogicalWorkAccounting.reset();
         const std::vector<DynamicExpressionVariantId> executionVariantIds = app.forwardPrepared->executionVariantIds();
         for (DynamicExpressionVariantId variantId : executionVariantIds) {
             StampedExecutionVariant variant;
@@ -3309,6 +3380,12 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
         const auto resetStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         const bool resetForwardState = validationPass || !applicationHasAnyDownstreamBackprop(applicationIndex);
         if (resetForwardState) {
+            // forwardVariantThisPass is intentionally cleared below so this
+            // application can accept the next forward without a backward drain.
+            // Preserve only the just-submitted variant for post-submit logical-work
+            // accounting.  This is host-only bookkeeping and adds no GPU work or
+            // synchronization.
+            app.lastForwardOnlyVariantForLogicalWorkAccounting = app.forwardVariantThisPass;
             clearForwardArrivalBookkeeping(applicationIndex);
         }
         if (emitLayerDiagnostics) {
@@ -3887,55 +3964,182 @@ void CustomLayer::cleanup() {
 }
 
 uint64_t CustomLayer::flopCountForward() {
+    return flopCountForward(0);
+}
+
+uint64_t CustomLayer::flopCountForward(uint64_t validExampleCount) {
     uint64_t flops = 0;
     for (const ApplicationState& app : applications) {
-        auto it = app.stampedVariants.find(kPrimaryDynamicExpressionVariant);
+        DynamicExpressionVariantId variantId = activeTrainingVariantId;
+        if (app.forwardVariantThisPass.has_value()) {
+            // Training keeps the exact submitted variant alive until the pass is
+            // drained by backward.
+            variantId = app.forwardVariantThisPass.value();
+        } else if (app.lastForwardOnlyVariantForLogicalWorkAccounting.has_value()) {
+            // Validation/inference and forward-only execution reset their pass
+            // state immediately after submission, so use the retained id of the
+            // forward that actually ran.
+            variantId = app.lastForwardOnlyVariantForLogicalWorkAccounting.value();
+        }
+
+        auto it = app.stampedVariants.find(variantId);
         if (it != app.stampedVariants.end() && it->second.forward != nullptr) {
-            flops += it->second.forward->flopCount();
+            flops += it->second.forward->logicalFlopCount(validExampleCount);
         }
     }
     return flops;
 }
 
 uint64_t CustomLayer::flopCountBackward() {
+    return flopCountBackward(0);
+}
+
+uint64_t CustomLayer::flopCountBackward(uint64_t validExampleCount) {
     uint64_t flops = 0;
     bool genericClearContributionAccounted = false;
 
-    // Report the cost of one whole layer backward pass. Generic shared ownership
-    // executes exactly one clear contribution and then accumulate contributions
-    // for later applications. The static estimate uses application-index order to
-    // choose which primary-variant plan is the clear contribution; runtime arrival
-    // order can differ, but we no longer count an accumulate plan for every app or
-    // report an unreachable single-application accumulate plan.
+    auto modelLogicalFlopsForGenericClear = [validExampleCount](const StampedExecutionVariant& variant) -> uint64_t {
+        THOR_THROW_IF_FALSE(variant.genericSharedBackwardClear != nullptr);
+        const uint64_t combinedLogicalFlops = variant.genericSharedBackwardClear->logicalFlopCount(validExampleCount);
+        if (variant.fusedOptimizerLogicalFlopCount > combinedLogicalFlops) {
+            throw runtime_error(
+                "CustomLayer fused optimizer logical FLOPs exceed the combined shared-backward logical FLOPs.");
+        }
+        return combinedLogicalFlops - variant.fusedOptimizerLogicalFlopCount;
+    };
+
+    // Report the logical cost of one whole layer backward pass. Generic shared
+    // ownership executes exactly one clear contribution and then accumulate
+    // contributions for later applications. Optimizer/constraint work grafted
+    // onto a clear plan is deliberately excluded from the model logical-work
+    // boundary, so optimizer fusion cannot change the reported backward FLOPs.
+    // The static estimate uses application-index order to choose which primary-
+    // variant plan is the clear contribution; runtime arrival order can differ,
+    // but we no longer count an accumulate plan for every app or report an
+    // unreachable single-application accumulate plan.
     for (const ApplicationState& app : applications) {
-        auto it = app.stampedVariants.find(kPrimaryDynamicExpressionVariant);
+        // Backward logical work must match the training variant whose forward
+        // produced the retained state consumed by this pass.  A completed
+        // validation/inference forward is deliberately ignored here because it
+        // has no corresponding backward; before a training pass has run, the
+        // currently selected training variant is the best static estimate.
+        const DynamicExpressionVariantId variantId =
+            app.forwardVariantThisPass.value_or(activeTrainingVariantId);
+        auto it = app.stampedVariants.find(variantId);
         if (it == app.stampedVariants.end()) {
             continue;
         }
         const StampedExecutionVariant& variant = it->second;
         if (variant.nativeSharedBackward != nullptr) {
-            flops += variant.nativeSharedBackward->flopCount();
+            flops += variant.nativeSharedBackward->logicalFlopCount(validExampleCount);
             continue;
         }
         if (variant.genericSharedBackwardClear != nullptr) {
             if (!genericClearContributionAccounted) {
-                flops += variant.genericSharedBackwardClear->flopCount();
+                flops += modelLogicalFlopsForGenericClear(variant);
                 genericClearContributionAccounted = true;
             } else if (variant.genericSharedBackwardAccumulate != nullptr) {
-                flops += variant.genericSharedBackwardAccumulate->flopCount();
+                flops += variant.genericSharedBackwardAccumulate->logicalFlopCount(validExampleCount);
             } else {
                 // A second generic shared contribution without an accumulate plan
                 // would also be invalid at runtime. Keep the estimator conservative
                 // rather than silently dropping all of that application's work.
-                flops += variant.genericSharedBackwardClear->flopCount();
+                flops += modelLogicalFlopsForGenericClear(variant);
             }
             continue;
         }
         if (variant.backwardError != nullptr) {
-            flops += variant.backwardError->flopCount();
+            flops += variant.backwardError->logicalFlopCount(validExampleCount);
         }
     }
     return flops;
+}
+
+uint64_t CustomLayer::logicalByteCountForward() {
+    return logicalByteCountForward(0);
+}
+
+uint64_t CustomLayer::logicalByteCountForward(uint64_t validExampleCount) {
+    uint64_t bytes = 0;
+    for (const ApplicationState& app : applications) {
+        DynamicExpressionVariantId variantId = activeTrainingVariantId;
+        if (app.forwardVariantThisPass.has_value()) {
+            variantId = app.forwardVariantThisPass.value();
+        } else if (app.lastForwardOnlyVariantForLogicalWorkAccounting.has_value()) {
+            variantId = app.lastForwardOnlyVariantForLogicalWorkAccounting.value();
+        }
+
+        auto it = app.stampedVariants.find(variantId);
+        if (it == app.stampedVariants.end() || it->second.forward == nullptr) {
+            continue;
+        }
+        const uint64_t contribution = it->second.forward->logicalByteCount(validExampleCount);
+        if (contribution > std::numeric_limits<uint64_t>::max() - bytes) {
+            throw runtime_error("CustomLayer forward logical byte accounting overflow.");
+        }
+        bytes += contribution;
+    }
+    return bytes;
+}
+
+uint64_t CustomLayer::logicalByteCountBackward() {
+    return logicalByteCountBackward(0);
+}
+
+uint64_t CustomLayer::logicalByteCountBackward(uint64_t validExampleCount) {
+    uint64_t bytes = 0;
+    bool genericClearContributionAccounted = false;
+
+    auto addBytes = [&](uint64_t contribution) {
+        if (contribution > std::numeric_limits<uint64_t>::max() - bytes) {
+            throw runtime_error("CustomLayer backward logical byte accounting overflow.");
+        }
+        bytes += contribution;
+    };
+
+    auto modelLogicalBytesForGenericClear = [validExampleCount](const StampedExecutionVariant& variant) -> uint64_t {
+        THOR_THROW_IF_FALSE(variant.genericSharedBackwardClear != nullptr);
+        const uint64_t combinedLogicalBytes = variant.genericSharedBackwardClear->logicalByteCount(validExampleCount);
+        if (variant.fusedOptimizerLogicalByteCount > combinedLogicalBytes) {
+            throw runtime_error(
+                "CustomLayer fused optimizer logical bytes exceed the combined shared-backward logical bytes.");
+        }
+        return combinedLogicalBytes - variant.fusedOptimizerLogicalByteCount;
+    };
+
+    // Mirror flopCountBackward(): report model backward tensor movement only.
+    // Optimizer/constraint reads and writes physically grafted onto the shared
+    // clear plan are subtracted so enabling dense optimizer fusion cannot change
+    // the logical model-work boundary.  Variant choice follows the forward that
+    // owns the retained state for this pass.
+    for (const ApplicationState& app : applications) {
+        const DynamicExpressionVariantId variantId =
+            app.forwardVariantThisPass.value_or(activeTrainingVariantId);
+        auto it = app.stampedVariants.find(variantId);
+        if (it == app.stampedVariants.end()) {
+            continue;
+        }
+        const StampedExecutionVariant& variant = it->second;
+        if (variant.nativeSharedBackward != nullptr) {
+            addBytes(variant.nativeSharedBackward->logicalByteCount(validExampleCount));
+            continue;
+        }
+        if (variant.genericSharedBackwardClear != nullptr) {
+            if (!genericClearContributionAccounted) {
+                addBytes(modelLogicalBytesForGenericClear(variant));
+                genericClearContributionAccounted = true;
+            } else if (variant.genericSharedBackwardAccumulate != nullptr) {
+                addBytes(variant.genericSharedBackwardAccumulate->logicalByteCount(validExampleCount));
+            } else {
+                addBytes(modelLogicalBytesForGenericClear(variant));
+            }
+            continue;
+        }
+        if (variant.backwardError != nullptr) {
+            addBytes(variant.backwardError->logicalByteCount(validExampleCount));
+        }
+    }
+    return bytes;
 }
 
 uint64_t CustomLayer::batchSizeForFlopEstimate() const {

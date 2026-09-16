@@ -53,6 +53,11 @@ class ScaleGradient : public Layer {
     float getScale() const { return scale; }
     std::string getType() override { return "ScaleGradient"; }
 
+    uint64_t logicalByteCountForward(uint64_t validExampleCount) override {
+        (void)validExampleCount;
+        return 0;
+    }
+
    private:
     static bool isSupportedDataType(DataType dataType) {
         switch (dataType) {

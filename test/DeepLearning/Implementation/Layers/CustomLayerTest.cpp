@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "DeepLearning/Implementation/Layers/Optimizers/Adam.h"
+#include "DeepLearning/Implementation/Layers/Optimizers/CustomOptimizer.h"
 #include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
 #include "DeepLearning/Implementation/Parameter/ParameterConstraint.h"
 #include "Helpers/GradientRivet.h"
@@ -346,6 +347,33 @@ class FixedMatrixParameter : public PhysicalParameter {
     std::vector<float> initialValues;
 };
 
+class ToggleDenseFusionOptimizer final : public CustomOptimizer {
+   public:
+    ToggleDenseFusionOptimizer(uint64_t id, bool allowDenseFusion)
+        : CustomOptimizer(
+              id,
+              {},
+              [](const CustomOptimizerUpdateContext& context) {
+                  const DataType weightsDType = context.weightsTensor().getDescriptor().getDataType();
+                  const Expression weights = context.weights(DataType::FP32, DataType::FP32);
+                  const Expression gradient = context.gradient();
+                  const Expression step = Expression::constantScalar(0.25);
+                  return CustomOptimizerUpdateExpression{{
+                      {"weights", (weights - step * gradient).withOutputDType(weightsDType)},
+                  }};
+              }),
+          allowDenseFusion(allowDenseFusion) {}
+
+    [[nodiscard]] bool supportsDenseUpdateFusion() const override { return allowDenseFusion; }
+
+    std::shared_ptr<Optimizer> clone() const override {
+        return std::make_shared<ToggleDenseFusionOptimizer>(getId(), allowDenseFusion);
+    }
+
+   private:
+    bool allowDenseFusion;
+};
+
 class SharedBackwardInspectableCustomLayer : public CustomLayer {
    public:
     using CustomLayer::CustomLayer;
@@ -659,6 +687,68 @@ DynamicExpression buildBackwardCapableVariantExpression(const TensorPlacement& p
     });
 }
 
+DynamicExpression buildFlopDistinctTrainingVariantExpression(const TensorPlacement& placement) {
+    return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
+                                         const DynamicExpression::TensorMap& outputs,
+                                         Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+        const Expression x = Expression::input("feature_input", DataType::FP32, DataType::FP32);
+        const Outputs primaryOutputs = Expression::outputs({{"feature_output", x * 2.0f}});
+
+        // Deliberately make the alternate variant substantially more expensive
+        // in both forward and backward so stale primary-variant accounting cannot
+        // accidentally satisfy the LWA-2C regression.
+        const Expression alternate = x.sin().exp() + x.cos();
+        const Outputs alternateOutputs = Expression::outputs({{"feature_output", alternate}});
+
+        DynamicExpressionBuild build{
+            std::make_shared<FusedEquation>(FusedEquation::compile(primaryOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            outputs,
+            {}};
+        constexpr DynamicExpressionVariantId alternateVariant = 7;
+        build.execution_variants.emplace(alternateVariant,
+                                         DynamicExpressionVariant{
+                                             .equation = std::make_shared<FusedEquation>(
+                                                 FusedEquation::compile(alternateOutputs.physicalOutputs(), placement.getDeviceNum())),
+                                             .tensor_scalar_inputs = {},
+                                             .pre_forward_hook = {},
+                                             .supports_backward = true,
+                                         });
+        return build;
+    });
+}
+
+DynamicExpression buildFlopDistinctEvaluationVariantExpression(const TensorPlacement& placement) {
+    return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
+                                         const DynamicExpression::TensorMap& outputs,
+                                         Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+        const Expression x = Expression::input("feature_input", DataType::FP32, DataType::FP32);
+        const Outputs trainingOutputs = Expression::outputs({{"feature_output", x + 1.0f}});
+        const Outputs evaluationOutputs = Expression::outputs({{"feature_output", x.sin().exp() + x.cos()}});
+
+        DynamicExpressionBuild build{
+            std::make_shared<FusedEquation>(FusedEquation::compile(trainingOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            outputs,
+            {}};
+        constexpr DynamicExpressionVariantId evaluationVariant = 11;
+        build.execution_variants.emplace(evaluationVariant,
+                                         DynamicExpressionVariant{
+                                             .equation = std::make_shared<FusedEquation>(
+                                                 FusedEquation::compile(evaluationOutputs.physicalOutputs(), placement.getDeviceNum())),
+                                             .tensor_scalar_inputs = {},
+                                             .pre_forward_hook = {},
+                                             .supports_backward = false,
+                                         });
+        build.evaluation_variant_id = evaluationVariant;
+        return build;
+    });
+}
+
 DynamicExpression buildTailSliceExpression(const TensorPlacement& placement) {
     return DynamicExpression(
         {"x"},
@@ -811,6 +901,24 @@ DynamicExpression buildSharedScaleBiasTwoInputTwoOutputExpression(const TensorPl
             {"out_x", x * scale + bias},
             {"out_y", y * scale + bias},
         });
+        return DynamicExpressionBuild{
+            std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            outputs,
+            {}};
+    });
+}
+
+DynamicExpression buildAuthoredDuplicateCseExpression(const TensorPlacement& placement) {
+    return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
+                                         const DynamicExpression::TensorMap& outputs,
+                                         Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+        const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+        const Expression a = x.sin().exp();
+        const Expression b = x.sin().cos();
+        const Outputs expressionOutputs = Expression::outputs({{"a", a}, {"b", b}});
         return DynamicExpressionBuild{
             std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
             inputs,
@@ -1260,6 +1368,87 @@ TEST(CustomLayer, BackwardCapableExecutionVariantUsesMatchingForwardAndBackwardP
     expectAllClose(readCpuTensor(primaryInputGradient_h), {2.0f, 4.0f});
 
     cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
+TEST(CustomLayer, Lwa2cLogicalFlopsFollowSubmittedTrainingVariant) {
+    const uint64_t batchSize = 1;
+    const uint64_t features = 3;
+    constexpr DynamicExpressionVariantId alternateVariant = 7;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    Tensor featureIn_h(cpuPlacement, descriptor);
+    writeCpuTensor(featureIn_h, {0.25f, -0.5f, 1.0f});
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    VariantSelectableCustomLayer custom(buildFlopDistinctTrainingVariantExpression(gpuPlacement), gpuPlacement, {}, false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    input.forward(featureIn_h, false, batchSize);
+    const uint64_t primaryForwardFlops = custom.flopCountForward();
+    const uint64_t primaryBackwardFlops = custom.flopCountBackward();
+    ASSERT_GT(primaryForwardFlops, 0u);
+    ASSERT_GT(primaryBackwardFlops, 0u);
+
+    Tensor gradOut_h(cpuPlacement, descriptor);
+    writeCpuTensor(gradOut_h, {1.0f, 1.0f, 1.0f});
+    ASSERT_TRUE(sink.getErrorOutput().has_value());
+    sink.getErrorOutput().value().copyFromAsync(gradOut_h, custom.getStreams()[0]);
+    custom.getStreams()[0].synchronize();
+    sink.backward(sink.getErrorOutput(), batchSize);
+
+    custom.selectTrainingVariant(alternateVariant);
+    input.forward(featureIn_h, false, batchSize);
+    const uint64_t alternateForwardFlops = custom.flopCountForward();
+    const uint64_t alternateBackwardFlops = custom.flopCountBackward();
+
+    EXPECT_GT(alternateForwardFlops, primaryForwardFlops)
+        << "Forward logical FLOPs must follow the execution variant submitted for this pass.";
+    EXPECT_GT(alternateBackwardFlops, primaryBackwardFlops)
+        << "Backward logical FLOPs must match the forward variant whose retained state owns this pass.";
+
+    sink.getErrorOutput().value().copyFromAsync(gradOut_h, custom.getStreams()[0]);
+    custom.getStreams()[0].synchronize();
+    sink.backward(sink.getErrorOutput(), batchSize);
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
+TEST(CustomLayer, Lwa2cForwardFlopsRetainSubmittedEvaluationVariantAfterForwardOnlyReset) {
+    const uint64_t batchSize = 1;
+    const uint64_t features = 3;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    Tensor featureIn_h(cpuPlacement, descriptor);
+    writeCpuTensor(featureIn_h, {0.25f, -0.5f, 1.0f});
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    CustomLayer custom(buildFlopDistinctEvaluationVariantExpression(gpuPlacement), gpuPlacement, {}, false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &custom, &sink});
+
+    const uint64_t primaryForwardFlops = custom.flopCountForward();
+    ASSERT_GT(primaryForwardFlops, 0u);
+
+    // Validation clears forwardVariantThisPass immediately because there is no
+    // matching backward drain.  LWA-2C still needs the post-submit accounting
+    // query to see the evaluation variant that actually executed.
+    input.forward(featureIn_h, true, batchSize);
+    const uint64_t evaluationForwardFlops = custom.flopCountForward();
+    EXPECT_GT(evaluationForwardFlops, primaryForwardFlops)
+        << "Post-submit validation accounting must not fall back to the primary execution variant.";
+
+    cleanupLayers({&input, &custom, &sink});
 }
 
 TEST(CustomLayer, ForwardOnlyExecutionVariantCannotBeSelectedForTraining) {
@@ -2269,6 +2458,322 @@ TEST(CustomLayer, Br66SingleApplicationExpressionLocalGradientFusesOptimizerInto
     expectAllClose(readCpuTensor(weights_h), expectedWeights);
 
     cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
+TEST(CustomLayer, Lwa2bForwardFlopsUsePreCseLogicalAccounting) {
+    const uint64_t batchSize = 4;
+    const uint64_t features = 16;
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    CustomLayer custom(
+        buildAuthoredDuplicateCseExpression(gpuPlacement),
+        {"x"},
+        {"a", "b"},
+        gpuPlacement,
+        {},
+        true);
+    CountingPassthrough sinkA;
+    CountingPassthrough sinkB;
+
+    input.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sinkA, 0, 0);
+    custom.connectToNextLayer(&sinkB, 1, 0);
+    compileAndInitialize({&input, &custom, &sinkA, &sinkB});
+
+    constexpr uint64_t logicalFlopsPerElement = 40;
+    EXPECT_EQ(custom.flopCountForward(), batchSize * features * logicalFlopsPerElement)
+        << "CustomLayer forward telemetry must consume the LWA-2A pre-CSE logical FLOP sidecar.";
+
+    cleanupLayers({&input, &custom, &sinkA, &sinkB});
+}
+
+TEST(CustomLayer, Lwa2bLogicalBackwardFlopsAreInvariantToDenseOptimizerFusion) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 3;
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    const std::vector<float> initialWeights(batchSize * features, 1.0f);
+
+    uint64_t fusedModelLogicalFlops = 0;
+    {
+        auto scale = std::make_shared<FixedMatrixParameter>(
+            "scale", batchSize, features, initialWeights, true);
+        scale->addConstraint(std::make_shared<NonNegativeParameterConstraint>());
+        scale->setOptimizer(std::static_pointer_cast<Optimizer>(
+            std::make_shared<ToggleDenseFusionOptimizer>(99201, true)));
+
+        NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+        GradientRivet gradientRivet;
+        CountingPassthrough bridge;
+        SharedBackwardInspectableCustomLayer custom(
+            buildSingleInputScaleExpression(gpuPlacement),
+            {"x"},
+            {"out"},
+            gpuPlacement,
+            {scale},
+            false);
+        CountingPassthrough sink;
+
+        input.connectToNextLayer(&gradientRivet);
+        gradientRivet.connectToNextLayer(&bridge);
+        bridge.connectToNextLayer(&custom);
+        custom.connectToNextLayer(&sink);
+        compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+        ASSERT_FALSE(scale->getOptimizer()->getWeightsGradient().has_value())
+            << "The fusion-enabled case must actually graft the optimizer onto shared backward.";
+        ASSERT_EQ(custom.stampedSharedBackwardPlans().size(), 1u);
+        const auto& fusedPlan = custom.stampedSharedBackwardPlans().front().backwardPlan;
+        ASSERT_NE(fusedPlan, nullptr);
+
+        const uint64_t combinedLogicalFlops = fusedPlan->logicalFlopCount();
+        fusedModelLogicalFlops = custom.flopCountBackward();
+        EXPECT_LT(fusedModelLogicalFlops, combinedLogicalFlops)
+            << "CustomLayer model logical FLOPs must exclude optimizer math physically fused into backward.";
+
+        cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+    }
+
+    uint64_t unfusedModelLogicalFlops = 0;
+    {
+        auto scale = std::make_shared<FixedMatrixParameter>(
+            "scale", batchSize, features, initialWeights, true);
+        scale->addConstraint(std::make_shared<NonNegativeParameterConstraint>());
+        scale->setOptimizer(std::static_pointer_cast<Optimizer>(
+            std::make_shared<ToggleDenseFusionOptimizer>(99202, false)));
+
+        NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+        GradientRivet gradientRivet;
+        CountingPassthrough bridge;
+        SharedBackwardInspectableCustomLayer custom(
+            buildSingleInputScaleExpression(gpuPlacement),
+            {"x"},
+            {"out"},
+            gpuPlacement,
+            {scale},
+            false);
+        CountingPassthrough sink;
+
+        input.connectToNextLayer(&gradientRivet);
+        gradientRivet.connectToNextLayer(&bridge);
+        bridge.connectToNextLayer(&custom);
+        custom.connectToNextLayer(&sink);
+        compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+        ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value())
+            << "The fusion-disabled case must keep the ordinary materialized-gradient optimizer path.";
+        ASSERT_EQ(custom.stampedSharedBackwardPlans().size(), 1u);
+        const auto& modelOnlyPlan = custom.stampedSharedBackwardPlans().front().backwardPlan;
+        ASSERT_NE(modelOnlyPlan, nullptr);
+
+        unfusedModelLogicalFlops = custom.flopCountBackward();
+        EXPECT_EQ(unfusedModelLogicalFlops, modelOnlyPlan->logicalFlopCount())
+            << "Without optimizer fusion, the shared backward plan itself is exactly the model logical work.";
+
+        cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+    }
+
+    EXPECT_EQ(fusedModelLogicalFlops, unfusedModelLogicalFlops)
+        << "Enabling dense optimizer fusion must not change CustomLayer model logical FLOP accounting.";
+}
+
+
+TEST(CustomLayer, Lwa3cForwardBytesUsePreCseLogicalAccounting) {
+    const uint64_t batchSize = 4;
+    const uint64_t features = 16;
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    CustomLayer custom(
+        buildAuthoredDuplicateCseExpression(gpuPlacement),
+        {"x"},
+        {"a", "b"},
+        gpuPlacement,
+        {},
+        true);
+    CountingPassthrough sinkA;
+    CountingPassthrough sinkB;
+
+    input.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sinkA, 0, 0);
+    custom.connectToNextLayer(&sinkB, 1, 0);
+    compileAndInitialize({&input, &custom, &sinkA, &sinkB});
+
+    // a = exp(sin(x)), b = cos(sin(x)) contains four separately authored
+    // FP32 pointwise operations. Each operation logically reads one tensor and
+    // writes one tensor: 4 ops * 2 movements * 4 bytes = 32 B/element.
+    constexpr uint64_t logicalBytesPerElement = 32;
+    EXPECT_EQ(custom.logicalByteCountForward(), batchSize * features * logicalBytesPerElement)
+        << "CustomLayer must aggregate the pre-CSE authored logical-byte sidecar rather than physical fused traffic.";
+
+    cleanupLayers({&input, &custom, &sinkA, &sinkB});
+}
+
+TEST(CustomLayer, Lwa3cLogicalBackwardBytesAreInvariantToDenseOptimizerFusion) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 3;
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    const std::vector<float> initialWeights(batchSize * features, 1.0f);
+
+    uint64_t fusedModelLogicalBytes = 0;
+    {
+        auto scale = std::make_shared<FixedMatrixParameter>(
+            "scale", batchSize, features, initialWeights, true);
+        scale->addConstraint(std::make_shared<NonNegativeParameterConstraint>());
+        scale->setOptimizer(std::static_pointer_cast<Optimizer>(
+            std::make_shared<ToggleDenseFusionOptimizer>(99301, true)));
+
+        NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+        GradientRivet gradientRivet;
+        CountingPassthrough bridge;
+        SharedBackwardInspectableCustomLayer custom(
+            buildSingleInputScaleExpression(gpuPlacement),
+            {"x"},
+            {"out"},
+            gpuPlacement,
+            {scale},
+            false);
+        CountingPassthrough sink;
+
+        input.connectToNextLayer(&gradientRivet);
+        gradientRivet.connectToNextLayer(&bridge);
+        bridge.connectToNextLayer(&custom);
+        custom.connectToNextLayer(&sink);
+        compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+        ASSERT_FALSE(scale->getOptimizer()->getWeightsGradient().has_value())
+            << "The fusion-enabled case must actually graft the optimizer onto shared backward.";
+        ASSERT_EQ(custom.stampedSharedBackwardPlans().size(), 1u);
+        const auto& fusedPlan = custom.stampedSharedBackwardPlans().front().backwardPlan;
+        ASSERT_NE(fusedPlan, nullptr);
+
+        const uint64_t combinedLogicalBytes = fusedPlan->logicalByteCount();
+        fusedModelLogicalBytes = custom.logicalByteCountBackward();
+        EXPECT_LT(fusedModelLogicalBytes, combinedLogicalBytes)
+            << "CustomLayer model logical bytes must exclude optimizer/constraint traffic physically fused into backward.";
+
+        cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+    }
+
+    uint64_t unfusedModelLogicalBytes = 0;
+    {
+        auto scale = std::make_shared<FixedMatrixParameter>(
+            "scale", batchSize, features, initialWeights, true);
+        scale->addConstraint(std::make_shared<NonNegativeParameterConstraint>());
+        scale->setOptimizer(std::static_pointer_cast<Optimizer>(
+            std::make_shared<ToggleDenseFusionOptimizer>(99302, false)));
+
+        NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+        GradientRivet gradientRivet;
+        CountingPassthrough bridge;
+        SharedBackwardInspectableCustomLayer custom(
+            buildSingleInputScaleExpression(gpuPlacement),
+            {"x"},
+            {"out"},
+            gpuPlacement,
+            {scale},
+            false);
+        CountingPassthrough sink;
+
+        input.connectToNextLayer(&gradientRivet);
+        gradientRivet.connectToNextLayer(&bridge);
+        bridge.connectToNextLayer(&custom);
+        custom.connectToNextLayer(&sink);
+        compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+        ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value())
+            << "The fusion-disabled case must keep the ordinary materialized-gradient optimizer path.";
+        ASSERT_EQ(custom.stampedSharedBackwardPlans().size(), 1u);
+        const auto& modelOnlyPlan = custom.stampedSharedBackwardPlans().front().backwardPlan;
+        ASSERT_NE(modelOnlyPlan, nullptr);
+
+        unfusedModelLogicalBytes = custom.logicalByteCountBackward();
+        EXPECT_EQ(unfusedModelLogicalBytes, modelOnlyPlan->logicalByteCount())
+            << "Without optimizer fusion, the shared backward plan itself is exactly the model logical byte work.";
+
+        cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+    }
+
+    EXPECT_EQ(fusedModelLogicalBytes, unfusedModelLogicalBytes)
+        << "Enabling dense optimizer fusion must not change CustomLayer model logical byte accounting.";
+}
+
+TEST(CustomLayer, Lwa3cLogicalBytesFollowSubmittedTrainingVariant) {
+    const uint64_t batchSize = 1;
+    const uint64_t features = 3;
+    constexpr DynamicExpressionVariantId alternateVariant = 7;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    Tensor featureIn_h(cpuPlacement, descriptor);
+    writeCpuTensor(featureIn_h, {0.25f, -0.5f, 1.0f});
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    VariantSelectableCustomLayer custom(buildFlopDistinctTrainingVariantExpression(gpuPlacement), gpuPlacement, {}, false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    input.forward(featureIn_h, false, batchSize);
+    const uint64_t primaryForwardBytes = custom.logicalByteCountForward();
+    const uint64_t primaryBackwardBytes = custom.logicalByteCountBackward();
+    ASSERT_GT(primaryForwardBytes, 0u);
+    ASSERT_GT(primaryBackwardBytes, 0u);
+
+    Tensor gradOut_h(cpuPlacement, descriptor);
+    writeCpuTensor(gradOut_h, {1.0f, 1.0f, 1.0f});
+    ASSERT_TRUE(sink.getErrorOutput().has_value());
+    sink.getErrorOutput().value().copyFromAsync(gradOut_h, custom.getStreams()[0]);
+    custom.getStreams()[0].synchronize();
+    sink.backward(sink.getErrorOutput(), batchSize);
+
+    custom.selectTrainingVariant(alternateVariant);
+    input.forward(featureIn_h, false, batchSize);
+    const uint64_t alternateForwardBytes = custom.logicalByteCountForward();
+    const uint64_t alternateBackwardBytes = custom.logicalByteCountBackward();
+
+    EXPECT_GT(alternateForwardBytes, primaryForwardBytes)
+        << "Forward logical bytes must follow the execution variant submitted for this pass.";
+    EXPECT_GT(alternateBackwardBytes, primaryBackwardBytes)
+        << "Backward logical bytes must match the forward variant whose retained state owns this pass.";
+
+    sink.getErrorOutput().value().copyFromAsync(gradOut_h, custom.getStreams()[0]);
+    custom.getStreams()[0].synchronize();
+    sink.backward(sink.getErrorOutput(), batchSize);
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
+TEST(CustomLayer, Lwa3cForwardBytesRetainSubmittedEvaluationVariantAfterForwardOnlyReset) {
+    const uint64_t batchSize = 1;
+    const uint64_t features = 3;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    Tensor featureIn_h(cpuPlacement, descriptor);
+    writeCpuTensor(featureIn_h, {0.25f, -0.5f, 1.0f});
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    CustomLayer custom(buildFlopDistinctEvaluationVariantExpression(gpuPlacement), gpuPlacement, {}, false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &custom, &sink});
+
+    const uint64_t primaryForwardBytes = custom.logicalByteCountForward();
+    ASSERT_GT(primaryForwardBytes, 0u);
+
+    input.forward(featureIn_h, true, batchSize);
+    const uint64_t evaluationForwardBytes = custom.logicalByteCountForward();
+    EXPECT_GT(evaluationForwardBytes, primaryForwardBytes)
+        << "Post-submit validation byte accounting must retain the evaluation variant that actually executed.";
+
+    cleanupLayers({&input, &custom, &sink});
 }
 
 TEST(CustomLayer, Br66SingleApplicationStageBoundaryGradientRemainsMaterialized) {

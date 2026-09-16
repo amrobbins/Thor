@@ -1482,6 +1482,620 @@ TEST(RaggedExpression, OrdinarySoftmaxCompilerConsumesExtentAndAutodiffUsesDedic
     }
 }
 
+TEST(RaggedExpression, Lwa4aLogicalWorkUsesAuthoritativeHostValidRowPrefix) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t capacity = 8;
+    constexpr uint64_t channels = 2;
+
+    const RaggedTensorDescriptor descriptor =
+        makeDescriptor(DataType::FP32, {channels}, batch_size, capacity, DataType::UINT32);
+    const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+    const Expression bias = Expression::input("bias", std::nullopt, DataType::FP32);
+    const Expression y = ragged.getValues() + bias;
+
+    Tensor values = makeGpuTensor<float>({capacity, channels}, std::vector<float>(capacity * channels, 1.0F), stream);
+    // Deliberately leave the device offsets payload inconsistent with the host
+    // publication. Logical-work telemetry must use authoritative host metadata
+    // and must not inspect/synchronize device offsets merely to count work.
+    Tensor offsets = makeGpuTensor<uint32_t>({batch_size + 1}, {0U, 0U, 0U, 0U}, stream);
+    RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+    partition.setHostOffsets({0, 2, 5, 7});
+    Tensor bias_tensor = makeGpuTensor<float>({channels}, {0.5F, -0.25F}, stream);
+
+    FusedEquation equation =
+        FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan =
+        equation.stamp({{"x.values", values}, {"x.offsets", offsets}, {"bias", bias_tensor}}, stream);
+
+    // ADD contributes one FLOP per active FP32 element. Logical bytes are one
+    // active x read + one active y write plus one fixed bias-vector read while
+    // the active prefix is non-empty.
+    EXPECT_EQ(plan.logicalFlopCount(), 7U * channels);
+    EXPECT_EQ(plan.logicalByteCount(), 7U * channels * sizeof(float) * 2U + channels * sizeof(float));
+
+    // A partial dense tail contains only rows [0, validExampleCount). The
+    // semantic packed extent is hostOffsets[2] == 5, not hostOffsets.back()==7.
+    EXPECT_EQ(plan.logicalFlopCount(2), 5U * channels);
+    EXPECT_EQ(plan.logicalByteCount(2), 5U * channels * sizeof(float) * 2U + channels * sizeof(float));
+
+    // Reuse the same stamped plan with a different authoritative partition.
+    // Capacity and device storage are unchanged; logical work follows only the
+    // newly published semantic active extent.
+    partition.setHostOffsets({0, 1, 1, 3});
+    EXPECT_EQ(plan.logicalFlopCount(), 3U * channels);
+    EXPECT_EQ(plan.logicalByteCount(), 3U * channels * sizeof(float) * 2U + channels * sizeof(float));
+    EXPECT_EQ(plan.logicalFlopCount(2), 1U * channels);
+    EXPECT_EQ(plan.logicalByteCount(2), 1U * channels * sizeof(float) * 2U + channels * sizeof(float));
+
+    partition.setHostOffsets({0, 0, 0, 0});
+    EXPECT_EQ(plan.logicalFlopCount(), 0U);
+    EXPECT_EQ(plan.logicalByteCount(), 0U);
+}
+
+TEST(RaggedExpression, Lwa4aDeviceActiveCountCarrierUsesPublishedHostPartition) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t capacity = 8;
+    constexpr uint64_t channels = 2;
+
+    const RaggedTensorDescriptor descriptor =
+        makeDescriptor(DataType::FP32, {channels}, batch_size, capacity, DataType::UINT32);
+    const RaggedExpression ragged = RaggedExpression::input(
+        "x.values",
+        "x.active_count",
+        descriptor,
+        RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+    const Expression y = ragged.getValues() * 2.0;
+
+    Tensor values = makeGpuTensor<float>({capacity, channels}, std::vector<float>(capacity * channels, 1.0F), stream);
+    // The device scalar is deliberately stale. The carrier's authoritative host
+    // publication includes the complete row partition needed for valid-prefix
+    // accounting, so telemetry must never read the device scalar.
+    Tensor active_count = makeGpuTensor<uint32_t>({1}, {0U}, stream);
+    RowPartitionRuntime::publishHostState(
+        active_count,
+        RowPartitionDescriptor(batch_size, capacity, DataType::UINT32),
+        active_count.getTensorId(),
+        {0, 2, 5, 7});
+
+    FusedEquation equation =
+        FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan =
+        equation.stamp({{"x.values", values}, {"x.active_count", active_count}}, stream);
+
+    EXPECT_EQ(plan.logicalFlopCount(), 7U * channels);
+    EXPECT_EQ(plan.logicalByteCount(), 7U * channels * sizeof(float) * 2U);
+    EXPECT_EQ(plan.logicalFlopCount(2), 5U * channels);
+    EXPECT_EQ(plan.logicalByteCount(2), 5U * channels * sizeof(float) * 2U);
+}
+
+TEST(RaggedExpression, Lwa4aLogicalWorkIsInvariantToUnusedPackedCapacity) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t channels = 2;
+    const std::vector<uint64_t> host_offsets{0, 2, 5, 7};
+
+    auto logical_work_for_capacity = [&](uint64_t capacity) {
+        const RaggedTensorDescriptor descriptor =
+            makeDescriptor(DataType::FP32, {channels}, batch_size, capacity, DataType::UINT32);
+        const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+        const Expression y = ragged.getValues() + 1.0;
+
+        Tensor values = makeGpuTensor<float>(
+            {capacity, channels}, std::vector<float>(capacity * channels, 1.0F), stream);
+        Tensor offsets = makeGpuTensor<uint32_t>({batch_size + 1}, {0U, 0U, 0U, 0U}, stream);
+        RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+        partition.setHostOffsets(host_offsets);
+
+        FusedEquation equation =
+            FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+        StampedExecutionPlan plan = equation.stamp({{"x.values", values}, {"x.offsets", offsets}}, stream);
+        return std::vector<uint64_t>{plan.logicalFlopCount(), plan.logicalByteCount()};
+    };
+
+    EXPECT_EQ(logical_work_for_capacity(8), logical_work_for_capacity(16));
+}
+
+TEST(RaggedExpression, Lwa4b1RaggedSoftmaxLogicalWorkUsesActivePrefixAndIgnoresUnusedCapacity) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t outer_per_value = 2;
+    constexpr uint64_t channels = 3;
+    constexpr uint64_t elements_per_value = outer_per_value * channels;
+    const std::vector<uint64_t> host_offsets{0, 2, 5, 7};
+
+    auto logical_work_for = [&](uint64_t capacity, bool log_softmax) {
+        const RaggedTensorDescriptor descriptor =
+            makeDescriptor(DataType::FP32, {outer_per_value, channels}, batch_size, capacity, DataType::UINT32);
+        const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+        const RaggedExpression y = log_softmax ? ragged.log_softmax() : ragged.softmax();
+
+        Tensor values = makeGpuTensor<float>(
+            {capacity, outer_per_value, channels}, std::vector<float>(capacity * elements_per_value, 1.0F), stream);
+        // Device metadata is deliberately stale. Logical-work telemetry must
+        // consume only the authoritative host partition.
+        Tensor offsets = makeGpuTensor<uint32_t>({batch_size + 1}, {0U, 0U, 0U, 0U}, stream);
+        RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+        partition.setHostOffsets(host_offsets);
+
+        FusedEquation forward =
+            FusedEquation::compile(Expression::outputs({{"y", y.getValues()}}).physicalOutputs(), 0);
+        FusedEquation backward = forward.compileBackward({"x.values"}, "dy");
+        Tensor dy = makeGpuTensor<float>(
+            {capacity, outer_per_value, channels}, std::vector<float>(capacity * elements_per_value, 1.0F), stream);
+        auto [forward_plan, backward_plan] = backward.stampForwardBackwardPair(
+            {{"x.values", values}, {"x.offsets", offsets}, {"dy", dy}}, stream);
+
+        const uint64_t full_elements = 7U * elements_per_value;
+        const uint64_t prefix_elements = 5U * elements_per_value;
+        EXPECT_EQ(forward_plan.logicalFlopCount(), full_elements * 5U);
+        EXPECT_EQ(forward_plan.logicalByteCount(), full_elements * sizeof(float) * 2U);
+        EXPECT_EQ(backward_plan.logicalFlopCount(), full_elements * 5U);
+        EXPECT_EQ(backward_plan.logicalByteCount(), full_elements * sizeof(float) * 3U);
+        EXPECT_EQ(forward_plan.logicalFlopCount(2), prefix_elements * 5U);
+        EXPECT_EQ(forward_plan.logicalByteCount(2), prefix_elements * sizeof(float) * 2U);
+        EXPECT_EQ(backward_plan.logicalFlopCount(2), prefix_elements * 5U);
+        EXPECT_EQ(backward_plan.logicalByteCount(2), prefix_elements * sizeof(float) * 3U);
+
+        std::vector<uint64_t> work{forward_plan.logicalFlopCount(),
+                                   forward_plan.logicalByteCount(),
+                                   backward_plan.logicalFlopCount(),
+                                   backward_plan.logicalByteCount(),
+                                   forward_plan.logicalFlopCount(2),
+                                   forward_plan.logicalByteCount(2),
+                                   backward_plan.logicalFlopCount(2),
+                                   backward_plan.logicalByteCount(2)};
+
+        partition.setHostOffsets({0, 0, 0, 0});
+        EXPECT_EQ(forward_plan.logicalFlopCount(), 0U);
+        EXPECT_EQ(forward_plan.logicalByteCount(), 0U);
+        EXPECT_EQ(backward_plan.logicalFlopCount(), 0U);
+        EXPECT_EQ(backward_plan.logicalByteCount(), 0U);
+        return work;
+    };
+
+    EXPECT_EQ(logical_work_for(8, false), logical_work_for(16, false));
+    EXPECT_EQ(logical_work_for(8, true), logical_work_for(16, true));
+}
+
+TEST(RaggedExpression, Lwa4b1SegmentedScanAndMinMaxBackwardUseOnlyActivePrefix) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 3;
+    const std::vector<uint64_t> host_offsets{0, 2, 5, 7};
+
+    auto logical_work_for_capacity = [&](uint64_t capacity) {
+        // Keep this test isolated to the LWA-4B1 scan family.  Using a higher-
+        // level RaggedExpression operation such as segment_softmax() also lowers
+        // segmented reduction/broadcast stages, whose runtime-active accounting
+        // deliberately belongs to LWA-4B2 and can therefore still use capacity
+        // in this patch series.
+        //
+        // A plain segmented scan is still a genuine row-partition-driven ragged
+        // operator: its semantic extent comes from the authoritative host offsets.
+        // Unlike ragged.getValues(), the plain input does not already carry a
+        // valuewise ragged-runtime-extent annotation, so the public segmentedScan
+        // API is the canonical construction and does not require the private
+        // RaggedExpression metadata-bearing helper.
+        const Expression values_expr = Expression::input("x.values", DataType::FP32, DataType::FP32);
+        const Expression offsets_expr = Expression::input("x.offsets", DataType::UINT32, DataType::UINT32);
+        const Expression y = values_expr.segmentedScan(offsets_expr, ScanOp::Max, true, false);
+
+        Tensor values = makeGpuTensor<float>({capacity}, std::vector<float>(capacity, 1.0F), stream);
+        Tensor dy = makeGpuTensor<float>({capacity}, std::vector<float>(capacity, 1.0F), stream);
+        Tensor offsets = makeGpuTensor<uint32_t>({batch_size + 1}, {0U, 0U, 0U, 0U}, stream);
+        RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+        partition.setHostOffsets(host_offsets);
+
+        FusedEquation forward = FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+        FusedEquation backward = forward.compileBackward({"x.values"}, "dy");
+        auto [forward_plan, backward_plan] = backward.stampForwardBackwardPair(
+            {{"x.values", values}, {"x.offsets", offsets}, {"dy", dy}}, stream);
+
+        const auto logical_work = [&](uint64_t valid_rows) {
+            return std::vector<uint64_t>{forward_plan.logicalFlopCount(valid_rows),
+                                         forward_plan.logicalByteCount(valid_rows),
+                                         backward_plan.logicalFlopCount(valid_rows),
+                                         backward_plan.logicalByteCount(valid_rows)};
+        };
+
+        const std::vector<uint64_t> full_work = logical_work(0);
+        const std::vector<uint64_t> prefix_work = logical_work(2);
+        EXPECT_GT(full_work[0], 0U);
+        EXPECT_GT(full_work[1], 0U);
+        EXPECT_GT(full_work[2], 0U);
+        EXPECT_GT(full_work[3], 0U);
+        EXPECT_LT(prefix_work[0], full_work[0]);
+        EXPECT_LT(prefix_work[1], full_work[1]);
+        EXPECT_LT(prefix_work[2], full_work[2]);
+        EXPECT_LT(prefix_work[3], full_work[3]);
+
+        // Change only rows after the valid two-row prefix. The prefix telemetry
+        // must remain unchanged even though complete-batch logical work changes.
+        partition.setHostOffsets({0, 2, 5, 8});
+        EXPECT_EQ(logical_work(2), prefix_work);
+        EXPECT_NE(logical_work(0), full_work);
+
+        std::vector<uint64_t> result = full_work;
+        result.insert(result.end(), prefix_work.begin(), prefix_work.end());
+        return result;
+    };
+
+    // The same semantic row partition must report the same logical work despite
+    // a larger unused packed capacity.
+    EXPECT_EQ(logical_work_for_capacity(8), logical_work_for_capacity(16));
+}
+
+TEST(RaggedExpression, Lwa4b1SegmentedReduceMinMaxBackwardUsesActivePrefixAndValidSegmentGradient) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 3;
+    const std::vector<uint64_t> host_offsets{0, 2, 5, 7};
+
+    auto logical_work_for_capacity = [&](uint64_t capacity) {
+        const RaggedTensorDescriptor descriptor =
+            makeDescriptor(DataType::FP32, {}, batch_size, capacity, DataType::UINT32);
+        const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+
+        FusedEquation forward = FusedEquation::compile(
+            Expression::outputs({{"y", ragged.segment_max()}}).physicalOutputs(), 0);
+        FusedEquation backward = forward.compileBackward({"x.values"}, "dy");
+
+        Tensor values = makeGpuTensor<float>({capacity}, std::vector<float>(capacity, 1.0F), stream);
+        Tensor dy = makeGpuTensor<float>({batch_size}, std::vector<float>(batch_size, 1.0F), stream);
+        Tensor offsets = makeGpuTensor<uint32_t>({batch_size + 1}, {0U, 0U, 0U, 0U}, stream);
+        RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+        partition.setHostOffsets(host_offsets);
+
+        auto [forward_plan, backward_plan] = backward.stampForwardBackwardPair(
+            {{"x.values", values}, {"x.offsets", offsets}, {"dy", dy}}, stream);
+
+        // Forward segmented reduction remains LWA-4B2. This gates only the
+        // min/max backward routing stage included in LWA-4B1.
+        const uint64_t full_active_values = 7U;
+        const uint64_t prefix_active_values = 5U;
+        constexpr uint64_t valid_rows = 2;
+        EXPECT_EQ(backward_plan.logicalFlopCount(), full_active_values * 2U);
+        EXPECT_EQ(backward_plan.logicalByteCount(),
+                  full_active_values * sizeof(float) * 2U + batch_size * sizeof(float));
+        EXPECT_EQ(backward_plan.logicalFlopCount(valid_rows), prefix_active_values * 2U);
+        EXPECT_EQ(backward_plan.logicalByteCount(valid_rows),
+                  prefix_active_values * sizeof(float) * 2U + valid_rows * sizeof(float));
+
+        return std::vector<uint64_t>{backward_plan.logicalFlopCount(),
+                                     backward_plan.logicalByteCount(),
+                                     backward_plan.logicalFlopCount(valid_rows),
+                                     backward_plan.logicalByteCount(valid_rows)};
+    };
+
+    EXPECT_EQ(logical_work_for_capacity(8), logical_work_for_capacity(16));
+}
+
+TEST(RaggedExpression, Lwa4b1PackedLayerNormCountsActivePrefixAndFixedAffineOperands) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t hidden = 4;
+    const std::vector<uint64_t> host_offsets{0, 2, 5, 7};
+
+    auto logical_work_for_capacity = [&](uint64_t capacity) {
+        const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+        const Expression scale = Expression::input("scale", DataType::FP32, DataType::FP32);
+        const Expression bias = Expression::input("bias", DataType::FP32, DataType::FP32);
+        const Expression offsets_expr = Expression::input("offsets", DataType::UINT32, DataType::UINT32);
+        const Expression packed = x.withRaggedRuntimeExtent(offsets_expr, batch_size, capacity, hidden);
+        const Expression y = Expression::layerNorm(
+            packed, scale, bias, hidden, 1.0e-5, DataType::FP32, DataType::FP32, capacity);
+
+        Tensor x_tensor = makeGpuTensor<float>(
+            {capacity, hidden}, std::vector<float>(capacity * hidden, 1.0F), stream);
+        Tensor scale_tensor = makeGpuTensor<float>({hidden}, std::vector<float>(hidden, 1.0F), stream);
+        Tensor bias_tensor = makeGpuTensor<float>({hidden}, std::vector<float>(hidden, 0.0F), stream);
+        Tensor offsets = makeGpuTensor<uint32_t>({batch_size + 1}, {0U, 0U, 0U, 0U}, stream);
+        RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+        partition.setHostOffsets(host_offsets);
+
+        FusedEquation equation =
+            FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+        StampedExecutionPlan plan = equation.stamp(
+            {{"x", x_tensor}, {"scale", scale_tensor}, {"bias", bias_tensor}, {"offsets", offsets}}, stream);
+
+        const uint64_t full_elements = 7U * hidden;
+        const uint64_t prefix_elements = 5U * hidden;
+        EXPECT_EQ(plan.logicalFlopCount(), full_elements * 8U);
+        EXPECT_EQ(plan.logicalByteCount(),
+                  full_elements * sizeof(float) * 2U + hidden * sizeof(float) * 2U);
+        EXPECT_EQ(plan.logicalFlopCount(2), prefix_elements * 8U);
+        EXPECT_EQ(plan.logicalByteCount(2),
+                  prefix_elements * sizeof(float) * 2U + hidden * sizeof(float) * 2U);
+
+        return std::vector<uint64_t>{plan.logicalFlopCount(),
+                                     plan.logicalByteCount(),
+                                     plan.logicalFlopCount(2),
+                                     plan.logicalByteCount(2)};
+    };
+
+    EXPECT_EQ(logical_work_for_capacity(9), logical_work_for_capacity(18));
+}
+
+TEST(RaggedExpression, Lwa4b1PackedRmsNormUsesActivePrefixRequestedOutputsAndCapacityInvariantWork) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t hidden = 4;
+    const std::vector<uint64_t> host_offsets{0, 2, 5, 7};
+
+    auto both_routes_work_for_capacity = [&](uint64_t capacity) {
+        const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+        const Expression scale = Expression::input("scale", DataType::FP32, DataType::FP32);
+        const Expression offsets_expr = Expression::input("offsets", DataType::UINT32, DataType::UINT32);
+        const Expression packed = x.withRaggedRuntimeExtent(offsets_expr, batch_size, capacity, hidden);
+        const Expression y = Expression::rmsNorm(
+            packed, scale, hidden, 1.0e-5, DataType::FP32, DataType::FP32, capacity);
+
+        FusedEquation forward =
+            FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+        FusedEquation backward = forward.compileBackward({"x", "scale"}, "dy");
+
+        Tensor x_tensor = makeGpuTensor<float>(
+            {capacity, hidden}, std::vector<float>(capacity * hidden, 1.0F), stream);
+        Tensor scale_tensor = makeGpuTensor<float>({hidden}, std::vector<float>(hidden, 1.0F), stream);
+        Tensor dy_tensor = makeGpuTensor<float>(
+            {capacity, hidden}, std::vector<float>(capacity * hidden, 1.0F), stream);
+        Tensor offsets = makeGpuTensor<uint32_t>({batch_size + 1}, {0U, 0U, 0U, 0U}, stream);
+        RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+        partition.setHostOffsets(host_offsets);
+
+        auto [forward_plan, backward_plan] = backward.stampForwardBackwardPair(
+            {{"x", x_tensor}, {"scale", scale_tensor}, {"offsets", offsets}, {"dy", dy_tensor}}, stream);
+
+        const uint64_t full_elements = 7U * hidden;
+        const uint64_t prefix_elements = 5U * hidden;
+        EXPECT_EQ(forward_plan.logicalFlopCount(), full_elements * 6U);
+        EXPECT_EQ(forward_plan.logicalByteCount(),
+                  full_elements * sizeof(float) * 2U + hidden * sizeof(float));
+        EXPECT_EQ(backward_plan.logicalFlopCount(), full_elements * 12U);
+        EXPECT_EQ(backward_plan.logicalByteCount(),
+                  full_elements * sizeof(float) * 3U + hidden * sizeof(float) * 2U);
+        EXPECT_EQ(forward_plan.logicalFlopCount(2), prefix_elements * 6U);
+        EXPECT_EQ(forward_plan.logicalByteCount(2),
+                  prefix_elements * sizeof(float) * 2U + hidden * sizeof(float));
+        EXPECT_EQ(backward_plan.logicalFlopCount(2), prefix_elements * 12U);
+        EXPECT_EQ(backward_plan.logicalByteCount(2),
+                  prefix_elements * sizeof(float) * 3U + hidden * sizeof(float) * 2U);
+
+        return std::vector<uint64_t>{forward_plan.logicalFlopCount(),
+                                     forward_plan.logicalByteCount(),
+                                     backward_plan.logicalFlopCount(),
+                                     backward_plan.logicalByteCount(),
+                                     forward_plan.logicalFlopCount(2),
+                                     forward_plan.logicalByteCount(2),
+                                     backward_plan.logicalFlopCount(2),
+                                     backward_plan.logicalByteCount(2)};
+    };
+
+    EXPECT_EQ(both_routes_work_for_capacity(9), both_routes_work_for_capacity(18));
+
+    // Prove logical bytes follow authored gradient routes rather than cuDNN's
+    // physical requirement to allocate both dX and dScale.
+    constexpr uint64_t capacity = 9;
+    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression scale = Expression::input("scale", DataType::FP32, DataType::FP32);
+    const Expression offsets_expr = Expression::input("offsets", DataType::UINT32, DataType::UINT32);
+    const Expression packed = x.withRaggedRuntimeExtent(offsets_expr, batch_size, capacity, hidden);
+    const Expression y = Expression::rmsNorm(
+        packed, scale, hidden, 1.0e-5, DataType::FP32, DataType::FP32, capacity);
+    FusedEquation forward = FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+
+    Tensor x_tensor = makeGpuTensor<float>(
+        {capacity, hidden}, std::vector<float>(capacity * hidden, 1.0F), stream);
+    Tensor scale_tensor = makeGpuTensor<float>({hidden}, std::vector<float>(hidden, 1.0F), stream);
+    Tensor dy_tensor = makeGpuTensor<float>(
+        {capacity, hidden}, std::vector<float>(capacity * hidden, 1.0F), stream);
+    Tensor offsets = makeGpuTensor<uint32_t>({batch_size + 1}, {0U, 0U, 0U, 0U}, stream);
+    RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+    partition.setHostOffsets(host_offsets);
+
+    auto backward_bytes_for = [&](const std::vector<std::string>& requested_inputs) {
+        FusedEquation backward = forward.compileBackward(requested_inputs, "dy");
+        auto plans = backward.stampForwardBackwardPair(
+            {{"x", x_tensor}, {"scale", scale_tensor}, {"offsets", offsets}, {"dy", dy_tensor}}, stream);
+        return plans.second.logicalByteCount();
+    };
+
+    const uint64_t active_elements = 7U * hidden;
+    EXPECT_EQ(backward_bytes_for({"x"}),
+              active_elements * sizeof(float) * 3U + hidden * sizeof(float));
+    EXPECT_EQ(backward_bytes_for({"scale"}),
+              active_elements * sizeof(float) * 2U + hidden * sizeof(float) * 2U);
+    EXPECT_EQ(backward_bytes_for({"x", "scale"}),
+              active_elements * sizeof(float) * 3U + hidden * sizeof(float) * 2U);
+
+    partition.setHostOffsets({0, 0, 0, 0});
+    EXPECT_EQ(backward_bytes_for({"x"}), 0U);
+    EXPECT_EQ(backward_bytes_for({"scale"}), hidden * sizeof(float));
+    EXPECT_EQ(backward_bytes_for({"x", "scale"}), hidden * sizeof(float));
+}
+
+
+TEST(RaggedExpression, Lwa4b2SegmentedReductionsUseActivePrefixValidRowsAndExactMeanDistribution) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 4;
+    constexpr uint64_t channels = 2;
+    constexpr uint64_t valid_rows = 3;
+    const std::vector<uint64_t> host_offsets{0, 2, 2, 5, 6};  // lengths [2,0,3,1]
+
+    auto logical_work_for = [&](uint64_t capacity,
+                                ExprOp op,
+                                const std::vector<uint64_t>& published_offsets) {
+        const RaggedTensorDescriptor descriptor =
+            makeDescriptor(DataType::FP32, {channels}, batch_size, capacity, DataType::UINT32);
+        const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+        const Expression y = [&]() -> Expression {
+            switch (op) {
+                case ExprOp::SEGMENTED_REDUCE_SUM:
+                    return ragged.segment_sum();
+                case ExprOp::SEGMENTED_REDUCE_MIN:
+                    return ragged.segment_min();
+                case ExprOp::SEGMENTED_REDUCE_MAX:
+                    return ragged.segment_max();
+                case ExprOp::SEGMENTED_REDUCE_MEAN:
+                    return ragged.segment_mean();
+                default:
+                    throw std::invalid_argument("LWA-4B2 test requires a segmented reduction op.");
+            }
+        }();
+
+        Tensor values = makeGpuTensor<float>(
+            {capacity, channels}, std::vector<float>(capacity * channels, 1.0F), stream);
+        // Device offsets are deliberately stale. Logical accounting must use
+        // only the authoritative published host partition.
+        Tensor offsets = makeGpuTensor<uint32_t>(
+            {batch_size + 1}, std::vector<uint32_t>(batch_size + 1, 0U), stream);
+        RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+        partition.setHostOffsets(published_offsets);
+
+        FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+        StampedExecutionPlan plan = equation.stamp({{"x.values", values}, {"x.offsets", offsets}}, stream);
+        return std::vector<uint64_t>{plan.logicalFlopCount(),
+                                     plan.logicalByteCount(),
+                                     plan.logicalFlopCount(valid_rows),
+                                     plan.logicalByteCount(valid_rows)};
+    };
+
+    const uint64_t full_active_elements = 6U * channels;
+    const uint64_t prefix_active_elements = 5U * channels;
+    const uint64_t full_output_elements = batch_size * channels;
+    const uint64_t prefix_output_elements = valid_rows * channels;
+    const uint64_t full_bytes = (full_active_elements + full_output_elements) * sizeof(float);
+    const uint64_t prefix_bytes = (prefix_active_elements + prefix_output_elements) * sizeof(float);
+
+    for (ExprOp op : {ExprOp::SEGMENTED_REDUCE_SUM,
+                      ExprOp::SEGMENTED_REDUCE_MIN,
+                      ExprOp::SEGMENTED_REDUCE_MAX}) {
+        const std::vector<uint64_t> work = logical_work_for(12, op, host_offsets);
+        EXPECT_EQ(work, (std::vector<uint64_t>{full_active_elements, full_bytes,
+                                               prefix_active_elements, prefix_bytes}));
+        EXPECT_EQ(work, logical_work_for(24, op, host_offsets));
+    }
+
+    // Mean adds one division per channel for every non-empty row.  The full
+    // partition has 3 non-empty rows; the first 3 valid rows have 2.
+    const std::vector<uint64_t> mean_work =
+        logical_work_for(12, ExprOp::SEGMENTED_REDUCE_MEAN, host_offsets);
+    EXPECT_EQ(mean_work,
+              (std::vector<uint64_t>{full_active_elements + 3U * channels,
+                                     full_bytes,
+                                     prefix_active_elements + 2U * channels,
+                                     prefix_bytes}));
+    EXPECT_EQ(mean_work, logical_work_for(24, ExprOp::SEGMENTED_REDUCE_MEAN, host_offsets));
+
+    // Same total active values, different row distribution: sum/min/max work is
+    // unchanged, while mean changes exactly with the non-empty-row count.
+    const std::vector<uint64_t> redistributed{0, 1, 3, 5, 6};  // [1,2,2,1], 4 non-empty
+    const std::vector<uint64_t> redistributed_sum =
+        logical_work_for(12, ExprOp::SEGMENTED_REDUCE_SUM, redistributed);
+    EXPECT_EQ(redistributed_sum[0], full_active_elements);
+    EXPECT_EQ(redistributed_sum[1], full_bytes);
+    const std::vector<uint64_t> redistributed_mean =
+        logical_work_for(12, ExprOp::SEGMENTED_REDUCE_MEAN, redistributed);
+    EXPECT_EQ(redistributed_mean[0], full_active_elements + 4U * channels);
+    EXPECT_EQ(redistributed_mean[1], full_bytes);
+    EXPECT_EQ(redistributed_mean[2], prefix_active_elements + 3U * channels);
+    EXPECT_EQ(redistributed_mean[3], prefix_bytes);
+
+    // Empty valid rows still produce segment outputs, so logical bytes contain
+    // the valid segment-side writes even when packed input work is zero.
+    const std::vector<uint64_t> empty =
+        logical_work_for(12, ExprOp::SEGMENTED_REDUCE_MEAN, {0, 0, 0, 0, 0});
+    EXPECT_EQ(empty[0], 0U);
+    EXPECT_EQ(empty[1], full_output_elements * sizeof(float));
+    EXPECT_EQ(empty[2], 0U);
+    EXPECT_EQ(empty[3], prefix_output_elements * sizeof(float));
+}
+
+TEST(RaggedExpression, Lwa4b2SegmentedBroadcastBackwardUsesSameValidPrefixAndIgnoresCapacity) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 4;
+    constexpr uint64_t channels = 2;
+    constexpr uint64_t valid_rows = 3;
+    const std::vector<uint64_t> host_offsets{0, 2, 2, 5, 6};
+
+    auto backward_work_for = [&](uint64_t capacity, bool normalized) {
+        const RaggedTensorDescriptor descriptor =
+            makeDescriptor(DataType::FP32, {channels}, batch_size, capacity, DataType::UINT32);
+        const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+        const Expression y = normalized ? ragged.segment_mean() : ragged.segment_sum();
+        FusedEquation forward = FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+        FusedEquation backward = forward.compileBackward({"x.values"}, "dy");
+
+        Tensor values = makeGpuTensor<float>(
+            {capacity, channels}, std::vector<float>(capacity * channels, 1.0F), stream);
+        Tensor dy = makeGpuTensor<float>(
+            {batch_size, channels}, std::vector<float>(batch_size * channels, 1.0F), stream);
+        Tensor offsets = makeGpuTensor<uint32_t>(
+            {batch_size + 1}, std::vector<uint32_t>(batch_size + 1, 0U), stream);
+        RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+        partition.setHostOffsets(host_offsets);
+
+        auto [forward_plan, backward_plan] = backward.stampForwardBackwardPair(
+            {{"x.values", values}, {"x.offsets", offsets}, {"dy", dy}}, stream);
+        (void)forward_plan;
+
+        const auto work = [&](uint64_t rows) {
+            return std::vector<uint64_t>{backward_plan.logicalFlopCount(rows),
+                                         backward_plan.logicalByteCount(rows)};
+        };
+        const std::vector<uint64_t> full_work = work(0);
+        const std::vector<uint64_t> prefix_work = work(valid_rows);
+
+        // Mutating only the tail row must not alter valid-prefix accounting.
+        partition.setHostOffsets({0, 2, 2, 5, 8});
+        EXPECT_EQ(work(valid_rows), prefix_work);
+        EXPECT_NE(work(0), full_work);
+
+        std::vector<uint64_t> result = full_work;
+        result.insert(result.end(), prefix_work.begin(), prefix_work.end());
+        return result;
+    };
+
+    const uint64_t full_active_elements = 6U * channels;
+    const uint64_t prefix_active_elements = 5U * channels;
+    const uint64_t full_segment_elements = batch_size * channels;
+    const uint64_t prefix_segment_elements = valid_rows * channels;
+    const uint64_t full_bytes = (full_segment_elements + full_active_elements) * sizeof(float);
+    const uint64_t prefix_bytes = (prefix_segment_elements + prefix_active_elements) * sizeof(float);
+
+    const std::vector<uint64_t> sum_work = backward_work_for(12, false);
+    EXPECT_EQ(sum_work,
+              (std::vector<uint64_t>{full_active_elements, full_bytes,
+                                     prefix_active_elements, prefix_bytes}));
+    EXPECT_EQ(sum_work, backward_work_for(24, false));
+
+    const std::vector<uint64_t> mean_work = backward_work_for(12, true);
+    EXPECT_EQ(mean_work,
+              (std::vector<uint64_t>{full_active_elements * 2U, full_bytes,
+                                     prefix_active_elements * 2U, prefix_bytes}));
+    EXPECT_EQ(mean_work, backward_work_for(24, true));
+}
+
 TEST(RaggedExpression, OrdinarySoftmaxExecutionUsesExactActivePrefixAndFinalAxis) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);

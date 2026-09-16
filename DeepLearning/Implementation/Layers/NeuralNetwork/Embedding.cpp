@@ -485,6 +485,174 @@ Tensor Embedding::weights() const {
     return storage.value();
 }
 
+uint64_t Embedding::logicalByteCountForward() { return logicalByteCountForward(0); }
+
+uint64_t Embedding::logicalByteCountForward(uint64_t validExampleCount) {
+    if (isRagged()) {
+        const RaggedEmbeddingConfig& config = raggedConfig.value();
+        const uint64_t validRows = validExampleCount == 0 ? config.batchSize : validExampleCount;
+        if (validRows > config.batchSize) return 0;
+
+        uint64_t bytes = 0;
+        const uint64_t weightElementBytes =
+            static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(weightsDataType));
+        for (uint32_t app = 0; app < raggedApplicationCount(); ++app) {
+            const uint32_t valuesSlot = raggedValuesSlot(app);
+            const uint32_t offsetsSlot = raggedOffsetsSlot(app);
+            if (valuesSlot >= featureInputs.size() || offsetsSlot >= featureInputs.size() ||
+                app >= featureOutputs.size() || !featureInputs[valuesSlot].has_value() ||
+                !featureInputs[offsetsSlot].has_value() || !featureOutputs[app].has_value()) {
+                return 0;
+            }
+            const Tensor& partitionCarrier = featureInputs[offsetsSlot].value();
+            const std::optional<uint64_t> activeValues =
+                validRows == config.batchSize
+                    ? RowPartitionRuntime::getPublishedHostActiveValueCountIfAvailable(partitionCarrier)
+                    : RowPartitionRuntime::getPublishedHostOffsetIfAvailable(partitionCarrier, validRows);
+            if (!activeValues.has_value() || activeValues.value() > config.maxTotalValues) return 0;
+
+            const Tensor& indices = featureInputs[valuesSlot].value();
+            const Tensor& output = featureOutputs[app].value();
+            if (indices.getArraySizeInBytes() % config.maxTotalValues != 0 ||
+                output.getArraySizeInBytes() % config.maxTotalValues != 0) {
+                return 0;
+            }
+            const uint64_t indexBytesPerValue = indices.getArraySizeInBytes() / config.maxTotalValues;
+            const uint64_t outputBytesPerValue = output.getArraySizeInBytes() / config.maxTotalValues;
+            if ((indexBytesPerValue != 0 && activeValues.value() > std::numeric_limits<uint64_t>::max() / indexBytesPerValue) ||
+                (outputBytesPerValue != 0 && activeValues.value() > std::numeric_limits<uint64_t>::max() / outputBytesPerValue)) {
+                return 0;
+            }
+            const uint64_t activeIndexBytes = activeValues.value() * indexBytesPerValue;
+            const uint64_t activeOutputBytes = activeValues.value() * outputBytesPerValue;
+            if (config.elementsPerValue != 0 && activeValues.value() > std::numeric_limits<uint64_t>::max() / config.elementsPerValue)
+                return 0;
+            const uint64_t activeIndexElements = activeValues.value() * config.elementsPerValue;
+            if (embeddingDim != 0 && activeIndexElements > std::numeric_limits<uint64_t>::max() / embeddingDim)
+                return 0;
+            const uint64_t selectedWeightElements = activeIndexElements * embeddingDim;
+            if (weightElementBytes != 0 && selectedWeightElements > std::numeric_limits<uint64_t>::max() / weightElementBytes)
+                return 0;
+            const uint64_t selectedWeightBytes = selectedWeightElements * weightElementBytes;
+
+            bytes = checkedLogicalByteAdd(bytes, activeIndexBytes, "Ragged Embedding forward indices");
+            bytes = checkedLogicalByteAdd(bytes, selectedWeightBytes, "Ragged Embedding forward selected weights");
+            bytes = checkedLogicalByteAdd(bytes, activeOutputBytes, "Ragged Embedding forward output");
+        }
+        return bytes;
+    }
+
+    uint64_t bytes = 0;
+    const uint64_t weightElementBytes =
+        static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(weightsDataType));
+    for (size_t i = 0; i < featureInputs.size(); ++i) {
+        if (!featureInputs[i].has_value()) continue;
+        const Tensor& indices = featureInputs[i].value();
+        bytes = checkedLogicalByteAdd(bytes, indices.getArraySizeInBytes(), "Embedding forward");
+        const uint64_t lookupElements = indices.getTotalNumElements();
+        if (embeddingDim != 0 && lookupElements > std::numeric_limits<uint64_t>::max() / embeddingDim) {
+            throw std::runtime_error("Embedding forward selected-row element count overflow.");
+        }
+        const uint64_t selectedWeightElements = lookupElements * embeddingDim;
+        if (weightElementBytes != 0 && selectedWeightElements > std::numeric_limits<uint64_t>::max() / weightElementBytes) {
+            throw std::runtime_error("Embedding forward selected-row byte count overflow.");
+        }
+        bytes = checkedLogicalByteAdd(bytes, selectedWeightElements * weightElementBytes, "Embedding forward");
+        if (i < featureOutputs.size() && featureOutputs[i].has_value()) {
+            bytes = checkedLogicalByteAdd(bytes, featureOutputs[i]->getArraySizeInBytes(), "Embedding forward");
+        }
+    }
+    return bytes;
+}
+
+uint64_t Embedding::logicalByteCountBackward() { return logicalByteCountBackward(0); }
+
+uint64_t Embedding::logicalByteCountBackward(uint64_t validExampleCount) {
+    if (isRagged()) {
+        const bool producesWeightGradient = !isInferenceOnly() && parameters[0]->isTrainingEnabled();
+        if (!producesWeightGradient) return 0;
+        const RaggedEmbeddingConfig& config = raggedConfig.value();
+        const uint64_t validRows = validExampleCount == 0 ? config.batchSize : validExampleCount;
+        if (validRows > config.batchSize) return 0;
+        const uint64_t weightElementBytes =
+            static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(weightsDataType));
+
+        uint64_t bytes = 0;
+        for (uint32_t app = 0; app < raggedApplicationCount(); ++app) {
+            const uint32_t valuesSlot = raggedValuesSlot(app);
+            const uint32_t offsetsSlot = raggedOffsetsSlot(app);
+            if (valuesSlot >= featureInputs.size() || offsetsSlot >= featureInputs.size() ||
+                app >= errorInputs.size() || !featureInputs[valuesSlot].has_value() ||
+                !featureInputs[offsetsSlot].has_value() || !errorInputs[app].has_value()) {
+                continue;
+            }
+            const Tensor& partitionCarrier = featureInputs[offsetsSlot].value();
+            const std::optional<uint64_t> activeValues =
+                validRows == config.batchSize
+                    ? RowPartitionRuntime::getPublishedHostActiveValueCountIfAvailable(partitionCarrier)
+                    : RowPartitionRuntime::getPublishedHostOffsetIfAvailable(partitionCarrier, validRows);
+            if (!activeValues.has_value() || activeValues.value() > config.maxTotalValues) return 0;
+
+            const Tensor& indices = featureInputs[valuesSlot].value();
+            const Tensor& upstreamGradient = errorInputs[app].value();
+            if (indices.getArraySizeInBytes() % config.maxTotalValues != 0 ||
+                upstreamGradient.getArraySizeInBytes() % config.maxTotalValues != 0) {
+                return 0;
+            }
+            const uint64_t indexBytesPerValue = indices.getArraySizeInBytes() / config.maxTotalValues;
+            const uint64_t gradientBytesPerValue = upstreamGradient.getArraySizeInBytes() / config.maxTotalValues;
+            if ((indexBytesPerValue != 0 && activeValues.value() > std::numeric_limits<uint64_t>::max() / indexBytesPerValue) ||
+                (gradientBytesPerValue != 0 && activeValues.value() > std::numeric_limits<uint64_t>::max() / gradientBytesPerValue)) {
+                return 0;
+            }
+            const uint64_t activeIndexBytes = activeValues.value() * indexBytesPerValue;
+            const uint64_t activeUpstreamBytes = activeValues.value() * gradientBytesPerValue;
+            if (config.elementsPerValue != 0 && activeValues.value() > std::numeric_limits<uint64_t>::max() / config.elementsPerValue)
+                return 0;
+            const uint64_t activeIndexElements = activeValues.value() * config.elementsPerValue;
+            if (embeddingDim != 0 && activeIndexElements > std::numeric_limits<uint64_t>::max() / embeddingDim)
+                return 0;
+            const uint64_t selectedGradientElements = activeIndexElements * embeddingDim;
+            if (weightElementBytes != 0 && selectedGradientElements > std::numeric_limits<uint64_t>::max() / weightElementBytes)
+                return 0;
+            const uint64_t selectedGradientBytes = selectedGradientElements * weightElementBytes;
+
+            bytes = checkedLogicalByteAdd(bytes, activeUpstreamBytes, "Ragged Embedding backward upstream gradient");
+            bytes = checkedLogicalByteAdd(bytes, activeIndexBytes, "Ragged Embedding backward indices");
+            bytes = checkedLogicalByteAdd(bytes, selectedGradientBytes, "Ragged Embedding backward sparse parameter gradient");
+        }
+        return bytes;
+    }
+
+    uint64_t bytes = 0;
+    const bool producesWeightGradient = !isInferenceOnly() && parameters[0]->isTrainingEnabled();
+    const uint64_t weightElementBytes =
+        static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(weightsDataType));
+    for (size_t i = 0; i < errorInputs.size(); ++i) {
+        if (!errorInputs[i].has_value()) continue;
+        bytes = checkedLogicalByteAdd(bytes, errorInputs[i]->getArraySizeInBytes(), "Embedding backward");
+        if (i >= featureInputs.size() || !featureInputs[i].has_value()) continue;
+        const Tensor& indices = featureInputs[i].value();
+        bytes = checkedLogicalByteAdd(bytes, indices.getArraySizeInBytes(), "Embedding backward");
+        if (producesWeightGradient) {
+            const uint64_t lookupElements = indices.getTotalNumElements();
+            if (embeddingDim != 0 && lookupElements > std::numeric_limits<uint64_t>::max() / embeddingDim) {
+                throw std::runtime_error("Embedding backward selected-gradient element count overflow.");
+            }
+            const uint64_t selectedGradientElements = lookupElements * embeddingDim;
+            if (weightElementBytes != 0 && selectedGradientElements > std::numeric_limits<uint64_t>::max() / weightElementBytes) {
+                throw std::runtime_error("Embedding backward selected-gradient byte count overflow.");
+            }
+            // The sparse row ids are representation metadata. The logical
+            // parameter-gradient result is the selected gradient values keyed
+            // by the already-consumed index operand.
+            bytes = checkedLogicalByteAdd(
+                bytes, selectedGradientElements * weightElementBytes, "Embedding backward");
+        }
+    }
+    return bytes;
+}
+
 void Embedding::computeFeatureOut(uint32_t connectionNumber) {
     if (isRagged()) {
         const uint32_t applicationIndex = connectionNumber;
