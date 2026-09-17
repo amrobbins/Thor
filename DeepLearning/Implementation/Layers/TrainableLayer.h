@@ -4,6 +4,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/LatestProducerCompletionJoin.h"
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Layers/Optimizers/Optimizer.h"
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
@@ -119,9 +120,12 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
 
         if (isStartOfForward) {
             if (weightsAreUpToDateEventValid) {
+                THOR_THROW_IF_FALSE(gradientUpdateStream.has_value());
                 for (const Stream &dataStream : uniqueDataStreams) {
-                    // All data streams must block forward until the single gradient stream is done updating weights.
-                    dataStream.waitEvent(weightsAreUpToDateEvent);
+                    // External data streams must block forward until the gradient stream is done updating weights.
+                    // If a data stream aliases the gradient stream, stream ordering already provides the dependency.
+                    if (dataStream != gradientUpdateStream.value())
+                        dataStream.waitEvent(weightsAreUpToDateEvent);
                 }
             }
             weightsAreUpToDateEventValid = false;
@@ -162,13 +166,14 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         // Parameter-gradient work can then run on the gradient stream without racing the
         // downstream producer of errorInput.
         Event* errorInputReadyEvent = nullptr;
-        if (requirements.needsAnyWork() && gradientUpdateStream.has_value()) {
+        if (requirements.needsAnyWork() && gradientUpdateStream.has_value() &&
+            streams[connectionNumber] != gradientUpdateStream.value()) {
             THOR_THROW_IF_FALSE(connectionNumber < errorInputReadyEvents.size());
             streams[connectionNumber].putEvent(errorInputReadyEvents[connectionNumber]);
             errorInputReadyEvent = &errorInputReadyEvents[connectionNumber];
         }
 
-        std::optional<Event> inputGradientReadyEvent = std::nullopt;
+        std::optional<detail::ProducerCompletionEvent> inputGradientReadyEvent = std::nullopt;
         if (requirements.needsAnyWork()) {
             if (backwardGradientMode == BackwardGradientMode::Unknown && usesFusedBackwardImplementation()) {
                 backwardGradientMode = BackwardGradientMode::Fused;
@@ -215,12 +220,14 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
             }
 
             if (requirements.needsInputGradient && inputGradientReadyEvent.has_value()) {
-                // A fused implementation may produce dx on the gradient-update stream.  The
-                // upstream layer consumes dx on this connection's data stream, so publish the
-                // returned readiness event to that stream before recursively submitting
-                // upstream backward work.
-                streams[connectionNumber].waitEvent(inputGradientReadyEvent.value());
-                errorOutHasBeenComputedEvents.push_back(inputGradientReadyEvent.value());
+                // A fused implementation may produce dx on the gradient-update stream. The
+                // completion carries its producer stream explicitly so publication back to the
+                // connection data stream can elide the same-stream case without guessing from
+                // the implementation mode.
+                const detail::ProducerCompletionEvent& completion = inputGradientReadyEvent.value();
+                if (streams[connectionNumber].getId() != completion.producerStreamId)
+                    streams[connectionNumber].waitEvent(completion.completionEvent);
+                errorOutHasBeenComputedEvents.push_back(completion);
             }
         }
 
@@ -238,9 +245,8 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
             // Weights cannot be updated until every requested input gradient that reads the
             // old weights has completed.
             if (gradientUpdateStream.has_value() && shouldApplyParameterUpdatesForBatch(batchSize)) {
-                for (const Event &eOutComputedEvent : errorOutHasBeenComputedEvents) {
-                    gradientUpdateStream.value().waitEvent(eOutComputedEvent);
-                }
+                detail::waitForLatestCompletionPerProducerStream(
+                    gradientUpdateStream.value(), errorOutHasBeenComputedEvents);
 
                 bool anyWeightsUpdated = false;
                 for (const auto &parameter : parameters) {
@@ -270,8 +276,8 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     // Weights are up-to-date by end of data stream
     virtual void computeFeatureOut(uint32_t connectionNumber) = 0;
 
-    // Error in is up-to-date by the end of the data stream.
-    virtual std::optional<Event> computeErrorOut(uint32_t connectionNumber) {
+    // Return the completion event and the physical stream that produced errorOut.
+    virtual std::optional<detail::ProducerCompletionEvent> computeErrorOut(uint32_t connectionNumber) {
         throw UnsupportedBackwardImplementation("computeErrorOut(...) not implemented.");
     }
 
@@ -281,9 +287,9 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         throw UnsupportedBackwardImplementation("accumulateWeightsGradient(...) not implemented.");
     }
 
-    // Error in is up-to-date by the end of the gradient stream.
-    // Gradient accumulation must be performed on the gradient stream, for serialization.
-    virtual std::optional<Event> computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) {
+    // Return the fused backward completion and the physical stream that produced it.
+    // Parameter-gradient accumulation remains serialized by the implementation's chosen stream.
+    virtual std::optional<detail::ProducerCompletionEvent> computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) {
         throw UnsupportedBackwardImplementation("computeErrorOutAccumulateWeightsGradienFused(...) not implemented.");
     }
 
@@ -450,7 +456,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     std::vector<Stream> uniqueDataStreams;
     std::shared_ptr<GradientUpdateStreamPool> gradientUpdateStreamPool;
     std::optional<Stream> gradientUpdateStream;
-    std::vector<Event> errorOutHasBeenComputedEvents;
+    std::vector<detail::ProducerCompletionEvent> errorOutHasBeenComputedEvents;
     std::vector<Event> errorInputReadyEvents;
     Event weightsAreUpToDateEvent;
     bool weightsAreUpToDateEventValid = false;

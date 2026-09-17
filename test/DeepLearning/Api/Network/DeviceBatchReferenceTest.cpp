@@ -159,6 +159,8 @@ TEST(DeviceBatchReference, PlacedNetworkDispatchesReferenceBatchThroughNamedInpu
         /*waitForOutputsOnProcessingStream=*/true,
         /*submitTiming=*/nullptr,
         /*outputSlotIndex=*/1);
+    EXPECT_FALSE(done.usesTiming());
+    EXPECT_TRUE(done.usesBlockingSync());
     done.synchronize();
     outputReadyEvents.at("prediction").synchronize();
 
@@ -167,6 +169,26 @@ TEST(DeviceBatchReference, PlacedNetworkDispatchesReferenceBatchThroughNamedInpu
     for (float value : values) {
         EXPECT_EQ(value, 7.0f);
     }
+
+    outputs.clear();
+    outputReadyEvents.clear();
+    Event reusableProcessingFinishedEvent;
+    Event reusedDone = placed->submitBatch(
+        0,
+        batch,
+        outputs,
+        outputReadyEvents,
+        /*isInferenceOnly=*/true,
+        &reusableProcessingFinishedEvent,
+        /*waitForOutputsOnProcessingStream=*/true,
+        /*submitTiming=*/nullptr,
+        /*outputSlotIndex=*/0);
+    ASSERT_TRUE(reusableProcessingFinishedEvent.isInitialized());
+    EXPECT_EQ(reusedDone.getId(), reusableProcessingFinishedEvent.getId());
+    EXPECT_FALSE(reusedDone.usesTiming());
+    EXPECT_TRUE(reusedDone.usesBlockingSync());
+    reusedDone.synchronize();
+    outputReadyEvents.at("prediction").synchronize();
 }
 
 TEST(DeviceBatchReference, PlacedNetworkRejectsValidExampleCountAbovePhysicalCapacity) {

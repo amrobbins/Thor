@@ -1,4 +1,6 @@
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/AdaptiveLayerNorm.h"
+#include "DeepLearning/Implementation/Layers/DistinctProducerStreamJoin.h"
+#include "DeepLearning/Implementation/Layers/DistinctTargetStreamFanout.h"
 #include "Utilities/Common/GpuMemoryDiagnostics.h"
 
 #include "Utilities/TensorOperations/DeepLearning/CudnnAdaptiveLayerNorm.h"
@@ -399,10 +401,15 @@ void AdaptiveLayerNorm::forward(optional<Tensor> featureInput, bool validationPa
 
     resetForwardArrivalBookkeeping();
 
-    for (uint32_t i = 1; i < NUM_INPUT_PORTS; ++i) {
+    for (uint32_t i = 1; i < NUM_INPUT_PORTS; ++i)
         THOR_THROW_IF_FALSE(adaptiveStreams[i].has_value());
-        computeStream().waitFor(adaptiveStreams[i].value(), forwardInputReadyEvents[i]);
-    }
+
+    detail::waitForDistinctProducerStreams(
+        computeStream(),
+        NUM_INPUT_PORTS,
+        [](std::size_t i) { return i != DATA; },
+        [&](std::size_t i) -> const Stream& { return adaptiveStreams[i].value(); },
+        [&](std::size_t i) -> Event& { return forwardInputReadyEvents[i]; });
 
     THOR_THROW_IF_FALSE(forwardPlan.has_value());
 
@@ -460,13 +467,20 @@ void AdaptiveLayerNorm::backward(optional<Tensor> errorInput, uint32_t batchSize
     CudnnAdaptiveLayerNorm::instance().backward(backwardPlan.value(), args, backwardWorkspace, computeStream());
 
     computeStream().putEvent(gradientsReadyEvent);
+    ThorImplementation::detail::waitOnDistinctTargetStreams(
+        computeStream(),
+        gradientsReadyEvent,
+        NUM_INPUT_PORTS,
+        [this](std::size_t i) {
+            return adaptivePreviousLayers[i].has_value() && adaptiveErrorOutputs[i].has_value();
+        },
+        [this](std::size_t i) -> const Stream& {
+            THOR_THROW_IF_FALSE(adaptiveStreams[i].has_value());
+            return adaptiveStreams[i].value();
+        });
     for (uint32_t i = 0; i < NUM_INPUT_PORTS; ++i) {
         if (!adaptivePreviousLayers[i].has_value() || !adaptiveErrorOutputs[i].has_value()) {
             continue;
-        }
-        if (i != DATA) {
-            THOR_THROW_IF_FALSE(adaptiveStreams[i].has_value());
-            adaptiveStreams[i].value().waitEvent(gradientsReadyEvent);
         }
         adaptivePreviousLayers[i].value()->backward(adaptiveErrorOutputs[i], batchSize);
     }

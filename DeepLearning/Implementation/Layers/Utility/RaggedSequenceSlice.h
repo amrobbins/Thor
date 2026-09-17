@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
+#include "DeepLearning/Implementation/Layers/DistinctProducerStreamJoin.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/TensorOperations/Ragged/RaggedSequenceSlice.h"
@@ -110,8 +111,7 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
         if (!stillWaitingForFeatureInputTensors.empty()) return;
         stillWaitingForFeatureInputTensors = allFeatureInputTensorIds;
 
-        streams[0].waitFor(streams[1], forwardInputReadyEvents[1]);
-        streams[0].waitFor(streams[2], forwardInputReadyEvents[2]);
+        detail::waitForDistinctProducerStreams(streams[0], streams, forwardInputReadyEvents, 1);
 
         launchRaggedSequenceSliceValues(featureInputs[0].value(),
                                         featureInputs[1].value(),

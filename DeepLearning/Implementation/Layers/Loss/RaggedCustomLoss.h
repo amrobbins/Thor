@@ -170,7 +170,6 @@ class RaggedCustomLoss : public Loss {
         std::optional<Layer*> previousLayer;
         Stream stream;
         Event readyEvent;
-        Event reusableEvent;
         bool received = false;
     };
     std::vector<SecondaryInputState> secondaryInputs;
@@ -178,14 +177,14 @@ class RaggedCustomLoss : public Loss {
     std::optional<Tensor> offsetsInput;
     Stream offsetsStream;
     Event offsetsReadyEvent;
-    Event offsetsReusableEvent;
     bool offsetsReceived = false;
 
     std::optional<Tensor> exampleWeightsInput;
     Stream exampleWeightsStream;
     Event exampleWeightsReadyEvent;
-    Event exampleWeightsReusableEvent;
     bool exampleWeightsReceived = false;
+
+    Event auxiliaryInputsReusableEvent;
 
     std::shared_ptr<PreparedDynamicExpression> lossPrepared;
     std::shared_ptr<StampedExecutionPlan> lossStamped;

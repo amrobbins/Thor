@@ -1,4 +1,6 @@
 #include "DeepLearning/Implementation/Layers/Loss/RaggedCustomLoss.h"
+#include "DeepLearning/Implementation/Layers/DistinctProducerStreamJoin.h"
+#include "DeepLearning/Implementation/Layers/DistinctTargetStreamFanout.h"
 
 #include "DeepLearning/Implementation/Layers/Loss/RegressionLossDType.h"
 #include "DeepLearning/Implementation/Layers/Loss/WeightedLossExpression.h"
@@ -467,14 +469,12 @@ void RaggedCustomLoss::cleanup() {
     gradientPrepared.reset();
     gradientPreRunHook = nullptr;
     offsetsReadyEvent = Event();
-    offsetsReusableEvent = Event();
     offsetsReceived = false;
     exampleWeightsReadyEvent = Event();
-    exampleWeightsReusableEvent = Event();
     exampleWeightsReceived = false;
+    auxiliaryInputsReusableEvent = Event();
     for (SecondaryInputState& secondary : secondaryInputs) {
         secondary.readyEvent = Event();
-        secondary.reusableEvent = Event();
         secondary.received = false;
     }
     Loss::cleanup();
@@ -566,28 +566,40 @@ void RaggedCustomLoss::forward(optional<Tensor> inputTensor, bool validationPass
 }
 
 void RaggedCustomLoss::synchronizeComputeStreamForInputs() {
-    THOR_THROW_IF_FALSE(stream.isInitialized());
-    THOR_THROW_IF_FALSE(labelsStream.isInitialized());
-    THOR_THROW_IF_FALSE(offsetsStream.isInitialized());
-    stream.waitFor(labelsStream, labelsReadyEvent);
-    stream.waitFor(offsetsStream, offsetsReadyEvent);
-    if (exampleWeightsInput.has_value()) {
-        THOR_THROW_IF_FALSE(exampleWeightsStream.isInitialized());
-        stream.waitFor(exampleWeightsStream, exampleWeightsReadyEvent);
-    }
-    for (SecondaryInputState& secondary : secondaryInputs) {
-        THOR_THROW_IF_FALSE(secondary.stream.isInitialized());
-        stream.waitFor(secondary.stream, secondary.readyEvent);
-    }
+    const std::size_t fixedInputCount = 3;
+    const std::size_t logicalInputCount = fixedInputCount + secondaryInputs.size();
+    detail::waitForDistinctProducerStreams(
+        stream,
+        logicalInputCount,
+        [&](std::size_t i) { return i != 2 || exampleWeightsInput.has_value(); },
+        [&](std::size_t i) -> const Stream& {
+            if (i == 0) return labelsStream;
+            if (i == 1) return offsetsStream;
+            if (i == 2) return exampleWeightsStream;
+            return secondaryInputs[i - fixedInputCount].stream;
+        },
+        [&](std::size_t i) -> Event& {
+            if (i == 0) return labelsReadyEvent;
+            if (i == 1) return offsetsReadyEvent;
+            if (i == 2) return exampleWeightsReadyEvent;
+            return secondaryInputs[i - fixedInputCount].readyEvent;
+        });
 }
 
 void RaggedCustomLoss::markAuxiliaryInputsReusableAfterCompute() {
-    labelsStream.waitFor(stream, labelsReusableEvent);
-    offsetsStream.waitFor(stream, offsetsReusableEvent);
-    if (exampleWeightsInput.has_value())
-        exampleWeightsStream.waitFor(stream, exampleWeightsReusableEvent);
-    for (SecondaryInputState& secondary : secondaryInputs)
-        secondary.stream.waitFor(stream, secondary.reusableEvent);
+    const std::size_t fixedInputCount = 3;
+    const std::size_t logicalTargetCount = fixedInputCount + secondaryInputs.size();
+    detail::recordCompletionAndWaitOnDistinctTargetStreams(
+        stream,
+        auxiliaryInputsReusableEvent,
+        logicalTargetCount,
+        [&](std::size_t i) { return i != 2 || exampleWeightsInput.has_value(); },
+        [&](std::size_t i) -> const Stream& {
+            if (i == 0) return labelsStream;
+            if (i == 1) return offsetsStream;
+            if (i == 2) return exampleWeightsStream;
+            return secondaryInputs[i - fixedInputCount].stream;
+        });
 }
 
 void RaggedCustomLoss::advanceDataIfReady(bool validationPass) {

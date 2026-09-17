@@ -375,7 +375,7 @@ void LayerNorm::computeFeatureOut(uint32_t connectionNumber) {
         forwardPlans[connectionNumber].value(), args, forwardWorkspaces[connectionNumber], streams[connectionNumber]);
 }
 
-optional<Event> LayerNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber,
+optional<detail::ProducerCompletionEvent> LayerNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber,
                                                                         bool clearWeightsGradientFirstIfFused) {
     if (!errorInputs[connectionNumber].has_value() || isInferenceOnly())
         return nullopt;
@@ -457,7 +457,8 @@ optional<Event> LayerNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t
 
     THOR_THROW_IF_FALSE(connectionNumber < backwardCompletionEvents.size());
     executionStream.putEvent(backwardCompletionEvents[connectionNumber]);
-    return backwardCompletionEvents[connectionNumber];
+    return detail::ProducerCompletionEvent{
+        executionStream.getId(), backwardCompletionEvents[connectionNumber]};
 }
 
 void LayerNorm::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {

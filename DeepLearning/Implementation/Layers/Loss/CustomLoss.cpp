@@ -305,7 +305,8 @@ void CustomLoss::notifyFusedGradientConsumptionComplete(const Event& consumersDo
     // expression.  Make that deferred lifetime explicit on the streams that are
     // allowed to reuse/rewrite the tensors for the next batch.
     labelsStream.waitEvent(consumersDone);
-    stream.waitEvent(consumersDone);
+    if (stream != labelsStream)
+        stream.waitEvent(consumersDone);
 }
 
 std::optional<Tensor> CustomLoss::connectToPredictionsInputLayer(Layer* predictionsInputLayer,

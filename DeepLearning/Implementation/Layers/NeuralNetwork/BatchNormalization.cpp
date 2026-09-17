@@ -516,7 +516,7 @@ void BatchNormalization::computeFeatureOut(uint32_t connectionNumber) {
 }
 // Error in is up-to-date by the end of the gradient stream.
 // Gradient accumulation must be performed on the gradient stream, for serialization.
-std::optional<Event> BatchNormalization::computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber,
+std::optional<detail::ProducerCompletionEvent> BatchNormalization::computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber,
                                                                                       bool clearWeightsGradientFirstIfFused) {
     if (!errorInputs[connectionNumber].has_value())
         return std::nullopt;
@@ -541,7 +541,8 @@ std::optional<Event> BatchNormalization::computeErrorOutAccumulateWeightsGradien
                                                   streams[connectionNumber]);
         THOR_THROW_IF_FALSE(connectionNumber < backwardCompletionEvents.size());
         streams[connectionNumber].putEvent(backwardCompletionEvents[connectionNumber]);
-        return backwardCompletionEvents[connectionNumber];
+        return detail::ProducerCompletionEvent{
+            streams[connectionNumber].getId(), backwardCompletionEvents[connectionNumber]};
     }
 
     THOR_THROW_IF_FALSE(connectionNumber < scratchDScale.size());
@@ -630,7 +631,8 @@ std::optional<Event> BatchNormalization::computeErrorOutAccumulateWeightsGradien
 
     THOR_THROW_IF_FALSE(connectionNumber < backwardCompletionEvents.size());
     executionStream.putEvent(backwardCompletionEvents[connectionNumber]);
-    return backwardCompletionEvents[connectionNumber];
+    return detail::ProducerCompletionEvent{
+        executionStream.getId(), backwardCompletionEvents[connectionNumber]};
 }
 
 void BatchNormalization::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {

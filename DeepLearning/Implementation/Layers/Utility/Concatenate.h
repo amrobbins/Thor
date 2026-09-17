@@ -14,6 +14,8 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
+#include "DeepLearning/Implementation/Layers/DistinctProducerStreamJoin.h"
+#include "DeepLearning/Implementation/Layers/DistinctTargetStreamFanout.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/TensorOperations/Misc/Concatenate.h"
 #include "Utilities/TensorOperations/Misc/Split.h"
@@ -262,11 +264,13 @@ class Concatenate : public MultiConnectionLayer {
         }
 
         streams[0].putEvent(backwardOutputsReadyEvent);
-        previousLayers[0].value()->backward(errorOutputs[0], batchSize);
-        for (unsigned int i = 1; i < errorOutputs.size(); ++i) {
-            streams[i].waitEvent(backwardOutputsReadyEvent);
+        ThorImplementation::detail::waitOnDistinctTargetStreams(
+            streams[0],
+            backwardOutputsReadyEvent,
+            streams,
+            /*firstLogicalTarget=*/0);
+        for (unsigned int i = 0; i < errorOutputs.size(); ++i)
             previousLayers[i].value()->backward(errorOutputs[i], batchSize);
-        }
     }
 
     void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override {
@@ -302,8 +306,7 @@ class Concatenate : public MultiConnectionLayer {
 
         stillWaitingForFeatureInputTensors = allFeatureInputTensorIds;
 
-        for (unsigned int i = 1; i < featureInputs.size(); ++i)
-            streams[0].waitFor(streams[i], forwardInputReadyEvents[i]);
+        detail::waitForDistinctProducerStreams(streams[0], streams, forwardInputReadyEvents, 1);
 
         refreshFeatureInputMemoryArray(streams[0]);
 

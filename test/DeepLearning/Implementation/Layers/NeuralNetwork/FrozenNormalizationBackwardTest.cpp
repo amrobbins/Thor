@@ -959,13 +959,17 @@ class OrderingProbeTrainableLayer final : public Impl::TrainableLayer {
    protected:
     void computeFeatureOut(uint32_t) override {}
 
-    optional<Event> computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber,
-                                                                  bool) override {
+    optional<Impl::detail::ProducerCompletionEvent> computeErrorOutAccumulateWeightsGradienFused(
+        uint32_t connectionNumber,
+        bool) override {
         THOR_THROW_IF_FALSE(gradientUpdateStream.has_value());
         errorOutputs[connectionNumber]->copyFromAsync(errorInputs[connectionNumber].value(),
                                                        gradientUpdateStream.value());
-        return gradientUpdateStream->putEvent(/*enableTiming=*/false,
-                                              /*expectingHostToWaitOnThisOne=*/false);
+        return Impl::detail::ProducerCompletionEvent{
+            .producerStreamId = gradientUpdateStream->getId(),
+            .completionEvent = gradientUpdateStream->putEvent(/*enableTiming=*/false,
+                                                               /*expectingHostToWaitOnThisOne=*/false),
+        };
     }
 };
 

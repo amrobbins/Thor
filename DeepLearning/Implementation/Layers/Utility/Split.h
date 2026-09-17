@@ -9,6 +9,8 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/DistinctProducerStreamJoin.h"
+#include "DeepLearning/Implementation/Layers/DistinctTargetStreamFanout.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/TensorOperations/Misc/Concatenate.h"
 #include "Utilities/TensorOperations/Misc/Split.h"
@@ -193,11 +195,13 @@ class Split : public MultiConnectionLayer {
                     streams[0]);
 
         streams[0].putEvent(outputsReadyEvent);
-        nextLayers[0].value()->forward(featureOutputs[0], validationPass, batchSize);
-        for (unsigned int i = 1; i < featureOutputs.size(); ++i) {
-            streams[i].waitEvent(outputsReadyEvent);
+        ThorImplementation::detail::waitOnDistinctTargetStreams(
+            streams[0],
+            outputsReadyEvent,
+            streams,
+            /*firstLogicalTarget=*/0);
+        for (unsigned int i = 0; i < featureOutputs.size(); ++i)
             nextLayers[i].value()->forward(featureOutputs[i], validationPass, batchSize);
-        }
     }
 
     void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override {
@@ -216,8 +220,7 @@ class Split : public MultiConnectionLayer {
             stillWaitingForErrorInputTensors = allErrorInputTensorIds;
         }
 
-        for (unsigned int i = 1; i < errorInputs.size(); ++i)
-            streams[0].waitFor(streams[i], backwardInputReadyEvents[i]);
+        detail::waitForDistinctProducerStreams(streams[0], streams, backwardInputReadyEvents, 1);
 
         const uint64_t activeOuterSlices = resolveActiveOuterSlices(errorOutputs[0].value().getDescriptor(), batchSize);
         launchConcatenate(

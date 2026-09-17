@@ -376,7 +376,7 @@ void RMSNorm::computeFeatureOut(uint32_t connectionNumber) {
         forwardExecutablePlans[connectionNumber].value(), args, forwardWorkspaces[connectionNumber], streams[connectionNumber]);
 }
 
-optional<Event> RMSNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber,
+optional<detail::ProducerCompletionEvent> RMSNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber,
                                                                       bool clearWeightsGradientFirstIfFused) {
     if (!errorInputs[connectionNumber].has_value() || isInferenceOnly())
         return nullopt;
@@ -436,7 +436,8 @@ optional<Event> RMSNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t c
 
     THOR_THROW_IF_FALSE(connectionNumber < backwardCompletionEvents.size());
     executionStream.putEvent(backwardCompletionEvents[connectionNumber]);
-    return backwardCompletionEvents[connectionNumber];
+    return detail::ProducerCompletionEvent{
+        executionStream.getId(), backwardCompletionEvents[connectionNumber]};
 }
 
 void RMSNorm::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {

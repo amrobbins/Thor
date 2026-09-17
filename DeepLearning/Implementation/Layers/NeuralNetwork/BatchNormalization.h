@@ -68,7 +68,7 @@ class BatchNormalization : public TrainableLayer {
    private:
     void computeFeatureOut(uint32_t connectionNumber) override;
     bool usesFusedBackwardImplementation() const override { return true; }
-    std::optional<Event> computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) override;
+    std::optional<detail::ProducerCompletionEvent> computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) override;
     void accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) override;
     bool shouldApplyParameterUpdatesForBatch(uint32_t validExampleCount) const override;
 

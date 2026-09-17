@@ -1,4 +1,6 @@
 #include "DeepLearning/Implementation/Layers/Loss/MultiInputCustomLoss.h"
+#include "DeepLearning/Implementation/Layers/DistinctProducerStreamJoin.h"
+#include "DeepLearning/Implementation/Layers/DistinctTargetStreamFanout.h"
 #include "DeepLearning/Implementation/Layers/Loss/WeightedLossExpression.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/ThorError.h"
@@ -452,12 +454,7 @@ void MultiInputCustomLoss::maskInvalidBatchTail(Tensor& tensor, const char* tens
 
 void MultiInputCustomLoss::synchronizeComputeStreamForInputs() {
     Stream& runStream = computeStream();
-    for (size_t i = 0; i < inputStreams.size(); ++i) {
-        THOR_THROW_IF_FALSE(inputStreams[i].isInitialized());
-        if (i == 0)
-            continue;
-        runStream.waitFor(inputStreams[i], inputReadyEvents[i]);
-    }
+    detail::waitForDistinctProducerStreams(runStream, inputStreams, inputReadyEvents, 1);
 }
 
 void MultiInputCustomLoss::forward(optional<Tensor> featureInput, bool validationPass, uint32_t validExampleCount) {
@@ -505,8 +502,8 @@ void MultiInputCustomLoss::forward(optional<Tensor> featureInput, bool validatio
     }
 
     computeStream().putEvent(inputsReusableEvent);
-    for (size_t i = 1; i < inputStreams.size(); ++i)
-        inputStreams[i].waitEvent(inputsReusableEvent);
+    ThorImplementation::detail::waitOnDistinctTargetStreams(
+        computeStream(), inputsReusableEvent, inputStreams);
 
     resetForwardBookkeeping();
 

@@ -1,4 +1,6 @@
 #include "DeepLearning/Implementation/Layers/Loss/CtcLoss.h"
+#include "DeepLearning/Implementation/Layers/DistinctProducerStreamJoin.h"
+#include "DeepLearning/Implementation/Layers/DistinctTargetStreamFanout.h"
 #include "Utilities/TensorOperations/Ragged/RowPartition.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
@@ -364,11 +366,17 @@ void CtcLoss::forward(optional<Tensor> inputTensor, bool validationPass, uint32_
     maskInvalidLossTail();
     maskInvalidPredictionGradientTail();
 
-    stream.putEvent(auxiliaryInputsReusableEvent);
-    labelOffsetsStream.waitEvent(auxiliaryInputsReusableEvent);
-    inputLengthsStream.waitEvent(auxiliaryInputsReusableEvent);
-    if (isInferenceOnly() || validationPass)
-        markLabelsReusableAfterCompute();
+    const bool releaseLabelsAfterForward = isInferenceOnly() || validationPass;
+    ThorImplementation::detail::recordCompletionAndWaitOnDistinctTargetStreams(
+        stream,
+        auxiliaryInputsReusableEvent,
+        /*logicalTargetCount=*/3,
+        [releaseLabelsAfterForward](std::size_t i) { return i < 2 || releaseLabelsAfterForward; },
+        [this](std::size_t i) -> const Stream& {
+            if (i == 0) return labelOffsetsStream;
+            if (i == 1) return inputLengthsStream;
+            return labelsStream;
+        });
 
     if (nextLayer.has_value())
         nextLayer.value()->forward(featureOutput, validationPass, currentValidExampleCount);
@@ -450,9 +458,20 @@ uint64_t CtcLoss::logicalByteCountBackward(uint64_t validExampleCount) {
 
 void CtcLoss::advanceDataIfReady(bool validationPass) {
     if (featureInputReceived && labelsReceived && labelOffsetsReceived && inputLengthsReceived) {
-        waitForLabelsReady();
-        stream.waitFor(labelOffsetsStream, labelOffsetsReadyEvent);
-        stream.waitFor(inputLengthsStream, inputLengthsReadyEvent);
+        detail::waitForDistinctProducerStreams(
+            stream,
+            3,
+            [](std::size_t) { return true; },
+            [&](std::size_t i) -> const Stream& {
+                if (i == 0) return labelsStream;
+                if (i == 1) return labelOffsetsStream;
+                return inputLengthsStream;
+            },
+            [&](std::size_t i) -> Event& {
+                if (i == 0) return labelsReadyEvent;
+                if (i == 1) return labelOffsetsReadyEvent;
+                return inputLengthsReadyEvent;
+            });
         forward(nullopt, validationPass);
     }
 }

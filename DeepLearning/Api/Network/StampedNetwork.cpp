@@ -1299,10 +1299,10 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
     const auto processingEventStart = timingNow(submitTiming);
     joinProcessingDataStreams(inputs[0]->getStream());
     if (reusableProcessingFinishedEvent != nullptr) {
-        inputs[0]->getStream().putEvent(*reusableProcessingFinishedEvent, true, true);
+        inputs[0]->getStream().putEvent(*reusableProcessingFinishedEvent, false, true);
         processingFinishedEvent = *reusableProcessingFinishedEvent;
     } else {
-        processingFinishedEvent = inputs[0]->getStream().putEvent(true, true);
+        processingFinishedEvent = inputs[0]->getStream().putEvent(false, true);
     }
     const auto processingEventFinish = timingNow(submitTiming);
 

@@ -1,6 +1,8 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
+#include "DeepLearning/Implementation/Layers/DistinctProducerStreamJoin.h"
+#include "DeepLearning/Implementation/Layers/DistinctTargetStreamFanout.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/Common/HostFunctionArgs.h"
@@ -219,7 +221,7 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         if (!stillWaitingForFeatureInputTensors.empty()) return;
         stillWaitingForFeatureInputTensors = allFeatureInputTensorIds;
 
-        for (uint32_t i = 1; i < inputPortCount; ++i) streams[0].waitFor(streams[i], forwardInputReadyEvents[i]);
+        detail::waitForDistinctProducerStreams(streams[0], streams, forwardInputReadyEvents, 1);
         refreshPointerTables(streams[0]);
 
         const TensorDescriptor valuesDescriptor = outputDescriptor.getValuesDescriptor();
@@ -292,9 +294,14 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
                                                 streams[0]);
 
         streams[0].putEvent(backwardOutputsReadyEvent);
+        ThorImplementation::detail::waitOnDistinctTargetStreams(
+            streams[0],
+            backwardOutputsReadyEvent,
+            valueInputCount,
+            [this](std::size_t i) { return errorOutputs[i].has_value() && previousLayers[i].has_value(); },
+            [this](std::size_t i) -> const Stream& { return streams[i]; });
         for (uint32_t i = 0; i < valueInputCount; ++i) {
             if (!errorOutputs[i].has_value() || !previousLayers[i].has_value()) continue;
-            if (i != 0) streams[i].waitEvent(backwardOutputsReadyEvent);
             previousLayers[i].value()->backward(errorOutputs[i], resolvedValidExampleCount);
         }
     }

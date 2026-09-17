@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/HostFunctionCleanupQueue.h"
 #include "Utilities/Common/SharedOwnership.h"
+#include "Utilities/Common/SynchronizationDiagnostics.h"
 #include "Utilities/Expression/CudaHelpers.h"
 
 #include <atomic>
@@ -303,11 +304,17 @@ void Stream::waitEvent(Event event) const {
     ScopedGpu scopedGpu(state->gpuNum);
 
     CUDA_CHECK(cudaStreamWaitEvent(state->cudaStream, event.getEvent(), 0));
+#ifdef THOR_DEBUG
+    ThorImplementation::detail::recordCudaStreamWaitEventForTests();
+#endif
 }
 
 void Stream::waitFor(const Stream &producer, Event &reusableEvent) const {
     THOR_THROW_IF_FALSE(!uninitialized());
     THOR_THROW_IF_FALSE(producer.isInitialized());
+
+    if (*this == producer)
+        return;
 
     producer.putEvent(reusableEvent,
                       /*enableTiming=*/false,

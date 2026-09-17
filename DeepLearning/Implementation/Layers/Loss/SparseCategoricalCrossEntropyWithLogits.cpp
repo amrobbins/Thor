@@ -1,4 +1,6 @@
 #include "DeepLearning/Implementation/Layers/Loss/SparseCategoricalCrossEntropyWithLogits.h"
+#include "DeepLearning/Implementation/Layers/DistinctProducerStreamJoin.h"
+#include "DeepLearning/Implementation/Layers/DistinctTargetStreamFanout.h"
 
 #include <limits>
 
@@ -152,9 +154,8 @@ void SparseCategoricalCrossEntropyWithLogits::initialize() {
 
 void SparseCategoricalCrossEntropyWithLogits::cleanup() {
     maskReadyEvent = Event();
-    maskReusableEvent = Event();
     activeCountReadyEvent = Event();
-    activeCountReusableEvent = Event();
+    auxiliaryInputsReusableEvent = Event();
     Loss::cleanup();
 }
 
@@ -322,12 +323,21 @@ void SparseCategoricalCrossEntropyWithLogits::forward(optional<Tensor> inputTens
     if (!usesRaggedActiveCount())
         maskInvalidLossTail();
 
-    if (maskInput.has_value())
-        maskStream.waitFor(stream, maskReusableEvent);
-    if (activeCountInput.has_value())
-        activeCountStream.waitFor(stream, activeCountReusableEvent);
-    if (isInferenceOnly() || validationPass)
-        markLabelsReusableAfterCompute();
+    const bool releaseLabelsAfterForward = isInferenceOnly() || validationPass;
+    detail::recordCompletionAndWaitOnDistinctTargetStreams(
+        stream,
+        auxiliaryInputsReusableEvent,
+        /*logicalTargetCount=*/3,
+        [&](std::size_t i) {
+            if (i == 0) return maskInput.has_value();
+            if (i == 1) return activeCountInput.has_value();
+            return releaseLabelsAfterForward;
+        },
+        [&](std::size_t i) -> const Stream& {
+            if (i == 0) return maskStream;
+            if (i == 1) return activeCountStream;
+            return labelsStream;
+        });
 
     if (nextLayer.has_value())
         nextLayer.value()->forward(featureOutput, validationPass, currentValidExampleCount);
@@ -439,11 +449,24 @@ uint64_t SparseCategoricalCrossEntropyWithLogits::logicalByteCountBackward(uint6
 void SparseCategoricalCrossEntropyWithLogits::advanceDataIfReady(bool validationPass) {
     if (featureInputReceived && labelsReceived && (!maskInput.has_value() || maskReceived) &&
         (!usesRaggedActiveCount() || activeCountReceived)) {
-        waitForLabelsReady();
-        if (maskInput.has_value())
-            stream.waitFor(maskStream, maskReadyEvent);
-        if (activeCountInput.has_value())
-            stream.waitFor(activeCountStream, activeCountReadyEvent);
+        detail::waitForDistinctProducerStreams(
+            stream,
+            3,
+            [&](std::size_t i) {
+                if (i == 0) return true;
+                if (i == 1) return maskInput.has_value();
+                return activeCountInput.has_value();
+            },
+            [&](std::size_t i) -> const Stream& {
+                if (i == 0) return labelsStream;
+                if (i == 1) return maskStream;
+                return activeCountStream;
+            },
+            [&](std::size_t i) -> Event& {
+                if (i == 0) return labelsReadyEvent;
+                if (i == 1) return maskReadyEvent;
+                return activeCountReadyEvent;
+            });
         forward(nullopt, validationPass);
     }
 }

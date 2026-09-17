@@ -5,6 +5,8 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/DistinctProducerStreamJoin.h"
+#include "DeepLearning/Implementation/Layers/DistinctTargetStreamFanout.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
@@ -255,10 +257,11 @@ class TensorFanout : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(featureInput.has_value());
         THOR_THROW_IF_FALSE(featureInput.value() == featureInputs[0]);
 
-        // Synchronize all streams at the point at which inputTensor is populated.
+        // Synchronize each distinct physical target stream at the point at which
+        // inputTensor is populated. Logical fanout aliases on one stream share one wait.
         streams[0].putEvent(inputReadyEvent);
-        for (unsigned int i = 1; i < streams.size(); ++i)
-            streams[i].waitEvent(inputReadyEvent);
+        ThorImplementation::detail::waitOnDistinctTargetStreams(
+            streams[0], inputReadyEvent, streams);
 
         std::unordered_set<Layer *> forwardedLayers;
         for (unsigned int i = 0; i < nextLayers.size(); ++i) {
@@ -285,8 +288,7 @@ class TensorFanout : public MultiConnectionLayer {
                 // Compile-time single-input fanouts are fused so the downstream
                 // error tensor is also the upstream error tensor.  In that case
                 // backprop is a stream sync plus a direct upstream call.
-                for (unsigned int i = 1; i < errorInputs.size(); ++i)
-                    streams[0].waitFor(streams[i], backwardInputReadyEvents[i]);
+                detail::waitForDistinctProducerStreams(streams[0], streams, backwardInputReadyEvents, 1);
                 previousLayers[0].value()->backward(errorOutputs[0], batchSize);
                 return;
             }
@@ -304,8 +306,7 @@ class TensorFanout : public MultiConnectionLayer {
 
         stillWaitingForErrorInputTensors = allErrorInputTensorIds;
 
-        for (unsigned int i = 1; i < errorInputs.size(); ++i)
-            streams[0].waitFor(streams[i], backwardInputReadyEvents[i]);
+        detail::waitForDistinctProducerStreams(streams[0], streams, backwardInputReadyEvents, 1);
 
         sumErrorInputsByDType();
 

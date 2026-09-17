@@ -1,5 +1,6 @@
 #include "Utilities/Common/Event.h"
 #include "Utilities/Common/Stream.h"
+#include "Utilities/Common/SynchronizationDiagnostics.h"
 
 #include "gtest/gtest.h"
 
@@ -95,6 +96,69 @@ TEST(Event, StreamWaitForReusesCallerOwnedDependencyEvent) {
 
     consumer.synchronize();
 }
+
+TEST(Event, StreamWaitForElidesSamePhysicalStreamDependency) {
+    Stream producer(0);
+    Stream consumerAlias = producer;
+    Event dependencyEvent;
+
+    consumerAlias.waitFor(producer, dependencyEvent);
+
+    EXPECT_FALSE(dependencyEvent.isInitialized());
+    consumerAlias.synchronize();
+}
+
+#ifdef THOR_DEBUG
+TEST(Event, SynchronizationCountersTrackCrossStreamWaitForOperations) {
+    Stream producer(0);
+    Stream consumer(0);
+    Event dependencyEvent;
+
+    ThorImplementation::resetSynchronizationOperationCountsForTests();
+    consumer.waitFor(producer, dependencyEvent);
+
+    const ThorImplementation::SynchronizationOperationCounts counts =
+        ThorImplementation::synchronizationOperationCountsForTests();
+    EXPECT_EQ(counts.eventRecordCount, 1u);
+    EXPECT_EQ(counts.streamWaitEventCount, 1u);
+    EXPECT_EQ(counts.hostEventSynchronizeCount, 0u);
+
+    consumer.synchronize();
+}
+
+TEST(Event, SynchronizationCountersProveSameStreamWaitForEmitsNoCudaDependencyOperations) {
+    Stream producer(0);
+    Stream consumerAlias = producer;
+    Event dependencyEvent;
+
+    ThorImplementation::resetSynchronizationOperationCountsForTests();
+    consumerAlias.waitFor(producer, dependencyEvent);
+
+    const ThorImplementation::SynchronizationOperationCounts counts =
+        ThorImplementation::synchronizationOperationCountsForTests();
+    EXPECT_EQ(counts.eventRecordCount, 0u);
+    EXPECT_EQ(counts.streamWaitEventCount, 0u);
+    EXPECT_EQ(counts.hostEventSynchronizeCount, 0u);
+    EXPECT_FALSE(dependencyEvent.isInitialized());
+
+    consumerAlias.synchronize();
+}
+
+TEST(Event, SynchronizationCountersTrackHostEventSynchronization) {
+    Stream stream(0);
+    Event completionEvent = stream.putEvent(/*enableTiming=*/false,
+                                            /*expectingHostToWaitOnThisOne=*/true);
+
+    ThorImplementation::resetSynchronizationOperationCountsForTests();
+    completionEvent.synchronize();
+
+    const ThorImplementation::SynchronizationOperationCounts counts =
+        ThorImplementation::synchronizationOperationCountsForTests();
+    EXPECT_EQ(counts.eventRecordCount, 0u);
+    EXPECT_EQ(counts.streamWaitEventCount, 0u);
+    EXPECT_EQ(counts.hostEventSynchronizeCount, 1u);
+}
+#endif
 
 TEST(Event, RejectsChangingBlockingSynchronizationIntentWhenReused) {
     Stream stream(0);

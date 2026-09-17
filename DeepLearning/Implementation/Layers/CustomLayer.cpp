@@ -1,5 +1,7 @@
 #include <optional>
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/DistinctProducerStreamJoin.h"
+#include "DeepLearning/Implementation/Layers/DistinctTargetStreamFanout.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -3145,15 +3147,20 @@ std::string CustomLayer::diagnosticLabel() {
 void CustomLayer::synchronizeComputeStreamForForwardInputs(uint32_t applicationIndex) {
     Stream& runStream = computeStream(applicationIndex);
     const uint32_t runFlat = primaryInputFlatIndex(applicationIndex);
-    for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
-        const uint32_t flat = inputFlatIndex(applicationIndex, inputPort);
-        if (flat == runFlat || flat >= streams.size() || !featureInputs[flat].has_value()) {
-            continue;
-        }
-        ApplicationState& app = applications[applicationIndex];
-        THOR_THROW_IF_FALSE(inputPort < app.forwardInputReadyEvents.size());
-        runStream.waitFor(streams[flat], app.forwardInputReadyEvents[inputPort]);
-    }
+    ApplicationState& app = applications[applicationIndex];
+    THOR_THROW_IF_FALSE(app.forwardInputReadyEvents.size() >= inputNames.size());
+
+    detail::waitForDistinctProducerStreams(
+        runStream,
+        inputNames.size(),
+        [&](std::size_t inputPort) {
+            const uint32_t flat = inputFlatIndex(applicationIndex, static_cast<uint32_t>(inputPort));
+            return flat != runFlat && flat < streams.size() && featureInputs[flat].has_value();
+        },
+        [&](std::size_t inputPort) -> const Stream& {
+            return streams[inputFlatIndex(applicationIndex, static_cast<uint32_t>(inputPort))];
+        },
+        [&](std::size_t inputPort) -> Event& { return app.forwardInputReadyEvents[inputPort]; });
 }
 
 void CustomLayer::propagateApplicationRowPartitionHostState(uint32_t applicationIndex, uint32_t sourceInputPort) {
@@ -3209,8 +3216,10 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
 
     if (isStartOfForward) {
         if (weightsAreUpToDateEventValid) {
+            THOR_THROW_IF_FALSE(gradientUpdateStream.has_value());
             for (const Stream& dataStream : uniqueDataStreams) {
-                dataStream.waitEvent(weightsAreUpToDateEvent);
+                if (dataStream != gradientUpdateStream.value())
+                    dataStream.waitEvent(weightsAreUpToDateEvent);
             }
         }
         weightsAreUpToDateEventValid = false;
@@ -3519,13 +3528,15 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
 
         app.backwardRanThisPass = true;
 
-        std::optional<Event> errorOutHasBeenComputedEvent = std::nullopt;
+        std::optional<detail::ProducerCompletionEvent> errorOutHasBeenComputedEvent = std::nullopt;
         bool genericSharedWroteParameterGradient = false;
         if (useNativeSharedBackward) {
             const auto errorComputeStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             variant.nativeSharedBackward->run();
-            computeStream(applicationIndex).putEvent(app.backwardErrorReadyEvent);
-            errorOutHasBeenComputedEvent = app.backwardErrorReadyEvent;
+            Stream& backwardProducerStream = computeStream(applicationIndex);
+            backwardProducerStream.putEvent(app.backwardErrorReadyEvent);
+            errorOutHasBeenComputedEvent = detail::ProducerCompletionEvent{
+                backwardProducerStream.getId(), app.backwardErrorReadyEvent};
             if (emitLayerDiagnostics) {
                 errorComputeMicros = layerSubmitDiagnosticElapsedMicros(errorComputeStart, layerSubmitDiagnosticNow());
             }
@@ -3558,7 +3569,9 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                     const uint32_t previousApplication =
                         lastParameterGradientContributionApplicationThisPass.value();
                     THOR_THROW_IF_FALSE(previousApplication < applications.size());
-                    sharedStream.waitEvent(applications[previousApplication].backwardErrorReadyEvent);
+                    const Stream& previousProducerStream = computeStream(previousApplication);
+                    if (sharedStream != previousProducerStream)
+                        sharedStream.waitEvent(applications[previousApplication].backwardErrorReadyEvent);
                 }
 
                 const auto errorComputeStart =
@@ -3584,7 +3597,8 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                 // contribution. StampedExecutionPlan::run() has already joined any
                 // internal helper lanes back to this stream before the event is recorded.
                 sharedStream.putEvent(app.backwardErrorReadyEvent);
-                errorOutHasBeenComputedEvent = app.backwardErrorReadyEvent;
+                errorOutHasBeenComputedEvent = detail::ProducerCompletionEvent{
+                    sharedStream.getId(), app.backwardErrorReadyEvent};
 
                 if (genericSharedWroteParameterGradient) {
                     lastParameterGradientContributionApplicationThisPass = applicationIndex;
@@ -3604,25 +3618,29 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
         }
 
         if (errorOutHasBeenComputedEvent.has_value()) {
-            errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent.value());
+            const detail::ProducerCompletionEvent& completion = errorOutHasBeenComputedEvent.value();
+            errorOutHasBeenComputedEvents.push_back(completion);
 
-            // The backward expression runs on this application's primary compute stream, but a
-            // multi-input layer can have a different upstream stream for every input port.
-            // Publish the produced input gradients to those connection streams before recursively
-            // invoking the upstream layers.  For native Attention this same event also marks all
-            // parameter gradients ready; the optimizer stream joins it before applying updates.
+            // The backward expression can publish its completion from either the application's
+            // compute stream or another execution stream. Use the explicit producer provenance
+            // rather than assuming the primary compute stream when fanning dInput readiness out.
             Stream& backwardComputeStream = computeStream(applicationIndex);
-            for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
-                const uint32_t inputFlat = inputFlatIndex(applicationIndex, inputPort);
-                if (inputFlat >= streams.size() || !previousLayers[inputFlat].has_value() ||
-                    !errorOutputs[inputFlat].has_value()) {
-                    continue;
-                }
-                Stream& upstreamStream = streams[inputFlat];
-                if (upstreamStream != backwardComputeStream) {
-                    upstreamStream.waitEvent(errorOutHasBeenComputedEvent.value());
-                }
-            }
+            THOR_THROW_IF_FALSE(backwardComputeStream.getId() == completion.producerStreamId);
+            ThorImplementation::detail::waitOnDistinctTargetStreams(
+                backwardComputeStream,
+                completion.completionEvent,
+                inputNames.size(),
+                [this, applicationIndex](std::size_t inputPort) {
+                    const uint32_t inputFlat =
+                        inputFlatIndex(applicationIndex, static_cast<uint32_t>(inputPort));
+                    return inputFlat < streams.size() && previousLayers[inputFlat].has_value() &&
+                           errorOutputs[inputFlat].has_value();
+                },
+                [this, applicationIndex](std::size_t inputPort) -> const Stream& {
+                    const uint32_t inputFlat =
+                        inputFlatIndex(applicationIndex, static_cast<uint32_t>(inputPort));
+                    return streams[inputFlat];
+                });
         }
 
         const auto recordBatchStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
@@ -3691,16 +3709,16 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
         if (gradientUpdateStream.has_value()) {
             const bool emitApplyDiagnostics = layerSubmitDiagnosticsActive();
             const auto waitErrorOutputsStart = emitApplyDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-            for (const Event& eOutComputedEvent : errorOutHasBeenComputedEvents) {
-                gradientUpdateStream.value().waitEvent(eOutComputedEvent);
-            }
+            detail::waitForLatestCompletionPerProducerStream(
+                gradientUpdateStream.value(), errorOutHasBeenComputedEvents);
             const uint64_t waitErrorOutputsMicros =
                 emitApplyDiagnostics ? layerSubmitDiagnosticElapsedMicros(waitErrorOutputsStart, layerSubmitDiagnosticNow()) : 0;
 
             // Native and generic shared backward may produce dX and dW together
-            // on an application compute stream. The optimizer stream joins every
-            // local backward-completion event before applying materialized gradients.
-            // This stream has now joined every local backward-completion event, so
+            // on application compute streams. The optimizer stream joins the latest
+            // completion from each distinct external producer stream; completions
+            // already recorded on the optimizer stream need no wait. This stream has
+            // therefore ordered every local backward completion before updates, so
             // an event recorded here is the local last-use point for any labels or
             // batch-validity-mask tensors captured by a fused CustomLoss gradient.
             // Return that dependency to the owning loss before the next batch can
@@ -3841,8 +3859,8 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             // the backward-error plans themselves, so make the owning loss wait
             // on each of their completion events directly.
             if (!fusedCustomLossOwners.empty()) {
-                for (const Event& eOutComputedEvent : errorOutHasBeenComputedEvents) {
-                    notifyFusedCustomLossOwners(eOutComputedEvent);
+                for (const detail::ProducerCompletionEvent& completion : errorOutHasBeenComputedEvents) {
+                    notifyFusedCustomLossOwners(completion.completionEvent);
                 }
             }
         }
@@ -3908,7 +3926,7 @@ void CustomLayer::computeFeatureOutForPass(uint32_t connectionNumber, bool valid
     }
 }
 
-std::optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
+std::optional<detail::ProducerCompletionEvent> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
     const bool emitDiagnostics = layerSubmitDiagnosticsActive();
     const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
     uint64_t runMicros = 0;
@@ -3948,7 +3966,8 @@ std::optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
                                    {"put_event_us", eventMicros},
                                    {"flops", bestEffortExecutionPlanFlopCount(*variant.backwardError)}});
     }
-    return app.backwardErrorReadyEvent;
+    return detail::ProducerCompletionEvent{
+        computeStream(decoded.applicationIndex).getId(), app.backwardErrorReadyEvent};
 }
 
 void CustomLayer::cleanup() {

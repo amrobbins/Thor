@@ -63,13 +63,12 @@ class SparseCategoricalCrossEntropyWithLogits : public Loss {
     std::optional<Tensor> maskInput;
     Stream maskStream;
     Event maskReadyEvent;
-    Event maskReusableEvent;
     bool maskReceived = false;
     std::optional<Tensor> activeCountInput;
     Stream activeCountStream;
     Event activeCountReadyEvent;
-    Event activeCountReusableEvent;
     bool activeCountReceived = false;
+    Event auxiliaryInputsReusableEvent;
     uint32_t numRows = 0;
     uint32_t numClasses = 0;
     std::optional<uint32_t> ignoreIndex;

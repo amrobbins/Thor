@@ -79,7 +79,7 @@ class CustomLayer : public TrainableLayer {
     void computeFeatureOut(uint32_t connectionNumber) override;
 
     // Error-output backward work runs on the data stream.
-    std::optional<Event> computeErrorOut(uint32_t connectionNumber) override;
+    std::optional<detail::ProducerCompletionEvent> computeErrorOut(uint32_t connectionNumber) override;
 
     std::optional<Tensor> createFeatureOutputTensor() override;
     std::optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) override;

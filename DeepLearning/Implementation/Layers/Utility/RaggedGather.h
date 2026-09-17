@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
+#include "DeepLearning/Implementation/Layers/DistinctProducerStreamJoin.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/TensorOperations/Ragged/RaggedGather.h"
@@ -117,7 +118,7 @@ class RaggedGather : public MultiConnectionLayer {
         if (!stillWaitingForFeatureInputTensors.empty()) return;
         stillWaitingForFeatureInputTensors = allFeatureInputTensorIds;
 
-        for (uint32_t i = 1; i < inputPortCount; ++i) streams[0].waitFor(streams[i], forwardInputReadyEvents[i]);
+        detail::waitForDistinctProducerStreams(streams[0], streams, forwardInputReadyEvents, 1);
 
         launchRaggedGather(featureInputs[0].value(),
                            featureInputs[2].value(),

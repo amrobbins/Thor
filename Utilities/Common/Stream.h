@@ -66,9 +66,11 @@ class Stream {
     void waitEvent(Event event) const;
 
     // Record a reusable synchronization-only event on producer and enqueue this
-    // stream's wait for that recorded generation. The caller owns the Event and
-    // therefore owns the logical dependency edge; Thor intentionally does not
-    // cache events implicitly by stream pair.
+    // stream's wait for that recorded generation. If producer aliases this same
+    // physical stream, stream ordering already provides the dependency and this
+    // is a no-op; reusableEvent may therefore remain uninitialized. The caller
+    // owns the Event and therefore owns the logical dependency edge; Thor
+    // intentionally does not cache events implicitly by stream pair.
     void waitFor(const Stream &producer, Event &reusableEvent) const;
 
     void synchronize() const;

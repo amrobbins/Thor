@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Stream.h"
 #include "Utilities/Common/SharedOwnership.h"
+#include "Utilities/Common/SynchronizationDiagnostics.h"
 #include "Utilities/Expression/CudaHelpers.h"
 
 #include <atomic>
@@ -72,7 +73,12 @@ Event::Event(int32_t gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOn
 
 Event::~Event() = default;
 
-void Event::record(Stream stream) { CUDA_CHECK(cudaEventRecord(getEvent(), stream)); }
+void Event::record(Stream stream) {
+    CUDA_CHECK(cudaEventRecord(getEvent(), stream));
+#ifdef THOR_DEBUG
+    ThorImplementation::detail::recordCudaEventRecordForTests();
+#endif
+}
 
 Event::operator cudaEvent_t() {
     THOR_THROW_IF_FALSE(isInitialized());
@@ -106,6 +112,9 @@ void Event::synchronize() {
 
     ScopedGpu scopedGpu(state->gpuNum);
     CUDA_CHECK(cudaEventSynchronize(state->cudaEvent));
+#ifdef THOR_DEBUG
+    ThorImplementation::detail::recordCudaEventSynchronizeForTests();
+#endif
 }
 
 float Event::synchronizeAndReportElapsedTimeInMilliseconds(Event startEvent) {

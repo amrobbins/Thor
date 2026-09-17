@@ -1,4 +1,7 @@
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/DistinctProducerStreamJoin.h"
+#include "DeepLearning/Implementation/Layers/DistinctTargetStreamFanout.h"
+#include "DeepLearning/Implementation/Layers/LatestProducerCompletionJoin.h"
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
@@ -26,6 +29,7 @@
 #include <vector>
 
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
+#include "Utilities/Common/SynchronizationDiagnostics.h"
 
 #pragma GCC diagnostic ignored "-Wsign-compare"
 #include "gtest/gtest.h"
@@ -241,6 +245,328 @@ void expectSynchronizationEventsCoverStreams(Layer &layer, const vector<Stream> 
 }
 
 }  // namespace
+
+
+
+#ifdef THOR_DEBUG
+TEST(LayerSynchronization, LatestProducerCompletionJoinSkipsSelfAndOlderSameProducerEvents) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Latest producer completion counter test requires a GPU";
+
+    Stream consumer(0);
+    Stream producerA(0);
+    Stream producerB(0);
+
+    Event selfOld;
+    Event aOld;
+    Event selfLatest;
+    Event bLatest;
+    Event aLatest;
+    consumer.putEvent(selfOld);
+    producerA.putEvent(aOld);
+    consumer.putEvent(selfLatest);
+    producerB.putEvent(bLatest);
+    producerA.putEvent(aLatest);
+
+    // Interleave consumer/self completions with repeated external producers:
+    // {self, A, self, B, A}. The final A completion dominates the earlier A.
+    vector<ThorImplementation::detail::ProducerCompletionEvent> completions{
+        {consumer.getId(), selfOld},
+        {producerA.getId(), aOld},
+        {consumer.getId(), selfLatest},
+        {producerB.getId(), bLatest},
+        {producerA.getId(), aLatest},
+    };
+
+    resetSynchronizationOperationCountsForTests();
+    ThorImplementation::detail::waitForLatestCompletionPerProducerStream(consumer, completions);
+
+    const SynchronizationOperationCounts counts = synchronizationOperationCountsForTests();
+    EXPECT_EQ(counts.eventRecordCount, 0u);
+    EXPECT_EQ(counts.streamWaitEventCount, 2u);
+    EXPECT_EQ(counts.hostEventSynchronizeCount, 0u);
+
+    consumer.synchronize();
+}
+#endif
+
+TEST(LayerSynchronization, LatestProducerCompletionJoinWaitsForNewestSameProducerCompletion) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Latest producer completion dependency test requires a GPU";
+
+    Stream consumer(0);
+    Stream producerA(0);
+    Event aOld;
+    producerA.putEvent(aOld);
+
+    ThorImplementation::Test::DeviceStreamGate betweenCompletionsGate(0);
+    betweenCompletionsGate.enqueue(producerA);
+
+    Event aLatest;
+    producerA.putEvent(aLatest);
+
+    vector<ThorImplementation::detail::ProducerCompletionEvent> completions{
+        {producerA.getId(), aOld},
+        {producerA.getId(), aLatest},
+    };
+    ThorImplementation::detail::waitForLatestCompletionPerProducerStream(consumer, completions);
+
+    Event consumerComplete = consumer.putEvent(
+        /*enableTiming=*/false,
+        /*expectingHostToWaitOnThisOne=*/true);
+    EXPECT_EQ(cudaEventQuery(consumerComplete.getEvent()), cudaErrorNotReady);
+
+    betweenCompletionsGate.release();
+    consumerComplete.synchronize();
+}
+
+#ifdef THOR_DEBUG
+TEST(LayerSynchronization, DistinctProducerJoinCoalescesLogicalStreamAliases) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Distinct producer synchronization counter test requires a GPU";
+
+    Stream consumer(0);
+    Stream producerA(0);
+    Stream producerB(0);
+    vector<Stream> logicalProducers{consumer, producerA, producerA, producerB, producerA};
+    vector<Event> dependencyEvents(logicalProducers.size());
+
+    resetSynchronizationOperationCountsForTests();
+    ThorImplementation::detail::waitForDistinctProducerStreams(
+        consumer, logicalProducers, dependencyEvents, 1);
+
+    const SynchronizationOperationCounts counts = synchronizationOperationCountsForTests();
+    EXPECT_EQ(counts.eventRecordCount, 2u);
+    EXPECT_EQ(counts.streamWaitEventCount, 2u);
+    EXPECT_EQ(counts.hostEventSynchronizeCount, 0u);
+
+    EXPECT_FALSE(dependencyEvents[0].isInitialized());
+    EXPECT_TRUE(dependencyEvents[1].isInitialized());
+    EXPECT_FALSE(dependencyEvents[2].isInitialized());
+    EXPECT_TRUE(dependencyEvents[3].isInitialized());
+    EXPECT_FALSE(dependencyEvents[4].isInitialized());
+
+    consumer.synchronize();
+}
+#endif
+
+#ifdef THOR_DEBUG
+TEST(LayerSynchronization, DistinctProducerJoinSkipsInterleavedConsumerStreamAliases) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Distinct producer synchronization counter test requires a GPU";
+
+    Stream consumer(0);
+    Stream producerA(0);
+    Stream producerB(0);
+    vector<Stream> logicalProducers{consumer, producerA, consumer, producerB, producerA};
+    vector<Event> dependencyEvents(logicalProducers.size());
+
+    resetSynchronizationOperationCountsForTests();
+    ThorImplementation::detail::waitForDistinctProducerStreams(
+        consumer, logicalProducers, dependencyEvents);
+
+    const SynchronizationOperationCounts counts = synchronizationOperationCountsForTests();
+    EXPECT_EQ(counts.eventRecordCount, 2u);
+    EXPECT_EQ(counts.streamWaitEventCount, 2u);
+    EXPECT_EQ(counts.hostEventSynchronizeCount, 0u);
+
+    EXPECT_FALSE(dependencyEvents[0].isInitialized());
+    EXPECT_TRUE(dependencyEvents[1].isInitialized());
+    EXPECT_FALSE(dependencyEvents[2].isInitialized());
+    EXPECT_TRUE(dependencyEvents[3].isInitialized());
+    EXPECT_FALSE(dependencyEvents[4].isInitialized());
+
+    consumer.synchronize();
+}
+#endif
+
+#ifdef THOR_DEBUG
+TEST(LayerSynchronization, DistinctTargetFanoutCoalescesLogicalStreamAliases) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Distinct target synchronization counter test requires a GPU";
+
+    Stream producer(0);
+    Stream targetA(0);
+    Stream targetB(0);
+    vector<Stream> logicalTargets{targetA, targetA, targetB, targetA};
+    Event producerCompletionEvent;
+
+    resetSynchronizationOperationCountsForTests();
+    producer.putEvent(producerCompletionEvent);
+    ThorImplementation::detail::waitOnDistinctTargetStreams(
+        producer, producerCompletionEvent, logicalTargets);
+
+    const SynchronizationOperationCounts counts = synchronizationOperationCountsForTests();
+    EXPECT_EQ(counts.eventRecordCount, 1u);
+    EXPECT_EQ(counts.streamWaitEventCount, 2u);
+    EXPECT_EQ(counts.hostEventSynchronizeCount, 0u);
+
+    targetA.synchronize();
+    targetB.synchronize();
+}
+#endif
+
+#ifdef THOR_DEBUG
+TEST(LayerSynchronization, DistinctTargetFanoutSkipsInterleavedProducerStreamAliases) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Distinct target synchronization counter test requires a GPU";
+
+    Stream producer(0);
+    Stream targetA(0);
+    Stream targetB(0);
+    vector<Stream> logicalTargets{producer, targetA, producer, targetB, targetA};
+    Event producerCompletionEvent;
+
+    resetSynchronizationOperationCountsForTests();
+    producer.putEvent(producerCompletionEvent);
+    ThorImplementation::detail::waitOnDistinctTargetStreams(
+        producer, producerCompletionEvent, logicalTargets);
+
+    const SynchronizationOperationCounts counts = synchronizationOperationCountsForTests();
+    EXPECT_EQ(counts.eventRecordCount, 1u);
+    EXPECT_EQ(counts.streamWaitEventCount, 2u);
+    EXPECT_EQ(counts.hostEventSynchronizeCount, 0u);
+
+    targetA.synchronize();
+    targetB.synchronize();
+}
+#endif
+
+#ifdef THOR_DEBUG
+TEST(LayerSynchronization, SamePointCompletionFanoutRecordsOnceForDistinctExternalTargets) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Same-point completion synchronization counter test requires a GPU";
+
+    Stream producer(0);
+    Stream targetA(0);
+    Stream targetB(0);
+    vector<Stream> logicalTargets{producer, targetA, producer, targetB, targetA};
+    Event reusableCompletionEvent;
+
+    resetSynchronizationOperationCountsForTests();
+    ThorImplementation::detail::recordCompletionAndWaitOnDistinctTargetStreams(
+        producer, reusableCompletionEvent, logicalTargets);
+
+    const SynchronizationOperationCounts counts = synchronizationOperationCountsForTests();
+    EXPECT_EQ(counts.eventRecordCount, 1u);
+    EXPECT_EQ(counts.streamWaitEventCount, 2u);
+    EXPECT_EQ(counts.hostEventSynchronizeCount, 0u);
+    EXPECT_TRUE(reusableCompletionEvent.isInitialized());
+
+    targetA.synchronize();
+    targetB.synchronize();
+}
+
+TEST(LayerSynchronization, SamePointCompletionFanoutEmitsNothingWhenAllTargetsAliasProducer) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Same-point completion synchronization counter test requires a GPU";
+
+    Stream producer(0);
+    vector<Stream> logicalTargets{producer, producer, producer};
+    Event reusableCompletionEvent;
+
+    resetSynchronizationOperationCountsForTests();
+    ThorImplementation::detail::recordCompletionAndWaitOnDistinctTargetStreams(
+        producer, reusableCompletionEvent, logicalTargets);
+
+    const SynchronizationOperationCounts counts = synchronizationOperationCountsForTests();
+    EXPECT_EQ(counts.eventRecordCount, 0u);
+    EXPECT_EQ(counts.streamWaitEventCount, 0u);
+    EXPECT_EQ(counts.hostEventSynchronizeCount, 0u);
+    EXPECT_FALSE(reusableCompletionEvent.isInitialized());
+}
+#endif
+
+TEST(LayerSynchronization, SamePointCompletionFanoutPreservesProducerCompletionDependency) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Same-point completion dependency test requires a GPU";
+
+    Stream producer(0);
+    Stream targetA(0);
+    Stream targetB(0);
+    ThorImplementation::Test::DeviceStreamGate producerGate(0);
+    producerGate.enqueue(producer);
+
+    Event reusableCompletionEvent;
+    vector<Stream> logicalTargets{producer, targetA, targetA, targetB};
+    ThorImplementation::detail::recordCompletionAndWaitOnDistinctTargetStreams(
+        producer, reusableCompletionEvent, logicalTargets);
+
+    Event targetAComplete = targetA.putEvent(
+        /*enableTiming=*/false,
+        /*expectingHostToWaitOnThisOne=*/true);
+    Event targetBComplete = targetB.putEvent(
+        /*enableTiming=*/false,
+        /*expectingHostToWaitOnThisOne=*/true);
+
+    EXPECT_EQ(cudaEventQuery(targetAComplete.getEvent()), cudaErrorNotReady);
+    EXPECT_EQ(cudaEventQuery(targetBComplete.getEvent()), cudaErrorNotReady);
+
+    producerGate.release();
+    targetAComplete.synchronize();
+    targetBComplete.synchronize();
+}
+
+TEST(LayerSynchronization, DistinctTargetFanoutPreservesEveryIndependentTargetDependency) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Distinct target dependency test requires a GPU";
+
+    Stream producer(0);
+    Stream targetA(0);
+    Stream targetB(0);
+    ThorImplementation::Test::DeviceStreamGate producerGate(0);
+    producerGate.enqueue(producer);
+
+    Event producerCompletionEvent;
+    producer.putEvent(producerCompletionEvent);
+    vector<Stream> logicalTargets{targetA, targetA, targetB, targetA};
+    ThorImplementation::detail::waitOnDistinctTargetStreams(
+        producer, producerCompletionEvent, logicalTargets);
+
+    Event targetAComplete = targetA.putEvent(
+        /*enableTiming=*/false,
+        /*expectingHostToWaitOnThisOne=*/true);
+    Event targetBComplete = targetB.putEvent(
+        /*enableTiming=*/false,
+        /*expectingHostToWaitOnThisOne=*/true);
+
+    EXPECT_EQ(cudaEventQuery(targetAComplete.getEvent()), cudaErrorNotReady);
+    EXPECT_EQ(cudaEventQuery(targetBComplete.getEvent()), cudaErrorNotReady);
+
+    producerGate.release();
+    targetAComplete.synchronize();
+    targetBComplete.synchronize();
+}
+
+TEST(LayerSynchronization, DistinctProducerJoinPreservesEveryIndependentProducerDependency) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Distinct producer dependency test requires a GPU";
+
+    Stream consumer(0);
+    Stream producerA(0);
+    Stream producerB(0);
+    ThorImplementation::Test::DeviceStreamGate gateA(0);
+    ThorImplementation::Test::DeviceStreamGate gateB(0);
+    gateA.enqueue(producerA);
+    gateB.enqueue(producerB);
+
+    vector<Stream> logicalProducers{producerA, producerA, producerB, producerB};
+    vector<Event> dependencyEvents(logicalProducers.size());
+    ThorImplementation::detail::waitForDistinctProducerStreams(
+        consumer, logicalProducers, dependencyEvents);
+
+    Event consumerComplete = consumer.putEvent(
+        /*enableTiming=*/false,
+        /*expectingHostToWaitOnThisOne=*/true);
+    EXPECT_EQ(cudaEventQuery(consumerComplete.getEvent()), cudaErrorNotReady);
+
+    gateA.release();
+    producerA.synchronize();
+    EXPECT_EQ(cudaEventQuery(consumerComplete.getEvent()), cudaErrorNotReady);
+
+    gateB.release();
+    consumerComplete.synchronize();
+}
 
 TEST(LayerSynchronization, UnconnectedLayerHasNoSynchronizeEvents) {
     SynchronizationTestLayer layer;

@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Layers/Metrics/CustomMetric.h"
+#include "DeepLearning/Implementation/Layers/DistinctProducerStreamJoin.h"
+#include "DeepLearning/Implementation/Layers/DistinctTargetStreamFanout.h"
 #include "DeepLearning/Implementation/Layers/Metrics/ReductionMetricDType.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionDescriptor.h"
@@ -733,7 +735,7 @@ class RaggedWeightedMean : public CustomMetric {
 
     void cleanup() override {
         offsetsReadyEvent = Event();
-        offsetsReusableEvent = Event();
+        auxiliaryInputsReusableEvent = Event();
         CustomMetric::cleanup();
     }
 
@@ -812,11 +814,19 @@ class RaggedWeightedMean : public CustomMetric {
         THOR_THROW_IF_FALSE(labelsInput.has_value());
         THOR_THROW_IF_FALSE(offsetsInput.has_value());
 
-        waitForLabelsReady();
-        stream.waitFor(offsetsStream, offsetsReadyEvent);
+        detail::waitForDistinctProducerStreams(
+            stream,
+            2,
+            [](std::size_t) { return true; },
+            [&](std::size_t i) -> const Stream& { return i == 0 ? labelsStream : offsetsStream; },
+            [&](std::size_t i) -> Event& { return i == 0 ? labelsReadyEvent : offsetsReadyEvent; });
         computeMetric(labelsInput.value(), featureInput.value(), featureOutput.value(), stream, currentValidExampleCount);
-        markLabelsReusableAfterCompute();
-        offsetsStream.waitFor(stream, offsetsReusableEvent);
+        detail::recordCompletionAndWaitOnDistinctTargetStreams(
+            stream,
+            auxiliaryInputsReusableEvent,
+            /*logicalTargetCount=*/2,
+            [](std::size_t) { return true; },
+            [&](std::size_t i) -> const Stream& { return i == 0 ? labelsStream : offsetsStream; });
 
         featureInputReceived = false;
         labelsReceived = false;
@@ -937,7 +947,7 @@ class RaggedWeightedMean : public CustomMetric {
     std::optional<Tensor> offsetsInput;
     Stream offsetsStream;
     Event offsetsReadyEvent;
-    Event offsetsReusableEvent;
+    Event auxiliaryInputsReusableEvent;
     bool offsetsReceived = false;
 };
 
