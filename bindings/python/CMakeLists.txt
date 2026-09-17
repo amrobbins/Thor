@@ -42,17 +42,24 @@ set(THOR_PY_PKG_NAME "thor")
 set(THOR_PY_PKG_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/${THOR_PY_PKG_NAME}")
 set(THOR_PY_PKG_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/${THOR_PY_PKG_NAME}")
 set(THOR_PY_VENV_DIR "${THOR_PY_PLATLIB}/${THOR_PY_PKG_NAME}")
+set(THOR_NSYS_LAUNCHER_PKG_NAME "thor_nsys_profile")
+set(THOR_NSYS_LAUNCHER_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/${THOR_NSYS_LAUNCHER_PKG_NAME}")
+set(THOR_NSYS_LAUNCHER_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/${THOR_NSYS_LAUNCHER_PKG_NAME}")
+set(THOR_NSYS_LAUNCHER_VENV_DIR "${THOR_PY_PURELIB}/${THOR_NSYS_LAUNCHER_PKG_NAME}")
 
 file(GLOB_RECURSE THOR_PY_PKG_FILES CONFIGURE_DEPENDS
         "${THOR_PY_PKG_SRC_DIR}/*.py"
         "${THOR_PY_PKG_SRC_DIR}/py.typed"
+        "${THOR_NSYS_LAUNCHER_SRC_DIR}/*.py"
 )
 
 # ---- Sync Python package into the build tree (so the built extension lives inside a real package dir) ----
 add_custom_command(
         OUTPUT "${THOR_PY_PKG_BUILD_DIR}/.thor_pkg_sync.stamp"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${THOR_PY_PKG_BUILD_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${THOR_NSYS_LAUNCHER_BUILD_DIR}"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${THOR_PY_PKG_SRC_DIR}" "${THOR_PY_PKG_BUILD_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${THOR_NSYS_LAUNCHER_SRC_DIR}" "${THOR_NSYS_LAUNCHER_BUILD_DIR}"
         COMMAND ${CMAKE_COMMAND} -E touch "${THOR_PY_PKG_BUILD_DIR}/.thor_pkg_sync.stamp"
         DEPENDS
         ${THOR_PY_PKG_FILES}
@@ -130,7 +137,9 @@ target_include_directories(_thor PRIVATE
 if (THOR_PYTHON_AUTO_INSTALL AND NOT DEFINED SKBUILD_PROJECT_NAME)
     add_custom_target(thor_py_install ALL
             COMMAND ${CMAKE_COMMAND} -E make_directory "${THOR_PY_VENV_DIR}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${THOR_NSYS_LAUNCHER_VENV_DIR}"
             COMMAND ${CMAKE_COMMAND} -E copy_directory "${THOR_PY_PKG_SRC_DIR}" "${THOR_PY_VENV_DIR}"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${THOR_NSYS_LAUNCHER_SRC_DIR}" "${THOR_NSYS_LAUNCHER_VENV_DIR}"
             COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:_thor>" "${THOR_PY_VENV_DIR}/"
             DEPENDS _thor
             COMMENT "Thor: installing Python package + native extension into venv"
@@ -138,7 +147,9 @@ if (THOR_PYTHON_AUTO_INSTALL AND NOT DEFINED SKBUILD_PROJECT_NAME)
 else ()
     add_custom_target(thor_py_install
             COMMAND ${CMAKE_COMMAND} -E make_directory "${THOR_PY_VENV_DIR}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${THOR_NSYS_LAUNCHER_VENV_DIR}"
             COMMAND ${CMAKE_COMMAND} -E copy_directory "${THOR_PY_PKG_SRC_DIR}" "${THOR_PY_VENV_DIR}"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${THOR_NSYS_LAUNCHER_SRC_DIR}" "${THOR_NSYS_LAUNCHER_VENV_DIR}"
             COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:_thor>" "${THOR_PY_VENV_DIR}/"
             DEPENDS _thor
             COMMENT "Thor: installing Python package + native extension into venv"

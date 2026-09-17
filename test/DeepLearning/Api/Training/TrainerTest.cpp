@@ -149,6 +149,7 @@ class CapturingExecutor : public TrainingExecutor {
         lastBatchSessionSize = request.batchSession != nullptr ? request.batchSession->getBatchSize() : 0;
         lastDeviceDatasetStorageReport = request.deviceDatasetStorageReport;
         lastInitialCompletedEpochs = request.initialCompletedEpochs;
+        lastNsightSystemsProfile = request.runtime.nsightSystemsProfile;
         if (request.completedTrainingEpochs != nullptr) {
             *request.completedTrainingEpochs = request.initialCompletedEpochs + request.epochs;
         }
@@ -179,6 +180,7 @@ class CapturingExecutor : public TrainingExecutor {
     uint64_t lastBatchSessionSize = 0;
     DeviceDatasetStorageReport lastDeviceDatasetStorageReport{};
     uint64_t lastInitialCompletedEpochs = 0;
+    std::optional<NsightSystemsProfileConfig> lastNsightSystemsProfile{};
     bool lastModelSelectionScoreIsCustom = false;
     std::optional<double> lastModelSelectionScore{};
     size_t lastEarlyCompletionPolicyCount = 0;
@@ -447,6 +449,81 @@ TEST(Trainer, FitSuppliesFreshBatchSessionFactoryForStartupRetry) {
     executor->retrySession1.reset();
     executor->retrySession2.reset();
     std::filesystem::remove_all(path);
+}
+
+TEST(Trainer, BuilderPropagatesPhaseRelativeNsightProfileConfig) {
+    auto data = makeFakeTrainingData();
+    auto executor = std::make_shared<CapturingExecutor>();
+    NsightSystemsProfileConfig profile;
+    profile.captures = {
+        NsightSystemsProfileCaptureConfig{"default", 12, 2, "/tmp/thor-profile.nsys-rep"},
+        NsightSystemsProfileCaptureConfig{"other_phase", 3, 2, "/tmp/other-profile.nsys-rep"},
+    };
+    Trainer trainer = Trainer::Builder()
+                          .network(makeFakePhaseNetwork("trainer-nsight-profile", "output"))
+                          .data(data)
+                          .executor(executor)
+                          .observer(std::make_shared<NullTrainingObserver>())
+                          .nsightSystemsProfile(std::move(profile))
+                          .build();
+
+    trainer.fit(20);
+
+    ASSERT_TRUE(executor->lastNsightSystemsProfile.has_value());
+    ASSERT_EQ(executor->lastNsightSystemsProfile->captures.size(), 1u);
+    EXPECT_EQ(executor->lastInitialCompletedEpochs, 0u);
+    EXPECT_EQ(executor->lastNsightSystemsProfile->captures[0].phaseName, "default");
+    EXPECT_EQ(executor->lastNsightSystemsProfile->captures[0].startEpoch, 12u);
+    EXPECT_EQ(executor->lastNsightSystemsProfile->captures[0].epochCount, 2u);
+    EXPECT_EQ(executor->lastNsightSystemsProfile->captures[0].outputPath, "/tmp/thor-profile.nsys-rep");
+
+    // The same startEpoch remains phase-relative on a later fit rather than
+    // being rewritten to a cumulative epoch number.
+    trainer.fit(20);
+    ASSERT_TRUE(executor->lastNsightSystemsProfile.has_value());
+    ASSERT_EQ(executor->lastNsightSystemsProfile->captures.size(), 1u);
+    EXPECT_EQ(executor->lastInitialCompletedEpochs, 20u);
+    EXPECT_EQ(executor->lastNsightSystemsProfile->captures[0].startEpoch, 12u);
+}
+
+TEST(Trainer, BuilderRejectsInvalidNsightSystemsProfileConfig) {
+    auto data = makeFakeTrainingData();
+    auto network = makeFakePhaseNetwork("trainer-invalid-nsight-profile", "output");
+
+    EXPECT_THROW(static_cast<void>(Trainer::Builder()
+                                       .network(network)
+                                       .data(data)
+                                       .nsightSystemsProfile(NsightSystemsProfileConfig{})
+                                       .build()),
+                 std::runtime_error);
+    EXPECT_THROW(static_cast<void>(Trainer::Builder()
+                                       .network(network)
+                                       .data(data)
+                                       .nsightSystemsProfile(NsightSystemsProfileConfig{{
+                                           NsightSystemsProfileCaptureConfig{"", 1, 2, "/tmp/profile.nsys-rep"}}})
+                                       .build()),
+                 std::runtime_error);
+    EXPECT_THROW(static_cast<void>(Trainer::Builder()
+                                       .network(network)
+                                       .data(data)
+                                       .nsightSystemsProfile(NsightSystemsProfileConfig{{
+                                           NsightSystemsProfileCaptureConfig{"default", 0, 2, "/tmp/profile.nsys-rep"}}})
+                                       .build()),
+                 std::runtime_error);
+    EXPECT_THROW(static_cast<void>(Trainer::Builder()
+                                       .network(network)
+                                       .data(data)
+                                       .nsightSystemsProfile(NsightSystemsProfileConfig{{
+                                           NsightSystemsProfileCaptureConfig{"default", 1, 0, "/tmp/profile.nsys-rep"}}})
+                                       .build()),
+                 std::runtime_error);
+    EXPECT_THROW(static_cast<void>(Trainer::Builder()
+                                       .network(network)
+                                       .data(data)
+                                       .nsightSystemsProfile(NsightSystemsProfileConfig{{
+                                           NsightSystemsProfileCaptureConfig{"default", 1, 2, "/tmp/profile.txt"}}})
+                                       .build()),
+                 std::runtime_error);
 }
 
 TEST(Trainer, BuilderRequiresTrainingData) {

@@ -267,6 +267,11 @@ class Trainer::Builder {
         return *this;
     }
 
+    Builder& nsightSystemsProfile(NsightSystemsProfileConfig profile) {
+        runtimeConfig_.nsightSystemsProfile = std::move(profile);
+        return *this;
+    }
+
     Builder& saveModelDirectory(std::optional<std::string> saveModelDirectory) {
         this->saveModelDirectory_ = std::move(saveModelDirectory);
         return *this;

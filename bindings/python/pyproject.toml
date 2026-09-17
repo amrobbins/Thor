@@ -49,6 +49,9 @@ compileiq = [
     "compileiq>=1.0.0",
 ]
 
+[project.scripts]
+thor-nsys-profile = "thor_nsys_profile:main"
+
 [project.urls]
 Homepage = "https://github.com/amrobbins/Thor"
 Repository = "https://github.com/amrobbins/Thor"
@@ -64,7 +67,7 @@ cmake.build-type = "Release"
 build.targets = ["thor_release_wheels"]
 install.components = ["thor_cuda_python_wheel"]
 
-wheel.packages = ["src/thor"]
+wheel.packages = ["src/thor", "src/thor_nsys_profile"]
 
 [tool.scikit-build.cmake.define]
 THOR_BUILD_PYTHON = true
@@ -78,7 +81,7 @@ provider = "thor_build.dynamic_metadata"
 provider = "thor_build.version_metadata"
 
 [tool.scikit-build.sdist]
-include = ["src/thor/py.typed", "build_backend/**/*.py", "tools/**/*.py", "src/thor/_cuda_stack_resolved.py"]
+include = ["src/thor/py.typed", "src/thor_nsys_profile/**/*.py", "build_backend/**/*.py", "tools/**/*.py", "src/thor/_cuda_stack_resolved.py"]
 
 [tool.pytest.ini_options]
 addopts = "-s -vv"

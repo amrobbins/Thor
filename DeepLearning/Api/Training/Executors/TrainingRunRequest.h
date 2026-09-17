@@ -28,6 +28,25 @@ class BatchSession;
 
 enum class TrainingRunExecutionMode { FIT, EVALUATE };
 
+// One Nsight Systems capture requested for a named TRAIN phase. startEpoch is
+// 1-based and relative to that fit/training phase: startEpoch=1 means the first
+// epoch of the matching phase regardless of the Trainer's cumulative epoch
+// history. outputPath is consumed by Thor's `thor-nsys-profile` launcher; the
+// CUDA profiler API itself only controls the collection window.
+struct NsightSystemsProfileCaptureConfig {
+    std::string phaseName{};
+    uint64_t startEpoch = 1;
+    uint64_t epochCount = 1;
+    std::string outputPath{};
+};
+
+// One Trainer parameter can describe independent capture windows for several
+// staged training phases. Trainer resolves this list against the phase that is
+// actually trainable for each fit call before submitting the run request.
+struct NsightSystemsProfileConfig {
+    std::vector<NsightSystemsProfileCaptureConfig> captures{};
+};
+
 struct TrainingRuntimeConfig {
     uint64_t maxInFlightBatches = 32;
     double statsIntervalSeconds = 10.0;
@@ -37,6 +56,7 @@ struct TrainingRuntimeConfig {
     // first-class named graph metrics (or explicit scalar requests), not magic
     // output names that every training graph is required to expose.
     std::set<std::string> scalarTensorsToReport = {"loss"};
+    std::optional<NsightSystemsProfileConfig> nsightSystemsProfile{};
 };
 
 // The callback reserves a FIFO device-startup ticket and must not wait for the

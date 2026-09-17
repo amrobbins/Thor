@@ -50,7 +50,7 @@ CUDA_STACK = CudaStack(
     distributions=(
         CudaDistribution("nvidia-cuda-runtime", "13.3.29"),
         CudaDistribution("nvidia-cuda-nvrtc", "13.3.33"),
-        CudaDistribution("nvidia-nvjitlink", "13.4.52"),
+        CudaDistribution("nvidia-nvjitlink", "13.4.92"),
         CudaDistribution("nvidia-cublas", "13.6.0.2"),
         CudaDistribution("nvidia-cusparse", "12.8.2.51"),
         CudaDistribution("nvidia-cusolver", "12.2.6.9"),

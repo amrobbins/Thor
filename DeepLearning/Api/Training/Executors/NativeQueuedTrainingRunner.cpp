@@ -25,6 +25,7 @@
 #include "Utilities/Expression/CudaHelpers.h"
 
 #include <cuda_runtime_api.h>
+#include <cuda_profiler_api.h>
 
 #include <algorithm>
 #include <array>
@@ -44,6 +45,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -63,6 +65,262 @@
 namespace Thor {
 
 namespace {
+
+constexpr const char* kThorNsightControlDirectoryEnvironment = "THOR_NSYS_CONTROL_DIR";
+constexpr const char* kThorNsightProfileOutputRequestPrefix = "profile_output_path.";
+constexpr const char* kThorNsightProfileReportOutputPrefix = "report_output_path.";
+constexpr std::chrono::seconds kThorNsightReportRelocationTimeout{60};
+constexpr std::chrono::milliseconds kThorNsightReportRelocationPollInterval{20};
+
+std::atomic<bool>& nsightSystemsCaptureClaimedForProcess() {
+    static std::atomic<bool> claimed{false};
+    return claimed;
+}
+
+std::atomic<uint64_t>& nsightSystemsCaptureSequenceForProcess() {
+    static std::atomic<uint64_t> sequence{0};
+    return sequence;
+}
+
+class NsightSystemsEpochCapture {
+   public:
+    NsightSystemsEpochCapture(const TrainingRunRequest& request, bool evaluateOnly) {
+        if (evaluateOnly || !request.runtime.nsightSystemsProfile.has_value()) {
+            return;
+        }
+
+        initialCompletedEpochs = request.initialCompletedEpochs;
+        for (const NsightSystemsProfileCaptureConfig& config : request.runtime.nsightSystemsProfile->captures) {
+            if (config.startEpoch == 0 || config.epochCount == 0) {
+                throw std::runtime_error(
+                    "Trainer Nsight profile capture startEpoch and epochCount must both be >= 1.");
+            }
+            if (config.outputPath.empty()) {
+                throw std::runtime_error("Trainer Nsight profile capture outputPath must not be empty.");
+            }
+            if (std::filesystem::path(config.outputPath).extension() != ".nsys-rep") {
+                throw std::runtime_error("Trainer Nsight profile capture outputPath must end in '.nsys-rep'.");
+            }
+            if ((config.epochCount - 1) > std::numeric_limits<uint64_t>::max() - config.startEpoch) {
+                throw std::runtime_error("Trainer Nsight profile capture epoch range overflows uint64_t.");
+            }
+            const uint64_t endPhaseEpoch = config.startEpoch + config.epochCount - 1;
+            if (endPhaseEpoch > request.epochs) {
+                throw std::runtime_error(
+                    "Trainer Nsight profile epoch range is relative to the current training phase and must be "
+                    "fully contained in this fit; requested phase epochs " +
+                    std::to_string(config.startEpoch) + ".." + std::to_string(endPhaseEpoch) +
+                    ", current phase has " + std::to_string(request.epochs) + " epochs.");
+            }
+            CaptureState state;
+            state.config = config;
+            state.endPhaseEpoch = endPhaseEpoch;
+            state.outputPath = std::filesystem::absolute(std::filesystem::path(config.outputPath)).lexically_normal();
+            if (std::filesystem::exists(state.outputPath)) {
+                throw std::runtime_error(
+                    "Trainer Nsight profile output already exists: '" + state.outputPath.string() + "'.");
+            }
+            captures.push_back(std::move(state));
+        }
+        std::sort(captures.begin(), captures.end(), [](const CaptureState& lhs, const CaptureState& rhs) {
+            return lhs.config.startEpoch < rhs.config.startEpoch;
+        });
+        for (size_t i = 1; i < captures.size(); ++i) {
+            if (captures[i].config.startEpoch <= captures[i - 1].endPhaseEpoch) {
+                throw std::runtime_error(
+                    "Trainer Nsight profile capture windows for one training phase must not overlap.");
+            }
+        }
+
+        const char* controlDirectory = std::getenv(kThorNsightControlDirectoryEnvironment);
+        if (controlDirectory == nullptr || controlDirectory[0] == '\0') {
+            throw std::runtime_error(
+                "Trainer Nsight profiling requires launching the process with `thor-nsys-profile`; "
+                "that launcher prepares Nsight Systems before CUDA work begins.");
+        }
+        controlDirectoryPath = std::filesystem::path(controlDirectory);
+        if (!std::filesystem::exists(controlDirectoryPath) ||
+            !std::filesystem::is_directory(controlDirectoryPath)) {
+            throw std::runtime_error(
+                "Trainer Nsight profiling received an invalid THOR_NSYS_CONTROL_DIR from `thor-nsys-profile`.");
+        }
+    }
+
+    NsightSystemsEpochCapture(const NsightSystemsEpochCapture&) = delete;
+    NsightSystemsEpochCapture& operator=(const NsightSystemsEpochCapture&) = delete;
+
+    ~NsightSystemsEpochCapture() { stopNoThrow(); }
+
+    void beginEpoch(uint64_t cumulativeEpoch) {
+        const std::optional<uint64_t> phaseEpoch = phaseEpochFor(cumulativeEpoch);
+        if (!phaseEpoch.has_value() || activeCaptureIndex.has_value()) {
+            return;
+        }
+        for (size_t captureIndex = 0; captureIndex < captures.size(); ++captureIndex) {
+            CaptureState& capture = captures[captureIndex];
+            if (capture.attempted || capture.config.startEpoch != phaseEpoch.value()) {
+                continue;
+            }
+            capture.attempted = true;
+
+            bool expected = false;
+            if (!nsightSystemsCaptureClaimedForProcess().compare_exchange_strong(
+                    expected, true, std::memory_order_acq_rel)) {
+                std::fprintf(
+                    stderr,
+                    "Thor: Nsight profile request for training-phase epoch %lu ignored because another Trainer "
+                    "is currently using the process-wide profiling session.\n",
+                    static_cast<unsigned long>(phaseEpoch.value()));
+                return;
+            }
+
+            try {
+                const uint64_t sequence =
+                    nsightSystemsCaptureSequenceForProcess().fetch_add(1, std::memory_order_relaxed);
+                std::ostringstream requestFileName;
+                requestFileName << kThorNsightProfileOutputRequestPrefix << std::setfill('0') << std::setw(20)
+                                << sequence;
+                capture.requestFile = controlDirectoryPath / requestFileName.str();
+                std::ostringstream reportMarkerFileName;
+                reportMarkerFileName << kThorNsightProfileReportOutputPrefix << std::setfill('0') << std::setw(20)
+                                     << sequence;
+                capture.reportMarkerFile = controlDirectoryPath / reportMarkerFileName.str();
+                std::ofstream outputRequest(capture.requestFile, std::ios::out | std::ios::trunc);
+                if (!outputRequest.is_open()) {
+                    throw std::runtime_error(
+                        "could not create Nsight output request file '" + capture.requestFile.string() + "'");
+                }
+                outputRequest << capture.outputPath.string() << '\n';
+                outputRequest.flush();
+                if (!outputRequest.good()) {
+                    throw std::runtime_error(
+                        "could not write Nsight output request file '" + capture.requestFile.string() + "'");
+                }
+            } catch (const std::exception& error) {
+                std::fprintf(stderr,
+                             "Thor: Nsight profiling disabled before training-phase epoch %lu: %s. Training will "
+                             "continue.\n",
+                             static_cast<unsigned long>(phaseEpoch.value()),
+                             error.what());
+                nsightSystemsCaptureClaimedForProcess().store(false, std::memory_order_release);
+                return;
+            }
+
+            const cudaError_t status = cudaProfilerStart();
+            if (status != cudaSuccess) {
+                std::fprintf(stderr,
+                             "Thor: cudaProfilerStart() failed before training-phase epoch %lu: %s. Training will "
+                             "continue without this profile capture.\n",
+                             static_cast<unsigned long>(phaseEpoch.value()),
+                             cudaGetErrorString(status));
+                std::error_code ignored;
+                std::filesystem::remove(capture.requestFile, ignored);
+                nsightSystemsCaptureClaimedForProcess().store(false, std::memory_order_release);
+                return;
+            }
+            capture.started = true;
+            activeCaptureIndex = captureIndex;
+            std::fprintf(stderr,
+                         "Thor: Nsight Systems capture started at training-phase epoch %lu (cumulative epoch %lu); "
+                         "report will be written to '%s'.\n",
+                         static_cast<unsigned long>(phaseEpoch.value()),
+                         static_cast<unsigned long>(cumulativeEpoch),
+                         capture.outputPath.string().c_str());
+            return;
+        }
+    }
+
+    void endEpoch(uint64_t cumulativeEpoch) {
+        const std::optional<uint64_t> phaseEpoch = phaseEpochFor(cumulativeEpoch);
+        if (!activeCaptureIndex.has_value() || !phaseEpoch.has_value()) {
+            return;
+        }
+        const CaptureState& capture = captures[activeCaptureIndex.value()];
+        if (phaseEpoch.value() == capture.endPhaseEpoch) {
+            stopNoThrow();
+        }
+    }
+
+   private:
+    struct CaptureState {
+        NsightSystemsProfileCaptureConfig config{};
+        std::filesystem::path outputPath{};
+        std::filesystem::path requestFile{};
+        std::filesystem::path reportMarkerFile{};
+        uint64_t endPhaseEpoch = 0;
+        bool attempted = false;
+        bool started = false;
+    };
+
+    [[nodiscard]] std::optional<uint64_t> phaseEpochFor(uint64_t cumulativeEpoch) const {
+        if (cumulativeEpoch <= initialCompletedEpochs) {
+            return std::nullopt;
+        }
+        return cumulativeEpoch - initialCompletedEpochs;
+    }
+
+    void stopNoThrow() noexcept {
+        if (!activeCaptureIndex.has_value()) {
+            return;
+        }
+        const size_t captureIndex = activeCaptureIndex.value();
+        CaptureState& capture = captures[captureIndex];
+        activeCaptureIndex.reset();
+        if (!capture.started) {
+            nsightSystemsCaptureClaimedForProcess().store(false, std::memory_order_release);
+            return;
+        }
+        capture.started = false;
+        const cudaError_t status = cudaProfilerStop();
+        if (status != cudaSuccess) {
+            nsightSystemsCaptureClaimedForProcess().store(false, std::memory_order_release);
+            std::fprintf(stderr,
+                         "Thor: cudaProfilerStop() failed: %s. Training will continue; the Nsight report may be "
+                         "incomplete.\n",
+                         cudaGetErrorString(status));
+            return;
+        }
+
+        // thor-nsys-profile launches Nsight with --capture-range-end=repeat:sync,
+        // so cudaProfilerStop() does not return until Nsight has finalized the
+        // current .nsys-rep. The report-ready callback relocates that finalized
+        // report to the Trainer-requested destination and publishes this marker.
+        // Wait for that final relocation too, so the next training epoch/phase
+        // cannot begin while report processing is still outstanding.
+        const auto relocationDeadline = std::chrono::steady_clock::now() + kThorNsightReportRelocationTimeout;
+        while (!capture.reportMarkerFile.empty() &&
+               !std::filesystem::exists(capture.reportMarkerFile) &&
+               std::chrono::steady_clock::now() < relocationDeadline) {
+            std::this_thread::sleep_for(kThorNsightReportRelocationPollInterval);
+        }
+
+        const bool relocationCompleted =
+            !capture.reportMarkerFile.empty() && std::filesystem::exists(capture.reportMarkerFile);
+        nsightSystemsCaptureClaimedForProcess().store(false, std::memory_order_release);
+        if (!relocationCompleted) {
+            std::fprintf(
+                stderr,
+                "Thor: Nsight Systems finalized the capture after training-phase epoch %lu, but the report "
+                "relocation callback did not complete within %lld seconds. Training will continue; inspect '%s' "
+                "for the finalized report and pending output request.\n",
+                static_cast<unsigned long>(capture.endPhaseEpoch),
+                static_cast<long long>(kThorNsightReportRelocationTimeout.count()),
+                controlDirectoryPath.string().c_str());
+            return;
+        }
+
+        std::fprintf(stderr,
+                     "Thor: Nsight Systems capture stopped after training-phase epoch %lu and the finalized report "
+                     "is ready at '%s'. Training continues normally.\n",
+                     static_cast<unsigned long>(capture.endPhaseEpoch),
+                     capture.outputPath.string().c_str());
+    }
+
+    std::vector<CaptureState> captures{};
+    std::filesystem::path controlDirectoryPath{};
+    uint64_t initialCompletedEpochs = 0;
+    std::optional<size_t> activeCaptureIndex{};
+};
 
 struct NativeQueuedSchedulerResourceDiagnosticsState {
     std::mutex mutex;
@@ -4310,6 +4568,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     request.cancellationToken.throwIfCancellationRequested();
 
     const bool evaluateOnly = request.executionMode == TrainingRunExecutionMode::EVALUATE;
+    NsightSystemsEpochCapture nsightSystemsEpochCapture(request, evaluateOnly);
     if (!evaluateOnly && request.checkBestModelEveryEpochs == 0 && !request.earlyCompletionPolicies.empty()) {
         throw std::runtime_error("Trainer early_completion_policies require check_best_model_every_epochs > 0.");
     }
@@ -4574,6 +4833,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
     for (uint32_t epochOffset = 0; epochOffset < request.epochs; ++epochOffset) {
         const uint64_t cumulativeEpoch = currentEpoch + 1;
+        nsightSystemsEpochCapture.beginEpoch(cumulativeEpoch);
         EpochLossAccumulator epochLosses;
         epochLosses.ensureValidationPopulation(request.defaultValidationPopulation);
         for (const NamedValidationSession& validation : additionalValidationSessions) {
@@ -4838,6 +5098,11 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         // already part of the scheduling window and have been consumed above in
         // submission order. No host-side queue drain or standalone named
         // validation command is required here.
+        //
+        // Deliberately do not drain the cross-epoch queue for profiling either.
+        // A few boundary batches may already be in flight, while the interior of
+        // the requested epoch range remains representative steady state.
+        nsightSystemsEpochCapture.endEpoch(cumulativeEpoch);
 
         bool earlyCompletionRequested = false;
         const bool modelSelectionEligible =

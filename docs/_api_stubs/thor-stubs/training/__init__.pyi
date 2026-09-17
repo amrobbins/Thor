@@ -110,6 +110,41 @@ class GradientClearPolicy(enum.Enum):
 
     accumulate = 1
 
+class NsightProfile:
+    def __init__(self, captures: Sequence[NsightProfileCapture]) -> None:
+        """
+        Configure the complete Nsight Systems profiling specification for a Trainer.
+
+        Each capture names the training phase it belongs to and uses epochs relative to
+        that phase. The same Trainer can therefore capture independent windows from
+        staged fits, for example a GLM pretrain and a later Transformer phase.
+        """
+
+    @property
+    def captures(self) -> list[NsightProfileCapture]: ...
+
+class NsightProfileCapture:
+    def __init__(self, phase: str, start_epoch: int, epoch_count: int, output: object) -> None:
+        """
+        Configure one phase-relative Nsight Systems capture window.
+
+        ``phase`` is the Thor training-phase name. ``start_epoch`` is 1-based within
+        that phase's fit call, not the Trainer's cumulative epoch count. ``output`` is
+        the final ``.nsys-rep`` path used by ``thor-nsys-profile``.
+        """
+
+    @property
+    def phase(self) -> str: ...
+
+    @property
+    def start_epoch(self) -> int: ...
+
+    @property
+    def epoch_count(self) -> int: ...
+
+    @property
+    def output(self) -> str: ...
+
 RestartCondition: TypeAlias = TrainingRestartPolicy
 
 RestartPolicy: TypeAlias = TrainingRestartPolicy
@@ -143,7 +178,7 @@ class StepExecutable:
     def get_architecture_json(self) -> str: ...
 
 class Trainer:
-    def __init__(self, network: thor.Network | None = None, optimizer: thor.optimizers.Optimizer | None = None, training_program: object | None = None, debug_synchronous: bool = False, stats_interval_s: float = 10.0, max_in_flight_batches: int = 32, scalar_tensors_to_report: Sequence[str] = ['loss'], stats_stderr_also: bool = False, stats_color: str = 'auto', save_model_dir: object | None = None, save_model_overwrite: bool = False, model_selection_score: object | None = None, data: thor.data.TrainingData | None = None, input_bindings: DatasetInputBindings | None = None) -> None: ...
+    def __init__(self, network: thor.Network | None = None, optimizer: thor.optimizers.Optimizer | None = None, training_program: object | None = None, debug_synchronous: bool = False, stats_interval_s: float = 10.0, max_in_flight_batches: int = 32, scalar_tensors_to_report: Sequence[str] = ['loss'], stats_stderr_also: bool = False, stats_color: str = 'auto', save_model_dir: object | None = None, save_model_overwrite: bool = False, model_selection_score: object | None = None, data: thor.data.TrainingData | None = None, input_bindings: DatasetInputBindings | None = None, nsight_profile: NsightProfile | None = None) -> None: ...
 
     def fit(self, epochs: int, check_best_model_every_epochs: int = 0, first_model_selection_epoch: int = 0, restart_conditions: object | None = None, early_completion_policies: object | None = None, max_training_batches_per_epoch: object | None = None) -> object: ...
 
@@ -742,6 +777,6 @@ class TrainingStep:
     @staticmethod
     def deserialize(architecture_json: str) -> TrainingStep: ...
 
-__all__: list = ['DatasetInputBindings', 'DeviceDatasetStorageReport', 'WindowedDeviceCacheReport', 'EarlyCompletionPolicy', 'EarlyCompletionRule', 'GradientClearPolicy', 'RestartCondition', 'RestartPolicy', 'StepExecutable', 'Trainer', 'TrainerFitOptions', 'TrainingEarlyCompletionPolicy', 'TrainingEnsembleMemberResult', 'TrainingEnsembleResult', 'TrainingEventPhase', 'TrainingInputBinding', 'TrainingNamedMetricResult', 'TrainingPhase', 'TrainingProgram', 'TrainingRestartCondition', 'TrainingRestartPolicy', 'TrainingRunCompletionReason', 'TrainingRunInputSignature', 'TrainingRunOutputSignature', 'TrainingRunResult', 'TrainingRuns', 'TrainingRunsEarlyCompletionPolicy', 'TrainingRunsEarlyCompletionRule', 'TrainingRunsFailurePolicy', 'TrainingRunsRestartCondition', 'TrainingRunsRestartPolicy', 'TrainingRunsResult', 'TrainingRunStatus', 'TrainingStatsSnapshot', 'TrainingStep', 'make_k_fold_run_specs', 'training_runs_from_k_fold_split']
+__all__: list = ['DatasetInputBindings', 'DeviceDatasetStorageReport', 'WindowedDeviceCacheReport', 'EarlyCompletionPolicy', 'EarlyCompletionRule', 'GradientClearPolicy', 'NsightProfile', 'NsightProfileCapture', 'RestartCondition', 'RestartPolicy', 'StepExecutable', 'Trainer', 'TrainerFitOptions', 'TrainingEarlyCompletionPolicy', 'TrainingEnsembleMemberResult', 'TrainingEnsembleResult', 'TrainingEventPhase', 'TrainingInputBinding', 'TrainingNamedMetricResult', 'TrainingPhase', 'TrainingProgram', 'TrainingRestartCondition', 'TrainingRestartPolicy', 'TrainingRunCompletionReason', 'TrainingRunInputSignature', 'TrainingRunOutputSignature', 'TrainingRunResult', 'TrainingRuns', 'TrainingRunsEarlyCompletionPolicy', 'TrainingRunsEarlyCompletionRule', 'TrainingRunsFailurePolicy', 'TrainingRunsRestartCondition', 'TrainingRunsRestartPolicy', 'TrainingRunsResult', 'TrainingRunStatus', 'TrainingStatsSnapshot', 'TrainingStep', 'make_k_fold_run_specs', 'training_runs_from_k_fold_split']
 
 def __dir__() -> list[str]: ...

@@ -105,3 +105,11 @@ def test_release_bundle_pipelines_link_package_with_next_sm_cuda_compile():
     assert "add_dependencies(${next_backend_target} ${previous_wheel_target})" in cmake_contents
     assert "thor_pipeline_backend_after_wheel(89 thor_kernel_wheel_sm89 120 Thor)" in cmake_contents
     assert "add_dependencies(ThorCudaSm120Objects thor_kernel_wheel_sm89)" not in cmake_contents
+
+
+def test_nsight_profile_launcher_is_packaged_as_a_console_script():
+    pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+
+    assert pyproject["project"]["scripts"]["thor-nsys-profile"] == "thor_nsys_profile:main"
+    assert "src/thor_nsys_profile" in pyproject["tool"]["scikit-build"]["wheel"]["packages"]

@@ -2755,6 +2755,78 @@ Multiple windowed fields may reference the same persisted sequence.
     device_dataset_storage_report.def_ro("windowed_device_cache",
                                          &DeviceDatasetStorageReport::windowedDeviceCache);
 
+    auto nsight_profile_capture =
+        nb::class_<NsightSystemsProfileCaptureConfig>(training, "NsightProfileCapture");
+    nsight_profile_capture.attr("__module__") = "thor.training";
+    nsight_profile_capture.def(
+        "__init__",
+        [](NsightSystemsProfileCaptureConfig* self,
+           std::string phase,
+           uint64_t start_epoch,
+           uint64_t epoch_count,
+           nb::object output) {
+            if (phase.empty()) {
+                throw nb::value_error("NsightProfileCapture phase must not be empty");
+            }
+            if (start_epoch == 0) {
+                throw nb::value_error("NsightProfileCapture start_epoch must be >= 1");
+            }
+            if (epoch_count == 0) {
+                throw nb::value_error("NsightProfileCapture epoch_count must be >= 1");
+            }
+            const std::optional<std::string> outputPath =
+                optionalPathStringFromPython(output, "NsightProfileCapture output");
+            if (!outputPath.has_value()) {
+                throw nb::value_error("NsightProfileCapture output must not be None");
+            }
+            if (std::filesystem::path(outputPath.value()).extension() != ".nsys-rep") {
+                throw nb::value_error("NsightProfileCapture output must end in '.nsys-rep'");
+            }
+            new (self) NsightSystemsProfileCaptureConfig{
+                std::move(phase), start_epoch, epoch_count, outputPath.value()};
+        },
+        "phase"_a,
+        "start_epoch"_a,
+        "epoch_count"_a,
+        "output"_a,
+        R"nbdoc(
+Configure one phase-relative Nsight Systems capture window.
+
+``phase`` is the Thor training-phase name. ``start_epoch`` is 1-based within
+that phase's fit call, not the Trainer's cumulative epoch count. ``output`` is
+the final ``.nsys-rep`` path used by ``thor-nsys-profile``.
+        )nbdoc");
+    nsight_profile_capture.def_prop_ro(
+        "phase", [](const NsightSystemsProfileCaptureConfig& self) { return self.phaseName; });
+    nsight_profile_capture.def_prop_ro(
+        "start_epoch", [](const NsightSystemsProfileCaptureConfig& self) { return self.startEpoch; });
+    nsight_profile_capture.def_prop_ro(
+        "epoch_count", [](const NsightSystemsProfileCaptureConfig& self) { return self.epochCount; });
+    nsight_profile_capture.def_prop_ro(
+        "output", [](const NsightSystemsProfileCaptureConfig& self) { return self.outputPath; });
+
+    auto nsight_profile = nb::class_<NsightSystemsProfileConfig>(training, "NsightProfile");
+    nsight_profile.attr("__module__") = "thor.training";
+    nsight_profile.def(
+        "__init__",
+        [](NsightSystemsProfileConfig* self,
+           std::vector<NsightSystemsProfileCaptureConfig> captures) {
+            if (captures.empty()) {
+                throw nb::value_error("NsightProfile captures must not be empty");
+            }
+            new (self) NsightSystemsProfileConfig{std::move(captures)};
+        },
+        "captures"_a,
+        R"nbdoc(
+Configure the complete Nsight Systems profiling specification for a Trainer.
+
+Each capture names the training phase it belongs to and uses epochs relative to
+that phase. The same Trainer can therefore capture independent windows from
+staged fits, for example a GLM pretrain and a later Transformer phase.
+        )nbdoc");
+    nsight_profile.def_prop_ro(
+        "captures", [](const NsightSystemsProfileConfig& self) { return self.captures; });
+
     auto trainer_fit_options = nb::class_<TrainerFitOptions>(training, "TrainerFitOptions");
     trainer_fit_options.attr("__module__") = "thor.training";
     trainer_fit_options.def(nb::init<>())
@@ -2781,7 +2853,8 @@ Multiple windowed fields may reference the same persisted sequence.
            bool save_model_overwrite,
            nb::object model_selection_score,
            std::shared_ptr<Thor::TrainingData> data,
-           Thor::DatasetInputBindings* input_bindings) -> nb::object {
+           Thor::DatasetInputBindings* input_bindings,
+           NsightSystemsProfileConfig* nsight_profile) -> nb::object {
             (void)cls;
             if (data == nullptr) {
                 throw nb::value_error("Trainer requires data");
@@ -2802,6 +2875,9 @@ Multiple windowed fields may reference the same persisted sequence.
             builder.data(std::move(data));
             if (input_bindings != nullptr) {
                 builder.inputBindings(*input_bindings);
+            }
+            if (nsight_profile != nullptr) {
+                builder.nsightSystemsProfile(*nsight_profile);
             }
             if (optimizer != nullptr) {
                 builder.optimizer(std::move(optimizer));
@@ -2829,7 +2905,8 @@ Multiple windowed fields may reference the same persisted sequence.
         "save_model_overwrite"_a = false,
         "model_selection_score"_a.none() = nb::none(),
         "data"_a.none() = nb::none(),
-        "input_bindings"_a.none() = nb::none());
+        "input_bindings"_a.none() = nb::none(),
+        "nsight_profile"_a.none() = nb::none());
     trainer.def(
         "__init__",
         [](Trainer*,
@@ -2846,7 +2923,8 @@ Multiple windowed fields may reference the same persisted sequence.
            bool,
            nb::object,
            std::shared_ptr<Thor::TrainingData>,
-           Thor::DatasetInputBindings*) {},
+           Thor::DatasetInputBindings*,
+           NsightSystemsProfileConfig*) {},
         "network"_a.none() = nb::none(),
         "optimizer"_a.none() = nb::none(),
         "training_program"_a.none() = nb::none(),
@@ -2860,7 +2938,8 @@ Multiple windowed fields may reference the same persisted sequence.
         "save_model_overwrite"_a = false,
         "model_selection_score"_a.none() = nb::none(),
         "data"_a.none() = nb::none(),
-        "input_bindings"_a.none() = nb::none());
+        "input_bindings"_a.none() = nb::none(),
+        "nsight_profile"_a.none() = nb::none());
     trainer.def(
         "fit",
         [](Trainer& self,

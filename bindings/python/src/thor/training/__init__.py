@@ -4,6 +4,8 @@ from .._thor.training import WindowedDeviceCacheReport
 from .._thor.training import EarlyCompletionPolicy
 from .._thor.training import EarlyCompletionRule
 from .._thor.training import GradientClearPolicy
+from .._thor.training import NsightProfile
+from .._thor.training import NsightProfileCapture
 from .._thor.training import RestartCondition
 from .._thor.training import RestartPolicy
 from .._thor.training import StepExecutable
@@ -44,6 +46,8 @@ __all__ = [
     "EarlyCompletionPolicy",
     "EarlyCompletionRule",
     "GradientClearPolicy",
+    "NsightProfile",
+    "NsightProfileCapture",
     "RestartCondition",
     "RestartPolicy",
     "StepExecutable",

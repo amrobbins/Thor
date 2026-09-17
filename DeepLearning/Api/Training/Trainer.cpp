@@ -210,6 +210,33 @@ Trainer Trainer::Builder::build() const {
     if (!std::isfinite(runtimeConfig_.statsIntervalSeconds) || runtimeConfig_.statsIntervalSeconds < 0.0) {
         throw std::runtime_error("Trainer statsIntervalSeconds must be finite and >= 0.");
     }
+    if (runtimeConfig_.nsightSystemsProfile.has_value()) {
+        const NsightSystemsProfileConfig& profile = runtimeConfig_.nsightSystemsProfile.value();
+        if (profile.captures.empty()) {
+            throw std::runtime_error("Trainer Nsight profile must contain at least one capture.");
+        }
+        std::set<std::string> outputPaths;
+        for (const NsightSystemsProfileCaptureConfig& capture : profile.captures) {
+            if (capture.phaseName.empty()) {
+                throw std::runtime_error("Trainer Nsight profile capture phaseName must not be empty.");
+            }
+            if (capture.startEpoch == 0) {
+                throw std::runtime_error("Trainer Nsight profile capture startEpoch must be >= 1.");
+            }
+            if (capture.epochCount == 0) {
+                throw std::runtime_error("Trainer Nsight profile capture epochCount must be >= 1.");
+            }
+            if (capture.outputPath.empty()) {
+                throw std::runtime_error("Trainer Nsight profile capture outputPath must not be empty.");
+            }
+            if (std::filesystem::path(capture.outputPath).extension() != ".nsys-rep") {
+                throw std::runtime_error("Trainer Nsight profile capture outputPath must end in '.nsys-rep'.");
+            }
+            if (!outputPaths.insert(capture.outputPath).second) {
+                throw std::runtime_error("Trainer Nsight profile capture outputPath values must be unique.");
+            }
+        }
+    }
 
     Trainer trainer;
     trainer.network = network_;
@@ -910,6 +937,20 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.trainingProgram = trainingProgram;
     request.datasetInputBindings = resolvedDatasetInputs.trainingInputBindings;
     request.runtime = runtimeConfig;
+    if (request.runtime.nsightSystemsProfile.has_value()) {
+        const std::string phaseName = currentTrainingPhaseHistoryLabel().value_or("default");
+        NsightSystemsProfileConfig phaseProfile;
+        for (const NsightSystemsProfileCaptureConfig& capture : request.runtime.nsightSystemsProfile->captures) {
+            if (capture.phaseName == phaseName) {
+                phaseProfile.captures.push_back(capture);
+            }
+        }
+        if (phaseProfile.captures.empty()) {
+            request.runtime.nsightSystemsProfile.reset();
+        } else {
+            request.runtime.nsightSystemsProfile = std::move(phaseProfile);
+        }
+    }
     request.runtime.scalarTensorsToReport.insert(additionalScalarTensorsToReport.begin(), additionalScalarTensorsToReport.end());
     request.epochs = options.epochs;
     request.saveModelDirectory = saveModelDirectory;

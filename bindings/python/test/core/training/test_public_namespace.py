@@ -48,6 +48,8 @@ EXPECTED_TRAINING_API = {
     "EarlyCompletionPolicy",
     "EarlyCompletionRule",
     "GradientClearPolicy",
+    "NsightProfile",
+    "NsightProfileCapture",
     "RestartCondition",
     "RestartPolicy",
     "StepExecutable",

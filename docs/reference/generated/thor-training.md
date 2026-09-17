@@ -16,6 +16,10 @@ Public API metadata source: **python __all__**.
 
 ::: thor.training.GradientClearPolicy
 
+::: thor.training.NsightProfile
+
+::: thor.training.NsightProfileCapture
+
 ::: thor.training.RestartCondition
 
 ::: thor.training.RestartPolicy
