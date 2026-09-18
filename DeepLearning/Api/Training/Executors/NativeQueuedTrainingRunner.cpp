@@ -1,5 +1,6 @@
 #include "DeepLearning/Api/Training/Executors/NativeQueuedTrainingRunner.h"
 #include "DeepLearning/Api/Training/Executors/NativeQueuedTrainingRunnerTestHooks.h"
+#include "DeepLearning/Api/Training/Executors/QueuedOutputSynchronization.h"
 #include "DeepLearning/Implementation/Data/Sessions/BatchSessionRuntimeAccess.h"
 
 #include "DeepLearning/Api/Data/Batch.h"
@@ -2576,6 +2577,7 @@ struct NativeQueuedSchedulerResources {
           plan(std::move(plan)),
           options(options),
           outputReadyEvents(this->placedNetwork->getNumStamps()),
+          independentOutputReadyDependencies(this->placedNetwork->getNumStamps()),
           processingFinishedEvents(options.maxInFlightBatches),
           completionFinishedEvents(options.maxInFlightBatches) {
         THOR_THROW_IF_FALSE(this->placedNetwork != nullptr);
@@ -2589,6 +2591,18 @@ struct NativeQueuedSchedulerResources {
                 stampedNetwork.getInputs();
             THOR_THROW_IF_FALSE(!inputs.empty());
             stampGpuNums.push_back(inputs[0]->getStream().getGpuNum());
+
+            for (const std::shared_ptr<ThorImplementation::NetworkOutput>& output : stampedNetwork.getOutputs()) {
+                THOR_THROW_IF_FALSE(output != nullptr);
+                std::optional<Stream> outputReadyEventStream = output->getIndependentOutputReadyEventStream();
+                if (outputReadyEventStream.has_value()) {
+                    independentOutputReadyDependencies[stamp].push_back(
+                        detail::QueuedOutputReadyDependency{
+                            .outputName = output->getName(),
+                            .producerStream = outputReadyEventStream.value(),
+                        });
+                }
+            }
         }
 
         // Completion must not serialize all queued slots through one stream: the
@@ -2626,6 +2640,7 @@ struct NativeQueuedSchedulerResources {
     NativeQueuedTrainingOptions options;
     uint64_t nextStampToProcess = 0;
     std::vector<std::map<std::string, Event>> outputReadyEvents;
+    std::vector<std::vector<detail::QueuedOutputReadyDependency>> independentOutputReadyDependencies;
     std::vector<Event> processingFinishedEvents;
     std::vector<Event> completionFinishedEvents;
     std::vector<int> stampGpuNums;
@@ -2674,6 +2689,8 @@ class NativeQueuedSegmentScheduler {
         uint64_t& nextStampToProcess = resources->nextStampToProcess;
         std::vector<std::map<std::string, Event>>& outputReadyEvents =
             resources->outputReadyEvents;
+        const std::vector<std::vector<detail::QueuedOutputReadyDependency>>& independentOutputReadyDependencies =
+            resources->independentOutputReadyDependencies;
         std::vector<Event>& processingFinishedEvents =
             resources->processingFinishedEvents;
         std::vector<Event>& completionFinishedEvents =
@@ -2990,12 +3007,10 @@ class NativeQueuedSegmentScheduler {
             const auto waitProcessingFinish = diagnosticNow(collectQueueDiagnostics);
 
             const auto waitOutputsStart = diagnosticNow(collectQueueDiagnostics);
-            uint64_t outputWaitCount = 0;
-            for (const auto& [outputName, outputReadyEvent] : outputReadyEvents[nextStampToProcess]) {
-                (void)outputName;
-                completionStream.waitEvent(outputReadyEvent);
-                outputWaitCount += 1;
-            }
+            uint64_t outputWaitCount = detail::waitForIndependentOutputReadyEvents(
+                completionStream,
+                outputReadyEvents[nextStampToProcess],
+                independentOutputReadyDependencies[nextStampToProcess]);
             for (const auto& [metricName, tensors] : params->metricStatisticTensors) {
                 (void)metricName;
                 if (tensors.aggregation == MetricAggregation::RATIO) {

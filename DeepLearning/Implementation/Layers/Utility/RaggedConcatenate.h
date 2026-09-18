@@ -103,6 +103,10 @@ class RaggedConcatenate : public MultiConnectionLayer {
         CUDA_CHECK(cudaMemcpyAsync(splitTensorFeatureInputMemoriesArray_d, valuePointers.data(), valueInputCount * sizeof(void*),
                                    cudaMemcpyHostToDevice, streams[0].getStream()));
 
+        // Value-input connections and their Tensor backing allocations are fixed
+        // once this layer is compiled, so the forward pointer table is static.
+        // Keeping it device-resident avoids a per-batch H2D copy and callback.
+
         if (errorInputs[0].has_value()) {
             discardedErrorOutputs.resize(valueInputCount);
             std::vector<void*> errorPointers(valueInputCount);
@@ -178,7 +182,6 @@ class RaggedConcatenate : public MultiConnectionLayer {
         stillWaitingForFeatureInputTensors = allFeatureInputTensorIds;
 
         detail::waitForDistinctProducerStreams(streams[0], streams, forwardInputReadyEvents, 1);
-        refreshValueInputMemoryArray(streams[0]);
 
         const TensorDescriptor& outputDescriptor = featureOutputs[0]->getDescriptor();
         const auto& outputDimensions = outputDescriptor.getDimensions();
@@ -235,8 +238,7 @@ class RaggedConcatenate : public MultiConnectionLayer {
                 streams[0]);
         }
 
-        streams[0].putEvent(backwardOutputsReadyEvent);
-        ThorImplementation::detail::waitOnDistinctTargetStreams(
+        ThorImplementation::detail::recordCompletionAndWaitOnDistinctTargetStreams(
             streams[0],
             backwardOutputsReadyEvent,
             valueInputCount,
@@ -388,18 +390,6 @@ class RaggedConcatenate : public MultiConnectionLayer {
             return std::nullopt;
         }
     }
-    struct ValueInputMemoryArrayRefreshArgs : public HostFunctionArgsBase { std::vector<void*> pointers; };
-    static void releaseValueInputMemoryArrayRefresh(void*) {}
-
-    void refreshValueInputMemoryArray(Stream stream) {
-        auto args = std::make_unique<ValueInputMemoryArrayRefreshArgs>();
-        args->pointers.resize(valueInputCount);
-        for (uint32_t i = 0; i < valueInputCount; ++i) args->pointers[i] = featureInputs[i]->getMemPtr();
-        CUDA_CHECK(cudaMemcpyAsync(splitTensorFeatureInputMemoriesArray_d, args->pointers.data(), valueInputCount * sizeof(void*),
-                                   cudaMemcpyHostToDevice, stream));
-        stream.enqueueHostFunction(&releaseValueInputMemoryArrayRefresh, std::move(args));
-    }
-
     unsigned int axis;
     uint32_t valueInputCount;
     uint32_t partitionInputIndex;

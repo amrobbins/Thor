@@ -386,8 +386,6 @@ class Stream:
         Stream(gpu_num=0)
 
         Create a CUDA stream on the specified GPU.
-        Priority is always REGULAR in the Python API.
-
         Parameters
         ----------
         gpu_num : int, default 0
@@ -399,8 +397,6 @@ class Stream:
         Stream(placement)
 
         Create a CUDA stream based on a tensor placement.
-        Priority is always REGULAR in the Python API.
-
         Parameters
         ----------
         placement : thor.physical.Placement

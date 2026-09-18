@@ -21,15 +21,13 @@ void bind_stream(nb::module_ &physical) {
         [](Stream *self, int32_t gpu_num) {
             if (gpu_num < 0)
                 throw nb::value_error("gpu_num must be >= 0");
-            new (self) Stream(gpu_num, Stream::Priority::REGULAR);
+            new (self) Stream(gpu_num);
         },
         "gpu_num"_a = 0,
         R"nbdoc(
 Stream(gpu_num=0)
 
 Create a CUDA stream on the specified GPU.
-Priority is always REGULAR in the Python API.
-
 Parameters
 ----------
 gpu_num : int, default 0
@@ -37,14 +35,12 @@ gpu_num : int, default 0
 
     stream.def(
         "__init__",
-        [](Stream *self, const Placement &placement) { new (self) Stream(placement, Stream::Priority::REGULAR); },
+        [](Stream *self, const Placement &placement) { new (self) Stream(placement); },
         "placement"_a,
         R"nbdoc(
 Stream(placement)
 
 Create a CUDA stream based on a tensor placement.
-Priority is always REGULAR in the Python API.
-
 Parameters
 ----------
 placement : thor.physical.Placement

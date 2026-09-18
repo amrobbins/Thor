@@ -12,9 +12,9 @@ namespace ThorImplementation::Test {
  * Test-only GPU-side stream gate.
  *
  * The gated stream waits on a CUDA stream memory operation until release()
- * writes the expected value from an independent control stream. Unlike a
- * spinning kernel, the wait does not occupy an SM and therefore cannot prevent
- * the release operation from being scheduled.
+ * stores the expected value into mapped pinned host memory. Unlike a spinning
+ * kernel, the wait does not occupy an SM, and release does not depend on any
+ * CUDA stream being scheduled.
  */
 class DeviceStreamGate {
    public:
@@ -34,8 +34,8 @@ class DeviceStreamGate {
     void releaseNoThrow() noexcept;
 
     int32_t gpuNum;
+    uint32_t* released_h = nullptr;
     uint32_t* released_d = nullptr;
-    Stream controlStream;
     std::optional<Stream> gatedStream;
     Event completionEvent;
     bool released = false;

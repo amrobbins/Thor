@@ -501,8 +501,7 @@ void MultiInputCustomLoss::forward(optional<Tensor> featureInput, bool validatio
         }
     }
 
-    computeStream().putEvent(inputsReusableEvent);
-    ThorImplementation::detail::waitOnDistinctTargetStreams(
+    ThorImplementation::detail::recordCompletionAndWaitOnDistinctTargetStreams(
         computeStream(), inputsReusableEvent, inputStreams);
 
     resetForwardBookkeeping();

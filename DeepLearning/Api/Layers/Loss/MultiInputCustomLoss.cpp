@@ -190,7 +190,7 @@ Tensor MultiInputCustomLoss::inferExpressionTensor(const ThorImplementation::Dyn
                                           ThorImplementation::TensorDescriptor(DataType::FP32, maskDimensions)));
     }
 
-    Stream fakeStream(0, Stream::Priority::REGULAR);
+    Stream fakeStream(0);
     ThorImplementation::DynamicExpressionBuild build = expression.build(fakeInputs, {}, fakeStream);
 
     const set<string> actualOutputNames = toNameSet(build.equation->getOutputNames());

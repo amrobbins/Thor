@@ -15,6 +15,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Api/Training/Executors/QueuedOutputSynchronization.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 
 #include <chrono>
@@ -782,9 +783,6 @@ TEST(LayerSynchronization, ProcessingFinishedEventJoinsDeferredSecondaryMetricSt
     ASSERT_NE(physicalWeightedMean->getStream().getId(), physicalValues->getStream().getId())
         << "WeightedMean must be on the secondary TensorFanout stream for this regression.";
 
-    ThorImplementation::Test::DeviceStreamGate weightedMetricGate(0);
-    weightedMetricGate.enqueue(physicalWeightedMean->getStream());
-
     const TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     Tensor valuesCpu(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, 1}));
     Tensor weightsCpu(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, 1}));
@@ -796,6 +794,43 @@ TEST(LayerSynchronization, ProcessingFinishedEventJoinsDeferredSecondaryMetricSt
     Batch batch;
     batch.insert("values", valuesCpu);
     batch.insert("weights", weightsCpu);
+
+    // Warm the exact graph once before inserting the GPU-side stream gate. CUDA
+    // may lazily load a module/kernel on its first launch, and that first-use
+    // loading path is allowed to synchronize the context. If a sibling stream
+    // is already parked behind DeviceStreamGate at that point, the CUDA loader
+    // can wait for the gated stream while this host thread has not yet reached
+    // release(), producing a test-created deadlock. The full suite naturally
+    // warmed these kernels before this regression, which is why the same test
+    // could pass there while hanging when run alone.
+    //
+    // Fully completing an ungated batch moves CUDA first-use work outside the
+    // adversarial section. The batch below is still the one under test and is
+    // submitted with the secondary WeightedMean stream blocked exactly as
+    // before, so the processing-finished invariant itself is unchanged.
+    map<string, Tensor> warmupOutputs;
+    map<string, Event> warmupOutputReadyEvents;
+    Event warmupProcessingFinished = placedNetwork->submitBatch(0,
+                                                                batch,
+                                                                warmupOutputs,
+                                                                warmupOutputReadyEvents,
+                                                                /*isInferenceOnly=*/true,
+                                                                /*reusableProcessingFinishedEvent=*/nullptr,
+                                                                /*waitForOutputsOnProcessingStream=*/false,
+                                                                /*submitTiming=*/nullptr,
+                                                                /*outputSlotIndex=*/0);
+    warmupProcessingFinished.synchronize();
+    for (auto& [outputName, readyEvent] : warmupOutputReadyEvents) {
+        (void)outputName;
+        readyEvent.synchronize();
+    }
+    placedNetwork->synchronize();
+
+    ASSERT_EQ(warmupOutputs.at("weighted_mean").getPlacement().getMemDevice(), TensorPlacement::MemDevices::CPU);
+    EXPECT_NEAR(*warmupOutputs.at("weighted_mean").getMemPtr<float>(), 10.0f / 3.0f, 1e-6f);
+
+    ThorImplementation::Test::DeviceStreamGate weightedMetricGate(0);
+    weightedMetricGate.enqueue(physicalWeightedMean->getStream());
 
     map<string, Tensor> outputs;
     map<string, Event> outputReadyEvents;
@@ -810,6 +845,12 @@ TEST(LayerSynchronization, ProcessingFinishedEventJoinsDeferredSecondaryMetricSt
                                                           /*outputSlotIndex=*/0);
 
     auto processingWait = async(launch::async, [processingFinished]() mutable { processingFinished.synchronize(); });
+
+    // Prove that the ungated primary metric/output path can make progress while
+    // WeightedMean is still parked. That makes the timeout below specifically a
+    // test of the secondary processing-stream dependency rather than ordinary
+    // first-batch or primary-path execution latency.
+    outputReadyEvents.at("mean").synchronize();
 
     // The processing-finished boundary must include every secondary stream
     // declared by Layer::getProcessingStreams(). WeightedMean gives us a safe,
@@ -859,4 +900,46 @@ TEST(LayerSynchronization, PlacedNetworkSaveWaitsForModelStreams) {
     EXPECT_NO_THROW(saveFuture.get());
 
     filesystem::remove_all(archiveDirectory);
+}
+
+TEST(LayerSynchronization, QueuedOutputCompletionWaitsOnlyIndependentReadyEvents) {
+    if (MachineEvaluator::instance().getNumGpus() < 1)
+        GTEST_SKIP() << "Queued output synchronization test requires a GPU";
+
+    Stream dominatedProducer(0);
+    Stream independentProducer(0);
+    Stream completionStream(0);
+
+    Event dominatedReady = dominatedProducer.putEvent(false, false);
+    Event independentReady = independentProducer.putEvent(false, false);
+    Event sameStreamReady = completionStream.putEvent(false, false);
+    map<string, Event> outputReadyEvents{
+        {"dominated", dominatedReady},
+        {"independent", independentReady},
+        {"same_stream_independent", sameStreamReady},
+    };
+    vector<Thor::detail::QueuedOutputReadyDependency> independentDependencies{
+        {.outputName = "independent", .producerStream = independentProducer},
+        {.outputName = "same_stream_independent", .producerStream = completionStream},
+    };
+
+#ifdef THOR_DEBUG
+    ThorImplementation::resetSynchronizationOperationCountsForTests();
+#endif
+
+    uint64_t waitCount = Thor::detail::waitForIndependentOutputReadyEvents(
+        completionStream,
+        outputReadyEvents,
+        independentDependencies);
+    EXPECT_EQ(waitCount, 1u);
+
+#ifdef THOR_DEBUG
+    const ThorImplementation::SynchronizationOperationCounts counts =
+        ThorImplementation::synchronizationOperationCountsForTests();
+    EXPECT_EQ(counts.eventRecordCount, 0u);
+    EXPECT_EQ(counts.streamWaitEventCount, 1u);
+    EXPECT_EQ(counts.hostEventSynchronizeCount, 0u);
+#endif
+
+    completionStream.synchronize();
 }

@@ -31,7 +31,11 @@ class BatchSourceReference {
     /** Wait for asynchronous producer work, if any, before reading the source. */
     void waitUntilReady(const Stream& consumingStream) const;
 
-    void recordConsumption(const Stream& consumingStream) const;
+    // Record this consumer's final read and return the exact completion token
+    // retained by the source owner. Callers that also need a dependency on the
+    // same producer-stream point may wait on the returned Event instead of
+    // recording a second event.
+    Event recordConsumption(const Stream& consumingStream) const;
 
     [[nodiscard]] bool refersToSameResource(const BatchSourceReference& other) const {
         return state == other.state && state != nullptr;

@@ -82,7 +82,6 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
 
     void cleanup() override {
         for (Event& event : forwardInputReadyEvents) event = Event();
-        outputsReadyEvent = Event();
         MultiConnectionLayer::cleanup();
     }
 
@@ -122,7 +121,6 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
                                         batchSize,
                                         streams[0]);
 
-        streams[0].putEvent(outputsReadyEvent);
         if (nextLayers[0].has_value())
             nextLayers[0].value()->forward(featureOutputs[0], validationPass, currentValidExampleCount);
         currentValidExampleCount = 0;
@@ -320,7 +318,6 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
     std::set<uint64_t> allFeatureInputTensorIds;
     std::set<uint64_t> stillWaitingForFeatureInputTensors;
     std::vector<Event> forwardInputReadyEvents;
-    Event outputsReadyEvent;
     uint32_t currentValidExampleCount = 0;
     bool batchCardinalitySet = false;
 };

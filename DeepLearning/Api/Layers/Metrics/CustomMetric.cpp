@@ -153,7 +153,7 @@ Tensor CustomMetric::inferMetricTensor() const {
                                           ThorImplementation::TensorDescriptor(DataType::FP32, maskDimensions)));
     }
 
-    Stream fakeStream(0, Stream::Priority::REGULAR);
+    Stream fakeStream(0);
     ThorImplementation::DynamicExpressionBuild build = expr.build(fakeInputs, {}, fakeStream);
 
     const std::set<std::string> actualOutputNames = toNameSet(build.equation->getOutputNames());

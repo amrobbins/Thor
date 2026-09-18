@@ -1278,9 +1278,23 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
 
     const auto outputWaitStart = timingNow(submitTiming);
     if (waitForOutputsOnProcessingStream) {
-        for (const auto& [outputName, outputReadyEvent] : outputReadyEvents) {
-            (void)outputName;
-            inputs[0]->getStream().waitEvent(outputReadyEvent);
+        const Stream processingStream = inputs[0]->getStream();
+        for (NetworkOutput* output : outputs) {
+            THOR_THROW_IF_FALSE(output != nullptr);
+            const std::optional<Stream> independentReadyProducer =
+                output->getIndependentOutputReadyEventStream();
+
+            // Same-placement output readiness is recorded on an ordinary graph-processing
+            // stream. The processing-stream join immediately below already orders that
+            // producer tail before processingFinishedEvent, so waiting its outputReadyEvent
+            // here would duplicate the same dependency. Auxiliary offload/download streams
+            // remain outside the processing barrier and still require this explicit wait.
+            if (!independentReadyProducer.has_value() || independentReadyProducer.value() == processingStream)
+                continue;
+
+            const auto readyIt = outputReadyEvents.find(output->getName());
+            THOR_THROW_IF_FALSE(readyIt != outputReadyEvents.end());
+            processingStream.waitEvent(readyIt->second);
         }
     }
     const auto outputWaitFinish = timingNow(submitTiming);

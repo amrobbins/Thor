@@ -47,6 +47,12 @@ class NetworkOutput : public Layer {
 
     virtual Event getOutputReadyEvent() { return getOutputReadyEventForSlot(0); }
 
+    // Ready events recorded on an auxiliary output/offload stream are not covered
+    // by StampedNetwork::processingFinishedEvent and therefore require a separate
+    // dependency in queued completion. Same-placement outputs record readiness on
+    // their ordinary processing stream, which processingFinishedEvent already joins.
+    [[nodiscard]] std::optional<Stream> getIndependentOutputReadyEventStream() const { return outputStream; }
+
     virtual Event getOutputReadyEventForSlot(uint32_t slotIndex) {
         requireOutputSlot(slotIndex);
         return outputSlots[slotIndex].outputReadyEvent;

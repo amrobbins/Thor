@@ -531,13 +531,26 @@ class NetworkInput : public Layer {
                 }
                 if (sourceReference.has_value()) sourceReference->waitUntilReady(loadStream);
                 slot.outputBuffer.value().copyFromAsync(featureInput.value(), loadStream);
+
+                // The H2D copy completion is simultaneously the source-lifetime
+                // boundary and the point the processing stream must wait for.
+                // Reuse that one completion token instead of recording a second
+                // outputBufferLoadedEvent at the exact same load-stream tail.
                 if (managedHostSource) {
-                    loadStream.putEvent(slot.managedHostSourceConsumedEvent);
+                    THOR_THROW_IF_FALSE(!sourceReference.has_value());
+                    loadStream.putEvent(
+                        slot.managedHostSourceConsumedEvent,
+                        /*enableTiming=*/false,
+                        /*expectingHostToWaitOnThisOne=*/true);
                     slot.managedHostSourceSubmitted = true;
+                    stream.waitEvent(slot.managedHostSourceConsumedEvent);
+                } else if (sourceReference.has_value()) {
+                    Event sourceConsumedEvent = sourceReference->recordConsumption(loadStream);
+                    stream.waitEvent(sourceConsumedEvent);
+                } else {
+                    loadStream.putEvent(slot.outputBufferLoadedEvent);
+                    stream.waitEvent(slot.outputBufferLoadedEvent);
                 }
-                if (sourceReference.has_value()) sourceReference->recordConsumption(loadStream);
-                loadStream.putEvent(slot.outputBufferLoadedEvent);
-                stream.waitEvent(slot.outputBufferLoadedEvent);
 
                 // Copy from the slot-local prefetch buffer into the connected public
                 // NetworkInput feature tensor.  The public feature tensor remains

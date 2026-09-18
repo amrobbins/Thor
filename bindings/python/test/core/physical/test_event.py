@@ -6,7 +6,7 @@ import thor
 
 @pytest.mark.cuda
 def test_event_basic_record_and_synchronize():
-    # Construct a stream on GPU 0 (priority forced to REGULAR in your binding)
+    # Construct a stream on GPU 0.
     s = thor.physical.Stream(gpu_num=0)
     assert s.get_gpu_num() == 0
 

@@ -259,8 +259,7 @@ class TensorFanout : public MultiConnectionLayer {
 
         // Synchronize each distinct physical target stream at the point at which
         // inputTensor is populated. Logical fanout aliases on one stream share one wait.
-        streams[0].putEvent(inputReadyEvent);
-        ThorImplementation::detail::waitOnDistinctTargetStreams(
+        ThorImplementation::detail::recordCompletionAndWaitOnDistinctTargetStreams(
             streams[0], inputReadyEvent, streams);
 
         std::unordered_set<Layer *> forwardedLayers;

@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
+#include "Utilities/Common/SynchronizationDiagnostics.h"
 
 #include <gtest/gtest.h>
 
@@ -35,6 +36,85 @@ void waitForCpuOutput(const std::shared_ptr<NetworkOutput>& output, Stream strea
 }
 
 }  // namespace
+
+#ifdef THOR_DEBUG
+namespace {
+
+class EinsumSynchronizationCaptureLayer final : public NoOpLayer {
+   public:
+    void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t validExampleCount = 0) override {
+        (void)featureInput;
+        (void)validationPass;
+        (void)validExampleCount;
+        ++forwardCalls;
+    }
+
+    void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override {
+        (void)errorInput;
+        (void)batchSize;
+        ++backwardCalls;
+    }
+
+    uint32_t forwardCalls = 0;
+    uint32_t backwardCalls = 0;
+};
+
+}  // namespace
+
+TEST(EinsumLayer, SynchronizationCoalescesPhysicalStreamAliasesAndSkipsSelfStream) {
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {1, 4});
+
+    Stream streamA(0);
+    Stream streamB(0);
+    Tensor input0(gpuPlacement, descriptor);
+    Tensor input1(gpuPlacement, descriptor);
+    Tensor input2(gpuPlacement, descriptor);
+
+    EinsumSynchronizationCaptureLayer previous0;
+    EinsumSynchronizationCaptureLayer previous1;
+    EinsumSynchronizationCaptureLayer previous2;
+    EinsumSynchronizationCaptureLayer sink;
+    auto einsum = std::make_unique<EinsumLayer>("i,i,i->i");
+
+    einsum->connectToPreviousLayer(&previous0, input0, streamA, true, 0);
+    einsum->connectToPreviousLayer(&previous1, input1, streamB, true, 1);
+    einsum->connectToPreviousLayer(&previous2, input2, streamA, true, 2);
+    einsum->connectToNextLayer(&sink);
+    einsum->compile();
+    einsum->initialize();
+
+    resetSynchronizationOperationCountsForTests();
+    einsum->forward(input0, false, 1);
+    einsum->forward(input2, false, 1);
+    einsum->forward(input1, false, 1);
+
+    SynchronizationOperationCounts counts = synchronizationOperationCountsForTests();
+    EXPECT_EQ(counts.eventRecordCount, 1u);
+    EXPECT_EQ(counts.streamWaitEventCount, 1u);
+    EXPECT_EQ(counts.hostEventSynchronizeCount, 0u);
+    EXPECT_EQ(sink.forwardCalls, 1u);
+
+    const std::vector<std::optional<Tensor>> errorInputs = einsum->getErrorInputs();
+    ASSERT_EQ(errorInputs.size(), 1u);
+    ASSERT_TRUE(errorInputs[0].has_value());
+
+    resetSynchronizationOperationCountsForTests();
+    einsum->backward(errorInputs[0], 1);
+
+    counts = synchronizationOperationCountsForTests();
+    EXPECT_EQ(counts.eventRecordCount, 1u);
+    EXPECT_EQ(counts.streamWaitEventCount, 1u);
+    EXPECT_EQ(counts.hostEventSynchronizeCount, 0u);
+    EXPECT_EQ(previous0.backwardCalls, 1u);
+    EXPECT_EQ(previous1.backwardCalls, 1u);
+    EXPECT_EQ(previous2.backwardCalls, 1u);
+
+    streamA.synchronize();
+    streamB.synchronize();
+    einsum->cleanup();
+}
+#endif
 
 TEST(EinsumLayer, ForwardMatrixContractionPreservesImplicitBatchAndPartialBatchCardinality) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);

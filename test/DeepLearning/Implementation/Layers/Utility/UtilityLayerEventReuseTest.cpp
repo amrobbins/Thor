@@ -93,3 +93,29 @@ TEST(UtilityLayerEventReuse, E3OwnedHotPathsDoNotUseValueReturningPutEvent) {
                return out.str();
            })();
 }
+
+
+TEST(UtilityLayerEventReuse, Sync2dConcatenatePointerTablesAreCompileTimeStatic) {
+    const filesystem::path root = findThorSourceRoot();
+
+    const string concatenate = readTextFile(
+        root / "DeepLearning" / "Implementation" / "Layers" / "Utility" / "Concatenate.h");
+    EXPECT_EQ(concatenate.find("refreshFeatureInputMemoryArray"), string::npos);
+    EXPECT_EQ(concatenate.find("FeatureInputMemoryArrayRefreshArgs"), string::npos);
+    EXPECT_EQ(concatenate.find("enqueueHostFunction"), string::npos);
+
+    const string raggedConcatenate = readTextFile(
+        root / "DeepLearning" / "Implementation" / "Layers" / "Utility" / "RaggedConcatenate.h");
+    EXPECT_EQ(raggedConcatenate.find("refreshValueInputMemoryArray"), string::npos);
+    EXPECT_EQ(raggedConcatenate.find("ValueInputMemoryArrayRefreshArgs"), string::npos);
+    EXPECT_EQ(raggedConcatenate.find("enqueueHostFunction"), string::npos);
+
+    const string raggedSequenceConcatenate = readTextFile(
+        root / "DeepLearning" / "Implementation" / "Layers" / "Utility" / "RaggedSequenceConcatenate.h");
+    EXPECT_EQ(raggedSequenceConcatenate.find("refreshPointerTables"), string::npos);
+    EXPECT_EQ(raggedSequenceConcatenate.find("releasePointerRefresh"), string::npos);
+    EXPECT_EQ(raggedSequenceConcatenate.find("refreshGradientPointerTable"), string::npos);
+    EXPECT_EQ(raggedSequenceConcatenate.find("releaseGradientPointerRefresh"), string::npos);
+    EXPECT_EQ(raggedSequenceConcatenate.find("enqueueHostFunction"), string::npos);
+    EXPECT_NE(raggedSequenceConcatenate.find("valueGradientPointers.data()"), string::npos);
+}

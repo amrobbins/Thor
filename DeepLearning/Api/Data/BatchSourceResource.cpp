@@ -22,7 +22,7 @@ class BatchSourceResourceState {
         if (producerReadyEvent.isInitialized()) consumingStream.waitEvent(producerReadyEvent);
     }
 
-    void recordConsumption(const Stream& consumingStream) {
+    Event recordConsumption(const Stream& consumingStream) {
         THOR_THROW_IF_FALSE(consumingStream.isInitialized());
         std::lock_guard<std::mutex> guard(mutex);
         if (producerReleased) {
@@ -36,9 +36,11 @@ class BatchSourceResourceState {
         // returning the reusable source storage. Create it with
         // cudaEventBlockingSync so that wait sleeps instead of actively polling
         // the GPU.
-        consumedEvents.push_back(consumingStream.putEvent(
+        Event consumedEvent = consumingStream.putEvent(
             /*enableTiming=*/false,
-            /*expectingHostToWaitOnThisOne=*/true));
+            /*expectingHostToWaitOnThisOne=*/true);
+        consumedEvents.push_back(consumedEvent);
+        return consumedEvent;
     }
 
     void releaseProducer() {
@@ -70,9 +72,9 @@ void BatchSourceReference::waitUntilReady(const Stream& consumingStream) const {
     state->waitUntilReady(consumingStream);
 }
 
-void BatchSourceReference::recordConsumption(const Stream& consumingStream) const {
+Event BatchSourceReference::recordConsumption(const Stream& consumingStream) const {
     THOR_THROW_IF_FALSE(isInitialized());
-    state->recordConsumption(consumingStream);
+    return state->recordConsumption(consumingStream);
 }
 
 BatchSourceOwner::BatchSourceOwner(ReleaseCallback releaseCallback)

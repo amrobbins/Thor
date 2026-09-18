@@ -466,8 +466,7 @@ void AdaptiveLayerNorm::backward(optional<Tensor> errorInput, uint32_t batchSize
 
     CudnnAdaptiveLayerNorm::instance().backward(backwardPlan.value(), args, backwardWorkspace, computeStream());
 
-    computeStream().putEvent(gradientsReadyEvent);
-    ThorImplementation::detail::waitOnDistinctTargetStreams(
+    ThorImplementation::detail::recordCompletionAndWaitOnDistinctTargetStreams(
         computeStream(),
         gradientsReadyEvent,
         NUM_INPUT_PORTS,

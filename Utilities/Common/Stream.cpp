@@ -156,11 +156,11 @@ struct Stream::State {
     bool processLifetime = false;
 };
 
-Stream::Stream(int gpuNum, Priority priority) { construct(gpuNum, priority); }
+Stream::Stream(int gpuNum) { construct(gpuNum); }
 
-Stream::Stream(ThorImplementation::TensorPlacement placement, Priority priority) {
+Stream::Stream(ThorImplementation::TensorPlacement placement) {
     const int gpuNum = placement.getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU ? placement.getDeviceNum() : 0;
-    construct(gpuNum, priority);
+    construct(gpuNum);
 }
 
 Stream::operator cudaStream_t() const {
@@ -524,24 +524,12 @@ void Stream::informIsStatic() {
 
 uint64_t Stream::getId() const { return state != nullptr ? state->id : 0; }
 
-void Stream::construct(int gpuNum, Priority priority) {
+void Stream::construct(int gpuNum) {
     auto newState = make_shared<State>(gpuNum, nextStreamId.fetch_add(1, memory_order_relaxed));
 
     ScopedGpu scopedGpu(gpuNum);
 
-    // greatestPriority is given the highest priority in terms of execution, and its numerical value is the minimum of the allowed
-    // range.
-    int leastPriority, greatestPriority;
-    CUDA_CHECK(cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority));
-    int priorityValue;
-    if (priority == Priority::HIGH)
-        priorityValue = greatestPriority;
-    else if (priority == Priority::REGULAR)
-        priorityValue = greatestPriority + 1;
-    else
-        priorityValue = greatestPriority + 2;
-
-    CUDA_CHECK(cudaStreamCreateWithPriority(&newState->cudaStream, cudaStreamNonBlocking, priorityValue));
+    CUDA_CHECK(cudaStreamCreateWithFlags(&newState->cudaStream, cudaStreamNonBlocking));
 
     cublasLtHandle_t ltHandle = nullptr;
     const cublasStatus_t cublasStatus = cublasLtCreate(&ltHandle);

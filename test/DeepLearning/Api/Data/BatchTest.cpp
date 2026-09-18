@@ -286,10 +286,12 @@ TEST(BatchSourceResource, ConsumptionEventsUseBlockingSynchronizationForHostRecy
         });
     Thor::BatchSourceReference reference = owner.getReference();
 
-    reference.recordConsumption(stream);
+    Event consumedEvent = reference.recordConsumption(stream);
     owner.release();
 
     ASSERT_EQ(releasedEvents.size(), 1u);
+    EXPECT_EQ(releasedEvents.front().getId(), consumedEvent.getId());
+    EXPECT_TRUE(consumedEvent.usesBlockingSync());
     EXPECT_TRUE(releasedEvents.front().usesBlockingSync());
     releasedEvents.front().synchronize();
 }

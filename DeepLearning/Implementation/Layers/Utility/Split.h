@@ -194,8 +194,7 @@ class Split : public MultiConnectionLayer {
                     spanGeometryPerSplitTensor_d,
                     streams[0]);
 
-        streams[0].putEvent(outputsReadyEvent);
-        ThorImplementation::detail::waitOnDistinctTargetStreams(
+        ThorImplementation::detail::recordCompletionAndWaitOnDistinctTargetStreams(
             streams[0],
             outputsReadyEvent,
             streams,

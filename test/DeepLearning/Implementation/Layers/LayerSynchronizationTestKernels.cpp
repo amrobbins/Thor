@@ -9,6 +9,7 @@
 #include <cuda_runtime.h>
 #include <dlfcn.h>
 
+#include <atomic>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -19,7 +20,6 @@ namespace {
 class StreamMemoryOperations {
    public:
     using WaitValue32 = CUresult (*)(CUstream, CUdeviceptr, cuuint32_t, unsigned int);
-    using WriteValue32 = CUresult (*)(CUstream, CUdeviceptr, cuuint32_t, unsigned int);
 
     static StreamMemoryOperations& instance() {
         static StreamMemoryOperations operations;
@@ -30,17 +30,11 @@ class StreamMemoryOperations {
         return waitValue32(stream, address, value, CU_STREAM_WAIT_VALUE_EQ);
     }
 
-    CUresult write(CUstream stream, CUdeviceptr address, cuuint32_t value) const {
-        return writeValue32(stream, address, value, CU_STREAM_WRITE_VALUE_DEFAULT);
-    }
-
    private:
     WaitValue32 waitValue32;
-    WriteValue32 writeValue32;
 
     StreamMemoryOperations()
-        : waitValue32(load<WaitValue32>("cuStreamWaitValue32_v2", "cuStreamWaitValue32")),
-          writeValue32(load<WriteValue32>("cuStreamWriteValue32_v2", "cuStreamWriteValue32")) {}
+        : waitValue32(load<WaitValue32>("cuStreamWaitValue32_v2", "cuStreamWaitValue32")) {}
 
     template <typename Function>
     static Function load(const char* preferredName, const char* fallbackName) {
@@ -88,12 +82,13 @@ void checkDriverResult(CUresult status, const char* operation) {
 
 }  // namespace
 
-DeviceStreamGate::DeviceStreamGate(int32_t gpuNum)
-    : gpuNum(gpuNum), controlStream(gpuNum, Stream::Priority::HIGH) {
+DeviceStreamGate::DeviceStreamGate(int32_t gpuNum) : gpuNum(gpuNum) {
     ScopedGpu scopedGpu(gpuNum);
-    CUDA_CHECK(cudaMalloc(&released_d, sizeof(uint32_t)));
-    CUDA_CHECK(cudaMemsetAsync(released_d, 0, sizeof(uint32_t), controlStream.getStream()));
-    controlStream.synchronize();
+    CUDA_CHECK(cudaHostAlloc(reinterpret_cast<void**>(&released_h), sizeof(uint32_t), cudaHostAllocMapped));
+    void* mappedDevicePointer = nullptr;
+    CUDA_CHECK(cudaHostGetDevicePointer(&mappedDevicePointer, released_h, 0));
+    released_d = static_cast<uint32_t*>(mappedDevicePointer);
+    std::atomic_ref<uint32_t>(*released_h).store(0u, std::memory_order_release);
 }
 
 DeviceStreamGate::~DeviceStreamGate() {
@@ -104,9 +99,10 @@ DeviceStreamGate::~DeviceStreamGate() {
         (void)cudaStreamSynchronize(gatedStream->getStream());
     }
 
-    if (released_d != nullptr) {
+    if (released_h != nullptr) {
         ScopedGpu scopedGpu(gpuNum);
-        (void)cudaFree(released_d);
+        (void)cudaFreeHost(released_h);
+        released_h = nullptr;
         released_d = nullptr;
     }
 }
@@ -127,11 +123,8 @@ void DeviceStreamGate::release() {
     if (released)
         return;
 
-    THOR_THROW_IF_FALSE(released_d != nullptr);
-    ScopedGpu scopedGpu(gpuNum);
-    checkDriverResult(StreamMemoryOperations::instance().write(asDriverStream(controlStream), asDevicePointer(released_d), 1u),
-                      "cuStreamWriteValue32");
-    controlStream.synchronize();
+    THOR_THROW_IF_FALSE(released_h != nullptr);
+    std::atomic_ref<uint32_t>(*released_h).store(1u, std::memory_order_release);
     released = true;
 }
 
@@ -147,27 +140,10 @@ bool DeviceStreamGate::isComplete() {
 }
 
 void DeviceStreamGate::releaseNoThrow() noexcept {
-    if (released || released_d == nullptr)
+    if (released || released_h == nullptr)
         return;
 
-    try {
-        ScopedGpu scopedGpu(gpuNum);
-        CUresult status = StreamMemoryOperations::instance().write(asDriverStream(controlStream), asDevicePointer(released_d), 1u);
-        if (status == CUDA_SUCCESS) {
-            (void)cudaStreamSynchronize(controlStream.getStream());
-        } else {
-            // A runtime memset is a safe fallback for destructor cleanup if
-            // the driver stream write itself reports an error.
-            if (cudaMemsetAsync(released_d, 1, sizeof(uint32_t), controlStream.getStream()) == cudaSuccess)
-                (void)cudaStreamSynchronize(controlStream.getStream());
-        }
-    } catch (...) {
-        // Destructors must not throw. A final runtime write still gives an
-        // already-enqueued wait the opportunity to retire.
-        ScopedGpu scopedGpu(gpuNum);
-        if (cudaMemsetAsync(released_d, 1, sizeof(uint32_t), controlStream.getStream()) == cudaSuccess)
-            (void)cudaStreamSynchronize(controlStream.getStream());
-    }
+    std::atomic_ref<uint32_t>(*released_h).store(1u, std::memory_order_release);
     released = true;
 }
 

@@ -81,7 +81,6 @@ class PaddedDenseToRagged : public MultiConnectionLayer {
     void cleanup() override {
         validationErrorBits = Tensor();
         for (Event& event : forwardInputReadyEvents) event = Event();
-        outputsReadyEvent = Event();
         MultiConnectionLayer::cleanup();
     }
 
@@ -105,7 +104,6 @@ class PaddedDenseToRagged : public MultiConnectionLayer {
                                           validationErrorBits,
                                           streams[0]));
 
-        streams[0].putEvent(outputsReadyEvent);
         if (nextLayers[0].has_value()) nextLayers[0].value()->forward(featureOutputs[0], validationPass, validExamples);
         currentValidExampleCount = 0;
         batchCardinalitySet = false;
@@ -307,7 +305,6 @@ class PaddedDenseToRagged : public MultiConnectionLayer {
     std::set<uint64_t> allFeatureInputTensorIds;
     std::set<uint64_t> stillWaitingForFeatureInputTensors;
     std::vector<Event> forwardInputReadyEvents;
-    Event outputsReadyEvent;
     uint32_t currentValidExampleCount = 0;
     bool batchCardinalitySet = false;
 };

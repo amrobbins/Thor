@@ -13,6 +13,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
 #include "Utilities/Common/PersistingL2Cache.h"
+#include "Utilities/Common/SynchronizationDiagnostics.h"
 
 #pragma GCC diagnostic ignored "-Wsign-compare"
 #include "gtest/gtest.h"
@@ -145,6 +146,12 @@ class ManagedHostTestNetworkInput : public NetworkInput {
         loadStream.enqueueHostFunction(
             &waitForHostGate,
             std::make_unique<WaitForHostGateArgs>(gate));
+    }
+
+    bool managedHostConsumedEventUsesBlockingSync(uint32_t slotIndex) const {
+        THOR_THROW_IF_FALSE(slotIndex < inputSlots.size());
+        THOR_THROW_IF_FALSE(inputSlots[slotIndex].managedHostSourceConsumedEvent.isInitialized());
+        return inputSlots[slotIndex].managedHostSourceConsumedEvent.usesBlockingSync();
     }
 };
 
@@ -1039,6 +1046,79 @@ TEST(NetworkInput, DeviceReferenceConfigurationRejectsMaterializedTensorSubmissi
 
     EXPECT_ANY_THROW(input.forward(tensor, false, 1));
 }
+
+#ifdef THOR_DEBUG
+TEST(NetworkInput, StagedTrackedSourceSharesOneCompletionEventForSourceReuseAndProcessingDependency) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput synchronization-count test requires a GPU";
+    }
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {4});
+    Tensor cpuSource(cpuPlacement, descriptor);
+    float* values = cpuSource.getMemPtr<float>();
+    for (uint32_t i = 0; i < 4; ++i) values[i] = 5.0f;
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    RuntimeForwardedInputCaptureLayer capture;
+    input.connectToNextLayer(&capture);
+    input.configureBatchInputSource(Thor::BatchFieldSourceDescription::materialized(cpuPlacement));
+    input.preallocateInputSlots(1);
+
+    vector<Event> consumedEvents;
+    Thor::BatchSourceOwner sourceOwner(
+        [&](vector<Event> events) { consumedEvents = std::move(events); });
+    Thor::BatchSourceReference sourceReference = sourceOwner.getReference();
+
+    resetSynchronizationOperationCountsForTests();
+    input.forward(cpuSource, false, 1, sourceReference);
+    const SynchronizationOperationCounts counts = synchronizationOperationCountsForTests();
+
+    // One record is the shared load-complete/source-consumed event and the
+    // other marks the staging buffer writable after its processing-stream copy.
+    // The old path recorded a third event at the same load-stream completion
+    // point solely for outputBufferLoadedEvent.
+    EXPECT_EQ(counts.eventRecordCount, 2u);
+    EXPECT_EQ(counts.streamWaitEventCount, 2u);
+    EXPECT_EQ(counts.hostEventSynchronizeCount, 0u);
+
+    sourceOwner.release();
+    ASSERT_EQ(consumedEvents.size(), 1u);
+    EXPECT_TRUE(consumedEvents.front().usesBlockingSync());
+
+    capture.synchronize();
+    expectAllEqual(capture.readCapture(0), 5.0f);
+}
+
+TEST(NetworkInput, ManagedHostStagingSharesBlockingConsumptionEventWithProcessingDependency) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput managed-host synchronization-count test requires a GPU";
+    }
+
+    constexpr uint64_t batchSize = 3;
+    const RowPartitionDescriptor descriptor(batchSize, 8, DataType::UINT32, 4);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    ManagedHostTestNetworkInput input(
+        gpuPlacement, DataType::UINT32, descriptor.getOffsetsDescriptor().getDimensions());
+    RuntimeForwardedInputCaptureLayer capture;
+    input.connectToNextLayer(&capture);
+    input.preallocateInputSlots(1);
+    input.setActiveInputSlot(0);
+
+    resetSynchronizationOperationCountsForTests();
+    input.forwardManagedRowPartitionOffsets(
+        false, descriptor, static_cast<uint32_t>(batchSize), {0, 1, 3, 4});
+    const SynchronizationOperationCounts counts = synchronizationOperationCountsForTests();
+
+    EXPECT_EQ(counts.eventRecordCount, 2u);
+    EXPECT_EQ(counts.streamWaitEventCount, 2u);
+    EXPECT_EQ(counts.hostEventSynchronizeCount, 0u);
+    EXPECT_TRUE(input.managedHostConsumedEventUsesBlockingSync(0));
+
+    capture.synchronize();
+}
+#endif
 
 TEST(NetworkInput, DirectSourceIsConsumedBeforeDownstreamProcessingCompletes) {
     if (MachineEvaluator::instance().getNumGpus() == 0) {

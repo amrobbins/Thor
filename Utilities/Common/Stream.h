@@ -37,14 +37,12 @@ class Stream {
    public:
     Stream() = default;
 
-    enum class Priority { HIGH = 3, REGULAR = 4, LOW = 5 };
-
-    explicit Stream(int gpuNum, Priority priority = Priority::REGULAR);
+    explicit Stream(int gpuNum);
 
     Stream(const Stream &other) = default;
     Stream(Stream &&other) noexcept = default;
 
-    explicit Stream(ThorImplementation::TensorPlacement placement, Priority priority = Priority::REGULAR);
+    explicit Stream(ThorImplementation::TensorPlacement placement);
 
     Stream &operator=(const Stream &other) = default;
     Stream &operator=(Stream &&other) noexcept = default;
@@ -141,7 +139,7 @@ class Stream {
     static void CUDART_CB hostFunctionTrampoline(void *rawArgs) noexcept;
     void rethrowHostFunctionFailure() const;
 
-    void construct(int gpuNum, Priority priority);
+    void construct(int gpuNum);
     bool uninitialized() const { return state == nullptr; }
 
    private:

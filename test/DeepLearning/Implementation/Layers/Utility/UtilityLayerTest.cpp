@@ -2133,3 +2133,33 @@ TEST(FiniteCheck, RaggedForwardAndBackwardIgnoreUndefinedInactiveCapacity) {
     finiteCheck->cleanup();
     valuesProducer.cleanup();
 }
+
+TEST(NetworkOutput, ClassifiesWhetherReadyEventEscapesProcessingStreamBarrier) {
+    if (MachineEvaluator::instance().getNumGpus() < 1)
+        GTEST_SKIP() << "NetworkOutput stream classification test requires a GPU";
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    Tensor sourceGpu(gpuPlacement, TensorDescriptor(DataType::FP32, {2, 2}));
+
+    {
+        auto input = make_shared<NetworkInput>(sourceGpu);
+        auto output = make_shared<NetworkOutput>(gpuPlacement);
+        vector<shared_ptr<Layer>> layers{input, output};
+        LayerTestHelper::connectAndInitializeNetwork(layers);
+        std::optional<Stream> readyStream = output->getIndependentOutputReadyEventStream();
+        EXPECT_FALSE(readyStream.has_value());
+        LayerTestHelper::tearDownNetwork(layers);
+    }
+
+    {
+        auto input = make_shared<NetworkInput>(sourceGpu);
+        auto output = make_shared<NetworkOutput>(cpuPlacement);
+        vector<shared_ptr<Layer>> layers{input, output};
+        LayerTestHelper::connectAndInitializeNetwork(layers);
+        std::optional<Stream> readyStream = output->getIndependentOutputReadyEventStream();
+        ASSERT_TRUE(readyStream.has_value());
+        EXPECT_FALSE(readyStream.value() == output->getStream());
+        LayerTestHelper::tearDownNetwork(layers);
+    }
+}

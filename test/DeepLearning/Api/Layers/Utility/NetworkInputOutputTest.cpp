@@ -5,6 +5,8 @@
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
+#include "Utilities/Common/SynchronizationDiagnostics.h"
+#include "Utilities/ComputeTopology/MachineEvaluator.h"
 
 #include "gtest/gtest.h"
 
@@ -363,3 +365,74 @@ TEST(UtilityApiLayers, NetworkOutputMaterializesWhenOutputPlacementDiffersFromIn
     EXPECT_NE(stampedOutput->getFeatureInput().value().getMemPtr<void>(), stampedOutput->getFeatureOutputForSlot(0).value().getMemPtr<void>());
     EXPECT_EQ(stampedOutput->getFeatureOutput().value().getPlacement().getMemDevice(), ThorImplementation::TensorPlacement::MemDevices::CPU);
 }
+
+#ifdef THOR_DEBUG
+TEST(UtilityApiLayers, ProcessingFinishedSkipsSamePlacementOutputReadyWaitButKeepsOffloadWait) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "NetworkOutput synchronization counter test requires a GPU";
+
+    auto submitAndCountWaits = [](bool networkOutputsOnGpu) -> uint64_t {
+        Network network(networkOutputsOnGpu ? "samePlacementOutputWaitElision" : "offloadOutputWaitPreserved");
+        constexpr uint32_t batchSize = 2;
+
+        NetworkInput input = NetworkInput::Builder()
+                                 .network(network)
+                                 .name("input")
+                                 .dimensions({3})
+                                 .dataType(DataType::FP32)
+                                 .build();
+        NetworkOutput::Builder()
+            .network(network)
+            .name("output")
+            .inputTensor(input.getFeatureOutput().value())
+            .dataType(DataType::FP32)
+            .build();
+
+        vector<Event> initDoneEvents;
+        shared_ptr<PlacedNetwork> placedNetwork = network.place(batchSize,
+                                                                initDoneEvents,
+                                                                /*inferenceOnly=*/true,
+                                                                /*forcedDevices=*/{0},
+                                                                /*forcedNumStampsPerGpu=*/1,
+                                                                networkOutputsOnGpu);
+        THOR_THROW_IF_FALSE(placedNetwork != nullptr);
+        for (Event& event : initDoneEvents)
+            event.synchronize();
+
+        ThorImplementation::TensorPlacement gpuPlacement(
+            ThorImplementation::TensorPlacement::MemDevices::GPU, 0);
+        placedNetwork->configureBatchInputPlacements({{"input", gpuPlacement}});
+        placedNetwork->synchronize();
+
+        ThorImplementation::Tensor inputGpu(
+            gpuPlacement,
+            ThorImplementation::TensorDescriptor(DataType::FP32, {batchSize, 3}));
+        map<string, ThorImplementation::Tensor> batchInputs{{"input", inputGpu}};
+        map<string, ThorImplementation::Tensor> batchOutputs;
+        map<string, Event> outputReadyEvents;
+
+        ThorImplementation::resetSynchronizationOperationCountsForTests();
+        Event processingFinished = placedNetwork->submitBatch(
+            0,
+            std::move(batchInputs),
+            batchOutputs,
+            outputReadyEvents,
+            /*isInferenceOnly=*/true,
+            /*reusableProcessingFinishedEvent=*/nullptr,
+            /*waitForOutputsOnProcessingStream=*/true,
+            /*submitTiming=*/nullptr,
+            /*outputSlotIndex=*/0);
+        const ThorImplementation::SynchronizationOperationCounts counts =
+            ThorImplementation::synchronizationOperationCountsForTests();
+
+        processingFinished.synchronize();
+        outputReadyEvents.at("output").synchronize();
+        return counts.streamWaitEventCount;
+    };
+
+    EXPECT_EQ(submitAndCountWaits(/*networkOutputsOnGpu=*/true), 0u)
+        << "same-placement outputReadyEvent is already dominated by the processing-stream barrier";
+    EXPECT_EQ(submitAndCountWaits(/*networkOutputsOnGpu=*/false), 2u)
+        << "GPU->CPU output still needs the offload stream's buffer-ready wait plus the canonical output-ready wait";
+}
+#endif

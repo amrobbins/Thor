@@ -1,6 +1,8 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
+#include "DeepLearning/Implementation/Layers/DistinctProducerStreamJoin.h"
+#include "DeepLearning/Implementation/Layers/DistinctTargetStreamFanout.h"
 #include "Utilities/TensorOperations/Einsum/Einsum.h"
 #include "Utilities/TensorOperations/Einsum/EinsumBackwardPlanner.h"
 #include "Utilities/TensorOperations/Einsum/EinsumParser.h"
@@ -174,20 +176,15 @@ class EinsumLayer : public MultiConnectionLayer {
         stillWaitingForFeatureInputTensorIds = allFeatureInputTensorIds;
 
         // Each producer reaches this method only after its own stream has
-        // enqueued the tensor-producing work.  Join every distinct producer
+        // enqueued the tensor-producing work. Join every distinct producer
         // stream onto the canonical einsum stream before launching the stamped
-        // Expression DAG.
-        std::set<uint64_t> joinedStreamIds;
-        joinedStreamIds.insert(streams[0].getId());
-        for (size_t i = 1; i < streams.size(); ++i) {
-            if (!streams[i].isInitialized()) {
-                continue;
-            }
-            if (!joinedStreamIds.insert(streams[i].getId()).second) {
-                continue;
-            }
-            streams[0].waitFor(streams[i], forwardInputReadyEvents[i]);
-        }
+        // Expression DAG. Physical stream aliases share one dependency edge.
+        ThorImplementation::detail::waitForDistinctProducerStreams(
+            streams[0],
+            streams.size(),
+            [this](std::size_t i) { return streams[i].isInitialized(); },
+            [this](std::size_t i) -> const Stream& { return streams[i]; },
+            [this](std::size_t i) -> Event& { return forwardInputReadyEvents[i]; });
 
         Stream runStream = streams[0];
         stampedForward->runOn(runStream);
@@ -216,9 +213,12 @@ class EinsumLayer : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(resolvedBatchSize >= 1);
         THOR_THROW_IF_FALSE(resolvedBatchSize <= capacity);
 
-        streams[0].putEvent(backwardErrorReadyEvent);
-        std::set<uint64_t> streamsWaitingOnError;
-        streamsWaitingOnError.insert(streams[0].getId());
+        ThorImplementation::detail::recordCompletionAndWaitOnDistinctTargetStreams(
+            streams[0],
+            backwardErrorReadyEvent,
+            expectedNumInputs,
+            [this](std::size_t i) { return errorOutputs[i].has_value(); },
+            [this](std::size_t i) -> const Stream& { return streams[i]; });
 
         for (uint32_t operandIndex = 0; operandIndex < expectedNumInputs; ++operandIndex) {
             if (!errorOutputs[operandIndex].has_value()) {
@@ -229,10 +229,6 @@ class EinsumLayer : public MultiConnectionLayer {
             THOR_THROW_IF_FALSE(execution.contraction != nullptr);
 
             Stream& runStream = streams[operandIndex];
-            if (streamsWaitingOnError.insert(runStream.getId()).second) {
-                runStream.waitEvent(backwardErrorReadyEvent);
-            }
-
             execution.contraction->runOn(runStream);
             if (execution.postprocess != nullptr) {
                 execution.postprocess->runOn(runStream);

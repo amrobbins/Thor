@@ -162,7 +162,7 @@ Tensor CustomLoss::inferExpressionTensor(const ThorImplementation::DynamicExpres
                                           ThorImplementation::TensorDescriptor(ThorImplementation::DataType::FP32, maskDimensions)));
     }
 
-    Stream fakeStream(0, Stream::Priority::REGULAR);
+    Stream fakeStream(0);
     ThorImplementation::DynamicExpressionBuild build = expression.build(fakeInputs, {}, fakeStream);
 
     const std::set<std::string> actualOutputNames = toNameSet(build.equation->getOutputNames());

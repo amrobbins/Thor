@@ -5,7 +5,6 @@
 #include "DeepLearning/Implementation/Layers/DistinctTargetStreamFanout.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
-#include "Utilities/Common/HostFunctionArgs.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/TensorOperations/Ragged/RaggedSequenceConcatenate.h"
@@ -13,7 +12,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <memory>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -139,6 +137,32 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&valueInputPointers_d), valueInputCount * sizeof(void *)));
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&valueGradientPointers_d), valueInputCount * sizeof(void *)));
 
+        // Forward value-input and backward gradient destinations are immutable
+        // while this compiled path remains executable. Post-compile loss-root
+        // pruning can only remove the entire backward path; it cannot replace one
+        // live gradient destination with another. Upload both pointer tables once.
+        std::vector<void *> valueInputPointers(valueInputCount);
+        std::vector<void *> valueGradientPointers(valueInputCount, nullptr);
+        for (uint32_t i = 0; i < valueInputCount; ++i) {
+            THOR_THROW_IF_FALSE(featureInputs[i].has_value());
+            valueInputPointers[i] = featureInputs[i]->getMemPtr();
+            if (errorOutputs[i].has_value()) valueGradientPointers[i] = errorOutputs[i]->getMemPtr();
+        }
+        CUDA_CHECK(cudaMemcpyAsync(valueInputPointers_d,
+                                   valueInputPointers.data(),
+                                   valueInputCount * sizeof(void *),
+                                   cudaMemcpyHostToDevice,
+                                   streams[0].getStream()));
+        CUDA_CHECK(cudaMemcpyAsync(valueGradientPointers_d,
+                                   valueGradientPointers.data(),
+                                   valueInputCount * sizeof(void *),
+                                   cudaMemcpyHostToDevice,
+                                   streams[0].getStream()));
+        // The host vectors are ordinary storage; compilation is a one-time
+        // boundary, so wait here rather than retaining them with a steady-state
+        // cudaLaunchHostFunc cleanup callback.
+        streams[0].synchronize();
+
         const uint64_t batchSize = outputDescriptor.getBatchSize();
         if (batchSize > std::numeric_limits<uint64_t>::max() / valueInputCount) {
             throw std::invalid_argument("RaggedSequenceConcatenate maximum copy-span count overflow.");
@@ -192,7 +216,6 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         copyPlanUploadInFlight = false;
         copyPlanUploadCompleteEvent = Event();
         for (Event &event : forwardInputReadyEvents) event = Event();
-        outputsReadyEvent = Event();
         backwardOutputsReadyEvent = Event();
         MultiConnectionLayer::cleanup();
     }
@@ -222,7 +245,6 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         stillWaitingForFeatureInputTensors = allFeatureInputTensorIds;
 
         detail::waitForDistinctProducerStreams(streams[0], streams, forwardInputReadyEvents, 1);
-        refreshPointerTables(streams[0]);
 
         const TensorDescriptor valuesDescriptor = outputDescriptor.getValuesDescriptor();
         uint64_t elementsPerValue = 1;
@@ -249,7 +271,6 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
                                         stagedActiveOutputValues,
                                         streams[0]);
 
-        streams[0].putEvent(outputsReadyEvent);
         if (nextLayers[0].has_value())
             nextLayers[0].value()->forward(featureOutputs[0], validationPass, currentValidExampleCount);
         currentValidExampleCount = 0;
@@ -274,9 +295,8 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         const std::vector<uint64_t> &dimensions = valuesDescriptor.getDimensions();
         for (uint32_t d = 1; d < dimensions.size(); ++d) elementsPerValue *= dimensions[d];
 
-        // Reuse the exact forward copy plan. Refresh only the gradient pointer
-        // table so late graph pruning/fusion cannot leave stale destinations.
-        refreshGradientPointerTable(streams[0]);
+        // Reuse the exact forward copy plan and the compile-time gradient
+        // destination table.
         THOR_THROW_IF_FALSE(copyPlanStaged);
         THOR_THROW_IF_FALSE(stagedValidExampleCount == resolvedValidExampleCount);
         RowPartitionRuntime outputPartition = RowPartitionRuntime::fromHostStateCarrier(
@@ -293,8 +313,7 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
                                                 stagedActiveOutputValues,
                                                 streams[0]);
 
-        streams[0].putEvent(backwardOutputsReadyEvent);
-        ThorImplementation::detail::waitOnDistinctTargetStreams(
+        ThorImplementation::detail::recordCompletionAndWaitOnDistinctTargetStreams(
             streams[0],
             backwardOutputsReadyEvent,
             valueInputCount,
@@ -456,12 +475,6 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         return activeValues * bytesPerValue;
     }
 
-    struct PointerRefreshArgs : public HostFunctionArgsBase {
-        std::vector<void *> valuePointers;
-        std::vector<void *> gradientPointers;
-    };
-    static void releasePointerRefresh(void *) {}
-
     void prepareBatchCopyPlanHostStorageForWrite() {
         THOR_THROW_IF_FALSE(copySpans_d != nullptr && copySpans_h != nullptr);
         ScopedGpu scopedGpu(featureInputs[0]->getPlacement().getDeviceNum());
@@ -521,34 +534,6 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         }
     }
 
-    void refreshPointerTables(Stream stream) {
-        auto args = std::make_unique<PointerRefreshArgs>();
-        args->valuePointers.resize(valueInputCount);
-        for (uint32_t i = 0; i < valueInputCount; ++i) {
-            args->valuePointers[i] = featureInputs[i]->getMemPtr();
-        }
-        CUDA_CHECK(cudaMemcpyAsync(valueInputPointers_d,
-                                   args->valuePointers.data(),
-                                   valueInputCount * sizeof(void *),
-                                   cudaMemcpyHostToDevice,
-                                   stream.getStream()));
-        stream.enqueueHostFunction(&releasePointerRefresh, std::move(args));
-    }
-
-    void refreshGradientPointerTable(Stream stream) {
-        auto args = std::make_unique<PointerRefreshArgs>();
-        args->gradientPointers.resize(valueInputCount, nullptr);
-        for (uint32_t i = 0; i < valueInputCount; ++i) {
-            if (errorOutputs[i].has_value()) args->gradientPointers[i] = errorOutputs[i]->getMemPtr();
-        }
-        CUDA_CHECK(cudaMemcpyAsync(valueGradientPointers_d,
-                                   args->gradientPointers.data(),
-                                   valueInputCount * sizeof(void *),
-                                   cudaMemcpyHostToDevice,
-                                   stream.getStream()));
-        stream.enqueueHostFunction(&releasePointerRefresh, std::move(args));
-    }
-
     void pruneUpstreamValueGradients() {
         for (uint32_t i = 0; i < valueInputCount; ++i) {
             if (!errorOutputs[i].has_value()) continue;
@@ -579,7 +564,6 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
     std::set<uint64_t> allFeatureInputTensorIds;
     std::set<uint64_t> stillWaitingForFeatureInputTensors;
     std::vector<Event> forwardInputReadyEvents;
-    Event outputsReadyEvent;
     Event backwardOutputsReadyEvent;
     uint32_t currentValidExampleCount = 0;
     bool batchCardinalitySet = false;

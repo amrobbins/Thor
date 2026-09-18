@@ -622,7 +622,7 @@ CustomLayer::SerializationProbe CustomLayer::buildExpressionForBatch(const Tenso
         }
     }
 
-    Stream fakeStream(0, Stream::Priority::REGULAR);
+    Stream fakeStream(0);
     ThorImplementation::DynamicExpressionBuild build = expr.build(fakeAllInputs, fakeOutputs, fakeStream);
     return SerializationProbe{std::move(build), std::move(fakeAllInputs), std::move(fakeOutputs)};
 }

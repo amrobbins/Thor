@@ -171,6 +171,11 @@ class Concatenate : public MultiConnectionLayer {
                                    cudaMemcpyHostToDevice,
                                    streams[0].getStream()));
 
+        // Feature-input connections cannot change after compilation, and Tensor
+        // handles retain their backing allocation for their lifetime. Therefore
+        // this device pointer table is immutable for the runnable layer and does
+        // not need a per-batch H2D refresh or host-lifetime callback.
+
         if (errorInputs[0].has_value()) {
             // Backpropagation through Concatenate may be intentionally sparse:
             // missing upstream destinations are backed by throwaway tensors so
@@ -263,8 +268,7 @@ class Concatenate : public MultiConnectionLayer {
                         streams[0]);
         }
 
-        streams[0].putEvent(backwardOutputsReadyEvent);
-        ThorImplementation::detail::waitOnDistinctTargetStreams(
+        ThorImplementation::detail::recordCompletionAndWaitOnDistinctTargetStreams(
             streams[0],
             backwardOutputsReadyEvent,
             streams,
@@ -307,8 +311,6 @@ class Concatenate : public MultiConnectionLayer {
         stillWaitingForFeatureInputTensors = allFeatureInputTensorIds;
 
         detail::waitForDistinctProducerStreams(streams[0], streams, forwardInputReadyEvents, 1);
-
-        refreshFeatureInputMemoryArray(streams[0]);
 
         const uint64_t activeOuterSlices =
             axis == 0 ? 1 : checkedMultiply(currentValidExampleCount, outerSlicesPerBatch,
@@ -466,31 +468,6 @@ class Concatenate : public MultiConnectionLayer {
         if (!getName().empty())
             out << " name='" << getName() << '\'';
         return out.str();
-    }
-
-    struct FeatureInputMemoryArrayRefreshArgs : public HostFunctionArgsBase {
-        std::vector<void *> splitTensorFeatureInputMemories;
-    };
-
-    static void releaseFeatureInputMemoryArrayRefresh(void *) {}
-
-    void refreshFeatureInputMemoryArray(Stream stream) {
-        THOR_THROW_IF_FALSE(splitTensorFeatureInputMemoriesArray_d != nullptr);
-
-        const int numSplitTensors = featureInputs.size();
-        auto refreshArgs = std::make_unique<FeatureInputMemoryArrayRefreshArgs>();
-        refreshArgs->splitTensorFeatureInputMemories.resize(numSplitTensors);
-        for (int i = 0; i < numSplitTensors; ++i) {
-            THOR_THROW_IF_FALSE(featureInputs[i].has_value());
-            refreshArgs->splitTensorFeatureInputMemories[i] = featureInputs[i].value().getMemPtr();
-        }
-
-        CUDA_CHECK(cudaMemcpyAsync(splitTensorFeatureInputMemoriesArray_d,
-                                   refreshArgs->splitTensorFeatureInputMemories.data(),
-                                   numSplitTensors * sizeof(void *),
-                                   cudaMemcpyHostToDevice,
-                                   stream));
-        stream.enqueueHostFunction(&releaseFeatureInputMemoryArrayRefresh, std::move(refreshArgs));
     }
 
     static uint64_t checkedMultiply(uint64_t lhs, uint64_t rhs, const char *what) {
