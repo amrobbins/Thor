@@ -46,6 +46,25 @@ struct ExactReductionCase {
     CubReductionPath expected_production_path;
 };
 
+struct ArgCensusCase {
+    const char* family;
+    const char* name;
+    std::vector<uint64_t> dimensions;
+    std::vector<uint32_t> axes;
+    CubReductionPath expected_production_path;
+    bool benchmark_composed_dense = false;
+};
+
+struct ViewCensusCase {
+    const char* family;
+    const char* name;
+    std::vector<uint64_t> dimensions;
+    std::vector<uint64_t> strides;
+    std::vector<uint32_t> axes;
+    CubReductionPath expected_production_path;
+    bool expect_dense_physical_permutation = false;
+};
+
 struct ExactTiming {
     double best_ms = 0.0;
     double median_ms = 0.0;
@@ -56,6 +75,8 @@ struct BenchmarkOptions {
     bool focused_arg_x4 = false;
     bool focused_arg_x4_awkward = false;
     bool reduction_census = false;
+    bool arg_census = false;
+    bool view_census = false;
     bool dense_run_stage_census = false;
     bool dense_stage_cost_calibration = false;
     bool list_reduction_candidates = false;
@@ -129,6 +150,39 @@ std::string formatAxes(const std::vector<uint32_t>& axes) {
         formatted += std::to_string(axes[i]);
     }
     return formatted;
+}
+
+std::string formatStrides(const std::vector<uint64_t>& strides) {
+    std::string formatted;
+    for (size_t i = 0; i < strides.size(); ++i) {
+        if (i != 0) {
+            formatted.push_back(';');
+        }
+        formatted += std::to_string(strides[i]);
+    }
+    return formatted;
+}
+
+uint64_t viewStorageSpanElements(const std::vector<uint64_t>& dimensions,
+                                 const std::vector<uint64_t>& strides) {
+    if (dimensions.size() != strides.size() || dimensions.empty()) {
+        throw std::invalid_argument("View census requires equal non-empty dimension/stride ranks.");
+    }
+    uint64_t max_offset = 0;
+    for (size_t axis = 0; axis < dimensions.size(); ++axis) {
+        if (dimensions[axis] == 0) {
+            throw std::invalid_argument("View census does not support zero-sized dimensions.");
+        }
+        const uint64_t contribution = checkedMultiply(dimensions[axis] - 1, strides[axis], "view storage span");
+        if (max_offset > std::numeric_limits<uint64_t>::max() - contribution) {
+            throw std::overflow_error("View census storage span overflowed uint64_t.");
+        }
+        max_offset += contribution;
+    }
+    if (max_offset == std::numeric_limits<uint64_t>::max()) {
+        throw std::overflow_error("View census storage span overflowed uint64_t.");
+    }
+    return max_offset + 1;
 }
 
 const char* dataTypeName(DataType dtype) {
@@ -316,46 +370,121 @@ std::string strategyName(const StampedCubReduction& reduction) {
     return pathName(reduction.getPath());
 }
 
-const char* tiledArgStrategyName(uint64_t inner_size) {
-    if (inner_size == 64) {
-        return "vector_direct_x2";
-    }
-    if (inner_size == 128) {
-        return "vector_direct_x4";
-    }
-    if (inner_size == 256) {
-        return "vector_direct_group2_x4";
-    }
-    if (inner_size == 512) {
-        return "vector_direct_group4_x4";
-    }
-    if (inner_size == 1024) {
-        return "vector_direct_group8_x4";
-    }
-    if (inner_size > 1024 && inner_size % 1024 == 0) {
-        return "vector_direct_block_shards_x4";
-    }
-    if (inner_size > 4096) {
-        return "alignment_safe_vectorized_block_shards_x4";
-    }
-    if (inner_size <= 2) {
-        return "direct_tiled_row_lanes16";
-    }
-    if (inner_size <= 4) {
-        return "direct_tiled_row_lanes8";
-    }
-    if (inner_size <= 8) {
-        return "direct_tiled_row_lanes4";
+std::string tiledArgStrategyName(uint64_t outer_size,
+                                 uint64_t inner_size,
+                                 uint64_t reduction_size,
+                                 DataType input_dtype,
+                                 bool has_carried_index = false) {
+    (void)outer_size;
+    if (reduction_size > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+        return "legacy_uint64_tiled";
     }
     if (inner_size <= 16) {
-        return "direct_tiled_row_lanes2";
+        int row_lanes = 1;
+        if (inner_size <= 2) {
+            row_lanes = 16;
+        } else if (inner_size <= 4) {
+            row_lanes = 8;
+        } else if (inner_size <= 8) {
+            row_lanes = 4;
+        } else if (inner_size <= 16) {
+            row_lanes = 2;
+        }
+        return "aligned_async_narrow_shared_rl" + std::to_string(row_lanes) + "_ordered_direct";
     }
-    return "direct_tiled_row_lanes1";
+    if (inner_size <= 32) {
+        if (!has_carried_index) {
+            return "aligned_async_narrow_cta2_shared_ordered_direct";
+        }
+        return "aligned_async_narrow_shared_rl1_carried";
+    }
+
+    const uint64_t element_bytes = static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(input_dtype));
+    if (element_bytes == 1) {
+        return "legacy_fp8_tiled";
+    }
+
+    const uint64_t items_per_lane = 16 / element_bytes;
+    int target_partitions = 1;
+    while (target_partitions < 32 && static_cast<uint64_t>(target_partitions * 16) < reduction_size) {
+        target_partitions <<= 1;
+    }
+
+    auto period_for_bytes = [&](uint64_t element_size) {
+        int period = 1;
+        const uint64_t row_bytes = inner_size * element_size;
+        while (period < 16 && (row_bytes * static_cast<uint64_t>(period)) % 16 != 0) {
+            period <<= 1;
+        }
+        return period;
+    };
+    int alignment_period = period_for_bytes(element_bytes);
+    if (has_carried_index) {
+        alignment_period = std::max(alignment_period, period_for_bytes(4));
+    }
+    const int row_partitions = std::max(target_partitions, alignment_period);
+
+    // Match ARG-DIRECT-7: incomplete packets are edge work and must not promote the bulk packet geometry.
+    const uint64_t complete_packets = inner_size / items_per_lane;
+    int desired_group_threads = 8;
+    while (desired_group_threads < 32
+           && static_cast<uint64_t>(desired_group_threads << 1) <= complete_packets) {
+        desired_group_threads <<= 1;
+    }
+    const int max_group_threads = std::min(32, 256 / row_partitions);
+    const int group_threads = std::min(desired_group_threads, max_group_threads);
+
+    const uint64_t tile_components = static_cast<uint64_t>(group_threads) * items_per_lane;
+    const uint64_t full_tiles = inner_size / tile_components;
+    const uint64_t remainder = inner_size % tile_components;
+    const bool fold_small_tail = full_tiles != 0 && remainder != 0 && remainder <= items_per_lane;
+    const bool value_rows_aligned = (inner_size * element_bytes) % 16 == 0;
+    const bool carried_rows_aligned = !has_carried_index || (inner_size * uint64_t{4}) % 16 == 0;
+    const bool simple_aligned_full_tiles = value_rows_aligned && carried_rows_aligned && remainder == 0;
+    return "logical_group" + std::to_string(group_threads) + "_shared_rp" + std::to_string(row_partitions)
+           + "_x" + std::to_string(items_per_lane) + "_16B_b"
+           + std::to_string(row_partitions * group_threads)
+           + (simple_aligned_full_tiles ? "_simple_aligned_full_tiles" : "_head_bulk_tail")
+           + (alignment_period > 1 ? "_stride_phase" + std::to_string(alignment_period) : "_aligned_stride")
+           + (!simple_aligned_full_tiles
+                  ? (fold_small_tail ? "_folded_tail" : (remainder != 0 ? "_tail_tile" : ""))
+                  : "");
 }
 
-const char* strategyName(const StampedCubArgReduction& reduction) {
+std::string contiguousArgStrategyName(DataType input_dtype, uint64_t reduction_size) {
+    if (reduction_size > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+        return "contiguous_segment_uint64_cub";
+    }
+    const uint64_t element_bytes = static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(input_dtype));
+    const uint64_t items_per_lane = 16 / element_bytes;
+    const uint64_t packets = reduction_size / items_per_lane;
+    int group_threads = element_bytes == 1 ? 32 : 1;
+    while (group_threads < 32 && static_cast<uint64_t>(group_threads) < packets) {
+        group_threads <<= 1;
+    }
+    int alignment_period = 1;
+    const uint64_t segment_bytes = reduction_size * element_bytes;
+    while (alignment_period < 16
+           && (segment_bytes * static_cast<uint64_t>(alignment_period)) % 16 != 0) {
+        alignment_period <<= 1;
+    }
+    return "grouped_contiguous_shared_g" + std::to_string(group_threads) + "_x"
+           + std::to_string(items_per_lane) + "_16B_phase" + std::to_string(alignment_period);
+}
+
+std::string strategyName(const StampedCubArgReduction& reduction) {
     if (reduction.getPath() == CubReductionPath::TiledFixedSegment) {
-        return tiledArgStrategyName(reduction.getGeometry().inner_size);
+        return tiledArgStrategyName(reduction.getGeometry().outer_size,
+                                    reduction.getGeometry().inner_size,
+                                    reduction.getGeometry().reduction_size,
+                                    reduction.getInputDataType());
+    }
+    if (reduction.getPath() == CubReductionPath::ContiguousFixedSegment) {
+        return contiguousArgStrategyName(reduction.getInputDataType(), reduction.getGeometry().reduction_size);
+    }
+    if (reduction.getPath() == CubReductionPath::DeviceTransformReduce
+        && reduction.getGeometry().input_elements <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+        return "device_transform_compact_u32_cub";
     }
     return pathName(reduction.getPath());
 }
@@ -1086,6 +1215,587 @@ const ReductionCandidate* findReductionCandidate(std::string_view name) {
     return nullptr;
 }
 
+std::string formatArgStageOrder(const CubArgReductionDenseCompositionPlan& plan) {
+    std::string formatted;
+    if (plan.topology.stages.empty()) {
+        return formatted;
+    }
+
+    uint32_t left = 0;
+    uint32_t right = static_cast<uint32_t>(plan.topology.stages.size() - 1);
+    for (size_t stage_index = 0; stage_index < plan.topology.stages.size(); ++stage_index) {
+        if (stage_index != 0) {
+            formatted.push_back('>');
+        }
+        const uint32_t ordinal = plan.topology.stages[stage_index].reduced_run_ordinal;
+        if (ordinal == left) {
+            formatted.push_back('L');
+            ++left;
+        } else if (ordinal == right) {
+            formatted.push_back('R');
+            if (right != 0) {
+                --right;
+            }
+        } else {
+            formatted.push_back('X');
+            formatted += std::to_string(ordinal);
+        }
+    }
+    return formatted;
+}
+
+std::string formatArgStageAxes(const CubArgReductionDenseCompositionPlan& plan) {
+    std::string formatted;
+    for (size_t stage_index = 0; stage_index < plan.topology.stages.size(); ++stage_index) {
+        if (stage_index != 0) {
+            formatted.push_back('>');
+        }
+        const std::vector<uint32_t>& axes = plan.topology.stages[stage_index].reduction_axes;
+        for (size_t axis_index = 0; axis_index < axes.size(); ++axis_index) {
+            if (axis_index != 0) {
+                formatted.push_back('+');
+            }
+            formatted += std::to_string(axes[axis_index]);
+        }
+    }
+    return formatted;
+}
+
+std::string formatArgStagePaths(const CubArgReductionDenseCompositionPlan& plan) {
+    std::string formatted;
+    for (size_t stage_index = 0; stage_index < plan.topology.stages.size(); ++stage_index) {
+        if (stage_index != 0) {
+            formatted.push_back('>');
+        }
+        formatted += pathName(plan.topology.stages[stage_index].expected_path);
+    }
+    return formatted;
+}
+
+std::string formatArgStageStrategies(const CubArgReductionDenseCompositionPlan& plan, DataType original_input_dtype) {
+    std::string formatted;
+    for (size_t stage_index = 0; stage_index < plan.topology.stages.size(); ++stage_index) {
+        if (stage_index != 0) {
+            formatted.push_back('>');
+        }
+        const CubReductionDenseCompositionStage& stage = plan.topology.stages[stage_index];
+        const DataType stage_input_dtype = stage_index == 0 ? original_input_dtype : DataType::FP32;
+        if (stage.expected_path == CubReductionPath::TiledFixedSegment) {
+            formatted += tiledArgStrategyName(stage.outer_size,
+                                               stage.inner_size,
+                                               stage.stage_reduction_size,
+                                               stage_input_dtype,
+                                               stage_index != 0);
+        } else if (stage.expected_path == CubReductionPath::ContiguousFixedSegment) {
+            formatted += contiguousArgStrategyName(stage_input_dtype, stage.stage_reduction_size);
+        } else {
+            formatted += pathName(stage.expected_path);
+        }
+    }
+    return formatted;
+}
+
+std::string argProductionAccumulatorIndexBits(const StampedCubArgReduction& reduction) {
+    switch (reduction.getPath()) {
+        case CubReductionPath::TiledFixedSegment:
+            return reduction.getGeometry().reduction_size <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())
+                       ? "32"
+                       : "64";
+        case CubReductionPath::DeviceTransformReduce:
+            return reduction.getGeometry().input_elements <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())
+                       ? "32"
+                       : "64";
+        case CubReductionPath::ContiguousFixedSegment:
+            return reduction.getGeometry().reduction_size <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())
+                       ? "32"
+                       : "64";
+        case CubReductionPath::StridedFixedSegment:
+            // The irregular logical-index fallback still carries the legacy uint64_t candidate index.
+            return "64";
+        case CubReductionPath::OffsetSegmented:
+        case CubReductionPath::ComposedDense:
+            return "n/a";
+    }
+    return "n/a";
+}
+
+std::vector<std::vector<uint32_t>> enumerateArgEndEliminationRunOrders(uint32_t reduced_run_count) {
+    if (reduced_run_count == 0) {
+        return {};
+    }
+    if (reduced_run_count >= 64) {
+        throw std::invalid_argument("ARG run-order census supports at most 63 reduced runs.");
+    }
+
+    const uint64_t decision_count = uint64_t{1} << (reduced_run_count - 1);
+    std::vector<std::vector<uint32_t>> orders;
+    orders.reserve(static_cast<size_t>(decision_count));
+    for (uint64_t decisions = 0; decisions < decision_count; ++decisions) {
+        uint32_t left = 0;
+        uint32_t right = reduced_run_count - 1;
+        std::vector<uint32_t> order;
+        order.reserve(reduced_run_count);
+        for (uint32_t step = 0; step + 1 < reduced_run_count; ++step) {
+            const bool choose_right = ((decisions >> step) & uint64_t{1}) != 0;
+            if (choose_right) {
+                order.push_back(right--);
+            } else {
+                order.push_back(left++);
+            }
+        }
+        THOR_THROW_IF_FALSE(left == right);
+        order.push_back(left);
+        orders.push_back(std::move(order));
+    }
+    return orders;
+}
+
+uint64_t argComposedIntermediateBytes(const CubArgReductionDenseCompositionPlan& plan) {
+    if (plan.topology.stages.size() <= 1) {
+        return 0;
+    }
+    const uint64_t index_bytes =
+        static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(plan.carried_index_dtype));
+    const uint64_t bytes_per_candidate = sizeof(float) + index_bytes;
+    uint64_t total_bytes = 0;
+    for (size_t stage_index = 0; stage_index + 1 < plan.topology.stages.size(); ++stage_index) {
+        const uint64_t stage_bytes = checkedMultiply(plan.topology.stages[stage_index].output_elements,
+                                                     bytes_per_candidate,
+                                                     "ARG census intermediate bytes");
+        if (total_bytes > std::numeric_limits<uint64_t>::max() - stage_bytes) {
+            throw std::overflow_error("ARG census intermediate bytes overflowed uint64_t.");
+        }
+        total_bytes += stage_bytes;
+    }
+    return total_bytes;
+}
+
+void validateArgIndexOutputs(const ArgCensusCase& benchmark_case,
+                             CubArgReductionOp op,
+                             const StampedCubArgReduction& production,
+                             const StampedCubArgReduction& composed,
+                             Stream& stream) {
+    production.runOn(stream);
+    composed.runOn(stream);
+    stream.synchronize();
+
+    if (!production.getIndexOutputTensor().has_value() || !composed.getIndexOutputTensor().has_value()) {
+        throw std::logic_error("ARG census validation requires index-producing reductions.");
+    }
+    const Tensor& production_gpu = production.getIndexOutputTensor().value();
+    const Tensor& composed_gpu = composed.getIndexOutputTensor().value();
+    if (production_gpu.getDataType() != DataType::UINT32 || composed_gpu.getDataType() != DataType::UINT32
+        || production_gpu.getDimensions() != composed_gpu.getDimensions()) {
+        throw std::runtime_error(std::string("ARG census output descriptor mismatch for case '")
+                                 + benchmark_case.name + "'.");
+    }
+
+    TensorPlacement cpu_placement(TensorPlacement::MemDevices::CPU);
+    Tensor production_cpu(cpu_placement, production_gpu.getDescriptor());
+    Tensor composed_cpu(cpu_placement, composed_gpu.getDescriptor());
+    production_cpu.copyFromAsync(production_gpu, stream);
+    composed_cpu.copyFromAsync(composed_gpu, stream);
+    stream.synchronize();
+
+    const uint32_t* expected = production_cpu.getMemPtr<uint32_t>();
+    const uint32_t* actual = composed_cpu.getMemPtr<uint32_t>();
+    for (uint64_t i = 0; i < production_cpu.getTotalNumElements(); ++i) {
+        if (expected[i] != actual[i]) {
+            throw std::runtime_error(std::string("ARG census composed validation failed for case '")
+                                     + benchmark_case.name + "' operation " + operationName(op) + " at output "
+                                     + std::to_string(i) + ": production index " + std::to_string(expected[i])
+                                     + ", composed index " + std::to_string(actual[i]) + ".");
+        }
+    }
+}
+
+void printArgCensusResult(const ArgCensusCase& benchmark_case,
+                          DataType dtype,
+                          CubArgReductionOp op,
+                          std::string_view executor,
+                          std::string_view implementation,
+                          std::string_view strategy,
+                          std::string_view stage_order,
+                          std::string_view stage_axes,
+                          std::string_view stage_paths,
+                          std::string_view index_bits,
+                          size_t workspace_bytes,
+                          uint64_t intermediate_bytes,
+                          uint64_t input_bytes,
+                          uint64_t output_bytes,
+                          const ExactTiming& timing,
+                          double speedup_vs_production) {
+    const uint64_t logical_bytes = input_bytes + output_bytes;
+    const double logical_gb_per_second = static_cast<double>(logical_bytes) / (timing.median_ms * 1.0e6);
+    std::cout << executor << ',' << benchmark_case.family << ',' << benchmark_case.name << ','
+              << formatDimensions(benchmark_case.dimensions) << ',' << formatAxes(benchmark_case.axes) << ','
+              << dataTypeName(dtype) << ',' << operationName(op) << ',' << implementation << ',' << strategy << ','
+              << stage_order << ',' << stage_axes << ',' << stage_paths << ',' << index_bits << ',' << workspace_bytes << ','
+              << intermediate_bytes << ',' << input_bytes << ',' << output_bytes << ',' << std::fixed
+              << std::setprecision(4) << timing.median_ms << ',' << timing.best_ms << ',' << timing.worst_ms << ','
+              << std::setprecision(2) << logical_gb_per_second << ',' << std::setprecision(4)
+              << speedup_vs_production << ",ok\n";
+}
+
+void runArgCensusCase(const ArgCensusCase& benchmark_case,
+                      DataType dtype,
+                      CubArgReductionOp op,
+                      Tensor& cache_flush,
+                      Stream& stream,
+                      const TensorPlacement& gpu_placement) {
+    Tensor input(gpu_placement, TensorDescriptor(dtype, benchmark_case.dimensions));
+    input.fillRandom(-100.0, 100.0, stream);
+    stream.synchronize();
+
+    CubArgReductionOutputOptions outputs;
+    outputs.produce_value = false;
+    outputs.produce_index = true;
+    outputs.index_output_dtype = DataType::UINT32;
+    CubArgReduction reduction(op, benchmark_case.axes, outputs);
+    std::shared_ptr<StampedCubArgReduction> production = reduction.stamp(input, stream);
+    std::optional<CubArgReductionDenseCompositionPlan> production_plan;
+    if (production->getPath() == CubReductionPath::ComposedDense) {
+        production_plan = CubArgReduction::analyzeDenseCompositionPlanForExecution(
+            benchmark_case.dimensions, benchmark_case.axes, dtype, outputs, stream);
+        if (!production_plan.has_value()) {
+            throw std::runtime_error(std::string("ARG census production ComposedDense plan missing for case '")
+                                     + benchmark_case.name + "'.");
+        }
+    }
+    if (production->getPath() != benchmark_case.expected_production_path) {
+        throw std::runtime_error(std::string("ARG census path drift for case '") + benchmark_case.name
+                                 + "': expected " + pathName(benchmark_case.expected_production_path) + ", got "
+                                 + pathName(production->getPath()) + ". Update the census intentionally if production "
+                                   "selection changed.");
+    }
+
+    uint32_t forced_reduced_run_count = 0;
+    if (benchmark_case.benchmark_composed_dense) {
+        const std::optional<CubArgReductionDenseCompositionPlan> structural_plan =
+            CubArgReduction::analyzeDenseCompositionPlan(benchmark_case.dimensions, benchmark_case.axes);
+        if (!structural_plan.has_value()) {
+            throw std::runtime_error(std::string("ARG census expected a dense composition plan for case '")
+                                     + benchmark_case.name + "'.");
+        }
+        forced_reduced_run_count = static_cast<uint32_t>(structural_plan->topology.stages.size());
+    }
+
+    const ExactTiming production_timing =
+        timeExactReduction(cache_flush, stream, [&] { production->runOn(stream); });
+    const uint64_t production_output_bytes = production->getIndexOutputTensor()->getArraySizeInBytes();
+    const std::string production_index_bits = production_plan.has_value()
+                                                  ? (production_plan->carried_index_dtype == DataType::UINT32 ? "32" : "64")
+                                                  : argProductionAccumulatorIndexBits(*production);
+    const std::string production_strategy = production_plan.has_value()
+                                                ? formatArgStageStrategies(production_plan.value(), dtype)
+                                                : strategyName(*production);
+    const std::string production_stage_order = production_plan.has_value()
+                                                   ? formatArgStageOrder(production_plan.value())
+                                                   : "direct";
+    const std::string production_stage_axes = production_plan.has_value()
+                                                  ? formatArgStageAxes(production_plan.value())
+                                                  : formatAxes(benchmark_case.axes);
+    const std::string production_stage_paths = production_plan.has_value()
+                                                   ? formatArgStagePaths(production_plan.value())
+                                                   : pathName(production->getPath());
+    const uint64_t production_intermediate_bytes = production_plan.has_value()
+                                                       ? argComposedIntermediateBytes(production_plan.value())
+                                                       : 0;
+    printArgCensusResult(benchmark_case,
+                         dtype,
+                         op,
+                         "production",
+                         pathName(production->getPath()),
+                         production_strategy,
+                         production_stage_order,
+                         production_stage_axes,
+                         production_stage_paths,
+                         production_index_bits,
+                         production->getWorkspaceSizeInBytes(),
+                         production_intermediate_bytes,
+                         input.getArraySizeInBytes(),
+                         production_output_bytes,
+                         production_timing,
+                         1.0);
+
+    if (forced_reduced_run_count != 0) {
+        for (const std::vector<uint32_t>& run_order :
+             enumerateArgEndEliminationRunOrders(forced_reduced_run_count)) {
+            const std::optional<CubArgReductionDenseCompositionPlan> forced_plan =
+                CubArgReduction::analyzeDenseCompositionPlanForRunOrder(
+                    benchmark_case.dimensions, benchmark_case.axes, run_order);
+            if (!forced_plan.has_value()) {
+                throw std::runtime_error(std::string("ARG census could not stamp legal end-elimination order for case '")
+                                         + benchmark_case.name + "'.");
+            }
+            std::shared_ptr<StampedCubArgReduction> forced =
+                reduction.stampComposedDenseWithPlan(input, forced_plan.value(), stream);
+            if (forced->getPath() != CubReductionPath::ComposedDense) {
+                throw std::runtime_error(std::string("ARG census forced-order executor did not select ComposedDense for case '")
+                                         + benchmark_case.name + "'.");
+            }
+            validateArgIndexOutputs(benchmark_case, op, *production, *forced, stream);
+            const ExactTiming forced_timing =
+                timeExactReduction(cache_flush, stream, [&] { forced->runOn(stream); });
+            const uint64_t forced_output_bytes = forced->getIndexOutputTensor()->getArraySizeInBytes();
+            const double speedup = production_timing.median_ms / forced_timing.median_ms;
+            const CubArgReductionDenseCompositionPlan& plan = forced_plan.value();
+            const std::string index_bits = plan.carried_index_dtype == DataType::UINT32 ? "32" : "64";
+            printArgCensusResult(benchmark_case,
+                                 dtype,
+                                 op,
+                                 "forced_order",
+                                 "composed_dense",
+                                 formatArgStageStrategies(plan, dtype),
+                                 formatArgStageOrder(plan),
+                                 formatArgStageAxes(plan),
+                                 formatArgStagePaths(plan),
+                                 index_bits,
+                                 forced->getWorkspaceSizeInBytes(),
+                                 argComposedIntermediateBytes(plan),
+                                 input.getArraySizeInBytes(),
+                                 forced_output_bytes,
+                                 forced_timing,
+                                 speedup);
+        }
+    }
+}
+
+void runArgCensus(Tensor& cache_flush, Stream& stream, const TensorPlacement& gpu_placement) {
+    // Keep this list intentionally explicit. It is a performance contract over each production dense ARG family and
+    // every composition topology that ARG-PLAN is expected to replace. Boundary cases flank each Tiled ownership or
+    // vectorization transition so cliffs remain visible instead of being averaged away by a broad random sweep.
+    const std::vector<ArgCensusCase> cases = {
+        {"direct_device", "full_r16777216", {16777216}, {0}, CubReductionPath::DeviceTransformReduce, false},
+        {"direct_contiguous", "suffix_r64", {262144, 64}, {1}, CubReductionPath::ContiguousFixedSegment, false},
+        {"direct_contiguous", "suffix_r65", {258111, 65}, {1}, CubReductionPath::ContiguousFixedSegment, false},
+        {"direct_contiguous", "suffix_r128", {131072, 128}, {1}, CubReductionPath::ContiguousFixedSegment, false},
+        {"direct_contiguous", "suffix_r256", {65536, 256}, {1}, CubReductionPath::ContiguousFixedSegment, false},
+        {"direct_contiguous", "suffix_r1024", {16384, 1024}, {1}, CubReductionPath::ContiguousFixedSegment, false},
+        {"direct_contiguous", "suffix_rr16x16", {65536, 16, 16}, {1, 2}, CubReductionPath::ContiguousFixedSegment, false},
+
+        {"direct_tiled_row_lanes", "r256_i2", {32768, 256, 2}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_row_lanes", "r256_i3", {21845, 256, 3}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_row_lanes", "r256_i4", {16384, 256, 4}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_row_lanes", "r256_i5", {13107, 256, 5}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_row_lanes", "r256_i8", {8192, 256, 8}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_row_lanes", "r256_i9", {7281, 256, 9}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_row_lanes", "r256_i15", {4369, 256, 15}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_row_lanes", "r256_i16", {4096, 256, 16}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_row_lanes", "r256_i17", {3855, 256, 17}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_row_lanes", "r256_i31", {2114, 256, 31}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_row_lanes", "r256_i32", {2048, 256, 32}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_row_lanes", "r256_i33", {1985, 256, 33}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_row_lanes", "r256_i63", {1040, 256, 63}, {1}, CubReductionPath::TiledFixedSegment, false},
+
+        {"direct_tiled_vector", "r256_i64", {1024, 256, 64}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_vector", "r256_i65", {1008, 256, 65}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_vector", "r256_i128", {512, 256, 128}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_vector", "r256_i129", {508, 256, 129}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_vector", "r256_i256", {256, 256, 256}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_vector", "r256_i257", {255, 256, 257}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_vector", "r256_i511", {128, 256, 511}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_vector", "r256_i512", {128, 256, 512}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_vector", "r256_i513", {128, 256, 513}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_vector", "r256_i1024", {64, 256, 1024}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_vector", "r256_i1025", {64, 256, 1025}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_shards", "r256_i2048", {32, 256, 2048}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_shards", "r256_i4096", {16, 256, 4096}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_shards", "r256_i4097", {16, 256, 4097}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_shards", "r256_i8192", {8, 256, 8192}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_shards", "r256_i8193", {8, 256, 8193}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_shards", "r256_i65536", {1, 256, 65536}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_shards", "r256_i65537", {1, 256, 65537}, {1}, CubReductionPath::TiledFixedSegment, false},
+
+        {"direct_tiled_reduction_sensitivity", "r64_i8", {32768, 64, 8}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_reduction_sensitivity", "r1024_i8", {2048, 1024, 8}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_reduction_sensitivity", "r64_i64", {4096, 64, 64}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_reduction_sensitivity", "r65_i64", {4032, 65, 64}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_reduction_sensitivity", "r128_i64", {2048, 128, 64}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_reduction_sensitivity", "r129_i64", {2032, 129, 64}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_reduction_sensitivity", "r64_i128", {2048, 64, 128}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_reduction_sensitivity", "r1024_i128", {128, 1024, 128}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_reduction_sensitivity", "r64_i4097", {64, 64, 4097}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_reduction_sensitivity", "r1024_i4097", {4, 1024, 4097}, {1}, CubReductionPath::TiledFixedSegment, false},
+        {"direct_tiled_multi_axis", "rr16x16_i128", {512, 16, 16, 128}, {1, 2}, CubReductionPath::TiledFixedSegment, false},
+
+        {"composed_two_runs", "rkr_trailing_reduced", {257, 63, 31}, {0, 2}, CubReductionPath::ComposedDense, true},
+        {"composed_two_runs", "rkrk_trailing_retained", {31, 17, 29, 19}, {0, 2}, CubReductionPath::ComposedDense, true},
+        {"composed_two_runs", "krkr_trailing_reduced", {17, 31, 19, 29}, {1, 3}, CubReductionPath::ComposedDense, true},
+        {"composed_two_runs", "krkrk_trailing_retained", {17, 31, 19, 29, 23}, {1, 3}, CubReductionPath::ComposedDense, true},
+        {"composed_three_runs", "rkrkr", {31, 17, 29, 19, 23}, {0, 2, 4}, CubReductionPath::ComposedDense, true},
+        {"composed_three_runs", "krkrkr", {7, 31, 11, 29, 13, 23}, {1, 3, 5}, CubReductionPath::ComposedDense, true},
+        {"composed_four_runs", "rkrkrkr", {13, 5, 11, 7, 9, 11, 7}, {0, 2, 4, 6}, CubReductionPath::ComposedDense, true},
+        {"composed_four_runs", "krkrkrkr", {2, 13, 3, 11, 5, 9, 7, 7}, {1, 3, 5, 7}, CubReductionPath::ComposedDense, true},
+        {"composed_multi_axis", "krrkrr", {17, 31, 7, 19, 29, 5}, {1, 2, 4, 5}, CubReductionPath::ComposedDense, true},
+        {"composed_multi_axis", "rrkrrkrr", {13, 5, 11, 17, 3, 19, 7}, {0, 1, 3, 4, 6}, CubReductionPath::ComposedDense, true},
+        {"composed_singleton", "r1rk_singleton_separator", {31, 1, 29, 19}, {0, 2}, CubReductionPath::ComposedDense, true},
+        {"composed_rank9", "rank9_alternating", {5, 7, 3, 11, 2, 13, 3, 17, 5}, {1, 3, 5, 7}, CubReductionPath::ComposedDense, true},
+    };
+
+    const std::vector<DataType> dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
+    const std::vector<CubArgReductionOp> operations = {CubArgReductionOp::ArgMin, CubArgReductionOp::ArgMax};
+
+    std::cout << "# mode=arg_census operations=argmin_index|argmax_index dtypes=fp16|bf16|fp32 "
+                 "cache_state=cold validation=production_exact_index_match production_selector=dense_disjoint_to_composed\n";
+    std::cout << "# Direct families and cost-planned dense composition are measured through production stamp(); each representative dense disjoint-run case additionally forces "
+                 "every legal left/right end-elimination order. speedup_vs_production > 1 means that forced order is faster than production.\n";
+    std::cout << "# index_bits reports the hot candidate/carried-index width; the public benchmark output remains UINT32.\n";
+    std::cout << "executor,family,case,dimensions,axes,dtype,operation,implementation,strategy,stage_order,stage_axes,stage_paths,"
+                 "index_bits,workspace_bytes,intermediate_bytes,input_bytes,output_bytes,median_ms,best_ms,worst_ms,"
+                 "logical_GBps,speedup_vs_production,validation\n";
+
+    for (const ArgCensusCase& benchmark_case : cases) {
+        for (DataType dtype : dtypes) {
+            for (CubArgReductionOp op : operations) {
+                runArgCensusCase(benchmark_case, dtype, op, cache_flush, stream, gpu_placement);
+            }
+        }
+    }
+}
+
+void validateViewCensusZeroSum(const ViewCensusCase& benchmark_case,
+                               StampedCubReduction& stamped,
+                               Stream& stream) {
+    stamped.runOn(stream);
+    stream.synchronize();
+
+    const Tensor& output_gpu = stamped.getOutputTensor();
+    TensorPlacement cpu_placement(TensorPlacement::MemDevices::CPU);
+    Tensor output_cpu(cpu_placement, output_gpu.getDescriptor());
+    output_cpu.copyFromAsync(output_gpu, stream);
+    stream.synchronize();
+
+    const uint64_t output_elements = output_cpu.getTotalNumElements();
+    for (uint64_t i = 0; i < output_elements; ++i) {
+        const float value = hostReductionValueAsFloat(output_cpu, i);
+        if (value != 0.0f) {
+            throw std::runtime_error(std::string("View census zero-SUM validation failed for case '")
+                                     + benchmark_case.name + "' at output " + std::to_string(i) + ": got "
+                                     + std::to_string(value) + ".");
+        }
+    }
+}
+
+void runViewCensusCase(const ViewCensusCase& benchmark_case,
+                       DataType dtype,
+                       Tensor& cache_flush,
+                       Stream& stream,
+                       const TensorPlacement& gpu_placement) {
+    const CubReductionGeometry analyzed = CubReduction::analyzeValueGeometry(
+        CubReductionOp::Sum, benchmark_case.dimensions, benchmark_case.strides, benchmark_case.axes);
+    if (analyzed.path != benchmark_case.expected_production_path) {
+        throw std::runtime_error(std::string("View census path drift for case '") + benchmark_case.name
+                                 + "': expected " + pathName(benchmark_case.expected_production_path) + ", got "
+                                 + pathName(analyzed.path) + ". Update VIEW-1A intentionally if production selection changed.");
+    }
+    if (analyzed.physical_layout_is_dense_permutation != benchmark_case.expect_dense_physical_permutation) {
+        throw std::runtime_error(std::string("View census dense-permutation classification drift for case '")
+                                 + benchmark_case.name + "'.");
+    }
+
+    const uint64_t storage_elements = viewStorageSpanElements(benchmark_case.dimensions, benchmark_case.strides);
+    Tensor storage(gpu_placement, TensorDescriptor(dtype, {storage_elements}));
+    Tensor input = storage.aliasView(benchmark_case.dimensions, benchmark_case.strides);
+
+    // Initialization and validation stay outside the timed interval. Zero input gives every logical view, including
+    // overlapping and broadcast aliases, the same exact SUM reference: every output must be zero. VIEW-1A is a path
+    // and performance census rather than a replacement-kernel correctness suite; VIEW-1 will add independent cursor
+    // reference tests when execution changes.
+    checkCuda(cudaMemsetAsync(storage.getMemPtr<void>(), 0, storage.getArraySizeInBytes(), stream.getStream()),
+              "cudaMemsetAsync(view census storage)");
+    stream.synchronize();
+
+    std::shared_ptr<StampedCubReduction> stamped = CubReduction(CubReductionOp::Sum, benchmark_case.axes).stamp(input, stream);
+    if (stamped->getPath() != benchmark_case.expected_production_path) {
+        throw std::runtime_error(std::string("View census stamped path drift for case '") + benchmark_case.name
+                                 + "': expected " + pathName(benchmark_case.expected_production_path) + ", got "
+                                 + pathName(stamped->getPath()) + ".");
+    }
+    validateViewCensusZeroSum(benchmark_case, *stamped, stream);
+
+    const ExactTiming timing = timeExactReduction(cache_flush, stream, [&] { stamped->runOn(stream); });
+    const Tensor& output = stamped->getOutputTensor();
+    const uint64_t element_bytes =
+        static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(dtype));
+    const uint64_t logical_input_bytes = input.getArraySizeInBytes();
+    const uint64_t storage_span_bytes = checkedMultiply(storage_elements, element_bytes, "view storage bytes");
+    const uint64_t output_bytes = output.getArraySizeInBytes();
+    const uint64_t logical_bytes = logical_input_bytes + output_bytes;
+    const double logical_gb_per_second = static_cast<double>(logical_bytes) / (timing.median_ms * 1.0e6);
+    const char* index_bits = stamped->getPath() == CubReductionPath::StridedFixedSegment
+                                 ? (stamped->getGeometry().strided_value_indexing_fits_uint32 ? "32" : "64")
+                                 : "n/a";
+
+    std::cout << benchmark_case.family << ',' << benchmark_case.name << ','
+              << formatDimensions(benchmark_case.dimensions) << ',' << formatStrides(benchmark_case.strides) << ','
+              << formatAxes(benchmark_case.axes) << ',' << dataTypeName(dtype) << ",sum," << pathName(stamped->getPath())
+              << ',' << strategyName(*stamped) << ','
+              << (stamped->getGeometry().physical_layout_is_dense_permutation ? "true" : "false") << ','
+              << (stamped->getGeometry().permutation_aware_tiled_geometry.has_value() ? "true" : "false") << ','
+              << index_bits << ',' << stamped->getGeometry().rank << ',' << stamped->getGeometry().output_elements << ','
+              << stamped->getGeometry().reduction_size << ',' << stamped->getWorkspaceSizeInBytes() << ','
+              << logical_input_bytes << ',' << storage_span_bytes << ',' << output_bytes << ',' << std::fixed
+              << std::setprecision(4) << timing.median_ms << ',' << timing.best_ms << ',' << timing.worst_ms << ','
+              << std::setprecision(2) << logical_gb_per_second << ",ok\n";
+}
+
+void runViewCensus(Tensor& cache_flush, Stream& stream, const TensorPlacement& gpu_placement) {
+    // VIEW-1A freezes the population that still depends on the legacy logical-index mapper before VIEW-1 replaces it.
+    // The final three cases are deliberate controls proving that existing rank-1 affine, supported permutation, and
+    // ordinary dense-composition paths remain outside the arbitrary-view fallback.
+    const std::vector<ViewCensusCase> cases = {
+        {"arbitrary_gapped", "gapped_reduction_stride", {4096, 127, 65}, {10160, 80, 1}, {1},
+         CubReductionPath::StridedFixedSegment, false},
+        {"arbitrary_gapped", "stride2_slice", {2048, 127, 65}, {16510, 130, 2}, {1},
+         CubReductionPath::StridedFixedSegment, false},
+        {"arbitrary_broadcast", "zero_stride_reduced_axis", {8192, 127, 65}, {0, 65, 1}, {0},
+         CubReductionPath::StridedFixedSegment, false},
+        {"arbitrary_overlap", "overlapping_outer_reduction", {4096, 127, 65}, {65, 65, 1}, {1},
+         CubReductionPath::StridedFixedSegment, false},
+        {"compact_permutation_fallback", "split_physical_reduction", {31, 29, 17, 23},
+         {667, 23, 20677, 1}, {1, 2}, CubReductionPath::StridedFixedSegment, true},
+        {"compact_permutation_fallback", "unsupported_retained_order", {31, 29, 17, 23},
+         {667, 23, 20677, 1}, {0}, CubReductionPath::StridedFixedSegment, true},
+        {"compact_permutation_fallback", "physically_trailing_reduction", {256, 257, 127},
+         {1, 32512, 256}, {0}, CubReductionPath::StridedFixedSegment, true},
+        {"compact_permutation_fallback", "full_reduction_rank3", {256, 257, 127},
+         {1, 32512, 256}, {0, 1, 2}, CubReductionPath::StridedFixedSegment, true},
+        {"arbitrary_singleton", "singleton_heavy_gapped", {2048, 1, 127, 1, 65},
+         {10160, 10160, 80, 80, 1}, {0, 2}, CubReductionPath::StridedFixedSegment, false},
+        // The singleton axis contributes no address span but its >UINT32_MAX stride forces the current mapper's
+        // UINT64 metadata/index arithmetic, so VIEW-1 has a baseline for both legacy indexing widths.
+        {"arbitrary_index_width", "uint64_indexing_singleton_stride", {2048, 1, 127, 65},
+         {10160, (1ULL << 32), 80, 1}, {0, 2}, CubReductionPath::StridedFixedSegment, false},
+
+        {"control_direct", "rank1_affine_stride2", {16777216}, {2}, {0},
+         CubReductionPath::DeviceTransformReduce, false},
+        {"control_direct", "supported_dense_permutation", {256, 257, 127}, {1, 32512, 256}, {2},
+         CubReductionPath::TiledFixedSegment, true},
+        {"control_dense", "ordinary_dense_disjoint", {31, 17, 29, 19, 23},
+         {215441, 12673, 437, 23, 1}, {0, 2, 4}, CubReductionPath::ComposedDense, true},
+    };
+
+    const std::vector<DataType> dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
+
+    std::cout << "# mode=view_census operation=sum dtypes=fp16|bf16|fp32 cache_state=cold "
+                 "validation=zero_sum_exact purpose=view1a_legacy_population_baseline\n";
+    std::cout << "# storage_span_bytes is the address span required by the alias view, not a claim about unique DRAM "
+                 "traffic; broadcast and overlapping views intentionally revisit addresses.\n";
+    std::cout << "# The first ten cases are expected to use the legacy arbitrary-view fallback in ThorKernels308. "
+                 "The final three are direct/dense controls that must not be stolen by VIEW-1.\n";
+    std::cout << "family,case,dimensions,strides,axes,dtype,operation,path,strategy,physical_dense_permutation,"
+                 "permutation_tiled_candidate,index_bits,rank,output_elements,reduction_elements_per_output,"
+                 "workspace_bytes,logical_input_bytes,storage_span_bytes,output_bytes,median_ms,best_ms,worst_ms,"
+                 "logical_GBps,validation\n";
+
+    for (const ViewCensusCase& benchmark_case : cases) {
+        for (DataType dtype : dtypes) {
+            runViewCensusCase(benchmark_case, dtype, cache_flush, stream, gpu_placement);
+        }
+    }
+}
+
 void runArgCase(const ReductionShape& shape,
                 DataType dtype,
                 CubArgReductionOp op,
@@ -1165,12 +1875,18 @@ void runArgCase(const ReductionShape& shape,
 
 void printUsage(const char* executable) {
     std::cout << "Usage: " << executable
-              << " [--arg-x4-focused|--arg-x4-awkward-focused|--reduction-census|--dense-stage-cost-calibration] [--dense-run-stage-census] [--candidate=<name>]...\n"
+              << " [--arg-x4-focused|--arg-x4-awkward-focused|--arg-census|--view-census|--reduction-census|--dense-stage-cost-calibration] [--dense-run-stage-census] [--candidate=<name>]...\n"
               << "       " << executable << " --list-reduction-candidates\n"
               << "  --arg-x4-focused          Run ARGMIN only for FP8 E4M3/FP16/FP32, R=64/256/1024, and "
                  "D=128/256/512/1024/2048/4096/65536.\n"
               << "  --arg-x4-awkward-focused  Run ARGMIN exact/awkward A/B pairs for FP8 E4M3/FP16/FP32, "
                  "R=64/256/1024, and D=4096/4097/8192/8193/65536/65537.\n"
+              << "  --arg-census              Run the cache-cold dense ArgMin/ArgMax performance census. Measures every "
+                 "production direct ARG family plus explicit composed-dense execution for disjoint reduced runs; "
+                 "composed results must exactly match production indices before timing.\n"
+              << "  --view-census             Run the VIEW-1A cache-cold SUM census over remaining rank>1 arbitrary views "
+                 "plus direct/dense controls. Records logical dimensions/strides, production path, storage span, "
+                 "index width, workspace, and traversal throughput without changing production selection.\n"
               << "  --reduction-census        Run exact cache-cold SUM cases spanning the current production dense "
                  "value-reduction families. Production path drift is treated as an error.\n"
               << "  --dense-run-stage-census With --reduction-census, additionally time every reachable direct stage "
@@ -1193,6 +1909,10 @@ BenchmarkOptions parseOptions(int argc, char** argv) {
             options.focused_arg_x4 = true;
         } else if (argument == "--arg-x4-awkward-focused") {
             options.focused_arg_x4_awkward = true;
+        } else if (argument == "--arg-census") {
+            options.arg_census = true;
+        } else if (argument == "--view-census") {
+            options.view_census = true;
         } else if (argument == "--reduction-census") {
             options.reduction_census = true;
         } else if (argument == "--dense-run-stage-census") {
@@ -1216,8 +1936,8 @@ BenchmarkOptions parseOptions(int argc, char** argv) {
     }
 
     const int mode_count = static_cast<int>(options.focused_arg_x4) + static_cast<int>(options.focused_arg_x4_awkward)
-                           + static_cast<int>(options.reduction_census)
-                           + static_cast<int>(options.dense_stage_cost_calibration);
+                           + static_cast<int>(options.arg_census) + static_cast<int>(options.view_census)
+                           + static_cast<int>(options.reduction_census) + static_cast<int>(options.dense_stage_cost_calibration);
     if (mode_count > 1) {
         throw std::invalid_argument("Select at most one focused benchmark mode.");
     }
@@ -1312,7 +2032,7 @@ int main(int argc, char** argv) {
                   << " target_input_bytes=" << target_input_bytes << " free_bytes=" << free_bytes
                   << " total_bytes=" << total_bytes << " target_over_l2=" << std::fixed << std::setprecision(2)
                   << static_cast<double>(target_input_bytes) / l2_cache_bytes << '\n';
-        if (options.reduction_census || options.dense_stage_cost_calibration) {
+        if (options.reduction_census || options.arg_census || options.view_census || options.dense_stage_cost_calibration) {
             std::cout << "# A separate >=8x-L2 cache-flush buffer is touched outside every cache-cold timed sample.\n";
             if (options.reduction_census) {
                 std::cout << "# Exact production-census shapes are preserved. Experimental candidates are benchmark-only "
@@ -1323,7 +2043,7 @@ int main(int argc, char** argv) {
                          "successive iterations cannot benchmark an L2-resident working set.\n";
         }
         std::cout << "# timing_samples=" << TIMING_SAMPLES;
-        if (options.reduction_census || options.dense_stage_cost_calibration) {
+        if (options.reduction_census || options.arg_census || options.view_census || options.dense_stage_cost_calibration) {
             std::cout << " timed_iterations_per_sample=1 reported_time=median\n";
         } else {
             std::cout << " timed_iterations_per_sample=" << TIMED_ITERATIONS_PER_SAMPLE
@@ -1346,6 +2066,16 @@ int main(int argc, char** argv) {
         if (options.dense_stage_cost_calibration) {
             Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
             runDenseStageCostCalibration(cache_flush, stream, gpu_placement);
+            return EXIT_SUCCESS;
+        }
+        if (options.arg_census) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runArgCensus(cache_flush, stream, gpu_placement);
+            return EXIT_SUCCESS;
+        }
+        if (options.view_census) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runViewCensus(cache_flush, stream, gpu_placement);
             return EXIT_SUCCESS;
         }
         if (!options.reduction_census) {

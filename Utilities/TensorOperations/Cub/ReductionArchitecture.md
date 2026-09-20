@@ -79,15 +79,78 @@ genuinely irregular-view fallback packs dimensions, strides, and axis lists into
 stamping. There is no cuDNN-derived rank-8 limit; the only representation bound is that axis identifiers are `uint32_t`.
 
 Value reductions support sum, product, mean, min, max, L1 norm, L2 norm, and sum-of-squares. Dense argmin/argmax use the same geometry
-classification: device-wide and physically contiguous domains remain on CUB, genuinely disjoint axes retain the logical
-index fallback, and contiguous middle-axis reductions use Thor's tiled backend. The ARG tiled backend keeps FP32 values
-paired with local reduction-row indices, normally using UINT32 candidate indices even for UINT64 outputs and promoting
-the hot candidate state to UINT64 only when the reduction domain itself exceeds UINT32. Narrow and awkward widths use
-the coalesced component-tiled CUB-warp backend. ARG caps contiguous packet ownership at four candidate pairs per lane:
-128 components use one warp, 256/512/1024 use 2/4/8-warp groups, and larger exact widths use independent
-1024-component block shards. Arbitrary D > 4096 uses the same x4 alignment-safe packets with preserved 1024-component
-shards plus at most one remainder shard. Arg reductions produce deterministic local flattened indices: NaNs propagate, and
-the lowest logical index wins equal-value ties.
+classification. ARG-DIRECT-1 keeps the device-wide CUB path but narrows its candidate index to UINT32 whenever the full
+reduction domain permits it. Physically contiguous fixed segments in the normal UINT32 domain use a Thor-owned
+warp-per-segment backend: each warp peels a bounded scalar head to a 16-byte boundary, reads the segment bulk through
+coalesced 16-byte packets, handles a bounded tail, and combines lane candidates through shared memory. CUB remains only
+for the exceptional contiguous domain that genuinely needs UINT64 candidate state.
+
+Contiguous middle-axis reductions with trailing retained values use ARG-DIRECT-1 throughout the normal UINT32
+candidate domain. Narrow rows (<=32 retained components) reuse the value reducer's proven staged-memory geometry: a
+physical warp peels a bounded number of complete rows until the source reaches the strongest useful 16/8/4-byte
+alignment, copies the contiguous bulk into a fixed double-buffered shared-memory stage, consumes a bounded suffix
+directly, and assigns otherwise-idle lanes to independent reduction rows. The row-lane count is derived from retained
+width (16/8/4/2/1 lanes for 2/4/8/16/32-component capacities), and candidate exchange is a shared-memory tree rather
+than a warp shuffle or CUB WarpReduce. Composed FP32+UINT32 narrow stages split the same 2 KiB-per-warp stage budget
+evenly between values and carried indices, preserving the existing shared-memory/occupancy budget.
+
+For wider rows, FP16/BF16 lanes own eight values per aligned 16-byte input packet and FP32 lanes own four. Reductions
+assign 1/2/4/8 whole warps to the same component tile only when the actual number of output tiles cannot by itself expose
+the tiled reducer's established target active-warp population. The warp count is then raised only as necessary so a warp
+that revisits multiple rows does so at a byte stride divisible by 16. That makes its row-head alignment stable: a shifted
+row uses bounded scalar edge work while the remaining complete packets are directly owned aligned 16-byte loads. Per-warp values and indices
+are canonicalized in separate 32-bit shared-memory arrays before the final combine; no warp-shuffle reconstruction is
+used. Composed ARG stages reuse the same backend for FP32 values plus UINT32 carried original-domain indices. UINT64
+candidate domains retain the conservative global-load geometry but also use shared memory rather than WarpReduce for
+candidate exchange. Arg reductions remain deterministic: NaNs propagate and the lowest original flattened reduction-
+domain index wins equal-value ties.
+
+Ordinary dense ARG reductions with disjoint reduced runs use `ComposedDense` rather than the arbitrary logical-index
+fallback. ARG composition reuses the value reducer's left/right interval-elimination topology, but has its own stamp-time
+stage-cost model because later passes read and write a SoA candidate `(FP32 value, original-domain index)`. The carried
+index width is selected once from the complete original reduction domain and is UINT32 whenever that full domain fits,
+otherwise UINT64. Each stage adds `local_run_index * domain_stride` to the carried original index, so different legal
+physical pass orders return exactly the same public row-major flattened reduction-domain index and tie-break on that
+original index. The production cost model accounts for candidate traffic, useful direct-kernel concurrency, L2-resident
+intermediates, and the current direct-kernel execution regimes. In particular, census calibration keeps the clean aligned
+tiled path distinct from the provisional awkward head/bulk/tail path and models the measured throughput troughs for
+saturated very-short contiguous and short-narrow stages. Those throughput penalties are not multiplied into small
+under-filled later passes, where the planner's existing active-warp term already represents the dominant cost. The ARG
+census can force every legal left/right elimination order for its representative composed
+cases, validates exact public indices against production before timing, and reports the selected stage strategies so the
+coarse ARG weights can be recalibrated after future direct-kernel improvements without changing topology. No runtime
+autotuning, allocation, host synchronization, or topology discovery is introduced by planning.
+
+The shared `CubReduction::analyzeGeometry()` selector owns this execution-family classification: an ordinary dense
+disjoint reduction is reported as `ComposedDense` immediately rather than being provisionally labeled
+`StridedFixedSegment` and promoted later by a value- or ARG-specific wrapper. Operation-specific planners choose only
+the detailed legal stage order inside `ComposedDense`; they do not rewrite the execution family.
+
+The ordinary-dense ARG selector therefore admits only `DeviceTransformReduce`, `ContiguousFixedSegment`,
+`TiledFixedSegment`, or `ComposedDense`; `StridedFixedSegment` remains only for genuinely irregular/non-dense views
+until the separate VIEW-ARG migration. A dedicated dense ARG gate exhausts ranks 1-9 and every non-empty reduction
+mask, with singleton-heavy and disjoint-run cases plus an irregular-view negative control, to prevent dense routing from
+regressing into the logical-index fallback.
+
+### VIEW-1A arbitrary-view census
+
+Before replacing the legacy rank>1 view fallback, `thor_cub_reduction_benchmark --view-census` freezes a bounded set of
+representative layouts that still depend on `StridedFixedSegment`: gapped and stride-sliced storage, zero-stride
+broadcast aliases, overlapping aliases, singleton-heavy irregular views, and physically compact permutations that the
+current permutation-aware tiled geometry cannot express because the physical reduction is split, the retained-output
+order is unsupported, the physical reduction is trailing, or a rank>1 compact permutation is reduced completely. The
+census times cache-cold SUM for FP16/BF16/FP32 and reports logical dimensions and strides, selected production path,
+physical-dense-permutation classification, indexing width, workspace, logical input bytes, address span, and logical
+bandwidth. The case set deliberately covers both the legacy UINT32 mapper and a UINT64-metadata view whose oversized
+stride belongs to a singleton axis, avoiding an artificial multi-gigabyte allocation. `storage_span_bytes` describes the
+address span required by the view; it is intentionally not treated as DRAM traffic because broadcast and overlapping
+views revisit addresses.
+
+The corresponding `CubReductionViewGate` checks the same execution-family boundary for every value operation. It also
+contains explicit controls for rank-1 affine `DeviceTransformReduce`, supported dense-permutation `TiledFixedSegment`,
+and ordinary dense `ComposedDense`, so VIEW-1 cannot gain coverage by stealing geometry from already ordained paths.
+VIEW-1A does not alter execution; it establishes the path/performance baseline against which the future
+`IncrementalStridedView` backend will be compared.
 
 ## Offset-segmented path
 

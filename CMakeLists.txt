@@ -329,7 +329,7 @@ endif ()
 
 string(TOUPPER "${CMAKE_BUILD_TYPE}" _thor_build_type_upper)
 if (_thor_build_type_upper MATCHES "^(RELEASE|RELWITHDEBINFO|MINSIZEREL)$")
-    set(_thor_default_cuda_architectures "89;120")
+    set(_thor_default_cuda_architectures "120")
     set(_thor_default_cuda_architectures_description "sm_89 for NVIDIA L4/Ada and sm_120 for RTX 50-series / Blackwell")
 else ()
     set(_thor_default_cuda_architectures "120")
@@ -885,15 +885,12 @@ function(thor_enable_release_cuda_device_lto target_name)
         set_property(TARGET ${target_name} PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
     endif ()
 
-    # CMake's INTERPROCEDURAL_OPTIMIZATION_RELEASE property emits the
-    # compile-side CUDA LTO IR by adding lto_<arch> code generation targets
-    # such as code=[compute_120,lto_120].  Do not also pass compile-time -dlto
-    # here: nvcc rejects -dlto together with explicit -gencode/code control and
-    # tells callers to use code=lto_<arch> for the compile-side intermediate.
-    # Keep only the Release device-link -dlto flag so nvlink consumes and
-    # optimizes the LTO IR emitted by the compile step.
+    # CMake's INTERPROCEDURAL_OPTIMIZATION_RELEASE property owns the CUDA
+    # device-LTO flags for this target.  In Release it emits both the
+    # compile-side lto_<arch> code objects and the matching device-link -dlto.
+    # Do not add another -dlto here: doing so duplicates the option on nvcc's
+    # device-link command line.  Keep only Thor's nvlink parallelism controls.
     target_link_options(${target_name} PRIVATE
-            "$<$<CONFIG:Release>:$<DEVICE_LINK:-dlto>>"
             "$<DEVICE_LINK:--threads=0>"
             "$<DEVICE_LINK:--split-compile=0>"
     )
@@ -1004,6 +1001,20 @@ file(GLOB_RECURSE THOR_SOURCES CONFIGURE_DEPENDS
         #        "${CMAKE_SOURCE_DIR}/Demos/**/*.cu"
 )
 
+# Dense ArgMin/ArgMax template instantiations are intentionally isolated from
+# CUDA device LTO. CUDA 13.3 nvlink can fail while JIT-compiling the SM89 LTO
+# IR for this enlarged template surface. These translation units remain normal
+# relocatable CUDA device code and still participate in Thor's device-link step.
+set(THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubArgReductionMin.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubArgReductionMax.cu"
+)
+foreach (_thor_arg_cuda_source IN LISTS THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES)
+    if (NOT EXISTS "${_thor_arg_cuda_source}")
+        message(FATAL_ERROR "Thor ARG CUDA source selected for non-LTO compilation is missing: ${_thor_arg_cuda_source}")
+    endif ()
+endforeach ()
+
 # ============================================================
 # Create shared library / release-wheel native graph
 # ============================================================
@@ -1022,10 +1033,13 @@ if (_thor_python_release_wheel_bundle)
             list(APPEND THOR_HOST_SOURCES "${_thor_source}")
         endif ()
     endforeach ()
+    list(REMOVE_ITEM THOR_CUDA_SOURCES ${THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES})
 
     add_library(ThorHostObjects OBJECT ${THOR_HOST_SOURCES})
     add_library(ThorCudaSm89Objects OBJECT ${THOR_CUDA_SOURCES})
     add_library(ThorCudaSm120Objects OBJECT ${THOR_CUDA_SOURCES})
+    add_library(ThorArgCudaSm89NoLtoObjects OBJECT ${THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES})
+    add_library(ThorArgCudaSm120NoLtoObjects OBJECT ${THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES})
 
     set_target_properties(ThorHostObjects PROPERTIES
             CXX_STANDARD 23
@@ -1043,22 +1057,60 @@ if (_thor_python_release_wheel_bundle)
             CUDA_SEPARABLE_COMPILATION ON
             POSITION_INDEPENDENT_CODE ON
     )
+    set_target_properties(ThorArgCudaSm89NoLtoObjects PROPERTIES
+            CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
+            CUDA_ARCHITECTURES 89
+            CUDA_SEPARABLE_COMPILATION ON
+            POSITION_INDEPENDENT_CODE ON
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
+    )
+    set_target_properties(ThorArgCudaSm120NoLtoObjects PROPERTIES
+            CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
+            CUDA_ARCHITECTURES 120
+            CUDA_SEPARABLE_COMPILATION ON
+            POSITION_INDEPENDENT_CODE ON
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
+    )
 
     add_library(Thor SHARED
             $<TARGET_OBJECTS:ThorHostObjects>
             $<TARGET_OBJECTS:ThorCudaSm120Objects>
+            $<TARGET_OBJECTS:ThorArgCudaSm120NoLtoObjects>
     )
     add_library(ThorKernelSm89 SHARED
             $<TARGET_OBJECTS:ThorHostObjects>
             $<TARGET_OBJECTS:ThorCudaSm89Objects>
+            $<TARGET_OBJECTS:ThorArgCudaSm89NoLtoObjects>
     )
     set_target_properties(ThorKernelSm89 PROPERTIES
             OUTPUT_NAME Thor
             LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/wheel_backends/sm89"
     )
 else ()
+    list(REMOVE_ITEM THOR_SOURCES ${THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES})
+    add_library(ThorArgCudaNoLtoObjects OBJECT ${THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES})
+    set_target_properties(ThorArgCudaNoLtoObjects PROPERTIES
+            CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
+            POSITION_INDEPENDENT_CODE ON
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
+    )
+    # These objects need relocatable device code only when Thor itself will run
+    # a CUDA device-link step.  Enabling separable compilation unconditionally
+    # makes a single-config Debug build emit __cudaRegisterLinkedBinary_* host
+    # references from the ARG objects, while Debug Thor intentionally has no
+    # device-link step to resolve them.  Keep Debug on its historical
+    # self-contained CUDA-object path; Release (and multi-config generators,
+    # whose Thor target has the corresponding device-link path available) uses
+    # separable compilation for the non-LTO ARG objects.
+    if (CMAKE_CONFIGURATION_TYPES OR CMAKE_BUILD_TYPE STREQUAL "Release")
+        set_property(TARGET ThorArgCudaNoLtoObjects PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+    endif ()
+
     #add_library(Thor STATIC ${THOR_SOURCES})
-    add_library(Thor SHARED ${THOR_SOURCES})
+    add_library(Thor SHARED
+            ${THOR_SOURCES}
+            $<TARGET_OBJECTS:ThorArgCudaNoLtoObjects>
+    )
 endif ()
 
 set_target_properties(Thor PROPERTIES
@@ -1584,42 +1636,61 @@ target_compile_definitions(Thor PRIVATE
         THOR_ZLIBNG_HAS_CRC32_Z=${THOR_ZLIBNG_HAS_CRC32_Z_INT}
 )
 
-# The release-wheel object libraries intentionally reuse the exact compile
-# contract accumulated on Thor above. Keeping Thor as the contract owner avoids
-# maintaining a second, subtly different set of include paths, definitions,
-# warnings, CUDA flags, and dependency usage requirements for wheel builds.
+# Object libraries intentionally reuse the exact compile contract accumulated on
+# Thor above. The ARG CUDA object targets differ only in that Release IPO/device
+# LTO is explicitly disabled for those translation units.
+function(thor_copy_target_property source_target destination_target property_name)
+    get_target_property(_thor_property_value ${source_target} ${property_name})
+    if (NOT _thor_property_value STREQUAL "_thor_property_value-NOTFOUND")
+        set_property(TARGET ${destination_target} PROPERTY ${property_name} "${_thor_property_value}")
+    endif ()
+endfunction()
+
+set(_thor_compile_contract_object_targets "")
 if (_thor_python_release_wheel_bundle)
-    function(thor_copy_target_property source_target destination_target property_name)
-        get_target_property(_thor_property_value ${source_target} ${property_name})
-        if (NOT _thor_property_value STREQUAL "_thor_property_value-NOTFOUND")
-            set_property(TARGET ${destination_target} PROPERTY ${property_name} "${_thor_property_value}")
-        endif ()
-    endfunction()
+    list(APPEND _thor_compile_contract_object_targets
+            ThorHostObjects
+            ThorCudaSm89Objects
+            ThorCudaSm120Objects
+            ThorArgCudaSm89NoLtoObjects
+            ThorArgCudaSm120NoLtoObjects
+    )
+else ()
+    list(APPEND _thor_compile_contract_object_targets ThorArgCudaNoLtoObjects)
+endif ()
 
-    foreach (_thor_object_target IN ITEMS ThorHostObjects ThorCudaSm89Objects ThorCudaSm120Objects)
-        foreach (_thor_compile_property IN ITEMS
-                INCLUDE_DIRECTORIES
-                COMPILE_DEFINITIONS
-                COMPILE_OPTIONS
-                COMPILE_FEATURES
-                LINK_LIBRARIES
-        )
-            thor_copy_target_property(Thor ${_thor_object_target} ${_thor_compile_property})
-        endforeach ()
-
-        # target_include_directories(Thor SYSTEM PUBLIC ...) records these paths
-        # as system includes for Thor itself, but copying INCLUDE_DIRECTORIES to
-        # an object library loses that classification. Reapply the CUDA stack
-        # include roots as SYSTEM so third-party CUDA/cuDNN warnings do not get
-        # promoted by Thor's -Werror policy.
-        if (THOR_CUDA_INCLUDE_DIRS)
-            target_include_directories(${_thor_object_target} SYSTEM PRIVATE
-                    ${THOR_CUDA_INCLUDE_DIRS}
-            )
-        endif ()
-
-        set_property(TARGET ${_thor_object_target} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+foreach (_thor_object_target IN LISTS _thor_compile_contract_object_targets)
+    foreach (_thor_compile_property IN ITEMS
+            INCLUDE_DIRECTORIES
+            COMPILE_DEFINITIONS
+            COMPILE_OPTIONS
+            COMPILE_FEATURES
+            LINK_LIBRARIES
+    )
+        thor_copy_target_property(Thor ${_thor_object_target} ${_thor_compile_property})
     endforeach ()
+
+    # Copying INCLUDE_DIRECTORIES loses the SYSTEM classification Thor has for
+    # CUDA/cuDNN headers. Reapply it so third-party warnings are not promoted by
+    # Thor's -Werror policy.
+    if (THOR_CUDA_INCLUDE_DIRS)
+        target_include_directories(${_thor_object_target} SYSTEM PRIVATE
+                ${THOR_CUDA_INCLUDE_DIRS}
+        )
+    endif ()
+
+    if (THOR_CUDA_STACK STREQUAL "python")
+        set_property(TARGET ${_thor_object_target} PROPERTY CUDA_RUNTIME_LIBRARY None)
+    endif ()
+endforeach ()
+unset(_thor_compile_contract_object_targets)
+
+if (_thor_python_release_wheel_bundle)
+    set_property(TARGET ThorHostObjects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET ThorCudaSm89Objects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET ThorCudaSm120Objects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET ThorArgCudaSm89NoLtoObjects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+    set_property(TARGET ThorArgCudaSm120NoLtoObjects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
 
     # Thor itself is the sm120 backend used to resolve _thor at build time. The
     # sm89 backend must have an identical host/runtime link contract while using
@@ -1632,8 +1703,9 @@ if (_thor_python_release_wheel_bundle)
         set_property(TARGET Thor PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
         set_property(TARGET ThorKernelSm89 PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
     endif ()
+else ()
+    set_property(TARGET ThorArgCudaNoLtoObjects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
 endif ()
-
 
 file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS
         "${CMAKE_SOURCE_DIR}/test/*.cpp"

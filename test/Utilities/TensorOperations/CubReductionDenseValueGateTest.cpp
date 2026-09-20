@@ -101,7 +101,9 @@ void expectEveryDenseValueMaskUsesOrdainedPath(const std::vector<uint64_t>& dime
         for (uint32_t mask = 1; mask < mask_count; ++mask) {
             const std::vector<uint32_t> axes = axesFromMask(rank, mask);
             SCOPED_TRACE(denseValueGateContext(op, dimensions, axes));
+            const CubReductionGeometry structural_geometry = CubReduction::analyzeGeometry(dimensions, axes);
             const CubReductionGeometry geometry = CubReduction::analyzeValueGeometry(op, dimensions, axes);
+            EXPECT_EQ(geometry.path, structural_geometry.path);
             EXPECT_TRUE(isOrdainedDenseValuePath(geometry.path));
             EXPECT_NE(geometry.path, CubReductionPath::StridedFixedSegment);
         }
@@ -146,7 +148,9 @@ TEST(CubReductionDenseValueGate, DensePhysicalPermutationRemainsOnOrdainedPathFo
     const std::vector<uint32_t> axes{2};
     for (CubReductionOp op : ALL_VALUE_OPERATIONS) {
         SCOPED_TRACE(valueOperationName(op));
+        const CubReductionGeometry structural_geometry = CubReduction::analyzeGeometry(dimensions, strides, axes);
         const CubReductionGeometry geometry = CubReduction::analyzeValueGeometry(op, dimensions, strides, axes);
+        EXPECT_EQ(geometry.path, structural_geometry.path);
         EXPECT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
         EXPECT_TRUE(geometry.physical_layout_is_dense_permutation);
         EXPECT_TRUE(geometry.permutation_aware_tiled_geometry.has_value());
@@ -162,7 +166,9 @@ TEST(CubReductionDenseValueGate, GenuineIrregularViewsRemainOutsideTheDenseValue
     const std::vector<uint32_t> axes{0, 2};
     for (CubReductionOp op : ALL_VALUE_OPERATIONS) {
         SCOPED_TRACE(valueOperationName(op));
+        const CubReductionGeometry structural_geometry = CubReduction::analyzeGeometry(dimensions, strides, axes);
         const CubReductionGeometry geometry = CubReduction::analyzeValueGeometry(op, dimensions, strides, axes);
+        EXPECT_EQ(geometry.path, structural_geometry.path);
         EXPECT_EQ(geometry.path, CubReductionPath::StridedFixedSegment);
         EXPECT_FALSE(geometry.dense_run_geometry.has_value());
     }

@@ -81,7 +81,7 @@ TEST(CubReductionGeometry, SelectsBestMultiAxisPathAndShapes) {
 
     const CubReductionGeometry disjoint =
         CubReduction::analyzeGeometry({2, 3, 4, 5}, std::vector<uint32_t>{1, 3});
-    EXPECT_EQ(disjoint.path, CubReductionPath::StridedFixedSegment);
+    EXPECT_EQ(disjoint.path, CubReductionPath::ComposedDense);
     EXPECT_FALSE(disjoint.reduced_axes_are_contiguous);
     EXPECT_EQ(disjoint.outer_size, 0U);
     EXPECT_EQ(disjoint.reduction_size, 15U);
@@ -144,7 +144,7 @@ TEST(CubReductionGeometry, SupportsRankBeyondFormerCudnnDescriptorLimit) {
     const CubReductionGeometry geometry = CubReduction::analyzeGeometry(dimensions, axes);
 
     EXPECT_EQ(geometry.rank, 9U);
-    EXPECT_EQ(geometry.path, CubReductionPath::StridedFixedSegment);
+    EXPECT_EQ(geometry.path, CubReductionPath::ComposedDense);
     EXPECT_EQ(geometry.input_elements, 32U);
     EXPECT_EQ(geometry.reduction_size, 16U);
     EXPECT_EQ(geometry.output_elements, 2U);
@@ -401,9 +401,9 @@ TEST(CubReductionGeometry, StampsCollapsedDenseRunsForAlexNetBiasGradient) {
     const CubReductionGeometry geometry =
         CubReduction::analyzeGeometry({512, 64, 55, 55}, std::vector<uint32_t>{0, 2, 3});
 
-    // Structural analysis remains operation-agnostic. Value-operation planning consumes this dense R|K|R metadata
-    // before stamping, while arg reductions and unvalidated value operations retain the structural fallback path.
-    EXPECT_EQ(geometry.path, CubReductionPath::StridedFixedSegment);
+    // Geometry analysis owns the final execution family. This dense R|K|R layout is therefore classified as
+    // ComposedDense immediately; value/ARG planners only choose the legal stage order within that family.
+    EXPECT_EQ(geometry.path, CubReductionPath::ComposedDense);
     ASSERT_TRUE(geometry.dense_run_geometry.has_value());
     const CubReductionDenseRunGeometry& runs = geometry.dense_run_geometry.value();
     ASSERT_EQ(runs.runs.size(), 3U);
@@ -553,7 +553,7 @@ TEST(CubReductionGeometry, DenseValueCompositionValidatesPerStageRatherThanMonol
     const uint64_t run_extent = 65536;
     const CubReductionGeometry structural =
         CubReduction::analyzeGeometry({run_extent, 2, run_extent, 2}, std::vector<uint32_t>{0, 2});
-    EXPECT_EQ(structural.path, CubReductionPath::StridedFixedSegment);
+    EXPECT_EQ(structural.path, CubReductionPath::ComposedDense);
     EXPECT_GT(structural.reduction_size, static_cast<uint64_t>(std::numeric_limits<int>::max()));
 
     // The logical reduction domain is > INT_MAX, but each TiledFixedSegment stage reduces only 65536 elements.
@@ -646,11 +646,11 @@ TEST(CubReductionGeometry, DenseRunPlanningDoesNotPretendArbitraryStridesAreDens
     EXPECT_FALSE(gapped.dense_run_geometry.has_value());
 }
 
-TEST(CubReductionGeometry, SelectsUint32IndexingForOrdinaryStridedFallbackWhenAllOffsetsFit) {
-    const CubReductionGeometry alexnet =
+TEST(CubReductionGeometry, SelectsUint32IndexingForIrregularStridedFallbackWhenAllOffsetsFit) {
+    const CubReductionGeometry dense_composed =
         CubReduction::analyzeGeometry({512, 64, 55, 55}, std::vector<uint32_t>{0, 2, 3});
-    EXPECT_EQ(alexnet.path, CubReductionPath::StridedFixedSegment);
-    EXPECT_TRUE(alexnet.strided_value_indexing_fits_uint32);
+    EXPECT_EQ(dense_composed.path, CubReductionPath::ComposedDense);
+    EXPECT_FALSE(dense_composed.strided_value_indexing_fits_uint32);
 
     const CubReductionGeometry small_irregular =
         CubReduction::analyzeGeometry({2, 3, 4}, {20, 4, 1}, std::vector<uint32_t>{0, 2});
@@ -659,10 +659,10 @@ TEST(CubReductionGeometry, SelectsUint32IndexingForOrdinaryStridedFallbackWhenAl
 }
 
 TEST(CubReductionGeometry, RetainsUint64IndexingWhenLogicalOrPhysicalFallbackDomainExceedsUint32) {
-    // The per-output reduction still fits CUB's signed-int fixed-segment limit, but the full logical item domain does
-    // not fit UINT32, so a 32-bit counting iterator would wrap.
-    const CubReductionGeometry large_logical =
-        CubReduction::analyzeGeometry({65535, 3, 32768}, std::vector<uint32_t>{0, 2});
+    // The per-output reduction still fits CUB's signed-int fixed-segment limit, but this overlapping arbitrary view
+    // has a full logical item domain larger than UINT32, so a 32-bit counting iterator would wrap.
+    const CubReductionGeometry large_logical = CubReduction::analyzeGeometry(
+        {65535, 3, 32768}, {1, 1, 1}, std::vector<uint32_t>{0, 2});
     EXPECT_EQ(large_logical.path, CubReductionPath::StridedFixedSegment);
     EXPECT_FALSE(large_logical.strided_value_indexing_fits_uint32);
 

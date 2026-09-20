@@ -3,6 +3,7 @@
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 
 #include <cstddef>
+#include <optional>
 
 namespace ThorImplementation::CubReductionInternal {
 
@@ -252,6 +253,11 @@ size_t queryArgMinReductionBytes(const Tensor& input,
                                  Tensor* index_output,
                                  const CubReductionGeometry& geometry,
                                  const Stream& stream);
+size_t queryArgMinReductionBytes(DataType input_dtype,
+                                 std::optional<DataType> value_output_dtype,
+                                 std::optional<DataType> index_output_dtype,
+                                 const CubReductionGeometry& geometry,
+                                 const Stream& stream);
 void launchArgMinReduction(const Tensor& temp_storage,
                            size_t temp_storage_bytes,
                            const Tensor& input,
@@ -265,6 +271,11 @@ size_t queryArgMaxReductionBytes(const Tensor& input,
                                  Tensor* index_output,
                                  const CubReductionGeometry& geometry,
                                  const Stream& stream);
+size_t queryArgMaxReductionBytes(DataType input_dtype,
+                                 std::optional<DataType> value_output_dtype,
+                                 std::optional<DataType> index_output_dtype,
+                                 const CubReductionGeometry& geometry,
+                                 const Stream& stream);
 void launchArgMaxReduction(const Tensor& temp_storage,
                            size_t temp_storage_bytes,
                            const Tensor& input,
@@ -272,5 +283,61 @@ void launchArgMaxReduction(const Tensor& temp_storage,
                            Tensor* index_output,
                            const CubReductionGeometry& geometry,
                            Stream& stream);
+
+// ARG-PLAN-2A direct-stage entry points. A null carried_index_input marks the cold root stage. Otherwise value_input
+// is FP32 and carried_index_input contains the original-domain partial index selected by the preceding stage.
+size_t queryComposedArgMinReductionStageBytes(const Tensor& value_input,
+                                              const Tensor* carried_index_input,
+                                              Tensor* value_output,
+                                              Tensor* index_output,
+                                              const CubReductionGeometry& geometry,
+                                              uint64_t domain_stride,
+                                              DataType carried_index_dtype,
+                                              const Stream& stream);
+size_t queryComposedArgMinReductionStageBytes(DataType value_input_dtype,
+                                              bool has_carried_index_input,
+                                              std::optional<DataType> value_output_dtype,
+                                              std::optional<DataType> index_output_dtype,
+                                              const CubReductionGeometry& geometry,
+                                              uint64_t domain_stride,
+                                              DataType carried_index_dtype,
+                                              const Stream& stream);
+void launchComposedArgMinReductionStage(const Tensor& temp_storage,
+                                        size_t temp_storage_bytes,
+                                        const Tensor& value_input,
+                                        const Tensor* carried_index_input,
+                                        Tensor* value_output,
+                                        Tensor* index_output,
+                                        const CubReductionGeometry& geometry,
+                                        uint64_t domain_stride,
+                                        DataType carried_index_dtype,
+                                        Stream& stream);
+
+size_t queryComposedArgMaxReductionStageBytes(const Tensor& value_input,
+                                              const Tensor* carried_index_input,
+                                              Tensor* value_output,
+                                              Tensor* index_output,
+                                              const CubReductionGeometry& geometry,
+                                              uint64_t domain_stride,
+                                              DataType carried_index_dtype,
+                                              const Stream& stream);
+size_t queryComposedArgMaxReductionStageBytes(DataType value_input_dtype,
+                                              bool has_carried_index_input,
+                                              std::optional<DataType> value_output_dtype,
+                                              std::optional<DataType> index_output_dtype,
+                                              const CubReductionGeometry& geometry,
+                                              uint64_t domain_stride,
+                                              DataType carried_index_dtype,
+                                              const Stream& stream);
+void launchComposedArgMaxReductionStage(const Tensor& temp_storage,
+                                        size_t temp_storage_bytes,
+                                        const Tensor& value_input,
+                                        const Tensor* carried_index_input,
+                                        Tensor* value_output,
+                                        Tensor* index_output,
+                                        const CubReductionGeometry& geometry,
+                                        uint64_t domain_stride,
+                                        DataType carried_index_dtype,
+                                        Stream& stream);
 
 }  // namespace ThorImplementation::CubReductionInternal
