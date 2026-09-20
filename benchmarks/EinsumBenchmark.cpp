@@ -105,6 +105,8 @@ void checkCuda(cudaError_t status, const char* operation) {
             return "strided_segment";
         case CubReductionPath::OffsetSegmented:
             return "offset_segmented";
+        case CubReductionPath::ComposedDense:
+            return "composed_dense";
     }
     return "unknown";
 }

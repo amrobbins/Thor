@@ -1,7 +1,6 @@
 #include "Utilities/Common/HostFunctionCleanupQueue.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
-#include "Utilities/Common/Event.h"
 #include "Utilities/Common/Stream.h"
 
 #include <condition_variable>
@@ -9,7 +8,6 @@
 #include <deque>
 #include <mutex>
 #include <thread>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -47,10 +45,6 @@ struct HostFunctionCleanupQueue::State {
     void workerLoop() {
         static constexpr size_t MAX_BATCH_SIZE = 64;
 
-        // Reuse one blocking event per GPU on each worker. A worker never
-        // re-records one of its events until the prior wait has completed.
-        unordered_map<int32_t, Event> completionEvents;
-
         while (true) {
             vector<PendingHostFunctionCleanup> cleanupBatch;
             cleanupBatch.reserve(MAX_BATCH_SIZE);
@@ -63,6 +57,9 @@ struct HostFunctionCleanupQueue::State {
                     return;
                 }
 
+                // Retain the existing same-stream batching only to amortize
+                // queue-lock traffic; callback completion is still checked
+                // independently for every argument below.
                 const uint64_t streamId = pending.front().stream.getId();
                 do {
                     cleanupBatch.emplace_back(std::move(pending.front()));
@@ -73,20 +70,16 @@ struct HostFunctionCleanupQueue::State {
                 notFull.notify_all();
             }
 
-            Stream &stream = cleanupBatch.front().stream;
-            Event &completionEvent = completionEvents[stream.getGpuNum()];
+            // Callback completion is a CPU lifetime notification, not a CUDA
+            // dependency. Each argument owns its completion state so cleanup
+            // remains correct even when callbacks finish before queue insertion
+            // or before this worker begins waiting.
+            for (PendingHostFunctionCleanup &cleanup : cleanupBatch)
+                HostFunctionCleanupQueue::waitForCallbackCompletion(*cleanup.args);
 
-            // This event is inserted after every cudaLaunchHostFunc represented
-            // by this batch on the same stream. Waiting for it therefore proves
-            // all callbacks in the batch returned. The event uses
-            // cudaEventBlockingSync, so the cleanup worker sleeps rather than
-            // spinning a CPU core.
-            stream.putEvent(completionEvent,
-                            /*enableTiming=*/false,
-                            /*expectingHostToWaitOnThisOne=*/true);
-            completionEvent.synchronize();
-
-            // Destruction is deliberately outside the CUDA host callbacks.
+            // Destruction is deliberately outside the CUDA host callbacks. The
+            // retained Stream copy keeps the stream-owned failure state alive
+            // through callback completion and argument destruction.
             const size_t completedCount = cleanupBatch.size();
             cleanupBatch.clear();
 
@@ -104,6 +97,10 @@ struct HostFunctionCleanupQueue::State {
 HostFunctionCleanupQueue &HostFunctionCleanupQueue::instance() {
     static HostFunctionCleanupQueue singleton;
     return singleton;
+}
+
+void HostFunctionCleanupQueue::waitForCallbackCompletion(HostFunctionArgsBase &args) noexcept {
+    args.waitForCallbackCompletion();
 }
 
 HostFunctionCleanupQueue::HostFunctionCleanupQueue() : state(make_unique<State>()) {

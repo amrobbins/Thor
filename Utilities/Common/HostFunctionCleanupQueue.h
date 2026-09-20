@@ -10,10 +10,10 @@ class Stream;
 /**
  * Bounded owner queue for cudaLaunchHostFunc argument cleanup.
  *
- * A fixed number of workers wait for callbacks by recording reusable blocking
- * CUDA events on the callback streams. This prevents one synchronizing host
- * thread from being created for every callback while still ensuring callback
- * argument destructors run outside CUDA's host-callback context.
+ * A fixed number of workers wait for callbacks using CPU completion state stored
+ * in each callback argument. This avoids cleanup-only CUDA synchronization while
+ * still ensuring callback argument destructors run outside CUDA's host-callback
+ * context.
  */
 class HostFunctionCleanupQueue {
    public:
@@ -44,6 +44,7 @@ class HostFunctionCleanupQueue {
     struct State;
 
     HostFunctionCleanupQueue();
+    static void waitForCallbackCompletion(HostFunctionArgsBase &args) noexcept;
 
     std::unique_ptr<State> state;
 };

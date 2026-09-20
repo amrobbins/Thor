@@ -21,7 +21,8 @@ implementation. Expression's vector-valued segmented forward caller is migrated 
 1. Device transform-reduce when the result contains one element.
 2. CUB fixed-size segmented reduction when each reduction domain is physically contiguous (`inner_size == 1`).
 3. A tiled row-vector CUDA/CUB-warp backend when the reduced axes are one contiguous block with trailing values.
-4. Fixed-size segmented reduction over a logical counting/transform iterator only for genuinely disjoint reduced axes.
+4. Arbitrary ordinary-dense combinations of reduced/retained runs use a stamped `ComposedDense` plan. The planner removes one reduced run at a time through only the proven direct families above, keeps every non-final aggregate in FP32, and chooses pass order at stamp time with the dense-stage cost model. For transformed/finalized operations, only the first pass applies the public input transform and only the final pass applies the public finalizer/output scale.
+5. Fixed-size segmented reduction over a logical counting/transform iterator remains only as the correctness fallback for genuinely irregular/non-dense views while that traversal is being replaced.
 
 The tiled path also accepts zero-copy logical permutations when stride analysis proves that the visible source is physically dense `[outer, reduction, inner]` storage. In that case the reducer traverses the physical source layout directly and writes the requested retained-axis dense order without materializing the permutation. Natural `[outer,inner]` output keeps the ordinary tuned store mapping. Production `[inner,outer]` output uses the shared-transpose retained writer described below so final global stores remain coalesced.
 
@@ -71,11 +72,13 @@ small widths can place multiple logical reductions in one warp, medium widths us
 one cooperative block per output, and very large widths use multiple independent component blocks per output. All tiled
 backends accumulate and finalize in FP32 and require no stamped dynamic workspace.
 
-Dense reduction rank is dynamic. Only the disjoint-axis fallback packs dimensions, strides, and axis lists into a
-rank-sized GPU metadata tensor while stamping. There is no cuDNN-derived rank-8 limit; the only representation bound is
-that axis identifiers are `uint32_t`.
+Dense reduction rank is dynamic. `ComposedDense` value reductions do not stamp logical-index metadata; all child
+reductions and their First/Intermediate/Final semantics are fully planned while stamping and `run()` launches them
+consecutively on the caller stream with no host synchronization, allocation, or runtime planning. Only the remaining
+genuinely irregular-view fallback packs dimensions, strides, and axis lists into a rank-sized GPU metadata tensor while
+stamping. There is no cuDNN-derived rank-8 limit; the only representation bound is that axis identifiers are `uint32_t`.
 
-Value reductions support sum, product, mean, min, max, L1 norm, and L2 norm. Dense argmin/argmax use the same geometry
+Value reductions support sum, product, mean, min, max, L1 norm, L2 norm, and sum-of-squares. Dense argmin/argmax use the same geometry
 classification: device-wide and physically contiguous domains remain on CUB, genuinely disjoint axes retain the logical
 index fallback, and contiguous middle-axis reductions use Thor's tiled backend. The ARG tiled backend keeps FP32 values
 paired with local reduction-row indices, normally using UINT32 candidate indices even for UINT64 outputs and promoting

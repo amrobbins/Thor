@@ -70,7 +70,7 @@ namespace {
 constexpr const char* kThorNsightControlDirectoryEnvironment = "THOR_NSYS_CONTROL_DIR";
 constexpr const char* kThorNsightProfileOutputRequestPrefix = "profile_output_path.";
 constexpr const char* kThorNsightProfileReportOutputPrefix = "report_output_path.";
-constexpr std::chrono::seconds kThorNsightReportRelocationTimeout{60};
+constexpr std::chrono::seconds kThorNsightReportRelocationStatusInterval{60};
 constexpr std::chrono::milliseconds kThorNsightReportRelocationPollInterval{20};
 
 std::atomic<bool>& nsightSystemsCaptureClaimedForProcess() {
@@ -274,6 +274,8 @@ class NsightSystemsEpochCapture {
         capture.started = false;
         const cudaError_t status = cudaProfilerStop();
         if (status != cudaSuccess) {
+            std::error_code ignored;
+            std::filesystem::remove(capture.requestFile, ignored);
             nsightSystemsCaptureClaimedForProcess().store(false, std::memory_order_release);
             std::fprintf(stderr,
                          "Thor: cudaProfilerStop() failed: %s. Training will continue; the Nsight report may be "
@@ -284,31 +286,60 @@ class NsightSystemsEpochCapture {
 
         // thor-nsys-profile launches Nsight with --capture-range-end=repeat:sync,
         // so cudaProfilerStop() does not return until Nsight has finalized the
-        // current .nsys-rep. The report-ready callback relocates that finalized
-        // report to the Trainer-requested destination and publishes this marker.
-        // Wait for that final relocation too, so the next training epoch/phase
-        // cannot begin while report processing is still outstanding.
-        const auto relocationDeadline = std::chrono::steady_clock::now() + kThorNsightReportRelocationTimeout;
-        while (!capture.reportMarkerFile.empty() &&
-               !std::filesystem::exists(capture.reportMarkerFile) &&
-               std::chrono::steady_clock::now() < relocationDeadline) {
+        // current .nsys-rep. The report-ready callback then relocates that file
+        // to the exact Trainer-requested destination and atomically publishes a
+        // marker containing that destination. Require both artifacts before
+        // resuming training: the marker alone is not sufficient proof that the
+        // requested output path is actually present.
+        const auto relocationCompleted = [&capture]() -> bool {
+            if (capture.reportMarkerFile.empty() || capture.outputPath.empty()) {
+                return false;
+            }
+            std::error_code error;
+            if (!std::filesystem::exists(capture.reportMarkerFile, error) || error) {
+                return false;
+            }
+            error.clear();
+            if (!std::filesystem::is_regular_file(capture.outputPath, error) || error) {
+                return false;
+            }
+
+            std::ifstream marker(capture.reportMarkerFile);
+            std::string relocatedPath;
+            if (!marker.is_open() || !std::getline(marker, relocatedPath) || relocatedPath.empty()) {
+                return false;
+            }
+            const std::filesystem::path markerPath =
+                std::filesystem::absolute(std::filesystem::path(relocatedPath)).lexically_normal();
+            return markerPath == capture.outputPath;
+        };
+
+        // Profiling was explicitly requested, so do not abandon a finalized
+        // capture merely because Nsight/report relocation takes longer than an
+        // arbitrary wall-clock deadline.  In particular, report generation can
+        // legitimately take more than a minute on systems with slow profiler
+        // post-processing.  Keep the training phase paused until the callback
+        // has both placed the report at the requested path and published the
+        // matching marker.  Emit a periodic diagnostic so a long wait remains
+        // observable rather than looking like a hang.
+        auto nextRelocationStatus =
+            std::chrono::steady_clock::now() + kThorNsightReportRelocationStatusInterval;
+        while (!relocationCompleted()) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= nextRelocationStatus) {
+                std::fprintf(
+                    stderr,
+                    "Thor: still waiting for the Nsight Systems report after training-phase epoch %lu to be "
+                    "relocated to '%s'. Training remains paused; profiler control files are in '%s'.\n",
+                    static_cast<unsigned long>(capture.endPhaseEpoch),
+                    capture.outputPath.string().c_str(),
+                    controlDirectoryPath.string().c_str());
+                nextRelocationStatus = now + kThorNsightReportRelocationStatusInterval;
+            }
             std::this_thread::sleep_for(kThorNsightReportRelocationPollInterval);
         }
 
-        const bool relocationCompleted =
-            !capture.reportMarkerFile.empty() && std::filesystem::exists(capture.reportMarkerFile);
         nsightSystemsCaptureClaimedForProcess().store(false, std::memory_order_release);
-        if (!relocationCompleted) {
-            std::fprintf(
-                stderr,
-                "Thor: Nsight Systems finalized the capture after training-phase epoch %lu, but the report "
-                "relocation callback did not complete within %lld seconds. Training will continue; inspect '%s' "
-                "for the finalized report and pending output request.\n",
-                static_cast<unsigned long>(capture.endPhaseEpoch),
-                static_cast<long long>(kThorNsightReportRelocationTimeout.count()),
-                controlDirectoryPath.string().c_str());
-            return;
-        }
 
         std::fprintf(stderr,
                      "Thor: Nsight Systems capture stopped after training-phase epoch %lu and the finalized report "

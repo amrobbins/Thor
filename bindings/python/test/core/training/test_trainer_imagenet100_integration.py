@@ -1181,21 +1181,31 @@ def _build_alexnet_imagenet100(name: str, *, num_classes: int, dtype=thor.DataTy
     labels = thor.layers.NetworkInput(network, "labels", [num_classes], dtype)
 
     x = examples.get_feature_output()
-    conv1 = thor.layers.Convolution2d(network, x, 64, 11, 11, 4, 4, 2, 2, True, activation=thor.activations.Relu())
+    conv1 = thor.layers.Convolution2d(
+        network, x, 64, 11, 11, vertical_stride=4, horizontal_stride=4,
+        padding=(2, 2, 2, 2), has_bias=True, activation=thor.activations.Relu())
     x = conv1.get_feature_output()
     pool1 = thor.layers.Pooling(network, x, thor.layers.Pooling.Type.max, 3, 3, 2, 2)
     x = pool1.get_feature_output()
 
-    conv2 = thor.layers.Convolution2d(network, x, 192, 5, 5, 1, 1, 2, 2, True, activation=thor.activations.Relu())
+    conv2 = thor.layers.Convolution2d(
+        network, x, 192, 5, 5, vertical_stride=1, horizontal_stride=1,
+        padding=(2, 2, 2, 2), has_bias=True, activation=thor.activations.Relu())
     x = conv2.get_feature_output()
     pool2 = thor.layers.Pooling(network, x, thor.layers.Pooling.Type.max, 3, 3, 2, 2)
     x = pool2.get_feature_output()
 
-    conv3 = thor.layers.Convolution2d(network, x, 384, 3, 3, 1, 1, 1, 1, True, activation=thor.activations.Relu())
+    conv3 = thor.layers.Convolution2d(
+        network, x, 384, 3, 3, vertical_stride=1, horizontal_stride=1,
+        padding=(1, 1, 1, 1), has_bias=True, activation=thor.activations.Relu())
     x = conv3.get_feature_output()
-    conv4 = thor.layers.Convolution2d(network, x, 256, 3, 3, 1, 1, 1, 1, True, activation=thor.activations.Relu())
+    conv4 = thor.layers.Convolution2d(
+        network, x, 256, 3, 3, vertical_stride=1, horizontal_stride=1,
+        padding=(1, 1, 1, 1), has_bias=True, activation=thor.activations.Relu())
     x = conv4.get_feature_output()
-    conv5 = thor.layers.Convolution2d(network, x, 256, 3, 3, 1, 1, 1, 1, True, activation=thor.activations.Relu())
+    conv5 = thor.layers.Convolution2d(
+        network, x, 256, 3, 3, vertical_stride=1, horizontal_stride=1,
+        padding=(1, 1, 1, 1), has_bias=True, activation=thor.activations.Relu())
     x = conv5.get_feature_output()
     pool5 = thor.layers.Pooling(network, x, thor.layers.Pooling.Type.max, 3, 3, 2, 2)
     x = pool5.get_feature_output()

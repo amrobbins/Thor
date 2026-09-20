@@ -27,7 +27,7 @@ TEST(CubReduction, MultiAxisContiguousSuffixUsesFixedSegments) {
     expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {21.0f, 57.0f});
 }
 
-TEST(CubReduction, MultiAxisDisjointUsesLogicalIndexMappingAndLeadingAxesUseTiledReduction) {
+TEST(CubReduction, DenseRkrSumUsesComposedReductionAndLeadingAxesUseTiledReduction) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     Tensor input = makeGpuTensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
@@ -37,7 +37,7 @@ TEST(CubReduction, MultiAxisDisjointUsesLogicalIndexMappingAndLeadingAxesUseTile
 
     std::shared_ptr<StampedCubReduction> disjoint =
         CubReduction(CubReductionOp::Sum, std::vector<uint32_t>{0, 2}, DataType::FP32).stamp(input, stream);
-    EXPECT_EQ(disjoint->getPath(), CubReductionPath::StridedFixedSegment);
+    EXPECT_EQ(disjoint->getPath(), CubReductionPath::ComposedDense);
     EXPECT_EQ(disjoint->getOutputTensor().getDimensions(), (std::vector<uint64_t>{1, 3, 1}));
     disjoint->run();
 
@@ -50,6 +50,167 @@ TEST(CubReduction, MultiAxisDisjointUsesLogicalIndexMappingAndLeadingAxesUseTile
 
     expectFloatVectorNear(copyGpuTensorAsFloat(disjoint->getOutputTensor(), stream), {18.0f, 26.0f, 34.0f});
     expectFloatVectorNear(copyGpuTensorAsFloat(leading->getOutputTensor(), stream), {36.0f, 42.0f});
+}
+
+TEST(CubReduction, DenseRkrSumCompositionPreservesRuntimeScaleAndWorkspaceQuery) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor input = makeGpuTensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
+                                  7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f},
+                                 {2, 3, 2},
+                                 stream);
+
+    CubReduction reduction(CubReductionOp::Sum, std::vector<uint32_t>{0, 2}, DataType::FP32, 3.0f);
+    const size_t queried_workspace = reduction.queryWorkspaceSizeInBytes(input.getDescriptor(), stream);
+    auto stamped = reduction.stamp(input, stream);
+    ASSERT_EQ(stamped->getPath(), CubReductionPath::ComposedDense);
+    EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), queried_workspace);
+    EXPECT_GE(stamped->getWorkspaceSizeInBytes(), 2U * 3U * sizeof(float));
+
+    // run(scale) overrides the configured scale exactly as it does on single-pass reductions.
+    stamped->run(2.0f);
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {36.0f, 52.0f, 68.0f});
+}
+
+TEST(CubReduction, DenseRkrkrSumUsesIntervalPlannedComposedReduction) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    std::vector<float> values(32);
+    for (size_t i = 0; i < values.size(); ++i) {
+        values[i] = static_cast<float>(i + 1);
+    }
+    Tensor input = makeGpuTensor(values, {2, 2, 2, 2, 2}, stream);
+
+    CubReduction reduction(CubReductionOp::Sum, std::vector<uint32_t>{0, 2, 4}, DataType::FP32, 3.0f);
+    const size_t queried_workspace = reduction.queryWorkspaceSizeInBytes(input.getDescriptor(), stream);
+    auto stamped = reduction.stamp(input, stream);
+    ASSERT_EQ(stamped->getPath(), CubReductionPath::ComposedDense);
+    EXPECT_EQ(stamped->getOutputTensor().getDimensions(), (std::vector<uint64_t>{1, 2, 1, 2, 1}));
+    EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), queried_workspace);
+    EXPECT_GT(stamped->getWorkspaceSizeInBytes(), 0U);
+
+    // run(scale) overrides the configured scale and must apply it only after all FP32 partial reductions complete.
+    stamped->run(2.0f);
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {184.0f, 216.0f, 312.0f, 344.0f});
+}
+
+TEST(CubReduction, DenseTrailingRetainedSumUsesIntervalPlannedComposedDenseReduction) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    std::vector<float> rkrk_values(24);
+    for (size_t i = 0; i < rkrk_values.size(); ++i) {
+        rkrk_values[i] = static_cast<float>(i + 1);
+    }
+    Tensor rkrk_input = makeGpuTensor(rkrk_values, {2, 3, 2, 2}, stream);
+    CubReduction rkrk_reduction(CubReductionOp::Sum, std::vector<uint32_t>{0, 2}, DataType::FP32, 3.0f);
+    const size_t rkrk_queried_workspace = rkrk_reduction.queryWorkspaceSizeInBytes(rkrk_input.getDescriptor(), stream);
+    auto rkrk = rkrk_reduction.stamp(rkrk_input, stream);
+    ASSERT_EQ(rkrk->getPath(), CubReductionPath::ComposedDense);
+    EXPECT_EQ(rkrk->getOutputTensor().getDimensions(), (std::vector<uint64_t>{1, 3, 1, 2}));
+    EXPECT_EQ(rkrk->getWorkspaceSizeInBytes(), rkrk_queried_workspace);
+    EXPECT_GT(rkrk->getWorkspaceSizeInBytes(), 0U);
+    rkrk->run(2.0f);
+
+    std::vector<float> krkrk_values(32);
+    for (size_t i = 0; i < krkrk_values.size(); ++i) {
+        krkrk_values[i] = static_cast<float>(i + 1);
+    }
+    Tensor krkrk_input = makeGpuTensor(krkrk_values, {2, 2, 2, 2, 2}, stream);
+    CubReduction krkrk_reduction(CubReductionOp::Sum, std::vector<uint32_t>{1, 3}, DataType::FP32, 3.0f);
+    const size_t krkrk_queried_workspace =
+        krkrk_reduction.queryWorkspaceSizeInBytes(krkrk_input.getDescriptor(), stream);
+    auto krkrk = krkrk_reduction.stamp(krkrk_input, stream);
+    ASSERT_EQ(krkrk->getPath(), CubReductionPath::ComposedDense);
+    EXPECT_EQ(krkrk->getOutputTensor().getDimensions(), (std::vector<uint64_t>{2, 1, 2, 1, 2}));
+    EXPECT_EQ(krkrk->getWorkspaceSizeInBytes(), krkrk_queried_workspace);
+    EXPECT_GT(krkrk->getWorkspaceSizeInBytes(), 0U);
+    krkrk->run(2.0f);
+
+    stream.synchronize();
+    expectFloatVectorNear(
+        copyGpuTensorAsFloat(rkrk->getOutputTensor(), stream), {64.0f, 72.0f, 96.0f, 104.0f, 128.0f, 136.0f});
+    expectFloatVectorNear(copyGpuTensorAsFloat(krkrk->getOutputTensor(), stream),
+                          {48.0f, 56.0f, 80.0f, 88.0f, 176.0f, 184.0f, 208.0f, 216.0f});
+}
+
+TEST(CubReduction, GeneralDenseSumPlannerExecutesManyAlternatingRunsAndSingletonSeparatedRuns) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    std::vector<float> alternating_values(128);
+    for (size_t i = 0; i < alternating_values.size(); ++i) {
+        alternating_values[i] = static_cast<float>(i + 1);
+    }
+    Tensor alternating_input = makeGpuTensor(alternating_values, {2, 2, 2, 2, 2, 2, 2}, stream);
+    CubReduction alternating_reduction(
+        CubReductionOp::Sum, std::vector<uint32_t>{0, 2, 4, 6}, DataType::FP32);
+    const size_t alternating_workspace =
+        alternating_reduction.queryWorkspaceSizeInBytes(alternating_input.getDescriptor(), stream);
+    auto alternating = alternating_reduction.stamp(alternating_input, stream);
+    ASSERT_EQ(alternating->getPath(), CubReductionPath::ComposedDense);
+    EXPECT_EQ(alternating->getWorkspaceSizeInBytes(), alternating_workspace);
+    const std::vector<std::vector<uint32_t>> alternating_stage_axes = alternating->getComposedStageAxes();
+    ASSERT_EQ(alternating_stage_axes.size(), 4U);
+    std::vector<uint32_t> remaining_reduced_runs{0, 2, 4, 6};
+    for (const std::vector<uint32_t>& stage_axes : alternating_stage_axes) {
+        ASSERT_FALSE(stage_axes.empty());
+        const uint32_t selected_run = stage_axes.front();
+        ASSERT_FALSE(remaining_reduced_runs.empty());
+        if (selected_run == remaining_reduced_runs.front()) {
+            remaining_reduced_runs.erase(remaining_reduced_runs.begin());
+        } else {
+            EXPECT_EQ(selected_run, remaining_reduced_runs.back());
+            remaining_reduced_runs.pop_back();
+        }
+    }
+    EXPECT_TRUE(remaining_reduced_runs.empty());
+    alternating->run();
+
+    std::vector<float> singleton_values(12);
+    for (size_t i = 0; i < singleton_values.size(); ++i) {
+        singleton_values[i] = static_cast<float>(i + 1);
+    }
+    Tensor singleton_input = makeGpuTensor(singleton_values, {2, 1, 3, 2}, stream);
+    auto singleton = CubReduction(CubReductionOp::Sum, std::vector<uint32_t>{0, 2}, DataType::FP32)
+                         .stamp(singleton_input, stream);
+    ASSERT_EQ(singleton->getPath(), CubReductionPath::ComposedDense);
+    singleton->run();
+
+    // Reducing only singleton axes is value-identical. The composed wrapper still needs one direct pass so runtime
+    // scaling and output conversion happen exactly once.
+    Tensor singleton_only_input = makeGpuTensor(singleton_values, {2, 1, 3, 1, 2}, stream);
+    auto singleton_only = CubReduction(CubReductionOp::Sum, std::vector<uint32_t>{1, 3}, DataType::FP32, 3.0f)
+                              .stamp(singleton_only_input, stream);
+    ASSERT_EQ(singleton_only->getPath(), CubReductionPath::ComposedDense);
+    singleton_only->run(2.0f);
+
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(alternating->getOutputTensor(), stream),
+                          {696.0f, 728.0f, 824.0f, 856.0f, 1208.0f, 1240.0f, 1336.0f, 1368.0f});
+    expectFloatVectorNear(copyGpuTensorAsFloat(singleton->getOutputTensor(), stream), {36.0f, 42.0f});
+    std::vector<float> singleton_only_expected(singleton_values.size());
+    for (size_t i = 0; i < singleton_values.size(); ++i) {
+        singleton_only_expected[i] = 2.0f * singleton_values[i];
+    }
+    expectFloatVectorNear(copyGpuTensorAsFloat(singleton_only->getOutputTensor(), stream), singleton_only_expected);
+}
+
+TEST(CubReduction, DenseRkrNonSumOperationsUseComposedDensePath) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor input = makeGpuTensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
+                                  7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f},
+                                 {2, 3, 2},
+                                 stream);
+
+    auto mean = CubReduction(CubReductionOp::Mean, std::vector<uint32_t>{0, 2}, DataType::FP32).stamp(input, stream);
+    EXPECT_EQ(mean->getPath(), CubReductionPath::ComposedDense);
+    mean->run();
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(mean->getOutputTensor(), stream), {4.5f, 6.5f, 8.5f});
 }
 
 TEST(CubReduction, MultiAxisAllAxesUsesDeviceTransformReduce) {
@@ -114,7 +275,7 @@ TEST(CubReduction, SqueezedScalarOutputUsesOneElementShape) {
     expectFloatVectorNear(copyGpuTensorAsFloat(scalar_output, stream), {24.0f});
 }
 
-TEST(CubReduction, RankNineStridedReductionUsesStampedDynamicMetadata) {
+TEST(CubReduction, RankNineDenseSumUsesComposedPathRatherThanDynamicStridedMetadata) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     std::vector<float> values(32);
@@ -124,7 +285,8 @@ TEST(CubReduction, RankNineStridedReductionUsesStampedDynamicMetadata) {
     Tensor input = makeGpuTensor(values, {2, 1, 2, 1, 2, 1, 2, 1, 2}, stream);
     std::shared_ptr<StampedCubReduction> stamped =
         CubReduction(CubReductionOp::Sum, std::vector<uint32_t>{0, 2, 4, 6}, DataType::FP32).stamp(input, stream);
-    EXPECT_EQ(stamped->getPath(), CubReductionPath::StridedFixedSegment);
+    EXPECT_EQ(stamped->getPath(), CubReductionPath::ComposedDense);
+    EXPECT_NE(stamped->getPath(), CubReductionPath::StridedFixedSegment);
     EXPECT_EQ(stamped->getGeometry().rank, 9U);
     stamped->run();
     stream.synchronize();

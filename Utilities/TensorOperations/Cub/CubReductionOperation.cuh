@@ -210,18 +210,19 @@ struct ConvertAndTransformInputToFp32 {
     __host__ __device__ float operator()(InputT value) const { return transform(ToFp32<InputT>{}(value)); }
 };
 
-template <typename InputT, typename InputTransformT>
+template <typename InputT, typename InputTransformT, typename IndexT>
 struct LogicalAxesToFp32 {
     const InputT* input;
-    uint64_t reduction_size;
-    CubReductionDeviceIndexing indexing;
+    IndexT reduction_size;
+    CubReductionDeviceIndexingT<IndexT> indexing;
     InputTransformT transform;
 
-    __host__ __device__ float operator()(int64_t logical_index) const {
-        const uint64_t unsigned_logical_index = static_cast<uint64_t>(logical_index);
-        const uint64_t output_index = unsigned_logical_index / reduction_size;
-        const uint64_t reduction_index = unsigned_logical_index - output_index * reduction_size;
-        const uint64_t physical_index = mapLogicalReductionIndex(indexing, output_index, reduction_index);
+    template <typename LogicalIndexT>
+    __host__ __device__ float operator()(LogicalIndexT logical_index) const {
+        const IndexT index = static_cast<IndexT>(logical_index);
+        const IndexT output_index = index / reduction_size;
+        const IndexT reduction_index = index - output_index * reduction_size;
+        const IndexT physical_index = mapLogicalReductionIndex(indexing, output_index, reduction_index);
         return transform(ToFp32<InputT>{}(input[physical_index]));
     }
 };
@@ -251,21 +252,22 @@ auto makeAffineStridedFp32Iterator(const InputT* input, uint64_t stride, InputTr
         AffineStridedToFp32<InputT, InputTransformT>{input, stride, input_transform});
 }
 
-template <typename InputT, typename InputTransformT>
+template <typename IndexT, typename LogicalIndexT, typename InputT, typename InputTransformT>
 auto makeStridedFp32Iterator(const InputT* input,
-                             const CubReductionGeometry& geometry,
+                             IndexT reduction_size,
+                             const CubReductionDeviceIndexingT<IndexT>& indexing,
                              InputTransformT input_transform) {
     return thrust::make_transform_iterator(
-        thrust::counting_iterator<int64_t>(0),
-        LogicalAxesToFp32<InputT, InputTransformT>{
-            input, geometry.reduction_size, geometry.device_indexing, input_transform});
+        thrust::counting_iterator<LogicalIndexT>(0),
+        LogicalAxesToFp32<InputT, InputTransformT, IndexT>{input, reduction_size, indexing, input_transform});
 }
 
 constexpr int TILED_REDUCTION_BLOCK_THREADS = 256;
-constexpr int TILED_REDUCTION_WARP_THREADS = 32;
+constexpr int TILED_REDUCTION_WARP_THREADS = static_cast<int>(CubReductionTiledPolicy::WARP_THREADS);
 constexpr int TILED_REDUCTION_WARPS_PER_BLOCK =
-    TILED_REDUCTION_BLOCK_THREADS / TILED_REDUCTION_WARP_THREADS;
-constexpr uint64_t TILED_REDUCTION_TARGET_ACTIVE_WARPS = 1024;
+    static_cast<int>(CubReductionTiledPolicy::WARPS_PER_BLOCK);
+static_assert(TILED_REDUCTION_WARPS_PER_BLOCK == TILED_REDUCTION_BLOCK_THREADS / TILED_REDUCTION_WARP_THREADS);
+constexpr uint64_t TILED_REDUCTION_TARGET_ACTIVE_WARPS = CubReductionTiledPolicy::TARGET_ACTIVE_WARPS;
 constexpr uint64_t TILED_REDUCTION_MAX_GRID_BLOCKS = 65535;
 
 // Sixteen FP32 accumulators per lane is the current proven-fast register tile. It is a benchmarked design point, not a
@@ -273,16 +275,18 @@ constexpr uint64_t TILED_REDUCTION_MAX_GRID_BLOCKS = 65535;
 // leaving the remaining registers for indexing, pipeline state, vector packets, operation temporaries, and compiler live
 // ranges. For wider trailing vectors, 2/4/8 physical warps cooperate on one output while keeping the same <=16
 // accumulators/thread. That scales the full-row engine through D=4096 without increasing per-thread accumulator pressure.
-constexpr int FULL_ROW_MAX_COMPONENTS_PER_LANE = 16;
+constexpr int FULL_ROW_MAX_COMPONENTS_PER_LANE =
+    static_cast<int>(CubReductionTiledPolicy::FULL_ROW_MAX_COMPONENTS_PER_LANE);
 constexpr uint64_t FULL_ROW_COMPONENTS_PER_WARP =
-    TILED_REDUCTION_WARP_THREADS * FULL_ROW_MAX_COMPONENTS_PER_LANE;
-constexpr int FULL_ROW_MAX_WARPS_PER_OUTPUT = TILED_REDUCTION_WARPS_PER_BLOCK;
+    CubReductionTiledPolicy::FULL_ROW_COMPONENTS_PER_WARP;
+constexpr int FULL_ROW_MAX_WARPS_PER_OUTPUT =
+    static_cast<int>(CubReductionTiledPolicy::FULL_ROW_MAX_WARPS_PER_OUTPUT);
 constexpr uint64_t FULL_ROW_GROUP_MAX_INNER_SIZE =
-    FULL_ROW_COMPONENTS_PER_WARP * FULL_ROW_MAX_WARPS_PER_OUTPUT;
+    CubReductionTiledPolicy::FULL_ROW_GROUP_MAX_INNER_SIZE;
 // Once one output consumes a full 8-warp block, wider D values are sharded across independent blocks. Each block owns
 // at most this many output components, preserving the same <=16 FP32 accumulators/thread. Component shards never need
 // to communicate because every trailing component is an independent reduction across the reduction axis.
-constexpr uint64_t FULL_ROW_COMPONENTS_PER_BLOCK = FULL_ROW_GROUP_MAX_INNER_SIZE;
+constexpr uint64_t FULL_ROW_COMPONENTS_PER_BLOCK = CubReductionTiledPolicy::FULL_ROW_COMPONENTS_PER_BLOCK;
 
 // Permuted retained output is produced without a global-memory transpose. Eight warps reduce adjacent physical outer
 // rows for one contiguous retained-component tile, keep all reduction state in registers, stage only the finalized FP32
@@ -324,7 +328,8 @@ constexpr size_t SHARED_TRANSPOSE_NARROW_SHARED_BYTES =
 // Each physical warp owns a private two-stage global->shared pipeline. Keeping the staging footprint fixed in bytes
 // makes occupancy independent of InputT while still allowing narrow dtypes to stage more reduction rows per batch.
 constexpr int ASYNC_TILED_REDUCTION_PIPELINE_STAGES = 2;
-constexpr size_t ASYNC_TILED_REDUCTION_STAGE_BYTES_PER_WARP = 2048;
+constexpr size_t ASYNC_TILED_REDUCTION_STAGE_BYTES_PER_WARP =
+    static_cast<size_t>(CubReductionTiledPolicy::ASYNC_STAGE_BYTES_PER_WARP);
 constexpr size_t ASYNC_TILED_REDUCTION_SHARED_BYTES =
     TILED_REDUCTION_WARPS_PER_BLOCK * ASYNC_TILED_REDUCTION_PIPELINE_STAGES
     * ASYNC_TILED_REDUCTION_STAGE_BYTES_PER_WARP;
@@ -337,9 +342,9 @@ constexpr size_t ASYNC_TILED_REDUCTION_SHARED_BYTES =
     return lhs < rhs ? lhs : rhs;
 }
 
-[[nodiscard]] __device__ inline uint64_t largestRowsWithByteAlignment(uint64_t max_rows,
-                                                                      size_t row_bytes,
-                                                                      size_t alignment) {
+[[nodiscard]] inline __host__ __device__ uint64_t largestRowsWithByteAlignment(uint64_t max_rows,
+                                                                              size_t row_bytes,
+                                                                              size_t alignment) {
     // Alignment is a power of two <= 16, so at most 15 smaller row counts need to be considered.
     for (uint64_t delta = 0; delta < static_cast<uint64_t>(alignment) && delta < max_rows; ++delta) {
         const uint64_t rows = max_rows - delta;
@@ -350,32 +355,76 @@ constexpr size_t ASYNC_TILED_REDUCTION_SHARED_BYTES =
     return 0;
 }
 
-// Prefer a stage row count whose total byte count carries a 16-byte alignment promise into cuda::memcpy_async. Odd
+struct AsyncFullRowStagePlan {
+    uint64_t rows_per_stage = 0;
+    size_t bulk_copy_alignment = 0;
+};
+
+// Prefer a stage row count whose total byte count preserves the strongest useful cuda::memcpy_async alignment. Odd
 // row widths such as 33 FP16 values otherwise tend to choose the absolute largest stage (31 rows = 2046 bytes), which
-// prevents the hardware cp.async path even though a slightly smaller 24-row stage is 16-byte aligned.
+// prevents the hardware cp.async path even though a slightly smaller 24-row stage is 16-byte aligned. Returning the
+// alignment together with the row count is important: the source of each outer row may need a tiny direct prologue
+// before the first async stage can truthfully make that same alignment promise.
 template <typename InputT>
-[[nodiscard]] __device__ inline uint64_t chooseAlignedAsyncRowsPerStage(uint64_t row_elements,
-                                                                        uint64_t reduction_size,
-                                                                        size_t stage_bytes =
-                                                                            ASYNC_TILED_REDUCTION_STAGE_BYTES_PER_WARP) {
+[[nodiscard]] inline __host__ __device__ AsyncFullRowStagePlan chooseAsyncFullRowStagePlan(
+    uint64_t row_elements,
+    uint64_t reduction_size,
+    size_t stage_bytes = ASYNC_TILED_REDUCTION_STAGE_BYTES_PER_WARP) {
     const uint64_t stage_capacity_elements = static_cast<uint64_t>(stage_bytes / sizeof(InputT));
     uint64_t max_rows = stage_capacity_elements / row_elements;
     max_rows = minU64(max_rows, reduction_size);
     if (max_rows == 0) {
-        return 1;
+        return {};
     }
 
     const size_t row_bytes = static_cast<size_t>(row_elements) * sizeof(InputT);
     if (const uint64_t rows = largestRowsWithByteAlignment(max_rows, row_bytes, 16); rows != 0) {
-        return rows;
+        return {rows, 16};
     }
     if (const uint64_t rows = largestRowsWithByteAlignment(max_rows, row_bytes, 8); rows != 0) {
-        return rows;
+        return {rows, 8};
     }
     if (const uint64_t rows = largestRowsWithByteAlignment(max_rows, row_bytes, 4); rows != 0) {
-        return rows;
+        return {rows, 4};
     }
-    return max_rows;
+    return {max_rows, 0};
+}
+
+template <typename InputT>
+[[nodiscard]] __device__ inline uint64_t chooseAsyncFullRowHeadRows(const InputT* outer_input,
+                                                                     uint64_t reduction_size,
+                                                                     uint64_t inner_size,
+                                                                     size_t bulk_copy_alignment) {
+    if (bulk_copy_alignment < 4 || reduction_size == 0) {
+        return reduction_size;
+    }
+
+    const size_t row_bytes = static_cast<size_t>(inner_size) * sizeof(InputT);
+    const uintptr_t initial_source_address = reinterpret_cast<uintptr_t>(outer_input);
+    for (size_t alignment = bulk_copy_alignment; alignment >= 4; alignment >>= 1U) {
+        const uintptr_t alignment_mask = static_cast<uintptr_t>(alignment - 1);
+        uintptr_t source_address = initial_source_address;
+        const uint64_t search_rows = minU64(reduction_size, static_cast<uint64_t>(alignment));
+        for (uint64_t head_rows = 0; head_rows < search_rows; ++head_rows) {
+            if ((source_address & alignment_mask) == 0U) {
+                return head_rows;
+            }
+            source_address += row_bytes;
+        }
+    }
+
+    // A power-of-two alignment has a period no longer than its byte alignment. If even four-byte alignment cannot be
+    // reached in the bounded searches above, this outer row cannot use the hardware async-copy path safely.
+    return reduction_size;
+}
+
+template <typename InputT>
+[[nodiscard]] __device__ inline uint64_t chooseAsyncFullRowBulkRows(uint64_t remaining_rows, uint64_t inner_size) {
+    // The head prologue guarantees that the bulk source is aligned by at least four bytes. Keep only the largest prefix
+    // whose byte count is also four-byte aligned; at most three rows are left for the direct suffix. Full stages retain
+    // the stronger alignment encoded in AsyncFullRowStagePlan.
+    const size_t row_bytes = static_cast<size_t>(inner_size) * sizeof(InputT);
+    return largestRowsWithByteAlignment(remaining_rows, row_bytes, 4);
 }
 
 template <typename GroupT, typename PipelineT>
@@ -394,8 +443,8 @@ __device__ inline void memcpyAsyncPreferAligned(GroupT group,
     } else if ((alignment_bits & 3U) == 0U) {
         cuda::memcpy_async(group, destination, source, cuda::aligned_size_t<4>(bytes), pipeline);
     } else {
-        // Odd-byte tails and genuinely under-aligned rows are still correct. libcudacxx may use a synchronous
-        // fallback for those bytes, while aligned bulk copies use the hardware-accelerated global->shared path.
+        // Defensive correctness fallback. The full-row async planner peels under-aligned heads/tails before enqueueing,
+        // so production full-row stages should never reach this generic libcudacxx path.
         cuda::memcpy_async(group, destination, source, bytes, pipeline);
     }
 }
@@ -417,6 +466,81 @@ __device__ inline void enqueueAsyncFullRowReductionStage(GroupT warp,
     pipeline.producer_commit();
 }
 
+// Directly consume a bounded head/tail range while preserving the exact component ownership used by the async wide
+// and grouped consumers. This is intentionally only a prologue/epilogue helper: the normal bulk remains double-buffered.
+template <typename InputT,
+          typename ReductionOpT,
+          typename InputTransformT,
+          int ComponentThreads,
+          int ItemsPerLane>
+__device__ inline void reduceDirectFullRowComponentRange(const InputT* outer_input,
+                                                         uint64_t row_begin,
+                                                         uint64_t row_end,
+                                                         uint64_t inner_size,
+                                                         int component_lane,
+                                                         ReductionOpT reduction_op,
+                                                         InputTransformT input_transform,
+                                                         float (&local)[ItemsPerLane]) {
+    if (row_begin >= row_end) {
+        return;
+    }
+
+    const InputT* row_source = outer_input + row_begin * inner_size;
+    for (uint64_t row = row_begin; row < row_end; ++row) {
+#pragma unroll
+        for (int item = 0; item < ItemsPerLane; ++item) {
+            const uint64_t component = static_cast<uint64_t>(component_lane)
+                                       + static_cast<uint64_t>(item * ComponentThreads);
+            if (component < inner_size) {
+                local[item] =
+                    reduction_op(local[item], input_transform(ToFp32<InputT>{}(row_source[component])));
+            }
+        }
+        row_source += inner_size;
+    }
+}
+
+template <typename InputT, typename ReductionOpT, typename InputTransformT, int RowLanes>
+__device__ inline void reduceDirectNarrowFullRowRange(const InputT* outer_input,
+                                                      uint64_t row_begin,
+                                                      uint64_t row_end,
+                                                      uint64_t inner_size,
+                                                      uint64_t component,
+                                                      int row_lane,
+                                                      ReductionOpT reduction_op,
+                                                      InputTransformT input_transform,
+                                                      float& local) {
+    const uint64_t first_row = row_begin + static_cast<uint64_t>(row_lane);
+    if (first_row >= row_end) {
+        return;
+    }
+
+    const InputT* source = outer_input + first_row * inner_size + component;
+    const uint64_t row_stride = static_cast<uint64_t>(RowLanes) * inner_size;
+    for (uint64_t row = first_row; row < row_end; row += static_cast<uint64_t>(RowLanes)) {
+        local = reduction_op(local, input_transform(ToFp32<InputT>{}(*source)));
+        source += row_stride;
+    }
+}
+
+// Defined later with the other direct Tiled backend helpers. Async launchers use it when a geometry cannot form even a
+// four-byte-aligned async stage, avoiding a forced generic cuda::memcpy_async path.
+template <typename InputT,
+          typename ReductionOpT,
+          typename InputTransformT,
+          typename OutputFinalizeT,
+          int RowLanes>
+void launchDirectTiledFixedSegmentReductionForRowLanes(const InputT* input,
+                                                       void* output,
+                                                       DataType output_dtype,
+                                                       const CubReductionGeometry& geometry,
+                                                       ReductionOpT reduction_op,
+                                                       float init,
+                                                       InputTransformT input_transform,
+                                                       OutputFinalizeT output_finalize,
+                                                       float output_scale,
+                                                       cudaStream_t stream);
+
 // The narrow async kernel handles non-exact widths below 32: the whole trailing row fits in one physical warp tile,
 // while otherwise-unused lanes split reduction rows for inner_size <= 16. Exact K=32 uses the direct full-row kernel
 // instead: all lanes are already useful, each reduction row is a naturally coalesced warp load, and async pipeline
@@ -435,6 +559,8 @@ __global__ void asyncNarrowFullRowReductionKernel(const InputT* input,
                                                   uint64_t inner_size,
                                                   uint64_t output_outer_stride,
                                                   uint64_t output_inner_stride,
+                                                  uint64_t rows_per_stage,
+                                                  size_t bulk_copy_alignment,
                                                   ReductionOpT reduction_op,
                                                   float init,
                                                   InputTransformT input_transform,
@@ -475,7 +601,6 @@ __global__ void asyncNarrowFullRowReductionKernel(const InputT* input,
     const uint64_t total_work = outer_size;
     const uint64_t block_work_stride =
         static_cast<uint64_t>(gridDim.x) * static_cast<uint64_t>(TILED_REDUCTION_WARPS_PER_BLOCK);
-    const uint64_t rows_per_stage = chooseAlignedAsyncRowsPerStage<InputT>(inner_size, reduction_size);
 
     for (uint64_t block_work_base =
              static_cast<uint64_t>(blockIdx.x) * static_cast<uint64_t>(TILED_REDUCTION_WARPS_PER_BLOCK);
@@ -492,49 +617,93 @@ __global__ void asyncNarrowFullRowReductionKernel(const InputT* input,
         const bool component_active = outer_active && static_cast<uint64_t>(component) < inner_size;
         float local = init;
         if (outer_active && reduction_size != 0) {
-            uint64_t current_rows = minU64(rows_per_stage, reduction_size);
+            const InputT* outer_input = input + outer_index * reduction_size * inner_size;
+            const uint64_t head_rows =
+                chooseAsyncFullRowHeadRows(outer_input, reduction_size, inner_size, bulk_copy_alignment);
+            const uint64_t remaining_rows = reduction_size - head_rows;
+            const uint64_t async_rows = chooseAsyncFullRowBulkRows<InputT>(remaining_rows, inner_size);
+            const uint64_t async_end = head_rows + async_rows;
+
+            uint64_t current_rows = 0;
             int current_stage = 0;
+            if (async_rows != 0) {
+                current_rows = minU64(rows_per_stage, async_rows);
+                enqueueAsyncFullRowReductionStage(warp,
+                                                  pipeline,
+                                                  warp_shared,
+                                                  input,
+                                                  outer_index,
+                                                  head_rows,
+                                                  current_rows,
+                                                  reduction_size,
+                                                  inner_size);
+            }
 
-            enqueueAsyncFullRowReductionStage(
-                warp, pipeline, warp_shared, input, outer_index, 0, current_rows, reduction_size, inner_size);
+            // Let the first async stage make progress while the bounded alignment prologue is consumed directly.
+            if (component_active) {
+                reduceDirectNarrowFullRowRange<InputT, ReductionOpT, InputTransformT, RowLanes>(outer_input,
+                                                                                               0,
+                                                                                               head_rows,
+                                                                                               inner_size,
+                                                                                               component,
+                                                                                               row_lane,
+                                                                                               reduction_op,
+                                                                                               input_transform,
+                                                                                               local);
+            }
 
-            uint64_t next_row = current_rows;
-            while (true) {
-                uint64_t next_rows = 0;
-                if (next_row < reduction_size) {
-                    next_rows = minU64(rows_per_stage, reduction_size - next_row);
-                    InputT* next_stage = warp_shared
-                                         + static_cast<uint64_t>(current_stage ^ 1) * stage_capacity_elements;
-                    enqueueAsyncFullRowReductionStage(warp,
-                                                      pipeline,
-                                                      next_stage,
-                                                      input,
-                                                      outer_index,
-                                                      next_row,
-                                                      next_rows,
-                                                      reduction_size,
-                                                      inner_size);
-                }
-
-                pipeline.consumer_wait();
-                if (component_active) {
-                    const InputT* stage = warp_shared
-                                          + static_cast<uint64_t>(current_stage) * stage_capacity_elements;
-                    for (uint64_t stage_row = static_cast<uint64_t>(row_lane);
-                         stage_row < current_rows;
-                         stage_row += static_cast<uint64_t>(RowLanes)) {
-                        const uint64_t shared_index = stage_row * inner_size + static_cast<uint64_t>(component);
-                        local = reduction_op(local, input_transform(ToFp32<InputT>{}(stage[shared_index])));
+            if (async_rows != 0) {
+                uint64_t next_row = head_rows + current_rows;
+                while (true) {
+                    uint64_t next_rows = 0;
+                    if (next_row < async_end) {
+                        next_rows = minU64(rows_per_stage, async_end - next_row);
+                        InputT* next_stage = warp_shared
+                                             + static_cast<uint64_t>(current_stage ^ 1) * stage_capacity_elements;
+                        enqueueAsyncFullRowReductionStage(warp,
+                                                          pipeline,
+                                                          next_stage,
+                                                          input,
+                                                          outer_index,
+                                                          next_row,
+                                                          next_rows,
+                                                          reduction_size,
+                                                          inner_size);
                     }
-                }
-                pipeline.consumer_release();
 
-                if (next_rows == 0) {
-                    break;
+                    pipeline.consumer_wait();
+                    if (component_active) {
+                        const InputT* stage = warp_shared
+                                              + static_cast<uint64_t>(current_stage) * stage_capacity_elements;
+                        for (uint64_t stage_row = static_cast<uint64_t>(row_lane);
+                             stage_row < current_rows;
+                             stage_row += static_cast<uint64_t>(RowLanes)) {
+                            const uint64_t shared_index =
+                                stage_row * inner_size + static_cast<uint64_t>(component);
+                            local = reduction_op(local, input_transform(ToFp32<InputT>{}(stage[shared_index])));
+                        }
+                    }
+                    pipeline.consumer_release();
+
+                    if (next_rows == 0) {
+                        break;
+                    }
+                    current_rows = next_rows;
+                    next_row += next_rows;
+                    current_stage ^= 1;
                 }
-                current_rows = next_rows;
-                next_row += next_rows;
-                current_stage ^= 1;
+            }
+
+            if (component_active) {
+                reduceDirectNarrowFullRowRange<InputT, ReductionOpT, InputTransformT, RowLanes>(outer_input,
+                                                                                               async_end,
+                                                                                               reduction_size,
+                                                                                               inner_size,
+                                                                                               component,
+                                                                                               row_lane,
+                                                                                               reduction_op,
+                                                                                               input_transform,
+                                                                                               local);
             }
         }
 
@@ -607,6 +776,26 @@ void launchAsyncNarrowFullRowReduction(const InputT* input,
                                        OutputFinalizeT output_finalize,
                                        float output_scale,
                                        cudaStream_t stream) {
+    const AsyncFullRowStagePlan async_plan =
+        chooseAsyncFullRowStagePlan<InputT>(geometry.inner_size, geometry.reduction_size);
+    if (async_plan.bulk_copy_alignment < 4) {
+        launchDirectTiledFixedSegmentReductionForRowLanes<InputT,
+                                                          ReductionOpT,
+                                                          InputTransformT,
+                                                          OutputFinalizeT,
+                                                          RowLanes>(input,
+                                                                    output,
+                                                                    output_dtype,
+                                                                    geometry,
+                                                                    reduction_op,
+                                                                    init,
+                                                                    input_transform,
+                                                                    output_finalize,
+                                                                    output_scale,
+                                                                    stream);
+        return;
+    }
+
     const uint64_t required_blocks =
         ceilDivideU64(geometry.outer_size, static_cast<uint64_t>(TILED_REDUCTION_WARPS_PER_BLOCK));
     const unsigned int grid_blocks = static_cast<unsigned int>(
@@ -628,6 +817,8 @@ void launchAsyncNarrowFullRowReduction(const InputT* input,
                 geometry.inner_size,
                 geometry.tiled_output_outer_stride,
                 geometry.tiled_output_inner_stride,
+                async_plan.rows_per_stage,
+                async_plan.bulk_copy_alignment,
                 reduction_op,
                 init,
                 input_transform,
@@ -649,6 +840,8 @@ void launchAsyncNarrowFullRowReduction(const InputT* input,
                 geometry.inner_size,
                 geometry.tiled_output_outer_stride,
                 geometry.tiled_output_inner_stride,
+                async_plan.rows_per_stage,
+                async_plan.bulk_copy_alignment,
                 reduction_op,
                 init,
                 input_transform,
@@ -677,6 +870,8 @@ __global__ void asyncWideFullRowReductionKernel(const InputT* input,
                                                 uint64_t inner_size,
                                                 uint64_t output_outer_stride,
                                                 uint64_t output_inner_stride,
+                                                uint64_t rows_per_stage,
+                                                size_t bulk_copy_alignment,
                                                 ReductionOpT reduction_op,
                                                 float init,
                                                 InputTransformT input_transform,
@@ -711,7 +906,6 @@ __global__ void asyncWideFullRowReductionKernel(const InputT* input,
 
     const uint64_t block_work_stride =
         static_cast<uint64_t>(gridDim.x) * static_cast<uint64_t>(TILED_REDUCTION_WARPS_PER_BLOCK);
-    const uint64_t rows_per_stage = chooseAlignedAsyncRowsPerStage<InputT>(inner_size, reduction_size);
 
     for (uint64_t block_work_base =
              static_cast<uint64_t>(blockIdx.x) * static_cast<uint64_t>(TILED_REDUCTION_WARPS_PER_BLOCK);
@@ -732,53 +926,99 @@ __global__ void asyncWideFullRowReductionKernel(const InputT* input,
         }
 
         if (outer_active && reduction_size != 0) {
-            uint64_t current_rows = minU64(rows_per_stage, reduction_size);
+            const InputT* outer_input = input + outer_index * reduction_size * inner_size;
+            const uint64_t head_rows =
+                chooseAsyncFullRowHeadRows(outer_input, reduction_size, inner_size, bulk_copy_alignment);
+            const uint64_t remaining_rows = reduction_size - head_rows;
+            const uint64_t async_rows = chooseAsyncFullRowBulkRows<InputT>(remaining_rows, inner_size);
+            const uint64_t async_end = head_rows + async_rows;
+
+            uint64_t current_rows = 0;
             int current_stage = 0;
-            enqueueAsyncFullRowReductionStage(
-                warp, pipeline, warp_shared, input, outer_index, 0, current_rows, reduction_size, inner_size);
+            if (async_rows != 0) {
+                current_rows = minU64(rows_per_stage, async_rows);
+                enqueueAsyncFullRowReductionStage(warp,
+                                                  pipeline,
+                                                  warp_shared,
+                                                  input,
+                                                  outer_index,
+                                                  head_rows,
+                                                  current_rows,
+                                                  reduction_size,
+                                                  inner_size);
+            }
 
-            uint64_t next_row = current_rows;
-            while (true) {
-                uint64_t next_rows = 0;
-                if (next_row < reduction_size) {
-                    next_rows = minU64(rows_per_stage, reduction_size - next_row);
-                    InputT* next_stage = warp_shared
-                                         + static_cast<uint64_t>(current_stage ^ 1) * stage_capacity_elements;
-                    enqueueAsyncFullRowReductionStage(warp,
-                                                      pipeline,
-                                                      next_stage,
-                                                      input,
-                                                      outer_index,
-                                                      next_row,
-                                                      next_rows,
-                                                      reduction_size,
-                                                      inner_size);
-                }
+            // Let the first async stage make progress while the bounded alignment prologue is consumed directly.
+            reduceDirectFullRowComponentRange<InputT,
+                                              ReductionOpT,
+                                              InputTransformT,
+                                              TILED_REDUCTION_WARP_THREADS,
+                                              ItemsPerLane>(outer_input,
+                                                            0,
+                                                            head_rows,
+                                                            inner_size,
+                                                            lane,
+                                                            reduction_op,
+                                                            input_transform,
+                                                            local);
 
-                pipeline.consumer_wait();
-                const InputT* stage =
-                    warp_shared + static_cast<uint64_t>(current_stage) * stage_capacity_elements;
-                for (uint64_t stage_row = 0; stage_row < current_rows; ++stage_row) {
-                    const uint64_t row_base = stage_row * inner_size;
+            if (async_rows != 0) {
+                uint64_t next_row = head_rows + current_rows;
+                while (true) {
+                    uint64_t next_rows = 0;
+                    if (next_row < async_end) {
+                        next_rows = minU64(rows_per_stage, async_end - next_row);
+                        InputT* next_stage = warp_shared
+                                             + static_cast<uint64_t>(current_stage ^ 1) * stage_capacity_elements;
+                        enqueueAsyncFullRowReductionStage(warp,
+                                                          pipeline,
+                                                          next_stage,
+                                                          input,
+                                                          outer_index,
+                                                          next_row,
+                                                          next_rows,
+                                                          reduction_size,
+                                                          inner_size);
+                    }
+
+                    pipeline.consumer_wait();
+                    const InputT* stage =
+                        warp_shared + static_cast<uint64_t>(current_stage) * stage_capacity_elements;
+                    for (uint64_t stage_row = 0; stage_row < current_rows; ++stage_row) {
+                        const uint64_t row_base = stage_row * inner_size;
 #pragma unroll
-                    for (int item = 0; item < ItemsPerLane; ++item) {
-                        const uint64_t component =
-                            static_cast<uint64_t>(lane) + static_cast<uint64_t>(item * TILED_REDUCTION_WARP_THREADS);
-                        if (component < inner_size) {
-                            local[item] = reduction_op(
-                                local[item], input_transform(ToFp32<InputT>{}(stage[row_base + component])));
+                        for (int item = 0; item < ItemsPerLane; ++item) {
+                            const uint64_t component = static_cast<uint64_t>(lane)
+                                                       + static_cast<uint64_t>(item * TILED_REDUCTION_WARP_THREADS);
+                            if (component < inner_size) {
+                                local[item] = reduction_op(
+                                    local[item], input_transform(ToFp32<InputT>{}(stage[row_base + component])));
+                            }
                         }
                     }
-                }
-                pipeline.consumer_release();
+                    pipeline.consumer_release();
 
-                if (next_rows == 0) {
-                    break;
+                    if (next_rows == 0) {
+                        break;
+                    }
+                    current_rows = next_rows;
+                    next_row += next_rows;
+                    current_stage ^= 1;
                 }
-                current_rows = next_rows;
-                next_row += next_rows;
-                current_stage ^= 1;
             }
+
+            reduceDirectFullRowComponentRange<InputT,
+                                              ReductionOpT,
+                                              InputTransformT,
+                                              TILED_REDUCTION_WARP_THREADS,
+                                              ItemsPerLane>(outer_input,
+                                                            async_end,
+                                                            reduction_size,
+                                                            inner_size,
+                                                            lane,
+                                                            reduction_op,
+                                                            input_transform,
+                                                            local);
         }
 
         if constexpr (SharedTranspose) {
@@ -854,6 +1094,26 @@ void launchAsyncWideFullRowReduction(const InputT* input,
                                      OutputFinalizeT output_finalize,
                                      float output_scale,
                                      cudaStream_t stream) {
+    const AsyncFullRowStagePlan async_plan =
+        chooseAsyncFullRowStagePlan<InputT>(geometry.inner_size, geometry.reduction_size);
+    if (async_plan.bulk_copy_alignment < 4) {
+        launchDirectTiledFixedSegmentReductionForRowLanes<InputT,
+                                                          ReductionOpT,
+                                                          InputTransformT,
+                                                          OutputFinalizeT,
+                                                          1>(input,
+                                                             output,
+                                                             output_dtype,
+                                                             geometry,
+                                                             reduction_op,
+                                                             init,
+                                                             input_transform,
+                                                             output_finalize,
+                                                             output_scale,
+                                                             stream);
+        return;
+    }
+
     const uint64_t required_blocks =
         ceilDivideU64(geometry.outer_size, static_cast<uint64_t>(TILED_REDUCTION_WARPS_PER_BLOCK));
     const unsigned int grid_blocks = static_cast<unsigned int>(
@@ -875,6 +1135,8 @@ void launchAsyncWideFullRowReduction(const InputT* input,
                 geometry.inner_size,
                 geometry.tiled_output_outer_stride,
                 geometry.tiled_output_inner_stride,
+                async_plan.rows_per_stage,
+                async_plan.bulk_copy_alignment,
                 reduction_op,
                 init,
                 input_transform,
@@ -896,6 +1158,8 @@ void launchAsyncWideFullRowReduction(const InputT* input,
                 geometry.inner_size,
                 geometry.tiled_output_outer_stride,
                 geometry.tiled_output_inner_stride,
+                async_plan.rows_per_stage,
+                async_plan.bulk_copy_alignment,
                 reduction_op,
                 init,
                 input_transform,
@@ -922,8 +1186,10 @@ __global__ void asyncGroupedFullRowReductionKernel(const InputT* input,
                                                    uint64_t outer_size,
                                                    uint64_t reduction_size,
                                                    uint64_t inner_size,
-                                                  uint64_t output_outer_stride,
-                                                  uint64_t output_inner_stride,
+                                                   uint64_t output_outer_stride,
+                                                   uint64_t output_inner_stride,
+                                                   uint64_t rows_per_stage,
+                                                   size_t bulk_copy_alignment,
                                                    ReductionOpT reduction_op,
                                                    float init,
                                                    InputTransformT input_transform,
@@ -957,8 +1223,6 @@ __global__ void asyncGroupedFullRowReductionKernel(const InputT* input,
         async_shared_bytes
         + static_cast<size_t>(group_index * ASYNC_TILED_REDUCTION_PIPELINE_STAGES) * stage_bytes_per_group);
 
-    const uint64_t rows_per_stage =
-        chooseAlignedAsyncRowsPerStage<InputT>(inner_size, reduction_size, stage_bytes_per_group);
     const uint64_t block_work_stride =
         static_cast<uint64_t>(gridDim.x) * static_cast<uint64_t>(groups_per_block);
 
@@ -978,60 +1242,99 @@ __global__ void asyncGroupedFullRowReductionKernel(const InputT* input,
         }
 
         if (reduction_size != 0) {
-            uint64_t current_rows = minU64(rows_per_stage, reduction_size);
+            const InputT* outer_input = input + outer_index * reduction_size * inner_size;
+            const uint64_t head_rows =
+                chooseAsyncFullRowHeadRows(outer_input, reduction_size, inner_size, bulk_copy_alignment);
+            const uint64_t remaining_rows = reduction_size - head_rows;
+            const uint64_t async_rows = chooseAsyncFullRowBulkRows<InputT>(remaining_rows, inner_size);
+            const uint64_t async_end = head_rows + async_rows;
+
+            uint64_t current_rows = 0;
             int current_stage = 0;
-            enqueueAsyncFullRowReductionStage(output_group,
-                                              pipeline,
-                                              group_shared,
-                                              input,
-                                              outer_index,
-                                              0,
-                                              current_rows,
-                                              reduction_size,
-                                              inner_size);
+            if (async_rows != 0) {
+                current_rows = minU64(rows_per_stage, async_rows);
+                enqueueAsyncFullRowReductionStage(output_group,
+                                                  pipeline,
+                                                  group_shared,
+                                                  input,
+                                                  outer_index,
+                                                  head_rows,
+                                                  current_rows,
+                                                  reduction_size,
+                                                  inner_size);
+            }
 
-            uint64_t next_row = current_rows;
-            while (true) {
-                uint64_t next_rows = 0;
-                if (next_row < reduction_size) {
-                    next_rows = minU64(rows_per_stage, reduction_size - next_row);
-                    InputT* next_stage = group_shared
-                                         + static_cast<uint64_t>(current_stage ^ 1) * stage_capacity_elements;
-                    enqueueAsyncFullRowReductionStage(output_group,
-                                                      pipeline,
-                                                      next_stage,
-                                                      input,
-                                                      outer_index,
-                                                      next_row,
-                                                      next_rows,
-                                                      reduction_size,
-                                                      inner_size);
-                }
+            // Let the first async stage make progress while the bounded alignment prologue is consumed directly.
+            reduceDirectFullRowComponentRange<InputT,
+                                              ReductionOpT,
+                                              InputTransformT,
+                                              group_threads,
+                                              ItemsPerLane>(outer_input,
+                                                            0,
+                                                            head_rows,
+                                                            inner_size,
+                                                            group_lane,
+                                                            reduction_op,
+                                                            input_transform,
+                                                            local);
 
-                pipeline.consumer_wait();
-                const InputT* stage =
-                    group_shared + static_cast<uint64_t>(current_stage) * stage_capacity_elements;
-                for (uint64_t stage_row = 0; stage_row < current_rows; ++stage_row) {
-                    const uint64_t row_base = stage_row * inner_size;
+            if (async_rows != 0) {
+                uint64_t next_row = head_rows + current_rows;
+                while (true) {
+                    uint64_t next_rows = 0;
+                    if (next_row < async_end) {
+                        next_rows = minU64(rows_per_stage, async_end - next_row);
+                        InputT* next_stage = group_shared
+                                             + static_cast<uint64_t>(current_stage ^ 1) * stage_capacity_elements;
+                        enqueueAsyncFullRowReductionStage(output_group,
+                                                          pipeline,
+                                                          next_stage,
+                                                          input,
+                                                          outer_index,
+                                                          next_row,
+                                                          next_rows,
+                                                          reduction_size,
+                                                          inner_size);
+                    }
+
+                    pipeline.consumer_wait();
+                    const InputT* stage =
+                        group_shared + static_cast<uint64_t>(current_stage) * stage_capacity_elements;
+                    for (uint64_t stage_row = 0; stage_row < current_rows; ++stage_row) {
+                        const uint64_t row_base = stage_row * inner_size;
 #pragma unroll
-                    for (int item = 0; item < ItemsPerLane; ++item) {
-                        const uint64_t component = static_cast<uint64_t>(group_lane)
-                                                   + static_cast<uint64_t>(item * group_threads);
-                        if (component < inner_size) {
-                            local[item] = reduction_op(
-                                local[item], input_transform(ToFp32<InputT>{}(stage[row_base + component])));
+                        for (int item = 0; item < ItemsPerLane; ++item) {
+                            const uint64_t component = static_cast<uint64_t>(group_lane)
+                                                       + static_cast<uint64_t>(item * group_threads);
+                            if (component < inner_size) {
+                                local[item] = reduction_op(
+                                    local[item], input_transform(ToFp32<InputT>{}(stage[row_base + component])));
+                            }
                         }
                     }
-                }
-                pipeline.consumer_release();
+                    pipeline.consumer_release();
 
-                if (next_rows == 0) {
-                    break;
+                    if (next_rows == 0) {
+                        break;
+                    }
+                    current_rows = next_rows;
+                    next_row += next_rows;
+                    current_stage ^= 1;
                 }
-                current_rows = next_rows;
-                next_row += next_rows;
-                current_stage ^= 1;
             }
+
+            reduceDirectFullRowComponentRange<InputT,
+                                              ReductionOpT,
+                                              InputTransformT,
+                                              group_threads,
+                                              ItemsPerLane>(outer_input,
+                                                            async_end,
+                                                            reduction_size,
+                                                            inner_size,
+                                                            group_lane,
+                                                            reduction_op,
+                                                            input_transform,
+                                                            local);
         }
 
 #pragma unroll
@@ -1071,6 +1374,27 @@ void launchAsyncGroupedFullRowReduction(const InputT* input,
     if (geometry.inner_size > component_capacity || geometry.inner_size > stage_capacity_elements) {
         throw std::logic_error("Grouped async full-row reduction launch exceeds its component or stage capacity.");
     }
+    const AsyncFullRowStagePlan async_plan = chooseAsyncFullRowStagePlan<InputT>(
+        geometry.inner_size,
+        geometry.reduction_size,
+        ASYNC_TILED_REDUCTION_STAGE_BYTES_PER_WARP * static_cast<size_t>(WarpsPerOutput));
+    if (async_plan.bulk_copy_alignment < 4) {
+        launchDirectTiledFixedSegmentReductionForRowLanes<InputT,
+                                                          ReductionOpT,
+                                                          InputTransformT,
+                                                          OutputFinalizeT,
+                                                          1>(input,
+                                                             output,
+                                                             output_dtype,
+                                                             geometry,
+                                                             reduction_op,
+                                                             init,
+                                                             input_transform,
+                                                             output_finalize,
+                                                             output_scale,
+                                                             stream);
+        return;
+    }
     const uint64_t required_blocks =
         ceilDivideU64(geometry.outer_size, static_cast<uint64_t>(groups_per_block));
     const unsigned int grid_blocks = static_cast<unsigned int>(
@@ -1091,6 +1415,8 @@ void launchAsyncGroupedFullRowReduction(const InputT* input,
             geometry.inner_size,
             geometry.tiled_output_outer_stride,
             geometry.tiled_output_inner_stride,
+            async_plan.rows_per_stage,
+            async_plan.bulk_copy_alignment,
             reduction_op,
             init,
             input_transform,
@@ -2941,20 +3267,40 @@ size_t queryReductionBytesForInput(const InputT* input,
             queried_bytes = 1;
             break;
         case CubReductionPath::StridedFixedSegment: {
-            auto input_iterator = makeStridedFp32Iterator<InputT>(input, geometry, input_transform);
-            CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(nullptr,
-                                                          queried_bytes,
-                                                          input_iterator,
-                                                          output_iterator,
-                                                          static_cast<int64_t>(geometry.output_elements),
-                                                          static_cast<int>(geometry.reduction_size),
-                                                          reduction_op,
-                                                          init,
-                                                          stream));
+            if (geometry.strided_value_indexing_fits_uint32) {
+                auto input_iterator = makeStridedFp32Iterator<uint32_t, uint32_t>(
+                    input,
+                    static_cast<uint32_t>(geometry.reduction_size),
+                    geometry.device_indexing32,
+                    input_transform);
+                CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(nullptr,
+                                                              queried_bytes,
+                                                              input_iterator,
+                                                              output_iterator,
+                                                              static_cast<int64_t>(geometry.output_elements),
+                                                              static_cast<int>(geometry.reduction_size),
+                                                              reduction_op,
+                                                              init,
+                                                              stream));
+            } else {
+                auto input_iterator = makeStridedFp32Iterator<uint64_t, int64_t>(
+                    input, geometry.reduction_size, geometry.device_indexing, input_transform);
+                CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(nullptr,
+                                                              queried_bytes,
+                                                              input_iterator,
+                                                              output_iterator,
+                                                              static_cast<int64_t>(geometry.output_elements),
+                                                              static_cast<int>(geometry.reduction_size),
+                                                              reduction_op,
+                                                              init,
+                                                              stream));
+            }
             break;
         }
         case CubReductionPath::OffsetSegmented:
             throw std::logic_error("Dense CUB reduction received offset-segmented geometry.");
+        case CubReductionPath::ComposedDense:
+            throw std::logic_error("Composed dense reduction must be queried by the stamped composition wrapper.");
     }
 
     return std::max<size_t>(queried_bytes, 1);
@@ -3033,20 +3379,40 @@ void launchReductionForInput(const Tensor& temp_storage,
                                                       stream);
             break;
         case CubReductionPath::StridedFixedSegment: {
-            auto input_iterator = makeStridedFp32Iterator<InputT>(input.getMemPtr<InputT>(), geometry, input_transform);
-            CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(temp_storage_ptr,
-                                                          temp_storage_bytes,
-                                                          input_iterator,
-                                                          output_iterator,
-                                                          static_cast<int64_t>(geometry.output_elements),
-                                                          static_cast<int>(geometry.reduction_size),
-                                                          reduction_op,
-                                                          init,
-                                                          stream));
+            if (geometry.strided_value_indexing_fits_uint32) {
+                auto input_iterator = makeStridedFp32Iterator<uint32_t, uint32_t>(
+                    input.getMemPtr<InputT>(),
+                    static_cast<uint32_t>(geometry.reduction_size),
+                    geometry.device_indexing32,
+                    input_transform);
+                CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(temp_storage_ptr,
+                                                              temp_storage_bytes,
+                                                              input_iterator,
+                                                              output_iterator,
+                                                              static_cast<int64_t>(geometry.output_elements),
+                                                              static_cast<int>(geometry.reduction_size),
+                                                              reduction_op,
+                                                              init,
+                                                              stream));
+            } else {
+                auto input_iterator = makeStridedFp32Iterator<uint64_t, int64_t>(
+                    input.getMemPtr<InputT>(), geometry.reduction_size, geometry.device_indexing, input_transform);
+                CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(temp_storage_ptr,
+                                                              temp_storage_bytes,
+                                                              input_iterator,
+                                                              output_iterator,
+                                                              static_cast<int64_t>(geometry.output_elements),
+                                                              static_cast<int>(geometry.reduction_size),
+                                                              reduction_op,
+                                                              init,
+                                                              stream));
+            }
             break;
         }
         case CubReductionPath::OffsetSegmented:
             throw std::logic_error("Dense CUB reduction received offset-segmented geometry.");
+        case CubReductionPath::ComposedDense:
+            throw std::logic_error("Composed dense reduction must be launched by the stamped composition wrapper.");
     }
 }
 

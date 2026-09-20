@@ -1,5 +1,6 @@
 #include "Utilities/Common/HostFunctionCleanupQueue.h"
 #include "Utilities/Common/Stream.h"
+#include "Utilities/Common/SynchronizationDiagnostics.h"
 
 #include "gtest/gtest.h"
 
@@ -7,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 
@@ -68,7 +70,76 @@ TEST(HostFunctionCleanupQueue, RetainsArgumentsUntilCallbacksComplete) {
                                    std::make_unique<CountedHostFunctionArgs>(callbacks, destructions, earlyDestructions));
     }
 
-    stream.synchronize();
+    // Queue completion alone must prove that every CUDA host callback returned;
+    // cleanup must not need an explicit stream synchronization boundary.
+    HostFunctionCleanupQueue::instance().waitForEmpty();
+
+    EXPECT_EQ(callbacks.load(), NUM_CALLBACKS);
+    EXPECT_EQ(destructions.load(), NUM_CALLBACKS);
+    EXPECT_EQ(earlyDestructions.load(), 0u);
+    EXPECT_EQ(HostFunctionCleanupQueue::instance().getPendingCount(), 0u);
+    EXPECT_EQ(HostFunctionCleanupQueue::instance().getActiveCount(), 0u);
+}
+
+#ifdef THOR_DEBUG
+TEST(HostFunctionCleanupQueue, FastCallbackCleanupEmitsNoCudaSynchronization) {
+    constexpr uint32_t NUM_CALLBACKS = 1024;
+
+    HostFunctionCleanupQueue &queue = HostFunctionCleanupQueue::instance();
+    queue.waitForEmpty();
+
+    Stream stream(0);
+    std::atomic<uint32_t> callbacks = 0;
+    std::atomic<uint32_t> destructions = 0;
+    std::atomic<uint32_t> earlyDestructions = 0;
+
+    ThorImplementation::resetSynchronizationOperationCountsForTests();
+
+    // Trivial callbacks intentionally maximize the chance that callback
+    // completion is published before a cleanup worker begins waiting. Atomic
+    // state must make notification timing irrelevant and avoid lost wake-ups.
+    for (uint32_t i = 0; i < NUM_CALLBACKS; ++i) {
+        stream.enqueueHostFunction(countedHostFunction,
+                                   std::make_unique<CountedHostFunctionArgs>(callbacks, destructions, earlyDestructions));
+    }
+
+    queue.waitForEmpty();
+
+    const ThorImplementation::SynchronizationOperationCounts counts =
+        ThorImplementation::synchronizationOperationCountsForTests();
+    EXPECT_EQ(counts.eventRecordCount, 0u);
+    EXPECT_EQ(counts.streamWaitEventCount, 0u);
+    EXPECT_EQ(counts.hostEventSynchronizeCount, 0u);
+    EXPECT_EQ(callbacks.load(), NUM_CALLBACKS);
+    EXPECT_EQ(destructions.load(), NUM_CALLBACKS);
+    EXPECT_EQ(earlyDestructions.load(), 0u);
+    EXPECT_EQ(queue.getPendingCount(), 0u);
+    EXPECT_EQ(queue.getActiveCount(), 0u);
+}
+#endif
+
+TEST(HostFunctionCleanupQueue, CleansUpInterleavedCallbacksFromMultipleStreams) {
+    constexpr uint32_t NUM_STREAMS = 6;
+    constexpr uint32_t CALLBACKS_PER_STREAM = 128;
+    constexpr uint32_t NUM_CALLBACKS = NUM_STREAMS * CALLBACKS_PER_STREAM;
+
+    std::vector<Stream> streams;
+    streams.reserve(NUM_STREAMS);
+    for (uint32_t i = 0; i < NUM_STREAMS; ++i)
+        streams.emplace_back(0);
+
+    std::atomic<uint32_t> callbacks = 0;
+    std::atomic<uint32_t> destructions = 0;
+    std::atomic<uint32_t> earlyDestructions = 0;
+
+    for (uint32_t callbackIndex = 0; callbackIndex < CALLBACKS_PER_STREAM; ++callbackIndex) {
+        for (Stream &stream : streams) {
+            stream.enqueueHostFunction(
+                countedHostFunction,
+                std::make_unique<CountedHostFunctionArgs>(callbacks, destructions, earlyDestructions));
+        }
+    }
+
     HostFunctionCleanupQueue::instance().waitForEmpty();
 
     EXPECT_EQ(callbacks.load(), NUM_CALLBACKS);

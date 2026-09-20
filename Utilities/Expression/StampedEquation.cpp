@@ -9799,7 +9799,6 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(ExprOp op,
     }
 
     const std::vector<uint32_t> axes = narrowReductionAxes(built->key.reduction_axes);
-    built->geometry = CubReduction::analyzeGeometry(input_dims, input.getStridesElements(), axes);
 
     switch (built->key.result_kind) {
         case ReductionResultKind::Value:
@@ -9807,9 +9806,12 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(ExprOp op,
                 throw std::runtime_error("Value-reduction planning received a non-value reduction op.");
             }
             built->value_op = toCubReductionOp(built->key.op);
+            built->geometry = CubReduction::analyzeValueGeometry(
+                built->value_op.value(), input_dims, input.getStridesElements(), axes);
             break;
         case ReductionResultKind::Indices:
             built->arg_op = toCubArgReductionOp(built->key.op);
+            built->geometry = CubReduction::analyzeGeometry(input_dims, input.getStridesElements(), axes);
             break;
     }
 

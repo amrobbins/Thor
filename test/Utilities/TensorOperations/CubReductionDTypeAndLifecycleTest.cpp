@@ -1,5 +1,6 @@
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -57,6 +58,101 @@ TEST(CubReduction, PermutationAwareTiledPathSupportsEveryInputStorageDtype) {
 #if THOR_CUB_ENABLE_64BIT_TYPES
     run_dtype(DataType::FP64);
 #endif
+}
+
+TEST(CubReduction, AsyncTiledLowPrecisionAlignmentPeelCoversEveryFullRowFamily) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    struct ProbeGeometry {
+        uint64_t reduction_size;
+        uint64_t inner_size;
+    };
+    constexpr uint64_t outer_size = 3;
+    const std::vector<ProbeGeometry> probes = {
+        {127, 15},    // async_full_row_narrow, RowLanes=2
+        {127, 193},   // async_full_row_x8
+        {127, 383},   // async_full_row_x16
+        {127, 769},   // async_full_row_group2_x16
+        {127, 1537},  // async_full_row_group4_x16
+        {127, 2813},  // async_full_row_group8_x16
+        {512, 383},   // aligned async_full_row_x16 control
+    };
+
+    for (DataType dtype : {DataType::FP16, DataType::BF16}) {
+        for (const ProbeGeometry probe : probes) {
+            SCOPED_TRACE(static_cast<int>(dtype));
+            SCOPED_TRACE(probe.reduction_size);
+            SCOPED_TRACE(probe.inner_size);
+
+            std::vector<float> values(outer_size * probe.reduction_size * probe.inner_size);
+            std::vector<float> expected(outer_size * probe.inner_size, 0.0f);
+            for (uint64_t outer = 0; outer < outer_size; ++outer) {
+                for (uint64_t row = 0; row < probe.reduction_size; ++row) {
+                    for (uint64_t component = 0; component < probe.inner_size; ++component) {
+                        const float value = static_cast<float>(
+                            static_cast<int>((outer * 11 + row * 3 + component * 5) % 7) - 3);
+                        values[(outer * probe.reduction_size + row) * probe.inner_size + component] = value;
+                        expected[outer * probe.inner_size + component] += value;
+                    }
+                }
+            }
+
+            Tensor input = makeGpuTensor(
+                values, {outer_size, probe.reduction_size, probe.inner_size}, stream, dtype);
+            std::shared_ptr<StampedCubReduction> stamped =
+                CubReduction(CubReductionOp::Sum, 1, DataType::FP32).stamp(input, stream);
+            ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+
+            stamped->run();
+            stream.synchronize();
+            expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
+        }
+    }
+}
+
+TEST(CubReduction, AsyncTiledAlignmentHeadBulkTailShareOneTransformedAccumulator) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer_size = 3;
+    constexpr uint64_t reduction_size = 127;
+    constexpr uint64_t inner_size = 383;
+    std::vector<float> values(outer_size * reduction_size * inner_size);
+    std::vector<float> expected(outer_size * inner_size, 0.0f);
+    for (uint64_t outer = 0; outer < outer_size; ++outer) {
+        for (uint64_t row = 0; row < reduction_size; ++row) {
+            for (uint64_t component = 0; component < inner_size; ++component) {
+                const float value =
+                    static_cast<float>(static_cast<int>((outer * 7 + row * 3 + component) % 5) - 2);
+                values[(outer * reduction_size + row) * inner_size + component] = value;
+                expected[outer * inner_size + component] += value * value;
+            }
+        }
+    }
+    constexpr float output_scale = 0.25f;
+    for (float& value : expected) {
+        value = std::sqrt(value) * output_scale;
+    }
+
+    const std::vector<uint64_t> dimensions = {outer_size, reduction_size, inner_size};
+    const CubReductionGeometry geometry =
+        CubReduction::analyzeValueGeometry(CubReductionOp::L2Norm, dimensions, std::vector<uint32_t>{1});
+    ASSERT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
+
+    for (DataType dtype : {DataType::FP16, DataType::BF16}) {
+        SCOPED_TRACE(static_cast<int>(dtype));
+        Tensor input = makeGpuTensor(values, dimensions, stream, dtype);
+        Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, geometry.output_dimensions));
+        std::shared_ptr<StampedCubReduction> stamped =
+            CubReduction(CubReductionOp::L2Norm, 1, DataType::FP32, output_scale).stamp(input, output, stream);
+        ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+        EXPECT_EQ(stamped->getOutputTensor().getMemPtr<void>(), output.getMemPtr<void>());
+
+        stamped->run();
+        stream.synchronize();
+        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected, 1.0e-5f);
+    }
 }
 
 TEST(CubReduction, AwkwardLargeVectorizedShardsHandleAlignmentAndPaddedInputTailForEveryStorageDtype) {

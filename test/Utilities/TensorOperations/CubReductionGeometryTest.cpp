@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -394,4 +395,281 @@ TEST(CubReductionGeometry, DenseAndAffinePathSelectionRemainsUnchanged) {
     EXPECT_FALSE(diagonal.physical_layout_is_dense_permutation);
     EXPECT_FALSE(diagonal.permutation_aware_tiled_geometry.has_value());
     EXPECT_EQ(CubReduction::mapLogicalReductionIndexToPhysicalIndex(diagonal, 0, 2), 8U);
+}
+
+TEST(CubReductionGeometry, StampsCollapsedDenseRunsForAlexNetBiasGradient) {
+    const CubReductionGeometry geometry =
+        CubReduction::analyzeGeometry({512, 64, 55, 55}, std::vector<uint32_t>{0, 2, 3});
+
+    // Structural analysis remains operation-agnostic. Value-operation planning consumes this dense R|K|R metadata
+    // before stamping, while arg reductions and unvalidated value operations retain the structural fallback path.
+    EXPECT_EQ(geometry.path, CubReductionPath::StridedFixedSegment);
+    ASSERT_TRUE(geometry.dense_run_geometry.has_value());
+    const CubReductionDenseRunGeometry& runs = geometry.dense_run_geometry.value();
+    ASSERT_EQ(runs.runs.size(), 3U);
+    EXPECT_EQ(runs.reduced_run_count, 2U);
+    EXPECT_EQ(runs.retained_run_count, 1U);
+
+    EXPECT_EQ(runs.runs[0].kind, CubReductionDenseRunKind::Reduced);
+    EXPECT_EQ(runs.runs[0].extent, 512U);
+    EXPECT_EQ(runs.runs[0].physical_stride, 64U * 55U * 55U);
+    EXPECT_EQ(runs.runs[0].domain_stride, 55U * 55U);
+
+    EXPECT_EQ(runs.runs[1].kind, CubReductionDenseRunKind::Retained);
+    EXPECT_EQ(runs.runs[1].extent, 64U);
+    EXPECT_EQ(runs.runs[1].physical_stride, 55U * 55U);
+    EXPECT_EQ(runs.runs[1].domain_stride, 1U);
+
+    EXPECT_EQ(runs.runs[2].kind, CubReductionDenseRunKind::Reduced);
+    EXPECT_EQ(runs.runs[2].extent, 55U * 55U);
+    EXPECT_EQ(runs.runs[2].physical_stride, 1U);
+    EXPECT_EQ(runs.runs[2].domain_stride, 1U);
+}
+
+TEST(CubReductionGeometry, ValuePlanningSelectsGeneralComposedDenseForRkrBeforeStamping) {
+    const std::vector<uint64_t> dimensions{512, 64, 55, 55};
+    const std::vector<uint32_t> axes{0, 2, 3};
+
+    for (CubReductionOp op : {CubReductionOp::Sum,
+                              CubReductionOp::Min,
+                              CubReductionOp::Max,
+                              CubReductionOp::Product,
+                              CubReductionOp::Mean,
+                              CubReductionOp::L1Norm,
+                              CubReductionOp::L2Norm,
+                              CubReductionOp::SumSquares}) {
+        const CubReductionGeometry value = CubReduction::analyzeValueGeometry(op, dimensions, axes);
+        EXPECT_EQ(value.path, CubReductionPath::ComposedDense);
+        EXPECT_FALSE(value.strided_value_indexing_fits_uint32);
+    }
+}
+
+TEST(CubReductionGeometry, StampsGeneralAlternatingDenseRunGeometry) {
+    const CubReductionGeometry geometry =
+        CubReduction::analyzeGeometry({31, 17, 29, 19, 23}, std::vector<uint32_t>{0, 2, 4});
+
+    ASSERT_TRUE(geometry.dense_run_geometry.has_value());
+    const CubReductionDenseRunGeometry& dense = geometry.dense_run_geometry.value();
+    ASSERT_EQ(dense.runs.size(), 5U);
+    EXPECT_EQ(dense.reduced_run_count, 3U);
+    EXPECT_EQ(dense.retained_run_count, 2U);
+
+    EXPECT_EQ(dense.runs[0].kind, CubReductionDenseRunKind::Reduced);
+    EXPECT_EQ(dense.runs[0].extent, 31U);
+    EXPECT_EQ(dense.runs[0].physical_stride, 17U * 29U * 19U * 23U);
+    EXPECT_EQ(dense.runs[0].domain_stride, 29U * 23U);
+
+    EXPECT_EQ(dense.runs[1].kind, CubReductionDenseRunKind::Retained);
+    EXPECT_EQ(dense.runs[1].extent, 17U);
+    EXPECT_EQ(dense.runs[1].physical_stride, 29U * 19U * 23U);
+    EXPECT_EQ(dense.runs[1].domain_stride, 19U);
+
+    EXPECT_EQ(dense.runs[2].kind, CubReductionDenseRunKind::Reduced);
+    EXPECT_EQ(dense.runs[2].extent, 29U);
+    EXPECT_EQ(dense.runs[2].physical_stride, 19U * 23U);
+    EXPECT_EQ(dense.runs[2].domain_stride, 23U);
+
+    EXPECT_EQ(dense.runs[3].kind, CubReductionDenseRunKind::Retained);
+    EXPECT_EQ(dense.runs[3].extent, 19U);
+    EXPECT_EQ(dense.runs[3].physical_stride, 23U);
+    EXPECT_EQ(dense.runs[3].domain_stride, 1U);
+
+    EXPECT_EQ(dense.runs[4].kind, CubReductionDenseRunKind::Reduced);
+    EXPECT_EQ(dense.runs[4].extent, 23U);
+    EXPECT_EQ(dense.runs[4].physical_stride, 1U);
+    EXPECT_EQ(dense.runs[4].domain_stride, 1U);
+}
+
+TEST(CubReductionGeometry, ValuePlanningSelectsGeneralComposedDenseForRkrkrBeforeStamping) {
+    const std::vector<uint64_t> dimensions{31, 17, 29, 19, 23};
+    const std::vector<uint32_t> axes{0, 2, 4};
+
+    for (CubReductionOp op : {CubReductionOp::Sum,
+                              CubReductionOp::Min,
+                              CubReductionOp::Max,
+                              CubReductionOp::Product,
+                              CubReductionOp::Mean,
+                              CubReductionOp::L1Norm,
+                              CubReductionOp::L2Norm,
+                              CubReductionOp::SumSquares}) {
+        const CubReductionGeometry value = CubReduction::analyzeValueGeometry(op, dimensions, axes);
+        EXPECT_EQ(value.path, CubReductionPath::ComposedDense);
+        EXPECT_FALSE(value.strided_value_indexing_fits_uint32);
+    }
+}
+
+TEST(CubReductionGeometry, ValuePlanningSelectsComposedDenseForTrailingRetainedTwoRunTopologies) {
+    for (CubReductionOp op : {CubReductionOp::Sum,
+                              CubReductionOp::Min,
+                              CubReductionOp::Max,
+                              CubReductionOp::Product,
+                              CubReductionOp::Mean,
+                              CubReductionOp::L1Norm,
+                              CubReductionOp::L2Norm,
+                              CubReductionOp::SumSquares}) {
+        const CubReductionGeometry rkrk =
+            CubReduction::analyzeValueGeometry(op, {2, 3, 5, 7}, {0, 2});
+        EXPECT_EQ(rkrk.path, CubReductionPath::ComposedDense);
+        EXPECT_FALSE(rkrk.strided_value_indexing_fits_uint32);
+
+        const CubReductionGeometry krkrk =
+            CubReduction::analyzeValueGeometry(op, {2, 3, 5, 7, 11}, {1, 3});
+        EXPECT_EQ(krkrk.path, CubReductionPath::ComposedDense);
+        EXPECT_FALSE(krkrk.strided_value_indexing_fits_uint32);
+    }
+}
+
+TEST(CubReductionGeometry, DenseValuePlannerHandlesArbitraryAlternatingRunsAndSingletonSeparators) {
+    for (CubReductionOp op : {CubReductionOp::Sum,
+                              CubReductionOp::Min,
+                              CubReductionOp::Max,
+                              CubReductionOp::Product,
+                              CubReductionOp::Mean,
+                              CubReductionOp::L1Norm,
+                              CubReductionOp::L2Norm,
+                              CubReductionOp::SumSquares}) {
+        const CubReductionGeometry trailing_reduced = CubReduction::analyzeValueGeometry(
+            op, {2, 3, 5, 7, 11, 13, 17}, {0, 2, 4, 6});
+        EXPECT_EQ(trailing_reduced.path, CubReductionPath::ComposedDense);
+
+        const CubReductionGeometry trailing_retained = CubReduction::analyzeValueGeometry(
+            op, {2, 3, 5, 7, 11, 13, 17, 19}, {0, 2, 4, 6});
+        EXPECT_EQ(trailing_retained.path, CubReductionPath::ComposedDense);
+
+        // Axis 1 is a retained singleton between reduced non-singleton axes 0 and 2. The generic planner absorbs it
+        // into one direct contiguous stage instead of treating the public non-contiguous axis list as strided.
+        const CubReductionGeometry singleton_separator =
+            CubReduction::analyzeValueGeometry(op, {2, 1, 3, 5}, {0, 2});
+        EXPECT_EQ(singleton_separator.path, CubReductionPath::ComposedDense);
+
+        // Reducing only singleton axes still needs one direct pass for transform/finalize/conversion/scaling.
+        const CubReductionGeometry singleton_only =
+            CubReduction::analyzeValueGeometry(op, {3, 1, 5, 1, 7}, {1, 3});
+        EXPECT_EQ(singleton_only.path, CubReductionPath::ComposedDense);
+    }
+}
+
+TEST(CubReductionGeometry, DenseValueCompositionValidatesPerStageRatherThanMonolithicReductionSize) {
+    const uint64_t run_extent = 65536;
+    const CubReductionGeometry structural =
+        CubReduction::analyzeGeometry({run_extent, 2, run_extent, 2}, std::vector<uint32_t>{0, 2});
+    EXPECT_EQ(structural.path, CubReductionPath::StridedFixedSegment);
+    EXPECT_GT(structural.reduction_size, static_cast<uint64_t>(std::numeric_limits<int>::max()));
+
+    // The logical reduction domain is > INT_MAX, but each TiledFixedSegment stage reduces only 65536 elements.
+    const CubReductionGeometry sum = CubReduction::analyzeValueGeometry(
+        CubReductionOp::Sum, {run_extent, 2, run_extent, 2}, {0, 2});
+    EXPECT_EQ(sum.path, CubReductionPath::ComposedDense);
+
+    // Every dense value operation validates its direct component stages independently rather than inheriting the
+    // legacy monolithic fixed-segment limit from StridedFixedSegment.
+    for (CubReductionOp op : {CubReductionOp::Min,
+                              CubReductionOp::Max,
+                              CubReductionOp::Product,
+                              CubReductionOp::Mean,
+                              CubReductionOp::L1Norm,
+                              CubReductionOp::L2Norm,
+                              CubReductionOp::SumSquares}) {
+        EXPECT_EQ(CubReduction::analyzeValueGeometry(
+                      op, {run_extent, 2, run_extent, 2}, {0, 2})
+                      .path,
+                  CubReductionPath::ComposedDense);
+    }
+}
+
+TEST(CubReductionGeometry, OnlyCubFixedSizeSegmentedPathsInheritTheIntSegmentSizeLimit) {
+    const uint64_t above_int_max = static_cast<uint64_t>(std::numeric_limits<int>::max()) + 1ULL;
+
+    // TiledFixedSegment is Thor-owned. Its geometry and kernel loops are uint64_t, so a middle reduced block may be
+    // larger than INT_MAX even though CUB's fixed-size segmented API cannot represent such a segment size.
+    const CubReductionGeometry tiled =
+        CubReduction::analyzeValueGeometry(CubReductionOp::Sum, {2, above_int_max, 2}, {1});
+    EXPECT_EQ(tiled.path, CubReductionPath::TiledFixedSegment);
+    EXPECT_EQ(tiled.reduction_size, above_int_max);
+
+    // The same must remain true when such a Tiled stage is one pass inside a disjoint-axis dense composition.
+    const CubReductionGeometry composed =
+        CubReduction::analyzeValueGeometry(CubReductionOp::Sum, {above_int_max, 2, 3, 2}, {0, 2});
+    EXPECT_EQ(composed.path, CubReductionPath::ComposedDense);
+    EXPECT_GT(composed.reduction_size, static_cast<uint64_t>(std::numeric_limits<int>::max()));
+
+    // Full reductions use DeviceReduce with an int64_t item count and likewise do not inherit the fixed-segment cap.
+    const CubReductionGeometry full =
+        CubReduction::analyzeValueGeometry(CubReductionOp::Sum, {above_int_max}, {0});
+    EXPECT_EQ(full.path, CubReductionPath::DeviceTransformReduce);
+
+    // ContiguousFixedSegment still calls DeviceSegmentedReduce's fixed-size overload, whose segment_size parameter is
+    // an int. Keep rejecting that geometry until we deliberately replace or widen that primitive.
+    EXPECT_THROW((void)CubReduction::analyzeValueGeometry(
+                     CubReductionOp::Sum, {2, above_int_max}, {1}),
+                 std::invalid_argument);
+}
+
+TEST(CubReductionGeometry, DenseRunPlanningCollapsesAdjacentRolesAndIgnoresSingletonSeparators) {
+    const CubReductionGeometry adjacent =
+        CubReduction::analyzeGeometry({2, 3, 4, 5}, std::vector<uint32_t>{0, 1, 3});
+    ASSERT_TRUE(adjacent.dense_run_geometry.has_value());
+    ASSERT_EQ(adjacent.dense_run_geometry->runs.size(), 3U);
+    EXPECT_EQ(adjacent.dense_run_geometry->runs[0].kind, CubReductionDenseRunKind::Reduced);
+    EXPECT_EQ(adjacent.dense_run_geometry->runs[0].extent, 6U);
+    EXPECT_EQ(adjacent.dense_run_geometry->runs[0].physical_stride, 20U);
+    EXPECT_EQ(adjacent.dense_run_geometry->runs[0].domain_stride, 5U);
+    EXPECT_EQ(adjacent.dense_run_geometry->runs[1].kind, CubReductionDenseRunKind::Retained);
+    EXPECT_EQ(adjacent.dense_run_geometry->runs[1].extent, 4U);
+    EXPECT_EQ(adjacent.dense_run_geometry->runs[1].physical_stride, 5U);
+    EXPECT_EQ(adjacent.dense_run_geometry->runs[1].domain_stride, 1U);
+    EXPECT_EQ(adjacent.dense_run_geometry->runs[2].kind, CubReductionDenseRunKind::Reduced);
+    EXPECT_EQ(adjacent.dense_run_geometry->runs[2].extent, 5U);
+    EXPECT_EQ(adjacent.dense_run_geometry->runs[2].physical_stride, 1U);
+    EXPECT_EQ(adjacent.dense_run_geometry->runs[2].domain_stride, 1U);
+
+    // The retained singleton does not consume storage or an output coordinate, so it must not split the two reduced
+    // spans into separate runtime runs. This gives the executor the physically meaningful R(2*3)|K(5) traversal.
+    const CubReductionGeometry singleton_separator =
+        CubReduction::analyzeGeometry({2, 1, 3, 5}, std::vector<uint32_t>{0, 2});
+    ASSERT_TRUE(singleton_separator.dense_run_geometry.has_value());
+    ASSERT_EQ(singleton_separator.dense_run_geometry->runs.size(), 2U);
+    EXPECT_EQ(singleton_separator.dense_run_geometry->runs[0].kind, CubReductionDenseRunKind::Reduced);
+    EXPECT_EQ(singleton_separator.dense_run_geometry->runs[0].extent, 6U);
+    EXPECT_EQ(singleton_separator.dense_run_geometry->runs[0].physical_stride, 5U);
+    EXPECT_EQ(singleton_separator.dense_run_geometry->runs[0].domain_stride, 1U);
+    EXPECT_EQ(singleton_separator.dense_run_geometry->runs[1].kind, CubReductionDenseRunKind::Retained);
+    EXPECT_EQ(singleton_separator.dense_run_geometry->runs[1].extent, 5U);
+    EXPECT_EQ(singleton_separator.dense_run_geometry->runs[1].physical_stride, 1U);
+    EXPECT_EQ(singleton_separator.dense_run_geometry->runs[1].domain_stride, 1U);
+}
+
+TEST(CubReductionGeometry, DenseRunPlanningDoesNotPretendArbitraryStridesAreDense) {
+    const CubReductionGeometry gapped =
+        CubReduction::analyzeGeometry({2, 3, 4}, {20, 4, 1}, std::vector<uint32_t>{0, 2});
+    EXPECT_EQ(gapped.path, CubReductionPath::StridedFixedSegment);
+    EXPECT_FALSE(gapped.dense_run_geometry.has_value());
+}
+
+TEST(CubReductionGeometry, SelectsUint32IndexingForOrdinaryStridedFallbackWhenAllOffsetsFit) {
+    const CubReductionGeometry alexnet =
+        CubReduction::analyzeGeometry({512, 64, 55, 55}, std::vector<uint32_t>{0, 2, 3});
+    EXPECT_EQ(alexnet.path, CubReductionPath::StridedFixedSegment);
+    EXPECT_TRUE(alexnet.strided_value_indexing_fits_uint32);
+
+    const CubReductionGeometry small_irregular =
+        CubReduction::analyzeGeometry({2, 3, 4}, {20, 4, 1}, std::vector<uint32_t>{0, 2});
+    EXPECT_EQ(small_irregular.path, CubReductionPath::StridedFixedSegment);
+    EXPECT_TRUE(small_irregular.strided_value_indexing_fits_uint32);
+}
+
+TEST(CubReductionGeometry, RetainsUint64IndexingWhenLogicalOrPhysicalFallbackDomainExceedsUint32) {
+    // The per-output reduction still fits CUB's signed-int fixed-segment limit, but the full logical item domain does
+    // not fit UINT32, so a 32-bit counting iterator would wrap.
+    const CubReductionGeometry large_logical =
+        CubReduction::analyzeGeometry({65535, 3, 32768}, std::vector<uint32_t>{0, 2});
+    EXPECT_EQ(large_logical.path, CubReductionPath::StridedFixedSegment);
+    EXPECT_FALSE(large_logical.strided_value_indexing_fits_uint32);
+
+    // A small logical tensor may still address beyond 4 Gi elements through an arbitrary view stride. getMemPtr()
+    // already includes the storage offset, so this specifically tests the relative physical index used by the mapper.
+    const CubReductionGeometry large_physical = CubReduction::analyzeGeometry(
+        {2, 3, 4}, {uint64_t{1} << 32, 4, 1}, std::vector<uint32_t>{0, 2});
+    EXPECT_EQ(large_physical.path, CubReductionPath::StridedFixedSegment);
+    EXPECT_FALSE(large_physical.strided_value_indexing_fits_uint32);
 }

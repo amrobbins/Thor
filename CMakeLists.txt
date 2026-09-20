@@ -1995,6 +1995,38 @@ target_compile_options(thor_type_converter_benchmark PRIVATE
         $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G>
 )
 
+add_executable(thor_cub_reduction_benchmark EXCLUDE_FROM_ALL
+        benchmarks/CubReductionBenchmark.cpp
+        benchmarks/CubReductionBenchmarkCandidate.cpp
+        benchmarks/CubReductionBenchmarkDenseRunTrailingReducedCandidate.cu
+        benchmarks/CubReductionBenchmarkDenseRunTrailingRetainedCandidates.cpp
+        benchmarks/CubReductionBenchmarkDenseRunOrderCandidates.cpp
+        benchmarks/CubReductionBenchmarkDirectTiledCandidate.cu
+        benchmarks/CubReductionBenchmarkCudnnFrontendCandidate.cpp
+        benchmarks/CubReductionBenchmarkCudnnFrontendLayout.cu
+)
+thor_apply_linker_settings(thor_cub_reduction_benchmark)
+# Benchmark-only reduction candidates may add CUDA translation units. Do not enable target-wide IPO here because that
+# would also request CUDA device LTO without the matching device-link configuration.
+thor_enable_release_no_semantic_interposition(thor_cub_reduction_benchmark)
+target_link_libraries(thor_cub_reduction_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_link_libraries(thor_cub_reduction_benchmark PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(thor_cub_reduction_benchmark PRIVATE PkgConfig::LIBURING)
+target_compile_options(thor_cub_reduction_benchmark PRIVATE
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3>
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:RelWithDebInfo>>:-O3>
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Debug>>:-O0 -ggdb>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:-O3>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:RelWithDebInfo>>:-O3>
+        # This is a performance benchmark. Benchmark-only CUDA candidates must remain optimized even when the
+        # surrounding Thor build is Debug; -G would make their timing incomparable with production/library kernels.
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-O3>
+)
+# Unlike normal benchmark-only CUDA candidates, this experiment is a direct A/B against a production Tiled kernel.
+# In Debug, compile it at the production Thor library's -O0 level so optimization level cannot decide the result.
+set_property(SOURCE benchmarks/CubReductionBenchmarkDirectTiledCandidate.cu APPEND PROPERTY COMPILE_OPTIONS
+        $<$<CONFIG:Debug>:-O0>)
+
 add_executable(thor_einsum_benchmark EXCLUDE_FROM_ALL
         benchmarks/EinsumBenchmark.cpp
 )

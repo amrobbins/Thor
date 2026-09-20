@@ -42,6 +42,7 @@ enum class CubReductionPath : uint8_t {
     TiledFixedSegment = 2,
     StridedFixedSegment = 3,
     OffsetSegmented = 4,
+    ComposedDense = 5,
 };
 
 /**
@@ -60,21 +61,77 @@ struct CubReductionIndexing {
 };
 
 /** Trivially-copyable device view over stamped, rank-sized arbitrary-axis metadata. */
-struct CubReductionDeviceIndexing {
+template <typename IndexT>
+struct CubReductionDeviceIndexingT {
     uint32_t reduced_axis_count = 0;
     uint32_t retained_axis_count = 0;
-    const uint64_t* reduced_axes = nullptr;
-    const uint64_t* retained_axes = nullptr;
-    const uint64_t* input_strides = nullptr;
-    const uint64_t* reduced_dimensions = nullptr;
-    const uint64_t* retained_dimensions = nullptr;
+    const IndexT* reduced_axes = nullptr;
+    const IndexT* retained_axes = nullptr;
+    const IndexT* input_strides = nullptr;
+    const IndexT* reduced_dimensions = nullptr;
+    const IndexT* retained_dimensions = nullptr;
 };
 
+using CubReductionDeviceIndexing32 = CubReductionDeviceIndexingT<uint32_t>;
+using CubReductionDeviceIndexing = CubReductionDeviceIndexingT<uint64_t>;
+
+static_assert(std::is_trivially_copyable_v<CubReductionDeviceIndexing32>);
 static_assert(std::is_trivially_copyable_v<CubReductionDeviceIndexing>);
 
 enum class CubReductionTiledRetainedOutputOrder : uint8_t {
     NaturalOuterInner = 0,
     PermutedInnerOuter = 1,
+};
+
+// Host/device-independent launch-policy constants shared by the tuned TiledFixedSegment implementation, the dense
+// composition cost planner, and reduction benchmarks. Keeping these values in the common reduction header prevents
+// the planner from silently estimating a different full-row ownership model than the kernels actually launch.
+namespace CubReductionTiledPolicy {
+inline constexpr uint64_t WARP_THREADS = 32;
+inline constexpr uint64_t WARPS_PER_BLOCK = 8;
+inline constexpr uint64_t TARGET_ACTIVE_WARPS = 1024;
+inline constexpr uint64_t FULL_ROW_MAX_COMPONENTS_PER_LANE = 16;
+inline constexpr uint64_t FULL_ROW_COMPONENTS_PER_WARP = WARP_THREADS * FULL_ROW_MAX_COMPONENTS_PER_LANE;
+inline constexpr uint64_t FULL_ROW_MAX_WARPS_PER_OUTPUT = WARPS_PER_BLOCK;
+inline constexpr uint64_t FULL_ROW_GROUP_MAX_INNER_SIZE =
+    FULL_ROW_COMPONENTS_PER_WARP * FULL_ROW_MAX_WARPS_PER_OUTPUT;
+inline constexpr uint64_t FULL_ROW_COMPONENTS_PER_BLOCK = FULL_ROW_GROUP_MAX_INNER_SIZE;
+inline constexpr uint64_t ASYNC_STAGE_BYTES_PER_WARP = 2048;
+}  // namespace CubReductionTiledPolicy
+
+/** Role of one collapsed run in a dense row-major reduction traversal. */
+enum class CubReductionDenseRunKind : uint8_t {
+    Reduced = 0,
+    Retained = 1,
+};
+
+/**
+ * One collapsed run of adjacent, traversal-equivalent dimensions in a dense row-major tensor.
+ *
+ * extent is the product of the non-singleton dimensions represented by the run. physical_stride is the source-element
+ * stride between adjacent coordinates of that collapsed run. domain_stride is the row-major multiplier of that run in
+ * the flattened reduction domain (for Reduced runs) or flattened output domain (for Retained runs). Singleton
+ * dimensions are omitted because they neither advance storage nor contribute a coordinate; runs on either side of an
+ * omitted singleton may therefore collapse together when they have the same role.
+ */
+struct CubReductionDenseRun {
+    CubReductionDenseRunKind kind = CubReductionDenseRunKind::Reduced;
+    uint64_t extent = 1;
+    uint64_t physical_stride = 1;
+    uint64_t domain_stride = 1;
+};
+
+/**
+ * Stamp-time traversal plan for an ordinary dense row-major tensor.
+ *
+ * Replacement dense-run reducers can consume this compact run sequence instead of rediscovering multidimensional
+ * coordinates from every scalar's flattened logical index. Launch policy is intentionally not part of this structure;
+ * block size, sharding, and scratch policy are selected separately.
+ */
+struct CubReductionDenseRunGeometry {
+    std::vector<CubReductionDenseRun> runs;
+    uint32_t reduced_run_count = 0;
+    uint32_t retained_run_count = 0;
 };
 
 /**
@@ -124,6 +181,18 @@ struct CubReductionGeometry {
     std::vector<uint64_t> squeezed_output_dimensions;
     CubReductionIndexing indexing;
     CubReductionDeviceIndexing device_indexing;
+    CubReductionDeviceIndexing32 device_indexing32;
+
+    // The value-reduction strided fallback specializes its hot logical/physical index arithmetic to UINT32 whenever
+    // both the logical item domain and every reachable source offset fit. Arg reductions intentionally retain their
+    // existing UINT64 fallback implementation; this flag describes the value-reduction path only.
+    bool strided_value_indexing_fits_uint32 = false;
+
+    // Populated only for ordinary dense row-major storage. This is traversal geometry, not launch policy. Production
+    // composed reducers consume this metadata during value-path planning and stamping. SUM can eliminate arbitrary
+    // reduced-run sequences through direct reducer stages; other value operations and arg reductions use it as their
+    // migration metadata until their composed semantics are implemented.
+    std::optional<CubReductionDenseRunGeometry> dense_run_geometry = std::nullopt;
 
     // DeviceTransformReduce normally consumes a dense pointer directly.  A rank-1
     // non-dense view (for example, an extracted matrix diagonal) is still an
@@ -207,6 +276,21 @@ class CubReduction {
     [[nodiscard]] static CubReductionGeometry analyzeGeometry(const std::vector<uint64_t>& input_dimensions,
                                                                const std::vector<uint64_t>& input_strides,
                                                                const std::vector<uint32_t>& axes);
+
+    /**
+     * Returns the executable geometry for a value reduction.
+     *
+     * analyzeGeometry() is deliberately operation-agnostic and describes the structural reduction geometry shared by
+     * value and arg reductions.  This planner applies value-operation-specific backend selection on top of that
+     * structural analysis so callers that cache a reduction plan observe the same path that stamp() will execute.
+     */
+    [[nodiscard]] static CubReductionGeometry analyzeValueGeometry(CubReductionOp op,
+                                                                    const std::vector<uint64_t>& input_dimensions,
+                                                                    const std::vector<uint32_t>& axes);
+    [[nodiscard]] static CubReductionGeometry analyzeValueGeometry(CubReductionOp op,
+                                                                    const std::vector<uint64_t>& input_dimensions,
+                                                                    const std::vector<uint64_t>& input_strides,
+                                                                    const std::vector<uint32_t>& axes);
 
     /** Maps one logical (output, reduction) coordinate pair to the source tensor's physical element offset. */
     [[nodiscard]] static uint64_t mapLogicalReductionIndexToPhysicalIndex(const CubReductionGeometry& geometry,
@@ -510,6 +594,11 @@ class StampedCubReduction {
     [[nodiscard]] DataType getOutputDataType() const { return output.getDataType(); }
     [[nodiscard]] DataType getAccumulatorDataType() const { return DataType::FP32; }
     [[nodiscard]] const CubReductionGeometry& getGeometry() const { return geometry; }
+    /**
+     * Returns the public reduction axes executed by each direct pass of a ComposedDense reduction, in execution order.
+     * Non-composed reductions return an empty vector. This is planning metadata only; run() never consults it.
+     */
+    [[nodiscard]] std::vector<std::vector<uint32_t>> getComposedStageAxes() const;
     [[nodiscard]] size_t getWorkspaceSizeInBytes() const { return temp_storage_bytes; }
     [[nodiscard]] float getOutputScale() const { return output_scale; }
 
@@ -526,6 +615,15 @@ class StampedCubReduction {
                         float output_scale,
                         const Stream& stream);
 
+    StampedCubReduction(CubReductionOp op,
+                        CubReductionGeometry geometry,
+                        const Tensor& input,
+                        const Tensor& output,
+                        size_t workspace_size_bytes,
+                        std::vector<std::shared_ptr<StampedCubReduction>> composed_stages,
+                        float output_scale,
+                        const Stream& stream);
+
     CubReductionOp op;
     CubReductionGeometry geometry;
     const Tensor input;
@@ -533,6 +631,7 @@ class StampedCubReduction {
     const size_t temp_storage_bytes;
     Tensor temp_storage;
     std::optional<Tensor> indexing_metadata;
+    std::vector<std::shared_ptr<StampedCubReduction>> composed_stages;
     const float output_scale;
     Stream stream;
 };

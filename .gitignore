@@ -9,6 +9,9 @@ token
 ndist
 *.patch
 
+# Local profiling datasets/caches. Never commit generated profiling data.
+/profiling/data/
+
 # Compiled source #
 ###################
 *.com

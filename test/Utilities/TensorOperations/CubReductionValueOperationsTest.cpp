@@ -1,5 +1,7 @@
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 
+#include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
+
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -7,6 +9,166 @@
 
 using namespace ThorImplementation;
 using namespace ThorImplementation::CubReductionTestSupport;
+
+namespace {
+
+void expectStageSemantics(CubReductionOp op,
+                          CubReductionInternal::CubReductionStageRole role,
+                          uint64_t total_reduction_size,
+                          CubReductionInternal::CubReductionStageInputTransform input_transform,
+                          CubReductionInternal::CubReductionStageCombine combine,
+                          CubReductionInternal::CubReductionStageFinalize finalize,
+                          uint64_t finalize_divisor = 1) {
+    const CubReductionInternal::CubReductionStageSemantics semantics =
+        CubReductionInternal::makeValueReductionStageSemantics(op, role, total_reduction_size);
+    EXPECT_EQ(semantics.input_transform, input_transform);
+    EXPECT_EQ(semantics.combine, combine);
+    EXPECT_EQ(semantics.finalize, finalize);
+    EXPECT_EQ(semantics.finalize_divisor, finalize_divisor);
+}
+
+}  // namespace
+
+TEST(CubReduction, ValueStageSemanticsSeparateFirstTransformCombineAndFinalization) {
+    using CubReductionInternal::CubReductionStageCombine;
+    using CubReductionInternal::CubReductionStageFinalize;
+    using CubReductionInternal::CubReductionStageInputTransform;
+    using CubReductionInternal::CubReductionStageRole;
+
+    constexpr uint64_t total_reduction_size = 105;
+
+    for (CubReductionStageRole role : {CubReductionStageRole::Complete,
+                                       CubReductionStageRole::First,
+                                       CubReductionStageRole::Intermediate,
+                                       CubReductionStageRole::Final}) {
+        expectStageSemantics(CubReductionOp::Sum,
+                             role,
+                             total_reduction_size,
+                             CubReductionStageInputTransform::Identity,
+                             CubReductionStageCombine::Sum,
+                             CubReductionStageFinalize::Identity);
+        expectStageSemantics(CubReductionOp::Product,
+                             role,
+                             total_reduction_size,
+                             CubReductionStageInputTransform::Identity,
+                             CubReductionStageCombine::Product,
+                             CubReductionStageFinalize::Identity);
+        expectStageSemantics(CubReductionOp::Min,
+                             role,
+                             total_reduction_size,
+                             CubReductionStageInputTransform::Identity,
+                             CubReductionStageCombine::Minimum,
+                             CubReductionStageFinalize::Identity);
+        expectStageSemantics(CubReductionOp::Max,
+                             role,
+                             total_reduction_size,
+                             CubReductionStageInputTransform::Identity,
+                             CubReductionStageCombine::Maximum,
+                             CubReductionStageFinalize::Identity);
+    }
+
+    expectStageSemantics(CubReductionOp::Mean,
+                         CubReductionStageRole::Complete,
+                         total_reduction_size,
+                         CubReductionStageInputTransform::Identity,
+                         CubReductionStageCombine::Sum,
+                         CubReductionStageFinalize::Divide,
+                         total_reduction_size);
+    expectStageSemantics(CubReductionOp::Mean,
+                         CubReductionStageRole::First,
+                         total_reduction_size,
+                         CubReductionStageInputTransform::Identity,
+                         CubReductionStageCombine::Sum,
+                         CubReductionStageFinalize::Identity);
+    expectStageSemantics(CubReductionOp::Mean,
+                         CubReductionStageRole::Intermediate,
+                         total_reduction_size,
+                         CubReductionStageInputTransform::Identity,
+                         CubReductionStageCombine::Sum,
+                         CubReductionStageFinalize::Identity);
+    expectStageSemantics(CubReductionOp::Mean,
+                         CubReductionStageRole::Final,
+                         total_reduction_size,
+                         CubReductionStageInputTransform::Identity,
+                         CubReductionStageCombine::Sum,
+                         CubReductionStageFinalize::Divide,
+                         total_reduction_size);
+
+    expectStageSemantics(CubReductionOp::L1Norm,
+                         CubReductionStageRole::Complete,
+                         total_reduction_size,
+                         CubReductionStageInputTransform::AbsoluteValue,
+                         CubReductionStageCombine::Sum,
+                         CubReductionStageFinalize::Identity);
+    expectStageSemantics(CubReductionOp::L1Norm,
+                         CubReductionStageRole::First,
+                         total_reduction_size,
+                         CubReductionStageInputTransform::AbsoluteValue,
+                         CubReductionStageCombine::Sum,
+                         CubReductionStageFinalize::Identity);
+    expectStageSemantics(CubReductionOp::L1Norm,
+                         CubReductionStageRole::Intermediate,
+                         total_reduction_size,
+                         CubReductionStageInputTransform::Identity,
+                         CubReductionStageCombine::Sum,
+                         CubReductionStageFinalize::Identity);
+    expectStageSemantics(CubReductionOp::L1Norm,
+                         CubReductionStageRole::Final,
+                         total_reduction_size,
+                         CubReductionStageInputTransform::Identity,
+                         CubReductionStageCombine::Sum,
+                         CubReductionStageFinalize::Identity);
+
+    expectStageSemantics(CubReductionOp::L2Norm,
+                         CubReductionStageRole::Complete,
+                         total_reduction_size,
+                         CubReductionStageInputTransform::Square,
+                         CubReductionStageCombine::Sum,
+                         CubReductionStageFinalize::SquareRoot);
+    expectStageSemantics(CubReductionOp::L2Norm,
+                         CubReductionStageRole::First,
+                         total_reduction_size,
+                         CubReductionStageInputTransform::Square,
+                         CubReductionStageCombine::Sum,
+                         CubReductionStageFinalize::Identity);
+    expectStageSemantics(CubReductionOp::L2Norm,
+                         CubReductionStageRole::Intermediate,
+                         total_reduction_size,
+                         CubReductionStageInputTransform::Identity,
+                         CubReductionStageCombine::Sum,
+                         CubReductionStageFinalize::Identity);
+    expectStageSemantics(CubReductionOp::L2Norm,
+                         CubReductionStageRole::Final,
+                         total_reduction_size,
+                         CubReductionStageInputTransform::Identity,
+                         CubReductionStageCombine::Sum,
+                         CubReductionStageFinalize::SquareRoot);
+
+    expectStageSemantics(CubReductionOp::SumSquares,
+                         CubReductionStageRole::Complete,
+                         total_reduction_size,
+                         CubReductionStageInputTransform::Square,
+                         CubReductionStageCombine::Sum,
+                         CubReductionStageFinalize::Identity);
+    expectStageSemantics(CubReductionOp::SumSquares,
+                         CubReductionStageRole::First,
+                         total_reduction_size,
+                         CubReductionStageInputTransform::Square,
+                         CubReductionStageCombine::Sum,
+                         CubReductionStageFinalize::Identity);
+    expectStageSemantics(CubReductionOp::SumSquares,
+                         CubReductionStageRole::Intermediate,
+                         total_reduction_size,
+                         CubReductionStageInputTransform::Identity,
+                         CubReductionStageCombine::Sum,
+                         CubReductionStageFinalize::Identity);
+    expectStageSemantics(CubReductionOp::SumSquares,
+                         CubReductionStageRole::Final,
+                         total_reduction_size,
+                         CubReductionStageInputTransform::Identity,
+                         CubReductionStageCombine::Sum,
+                         CubReductionStageFinalize::Identity);
+}
 
 TEST(CubReduction, DefinesExplicitFp32EmptyReductionValues) {
     EXPECT_FLOAT_EQ(CubReduction::getFp32EmptyReductionValue(CubReductionOp::Sum), 0.0f);

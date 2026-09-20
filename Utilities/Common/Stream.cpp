@@ -351,6 +351,14 @@ void CUDART_CB Stream::hostFunctionTrampoline(void *rawArgs) noexcept {
     } catch (...) {
         failureState->captureCurrentException();
     }
+
+    // Hold the lifetime-rendezvous mutex through function exit. The cleanup
+    // worker first waits for callbackCompleted, then acquires this mutex before
+    // destroying args. Publishing completion while this guard is held ensures
+    // the worker cannot destroy args while notify_one() or any other trampoline
+    // access to args is still in progress.
+    lock_guard<mutex> callbackCompletionLock(args->callbackCompletionMutex);
+    args->markCallbackCompleted();
 }
 
 void Stream::rethrowHostFunctionFailure() const {

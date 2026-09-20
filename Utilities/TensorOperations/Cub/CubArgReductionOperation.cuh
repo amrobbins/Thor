@@ -1112,6 +1112,8 @@ size_t queryArgReductionBytesForInput(const Tensor& input,
         }
         case CubReductionPath::OffsetSegmented:
             throw std::logic_error("Dense CUB arg reduction received offset-segmented geometry.");
+        case CubReductionPath::ComposedDense:
+            throw std::logic_error("Composed dense reduction is a value-reduction-only execution path.");
     }
 
     return std::max<size_t>(queried_bytes, 1);
@@ -1182,6 +1184,8 @@ void launchArgReductionForInput(const Tensor& temp_storage,
         }
         case CubReductionPath::OffsetSegmented:
             throw std::logic_error("Dense CUB arg reduction received offset-segmented geometry.");
+        case CubReductionPath::ComposedDense:
+            throw std::logic_error("Composed dense reduction is a value-reduction-only execution path.");
     }
 }
 

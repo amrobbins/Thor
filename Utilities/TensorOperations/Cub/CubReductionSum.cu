@@ -82,6 +82,44 @@ void launchSumReduction(const Tensor& temp_storage,
         temp_storage, temp_storage_bytes, input, output, geometry, 1.0f, output_scale, stream);
 }
 
+size_t querySumDivideReductionBytes(DataType input_dtype,
+                                    const void* input,
+                                    uint64_t input_elements,
+                                    DataType output_dtype,
+                                    void* output,
+                                    const CubReductionGeometry& geometry,
+                                    uint64_t divisor,
+                                    float output_scale,
+                                    const Stream& stream) {
+    return queryAdditiveReductionBytes(input_dtype,
+                                       input,
+                                       input_elements,
+                                       output_dtype,
+                                       output,
+                                       geometry,
+                                       static_cast<float>(divisor),
+                                       output_scale,
+                                       stream);
+}
+
+void launchSumDivideReduction(const Tensor& temp_storage,
+                              size_t temp_storage_bytes,
+                              const Tensor& input,
+                              Tensor& output,
+                              const CubReductionGeometry& geometry,
+                              uint64_t divisor,
+                              float output_scale,
+                              Stream& stream) {
+    launchAdditiveReduction(temp_storage,
+                            temp_storage_bytes,
+                            input,
+                            output,
+                            geometry,
+                            static_cast<float>(divisor),
+                            output_scale,
+                            stream);
+}
+
 size_t queryMeanReductionBytes(DataType input_dtype,
                                const void* input,
                                uint64_t input_elements,
@@ -90,15 +128,15 @@ size_t queryMeanReductionBytes(DataType input_dtype,
                                const CubReductionGeometry& geometry,
                                float output_scale,
                                const Stream& stream) {
-    return queryAdditiveReductionBytes(input_dtype,
-                                       input,
-                                       input_elements,
-                                       output_dtype,
-                                       output,
-                                       geometry,
-                                       static_cast<float>(geometry.reduction_size),
-                                       output_scale,
-                                       stream);
+    return querySumDivideReductionBytes(input_dtype,
+                                        input,
+                                        input_elements,
+                                        output_dtype,
+                                        output,
+                                        geometry,
+                                        geometry.reduction_size,
+                                        output_scale,
+                                        stream);
 }
 
 void launchMeanReduction(const Tensor& temp_storage,
@@ -108,14 +146,14 @@ void launchMeanReduction(const Tensor& temp_storage,
                          const CubReductionGeometry& geometry,
                          float output_scale,
                          Stream& stream) {
-    launchAdditiveReduction(temp_storage,
-                            temp_storage_bytes,
-                            input,
-                            output,
-                            geometry,
-                            static_cast<float>(geometry.reduction_size),
-                            output_scale,
-                            stream);
+    launchSumDivideReduction(temp_storage,
+                             temp_storage_bytes,
+                             input,
+                             output,
+                             geometry,
+                             geometry.reduction_size,
+                             output_scale,
+                             stream);
 }
 
 }  // namespace ThorImplementation::CubReductionInternal
