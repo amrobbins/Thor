@@ -55,6 +55,30 @@ function(_thor_require_metadata stage_dir expected_name)
         message(FATAL_ERROR "${expected_name}: wheel metadata is not version ${_thor_version}")
     endif ()
 
+    # Core Metadata 2.4 / PEP 639 License-File paths are relative to the
+    # wheel's .dist-info/licenses directory.  Validate the declarations here
+    # so malformed wheels are rejected before Twine sends them to PyPI.
+    get_filename_component(_dist_info_dir "${_metadata_file}" DIRECTORY)
+    file(STRINGS "${_metadata_file}" _license_file_lines REGEX "^License-File:[ \t]*.+$")
+    foreach (_license_file_line IN LISTS _license_file_lines)
+        string(REGEX REPLACE "^License-File:[ \t]*" "" _license_file "${_license_file_line}")
+        string(STRIP "${_license_file}" _license_file)
+        if (_license_file STREQUAL "")
+            message(FATAL_ERROR "${expected_name}: wheel metadata contains an empty License-File field")
+        endif ()
+        string(FIND "${_license_file}" "\\" _license_backslash_index)
+        if (IS_ABSOLUTE "${_license_file}" OR _license_file MATCHES "(^|/)\.\.(/|$)" OR NOT _license_backslash_index EQUAL -1)
+            message(FATAL_ERROR
+                    "${expected_name}: invalid License-File path '${_license_file}'; "
+                    "license paths must be relative POSIX paths beneath .dist-info/licenses")
+        endif ()
+        if (NOT EXISTS "${_dist_info_dir}/licenses/${_license_file}")
+            message(FATAL_ERROR
+                    "${expected_name}: License-File '${_license_file}' is declared in METADATA but is missing at "
+                    "${_dist_info_dir}/licenses/${_license_file}")
+        endif ()
+    endforeach ()
+
     if (expected_name STREQUAL "thor-cuda")
         foreach (_kernel_distribution IN ITEMS thor-cuda-kernels-sm89 thor-cuda-kernels-sm120)
             string(FIND

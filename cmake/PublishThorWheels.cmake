@@ -99,7 +99,7 @@ endif ()
 function(_thor_publish_one wheel distribution_name)
     message(STATUS "Thor: publishing ${distribution_name}: ${wheel}")
     execute_process(
-            COMMAND "${THOR_RELEASE_PYTHON_EXECUTABLE}" -m twine upload ${_twine_destination_args} "${wheel}"
+            COMMAND "${THOR_RELEASE_PYTHON_EXECUTABLE}" -m twine upload --verbose ${_twine_destination_args} "${wheel}"
             RESULT_VARIABLE _result
             OUTPUT_VARIABLE _stdout
             ERROR_VARIABLE _stderr
