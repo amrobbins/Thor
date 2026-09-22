@@ -12,6 +12,8 @@
 
 #include "CudaSourceEmitter.h"
 
+#include <cuda_runtime_api.h>
+
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
@@ -1866,6 +1868,37 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
     return ltoir;
 }
 
+static void stampDeviceRuntimeExtentOccupancyGrid(const std::shared_ptr<CompiledEquation>& compiled) {
+    if (!compiled->uses_device_runtime_extent || compiled->launch_kind == CompiledEquation::LaunchKind::FusedTiledTranspose) {
+        return;
+    }
+    if (compiled->kernel == nullptr) {
+        throw std::runtime_error("Cannot stamp ragged fused occupancy grid without a loaded CUDA kernel.");
+    }
+
+    constexpr int FLAT_BLOCK_THREADS = 256;
+    int active_blocks_per_sm = 0;
+    CU_CHECK(cuOccupancyMaxActiveBlocksPerMultiprocessor(
+        &active_blocks_per_sm, compiled->kernel, FLAT_BLOCK_THREADS, 0));
+    if (active_blocks_per_sm <= 0) {
+        throw std::runtime_error("Ragged fused occupancy query returned no active blocks per multiprocessor.");
+    }
+
+    cudaDeviceProp device_properties{};
+    CUDA_CHECK(cudaGetDeviceProperties(&device_properties, compiled->deviceNum));
+    const int multiprocessor_count = device_properties.multiProcessorCount;
+    if (multiprocessor_count <= 0) {
+        throw std::runtime_error("CUDA reported no multiprocessors while stamping ragged fused occupancy grid.");
+    }
+
+    const uint64_t grid_blocks =
+        static_cast<uint64_t>(active_blocks_per_sm) * static_cast<uint64_t>(multiprocessor_count);
+    if (grid_blocks == 0 || grid_blocks > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+        throw std::runtime_error("Ragged fused occupancy grid exceeds the supported launch range.");
+    }
+    compiled->device_runtime_extent_occupancy_grid_blocks = static_cast<uint32_t>(grid_blocks);
+}
+
 static std::optional<RaggedRuntimeExtentSource> expressionDeviceRaggedRuntimeExtentSource(
     const PhysicalExpression& expr) {
     std::optional<RaggedRuntimeExtentSource> source;
@@ -1964,6 +1997,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
     compiled->uses_device_runtime_extent = uses_device_ragged_runtime_extent;
     if (device_ragged_runtime_extent_source.has_value())
         compiled->device_runtime_extent_source = device_ragged_runtime_extent_source.value();
+    stampDeviceRuntimeExtentOccupancyGrid(compiled);
 
     cacheInsert(key, compiled);
     return compiled;
@@ -9624,6 +9658,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
         }
     }
 
+    stampDeviceRuntimeExtentOccupancyGrid(compiled);
     specializedBroadcastCache.put(cache_key, compiled);
     return compiled;
 }

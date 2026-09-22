@@ -87,6 +87,11 @@ struct CompiledEquation {
     // read the managed active-count value at [0].
     bool uses_device_runtime_extent = false;
     RaggedRuntimeExtentSource device_runtime_extent_source = RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT;
+    // Device-wide resident block count for the standard 256-thread flat launch,
+    // stamped from this exact compiled kernel's occupancy. Ragged valuewise
+    // kernels use this as their persistent grid-stride launch ceiling so they
+    // fully occupy the GPU without launching against unused reserved capacity.
+    uint32_t device_runtime_extent_occupancy_grid_blocks = 0;
 
     // Debug/test metadata for the tiled logical-transpose consumer auto-swizzle path.
     // These are intentionally not consulted by the runtime launcher; they let tests

@@ -278,10 +278,16 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     uint32_t grid;
     if (compiledEquation->uses_device_runtime_extent) {
         // The kernel reads its explicit device runtime-extent input and uses a
-        // grid-stride loop. Keep launch overhead independent of reserved ragged
-        // capacity without a host readback.
-        constexpr uint64_t MAX_RAGGED_VALUEWISE_GRID_BLOCKS = 256;
-        grid = static_cast<uint32_t>(std::min(grid64, MAX_RAGGED_VALUEWISE_GRID_BLOCKS));
+        // grid-stride loop. Size the persistent worker grid from the occupancy
+        // of this exact compiled kernel instead of an arbitrary fixed cap. This
+        // fully populates the device while keeping launch overhead independent
+        // of potentially much larger reserved ragged capacity and requires no
+        // host readback of the active extent.
+        if (compiledEquation->device_runtime_extent_occupancy_grid_blocks == 0) {
+            throw std::runtime_error("Ragged fused kernel is missing its stamped occupancy launch grid.");
+        }
+        grid = static_cast<uint32_t>(std::min<uint64_t>(
+            grid64, compiledEquation->device_runtime_extent_occupancy_grid_blocks));
     } else {
         // Preserve the existing dense launch behavior exactly.
         grid = static_cast<uint32_t>(grid64);

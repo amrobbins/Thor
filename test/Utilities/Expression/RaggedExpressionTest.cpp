@@ -3286,6 +3286,22 @@ TEST(RaggedExpression, LowPrecisionStorageFp32ComputeWidePacketsPreserveInactive
         StampedExecutionPlan plan = equation.stamp(
             {{"x", x}, {"active_count", active_count}}, stream, {}, {{"out", output}});
 
+        const auto compiled_kernels = plan.fusedKernelCompiledEquationsForDiagnostics();
+        ASSERT_EQ(compiled_kernels.size(), 1U);
+        ASSERT_NE(compiled_kernels.front(), nullptr);
+        ASSERT_NE(compiled_kernels.front()->kernel, nullptr);
+        ASSERT_TRUE(compiled_kernels.front()->uses_device_runtime_extent);
+        int active_blocks_per_sm = 0;
+        CU_CHECK(cuOccupancyMaxActiveBlocksPerMultiprocessor(
+            &active_blocks_per_sm, compiled_kernels.front()->kernel, 256, 0));
+        cudaDeviceProp device_properties{};
+        ASSERT_EQ(cudaGetDeviceProperties(&device_properties, 0), cudaSuccess);
+        const int multiprocessor_count = device_properties.multiProcessorCount;
+        ASSERT_GT(active_blocks_per_sm, 0);
+        ASSERT_GT(multiprocessor_count, 0);
+        EXPECT_EQ(compiled_kernels.front()->device_runtime_extent_occupancy_grid_blocks,
+                  static_cast<uint32_t>(active_blocks_per_sm * multiprocessor_count));
+
         auto quantize_to_storage = [&](float value) {
             switch (storage_dtype) {
                 case DataType::BF16:

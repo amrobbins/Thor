@@ -357,7 +357,12 @@ void checkCu(CUresult status, const char* where) {
     const uint64_t launch_numel = ceilDiv(max_numel, std::max<uint32_t>(1, compiled.elements_per_thread));
     geometry.block_x = static_cast<uint32_t>(std::min<uint64_t>(launch_numel, 256ULL));
     uint64_t grid_x = ceilDiv(launch_numel, geometry.block_x);
-    if (compiled.uses_device_runtime_extent) grid_x = std::min<uint64_t>(grid_x, 256ULL);
+    if (compiled.uses_device_runtime_extent) {
+        if (compiled.device_runtime_extent_occupancy_grid_blocks == 0) {
+            throw std::runtime_error("Ragged fused census kernel is missing its stamped occupancy launch grid");
+        }
+        grid_x = std::min<uint64_t>(grid_x, compiled.device_runtime_extent_occupancy_grid_blocks);
+    }
     geometry.grid_x = static_cast<uint32_t>(grid_x);
     return geometry;
 }
@@ -1680,6 +1685,7 @@ void runCase(const CensusCase& c,
               << registers_per_thread << ',' << local_bytes_per_thread << ',' << static_shared_bytes << ','
               << (compiled.uses_device_runtime_extent ? 1 : 0) << ','
               << (compiled.uses_device_runtime_extent ? runtimeExtentSourceName(compiled.device_runtime_extent_source) : "none") << ','
+              << (compiled.uses_device_runtime_extent ? compiled.device_runtime_extent_occupancy_grid_blocks : 0) << ','
               << pool_slots << ',' << pool_touched_bytes << ',' << std::fixed << std::setprecision(2) << pool_over_l2 << ','
               << reuse_distance_bytes << ',' << reuse_distance_over_l2 << ','
               << (needs_explicit_eviction ? "rotation_plus_eviction" : "rotation") << ',' << effective_bytes << ','
@@ -1741,8 +1747,9 @@ int main(int argc, char** argv) {
                   << "# input_packet_bytes are nominal contiguous value spans implied by packet_scalars; broadcast/indexed operands can legitimately load/reuse less or use indexed scalar traffic.\n"
                   << "# max_packet_bytes is the largest nominal per-thread value packet among materialized inputs/output; the portable sm89/sm120 fused target is <=16 B.\n"
                   << "# cache_control=rotation means the intervening reuse distance itself is >= requested L2 multiple; rotation_plus_eviction adds an untimed device-read eviction pass before each timed sample.\n"
+                  << "# runtime_extent_occupancy_grid_blocks is the device-wide resident-block ceiling stamped from the exact compiled kernel at 256 threads/block.\n"
                   << "# each timing sample contains exactly one production fused-kernel launch; slot rotation/cache eviction occurs outside that event interval.\n";
-        std::cout << "family,case,input_dtypes,output_dtype,explicit_compute_dtype,expected_elements_per_thread,input_shapes,output_shape,kernel_name,launch_kind,selected_path,elements_per_thread,packet_scalars,input_packet_bytes,output_packet_bytes,max_packet_bytes,grid_x,grid_y,grid_z,block_x,block_y,block_z,registers_per_thread,local_bytes_per_thread,static_shared_bytes,device_runtime_extent,runtime_extent_source,pool_slots,pool_touched_bytes,pool_over_l2,reuse_distance_bytes,reuse_distance_over_l2,cache_control,effective_bytes,compulsory_bytes,model_logical_bytes,median_ms,best_ms,worst_ms,effective_gb_s,compulsory_gb_s\n";
+        std::cout << "family,case,input_dtypes,output_dtype,explicit_compute_dtype,expected_elements_per_thread,input_shapes,output_shape,kernel_name,launch_kind,selected_path,elements_per_thread,packet_scalars,input_packet_bytes,output_packet_bytes,max_packet_bytes,grid_x,grid_y,grid_z,block_x,block_y,block_z,registers_per_thread,local_bytes_per_thread,static_shared_bytes,device_runtime_extent,runtime_extent_source,runtime_extent_occupancy_grid_blocks,pool_slots,pool_touched_bytes,pool_over_l2,reuse_distance_bytes,reuse_distance_over_l2,cache_control,effective_bytes,compulsory_bytes,model_logical_bytes,median_ms,best_ms,worst_ms,effective_gb_s,compulsory_gb_s\n";
 
         size_t selected_count = 0;
         for (const CensusCase& c : cases) {
