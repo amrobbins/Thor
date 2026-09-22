@@ -1432,6 +1432,7 @@ static AttentionTensorLogicalDims logicalAttentionDims(const std::vector<uint64_
 
 static AttentionTensorLogicalDims packedRaggedAttentionDims(const std::vector<uint64_t>& dims,
                                                             uint64_t batch,
+                                                            uint64_t maxSequenceLength,
                                                             AttentionTensorLayout layout,
                                                             const char* tensor_name) {
     if (layout != AttentionTensorLayout::BSHD) {
@@ -1442,7 +1443,16 @@ static AttentionTensorLogicalDims packedRaggedAttentionDims(const std::vector<ui
         throw std::runtime_error(std::string("Canonical ragged attention tensor '") + tensor_name +
                                  "' must use packed [T,H,D] storage with a non-zero logical batch.");
     }
-    return {batch, dims.at(1), dims.at(0), dims.at(2)};
+    // Canonical packed storage carries total packed capacity T in dims[0], but
+    // attention's semantic sequence dimension is the per-row S_max. Legacy
+    // low-level callers that do not publish S_max retain the old T fallback;
+    // high-level RaggedTensor Attention always supplies max_values_per_row.
+    const uint64_t semanticSequenceLength = maxSequenceLength != 0 ? maxSequenceLength : dims.at(0);
+    if (semanticSequenceLength == 0 || semanticSequenceLength > dims.at(0)) {
+        throw std::runtime_error(std::string("Canonical ragged attention tensor '") + tensor_name +
+                                 "' has an invalid per-row max sequence length.");
+    }
+    return {batch, dims.at(1), semanticSequenceLength, dims.at(2)};
 }
 
 static bool isAllowedAttentionBiasDims(const std::vector<uint64_t>& dims,
@@ -3102,6 +3112,8 @@ static CompiledAttention makeForwardAttentionView(const CompiledAttentionBackwar
     forward.use_bias = backward.use_bias;
     forward.use_padding_mask = backward.use_padding_mask;
     forward.use_ragged_offsets = backward.use_ragged_offsets;
+    forward.ragged_query_max_sequence_length = backward.ragged_query_max_sequence_length;
+    forward.ragged_kv_max_sequence_length = backward.ragged_kv_max_sequence_length;
     forward.use_paged_kv_cache = backward.use_paged_kv_cache;
     forward.paged_kv_max_sequence_length = backward.paged_kv_max_sequence_length;
     forward.dropout_probability = backward.dropout_probability;
@@ -5846,26 +5858,53 @@ static uint64_t computeAttentionStageFlops(const CompiledAttention& attention, c
     const std::vector<uint64_t> out_dims = resolveAttentionOutputDimsFromInputs(attention, stage_input_dims);
     const auto& q_dims = stage_input_dims.at(0);
     const auto& k_dims = stage_input_dims.at(1);
+    const auto& v_dims = stage_input_dims.at(2);
 
     uint64_t scores = 0;
     uint64_t qk_dim = 0;
     uint64_t value_dim = 0;
     if (attention.use_ragged_offsets) {
+        size_t nextOptional = 3;
+        if (attention.use_bias) ++nextOptional;
+        if (attention.use_padding_mask) nextOptional += 2;
+        if (stage_input_dims.size() <= nextOptional + 1) {
+            throw std::runtime_error("Attention FLOP accounting expected q/kv row-partition shapes for ragged attention.");
+        }
+        const auto& qOffsets = stage_input_dims.at(nextOptional);
+        const auto& kvOffsets = stage_input_dims.at(nextOptional + 1);
+        if (qOffsets.size() != 1 || qOffsets.at(0) < 2 || kvOffsets != qOffsets) {
+            throw std::runtime_error("Attention FLOP accounting requires matching q/kv row partitions with shape [B+1].");
+        }
+        const uint64_t batch = qOffsets.at(0) - 1;
         const bool queryRagged = q_dims.size() == 3;
         const bool keyValueRagged = k_dims.size() == 3;
-        const uint64_t queryHeads = queryRagged
-            ? q_dims.at(1)
-            : logicalAttentionDims(q_dims, attention.q_layout, "q").heads;
-        const uint64_t queryExtent = queryRagged
-            ? q_dims.at(0)
-            : logicalAttentionDims(q_dims, attention.q_layout, "q").sequence_length;
-        const uint64_t keyExtent = keyValueRagged
-            ? k_dims.at(0)
-            : logicalAttentionDims(k_dims, attention.k_layout, "k").sequence_length;
-        scores = checkedMulU64(queryHeads, queryExtent, "computeAttentionStageFlops");
-        scores = checkedMulU64(scores, keyExtent, "computeAttentionStageFlops");
-        qk_dim = queryRagged ? q_dims.at(2) : logicalAttentionDims(q_dims, attention.q_layout, "q").head_dim;
-        value_dim = queryRagged ? out_dims.at(2) : logicalAttentionDims(out_dims, attention.o_layout, "o").head_dim;
+        const AttentionTensorLogicalDims qLogical = queryRagged
+            ? packedRaggedAttentionDims(q_dims,
+                                        batch,
+                                        attention.ragged_query_max_sequence_length,
+                                        attention.q_layout,
+                                        "q")
+            : logicalAttentionDims(q_dims, attention.q_layout, "q");
+        const AttentionTensorLogicalDims kLogical = keyValueRagged
+            ? packedRaggedAttentionDims(k_dims,
+                                        batch,
+                                        attention.ragged_kv_max_sequence_length,
+                                        attention.k_layout,
+                                        "k")
+            : logicalAttentionDims(k_dims, attention.k_layout, "k");
+        const AttentionTensorLogicalDims vLogical = keyValueRagged
+            ? packedRaggedAttentionDims(v_dims,
+                                        batch,
+                                        attention.ragged_kv_max_sequence_length,
+                                        attention.v_layout,
+                                        "v")
+            : logicalAttentionDims(v_dims, attention.v_layout, "v");
+
+        scores = checkedMulU64(batch, qLogical.heads, "computeAttentionStageFlops");
+        scores = checkedMulU64(scores, qLogical.sequence_length, "computeAttentionStageFlops");
+        scores = checkedMulU64(scores, kLogical.sequence_length, "computeAttentionStageFlops");
+        qk_dim = qLogical.head_dim;
+        value_dim = vLogical.head_dim;
     } else {
         const uint64_t batch = out_dims.at(0);
         const uint64_t query_heads = out_dims.at(1);
@@ -10368,16 +10407,25 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
     const bool queryPackedRagged = compiledStage->use_ragged_offsets && q.getDimensions().size() == 3;
     const bool kvPackedRagged = compiledStage->use_ragged_offsets && k.getDimensions().size() == 3;
     const AttentionTensorLogicalDims qLogical = queryPackedRagged
-                                                     ? packedRaggedAttentionDims(
-                                                           q.getDimensions(), raggedBatchSize, compiledStage->q_layout, "q")
+                                                     ? packedRaggedAttentionDims(q.getDimensions(),
+                                                                                 raggedBatchSize,
+                                                                                 compiledStage->ragged_query_max_sequence_length,
+                                                                                 compiledStage->q_layout,
+                                                                                 "q")
                                                      : logicalAttentionDims(q.getDimensions(), compiledStage->q_layout, "q");
     const AttentionTensorLogicalDims kLogical = kvPackedRagged
-                                                     ? packedRaggedAttentionDims(
-                                                           k.getDimensions(), raggedBatchSize, compiledStage->k_layout, "k")
+                                                     ? packedRaggedAttentionDims(k.getDimensions(),
+                                                                                 raggedBatchSize,
+                                                                                 compiledStage->ragged_kv_max_sequence_length,
+                                                                                 compiledStage->k_layout,
+                                                                                 "k")
                                                      : logicalAttentionDims(k.getDimensions(), compiledStage->k_layout, "k");
     const AttentionTensorLogicalDims vLogical = kvPackedRagged
-                                                     ? packedRaggedAttentionDims(
-                                                           v.getDimensions(), raggedBatchSize, compiledStage->v_layout, "v")
+                                                     ? packedRaggedAttentionDims(v.getDimensions(),
+                                                                                 raggedBatchSize,
+                                                                                 compiledStage->ragged_kv_max_sequence_length,
+                                                                                 compiledStage->v_layout,
+                                                                                 "v")
                                                      : logicalAttentionDims(v.getDimensions(), compiledStage->v_layout, "v");
     std::optional<CudnnRaggedAttentionScratch> raggedScratch = std::nullopt;
     if (compiledStage->use_ragged_offsets) {
@@ -10642,12 +10690,18 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
     const bool queryPackedRagged = compiledStage->use_ragged_offsets && q.getDimensions().size() == 3;
     const bool kvPackedRagged = compiledStage->use_ragged_offsets && k.getDimensions().size() == 3;
     const AttentionTensorLogicalDims qLogical = queryPackedRagged
-                                                     ? packedRaggedAttentionDims(
-                                                           q.getDimensions(), raggedBatchSize, compiledStage->q_layout, "q")
+                                                     ? packedRaggedAttentionDims(q.getDimensions(),
+                                                                                 raggedBatchSize,
+                                                                                 compiledStage->ragged_query_max_sequence_length,
+                                                                                 compiledStage->q_layout,
+                                                                                 "q")
                                                      : logicalAttentionDims(q.getDimensions(), compiledStage->q_layout, "q");
     const AttentionTensorLogicalDims kLogical = kvPackedRagged
-                                                     ? packedRaggedAttentionDims(
-                                                           k.getDimensions(), raggedBatchSize, compiledStage->k_layout, "k")
+                                                     ? packedRaggedAttentionDims(k.getDimensions(),
+                                                                                 raggedBatchSize,
+                                                                                 compiledStage->ragged_kv_max_sequence_length,
+                                                                                 compiledStage->k_layout,
+                                                                                 "k")
                                                      : logicalAttentionDims(k.getDimensions(), compiledStage->k_layout, "k");
     std::optional<CudnnRaggedAttentionScratch> raggedScratch = std::nullopt;
     if (compiledStage->use_ragged_offsets) {

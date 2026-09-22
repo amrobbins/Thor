@@ -779,6 +779,7 @@ TEST(UtilityApiLayers, RMSNormAcceptsRaggedTensorPreservesPartitionAndUsesPacked
     EXPECT_EQ(layer.getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
     ASSERT_TRUE(layer.getRaggedFeatureOutput()->hasMaxValuesPerRow());
     EXPECT_EQ(layer.getRaggedFeatureOutput()->getMaxValuesPerRow(), 17u);
+    EXPECT_TRUE(layer.outputTensorDimensionsIncludeBatch(layer.getFeatureOutput().value()));
     EXPECT_EQ(layer.getOutputTensorBytes(logicalBatchSize), layer.getFeatureOutput().value().getTotalSizeInBytes());
 
     const json architecture = layer.architectureJson();

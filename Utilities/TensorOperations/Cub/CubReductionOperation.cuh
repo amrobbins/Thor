@@ -3,7 +3,7 @@
 #include "Utilities/Common/LowPrecisionFloat.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/TensorOperations/Cub/CubDataTypePolicy.h"
-#include "Utilities/TensorOperations/Cub/CubReductionIndexing.cuh"
+#include "Utilities/TensorOperations/Cub/CubReduction.h"
 
 #include <cub/device/device_reduce.cuh>
 #include <cub/device/device_segmented_reduce.cuh>
@@ -86,22 +86,20 @@ struct SquareFp32 {
 
 struct AdditiveFinalizeFp32 {
     float divisor;
+    bool square_root;
 
-    // Sum and mean intentionally share this finalizer type so the complete additive reduction kernel family is
-    // instantiated only once. The distinction is paid once per final aggregate rather than in the reduction loop.
+    // Sum, mean, sum-squares, and L2 intentionally share this finalizer type so optional division/square-root
+    // semantics do not multiply the complete additive reduction kernel matrix. These choices are paid once per
+    // final aggregate rather than in the input transform or reduction loop.
     __host__ __device__ float operator()(float value) const {
+        float finalized = value;
         if (divisor == 0.0f) {
-            return 0.0f;
+            finalized = 0.0f;
+        } else if (divisor != 1.0f) {
+            finalized /= divisor;
         }
-        if (divisor == 1.0f) {
-            return value;
-        }
-        return value / divisor;
+        return square_root ? ::sqrtf(finalized) : finalized;
     }
-};
-
-struct SquareRootFinalizeFp32 {
-    __host__ __device__ float operator()(float value) const { return ::sqrtf(value); }
 };
 
 struct PropagatingMinimumFp32 {
@@ -210,23 +208,6 @@ struct ConvertAndTransformInputToFp32 {
     __host__ __device__ float operator()(InputT value) const { return transform(ToFp32<InputT>{}(value)); }
 };
 
-template <typename InputT, typename InputTransformT, typename IndexT>
-struct LogicalAxesToFp32 {
-    const InputT* input;
-    IndexT reduction_size;
-    CubReductionDeviceIndexingT<IndexT> indexing;
-    InputTransformT transform;
-
-    template <typename LogicalIndexT>
-    __host__ __device__ float operator()(LogicalIndexT logical_index) const {
-        const IndexT index = static_cast<IndexT>(logical_index);
-        const IndexT output_index = index / reduction_size;
-        const IndexT reduction_index = index - output_index * reduction_size;
-        const IndexT physical_index = mapLogicalReductionIndex(indexing, output_index, reduction_index);
-        return transform(ToFp32<InputT>{}(input[physical_index]));
-    }
-};
-
 template <typename InputT, typename InputTransformT>
 auto makeContiguousFp32Iterator(const InputT* input, InputTransformT input_transform) {
     return thrust::make_transform_iterator(
@@ -250,16 +231,6 @@ auto makeAffineStridedFp32Iterator(const InputT* input, uint64_t stride, InputTr
     return thrust::make_transform_iterator(
         thrust::counting_iterator<int64_t>(0),
         AffineStridedToFp32<InputT, InputTransformT>{input, stride, input_transform});
-}
-
-template <typename IndexT, typename LogicalIndexT, typename InputT, typename InputTransformT>
-auto makeStridedFp32Iterator(const InputT* input,
-                             IndexT reduction_size,
-                             const CubReductionDeviceIndexingT<IndexT>& indexing,
-                             InputTransformT input_transform) {
-    return thrust::make_transform_iterator(
-        thrust::counting_iterator<LogicalIndexT>(0),
-        LogicalAxesToFp32<InputT, InputTransformT, IndexT>{input, reduction_size, indexing, input_transform});
 }
 
 constexpr int TILED_REDUCTION_BLOCK_THREADS = 256;
@@ -287,6 +258,225 @@ constexpr uint64_t FULL_ROW_GROUP_MAX_INNER_SIZE =
 // at most this many output components, preserving the same <=16 FP32 accumulators/thread. Component shards never need
 // to communicate because every trailing component is an independent reduction across the reduction axis.
 constexpr uint64_t FULL_ROW_COMPONENTS_PER_BLOCK = CubReductionTiledPolicy::FULL_ROW_COMPONENTS_PER_BLOCK;
+
+constexpr uint64_t ROW_SPLIT_MIN_REDUCTION_SIZE = CubReductionTiledPolicy::ROW_SPLIT_MIN_REDUCTION_SIZE;
+constexpr uint64_t ROW_SPLIT_MAX_OUTER_SIZE = CubReductionTiledPolicy::ROW_SPLIT_MAX_OUTER_SIZE;
+constexpr uint64_t ROW_SPLIT_MIN_INNER_SIZE = CubReductionTiledPolicy::ROW_SPLIT_MIN_INNER_SIZE;
+constexpr uint64_t ROW_SPLIT_MAX_INNER_SIZE = CubReductionTiledPolicy::ROW_SPLIT_MAX_INNER_SIZE;
+constexpr uint64_t ROW_SPLIT_TARGET_SM_WAVES = CubReductionTiledPolicy::ROW_SPLIT_TARGET_SM_WAVES;
+
+[[nodiscard]] inline uint64_t ceilDivideRowSplit(uint64_t numerator, uint64_t denominator) {
+    if (denominator == 0) {
+        throw std::logic_error("ROW-SPLIT-FULL-ROW denominator must be non-zero.");
+    }
+    return numerator / denominator + static_cast<uint64_t>(numerator % denominator != 0);
+}
+
+template <typename InputT>
+[[nodiscard]] constexpr bool rowSplitInputTypeIsProductionSupported() {
+    return std::is_same_v<InputT, __half> || std::is_same_v<InputT, __nv_bfloat16>
+           || std::is_same_v<InputT, float>;
+}
+
+template <typename InputT>
+[[nodiscard]] bool shouldUseRowSplitFullRowReduction(const CubReductionGeometry& geometry) {
+    if constexpr (!rowSplitInputTypeIsProductionSupported<InputT>()) {
+        return false;
+    }
+
+    // The row-split kernels require the same physically dense [outer,reduction,inner] traversal as the established
+    // full-row family and emit natural dense [outer,inner] output.  Pitched/view-transpose paths have their own
+    // address/order contracts and remain on their dedicated kernels.
+    return geometry.path == CubReductionPath::TiledFixedSegment
+           && !geometry.payload_transpose_tiled_geometry.has_value()
+           && !geometry.pitched_tiled_geometry.has_value()
+           && !geometry.tiled_output_permuted
+           && !geometry.tiled_output_shared_transpose
+           && geometry.tiled_output_outer_stride == geometry.inner_size
+           && geometry.tiled_output_inner_stride == 1
+           && geometry.outer_size >= 1 && geometry.outer_size <= ROW_SPLIT_MAX_OUTER_SIZE
+           && geometry.reduction_size >= ROW_SPLIT_MIN_REDUCTION_SIZE
+           && geometry.inner_size >= ROW_SPLIT_MIN_INNER_SIZE
+           && geometry.inner_size <= ROW_SPLIT_MAX_INNER_SIZE;
+}
+
+[[nodiscard]] inline uint64_t rowSplitShardsPerOutput(const CubReductionGeometry& geometry, int gpu_num) {
+    int multiprocessors = 0;
+    const cudaError_t status = cudaDeviceGetAttribute(&multiprocessors, cudaDevAttrMultiProcessorCount, gpu_num);
+    if (status != cudaSuccess || multiprocessors <= 0) {
+        throw std::runtime_error(std::string("ROW-SPLIT-FULL-ROW could not query GPU multiprocessor count: ")
+                                 + cudaGetErrorString(status));
+    }
+
+    const uint64_t target_blocks = static_cast<uint64_t>(multiprocessors) * ROW_SPLIT_TARGET_SM_WAVES;
+    const uint64_t desired_shards =
+        std::max<uint64_t>(1, ceilDivideRowSplit(target_blocks, geometry.outer_size));
+    return std::min<uint64_t>(geometry.reduction_size, desired_shards);
+}
+
+[[nodiscard]] inline size_t rowSplitWorkspaceBytes(const CubReductionGeometry& geometry, int gpu_num) {
+    const uint64_t shards_per_output = rowSplitShardsPerOutput(geometry, gpu_num);
+    if (geometry.outer_size > std::numeric_limits<uint64_t>::max() / shards_per_output) {
+        throw std::overflow_error("ROW-SPLIT-FULL-ROW first-stage block count overflows uint64_t.");
+    }
+    const uint64_t first_stage_blocks = geometry.outer_size * shards_per_output;
+    if (first_stage_blocks > std::numeric_limits<uint64_t>::max() / geometry.inner_size) {
+        throw std::overflow_error("ROW-SPLIT-FULL-ROW partial element count overflows uint64_t.");
+    }
+    const uint64_t partial_elements = first_stage_blocks * geometry.inner_size;
+    if (partial_elements > static_cast<uint64_t>(std::numeric_limits<size_t>::max() / sizeof(float))) {
+        throw std::overflow_error("ROW-SPLIT-FULL-ROW workspace size overflows size_t.");
+    }
+    return static_cast<size_t>(partial_elements) * sizeof(float);
+}
+
+[[nodiscard]] inline uint64_t rowSplitShardsPerOutputFromWorkspace(const CubReductionGeometry& geometry,
+                                                                   size_t workspace_bytes) {
+    const uint64_t bytes_per_shard = geometry.outer_size * geometry.inner_size * sizeof(float);
+    if (bytes_per_shard == 0 || workspace_bytes < bytes_per_shard
+        || workspace_bytes % bytes_per_shard != 0) {
+        throw std::logic_error("ROW-SPLIT-FULL-ROW stamped workspace is inconsistent with reduction geometry.");
+    }
+    const uint64_t shards_per_output = static_cast<uint64_t>(workspace_bytes) / bytes_per_shard;
+    if (shards_per_output == 0 || shards_per_output > geometry.reduction_size) {
+        throw std::logic_error("ROW-SPLIT-FULL-ROW stamped shard count is invalid.");
+    }
+    return shards_per_output;
+}
+
+[[nodiscard]] inline uint32_t chooseRowSplitFirstStageThreads(uint64_t inner_size) {
+    uint32_t threads = 32;
+    while (threads < static_cast<uint32_t>(TILED_REDUCTION_BLOCK_THREADS)
+           && static_cast<uint64_t>(threads) < inner_size) {
+        threads *= 2;
+    }
+    return threads;
+}
+
+template <typename InputT, typename ReductionOpT, typename InputTransformT>
+__global__ void rowSplitFullRowFirstStageReductionKernel(const InputT* input,
+                                                         float* partials,
+                                                         uint64_t outer_size,
+                                                         uint64_t reduction_size,
+                                                         uint64_t inner_size,
+                                                         uint64_t shards_per_output,
+                                                         ReductionOpT reduction_op,
+                                                         float init,
+                                                         InputTransformT input_transform) {
+    const uint64_t work = static_cast<uint64_t>(blockIdx.x);
+    const uint64_t total_work = outer_size * shards_per_output;
+    if (work >= total_work) {
+        return;
+    }
+
+    const uint64_t outer = work / shards_per_output;
+    const uint64_t shard = work - outer * shards_per_output;
+    const uint64_t base_rows = reduction_size / shards_per_output;
+    const uint64_t extra_rows = reduction_size % shards_per_output;
+    const uint64_t row_begin = shard * base_rows + (shard < extra_rows ? shard : extra_rows);
+    const uint64_t row_count = base_rows + static_cast<uint64_t>(shard < extra_rows);
+    const uint64_t row_end = row_begin + row_count;
+    const uint64_t outer_input_base = outer * reduction_size * inner_size;
+    const uint64_t partial_base = work * inner_size;
+
+    // Each thread owns trailing components while CTAs own disjoint reduction-row shards. Every warp therefore issues
+    // contiguous/coalesced source reads for each row; unlike the direct/grouped full-row kernels, a single output can
+    // now occupy hundreds of CTAs when R is enormous.
+    for (uint64_t component = static_cast<uint64_t>(threadIdx.x); component < inner_size;
+         component += static_cast<uint64_t>(blockDim.x)) {
+        float aggregate = init;
+        uint64_t input_index = outer_input_base + row_begin * inner_size + component;
+        for (uint64_t row = row_begin; row < row_end; ++row) {
+            aggregate = reduction_op(aggregate, input_transform(ToFp32<InputT>{}(input[input_index])));
+            input_index += inner_size;
+        }
+        partials[partial_base + component] = aggregate;
+    }
+}
+
+template <typename ReductionOpT, typename OutputFinalizeT>
+__global__ void rowSplitFullRowFinalizeReductionKernel(const float* partials,
+                                                       void* output,
+                                                       DataType output_dtype,
+                                                       uint64_t outer_size,
+                                                       uint64_t inner_size,
+                                                       uint64_t shards_per_output,
+                                                       ReductionOpT reduction_op,
+                                                       float init,
+                                                       OutputFinalizeT output_finalize,
+                                                       float output_scale) {
+    const uint64_t output_elements = outer_size * inner_size;
+    const uint64_t grid_stride = static_cast<uint64_t>(gridDim.x) * static_cast<uint64_t>(blockDim.x);
+    for (uint64_t output_index = static_cast<uint64_t>(blockIdx.x) * static_cast<uint64_t>(blockDim.x)
+                                     + static_cast<uint64_t>(threadIdx.x);
+         output_index < output_elements;
+         output_index += grid_stride) {
+        const uint64_t outer = output_index / inner_size;
+        const uint64_t component = output_index - outer * inner_size;
+        float aggregate = init;
+        uint64_t partial_index = outer * shards_per_output * inner_size + component;
+        for (uint64_t shard = 0; shard < shards_per_output; ++shard) {
+            aggregate = reduction_op(aggregate, partials[partial_index]);
+            partial_index += inner_size;
+        }
+        storeFp32AsRuntimeDType(
+            output, output_dtype, output_index, output_finalize(aggregate) * output_scale);
+    }
+}
+
+template <typename InputT, typename ReductionOpT, typename InputTransformT, typename OutputFinalizeT>
+void launchRowSplitFullRowReduction(const Tensor& temp_storage,
+                                    size_t temp_storage_bytes,
+                                    const Tensor& input,
+                                    Tensor& output,
+                                    const CubReductionGeometry& geometry,
+                                    ReductionOpT reduction_op,
+                                    float init,
+                                    InputTransformT input_transform,
+                                    OutputFinalizeT output_finalize,
+                                    float output_scale,
+                                    cudaStream_t stream) {
+    const uint64_t shards_per_output = rowSplitShardsPerOutputFromWorkspace(geometry, temp_storage_bytes);
+    const uint64_t first_stage_blocks = geometry.outer_size * shards_per_output;
+    if (first_stage_blocks > static_cast<uint64_t>(std::numeric_limits<unsigned int>::max())) {
+        throw std::overflow_error("ROW-SPLIT-FULL-ROW first-stage CUDA grid exceeds uint32_t.");
+    }
+
+    float* partials = reinterpret_cast<float*>(
+        const_cast<void*>(static_cast<const void*>(temp_storage.getMemPtr<void>())));
+    const uint32_t first_stage_threads = chooseRowSplitFirstStageThreads(geometry.inner_size);
+    rowSplitFullRowFirstStageReductionKernel<InputT, ReductionOpT, InputTransformT>
+        <<<static_cast<unsigned int>(first_stage_blocks), first_stage_threads, 0, stream>>>(
+            input.getMemPtr<InputT>(),
+            partials,
+            geometry.outer_size,
+            geometry.reduction_size,
+            geometry.inner_size,
+            shards_per_output,
+            reduction_op,
+            init,
+            input_transform);
+    CUDA_CHECK(cudaGetLastError());
+
+    const uint64_t output_elements = geometry.outer_size * geometry.inner_size;
+    const uint64_t final_blocks = ceilDivideRowSplit(output_elements, TILED_REDUCTION_BLOCK_THREADS);
+    if (final_blocks > static_cast<uint64_t>(std::numeric_limits<unsigned int>::max())) {
+        throw std::overflow_error("ROW-SPLIT-FULL-ROW finalize CUDA grid exceeds uint32_t.");
+    }
+    rowSplitFullRowFinalizeReductionKernel<ReductionOpT, OutputFinalizeT>
+        <<<static_cast<unsigned int>(final_blocks), TILED_REDUCTION_BLOCK_THREADS, 0, stream>>>(
+            partials,
+            output.getMemPtr<void>(),
+            output.getDataType(),
+            geometry.outer_size,
+            geometry.inner_size,
+            shards_per_output,
+            reduction_op,
+            init,
+            output_finalize,
+            output_scale);
+    CUDA_CHECK(cudaGetLastError());
+}
 
 // Permuted retained output is produced without a global-memory transpose. Eight warps reduce adjacent physical outer
 // rows for one contiguous retained-component tile, keep all reduction state in registers, stage only the finalized FP32
@@ -2481,6 +2671,296 @@ void launchDirectTiledFixedSegmentReductionForRowLanes(const InputT* input,
     CUDA_CHECK(cudaGetLastError());
 }
 
+
+// VIEW-PITCHED-TILED is intentionally a separate kernel family from the sealed dense TiledFixedSegment kernels above.
+// The planner proves that every source address is affine in exactly three flattened coordinates:
+//
+//   outer * outer_stride + reduction * reduction_stride + inner
+//
+// Inner components are physically contiguous, so adjacent component groups issue coalesced global loads. RowLanes is a
+// runtime power-of-two subwarp width rather than a template parameter: this avoids adding a new dtype/op/RowLanes kernel
+// specialization matrix solely for pitched views. No logical-axis arrays, coordinate division/modulo, or per-element
+// mixed-radix mapping is used.
+template <typename InputT, typename ReductionOpT, typename InputTransformT, typename OutputFinalizeT>
+__global__ void pitchedTiledFixedSegmentReductionKernel(const InputT* input,
+                                                        void* output,
+                                                        DataType output_dtype,
+                                                        uint64_t outer_size,
+                                                        uint64_t reduction_size,
+                                                        uint64_t inner_size,
+                                                        uint64_t outer_stride,
+                                                        uint64_t reduction_stride,
+                                                        uint64_t output_outer_stride,
+                                                        uint64_t output_inner_stride,
+                                                        int row_lanes,
+                                                        ReductionOpT reduction_op,
+                                                        float init,
+                                                        InputTransformT input_transform,
+                                                        OutputFinalizeT output_finalize,
+                                                        float output_scale) {
+    const int physical_warp = static_cast<int>(threadIdx.x) / TILED_REDUCTION_WARP_THREADS;
+    const int lane = static_cast<int>(threadIdx.x) % TILED_REDUCTION_WARP_THREADS;
+    const int component_in_warp = lane / row_lanes;
+    const int row_lane = lane - component_in_warp * row_lanes;
+    const int components_per_warp = TILED_REDUCTION_WARP_THREADS / row_lanes;
+
+    const uint64_t component_tiles =
+        ceilDivideU64(inner_size, static_cast<uint64_t>(components_per_warp));
+    const uint64_t total_work = outer_size * component_tiles;
+    const uint64_t first_work =
+        static_cast<uint64_t>(blockIdx.x) * static_cast<uint64_t>(TILED_REDUCTION_WARPS_PER_BLOCK)
+        + static_cast<uint64_t>(physical_warp);
+    const uint64_t work_stride =
+        static_cast<uint64_t>(gridDim.x) * static_cast<uint64_t>(TILED_REDUCTION_WARPS_PER_BLOCK);
+
+    for (uint64_t work_index = first_work; work_index < total_work; work_index += work_stride) {
+        const uint64_t outer_index = work_index / component_tiles;
+        const uint64_t component_tile = work_index - outer_index * component_tiles;
+        const uint64_t component =
+            component_tile * static_cast<uint64_t>(components_per_warp) + static_cast<uint64_t>(component_in_warp);
+        const bool component_active = component < inner_size;
+
+        float local = init;
+        if (component_active && static_cast<uint64_t>(row_lane) < reduction_size) {
+            uint64_t row = static_cast<uint64_t>(row_lane);
+            uint64_t input_index = outer_index * outer_stride + row * reduction_stride + component;
+            for (;;) {
+                local = reduction_op(local, input_transform(ToFp32<InputT>{}(input[input_index])));
+                if (reduction_size - row <= static_cast<uint64_t>(row_lanes)) {
+                    break;
+                }
+                row += static_cast<uint64_t>(row_lanes);
+                // The planner proved every reachable row offset fits uint64_t. Only form the row-step product when a
+                // next row actually exists, so even extreme but valid pitches cannot overflow on an unused increment.
+                input_index += static_cast<uint64_t>(row_lanes) * reduction_stride;
+            }
+        }
+
+        // row_lanes is uniform for the launch and always a power of two <= warpSize. CUDA's width argument partitions
+        // the physical warp into independent logical subwarps, so reductions never exchange values between adjacent
+        // retained components even though every lane participates in the shuffle instruction.
+        for (int offset = row_lanes / 2; offset > 0; offset /= 2) {
+            const float other = __shfl_down_sync(0xffffffffu, local, offset, row_lanes);
+            if (row_lane < offset) {
+                local = reduction_op(local, other);
+            }
+        }
+
+        if (component_active && row_lane == 0) {
+            const float finalized = output_finalize(local) * output_scale;
+            storeFp32AsRuntimeDType(
+                output,
+                output_dtype,
+                tiledReductionOutputIndex(
+                    outer_index, component, output_outer_stride, output_inner_stride),
+                finalized);
+        }
+    }
+}
+
+[[nodiscard]] inline int choosePitchedTiledRowLanes(const CubReductionGeometry& geometry) {
+    // Use the largest useful logical subwarp that still leaves enough independent component groups in each physical
+    // warp. Wide payloads stay at RowLanes=1 for maximally coalesced component traffic; narrow payloads expose row
+    // parallelism when the reduction domain is large enough to use it.
+    if (geometry.inner_size <= 1 && geometry.reduction_size >= 32) {
+        return 32;
+    }
+    if (geometry.inner_size <= 2 && geometry.reduction_size >= 16) {
+        return 16;
+    }
+    if (geometry.inner_size <= 4 && geometry.reduction_size >= 8) {
+        return 8;
+    }
+    if (geometry.inner_size <= 8 && geometry.reduction_size >= 4) {
+        return 4;
+    }
+    if (geometry.inner_size <= 16 && geometry.reduction_size >= 2) {
+        return 2;
+    }
+    return 1;
+}
+
+template <typename InputT, typename ReductionOpT, typename InputTransformT, typename OutputFinalizeT>
+void launchPitchedTiledFixedSegmentReduction(const InputT* input,
+                                             void* output,
+                                             DataType output_dtype,
+                                             const CubReductionGeometry& geometry,
+                                             ReductionOpT reduction_op,
+                                             float init,
+                                             InputTransformT input_transform,
+                                             OutputFinalizeT output_finalize,
+                                             float output_scale,
+                                             cudaStream_t stream) {
+    if (!geometry.pitched_tiled_geometry.has_value() || geometry.tiled_output_permuted
+        || geometry.tiled_output_shared_transpose || geometry.tiled_output_outer_stride != geometry.inner_size
+        || geometry.tiled_output_inner_stride != 1) {
+        throw std::logic_error(
+            "Pitched tiled CUB reduction requires natural dense retained-output geometry.");
+    }
+    const CubReductionPitchedTiledGeometry& pitched = geometry.pitched_tiled_geometry.value();
+    const int row_lanes = choosePitchedTiledRowLanes(geometry);
+    const int components_per_warp = TILED_REDUCTION_WARP_THREADS / row_lanes;
+    const uint64_t component_tiles =
+        ceilDivideU64(geometry.inner_size, static_cast<uint64_t>(components_per_warp));
+    const uint64_t total_work = geometry.outer_size * component_tiles;
+    const uint64_t required_blocks =
+        ceilDivideU64(total_work, static_cast<uint64_t>(TILED_REDUCTION_WARPS_PER_BLOCK));
+    const unsigned int grid_blocks = static_cast<unsigned int>(
+        std::min<uint64_t>(required_blocks, TILED_REDUCTION_MAX_GRID_BLOCKS));
+
+    pitchedTiledFixedSegmentReductionKernel<InputT, ReductionOpT, InputTransformT, OutputFinalizeT>
+        <<<grid_blocks, TILED_REDUCTION_BLOCK_THREADS, 0, stream>>>(input,
+                                                                   output,
+                                                                   output_dtype,
+                                                                   geometry.outer_size,
+                                                                   geometry.reduction_size,
+                                                                   geometry.inner_size,
+                                                                   pitched.outer_stride,
+                                                                   pitched.reduction_stride,
+                                                                   geometry.tiled_output_outer_stride,
+                                                                   geometry.tiled_output_inner_stride,
+                                                                   row_lanes,
+                                                                   reduction_op,
+                                                                   init,
+                                                                   input_transform,
+                                                                   output_finalize,
+                                                                   output_scale);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// VIEW-DIRECT-2B is a separate compact-permutation strategy. The planner has already flattened the physical source to
+// [A,reduction,B,payload] and proved that Thor's logical dense output is [B,A,payload]. Each producer warp owns one A
+// row at a time and keeps adjacent payload lanes contiguous on every global read. Finalized values are staged through a
+// fixed 32x33 FP32 shared-memory tile; the +1 padding deliberately favors coalesced global traffic even if an awkward
+// payload width still creates a small shared-memory bank-conflict pattern in the consumer pass. No global transpose
+// intermediate or logical-coordinate mapper is involved.
+constexpr uint64_t PAYLOAD_TRANSPOSE_TILE_ROWS = 32;
+constexpr uint64_t PAYLOAD_TRANSPOSE_TILE_COLUMNS = 32;
+constexpr uint64_t PAYLOAD_TRANSPOSE_SHARED_PITCH = 33;
+static_assert(PAYLOAD_TRANSPOSE_TILE_ROWS % TILED_REDUCTION_WARPS_PER_BLOCK == 0);
+static_assert(PAYLOAD_TRANSPOSE_TILE_COLUMNS == TILED_REDUCTION_WARP_THREADS);
+
+template <typename InputT, typename ReductionOpT, typename InputTransformT, typename OutputFinalizeT>
+__global__ void payloadTranspose32x33ReductionKernel(const InputT* input,
+                                                     void* output,
+                                                     DataType output_dtype,
+                                                     uint64_t a_size,
+                                                     uint64_t reduction_size,
+                                                     uint64_t b_size,
+                                                     uint64_t payload_size,
+                                                     uint64_t a_tiles,
+                                                     uint64_t payload_tiles,
+                                                     ReductionOpT reduction_op,
+                                                     float init,
+                                                     InputTransformT input_transform,
+                                                     OutputFinalizeT output_finalize,
+                                                     float output_scale) {
+    __shared__ float retained_tile[PAYLOAD_TRANSPOSE_TILE_ROWS][PAYLOAD_TRANSPOSE_SHARED_PITCH];
+
+    const int physical_warp = static_cast<int>(threadIdx.x) / TILED_REDUCTION_WARP_THREADS;
+    const int lane = static_cast<int>(threadIdx.x) % TILED_REDUCTION_WARP_THREADS;
+    constexpr uint64_t a_rows_per_warp = PAYLOAD_TRANSPOSE_TILE_ROWS / TILED_REDUCTION_WARPS_PER_BLOCK;
+
+    const uint64_t total_work = b_size * a_tiles * payload_tiles;
+    const uint64_t grid_stride = static_cast<uint64_t>(gridDim.x);
+    const uint64_t reduction_row_stride = b_size * payload_size;
+    const uint64_t a_stride = reduction_size * reduction_row_stride;
+
+    for (uint64_t work_index = static_cast<uint64_t>(blockIdx.x); work_index < total_work;
+         work_index += grid_stride) {
+        const uint64_t payload_tile_index = work_index % payload_tiles;
+        const uint64_t outer_work = work_index / payload_tiles;
+        const uint64_t a_tile_index = outer_work % a_tiles;
+        const uint64_t b_index = outer_work / a_tiles;
+        const uint64_t a_base = a_tile_index * PAYLOAD_TRANSPOSE_TILE_ROWS;
+        const uint64_t payload_base = payload_tile_index * PAYLOAD_TRANSPOSE_TILE_COLUMNS;
+        const uint64_t payload_index = payload_base + static_cast<uint64_t>(lane);
+        const bool payload_active = payload_index < payload_size;
+
+#pragma unroll
+        for (uint64_t a_pass = 0; a_pass < a_rows_per_warp; ++a_pass) {
+            const uint64_t a_local =
+                static_cast<uint64_t>(physical_warp) + a_pass * static_cast<uint64_t>(TILED_REDUCTION_WARPS_PER_BLOCK);
+            const uint64_t a_index = a_base + a_local;
+            if (a_index >= a_size || !payload_active) {
+                continue;
+            }
+
+            float local = init;
+            uint64_t input_index = a_index * a_stride + b_index * payload_size + payload_index;
+            for (uint64_t reduction_index = 0; reduction_index < reduction_size; ++reduction_index) {
+                local = reduction_op(local, input_transform(ToFp32<InputT>{}(input[input_index])));
+                input_index += reduction_row_stride;
+            }
+            retained_tile[a_local][lane] = output_finalize(local) * output_scale;
+        }
+        __syncthreads();
+
+        const uint64_t valid_a_rows = minU64(PAYLOAD_TRANSPOSE_TILE_ROWS, a_size - a_base);
+        const uint64_t valid_payload = minU64(PAYLOAD_TRANSPOSE_TILE_COLUMNS, payload_size - payload_base);
+        const uint64_t staged_values = valid_a_rows * valid_payload;
+
+        // When payload_size <= 32 this consumer walk is exactly one dense [A,payload] output interval for fixed B,
+        // so consecutive threads issue fully coalesced writes even across A-row boundaries. Wider payloads retain
+        // coalescing within each 32-value payload packet while reusing the same fixed shared-memory footprint.
+        for (uint64_t linear = static_cast<uint64_t>(threadIdx.x); linear < staged_values;
+             linear += static_cast<uint64_t>(blockDim.x)) {
+            const uint64_t a_local = linear / valid_payload;
+            const uint64_t payload_local = linear - a_local * valid_payload;
+            const uint64_t output_index =
+                ((b_index * a_size + (a_base + a_local)) * payload_size) + payload_base + payload_local;
+            storeFp32AsRuntimeDType(
+                output, output_dtype, output_index, retained_tile[a_local][payload_local]);
+        }
+        __syncthreads();
+    }
+}
+
+template <typename InputT, typename ReductionOpT, typename InputTransformT, typename OutputFinalizeT>
+void launchPayloadTranspose32x33Reduction(const InputT* input,
+                                          void* output,
+                                          DataType output_dtype,
+                                          const CubReductionGeometry& geometry,
+                                          ReductionOpT reduction_op,
+                                          float init,
+                                          InputTransformT input_transform,
+                                          OutputFinalizeT output_finalize,
+                                          float output_scale,
+                                          cudaStream_t stream) {
+    if (!geometry.payload_transpose_tiled_geometry.has_value() || geometry.pitched_tiled_geometry.has_value()) {
+        throw std::logic_error("VIEW-DIRECT-2B requires exclusive payload-transpose tiled geometry.");
+    }
+    const CubReductionPayloadTransposeTiledGeometry& transposed =
+        geometry.payload_transpose_tiled_geometry.value();
+    if (transposed.a_size <= 1 || transposed.b_size <= 1 || transposed.payload_size == 0
+        || transposed.reduction_size != geometry.reduction_size) {
+        throw std::logic_error("VIEW-DIRECT-2B payload-transpose geometry is internally inconsistent.");
+    }
+
+    const uint64_t a_tiles = ceilDivideU64(transposed.a_size, PAYLOAD_TRANSPOSE_TILE_ROWS);
+    const uint64_t payload_tiles = ceilDivideU64(transposed.payload_size, PAYLOAD_TRANSPOSE_TILE_COLUMNS);
+    const uint64_t total_work = transposed.b_size * a_tiles * payload_tiles;
+    const unsigned int grid_blocks = static_cast<unsigned int>(
+        std::min<uint64_t>(total_work, TILED_REDUCTION_MAX_GRID_BLOCKS));
+
+    payloadTranspose32x33ReductionKernel<InputT, ReductionOpT, InputTransformT, OutputFinalizeT>
+        <<<grid_blocks, TILED_REDUCTION_BLOCK_THREADS, 0, stream>>>(input,
+                                                                   output,
+                                                                   output_dtype,
+                                                                   transposed.a_size,
+                                                                   transposed.reduction_size,
+                                                                   transposed.b_size,
+                                                                   transposed.payload_size,
+                                                                   a_tiles,
+                                                                   payload_tiles,
+                                                                   reduction_op,
+                                                                   init,
+                                                                   input_transform,
+                                                                   output_finalize,
+                                                                   output_scale);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 // Wide fallback for permuted retained output when the tuned full-row family assigns multiple warps (or an entire CTA)
 // to one outer row. Those CTAs do not own adjacent outer rows, so shared-memory transposition cannot be expressed as a
 // pure epilogue without changing work ownership. Keep that exception isolated here; <=512 components use the tuned
@@ -3209,6 +3689,7 @@ size_t queryReductionBytesForInput(const InputT* input,
                                    InputTransformT input_transform,
                                    OutputFinalizeT output_finalize,
                                    float output_scale,
+                                   int gpu_num,
                                    cudaStream_t stream) {
     using AccumulatorT =
         std::decay_t<decltype(std::declval<ReductionOpT>()(std::declval<float>(), std::declval<float>()))>;
@@ -3262,41 +3743,15 @@ size_t queryReductionBytesForInput(const InputT* input,
             break;
         }
         case CubReductionPath::TiledFixedSegment:
-            // Tiled backends use only launch-owned registers/static-or-dynamic shared memory and no stamped temporary tensor.
-            // Keep the one-byte workspace convention so the allocation-free run contract remains uniform across backends.
-            queried_bytes = 1;
-            break;
-        case CubReductionPath::StridedFixedSegment: {
-            if (geometry.strided_value_indexing_fits_uint32) {
-                auto input_iterator = makeStridedFp32Iterator<uint32_t, uint32_t>(
-                    input,
-                    static_cast<uint32_t>(geometry.reduction_size),
-                    geometry.device_indexing32,
-                    input_transform);
-                CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(nullptr,
-                                                              queried_bytes,
-                                                              input_iterator,
-                                                              output_iterator,
-                                                              static_cast<int64_t>(geometry.output_elements),
-                                                              static_cast<int>(geometry.reduction_size),
-                                                              reduction_op,
-                                                              init,
-                                                              stream));
+            if (shouldUseRowSplitFullRowReduction<InputT>(geometry)) {
+                queried_bytes = rowSplitWorkspaceBytes(geometry, gpu_num);
             } else {
-                auto input_iterator = makeStridedFp32Iterator<uint64_t, int64_t>(
-                    input, geometry.reduction_size, geometry.device_indexing, input_transform);
-                CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(nullptr,
-                                                              queried_bytes,
-                                                              input_iterator,
-                                                              output_iterator,
-                                                              static_cast<int64_t>(geometry.output_elements),
-                                                              static_cast<int>(geometry.reduction_size),
-                                                              reduction_op,
-                                                              init,
-                                                              stream));
+                // The ordinary tiled backends use only launch-owned registers/static-or-dynamic shared memory and no
+                // stamped temporary tensor. Keep the one-byte workspace convention so the allocation-free run
+                // contract remains uniform across those backends.
+                queried_bytes = 1;
             }
             break;
-        }
         case CubReductionPath::OffsetSegmented:
             throw std::logic_error("Dense CUB reduction received offset-segmented geometry.");
         case CubReductionPath::ComposedDense:
@@ -3367,48 +3822,53 @@ void launchReductionForInput(const Tensor& temp_storage,
             break;
         }
         case CubReductionPath::TiledFixedSegment:
-            launchTiledFixedSegmentReduction<InputT>(input.getMemPtr<InputT>(),
-                                                      output.getMemPtr<void>(),
-                                                      output.getDataType(),
-                                                      geometry,
-                                                      reduction_op,
-                                                      init,
-                                                      input_transform,
-                                                      output_finalize,
-                                                      output_scale,
-                                                      stream);
-            break;
-        case CubReductionPath::StridedFixedSegment: {
-            if (geometry.strided_value_indexing_fits_uint32) {
-                auto input_iterator = makeStridedFp32Iterator<uint32_t, uint32_t>(
-                    input.getMemPtr<InputT>(),
-                    static_cast<uint32_t>(geometry.reduction_size),
-                    geometry.device_indexing32,
-                    input_transform);
-                CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(temp_storage_ptr,
-                                                              temp_storage_bytes,
-                                                              input_iterator,
-                                                              output_iterator,
-                                                              static_cast<int64_t>(geometry.output_elements),
-                                                              static_cast<int>(geometry.reduction_size),
+            if (shouldUseRowSplitFullRowReduction<InputT>(geometry)) {
+                launchRowSplitFullRowReduction<InputT>(temp_storage,
+                                                        temp_storage_bytes,
+                                                        input,
+                                                        output,
+                                                        geometry,
+                                                        reduction_op,
+                                                        init,
+                                                        input_transform,
+                                                        output_finalize,
+                                                        output_scale,
+                                                        stream);
+            } else if (geometry.payload_transpose_tiled_geometry.has_value()) {
+                launchPayloadTranspose32x33Reduction<InputT>(input.getMemPtr<InputT>(),
+                                                              output.getMemPtr<void>(),
+                                                              output.getDataType(),
+                                                              geometry,
                                                               reduction_op,
                                                               init,
-                                                              stream));
+                                                              input_transform,
+                                                              output_finalize,
+                                                              output_scale,
+                                                              stream);
+            } else if (geometry.pitched_tiled_geometry.has_value()) {
+                launchPitchedTiledFixedSegmentReduction<InputT>(input.getMemPtr<InputT>(),
+                                                                 output.getMemPtr<void>(),
+                                                                 output.getDataType(),
+                                                                 geometry,
+                                                                 reduction_op,
+                                                                 init,
+                                                                 input_transform,
+                                                                 output_finalize,
+                                                                 output_scale,
+                                                                 stream);
             } else {
-                auto input_iterator = makeStridedFp32Iterator<uint64_t, int64_t>(
-                    input.getMemPtr<InputT>(), geometry.reduction_size, geometry.device_indexing, input_transform);
-                CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(temp_storage_ptr,
-                                                              temp_storage_bytes,
-                                                              input_iterator,
-                                                              output_iterator,
-                                                              static_cast<int64_t>(geometry.output_elements),
-                                                              static_cast<int>(geometry.reduction_size),
-                                                              reduction_op,
-                                                              init,
-                                                              stream));
+                launchTiledFixedSegmentReduction<InputT>(input.getMemPtr<InputT>(),
+                                                          output.getMemPtr<void>(),
+                                                          output.getDataType(),
+                                                          geometry,
+                                                          reduction_op,
+                                                          init,
+                                                          input_transform,
+                                                          output_finalize,
+                                                          output_scale,
+                                                          stream);
             }
             break;
-        }
         case CubReductionPath::OffsetSegmented:
             throw std::logic_error("Dense CUB reduction received offset-segmented geometry.");
         case CubReductionPath::ComposedDense:
@@ -3440,6 +3900,7 @@ size_t queryOperationReductionBytes(DataType input_dtype,
                                                    input_transform,
                                                    output_finalize,
                                                    output_scale,
+                                                   stream.getGpuNum(),
                                                    stream.getStream());
     };
     return dispatchReductionInputDType(input_dtype, dispatch_input);

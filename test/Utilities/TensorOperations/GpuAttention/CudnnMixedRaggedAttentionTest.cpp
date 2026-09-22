@@ -204,16 +204,26 @@ TEST(CudnnMixedRaggedAttention, DenseQueryRaggedKvForwardBackwardMatchesPaddedDe
     mixed.o = AttentionTensorSpec::bshd(batch, heads, queryLength, dim, DataType::FP16);
     mixed.k.ragged = true;
     mixed.v.ragged = true;
+    // The semantic sequence capacity remains S_max=kvCapacity, while the
+    // physical packed THD allocation has only kvCapacity tokens total.  Keep
+    // those two capacities explicit: raggedPackedTokenCapacity is T_max, not
+    // the per-row S_max used in the cuDNN descriptor dimensions.
+    mixed.k.raggedPackedTokenCapacity = static_cast<int64_t>(kvCapacity);
+    mixed.v.raggedPackedTokenCapacity = static_cast<int64_t>(kvCapacity);
     mixed.computeDataType = DataType::FP32;
     mixed.intermediateDataType = DataType::FP32;
     mixed.usePaddingMask = true;
     mixed.generateStats = true;
     mixed.debugName = "mixed_dense_q_ragged_kv";
     ASSERT_NO_THROW(mixed.validateBackward());
+    EXPECT_EQ(mixed.keyValueLength(), static_cast<int64_t>(kvCapacity));
+    EXPECT_EQ(mixed.maxTotalKeyValueTokens(), static_cast<int64_t>(kvCapacity));
 
     CudnnAttentionDescriptor dense = mixed;
     dense.k.ragged = false;
     dense.v.ragged = false;
+    dense.k.raggedPackedTokenCapacity = 0;
+    dense.v.raggedPackedTokenCapacity = 0;
     dense.debugName = "padded_dense_reference";
     ASSERT_NO_THROW(dense.validateBackward());
 
@@ -431,16 +441,25 @@ TEST(CudnnMixedRaggedAttention, RaggedQueryDenseKvForwardBackwardMatchesPaddedDe
     mixed.o = AttentionTensorSpec::bshd(batch, heads, queryCapacity, dim, DataType::FP16);
     mixed.q.ragged = true;
     mixed.o.ragged = true;
+    // The semantic sequence capacity remains S_max=queryCapacity, while the
+    // physical packed THD allocation has only queryCapacity tokens total.
+    // Declare T_max explicitly so it is not confused with B*S_max.
+    mixed.q.raggedPackedTokenCapacity = static_cast<int64_t>(queryCapacity);
+    mixed.o.raggedPackedTokenCapacity = static_cast<int64_t>(queryCapacity);
     mixed.computeDataType = DataType::FP32;
     mixed.intermediateDataType = DataType::FP32;
     mixed.usePaddingMask = true;
     mixed.generateStats = true;
     mixed.debugName = "mixed_ragged_q_dense_kv";
     ASSERT_NO_THROW(mixed.validateBackward());
+    EXPECT_EQ(mixed.queryLength(), static_cast<int64_t>(queryCapacity));
+    EXPECT_EQ(mixed.maxTotalQueryTokens(), static_cast<int64_t>(queryCapacity));
 
     CudnnAttentionDescriptor dense = mixed;
     dense.q.ragged = false;
     dense.o.ragged = false;
+    dense.q.raggedPackedTokenCapacity = 0;
+    dense.o.raggedPackedTokenCapacity = 0;
     dense.debugName = "padded_dense_query_reference";
     ASSERT_NO_THROW(dense.validateBackward());
 

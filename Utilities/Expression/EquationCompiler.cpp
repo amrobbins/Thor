@@ -3542,6 +3542,8 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
     compiled->use_bias = node.attention_use_bias;
     compiled->use_padding_mask = node.attention_use_padding_mask;
     compiled->use_ragged_offsets = node.attention_use_ragged_offsets;
+    compiled->ragged_query_max_sequence_length = node.attention_ragged_query_max_sequence_length;
+    compiled->ragged_kv_max_sequence_length = node.attention_ragged_kv_max_sequence_length;
     compiled->use_paged_kv_cache = node.attention_use_paged_kv_cache;
     compiled->paged_kv_max_sequence_length = node.attention_paged_kv_max_sequence_length;
     compiled->dropout_probability = node.attention_dropout_probability;
@@ -3688,6 +3690,8 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
     compiled->use_bias = node.attention_use_bias;
     compiled->use_padding_mask = node.attention_use_padding_mask;
     compiled->use_ragged_offsets = node.attention_use_ragged_offsets;
+    compiled->ragged_query_max_sequence_length = node.attention_ragged_query_max_sequence_length;
+    compiled->ragged_kv_max_sequence_length = node.attention_ragged_kv_max_sequence_length;
     compiled->use_paged_kv_cache = node.attention_use_paged_kv_cache;
     compiled->paged_kv_max_sequence_length = node.attention_paged_kv_max_sequence_length;
     compiled->dropout_probability = node.attention_dropout_probability;

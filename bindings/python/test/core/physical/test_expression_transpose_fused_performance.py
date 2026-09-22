@@ -11,6 +11,12 @@ from thor.physical import DeviceType, Expression as ex, PhysicalTensor, Placemen
 
 GPU_NUM = int(os.getenv("THOR_EXPR_PERF_GPU", "0"))
 
+# NOTE: this is intentionally a cached-launch regression benchmark. It repeatedly
+# uses the same stamped allocations, so its bandwidth numbers can reflect warm L2
+# residency and its broadcast byte accounting is logical/effective rather than
+# compulsory DRAM traffic. Use the C++ thor_fused_kernel_census benchmark for
+# cache-controlled fused-kernel bandwidth/dispatch analysis.
+
 # Keep these env-tunable so you can scale the benchmark on different machines.
 # These fall back to the existing expression-performance env vars when present.
 WARMUP_ITERS = int(os.getenv(
@@ -66,6 +72,9 @@ def _bytes_per_element(dtype: thor.DataType) -> int:
 def _benchmark_cached_launches(launch_fn: Callable[[], None], stream: Stream) -> float:
     """
     Returns wall time in seconds for MEASURE_ITERS cached stamped launches only.
+
+    This helper intentionally does not evict or rotate allocations between
+    launches; do not interpret its reported bandwidth as a DRAM-bandwidth census.
 
     Timing protocol:
       1. One untimed launch to trigger stamp-time specialization / cache fill

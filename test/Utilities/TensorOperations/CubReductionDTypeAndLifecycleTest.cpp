@@ -297,6 +297,42 @@ TEST(CubReduction, ValidatesPreallocatedOutputContract) {
                  std::invalid_argument);
 }
 
+TEST(CubReduction, PreallocatedOutputOverlapUsesReachableViewAddressSpan) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    // A rank-1 affine broadcast is an ordained DeviceTransformReduce path. Its logical view contains 1024 FP32
+    // elements but can only address storage element 0. Put a valid dense scalar output later in the same allocation.
+    // The old logical-byte overlap check incorrectly rejected this even though the reachable input/output address spans
+    // are disjoint.
+    Tensor storage = Tensor::zeros(gpuPlacement, TensorDescriptor(DataType::FP32, {128}), stream);
+    Tensor input = storage.aliasView({1024}, {0}, 0);
+    Tensor disjoint_output = storage.aliasView({1}, {1}, 64);
+
+    CubReduction reduction(CubReductionOp::Sum, 0, DataType::FP32);
+    std::shared_ptr<StampedCubReduction> stamped = reduction.stamp(input, disjoint_output, stream);
+    EXPECT_EQ(stamped->getPath(), CubReductionPath::DeviceTransformReduce);
+    EXPECT_TRUE(stamped->getGeometry().device_transform_uses_affine_stride);
+    EXPECT_EQ(stamped->getGeometry().affine_input_stride, 0U);
+    EXPECT_EQ(stamped->getOutputTensor().getMemPtr<void>(), disjoint_output.getMemPtr<void>());
+
+    stamped->run();
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(disjoint_output, stream), {0.0f});
+
+    // Moving the output onto an address the broadcast view can actually read must still be rejected.
+    Tensor overlapping_output = storage.aliasView({1}, {1}, 0);
+    EXPECT_THROW(static_cast<void>(reduction.stamp(input, overlapping_output, stream)), std::invalid_argument);
+
+    // Dense aliases are valid preallocated outputs, but genuinely strided multi-element output views remain
+    // unsupported. Use an independent ordained dense reduction because a one-element output has no meaningful stride.
+    Tensor dense_input = storage.aliasView({2, 2}, {2, 1}, 8);
+    Tensor strided_output = storage.aliasView({2}, {2}, 64);
+    EXPECT_THROW(static_cast<void>(CubReduction(CubReductionOp::Sum, 0, DataType::FP32)
+                                       .stamp(dense_input, strided_output, stream)),
+                 std::invalid_argument);
+}
+
 #if THOR_CUB_ENABLE_FP8_TYPES
 TEST(CubReduction, Fp8OutputsUseDestinationFormatOverflowSemantics) {
     REQUIRE_CUDA_DEVICE();

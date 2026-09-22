@@ -61,7 +61,12 @@ class Layer {
     [[nodiscard]] virtual uint64_t getOutputTensorBytes(uint32_t batchSize) const {
         if (!featureOutput.has_value())
             return 0UL;
-        return featureOutput.value().getTotalSizeInBytes() * batchSize;
+        const Tensor& output = featureOutput.value();
+        const uint64_t outputBytes = output.getTotalSizeInBytes();
+        // Most API tensors are per-example shapes and need the runtime batch prepended.
+        // Batch-shaped outputs (notably packed ragged [T_max,...] values) already
+        // describe their complete physical capacity and must be counted exactly once.
+        return outputTensorDimensionsIncludeBatch(output) ? outputBytes : outputBytes * batchSize;
     }
     [[nodiscard]] virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize,
                                                                          ThorImplementation::TensorPlacement tensorPlacement) const {

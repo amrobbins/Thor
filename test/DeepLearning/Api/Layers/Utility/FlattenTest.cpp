@@ -228,6 +228,10 @@ TEST(UtilityApiLayers, RaggedFlattenPreservesPartitionAndFlattensOnlyTrailingVal
     EXPECT_EQ(output.getOffsetsDataType(), DataType::UINT64);
     ASSERT_TRUE(flatten.getFeatureOutput().has_value());
     EXPECT_TRUE(flatten.outputTensorDimensionsIncludeBatch(flatten.getFeatureOutput().value()));
+    // Flatten inherits Layer::getOutputTensorBytes(). Because this packed ragged
+    // output already contains the full batch capacity, the base estimator must
+    // not multiply it by the logical batch again.
+    EXPECT_EQ(flatten.getOutputTensorBytes(input.getBatchSize()), output.getValues().getTotalSizeInBytes());
 
     const json architecture = flatten.architectureJson();
     EXPECT_TRUE(architecture.at("use_ragged").get<bool>());

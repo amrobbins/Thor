@@ -1640,6 +1640,8 @@ class BackwardGraphBuilder {
         node.attention_use_bias = forward_attention.attention_use_bias;
         node.attention_use_padding_mask = forward_attention.attention_use_padding_mask;
         node.attention_use_ragged_offsets = forward_attention.attention_use_ragged_offsets;
+        node.attention_ragged_query_max_sequence_length = forward_attention.attention_ragged_query_max_sequence_length;
+        node.attention_ragged_kv_max_sequence_length = forward_attention.attention_ragged_kv_max_sequence_length;
         node.attention_use_paged_kv_cache = forward_attention.attention_use_paged_kv_cache;
         node.attention_paged_kv_max_sequence_length = forward_attention.attention_paged_kv_max_sequence_length;
         node.attention_dropout_probability = forward_attention.attention_dropout_probability;

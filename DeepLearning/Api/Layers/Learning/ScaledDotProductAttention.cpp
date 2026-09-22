@@ -397,6 +397,8 @@ ThorImplementation::Expression makeAttentionOutputExpression(bool useBias,
                                                               bool useSequenceLengths,
                                                               bool queryRagged,
                                                               bool keyValueRagged,
+                                                              uint64_t queryMaxSequenceLength,
+                                                              uint64_t keyValueMaxSequenceLength,
                                                               bool useFp8ForwardScaling,
                                                               ThorImplementation::AttentionTensorLayout tensorLayout,
                                                               ThorImplementation::AttentionMaskKind maskKind,
@@ -423,6 +425,8 @@ ThorImplementation::Expression makeAttentionOutputExpression(bool useBias,
     options.diagonal_left_bound = diagonalLeftBound;
     options.diagonal_right_bound = diagonalRightBound;
     options.use_alibi_mask = useAlibiMask;
+    options.ragged_query_max_sequence_length = (queryRagged || keyValueRagged) ? queryMaxSequenceLength : 0;
+    options.ragged_kv_max_sequence_length = (queryRagged || keyValueRagged) ? keyValueMaxSequenceLength : 0;
     options.compute_dtype = computeDType;
     options.output_dtype = outputDType;
     options.dropout_probability = dropoutProbability;
@@ -547,6 +551,8 @@ std::shared_ptr<const ThorImplementation::ExpressionDefinition> makeSerializable
                                                                                                      bool useSequenceLengths,
                                                                                                      bool queryRagged,
                                                                                                      bool keyValueRagged,
+                                                                                                     uint64_t queryMaxSequenceLength,
+                                                                                                     uint64_t keyValueMaxSequenceLength,
                                                                                                      bool useFp8ForwardScaling,
                                                                                                      ThorImplementation::AttentionTensorLayout tensorLayout,
                                                                                                      ThorImplementation::AttentionMaskKind maskKind,
@@ -568,6 +574,8 @@ std::shared_ptr<const ThorImplementation::ExpressionDefinition> makeSerializable
                                                    useSequenceLengths,
                                                    queryRagged,
                                                    keyValueRagged,
+                                                   queryMaxSequenceLength,
+                                                   keyValueMaxSequenceLength,
                                                    useFp8ForwardScaling,
                                                    tensorLayout,
                                                    maskKind,
@@ -589,6 +597,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(bool useBias,
                                                               bool useSequenceLengths,
                                                               bool queryRagged,
                                                               bool keyValueRagged,
+                                                              uint64_t queryMaxSequenceLength,
+                                                              uint64_t keyValueMaxSequenceLength,
                                                               bool useFp8ForwardScaling,
                                                               ThorImplementation::AttentionTensorLayout tensorLayout,
                                                               ThorImplementation::AttentionMaskKind maskKind,
@@ -615,6 +625,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(bool useBias,
                                                                     useSequenceLengths,
                                                                     queryRagged,
                                                                     keyValueRagged,
+                                                                    queryMaxSequenceLength,
+                                                                    keyValueMaxSequenceLength,
                                                                     useFp8ForwardScaling,
                                                                     tensorLayout,
                                                                     maskKind,
@@ -639,6 +651,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(bool useBias,
          useSequenceLengths,
          queryRagged,
          keyValueRagged,
+         queryMaxSequenceLength,
+         keyValueMaxSequenceLength,
          useRaggedOffsets,
          tensorLayout,
          dropoutProbability,
@@ -751,8 +765,11 @@ ThorImplementation::DynamicExpression makeAttentionExpression(bool useBias,
             std::function<void(Stream&)> preForwardHook;
             if (dropoutProbability > 0.0f) {
                 auto dropoutState = std::make_shared<SdpaDropoutRuntimeState>(dropoutSeed, dropoutOffset);
-                dropoutState->setOffsetAdvance(
-                    checkedDropoutOffsetAdvance(batch, queryLogicalDims.heads, queryLogicalDims.sequence, keyValueLogicalDims.sequence));
+                dropoutState->setOffsetAdvance(checkedDropoutOffsetAdvance(
+                    batch,
+                    queryLogicalDims.heads,
+                    queryRagged ? queryMaxSequenceLength : queryLogicalDims.sequence,
+                    keyValueRagged ? keyValueMaxSequenceLength : keyValueLogicalDims.sequence));
                 tensorScalarInputs[kDropoutSeedInputName] = dropoutState->seedBinding(query.getPlacement());
                 tensorScalarInputs[kDropoutOffsetInputName] = dropoutState->offsetBinding(query.getPlacement());
                 preForwardHook = [dropoutState](Stream& runStream) { dropoutState->uploadForForward(runStream); };
@@ -1048,7 +1065,12 @@ ScaledDotProductAttention ScaledDotProductAttention::Builder::build() {
     const bool useSequenceLengths = _querySequenceLengthsInput.has_value();
     const bool useFp8ForwardScaling = _fp8DescaleQInput.has_value();
     const auto qDims = logicalDims(_queryInput->getDimensions(), _tensorLayout.value());
+    const auto kDims = logicalDims(_keyInput->getDimensions(), _tensorLayout.value());
     const auto vDims = logicalDims(_valueInput->getDimensions(), _tensorLayout.value());
+    const uint64_t queryMaxSequenceLength =
+        queryRagged && _queryRaggedInput->hasMaxValuesPerRow() ? _queryRaggedInput->getMaxValuesPerRow() : qDims.sequence;
+    const uint64_t keyValueMaxSequenceLength =
+        keyValueRagged && _keyRaggedInput->hasMaxValuesPerRow() ? _keyRaggedInput->getMaxValuesPerRow() : kDims.sequence;
     Tensor output(_outputDataType.value(), outputDims(qDims.heads, qDims.sequence, vDims.head_dim, _tensorLayout.value()));
 
     std::vector<std::string> inputNames =
@@ -1074,6 +1096,8 @@ ScaledDotProductAttention ScaledDotProductAttention::Builder::build() {
                                                                 useSequenceLengths,
                                                                 queryRagged,
                                                                 keyValueRagged,
+                                                                queryMaxSequenceLength,
+                                                                keyValueMaxSequenceLength,
                                                                 useFp8ForwardScaling,
                                                                 _tensorLayout.value(),
                                                                 _maskKind.value(),
@@ -1357,6 +1381,10 @@ void ScaledDotProductAttention::deserialize(std::shared_ptr<thor_file::TarReader
     const auto qDims = logicalDims(queryInput.getDimensions(), tensorLayout);
     const auto kDims = logicalDims(keyInput.getDimensions(), tensorLayout);
     const auto vDims = logicalDims(valueInput.getDimensions(), tensorLayout);
+    const uint64_t queryMaxSequenceLength =
+        queryRagged && queryRaggedInput->hasMaxValuesPerRow() ? queryRaggedInput->getMaxValuesPerRow() : qDims.sequence;
+    const uint64_t keyValueMaxSequenceLength =
+        keyValueRagged && keyRaggedInput->hasMaxValuesPerRow() ? keyRaggedInput->getMaxValuesPerRow() : kDims.sequence;
     const bool useFp8ForwardScaling = fp8DescaleQInput.has_value();
     if (queryInput.getDataType() != keyInput.getDataType() || queryInput.getDataType() != valueInput.getDataType()) {
         throw std::runtime_error("ScaledDotProductAttention deserialize query/key/value tensors must have the same dtype.");
@@ -1482,6 +1510,8 @@ void ScaledDotProductAttention::deserialize(std::shared_ptr<thor_file::TarReader
                                                             useSequenceLengths,
                                                             queryRagged,
                                                             keyValueRagged,
+                                                            queryMaxSequenceLength,
+                                                            keyValueMaxSequenceLength,
                                                             useFp8ForwardScaling,
                                                             tensorLayout,
                                                             maskKind,

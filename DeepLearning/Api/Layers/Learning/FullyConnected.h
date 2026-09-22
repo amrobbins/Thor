@@ -160,6 +160,17 @@ class FullyConnected : public TrainableLayer, public TrainingDropoutControllable
     DataType getComputeDataType() const { return computeDataType; }
     DataType getOutputDataType() const { return outputDataType; }
     bool getUseRagged() const { return !raggedFeatureInputs.empty(); }
+    [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {
+        bool isFeatureOutput = false;
+        for (const Tensor& output : featureOutputs) {
+            if (output == outputTensor) {
+                isFeatureOutput = true;
+                break;
+            }
+        }
+        THOR_THROW_IF_FALSE(isFeatureOutput);
+        return !raggedFeatureOutputs.empty();
+    }
     float getOutputDropoutProbability() const { return outputDropoutProbability; }
     int64_t getOutputDropoutSeed() const { return outputDropoutSeed; }
     std::optional<Tensor> getResidualInput() const { return residualInput; }

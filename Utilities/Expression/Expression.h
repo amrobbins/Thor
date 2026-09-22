@@ -381,6 +381,11 @@ struct ExprNode {
     bool attention_use_bias = false;
     bool attention_use_padding_mask = false;
     bool attention_use_ragged_offsets = false;
+    // Placement-time per-row sequence capacities for packed [T,H,D] ragged
+    // attention. These are semantic S_max values; T remains the physical packed
+    // tensor capacity. Zero preserves the legacy rank-4 ragged contract.
+    uint64_t attention_ragged_query_max_sequence_length = 0;
+    uint64_t attention_ragged_kv_max_sequence_length = 0;
     bool attention_use_paged_kv_cache = false;
     int64_t attention_paged_kv_max_sequence_length = 0;
     float attention_dropout_probability = 0.0f;
@@ -743,6 +748,12 @@ struct AttentionOptions {
     std::optional<float> attention_scale = std::nullopt;
     bool use_alibi_mask = false;
     bool use_padding_mask = false;
+    // Optional semantic S_max capacities for canonical packed ragged q/o and
+    // k/v. High-level RaggedTensor Attention populates these from
+    // max_values_per_row. Low-level legacy rank-4 ragged expressions may leave
+    // them zero because their rank-4 S dimension already is S_max.
+    uint64_t ragged_query_max_sequence_length = 0;
+    uint64_t ragged_kv_max_sequence_length = 0;
     float dropout_probability = 0.0f;
     bool use_fp8_forward_scaling = false;
     bool use_paged_kv_cache = false;

@@ -37,6 +37,11 @@ struct AttentionTensorSpec {
     std::vector<int64_t> strides;
     DataType dataType = DataType::FP16;
     bool ragged = false;
+    // For canonical packed ragged storage, semantic dimensions remain [B,H,S_max,D]
+    // while the physical payload is [T,H,D]. Keep T separate so cuDNN sees the
+    // per-row sequence bound instead of the whole packed batch capacity. Zero
+    // means the tensor uses ordinary rank-4 storage (including legacy ragged).
+    int64_t raggedPackedTokenCapacity = 0;
 
     static AttentionTensorSpec bhsd(
         int64_t batch, int64_t heads, int64_t sequenceLength, int64_t headDim, DataType dataType);
@@ -118,6 +123,8 @@ struct CudnnAttentionDescriptor {
     int64_t keyValueHeads() const;
     int64_t queryLength() const;
     int64_t keyValueLength() const;
+    int64_t maxTotalQueryTokens() const;
+    int64_t maxTotalKeyValueTokens() const;
     int64_t qkHeadDim() const;
     int64_t vHeadDim() const;
 

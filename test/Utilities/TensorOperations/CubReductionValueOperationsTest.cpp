@@ -2,6 +2,7 @@
 
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -199,6 +200,85 @@ TEST(CubReduction, WholeTensorPathSupportsEveryValueOperation) {
                       {CubReductionOp::L2Norm, {std::sqrt(29.0f)}, 1.0e-5f},
                       {CubReductionOp::SumSquares, {29.0f}, 0.0f}},
                      stream);
+}
+
+TEST(CubReduction, CompactPhysicalPermutationFullReductionSupportsEveryValueOperation) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    // Logical [2,3,4] uses physical order [1,2,0]. Every storage value participates exactly once, so a full value
+    // reduction is invariant to that permutation and can consume the compact physical span directly.
+    std::vector<float> values;
+    values.reserve(24);
+    for (int i = 0; i < 12; ++i) {
+        values.push_back(-1.0f);
+        values.push_back(1.0f);
+    }
+    Tensor storage = makeGpuTensor(values, {3, 4, 2}, stream);
+    Tensor permuted = storage.aliasView({2, 3, 4}, {1, 8, 2}, 0);
+    const std::vector<uint32_t> axes = {0, 1, 2};
+
+    const std::vector<OperationExpectation> expectations = {
+        {CubReductionOp::Sum, {0.0f}, 0.0f},
+        {CubReductionOp::Product, {1.0f}, 0.0f},
+        {CubReductionOp::Mean, {0.0f}, 0.0f},
+        {CubReductionOp::Min, {-1.0f}, 0.0f},
+        {CubReductionOp::Max, {1.0f}, 0.0f},
+        {CubReductionOp::L1Norm, {24.0f}, 0.0f},
+        {CubReductionOp::L2Norm, {std::sqrt(24.0f)}, 1.0e-5f},
+        {CubReductionOp::SumSquares, {24.0f}, 0.0f},
+    };
+
+    for (const OperationExpectation& expectation : expectations) {
+        SCOPED_TRACE(static_cast<int>(expectation.op));
+        std::shared_ptr<StampedCubReduction> stamped = CubReduction(expectation.op, axes).stamp(permuted, stream);
+        ASSERT_EQ(stamped->getPath(), CubReductionPath::DeviceTransformReduce);
+        stamped->runOn(stream);
+        stream.synchronize();
+        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
+                              expectation.expected,
+                              expectation.tolerance);
+    }
+}
+
+TEST(CubReduction, CompactPhysicalPermutationTrailingReductionUsesContiguousSegmentsForEveryValueOperation) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    // Physical storage is [axis1=2, axis2=3, axis0=2]. The logical [axis0,axis1,axis2] view therefore has physical
+    // order [1,2,0]. Reducing axis0 consumes six ordinary contiguous 2-value segments, and physical retained order
+    // [1,2] is already the logical dense output order.
+    Tensor storage = makeGpuTensor(
+        {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f},
+        {2, 3, 2},
+        stream);
+    Tensor permuted = storage.aliasView({2, 2, 3}, {1, 6, 2}, 0);
+
+    const std::vector<OperationExpectation> expectations = {
+        {CubReductionOp::Sum, {3.0f, 7.0f, 11.0f, 15.0f, 19.0f, 23.0f}, 0.0f},
+        {CubReductionOp::Product, {2.0f, 12.0f, 30.0f, 56.0f, 90.0f, 132.0f}, 0.0f},
+        {CubReductionOp::Mean, {1.5f, 3.5f, 5.5f, 7.5f, 9.5f, 11.5f}, 0.0f},
+        {CubReductionOp::Min, {1.0f, 3.0f, 5.0f, 7.0f, 9.0f, 11.0f}, 0.0f},
+        {CubReductionOp::Max, {2.0f, 4.0f, 6.0f, 8.0f, 10.0f, 12.0f}, 0.0f},
+        {CubReductionOp::L1Norm, {3.0f, 7.0f, 11.0f, 15.0f, 19.0f, 23.0f}, 0.0f},
+        {CubReductionOp::L2Norm,
+         {std::sqrt(5.0f), std::sqrt(25.0f), std::sqrt(61.0f), std::sqrt(113.0f), std::sqrt(181.0f),
+          std::sqrt(265.0f)},
+         1.0e-5f},
+        {CubReductionOp::SumSquares, {5.0f, 25.0f, 61.0f, 113.0f, 181.0f, 265.0f}, 0.0f},
+    };
+
+    for (const OperationExpectation& expectation : expectations) {
+        SCOPED_TRACE(static_cast<int>(expectation.op));
+        std::shared_ptr<StampedCubReduction> stamped = CubReduction(expectation.op, 0).stamp(permuted, stream);
+        ASSERT_EQ(stamped->getPath(), CubReductionPath::ContiguousFixedSegment);
+        EXPECT_TRUE(stamped->getGeometry().permutation_aware_contiguous_segments);
+        stamped->runOn(stream);
+        stream.synchronize();
+        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
+                              expectation.expected,
+                              expectation.tolerance);
+    }
 }
 
 TEST(CubReduction, ContiguousFixedSegmentPathSupportsEveryValueOperation) {
@@ -513,6 +593,94 @@ TEST(CubReduction, TiledFixedSegmentCoversWidthPoliciesAndAsyncStaging) {
         stream.synchronize();
         expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
     }
+}
+
+TEST(CubReduction, RowSplitFullRowProductionPathCoversDirectAndGroupedTransformerRegimes) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer_size = 1;
+    constexpr uint64_t reduction_size = 4096;
+
+    int multiprocessors = 0;
+    ASSERT_EQ(cudaDeviceGetAttribute(&multiprocessors, cudaDevAttrMultiProcessorCount, stream.getGpuNum()), cudaSuccess);
+    ASSERT_GT(multiprocessors, 0);
+    const uint64_t target_blocks = static_cast<uint64_t>(multiprocessors)
+                                   * CubReductionTiledPolicy::ROW_SPLIT_TARGET_SM_WAVES;
+    const uint64_t expected_shards = std::min<uint64_t>(
+        reduction_size,
+        (target_blocks + outer_size - 1) / outer_size);
+
+    // Width 512 is the vectorizedDirectFullRowReduction<...,16> bottleneck observed in the product transformer.
+    // Width 768 exercises asyncGroupedFullRowReduction<...,2,16>, the companion low-output/high-R bottleneck.
+    for (uint64_t inner_size : {512ULL, 768ULL}) {
+        SCOPED_TRACE(inner_size);
+        std::vector<float> values(outer_size * reduction_size * inner_size, 1.0f);
+        Tensor input = makeGpuTensor(values, {outer_size, reduction_size, inner_size}, stream, DataType::BF16);
+        CubReduction reduction(CubReductionOp::Sum, 1, DataType::FP32);
+        const size_t queried_workspace = reduction.queryWorkspaceSizeInBytes(input.getDescriptor(), stream);
+        const size_t expected_workspace = static_cast<size_t>(outer_size * expected_shards * inner_size * sizeof(float));
+        EXPECT_EQ(queried_workspace, expected_workspace);
+        EXPECT_GT(queried_workspace, 1U);
+
+        std::shared_ptr<StampedCubReduction> stamped = reduction.stamp(input, stream);
+        EXPECT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+        EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), queried_workspace);
+        stamped->run();
+        stream.synchronize();
+        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
+                              std::vector<float>(inner_size, static_cast<float>(reduction_size)));
+    }
+}
+
+TEST(CubReduction, RowSplitFullRowPreservesGenericReductionSemanticsAndFinalizers) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t reduction_size = 1024;
+    constexpr uint64_t inner_size = 17;
+    std::vector<float> values(reduction_size * inner_size);
+    for (uint64_t row = 0; row < reduction_size; ++row) {
+        const float value = (row & 1U) == 0 ? -1.0f : 1.0f;
+        for (uint64_t component = 0; component < inner_size; ++component) {
+            values[row * inner_size + component] = value;
+        }
+    }
+    Tensor input = makeGpuTensor(values, {1, reduction_size, inner_size}, stream, DataType::BF16);
+
+    const std::vector<OperationExpectation> expectations = {
+        {CubReductionOp::Sum, std::vector<float>(inner_size, 0.0f), 0.0f},
+        {CubReductionOp::Mean, std::vector<float>(inner_size, 0.0f), 0.0f},
+        {CubReductionOp::L1Norm, std::vector<float>(inner_size, 1024.0f), 0.0f},
+        {CubReductionOp::L2Norm, std::vector<float>(inner_size, 32.0f), 0.0f},
+        {CubReductionOp::SumSquares, std::vector<float>(inner_size, 1024.0f), 0.0f},
+        {CubReductionOp::Product, std::vector<float>(inner_size, 1.0f), 0.0f},
+        {CubReductionOp::Min, std::vector<float>(inner_size, -1.0f), 0.0f},
+        {CubReductionOp::Max, std::vector<float>(inner_size, 1.0f), 0.0f},
+    };
+
+    for (const OperationExpectation& expectation : expectations) {
+        SCOPED_TRACE(static_cast<int>(expectation.op));
+        CubReduction reduction(expectation.op, 1, DataType::FP32);
+        EXPECT_GT(reduction.queryWorkspaceSizeInBytes(input.getDescriptor(), stream), 1U);
+        std::shared_ptr<StampedCubReduction> stamped = reduction.stamp(input, stream);
+        stamped->run();
+        stream.synchronize();
+        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
+                              expectation.expected,
+                              expectation.tolerance);
+    }
+}
+
+TEST(CubReduction, RowSplitFullRowGateKeepsManyOutputAndShortReductionFastPaths) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    // Keep the release-calibrated gate explicit: 128 outer rows are inside the proven row-split region, while 129 is
+    // deliberately left on the already-ordained direct/grouped kernels. Short reductions likewise avoid scratch.
+    CubReduction sum(CubReductionOp::Sum, 1, DataType::FP32);
+    EXPECT_EQ(sum.queryWorkspaceSizeInBytes(TensorDescriptor(DataType::BF16, {129, 2048, 512}), stream), 1U);
+    EXPECT_EQ(sum.queryWorkspaceSizeInBytes(TensorDescriptor(DataType::BF16, {1, 65, 512}), stream), 1U);
 }
 
 TEST(CubReduction, PermutationAwareTiledPathCoversTunedWidthPolicies) {

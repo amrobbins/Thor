@@ -1,4 +1,5 @@
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
+#include "Utilities/Expression/StampedEquation.h"
 
 #include "gtest/gtest.h"
 
@@ -232,6 +233,94 @@ std::string probeCaseLabel(const Fp8AttentionProbeCase& probeCase) {
 }
 
 }  // namespace
+
+TEST(CudnnAttentionDescriptor, PackedRaggedCompiledDescriptorKeepsSmaxSeparateFromPackedT) {
+    constexpr uint64_t batch = 32;
+    constexpr uint64_t sequence = 819;
+    constexpr uint64_t packedTokens = batch * sequence;
+    constexpr uint64_t heads = 4;
+    constexpr uint64_t headDim = 32;
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Tensor q(cpuPlacement, TensorDescriptor(DataType::BF16, {packedTokens, heads, headDim}));
+    Tensor k(cpuPlacement, TensorDescriptor(DataType::BF16, {packedTokens, heads, headDim}));
+    Tensor v(cpuPlacement, TensorDescriptor(DataType::BF16, {packedTokens, heads, headDim}));
+    Tensor o(cpuPlacement, TensorDescriptor(DataType::BF16, {packedTokens, heads, headDim}));
+
+    CompiledAttention forward;
+    forward.q_layout = AttentionTensorLayout::BSHD;
+    forward.k_layout = AttentionTensorLayout::BSHD;
+    forward.v_layout = AttentionTensorLayout::BSHD;
+    forward.o_layout = AttentionTensorLayout::BSHD;
+    forward.use_ragged_offsets = true;
+    forward.ragged_query_max_sequence_length = sequence;
+    forward.ragged_kv_max_sequence_length = sequence;
+    forward.compute_dtype = DataType::FP32;
+    forward.output_dtype = DataType::BF16;
+
+    const CudnnAttentionDescriptor forwardDescriptor = forward.descriptorFor(q, k, v, o, batch);
+    const std::vector<int64_t> expectedDims{
+        static_cast<int64_t>(batch), static_cast<int64_t>(heads), static_cast<int64_t>(sequence), static_cast<int64_t>(headDim)};
+    const std::vector<int64_t> expectedStrides{
+        static_cast<int64_t>(sequence * heads * headDim),
+        static_cast<int64_t>(headDim),
+        static_cast<int64_t>(heads * headDim),
+        1};
+
+    EXPECT_EQ(forwardDescriptor.q.dimensions, expectedDims);
+    EXPECT_EQ(forwardDescriptor.q.strides, expectedStrides);
+    EXPECT_EQ(forwardDescriptor.q.raggedPackedTokenCapacity, static_cast<int64_t>(packedTokens));
+    EXPECT_EQ(forwardDescriptor.queryLength(), static_cast<int64_t>(sequence));
+    EXPECT_EQ(forwardDescriptor.maxTotalQueryTokens(), static_cast<int64_t>(packedTokens));
+    EXPECT_EQ(forwardDescriptor.maxTotalKeyValueTokens(), static_cast<int64_t>(packedTokens));
+    EXPECT_NO_THROW(forwardDescriptor.validateForward());
+
+    // This is the exact regression geometry from the product-transformer trace:
+    // a 64-token query tile must see ceil(819/64)=13 sequence tiles, not
+    // ceil((32*819)/64)=410 tiles.
+    EXPECT_EQ((forwardDescriptor.queryLength() + 63) / 64, 13);
+    EXPECT_NE((forwardDescriptor.queryLength() + 63) / 64,
+              (static_cast<int64_t>(packedTokens) + 63) / 64);
+
+    CompiledAttentionBackward backward;
+    backward.q_layout = AttentionTensorLayout::BSHD;
+    backward.k_layout = AttentionTensorLayout::BSHD;
+    backward.v_layout = AttentionTensorLayout::BSHD;
+    backward.o_layout = AttentionTensorLayout::BSHD;
+    backward.use_ragged_offsets = true;
+    backward.ragged_query_max_sequence_length = sequence;
+    backward.ragged_kv_max_sequence_length = sequence;
+    backward.compute_dtype = DataType::FP32;
+    backward.dQ_dtype = DataType::BF16;
+    backward.dK_dtype = DataType::BF16;
+    backward.dV_dtype = DataType::BF16;
+
+    const CudnnAttentionDescriptor backwardDescriptor = backward.descriptorFor(q, k, v, o, batch);
+    EXPECT_EQ(backwardDescriptor.q.dimensions, expectedDims);
+    EXPECT_EQ(backwardDescriptor.q.raggedPackedTokenCapacity, static_cast<int64_t>(packedTokens));
+    EXPECT_EQ(backwardDescriptor.queryLength(), static_cast<int64_t>(sequence));
+    EXPECT_EQ(backwardDescriptor.maxTotalQueryTokens(), static_cast<int64_t>(packedTokens));
+    EXPECT_EQ(backwardDescriptor.maxTotalKeyValueTokens(), static_cast<int64_t>(packedTokens));
+}
+
+TEST(CudnnAttentionDescriptor, PackedRaggedCacheKeyIncludesPhysicalTokenCapacity) {
+    CudnnAttentionDescriptor a = makePackedDescriptor();
+    a.q.ragged = true;
+    a.o.ragged = true;
+    a.k.ragged = true;
+    a.v.ragged = true;
+    a.usePaddingMask = true;
+    a.q.raggedPackedTokenCapacity = 180;
+    a.o.raggedPackedTokenCapacity = 180;
+    a.k.raggedPackedTokenCapacity = 220;
+    a.v.raggedPackedTokenCapacity = 220;
+
+    CudnnAttentionDescriptor b = a;
+    b.q.raggedPackedTokenCapacity = 181;
+    b.o.raggedPackedTokenCapacity = 181;
+
+    EXPECT_NE(a.cacheKey("forward", 0), b.cacheKey("forward", 0));
+}
 
 TEST(CudnnAttentionDescriptor, AllowsPackedRaggedQOAndKVOffsetPairs) {
     CudnnAttentionDescriptor descriptor = makePackedDescriptor();

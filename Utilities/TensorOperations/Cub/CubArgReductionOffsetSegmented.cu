@@ -32,6 +32,23 @@ decltype(auto) dispatchOffsetDType(DataType dtype, Fn&& fn) {
     }
 }
 
+template <typename InputT>
+struct OffsetSegmentedArgCandidateInput {
+    const InputT* input;
+
+    __host__ __device__ ArgReductionCandidateFp32 operator()(int64_t logical_index) const {
+        const uint64_t index = static_cast<uint64_t>(logical_index);
+        return ArgReductionCandidateFp32{index, ToFp32<InputT>{}(input[index])};
+    }
+};
+
+template <typename InputT>
+auto makeOffsetSegmentedArgCandidateIterator(const Tensor& input) {
+    return thrust::make_transform_iterator(
+        thrust::counting_iterator<int64_t>(0),
+        OffsetSegmentedArgCandidateInput<InputT>{input.getMemPtr<InputT>()});
+}
+
 [[nodiscard]] uint64_t vectorElementsPerValue(const Tensor& input) {
     const std::vector<uint64_t>& dimensions = input.getDimensions();
     if (dimensions.size() <= 1) {
@@ -60,7 +77,7 @@ size_t queryScalarForTypes(const Tensor& input,
                            ArgReductionCandidateFp32 init,
                            cudaStream_t stream) {
     size_t queried_bytes = 0;
-    auto input_iterator = makeDeviceArgCandidateIterator<InputT>(input);
+    auto input_iterator = makeOffsetSegmentedArgCandidateIterator<InputT>(input);
     auto output_iterator = makeRuntimeArgReductionOutputIterator(nullptr, &index_output);
     const OffsetT* offsets = segment_offsets.getMemPtr<OffsetT>();
     CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(nullptr,
@@ -87,7 +104,7 @@ void launchScalarForTypes(const Tensor& temp_storage,
                           ArgReductionCandidateFp32 init,
                           cudaStream_t stream) {
     void* temp_storage_ptr = const_cast<void*>(static_cast<const void*>(temp_storage.getMemPtr<void>()));
-    auto input_iterator = makeDeviceArgCandidateIterator<InputT>(input);
+    auto input_iterator = makeOffsetSegmentedArgCandidateIterator<InputT>(input);
     auto output_iterator = makeRuntimeArgReductionOutputIterator(nullptr, &index_output);
     const OffsetT* offsets = segment_offsets.getMemPtr<OffsetT>();
     CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(temp_storage_ptr,

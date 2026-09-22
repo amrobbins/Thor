@@ -8,7 +8,6 @@
 #include <limits>
 #include <memory>
 #include <optional>
-#include <type_traits>
 #include <vector>
 
 namespace ThorImplementation {
@@ -40,43 +39,9 @@ enum class CubReductionPath : uint8_t {
     DeviceTransformReduce = 0,
     ContiguousFixedSegment = 1,
     TiledFixedSegment = 2,
-    StridedFixedSegment = 3,
     OffsetSegmented = 4,
     ComposedDense = 5,
 };
-
-/**
- * Host-side arbitrary-axis indexing metadata.
- *
- * Rank is intentionally dynamic. Output coordinates are decoded in retained-axis order and reduction coordinates are
- * decoded in reduced-axis order. Both orders are row-major and therefore match the flattened ordering of
- * keep-dimension and squeezed outputs.
- */
-struct CubReductionIndexing {
-    std::vector<uint32_t> reduced_axes;
-    std::vector<uint32_t> retained_axes;
-    std::vector<uint64_t> input_strides;
-    std::vector<uint64_t> reduced_dimensions;
-    std::vector<uint64_t> retained_dimensions;
-};
-
-/** Trivially-copyable device view over stamped, rank-sized arbitrary-axis metadata. */
-template <typename IndexT>
-struct CubReductionDeviceIndexingT {
-    uint32_t reduced_axis_count = 0;
-    uint32_t retained_axis_count = 0;
-    const IndexT* reduced_axes = nullptr;
-    const IndexT* retained_axes = nullptr;
-    const IndexT* input_strides = nullptr;
-    const IndexT* reduced_dimensions = nullptr;
-    const IndexT* retained_dimensions = nullptr;
-};
-
-using CubReductionDeviceIndexing32 = CubReductionDeviceIndexingT<uint32_t>;
-using CubReductionDeviceIndexing = CubReductionDeviceIndexingT<uint64_t>;
-
-static_assert(std::is_trivially_copyable_v<CubReductionDeviceIndexing32>);
-static_assert(std::is_trivially_copyable_v<CubReductionDeviceIndexing>);
 
 enum class CubReductionTiledRetainedOutputOrder : uint8_t {
     NaturalOuterInner = 0,
@@ -97,6 +62,19 @@ inline constexpr uint64_t FULL_ROW_GROUP_MAX_INNER_SIZE =
     FULL_ROW_COMPONENTS_PER_WARP * FULL_ROW_MAX_WARPS_PER_OUTPUT;
 inline constexpr uint64_t FULL_ROW_COMPONENTS_PER_BLOCK = FULL_ROW_GROUP_MAX_INNER_SIZE;
 inline constexpr uint64_t ASYNC_STAGE_BYTES_PER_WARP = 2048;
+
+// ROW-SPLIT-FULL-ROW: the direct/vectorized full-row kernels deliberately derive their parallelism from independent
+// output rows.  That is ideal for ordinary dense reductions, but release benchmarking on SM120 shows a distinct
+// regime where there are only a few output rows and an enormous reduction depth: one/few CTAs otherwise serialize a
+// very large memory stream while most of the GPU is idle.  In that regime production splits each output's reduction
+// rows across enough independent CTAs for roughly two SM waves, writes FP32 partial vectors, then performs one tiny
+// deterministic final reduction.  Keep the gate intentionally conservative: every measured FP16/BF16/FP32 case with
+// reduction >= 1024 and outer <= 128 won decisively, while the existing kernels remain ordained outside this regime.
+inline constexpr uint64_t ROW_SPLIT_MIN_REDUCTION_SIZE = 1024;
+inline constexpr uint64_t ROW_SPLIT_MAX_OUTER_SIZE = 128;
+inline constexpr uint64_t ROW_SPLIT_MIN_INNER_SIZE = 15;
+inline constexpr uint64_t ROW_SPLIT_MAX_INNER_SIZE = FULL_ROW_GROUP_MAX_INNER_SIZE;
+inline constexpr uint64_t ROW_SPLIT_TARGET_SM_WAVES = 2;
 }  // namespace CubReductionTiledPolicy
 
 /** Role of one collapsed run in a dense row-major reduction traversal. */
@@ -214,6 +192,51 @@ struct CubReductionPermutationAwareTiledGeometry {
         CubReductionTiledRetainedOutputOrder::NaturalOuterInner;
 };
 
+/**
+ * VIEW-PITCHED-TILED metadata for a non-overlapping affine view that is logically
+ * [outer..., reduction..., inner...] and whose trailing inner block is physically contiguous.
+ *
+ * The outer and reduction groups may contain padding between adjacent flattened entries,
+ * but each group must itself be row-major flattenable to one constant element stride. The
+ * resulting source address is therefore exactly
+ *
+ *   outer * outer_stride + reduction * reduction_stride + inner
+ *
+ * with no per-scalar mixed-radix coordinate reconstruction. This is intentionally narrower
+ * than a general strided-view reducer: zero-stride/broadcast aliases, overlapping views,
+ * retained-axis permutations, and non-contiguous inner payloads are not candidates.
+ */
+struct CubReductionPitchedTiledGeometry {
+    uint64_t outer_size = 1;
+    uint64_t reduction_size = 1;
+    uint64_t inner_size = 1;
+    uint64_t outer_stride = 0;
+    uint64_t reduction_stride = 1;
+};
+
+/**
+ * VIEW-DIRECT-2B metadata for the compact-permutation retained-order transform
+ *
+ *   physical source: [A..., reduction..., B..., payload...]
+ *   logical output:  [B..., A..., payload...]
+ *
+ * after singleton axes are removed. The source is physically dense, so all sizes below are flattened once on the
+ * host and the kernel performs no logical-coordinate reconstruction. The dedicated 32x33 shared-memory strategy
+ * keeps payload reads coalesced, stages finalized values in [A,payload] tiles, and emits logical [B,A,payload]
+ * directly without a global transpose intermediate.
+ */
+struct CubReductionPayloadTransposeTiledGeometry {
+    std::vector<uint32_t> physical_a_axes;
+    std::vector<uint32_t> physical_reduction_axes;
+    std::vector<uint32_t> physical_b_axes;
+    std::vector<uint32_t> physical_payload_axes;
+
+    uint64_t a_size = 1;
+    uint64_t reduction_size = 1;
+    uint64_t b_size = 1;
+    uint64_t payload_size = 1;
+};
+
 struct CubReductionGeometry {
     std::vector<uint32_t> axes;
     uint32_t rank = 0;
@@ -231,15 +254,6 @@ struct CubReductionGeometry {
     uint64_t output_elements = 0;
     std::vector<uint64_t> output_dimensions;
     std::vector<uint64_t> squeezed_output_dimensions;
-    CubReductionIndexing indexing;
-    CubReductionDeviceIndexing device_indexing;
-    CubReductionDeviceIndexing32 device_indexing32;
-
-    // The value-reduction strided fallback specializes its hot logical/physical index arithmetic to UINT32 whenever
-    // both the logical item domain and every reachable source offset fit. Arg reductions intentionally retain their
-    // existing UINT64 fallback implementation; this flag describes the value-reduction path only.
-    bool strided_value_indexing_fits_uint32 = false;
-
     // Populated only for ordinary dense row-major storage. This is traversal geometry, not launch policy. Production
     // composed reducers consume this metadata during value-path planning and stamping. SUM can eliminate arbitrary
     // reduced-run sequences through direct reducer stages; other value operations and arg reductions use it as their
@@ -257,7 +271,25 @@ struct CubReductionGeometry {
     // element offset.  Storage offsets are therefore intentionally not baked into this reusable geometry.
     bool physical_layout_is_dense_permutation = false;
     std::vector<uint32_t> physical_non_singleton_axis_order;
+
+    // VIEW-DIRECT-2A: a compact physical permutation whose non-singleton reduced axes form the complete physical
+    // trailing block can be handed directly to CUB DeviceSegmentedReduce when the physical retained-axis order already
+    // matches Thor's logical dense output order. Each output is then one ordinary contiguous physical segment; no
+    // logical-to-physical input mapper or output permutation is required. More general retained-order permutations are
+    // intentionally left for VIEW-DIRECT-2B.
+    bool permutation_aware_contiguous_segments = false;
+
     std::optional<CubReductionPermutationAwareTiledGeometry> permutation_aware_tiled_geometry = std::nullopt;
+
+    // VIEW-DIRECT-2B: compact dense physical [A,reduction,B,payload] storage whose logical retained order is
+    // [B,A,payload]. This is intentionally a separate Thor-owned 32x33 shared-memory strategy rather than a
+    // general retained-axis permutation engine.
+    std::optional<CubReductionPayloadTransposeTiledGeometry> payload_transpose_tiled_geometry = std::nullopt;
+
+    // VIEW-PITCHED-TILED is a separate Thor-owned input strategy under the TiledFixedSegment execution family.
+    // It never changes or reuses the ordained dense tiled kernels: launch dispatch selects a dedicated pitched
+    // kernel whenever this metadata is present. Output order is always the natural logical [outer,inner] order.
+    std::optional<CubReductionPitchedTiledGeometry> pitched_tiled_geometry = std::nullopt;
 
     // TiledFixedSegment logically produces a dense [outer_size, inner_size] matrix after reducing the physically
     // contiguous middle domain. Natural output uses output_index = outer * inner_size + inner. Production
@@ -321,6 +353,11 @@ class CubReduction {
      */
     [[nodiscard]] static float getFp32EmptyReductionValue(CubReductionOp op);
 
+    /**
+     * Analyzes reduction geometry and selects an ordained execution family. DENSE-GATE-FINAL makes dense ownership a
+     * hard invariant, and DELETE removes the arbitrary logical-index fallback entirely. Unsupported rank>1 views throw
+     * NotImplementedException instead of being assigned a catch-all execution path.
+     */
     [[nodiscard]] static CubReductionGeometry analyzeGeometry(const std::vector<uint64_t>& input_dimensions,
                                                                uint32_t axis);
     [[nodiscard]] static CubReductionGeometry analyzeGeometry(const std::vector<uint64_t>& input_dimensions,
@@ -334,7 +371,8 @@ class CubReduction {
      *
      * analyzeGeometry() already selects the final operation-independent execution family, including ComposedDense for
      * ordinary dense disjoint reductions. This wrapper validates the value operation and fixed-segment limits so
-     * callers that cache a value-reduction plan observe the same path that stamp() will execute.
+     * callers that cache a value-reduction plan observe the same path that stamp() will execute. Unsupported views are
+     * rejected directly by analyzeGeometry(); there is no arbitrary logical-index execution family after DELETE.
      */
     [[nodiscard]] static CubReductionGeometry analyzeValueGeometry(CubReductionOp op,
                                                                     const std::vector<uint64_t>& input_dimensions,
@@ -351,16 +389,12 @@ class CubReduction {
     [[nodiscard]] static std::optional<CubReductionDenseCompositionPlan> analyzeDenseCompositionPlan(
         const std::vector<uint64_t>& input_dimensions, const std::vector<uint32_t>& axes);
 
-    /** Maps one logical (output, reduction) coordinate pair to the source tensor's physical element offset. */
-    [[nodiscard]] static uint64_t mapLogicalReductionIndexToPhysicalIndex(const CubReductionGeometry& geometry,
-                                                                          uint64_t output_index,
-                                                                          uint64_t reduction_index);
-
     /** Queries backend temporary storage without allocating input, output, or workspace tensors. */
     [[nodiscard]] size_t queryWorkspaceSizeInBytes(const TensorDescriptor& input_descriptor,
                                                    const Stream& stream) const;
 
     [[nodiscard]] std::shared_ptr<StampedCubReduction> stamp(const Tensor& input, const Stream& stream) const;
+
     [[nodiscard]] std::shared_ptr<StampedCubReduction> stamp(const Tensor& input,
                                                              const Tensor& preallocated_output,
                                                              const Stream& stream) const;
@@ -573,9 +607,9 @@ class CubArgReduction {
     [[nodiscard]] static uint64_t getEmptyReductionIndex() { return std::numeric_limits<uint64_t>::max(); }
 
     /**
-     * Returns the executable path for an ordinary dense ARG reduction. analyzeGeometry() already selects
-     * ComposedDense for dense disjoint reduced runs; this compatibility wrapper performs ARG-side executable-limit
-     * validation without changing the path. Genuinely irregular view routing is left to the later VIEW-ARG milestone.
+     * Returns the executable path for an ordinary dense ARG reduction. analyzeGeometry() already selects an ordained
+     * dense family, including ComposedDense for disjoint reduced runs; this wrapper reasserts that DENSE-GATE-FINAL
+     * invariant and performs ARG-side executable-limit validation without changing the path.
      */
     [[nodiscard]] static CubReductionGeometry analyzeDenseGeometry(
         const std::vector<uint64_t>& input_dimensions, const std::vector<uint32_t>& axes);
@@ -694,7 +728,6 @@ class StampedCubArgReduction {
                            std::optional<Tensor> index_output,
                            size_t temp_storage_bytes,
                            const Tensor& temp_storage,
-                           std::optional<Tensor> indexing_metadata,
                            const Stream& stream);
 
     StampedCubArgReduction(CubArgReductionOp op,
@@ -725,7 +758,6 @@ class StampedCubArgReduction {
     mutable std::optional<Tensor> index_output;
     const size_t temp_storage_bytes;
     Tensor temp_storage;
-    std::optional<Tensor> indexing_metadata;
 
     // Present only on direct stages owned by a ComposedDense ARG executor. The first stage has no carried-index input;
     // later stages consume the previous stage's SoA index tensor. domain_stride maps this stage's local row coordinate
@@ -778,7 +810,6 @@ class StampedCubReduction {
                         const Tensor& output,
                         size_t temp_storage_bytes,
                         const Tensor& temp_storage,
-                        std::optional<Tensor> indexing_metadata,
                         float output_scale,
                         const Stream& stream);
 
@@ -797,7 +828,6 @@ class StampedCubReduction {
     mutable Tensor output;
     const size_t temp_storage_bytes;
     Tensor temp_storage;
-    std::optional<Tensor> indexing_metadata;
     std::vector<std::shared_ptr<StampedCubReduction>> composed_stages;
     const float output_scale;
     Stream stream;

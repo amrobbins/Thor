@@ -89,6 +89,7 @@ TEST(UtilityApiLayers, RaggedLayerNormBuildsAndPreservesCanonicalPartition) {
     const RaggedTensor output = layer.getRaggedFeatureOutput().value();
     EXPECT_EQ(output.getValues().getDimensions(), (vector<uint64_t>{11, 4}));
     EXPECT_EQ(output.getOffsets(), input.getOffsets());
+    EXPECT_TRUE(layer.outputTensorDimensionsIncludeBatch(output.getValues()));
     EXPECT_EQ(output.getBatchSize(), input.getBatchSize());
     EXPECT_EQ(output.getMaxTotalValues(), input.getMaxTotalValues());
     ASSERT_TRUE(output.hasMaxValuesPerRow());

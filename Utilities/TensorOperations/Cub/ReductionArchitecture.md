@@ -78,7 +78,7 @@ consecutively on the caller stream with no host synchronization, allocation, or 
 genuinely irregular-view fallback packs dimensions, strides, and axis lists into a rank-sized GPU metadata tensor while
 stamping. There is no cuDNN-derived rank-8 limit; the only representation bound is that axis identifiers are `uint32_t`.
 
-Value reductions support sum, product, mean, min, max, L1 norm, L2 norm, and sum-of-squares. Dense argmin/argmax use the same geometry
+Value reductions support sum, product, mean, min, max, L1 norm, L2 norm, and sum-of-squares. VALUE-BINARY-CLEANUP keeps input transforms and reduction operators compile-time specialized while sharing additive finalization at output granularity: Sum, Mean, and the final composed L2 stage use one `IdentityFp32 + AdditiveFinalizeFp32` kernel matrix, while SumSquares and complete L2 use one `SquareFp32 + AdditiveFinalizeFp32` matrix. Division and optional square root are runtime finalizer data paid once per output, so L2 does not instantiate independent copies of every tiled/CUB reduction geometry. `CubReductionMean.cu` and `CubReductionL2Norm.cu` remain intentionally template-free. Dense argmin/argmax use the same geometry
 classification. ARG-DIRECT-1 keeps the device-wide CUB path but narrows its candidate index to UINT32 whenever the full
 reduction domain permits it. Physically contiguous fixed segments in the normal UINT32 domain use a Thor-owned
 warp-per-segment backend: each warp peels a bounded scalar head to a 16-byte boundary, reads the segment bulk through
@@ -121,36 +121,87 @@ cases, validates exact public indices against production before timing, and repo
 coarse ARG weights can be recalibrated after future direct-kernel improvements without changing topology. No runtime
 autotuning, allocation, host synchronization, or topology discovery is introduced by planning.
 
-The shared `CubReduction::analyzeGeometry()` selector owns this execution-family classification: an ordinary dense
-disjoint reduction is reported as `ComposedDense` immediately rather than being provisionally labeled
-`StridedFixedSegment` and promoted later by a value- or ARG-specific wrapper. Operation-specific planners choose only
-the detailed legal stage order inside `ComposedDense`; they do not rewrite the execution family.
+The shared `CubReduction::analyzeGeometry()` selector owns execution-family classification. An ordinary dense disjoint
+reduction is reported as `ComposedDense` immediately, and DENSE-GATE-FINAL makes that ownership an implementation
+invariant: canonical dense geometry must resolve to `DeviceTransformReduce`, `ContiguousFixedSegment`,
+`TiledFixedSegment`, or `ComposedDense`. The structural dense planner must produce a complete all-direct composition for
+every disjoint mask; failure is an internal logic error rather than an invitation to enter a catch-all view reducer.
+Operation-specific value and ARG planners choose only the detailed legal stage order inside `ComposedDense`; they do not
+rewrite the execution family.
 
-The ordinary-dense ARG selector therefore admits only `DeviceTransformReduce`, `ContiguousFixedSegment`,
-`TiledFixedSegment`, or `ComposedDense`; `StridedFixedSegment` remains only for genuinely irregular/non-dense views
-until the separate VIEW-ARG migration. A dedicated dense ARG gate exhausts ranks 1-9 and every non-empty reduction
-mask, with singleton-heavy and disjoint-run cases plus an irregular-view negative control, to prevent dense routing from
-regressing into the logical-index fallback.
+The ordinary-dense ARG selector obeys the same ownership contract. `CubArgReduction::stamp()` requires a dense-contiguous
+input, and the dense gate exhausts ranks 1-9 and every non-empty reduction mask, with singleton-heavy and disjoint-run
+cases, so dense ARG execution cannot acquire arbitrary-view behavior accidentally. ARG-BINARY-CLEANUP removed the old
+arbitrary-view candidate iterator, device-indexing metadata, and corresponding CUB segmented-reduction instantiations.
+If arbitrary-view ARG support is intentionally added later, it must receive an explicit physical-layout-aware strategy.
 
-### VIEW-1A arbitrary-view census
+The same cleanup keeps the three benchmarked normal ARG fast families intact (`alignedContiguousSegmentArgReduction`,
+`alignedAsyncNarrowTiledArgReduction`, and `alignedCooperativeTiledArgReduction`) while deleting the superseded
+full-row/grouped/block-sharded/alignment-safe tiled families. Exceptional wide-FP8 and true UINT64 candidate domains use
+one conservative generic tiled backend with `RowLanes=1`, so those rare cases no longer instantiate a matrix of historical
+fallback topologies. Composed UINT32 contiguous stages likewise have no CUB segmented fallback: the first stage uses the
+normal aligned contiguous kernel and every carried-index stage is FP32 by construction. The remaining CUB segmented ARG
+instantiations in the dense executor are therefore limited to genuine UINT64 *composed* contiguous stages; direct
+contiguous ARG above UINT32 is unreachable because the CUB fixed-segment API's `int` segment-size gate rejects it first.
+The separate offset-segmented ARG API retains its own intentionally independent segmented implementation.
 
-Before replacing the legacy rank>1 view fallback, `thor_cub_reduction_benchmark --view-census` freezes a bounded set of
-representative layouts that still depend on `StridedFixedSegment`: gapped and stride-sliced storage, zero-stride
-broadcast aliases, overlapping aliases, singleton-heavy irregular views, and physically compact permutations that the
-current permutation-aware tiled geometry cannot express because the physical reduction is split, the retained-output
-order is unsupported, the physical reduction is trailing, or a rank>1 compact permutation is reduced completely. The
-census times cache-cold SUM for FP16/BF16/FP32 and reports logical dimensions and strides, selected production path,
-physical-dense-permutation classification, indexing width, workspace, logical input bytes, address span, and logical
-bandwidth. The case set deliberately covers both the legacy UINT32 mapper and a UINT64-metadata view whose oversized
-stride belongs to a singleton axis, avoiding an artificial multi-gigabyte allocation. `storage_span_bytes` describes the
-address span required by the view; it is intentionally not treated as DRAM traffic because broadcast and overlapping
-views revisit addresses.
+### Low-output / deep full-row reduction sharding
 
-The corresponding `CubReductionViewGate` checks the same execution-family boundary for every value operation. It also
-contains explicit controls for rank-1 affine `DeviceTransformReduce`, supported dense-permutation `TiledFixedSegment`,
-and ordinary dense `ComposedDense`, so VIEW-1 cannot gain coverage by stealing geometry from already ordained paths.
-VIEW-1A does not alter execution; it establishes the path/performance baseline against which the future
-`IncrementalStridedView` backend will be compared.
+The direct and grouped `TiledFixedSegment` full-row kernels derive most of their launch parallelism from independent
+outer/output rows. That ownership remains the fastest strategy when many outputs are available, but it is pathological
+for shapes such as `[1, 104832, 512] -> [1, 1, 512]`: one warp (or one small cooperating warp group) otherwise scans the
+entire reduction domain while almost every SM is idle.
+
+Release census calibration therefore ordains a separate two-stage row-split strategy for the measured low-output,
+deep-reduction regime: FP16/BF16/FP32 inputs, reduction extent at least 1024, outer extent at most 128, and retained
+width 15..4096. The first stage keeps the full-row family's coalescing invariant—threads own adjacent trailing
+components—but splits reduction rows across enough CTAs for approximately two waves over the target GPU's SMs. Each CTA
+writes one FP32 partial vector. A second deterministic kernel combines those partial vectors in shard order, applies the
+operation's finalizer exactly once, applies the runtime output scale exactly once, and performs the final storage-dtype
+conversion. Sum, mean, L1/L2, sum-squares, product, min, and max therefore share the same row-split execution mechanism;
+input transforms occur only in the first stage and finalization only in the second.
+
+The row-split workspace is stamped explicitly as `outer * shards_per_output * inner * sizeof(float)`. The shard count is
+chosen at stamp/query time from the target GPU's multiprocessor count and recovered from the stamped workspace at run
+time, so steady-state launches perform no device-property query or allocation. Existing direct/grouped/block-sharded
+kernels remain unchanged outside the calibrated gate, including many-output and short-reduction cases where the extra
+partial/finalize pass is unnecessary. The dense composition planner models row-split stages as saturated rather than
+retaining the old one/few-warp parallelism penalty.
+
+### View ownership after DELETE
+
+`thor_cub_reduction_benchmark --view-census` is now the final ownership census rather than a benchmark of a generic
+fallback. The structured view families that Thor intentionally supports are assigned directly to ordained implementations:
+
+- VIEW-DIRECT-1 sends a one-to-one compact physical permutation with every logical axis reduced directly through
+  `DeviceTransformReduce`, because visitation order is irrelevant for a full value reduction.
+- VIEW-DIRECT-2A sends a compact permutation whose reduced axes form the physical suffix and whose retained physical order
+  already equals dense logical output order through `ContiguousFixedSegment`.
+- VIEW-PITCHED-TILED handles a logically contiguous `[outer..., reduction..., inner...]` view when the trailing payload is
+  physically contiguous, outer and reduction groups each flatten to one constant pitch, and adjacent slabs do not overlap.
+  Its dedicated Thor kernel addresses `outer * outer_stride + reduction * reduction_stride + inner`, so repeated-label
+  einsum diagonal pre-reductions such as `[2,2,3]` with strides `[18,3,1]` remain zero-copy and coalesced.
+- VIEW-DIRECT-2B handles a compact source collapsible to `[A,reduction,B,payload]` with dense logical output
+  `[B,A,payload]`. Its dedicated Thor kernel reduces from compact physical storage, stages finalized FP32 values through a
+  fixed `32x33` shared-memory tile, and writes dense retained order directly without a global transpose intermediate.
+
+DELETE removes the old arbitrary rank>1 logical-index reducer completely. There is no legacy execution-family enum,
+host/device mixed-radix indexing metadata, device logical-to-physical mapper, strided FP32 iterator, legacy 32/64-bit CUB
+segmented-reduction specialization surface, or benchmark-only resurrection hook. Unsupported arbitrary views therefore
+throw `NotImplementedException` directly from structural analysis. The final view census retains representative unsupported
+layouts—stride-2 inner payloads, zero-stride broadcasts, overlapping aliases, split physical reductions, singleton-heavy
+gapped views, and the former synthetic UINT64-index case—but reports them as `unsupported / not_implemented` without
+allocating or timing an implementation.
+
+Einsum keeps repeated-label diagonal operands as zero-copy views when an ordained reducer owns their stride pattern. If an
+operand-local pre-reduction has no ordained owner, einsum materializes only that logical operand into dense order and then
+uses the normal dense reducer. This preserves the supported einsum surface without reintroducing a generic arbitrary-view
+reduction mechanism.
+
+`CubReductionViewGate`, the dense value/ARG gates, execution tests for each ordained view strategy, and the source guard in
+`ReductionSourceGuardTest` collectively enforce the post-DELETE architecture. The source guard also requires the deleted
+logical-index header to stay absent and rejects the historical mapper/indexing symbols if they reappear in active CUB
+reduction sources.
 
 ## Offset-segmented path
 

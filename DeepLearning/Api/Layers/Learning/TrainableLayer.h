@@ -55,8 +55,8 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
 
     uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize,
                                                       ThorImplementation::TensorPlacement tensorPlacement) const override {
-        uint64_t batchSizeDependentMem = featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes() * batchSize;
-        return batchSizeDependentMem;
+        (void)tensorPlacement;
+        return getOutputTensorBytes(batchSize);
     }
     bool hasOptimizer() const;
     void freezeTraining();

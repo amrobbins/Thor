@@ -1,16 +1,15 @@
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 
 #include "Utilities/Common/ScopedGpu.h"
+#include "Utilities/Exceptions.h"
 #include "Utilities/TensorOperations/Cub/CubDataTypePolicy.h"
 #include "Utilities/TensorOperations/Cub/CubDevicePrimitiveSupport.h"
-#include "Utilities/TensorOperations/Cub/CubReductionIndexing.cuh"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -198,10 +197,24 @@ enum class DensePlannerStageClass : uint8_t {
            || path == CubReductionPath::TiledFixedSegment;
 }
 
+[[nodiscard]] bool isOrdainedDenseReductionPath(CubReductionPath path) {
+    return isDirectDenseReductionPath(path) || path == CubReductionPath::ComposedDense;
+}
+
+void requireOrdainedDenseReductionPath(const CubReductionGeometry& geometry) {
+    if (isOrdainedDenseReductionPath(geometry.path)) {
+        return;
+    }
+
+    throw std::logic_error(
+        "DENSE-GATE-FINAL invariant violated: ordinary dense tensor reduction was not assigned to an ordained "
+        "dense execution family.");
+}
+
 [[nodiscard]] bool usesCubFixedSegmentSize(CubReductionPath path) {
     // DeviceSegmentedReduce's fixed-size overload takes an `int segment_size`. Thor-owned TiledFixedSegment kernels
     // use uint64_t geometry throughout and therefore do not inherit that CUB API limit.
-    return path == CubReductionPath::ContiguousFixedSegment || path == CubReductionPath::StridedFixedSegment;
+    return path == CubReductionPath::ContiguousFixedSegment;
 }
 
 [[nodiscard]] DenseDirectStageGeometry analyzeDirectDenseStageGeometry(
@@ -528,6 +541,20 @@ enum class DensePlannerStageClass : uint8_t {
     }
 
     THOR_THROW_IF_FALSE(stage.path == CubReductionPath::TiledFixedSegment);
+
+    // ROW-SPLIT-FULL-ROW productionizes the benchmarked two-stage path for exactly the regime where the direct
+    // full-row ownership model has too few independent outputs to populate the GPU.  Do not retain the old
+    // one/few-warp parallelism penalty in the dense composition planner after execution has been split across roughly
+    // two SM waves.  The actual launch chooses the shard count from the target GPU's SM count; TARGET_ACTIVE_WARPS is
+    // the planner's architecture-neutral saturation proxy.
+    if (stage.reduction_size >= ROW_SPLIT_MIN_REDUCTION_SIZE
+        && stage.outer_size >= 1 && stage.outer_size <= ROW_SPLIT_MAX_OUTER_SIZE
+        && stage.inner_size >= ROW_SPLIT_MIN_INNER_SIZE
+        && stage.inner_size <= ROW_SPLIT_MAX_INNER_SIZE
+        && (input_dtype == DataType::FP16 || input_dtype == DataType::BF16 || input_dtype == DataType::FP32)) {
+        return TARGET_ACTIVE_WARPS;
+    }
+
     const uint64_t input_element_bytes =
         static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(input_dtype));
 
@@ -1166,8 +1193,9 @@ template <typename StageCostFn>
     const CubReductionGeometry& geometry,
     const std::vector<uint64_t>& input_dimensions,
     std::optional<DenseValueCompositionCostContext> cost_context = std::nullopt) {
-    if ((geometry.path != CubReductionPath::StridedFixedSegment && geometry.path != CubReductionPath::ComposedDense)
-        || !geometry.dense_run_geometry.has_value()) {
+    // DENSE-GATE-FINAL: a value composition plan is meaningful only for geometry already ordained as ComposedDense.
+    // DELETE leaves no catch-all view family that can be reinterpreted later as a dense composition.
+    if (geometry.path != CubReductionPath::ComposedDense || !geometry.dense_run_geometry.has_value()) {
         return std::nullopt;
     }
 
@@ -1406,6 +1434,86 @@ void requireExecutableFixedSegmentSize(const CubReductionGeometry& geometry) {
     return true;
 }
 
+[[nodiscard]] bool analyzePermutationAwareContiguousCandidate(const std::vector<uint64_t>& input_dimensions,
+                                                               const std::vector<uint32_t>& axes,
+                                                               CubReductionGeometry& geometry) {
+    geometry.permutation_aware_contiguous_segments = false;
+    if (!geometry.physical_layout_is_dense_permutation || geometry.output_elements <= 1) {
+        return false;
+    }
+
+    std::vector<bool> reduced(input_dimensions.size(), false);
+    for (uint32_t axis : axes) {
+        reduced[axis] = true;
+    }
+
+    const std::vector<uint32_t>& physical_order = geometry.physical_non_singleton_axis_order;
+    size_t first_reduced = physical_order.size();
+    for (size_t physical = 0; physical < physical_order.size(); ++physical) {
+        if (reduced[physical_order[physical]]) {
+            first_reduced = physical;
+            break;
+        }
+    }
+    if (first_reduced == physical_order.size()) {
+        return false;
+    }
+
+    // VIEW-DIRECT-2A is deliberately the physically trailing case only. Once the first non-singleton reduced axis is
+    // reached in physical order, every remaining non-singleton physical axis must also be reduced. That makes each
+    // retained output one ordinary contiguous segment of exactly geometry.reduction_size values.
+    for (size_t physical = first_reduced; physical < physical_order.size(); ++physical) {
+        if (!reduced[physical_order[physical]]) {
+            return false;
+        }
+    }
+
+    std::vector<uint32_t> physical_retained_axes;
+    physical_retained_axes.reserve(first_reduced);
+    for (size_t physical = 0; physical < first_reduced; ++physical) {
+        physical_retained_axes.push_back(physical_order[physical]);
+    }
+
+    std::vector<uint32_t> logical_non_singleton_retained_axes;
+    logical_non_singleton_retained_axes.reserve(input_dimensions.size() - axes.size());
+    for (uint32_t axis = 0; axis < input_dimensions.size(); ++axis) {
+        if (!reduced[axis] && input_dimensions[axis] > 1) {
+            logical_non_singleton_retained_axes.push_back(axis);
+        }
+    }
+
+    // DeviceSegmentedReduce emits segments in physical prefix order. VIEW-DIRECT-2A intentionally activates only
+    // when that order is already Thor's dense logical output order. If these differ, input traversal is still usable
+    // but an output permutation is required; that is the separate VIEW-DIRECT-2B problem.
+    if (physical_retained_axes != logical_non_singleton_retained_axes) {
+        return false;
+    }
+
+    uint64_t physical_reduction_size = 1;
+    for (size_t physical = first_reduced; physical < physical_order.size(); ++physical) {
+        const uint32_t axis = physical_order[physical];
+        if (physical_reduction_size > std::numeric_limits<uint64_t>::max() / input_dimensions[axis]) {
+            throw std::invalid_argument("CUB permutation-aware contiguous reduction size overflows uint64_t.");
+        }
+        physical_reduction_size *= input_dimensions[axis];
+    }
+
+    uint64_t physical_output_elements = 1;
+    for (uint32_t axis : physical_retained_axes) {
+        if (physical_output_elements > std::numeric_limits<uint64_t>::max() / input_dimensions[axis]) {
+            throw std::invalid_argument("CUB permutation-aware contiguous output size overflows uint64_t.");
+        }
+        physical_output_elements *= input_dimensions[axis];
+    }
+
+    if (physical_reduction_size != geometry.reduction_size || physical_output_elements != geometry.output_elements) {
+        throw std::logic_error("CUB permutation-aware contiguous geometry is internally inconsistent.");
+    }
+
+    geometry.permutation_aware_contiguous_segments = true;
+    return true;
+}
+
 void analyzePermutationAwareTiledCandidate(const std::vector<uint64_t>& input_dimensions,
                                            const std::vector<uint32_t>& axes,
                                            CubReductionGeometry& geometry) {
@@ -1498,6 +1606,129 @@ void analyzePermutationAwareTiledCandidate(const std::vector<uint64_t>& input_di
     geometry.permutation_aware_tiled_geometry = std::move(candidate);
 }
 
+void analyzePayloadTransposeTiledCandidate(const std::vector<uint64_t>& input_dimensions,
+                                            const std::vector<uint32_t>& axes,
+                                            CubReductionGeometry& geometry) {
+    if (!geometry.physical_layout_is_dense_permutation || geometry.output_elements <= 1) {
+        return;
+    }
+
+    std::vector<bool> reduced(input_dimensions.size(), false);
+    for (uint32_t axis : axes) {
+        reduced[axis] = true;
+    }
+
+    const std::vector<uint32_t>& physical_order = geometry.physical_non_singleton_axis_order;
+    size_t first_reduced = physical_order.size();
+    size_t last_reduced = 0;
+    bool found_non_singleton_reduction = false;
+    for (size_t physical = 0; physical < physical_order.size(); ++physical) {
+        if (!reduced[physical_order[physical]]) {
+            continue;
+        }
+        if (!found_non_singleton_reduction) {
+            first_reduced = physical;
+        }
+        last_reduced = physical;
+        found_non_singleton_reduction = true;
+    }
+    if (!found_non_singleton_reduction) {
+        return;
+    }
+    for (size_t physical = first_reduced; physical <= last_reduced; ++physical) {
+        if (!reduced[physical_order[physical]]) {
+            return;
+        }
+    }
+
+    // VIEW-DIRECT-2B is deliberately the middle-reduction case. A and B must both be genuine retained physical
+    // groups; physically trailing output reorder remains outside this strategy.
+    if (first_reduced == 0 || last_reduced + 1 >= physical_order.size()) {
+        return;
+    }
+
+    CubReductionPayloadTransposeTiledGeometry candidate;
+    candidate.physical_a_axes.assign(physical_order.begin(), physical_order.begin() + first_reduced);
+    candidate.physical_reduction_axes.assign(
+        physical_order.begin() + first_reduced, physical_order.begin() + last_reduced + 1);
+
+    std::vector<uint32_t> physical_inner_axes(
+        physical_order.begin() + last_reduced + 1, physical_order.end());
+    std::vector<uint32_t> logical_retained_axes;
+    logical_retained_axes.reserve(input_dimensions.size() - axes.size());
+    for (uint32_t axis = 0; axis < input_dimensions.size(); ++axis) {
+        if (!reduced[axis] && input_dimensions[axis] > 1) {
+            logical_retained_axes.push_back(axis);
+        }
+    }
+
+    // Split the physical suffix as [B..., payload...] and accept only the exact logical retained ordering
+    // [B..., A..., payload...]. This is the payload-preserving A/B rotation from the VIEW-DIRECT-2B design, not a
+    // general permutation recognizer. B must contain at least one non-singleton axis; payload may be scalar (empty).
+    bool matched = false;
+    for (size_t b_axis_count = 1; b_axis_count <= physical_inner_axes.size(); ++b_axis_count) {
+        std::vector<uint32_t> requested_order;
+        requested_order.reserve(logical_retained_axes.size());
+        requested_order.insert(
+            requested_order.end(), physical_inner_axes.begin(), physical_inner_axes.begin() + b_axis_count);
+        requested_order.insert(
+            requested_order.end(), candidate.physical_a_axes.begin(), candidate.physical_a_axes.end());
+        requested_order.insert(
+            requested_order.end(), physical_inner_axes.begin() + b_axis_count, physical_inner_axes.end());
+        if (requested_order != logical_retained_axes) {
+            continue;
+        }
+        candidate.physical_b_axes.assign(
+            physical_inner_axes.begin(), physical_inner_axes.begin() + b_axis_count);
+        candidate.physical_payload_axes.assign(
+            physical_inner_axes.begin() + b_axis_count, physical_inner_axes.end());
+        matched = true;
+        break;
+    }
+    if (!matched) {
+        return;
+    }
+
+    auto productOfAxes = [&](const std::vector<uint32_t>& physical_axes, const char* label) {
+        uint64_t product = 1;
+        for (uint32_t axis : physical_axes) {
+            if (product > std::numeric_limits<uint64_t>::max() / input_dimensions[axis]) {
+                throw std::invalid_argument(std::string("CUB VIEW-DIRECT-2B ") + label + " size overflows uint64_t.");
+            }
+            product *= input_dimensions[axis];
+        }
+        return product;
+    };
+
+    candidate.a_size = productOfAxes(candidate.physical_a_axes, "A");
+    candidate.reduction_size = productOfAxes(candidate.physical_reduction_axes, "reduction");
+    candidate.b_size = productOfAxes(candidate.physical_b_axes, "B");
+    candidate.payload_size = productOfAxes(candidate.physical_payload_axes, "payload");
+
+    if (candidate.a_size <= 1 || candidate.b_size <= 1 || candidate.reduction_size != geometry.reduction_size) {
+        return;
+    }
+    if (candidate.a_size > std::numeric_limits<uint64_t>::max() / candidate.b_size
+        || candidate.a_size * candidate.b_size > std::numeric_limits<uint64_t>::max() / candidate.payload_size
+        || candidate.a_size * candidate.b_size * candidate.payload_size != geometry.output_elements) {
+        throw std::logic_error("CUB VIEW-DIRECT-2B retained-output geometry is internally inconsistent.");
+    }
+
+    geometry.payload_transpose_tiled_geometry = std::move(candidate);
+}
+
+void activatePayloadTransposeTiledCandidate(CubReductionGeometry& geometry) {
+    if (!geometry.payload_transpose_tiled_geometry.has_value()) {
+        throw std::logic_error("CUB VIEW-DIRECT-2B activation requires detected payload-transpose geometry.");
+    }
+    const CubReductionPayloadTransposeTiledGeometry& candidate =
+        geometry.payload_transpose_tiled_geometry.value();
+    if (candidate.reduction_size != geometry.reduction_size || candidate.a_size <= 1 || candidate.b_size <= 1) {
+        throw std::logic_error("CUB VIEW-DIRECT-2B geometry is internally inconsistent.");
+    }
+    geometry.path = CubReductionPath::TiledFixedSegment;
+}
+
 void activatePermutationAwareTiledCandidate(CubReductionGeometry& geometry) {
     if (!geometry.permutation_aware_tiled_geometry.has_value()) {
         throw std::logic_error("CUB permutation-aware tiled activation requires detected physical geometry.");
@@ -1540,6 +1771,173 @@ void activatePermutationAwareTiledCandidate(CubReductionGeometry& geometry) {
     geometry.path = CubReductionPath::TiledFixedSegment;
 }
 
+struct FlattenedAffineGroup {
+    uint64_t extent = 1;
+    uint64_t stride = 1;
+    bool has_non_singleton_axis = false;
+};
+
+[[nodiscard]] std::optional<FlattenedAffineGroup> flattenAffineAxisRange(
+    const std::vector<uint64_t>& input_dimensions,
+    const std::vector<uint64_t>& input_strides,
+    uint32_t first_axis,
+    uint32_t last_axis_exclusive) {
+    FlattenedAffineGroup group;
+    if (first_axis >= last_axis_exclusive) {
+        return group;
+    }
+
+    uint64_t expected_outer_stride = 0;
+    for (uint32_t axis = last_axis_exclusive; axis-- > first_axis;) {
+        const uint64_t dimension = input_dimensions[axis];
+        const uint64_t stride = input_strides[axis];
+        if (group.extent > std::numeric_limits<uint64_t>::max() / dimension) {
+            return std::nullopt;
+        }
+        group.extent *= dimension;
+
+        if (dimension == 1) {
+            continue;
+        }
+        if (stride == 0) {
+            return std::nullopt;
+        }
+
+        if (!group.has_non_singleton_axis) {
+            group.stride = stride;
+            if (dimension > std::numeric_limits<uint64_t>::max() / stride) {
+                return std::nullopt;
+            }
+            expected_outer_stride = dimension * stride;
+            group.has_non_singleton_axis = true;
+            continue;
+        }
+
+        if (stride != expected_outer_stride) {
+            return std::nullopt;
+        }
+        if (dimension > std::numeric_limits<uint64_t>::max() / stride) {
+            return std::nullopt;
+        }
+        expected_outer_stride = dimension * stride;
+    }
+
+    return group;
+}
+
+void analyzePitchedTiledCandidate(const std::vector<uint64_t>& input_dimensions,
+                                  const std::vector<uint64_t>& input_strides,
+                                  const std::vector<uint32_t>& axes,
+                                  CubReductionGeometry& geometry) {
+    if (input_dimensions.size() <= 1 || axes.empty() || !geometry.reduced_axes_are_contiguous) {
+        return;
+    }
+
+    const uint32_t first_reduced_axis = axes.front();
+    const uint32_t last_reduced_axis = axes.back();
+
+    const std::optional<FlattenedAffineGroup> outer =
+        flattenAffineAxisRange(input_dimensions, input_strides, 0, first_reduced_axis);
+    const std::optional<FlattenedAffineGroup> reduction =
+        flattenAffineAxisRange(input_dimensions, input_strides, first_reduced_axis, last_reduced_axis + 1);
+    const std::optional<FlattenedAffineGroup> inner = flattenAffineAxisRange(
+        input_dimensions, input_strides, last_reduced_axis + 1, static_cast<uint32_t>(input_dimensions.size()));
+    if (!outer.has_value() || !reduction.has_value() || !inner.has_value()) {
+        return;
+    }
+
+    if (outer->extent != geometry.outer_size || reduction->extent != geometry.reduction_size
+        || inner->extent != geometry.inner_size) {
+        throw std::logic_error("CUB pitched tiled flattened extents are internally inconsistent.");
+    }
+
+    // The dedicated kernel assigns adjacent retained components to adjacent lanes. Keep that access exactly
+    // contiguous so every active warp issues coalesced reads. Singleton-only inner groups have extent one and need
+    // no physical stride constraint.
+    if (inner->extent > 1 && (!inner->has_non_singleton_axis || inner->stride != 1)) {
+        return;
+    }
+
+    const uint64_t reduction_stride =
+        reduction->has_non_singleton_axis ? reduction->stride : std::max<uint64_t>(inner->extent, 1);
+    if (reduction->extent > 1 && reduction_stride < inner->extent) {
+        return;
+    }
+
+    uint64_t reduction_span = inner->extent;
+    if (reduction->extent > 1) {
+        const uint64_t last_reduction = reduction->extent - 1;
+        if (last_reduction > (std::numeric_limits<uint64_t>::max() - inner->extent) / reduction_stride) {
+            return;
+        }
+        reduction_span = last_reduction * reduction_stride + inner->extent;
+    }
+
+    uint64_t outer_stride = 0;
+    if (outer->extent > 1) {
+        if (!outer->has_non_singleton_axis) {
+            return;
+        }
+        outer_stride = outer->stride;
+        // Deliberately exclude overlapping/broadcast aliases. Adjacent flattened outer entries must own disjoint
+        // pitched reduction slabs. Gaps are allowed and are exactly what repeated-label diagonal views introduce.
+        if (outer_stride < reduction_span) {
+            return;
+        }
+    }
+
+    // Prove the complete reachable source offset also fits the uint64_t arithmetic used by the kernel. Tensor views
+    // already validate their backing allocation; this check is specifically about keeping the affine address math exact.
+    uint64_t max_source_offset = inner->extent - 1;
+    const auto appendOffset = [&](uint64_t count_minus_one, uint64_t stride) -> bool {
+        if (count_minus_one == 0) {
+            return true;
+        }
+        if (stride > (std::numeric_limits<uint64_t>::max() - max_source_offset) / count_minus_one) {
+            return false;
+        }
+        max_source_offset += count_minus_one * stride;
+        return true;
+    };
+    if (!appendOffset(reduction->extent - 1, reduction_stride)
+        || !appendOffset(outer->extent - 1, outer_stride)) {
+        return;
+    }
+
+    CubReductionPitchedTiledGeometry candidate;
+    candidate.outer_size = outer->extent;
+    candidate.reduction_size = reduction->extent;
+    candidate.inner_size = inner->extent;
+    candidate.outer_stride = outer_stride;
+    candidate.reduction_stride = reduction_stride;
+    geometry.pitched_tiled_geometry = candidate;
+}
+
+void activatePitchedTiledCandidate(CubReductionGeometry& geometry) {
+    if (!geometry.pitched_tiled_geometry.has_value()) {
+        throw std::logic_error("CUB pitched tiled activation requires detected affine geometry.");
+    }
+
+    const CubReductionPitchedTiledGeometry& candidate = geometry.pitched_tiled_geometry.value();
+    if (candidate.outer_size != geometry.outer_size || candidate.reduction_size != geometry.reduction_size
+        || candidate.inner_size != geometry.inner_size) {
+        throw std::logic_error("CUB pitched tiled geometry is internally inconsistent.");
+    }
+    if (candidate.outer_size != 0
+        && candidate.inner_size > std::numeric_limits<uint64_t>::max() / candidate.outer_size) {
+        throw std::logic_error("CUB pitched tiled output size overflows uint64_t.");
+    }
+    if (candidate.outer_size * candidate.inner_size != geometry.output_elements) {
+        throw std::logic_error("CUB pitched tiled retained-output size is internally inconsistent.");
+    }
+
+    geometry.tiled_output_outer_stride = candidate.inner_size;
+    geometry.tiled_output_inner_stride = 1;
+    geometry.tiled_output_permuted = false;
+    geometry.tiled_output_shared_transpose = false;
+    geometry.path = CubReductionPath::TiledFixedSegment;
+}
+
 [[nodiscard]] uint64_t segmentedElementsPerValue(const Tensor& input) {
     const std::vector<uint64_t>& dimensions = input.getDimensions();
     if (dimensions.empty()) {
@@ -1559,125 +1957,75 @@ void activatePermutationAwareTiledCandidate(CubReductionGeometry& geometry) {
     return elements_per_value;
 }
 
-[[nodiscard]] bool stridedValueIndexingFitsUint32(const std::vector<uint64_t>& input_dimensions,
-                                                   const std::vector<uint64_t>& input_strides,
-                                                   const CubReductionGeometry& geometry) {
-    constexpr uint64_t max_u32 = static_cast<uint64_t>(std::numeric_limits<uint32_t>::max());
-    if (geometry.input_elements > max_u32 || geometry.output_elements > max_u32 || geometry.reduction_size > max_u32) {
-        return false;
+struct TensorReachableAddressSpan {
+    uintptr_t begin = 0;
+    uintptr_t end = 0;
+};
+
+[[nodiscard]] TensorReachableAddressSpan tensorReachableAddressSpan(const Tensor& tensor) {
+    const std::vector<uint64_t> dimensions = tensor.getDimensions();
+    const std::vector<uint64_t> strides = tensor.getStridesElements();
+    if (dimensions.size() != strides.size() || dimensions.empty()) {
+        throw std::logic_error("CUB tensor reduction received invalid tensor view metadata while checking storage overlap.");
     }
 
-    // input.getMemPtr() already includes a view's storage offset, so only the maximum reachable offset relative to that
-    // pointer must fit IndexT. Requiring each dimension/stride and the accumulated offset to fit also guarantees that
-    // every multiply/add performed by the UINT32 device mapper is exact rather than relying on wraparound.
-    uint64_t max_physical_offset = 0;
-    for (size_t dimension = 0; dimension < input_dimensions.size(); ++dimension) {
-        if (input_dimensions[dimension] > max_u32 || input_strides[dimension] > max_u32) {
-            return false;
+    uint64_t max_element_offset = 0;
+    for (size_t dimension = 0; dimension < dimensions.size(); ++dimension) {
+        const uint64_t extent_minus_one = dimensions[dimension] - 1;
+        if (extent_minus_one != 0
+            && strides[dimension] > (std::numeric_limits<uint64_t>::max() - max_element_offset) / extent_minus_one) {
+            throw std::invalid_argument("CUB tensor reduction tensor view address span overflows uint64_t.");
         }
-        const uint64_t coordinate_max = input_dimensions[dimension] - 1;
-        if (coordinate_max != 0 && input_strides[dimension] > max_u32 / coordinate_max) {
-            return false;
-        }
-        const uint64_t contribution = coordinate_max * input_strides[dimension];
-        if (contribution > max_u32 - max_physical_offset) {
-            return false;
-        }
-        max_physical_offset += contribution;
+        max_element_offset += extent_minus_one * strides[dimension];
     }
-    return true;
+
+    if (max_element_offset == std::numeric_limits<uint64_t>::max()) {
+        throw std::invalid_argument("CUB tensor reduction tensor view address span overflows uint64_t.");
+    }
+    const uint64_t span_elements = max_element_offset + 1;
+    const uint64_t element_bytes = static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(tensor.getDataType()));
+    if (span_elements > std::numeric_limits<uint64_t>::max() / element_bytes) {
+        throw std::invalid_argument("CUB tensor reduction tensor view byte span overflows uint64_t.");
+    }
+    const uint64_t span_bytes = span_elements * element_bytes;
+
+    const uintptr_t begin = reinterpret_cast<uintptr_t>(tensor.getMemPtr<void>());
+    if (span_bytes > static_cast<uint64_t>(std::numeric_limits<uintptr_t>::max() - begin)) {
+        throw std::invalid_argument("CUB tensor reduction tensor view address span exceeds the process address space.");
+    }
+    return TensorReachableAddressSpan{begin, begin + static_cast<uintptr_t>(span_bytes)};
 }
 
-std::optional<Tensor> stampDeviceIndexingMetadata(CubReductionGeometry& geometry,
-                                                   const TensorPlacement& placement,
-                                                   const Stream& stream,
-                                                   bool allow_uint32_value_indexing) {
-    geometry.device_indexing = {};
-    geometry.device_indexing32 = {};
-    if (geometry.path != CubReductionPath::StridedFixedSegment) {
-        return std::nullopt;
+[[nodiscard]] bool tensorStorageOverlaps(const Tensor& lhs, const Tensor& rhs) {
+    // Tensor::getArraySizeInBytes() is the logical payload size. For alias views that may be much larger than the
+    // physical address span (broadcast/zero-stride) or smaller than it (gapped/strided). Safety checks therefore use
+    // the conservative interval containing every address the view can actually reach. Strides are non-negative in
+    // Tensor, so the interval begins at getMemPtr() and ends at the maximum strided coordinate plus one element.
+    const TensorReachableAddressSpan lhs_span = tensorReachableAddressSpan(lhs);
+    const TensorReachableAddressSpan rhs_span = tensorReachableAddressSpan(rhs);
+    return lhs_span.begin < rhs_span.end && rhs_span.begin < lhs_span.end;
+}
+
+void requireDenseContiguousReductionOutput(const Tensor& output, const char* role) {
+    if (!output.isInitialized()) {
+        throw std::invalid_argument(std::string(role) + " must be initialized.");
     }
-
-    const CubReductionIndexing& indexing = geometry.indexing;
-    const size_t rank = indexing.input_strides.size();
-    const size_t reduced_count = indexing.reduced_axes.size();
-    const size_t retained_count = indexing.retained_axes.size();
-    if (reduced_count + retained_count != rank
-        || indexing.reduced_dimensions.size() != reduced_count
-        || indexing.retained_dimensions.size() != retained_count) {
-        throw std::logic_error("CUB tensor reduction indexing metadata is internally inconsistent.");
+    if (output.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
+        throw std::invalid_argument(std::string(role) + " must be a GPU tensor.");
     }
-
-    if (allow_uint32_value_indexing && geometry.strided_value_indexing_fits_uint32) {
-        std::vector<uint32_t> packed;
-        packed.reserve(rank + 2 * reduced_count + 2 * retained_count);
-        for (uint64_t stride : indexing.input_strides) {
-            packed.push_back(static_cast<uint32_t>(stride));
-        }
-        packed.insert(packed.end(), indexing.reduced_axes.begin(), indexing.reduced_axes.end());
-        packed.insert(packed.end(), indexing.retained_axes.begin(), indexing.retained_axes.end());
-        for (uint64_t dimension : indexing.reduced_dimensions) {
-            packed.push_back(static_cast<uint32_t>(dimension));
-        }
-        for (uint64_t dimension : indexing.retained_dimensions) {
-            packed.push_back(static_cast<uint32_t>(dimension));
-        }
-
-        Tensor host_metadata(TensorPlacement(TensorPlacement::MemDevices::CPU),
-                             TensorDescriptor(DataType::UINT32, {static_cast<uint64_t>(packed.size())}));
-        std::memcpy(host_metadata.getMemPtr<uint32_t>(), packed.data(), packed.size() * sizeof(uint32_t));
-
-        Tensor device_metadata(placement, TensorDescriptor(DataType::UINT32, {static_cast<uint64_t>(packed.size())}));
-        device_metadata.copyFromAsync(host_metadata, stream);
-        stream.synchronize();
-
-        const uint32_t* base = device_metadata.getMemPtr<uint32_t>();
-        geometry.device_indexing32.reduced_axis_count = static_cast<uint32_t>(reduced_count);
-        geometry.device_indexing32.retained_axis_count = static_cast<uint32_t>(retained_count);
-        geometry.device_indexing32.input_strides = base;
-        geometry.device_indexing32.reduced_axes = base + rank;
-        geometry.device_indexing32.retained_axes = geometry.device_indexing32.reduced_axes + reduced_count;
-        geometry.device_indexing32.reduced_dimensions = geometry.device_indexing32.retained_axes + retained_count;
-        geometry.device_indexing32.retained_dimensions = geometry.device_indexing32.reduced_dimensions + reduced_count;
-        return device_metadata;
+    // Reduction outputs only require a dense contiguous address range beginning at getMemPtr().
+    // A dense alias into a larger allocation satisfies that contract even though Tensor records
+    // aliasView() strides as custom metadata.
+    if (!output.isDenseContiguous()) {
+        throw std::invalid_argument(std::string(role) + " must be dense contiguous.");
     }
-
-    std::vector<uint64_t> packed;
-    packed.reserve(rank + 2 * reduced_count + 2 * retained_count);
-    packed.insert(packed.end(), indexing.input_strides.begin(), indexing.input_strides.end());
-    for (uint32_t axis : indexing.reduced_axes) {
-        packed.push_back(axis);
-    }
-    for (uint32_t axis : indexing.retained_axes) {
-        packed.push_back(axis);
-    }
-    packed.insert(packed.end(), indexing.reduced_dimensions.begin(), indexing.reduced_dimensions.end());
-    packed.insert(packed.end(), indexing.retained_dimensions.begin(), indexing.retained_dimensions.end());
-
-    Tensor host_metadata(TensorPlacement(TensorPlacement::MemDevices::CPU),
-                         TensorDescriptor(DataType::UINT64, {static_cast<uint64_t>(packed.size())}));
-    std::memcpy(host_metadata.getMemPtr<uint64_t>(), packed.data(), packed.size() * sizeof(uint64_t));
-
-    Tensor device_metadata(placement, TensorDescriptor(DataType::UINT64, {static_cast<uint64_t>(packed.size())}));
-    device_metadata.copyFromAsync(host_metadata, stream);
-    stream.synchronize();
-
-    const uint64_t* base = device_metadata.getMemPtr<uint64_t>();
-    geometry.device_indexing.reduced_axis_count = static_cast<uint32_t>(reduced_count);
-    geometry.device_indexing.retained_axis_count = static_cast<uint32_t>(retained_count);
-    geometry.device_indexing.input_strides = base;
-    geometry.device_indexing.reduced_axes = base + rank;
-    geometry.device_indexing.retained_axes = geometry.device_indexing.reduced_axes + reduced_count;
-    geometry.device_indexing.reduced_dimensions = geometry.device_indexing.retained_axes + retained_count;
-    geometry.device_indexing.retained_dimensions = geometry.device_indexing.reduced_dimensions + reduced_count;
-    return device_metadata;
 }
 
 void requireExpectedOutput(const Tensor& input,
                            const Tensor& output,
                            DataType output_dtype,
                            const CubReductionGeometry& geometry) {
-    requireDenseContiguousGpuTensor(output, "output");
+    requireDenseContiguousReductionOutput(output, "output");
     requireSameGpuPlacement(input, output, "input", "output");
     if (output.getDataType() != output_dtype) {
         throw std::invalid_argument("CUB tensor reduction preallocated output dtype does not match the configured output dtype.");
@@ -1691,21 +2039,9 @@ void requireExpectedOutput(const Tensor& input,
         throw std::invalid_argument("CUB tensor reduction preallocated output element count does not match the reduction geometry.");
     }
 
-    const uintptr_t input_begin = reinterpret_cast<uintptr_t>(input.getMemPtr<void>());
-    const uintptr_t output_begin = reinterpret_cast<uintptr_t>(output.getMemPtr<void>());
-    const uintptr_t input_end = input_begin + input.getArraySizeInBytes();
-    const uintptr_t output_end = output_begin + output.getArraySizeInBytes();
-    if (input_begin < output_end && output_begin < input_end) {
+    if (tensorStorageOverlaps(input, output)) {
         throw std::invalid_argument("CUB tensor reduction input and output storage must not overlap.");
     }
-}
-
-[[nodiscard]] bool tensorStorageOverlaps(const Tensor& lhs, const Tensor& rhs) {
-    const uintptr_t lhs_begin = reinterpret_cast<uintptr_t>(lhs.getMemPtr<void>());
-    const uintptr_t rhs_begin = reinterpret_cast<uintptr_t>(rhs.getMemPtr<void>());
-    const uintptr_t lhs_end = lhs_begin + lhs.getArraySizeInBytes();
-    const uintptr_t rhs_end = rhs_begin + rhs.getArraySizeInBytes();
-    return lhs_begin < rhs_end && rhs_begin < lhs_end;
 }
 
 void requireExpectedArgOutput(const Tensor& input,
@@ -1713,7 +2049,7 @@ void requireExpectedArgOutput(const Tensor& input,
                               DataType output_dtype,
                               const CubReductionGeometry& geometry,
                               const char* role) {
-    requireDenseContiguousGpuTensor(output, role);
+    requireDenseContiguousReductionOutput(output, role);
     requireSameGpuPlacement(input, output, "input", role);
     if (output.getDataType() != output_dtype) {
         throw std::invalid_argument(std::string("CUB arg reduction preallocated ") + role
@@ -2398,11 +2734,6 @@ CubReductionGeometry CubReduction::analyzeGeometry(const std::vector<uint64_t>& 
     geometry.output_elements = 1;
     geometry.output_dimensions = input_dimensions;
     geometry.squeezed_output_dimensions.reserve(input_dimensions.size() - axes.size());
-    geometry.indexing.input_strides = input_strides;
-    geometry.indexing.reduced_axes.reserve(axes.size());
-    geometry.indexing.reduced_dimensions.reserve(axes.size());
-    geometry.indexing.retained_axes.reserve(input_dimensions.size() - axes.size());
-    geometry.indexing.retained_dimensions.reserve(input_dimensions.size() - axes.size());
 
     std::vector<uint64_t> dense_strides(input_dimensions.size(), 1);
     uint64_t running_stride = 1;
@@ -2423,15 +2754,11 @@ CubReductionGeometry CubReduction::analyzeGeometry(const std::vector<uint64_t>& 
             geometry.output_dimensions[dimension] = 1;
             geometry.reduction_size = checkedMultiply(
                 geometry.reduction_size, input_dimensions[dimension], "reduction element count");
-            geometry.indexing.reduced_axes.push_back(dimension);
-            geometry.indexing.reduced_dimensions.push_back(input_dimensions[dimension]);
             ++reduced_cursor;
         } else {
             geometry.output_elements = checkedMultiply(
                 geometry.output_elements, input_dimensions[dimension], "output element count");
             geometry.squeezed_output_dimensions.push_back(input_dimensions[dimension]);
-            geometry.indexing.retained_axes.push_back(dimension);
-            geometry.indexing.retained_dimensions.push_back(input_dimensions[dimension]);
         }
     }
     if (geometry.squeezed_output_dimensions.empty()) {
@@ -2468,7 +2795,23 @@ CubReductionGeometry CubReduction::analyzeGeometry(const std::vector<uint64_t>& 
 
     static_cast<void>(analyzeDensePhysicalPermutation(input_dimensions, input_strides, geometry));
     if (!input_is_dense_contiguous) {
+        static_cast<void>(analyzePermutationAwareContiguousCandidate(input_dimensions, axes, geometry));
         analyzePermutationAwareTiledCandidate(input_dimensions, axes, geometry);
+        // VIEW-DIRECT-2B fills only the compact [A,reduction,B,payload] -> [B,A,payload] retained-order gap left by
+        // the existing permutation-aware tiled family. It is intentionally considered only after those ordained
+        // candidates reject the geometry.
+        if (!geometry.permutation_aware_contiguous_segments
+            && !geometry.permutation_aware_tiled_geometry.has_value()) {
+            analyzePayloadTransposeTiledCandidate(input_dimensions, axes, geometry);
+        }
+        // Preserve ownership of every already-ordained compact-permutation path. VIEW-PITCHED-TILED is considered
+        // only when no direct compact-permutation strategy applies. Keeping these candidates mutually exclusive also
+        // makes launch dispatch unambiguous.
+        if (!geometry.permutation_aware_contiguous_segments
+            && !geometry.permutation_aware_tiled_geometry.has_value()
+            && !geometry.payload_transpose_tiled_geometry.has_value()) {
+            analyzePitchedTiledCandidate(input_dimensions, input_strides, axes, geometry);
+        }
     }
 
     const bool reduces_to_single_output = geometry.output_elements == 1;
@@ -2483,20 +2826,44 @@ CubReductionGeometry CubReduction::analyzeGeometry(const std::vector<uint64_t>& 
         } else if (geometry.reduced_axes_are_contiguous) {
             geometry.path = CubReductionPath::TiledFixedSegment;
         } else {
-            // Dense disjoint reduced runs are an execution family of their own, not an arbitrary-view fallback.
-            // Ask the shared structural interval planner whether the geometry can be decomposed entirely into the
-            // proven direct dense stages. This is host-only structural planning and does not perform GPU queries or
-            // runtime autotuning; value/ARG execution planners may later choose a different legal stage order using
-            // their calibrated cost models, but they must not change the execution family.
-            geometry.path = makeStructuralDenseCompositionPlan(geometry, input_dimensions).has_value()
-                                ? CubReductionPath::ComposedDense
-                                : CubReductionPath::StridedFixedSegment;
+            // DENSE-GATE-FINAL: dense disjoint reduced runs are an execution family of their own. There is no
+            // arbitrary-view escape hatch for an ordinary dense tensor anymore. The shared structural interval
+            // planner must be able to decompose every such geometry entirely into proven direct dense stages; value
+            // and ARG execution planners may later choose a different legal stage order using their calibrated cost
+            // models, but they must not change the execution family.
+            const std::optional<CubReductionDenseCompositionPlan> structural_plan =
+                makeStructuralDenseCompositionPlan(geometry, input_dimensions);
+            if (!structural_plan.has_value()) {
+                throw std::logic_error(
+                    "DENSE-GATE-FINAL invariant violated: dense disjoint reduction has no all-direct composition "
+                    "plan.");
+            }
+            geometry.path = CubReductionPath::ComposedDense;
         }
+        requireOrdainedDenseReductionPath(geometry);
+    } else if (reduces_to_single_output && geometry.physical_layout_is_dense_permutation) {
+        // VIEW-DIRECT-1: when every logical axis is reduced, a compact physical permutation is just one contiguous
+        // physical value domain. Value reductions are insensitive to the logical visitation order, so feed that span
+        // directly to CUB DeviceReduce rather than reconstructing one logical coordinate per scalar through the
+        // arbitrary-view mapper. input.getMemPtr() already points at the view's storage offset, and a proven dense
+        // physical permutation contains each logical value exactly once in input_elements contiguous elements.
+        geometry.path = CubReductionPath::DeviceTransformReduce;
+    } else if (geometry.permutation_aware_contiguous_segments) {
+        // VIEW-DIRECT-2A: the non-singleton reduced axes are the complete physical suffix and the physical retained
+        // prefix is already in Thor's logical dense output order. Each retained output is therefore one ordinary
+        // contiguous segment in storage, so use CUB DeviceSegmentedReduce directly with no logical input mapper.
+        // Cases that need retained-output permutation deliberately remain for VIEW-DIRECT-2B.
+        geometry.path = CubReductionPath::ContiguousFixedSegment;
     } else if (geometry.permutation_aware_tiled_geometry.has_value()) {
         // A logical permutation view over physically dense storage can reuse the tuned dense tiled family directly.
         // The candidate supplies the physical [outer,reduction,inner] traversal and whether the final dense retained
         // output is natural [outer,inner] or the [inner,outer] rotation. No input or output intermediate is required.
         activatePermutationAwareTiledCandidate(geometry);
+    } else if (geometry.payload_transpose_tiled_geometry.has_value()) {
+        // VIEW-DIRECT-2B: the compact source is physically [A,reduction,B,payload] while Thor's dense retained output
+        // is [B,A,payload]. A dedicated 32x33 shared-memory strategy preserves coalesced payload reads and writes the
+        // logical output directly, with no mixed-radix mapper or global transpose intermediate.
+        activatePayloadTransposeTiledCandidate(geometry);
     } else if (reduces_to_single_output && input_dimensions.size() == 1) {
         // Rank-1 views are always affine, including diagonals (stride > 1) and
         // broadcast aliases (stride == 0).  Keep the single-output CUB fast
@@ -2504,24 +2871,27 @@ CubReductionGeometry CubReduction::analyzeGeometry(const std::vector<uint64_t>& 
         geometry.path = CubReductionPath::DeviceTransformReduce;
         geometry.device_transform_uses_affine_stride = true;
         geometry.affine_input_stride = input_strides[0];
+    } else if (geometry.pitched_tiled_geometry.has_value()) {
+        // VIEW-PITCHED-TILED: a non-dense logical [outer,reduction,inner] view with a contiguous inner payload can be
+        // addressed with two affine pitches. The dedicated pitched kernel keeps adjacent inner components coalesced
+        // and performs no per-scalar logical-coordinate reconstruction. It is intentionally separate from the sealed
+        // dense/permutation tiled kernels.
+        activatePitchedTiledCandidate(geometry);
     } else {
-        // Do not materialize merely to regain a dense reduction path.  The
-        // centralized strided backend is the correctness fallback for genuine
-        // views; dense tensors continue to use the optimized paths above.
-        geometry.path = CubReductionPath::StridedFixedSegment;
+        // DELETE: Thor no longer has an arbitrary per-scalar logical-index reduction backend. Every real workload must
+        // be owned by an explicit physical-layout-aware reducer; exotic views fail rather than silently executing a
+        // catastrophically slow catch-all implementation.
+        throw NotImplementedException(
+            "Unsupported CUB tensor-reduction geometry: no ordained production reducer owns this layout. "
+            "Materialize/reorder the view or add an explicit high-efficiency reduction strategy for this geometry.");
     }
 
     // The fixed-segment int limit belongs only to paths that actually execute the CUB fixed-size segmented
-    // primitive. Dense disjoint reductions have already been classified as ComposedDense above, so they never need a
-    // provisional StridedFixedSegment exemption here. Thor-owned tiled/composed stages carry uint64_t geometry.
+    // primitive. Thor-owned tiled/composed stages carry uint64_t geometry.
     if (usesCubFixedSegmentSize(geometry.path)
         && geometry.reduction_size > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
         throw std::invalid_argument("CUB fixed-size segmented reduction segment size exceeds its int limit.");
     }
-
-    geometry.strided_value_indexing_fits_uint32 =
-        geometry.path == CubReductionPath::StridedFixedSegment
-        && stridedValueIndexingFitsUint32(input_dimensions, input_strides, geometry);
 
     return geometry;
 }
@@ -2550,18 +2920,6 @@ std::optional<CubReductionDenseCompositionPlan> CubReduction::analyzeDenseCompos
     const std::vector<uint32_t>& axes) {
     const CubReductionGeometry geometry = analyzeGeometry(input_dimensions, axes);
     return makeStructuralDenseCompositionPlan(geometry, input_dimensions);
-}
-
-uint64_t CubReduction::mapLogicalReductionIndexToPhysicalIndex(const CubReductionGeometry& geometry,
-                                                               uint64_t output_index,
-                                                               uint64_t reduction_index) {
-    if (output_index >= geometry.output_elements) {
-        throw std::out_of_range("CUB tensor reduction output index is outside the geometry.");
-    }
-    if (reduction_index >= geometry.reduction_size) {
-        throw std::out_of_range("CUB tensor reduction reduction index is outside the geometry.");
-    }
-    return CubReductionInternal::mapLogicalReductionIndex(geometry.indexing, output_index, reduction_index);
 }
 
 std::shared_ptr<StampedCubReduction> CubReduction::stamp(const Tensor& input, const Stream& stream) const {
@@ -2618,8 +2976,6 @@ std::shared_ptr<StampedCubReduction> CubReduction::stampValidated(const Tensor& 
                                                TensorDescriptor(DataType::FP32, stage_plan.output_dimensions));
             requireExpectedOutput(current_input, stage_output, stage_output_dtype, stage_geometry);
 
-            std::optional<Tensor> indexing_metadata = stampDeviceIndexingMetadata(
-                stage_geometry, current_input.getPlacement(), stream, /*allow_uint32_value_indexing=*/true);
             const CubReductionInternal::CubReductionStageSemantics stage_semantics =
                 CubReductionInternal::makeValueReductionStageSemantics(
                     op, composedValueStageRole(stage_index, plan->stages.size()), geometry.reduction_size);
@@ -2641,7 +2997,6 @@ std::shared_ptr<StampedCubReduction> CubReduction::stampValidated(const Tensor& 
                                         stage_output,
                                         temp_storage_bytes,
                                         temp_storage,
-                                        std::move(indexing_metadata),
                                         stage_output_scale,
                                         stream));
             workspace_size_bytes += temp_storage_bytes;
@@ -2670,8 +3025,6 @@ std::shared_ptr<StampedCubReduction> CubReduction::stampValidated(const Tensor& 
     }
 
     CubReductionGeometry stamped_geometry = geometry;
-    std::optional<Tensor> indexing_metadata = stampDeviceIndexingMetadata(
-        stamped_geometry, input.getPlacement(), stream, /*allow_uint32_value_indexing=*/true);
     Tensor mutable_output = output;
     const CubReductionInternal::CubReductionStageSemantics semantics =
         CubReductionInternal::makeValueReductionStageSemantics(
@@ -2693,7 +3046,6 @@ std::shared_ptr<StampedCubReduction> CubReduction::stampValidated(const Tensor& 
                                                                         output,
                                                                         temp_storage_bytes,
                                                                         temp_storage,
-                                                                        std::move(indexing_metadata),
                                                                         output_scale,
                                                                         stream));
 }
@@ -2988,6 +3340,9 @@ CubReductionGeometry CubArgReduction::analyzeDenseGeometry(
     const std::vector<uint64_t>& input_dimensions,
     const std::vector<uint32_t>& axes) {
     CubReductionGeometry geometry = CubReduction::analyzeGeometry(input_dimensions, axes);
+    // DENSE-GATE-FINAL: this public helper accepts only canonical dense geometry, so returning the legacy arbitrary
+    // view family would be an internal architecture violation rather than a recoverable execution choice.
+    requireOrdainedDenseReductionPath(geometry);
     requireExecutableFixedSegmentSize(geometry);
     return geometry;
 }
@@ -3467,24 +3822,20 @@ std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampValidated(
     const CubReductionGeometry& geometry,
     const Stream& stream) const {
     ScopedGpu scoped_gpu(stream.getGpuNum());
-    CubReductionGeometry stamped_geometry = geometry;
-    std::optional<Tensor> indexing_metadata = stampDeviceIndexingMetadata(
-        stamped_geometry, input.getPlacement(), stream, /*allow_uint32_value_indexing=*/false);
     Tensor* value_output_ptr = value_output.has_value() ? &value_output.value() : nullptr;
     Tensor* index_output_ptr = index_output.has_value() ? &index_output.value() : nullptr;
     const size_t temp_storage_bytes =
-        queryArgReductionBytes(op, input, value_output_ptr, index_output_ptr, stamped_geometry, stream);
+        queryArgReductionBytes(op, input, value_output_ptr, index_output_ptr, geometry, stream);
     Tensor temp_storage(
         input.getPlacement(), TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(temp_storage_bytes)}));
 
     return std::shared_ptr<StampedCubArgReduction>(new StampedCubArgReduction(op,
-                                                                             std::move(stamped_geometry),
+                                                                             geometry,
                                                                              input,
                                                                              std::move(value_output),
                                                                              std::move(index_output),
                                                                              temp_storage_bytes,
                                                                              temp_storage,
-                                                                             std::move(indexing_metadata),
                                                                              stream));
 }
 
@@ -3495,7 +3846,6 @@ StampedCubArgReduction::StampedCubArgReduction(CubArgReductionOp op,
                                                std::optional<Tensor> index_output,
                                                size_t temp_storage_bytes,
                                                const Tensor& temp_storage,
-                                               std::optional<Tensor> indexing_metadata,
                                                const Stream& stream)
     : op(op),
       geometry(std::move(geometry)),
@@ -3504,7 +3854,6 @@ StampedCubArgReduction::StampedCubArgReduction(CubArgReductionOp op,
       index_output(std::move(index_output)),
       temp_storage_bytes(temp_storage_bytes),
       temp_storage(temp_storage),
-      indexing_metadata(std::move(indexing_metadata)),
       stream(stream) {
     requireTempStorage(this->temp_storage, input.getPlacement(), temp_storage_bytes);
     if (!this->value_output.has_value() && !this->index_output.has_value()) {
@@ -3633,7 +3982,6 @@ StampedCubReduction::StampedCubReduction(CubReductionOp op,
                                          const Tensor& output,
                                          size_t temp_storage_bytes,
                                          const Tensor& temp_storage,
-                                         std::optional<Tensor> indexing_metadata,
                                          float output_scale,
                                          const Stream& stream)
     : op(op),
@@ -3642,7 +3990,6 @@ StampedCubReduction::StampedCubReduction(CubReductionOp op,
       output(output),
       temp_storage_bytes(temp_storage_bytes),
       temp_storage(temp_storage),
-      indexing_metadata(std::move(indexing_metadata)),
       output_scale(output_scale),
       stream(stream) {
     requireTempStorage(this->temp_storage, input.getPlacement(), temp_storage_bytes);

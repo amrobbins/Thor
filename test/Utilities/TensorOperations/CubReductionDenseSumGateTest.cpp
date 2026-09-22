@@ -1,4 +1,5 @@
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
+#include "Utilities/Exceptions.h"
 
 #include <array>
 #include <cstdint>
@@ -60,7 +61,6 @@ void expectEveryDenseSumMaskUsesOrdainedPath(const std::vector<uint64_t>& dimens
         const CubReductionGeometry geometry =
             CubReduction::analyzeValueGeometry(CubReductionOp::Sum, dimensions, axes);
         EXPECT_TRUE(isOrdainedDenseSumPath(geometry.path));
-        EXPECT_NE(geometry.path, CubReductionPath::StridedFixedSegment);
     }
 }
 
@@ -94,12 +94,14 @@ TEST(CubReductionDenseSumGate, SingletonSeparatedDenseRanksAlsoAvoidStridedFallb
 }
 
 TEST(CubReductionDenseSumGate, GenuineIrregularViewsRemainOutsideTheDenseGate) {
-    // DENSE-SUM-GATE is specifically an ordinary-dense invariant. A gapped view still belongs to the arbitrary-view
-    // fallback until VIEW-1 replaces that implementation.
-    const CubReductionGeometry irregular = CubReduction::analyzeValueGeometry(
-        CubReductionOp::Sum, {2, 3, 4}, {20, 4, 1}, std::vector<uint32_t>{0, 2});
-    EXPECT_EQ(irregular.path, CubReductionPath::StridedFixedSegment);
-    EXPECT_FALSE(irregular.dense_run_geometry.has_value());
+    // Structural analysis still identifies the legacy family for census/DELETE accounting, but production value
+    // DELETE rejects arbitrary gapped views during structural analysis itself.
+    EXPECT_THROW((void)CubReduction::analyzeGeometry(
+                     {2, 3, 4}, {20, 4, 1}, std::vector<uint32_t>{0, 2}),
+                 NotImplementedException);
+    EXPECT_THROW((void)CubReduction::analyzeValueGeometry(
+                     CubReductionOp::Sum, {2, 3, 4}, {20, 4, 1}, std::vector<uint32_t>{0, 2}),
+                 NotImplementedException);
 }
 
 TEST(CubReductionDenseSumGate, ComposedDenseExecutesForEveryFloatingInputDTypeWithPreallocatedScaledOutput) {
@@ -123,7 +125,6 @@ TEST(CubReductionDenseSumGate, ComposedDenseExecutesForEveryFloatingInputDTypeWi
         auto stamped = reduction.stamp(input, output, stream);
 
         ASSERT_EQ(stamped->getPath(), CubReductionPath::ComposedDense);
-        EXPECT_NE(stamped->getPath(), CubReductionPath::StridedFixedSegment);
         EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), queried_workspace);
         EXPECT_GT(stamped->getWorkspaceSizeInBytes(), 0U);
 

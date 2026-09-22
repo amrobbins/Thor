@@ -1006,8 +1006,8 @@ file(GLOB_RECURSE THOR_SOURCES CONFIGURE_DEPENDS
 # IR for this enlarged template surface. These translation units remain normal
 # relocatable CUDA device code and still participate in Thor's device-link step.
 set(THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubArgReductionMin.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubArgReductionMax.cu"
+        #"${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubArgReductionMin.cu"
+        #"${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubArgReductionMax.cu"
 )
 foreach (_thor_arg_cuda_source IN LISTS THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES)
     if (NOT EXISTS "${_thor_arg_cuda_source}")
@@ -1038,8 +1038,10 @@ if (_thor_python_release_wheel_bundle)
     add_library(ThorHostObjects OBJECT ${THOR_HOST_SOURCES})
     add_library(ThorCudaSm89Objects OBJECT ${THOR_CUDA_SOURCES})
     add_library(ThorCudaSm120Objects OBJECT ${THOR_CUDA_SOURCES})
-    add_library(ThorArgCudaSm89NoLtoObjects OBJECT ${THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES})
-    add_library(ThorArgCudaSm120NoLtoObjects OBJECT ${THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES})
+    if (THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES)
+        add_library(ThorArgCudaSm89NoLtoObjects OBJECT ${THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES})
+        add_library(ThorArgCudaSm120NoLtoObjects OBJECT ${THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES})
+    endif ()
 
     set_target_properties(ThorHostObjects PROPERTIES
             CXX_STANDARD 23
@@ -1057,60 +1059,74 @@ if (_thor_python_release_wheel_bundle)
             CUDA_SEPARABLE_COMPILATION ON
             POSITION_INDEPENDENT_CODE ON
     )
-    set_target_properties(ThorArgCudaSm89NoLtoObjects PROPERTIES
-            CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
-            CUDA_ARCHITECTURES 89
-            CUDA_SEPARABLE_COMPILATION ON
-            POSITION_INDEPENDENT_CODE ON
-            INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
-    )
-    set_target_properties(ThorArgCudaSm120NoLtoObjects PROPERTIES
-            CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
-            CUDA_ARCHITECTURES 120
-            CUDA_SEPARABLE_COMPILATION ON
-            POSITION_INDEPENDENT_CODE ON
-            INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
-    )
+    if (THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES)
+        set_target_properties(ThorArgCudaSm89NoLtoObjects PROPERTIES
+                CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
+                CUDA_ARCHITECTURES 89
+                CUDA_SEPARABLE_COMPILATION ON
+                POSITION_INDEPENDENT_CODE ON
+                INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
+        )
+        set_target_properties(ThorArgCudaSm120NoLtoObjects PROPERTIES
+                CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
+                CUDA_ARCHITECTURES 120
+                CUDA_SEPARABLE_COMPILATION ON
+                POSITION_INDEPENDENT_CODE ON
+                INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
+        )
+    endif ()
 
-    add_library(Thor SHARED
+    set(_thor_sm120_backend_objects
             $<TARGET_OBJECTS:ThorHostObjects>
             $<TARGET_OBJECTS:ThorCudaSm120Objects>
-            $<TARGET_OBJECTS:ThorArgCudaSm120NoLtoObjects>
     )
-    add_library(ThorKernelSm89 SHARED
+    set(_thor_sm89_backend_objects
             $<TARGET_OBJECTS:ThorHostObjects>
             $<TARGET_OBJECTS:ThorCudaSm89Objects>
-            $<TARGET_OBJECTS:ThorArgCudaSm89NoLtoObjects>
     )
+    if (THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES)
+        list(APPEND _thor_sm120_backend_objects $<TARGET_OBJECTS:ThorArgCudaSm120NoLtoObjects>)
+        list(APPEND _thor_sm89_backend_objects $<TARGET_OBJECTS:ThorArgCudaSm89NoLtoObjects>)
+    endif ()
+
+    add_library(Thor SHARED ${_thor_sm120_backend_objects})
+    add_library(ThorKernelSm89 SHARED ${_thor_sm89_backend_objects})
+    unset(_thor_sm120_backend_objects)
+    unset(_thor_sm89_backend_objects)
     set_target_properties(ThorKernelSm89 PROPERTIES
             OUTPUT_NAME Thor
             LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/wheel_backends/sm89"
     )
 else ()
     list(REMOVE_ITEM THOR_SOURCES ${THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES})
-    add_library(ThorArgCudaNoLtoObjects OBJECT ${THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES})
-    set_target_properties(ThorArgCudaNoLtoObjects PROPERTIES
-            CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
-            POSITION_INDEPENDENT_CODE ON
-            INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
-    )
-    # These objects need relocatable device code only when Thor itself will run
-    # a CUDA device-link step.  Enabling separable compilation unconditionally
-    # makes a single-config Debug build emit __cudaRegisterLinkedBinary_* host
-    # references from the ARG objects, while Debug Thor intentionally has no
-    # device-link step to resolve them.  Keep Debug on its historical
-    # self-contained CUDA-object path; Release (and multi-config generators,
-    # whose Thor target has the corresponding device-link path available) uses
-    # separable compilation for the non-LTO ARG objects.
-    if (CMAKE_CONFIGURATION_TYPES OR CMAKE_BUILD_TYPE STREQUAL "Release")
-        set_property(TARGET ThorArgCudaNoLtoObjects PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+    set(_thor_arg_cuda_no_lto_objects "")
+    if (THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES)
+        add_library(ThorArgCudaNoLtoObjects OBJECT ${THOR_ARG_CUDA_NO_DEVICE_LTO_SOURCES})
+        set_target_properties(ThorArgCudaNoLtoObjects PROPERTIES
+                CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
+                POSITION_INDEPENDENT_CODE ON
+                INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
+        )
+        # These objects need relocatable device code only when Thor itself will run
+        # a CUDA device-link step.  Enabling separable compilation unconditionally
+        # makes a single-config Debug build emit __cudaRegisterLinkedBinary_* host
+        # references from the ARG objects, while Debug Thor intentionally has no
+        # device-link step to resolve them.  Keep Debug on its historical
+        # self-contained CUDA-object path; Release (and multi-config generators,
+        # whose Thor target has the corresponding device-link path available) uses
+        # separable compilation for the non-LTO ARG objects.
+        if (CMAKE_CONFIGURATION_TYPES OR CMAKE_BUILD_TYPE STREQUAL "Release")
+            set_property(TARGET ThorArgCudaNoLtoObjects PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+        endif ()
+        list(APPEND _thor_arg_cuda_no_lto_objects $<TARGET_OBJECTS:ThorArgCudaNoLtoObjects>)
     endif ()
 
     #add_library(Thor STATIC ${THOR_SOURCES})
     add_library(Thor SHARED
             ${THOR_SOURCES}
-            $<TARGET_OBJECTS:ThorArgCudaNoLtoObjects>
+            ${_thor_arg_cuda_no_lto_objects}
     )
+    unset(_thor_arg_cuda_no_lto_objects)
 endif ()
 
 set_target_properties(Thor PROPERTIES
@@ -1652,10 +1668,14 @@ if (_thor_python_release_wheel_bundle)
             ThorHostObjects
             ThorCudaSm89Objects
             ThorCudaSm120Objects
-            ThorArgCudaSm89NoLtoObjects
-            ThorArgCudaSm120NoLtoObjects
     )
-else ()
+    if (TARGET ThorArgCudaSm89NoLtoObjects)
+        list(APPEND _thor_compile_contract_object_targets
+                ThorArgCudaSm89NoLtoObjects
+                ThorArgCudaSm120NoLtoObjects
+        )
+    endif ()
+elseif (TARGET ThorArgCudaNoLtoObjects)
     list(APPEND _thor_compile_contract_object_targets ThorArgCudaNoLtoObjects)
 endif ()
 
@@ -1689,8 +1709,10 @@ if (_thor_python_release_wheel_bundle)
     set_property(TARGET ThorHostObjects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET ThorCudaSm89Objects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET ThorCudaSm120Objects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-    set_property(TARGET ThorArgCudaSm89NoLtoObjects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
-    set_property(TARGET ThorArgCudaSm120NoLtoObjects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+    if (TARGET ThorArgCudaSm89NoLtoObjects)
+        set_property(TARGET ThorArgCudaSm89NoLtoObjects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+        set_property(TARGET ThorArgCudaSm120NoLtoObjects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+    endif ()
 
     # Thor itself is the sm120 backend used to resolve _thor at build time. The
     # sm89 backend must have an identical host/runtime link contract while using
@@ -1703,7 +1725,7 @@ if (_thor_python_release_wheel_bundle)
         set_property(TARGET Thor PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
         set_property(TARGET ThorKernelSm89 PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
     endif ()
-else ()
+elseif (TARGET ThorArgCudaNoLtoObjects)
     set_property(TARGET ThorArgCudaNoLtoObjects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
 endif ()
 
@@ -2074,6 +2096,7 @@ add_executable(thor_cub_reduction_benchmark EXCLUDE_FROM_ALL
         benchmarks/CubReductionBenchmarkDenseRunTrailingRetainedCandidates.cpp
         benchmarks/CubReductionBenchmarkDenseRunOrderCandidates.cpp
         benchmarks/CubReductionBenchmarkDirectTiledCandidate.cu
+        benchmarks/CubReductionBenchmarkRowSplitCandidate.cu
         benchmarks/CubReductionBenchmarkCudnnFrontendCandidate.cpp
         benchmarks/CubReductionBenchmarkCudnnFrontendLayout.cu
 )
@@ -2098,6 +2121,36 @@ target_compile_options(thor_cub_reduction_benchmark PRIVATE
 # In Debug, compile it at the production Thor library's -O0 level so optimization level cannot decide the result.
 set_property(SOURCE benchmarks/CubReductionBenchmarkDirectTiledCandidate.cu APPEND PROPERTY COMPILE_OPTIONS
         $<$<CONFIG:Debug>:-O0>)
+# The row-split experiment is also a direct production-vs-candidate A/B. Keep Debug comparisons honest by matching
+# the production Thor library's Debug optimization level; Release/RelWithDebInfo remain -O3 through the target options.
+set_property(SOURCE benchmarks/CubReductionBenchmarkRowSplitCandidate.cu APPEND PROPERTY COMPILE_OPTIONS
+        $<$<CONFIG:Debug>:-O0>)
+
+# Fused-expression census contains a small CUDA cache-eviction kernel while
+# executing production Thor fused kernels for all timed work.  Keep the target
+# out of the default build, like the other performance census executables.
+set_source_files_properties(benchmarks/FusedKernelCensus.cpp PROPERTIES LANGUAGE CUDA)
+add_executable(thor_fused_kernel_census EXCLUDE_FROM_ALL
+        benchmarks/FusedKernelCensus.cpp
+)
+thor_apply_linker_settings(thor_fused_kernel_census)
+thor_enable_release_no_semantic_interposition(thor_fused_kernel_census)
+target_link_libraries(thor_fused_kernel_census PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+# FusedKernelCensus queries attributes of the NVRTC-loaded CUfunction via
+# the CUDA driver API (cuFuncGetAttribute/cuGetError*).  libcudart does
+# not provide those symbols, so link the driver import target explicitly.
+# Keep this benchmark-local rather than adding the driver to Thor's common
+# CUDA link set, which would unnecessarily affect library/wheel consumers.
+target_link_libraries(thor_fused_kernel_census PRIVATE CUDA::cuda_driver)
+target_link_libraries(thor_fused_kernel_census PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(thor_fused_kernel_census PRIVATE PkgConfig::LIBURING)
+target_compile_options(thor_fused_kernel_census PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3>
+        # Benchmark-only cache-control code stays optimized in Debug; the timed
+        # kernels themselves come from the Thor library configuration.
+        $<$<CONFIG:Debug>:-O3>
+)
 
 add_executable(thor_einsum_benchmark EXCLUDE_FROM_ALL
         benchmarks/EinsumBenchmark.cpp

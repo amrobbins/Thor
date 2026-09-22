@@ -56,6 +56,17 @@ class Embedding : public TrainableLayer {
     void informThatInputConnectionMade(Tensor inputTensor) override;
     void resetGraphTraversalState() override;
     bool mustConnectAllInputsToDriveOutput() const override { return !raggedFeatureInputs.empty(); }
+    [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {
+        bool isFeatureOutput = false;
+        for (const Tensor& output : featureOutputs) {
+            if (output == outputTensor) {
+                isFeatureOutput = true;
+                break;
+            }
+        }
+        THOR_THROW_IF_FALSE(isFeatureOutput);
+        return !raggedFeatureOutputs.empty();
+    }
 
     int getConnectionType(Tensor connectingTensor) const override;
     [[nodiscard]] ThorImplementation::RaggedPartitionRequirement

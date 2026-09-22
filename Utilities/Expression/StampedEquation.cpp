@@ -325,6 +325,7 @@ static AttentionTensorSpec attentionSpecForTensor(const Tensor& tensor, Attentio
 static AttentionTensorSpec packedRaggedAttentionSpecForTensor(const Tensor& tensor,
                                                               AttentionTensorLayout layout,
                                                               uint64_t batchSize,
+                                                              uint64_t maxSequenceLength,
                                                               const char* tensor_name) {
     if (layout != AttentionTensorLayout::BSHD) {
         throw std::runtime_error(std::string("Canonical ragged attention tensor '") + tensor_name +
@@ -335,18 +336,44 @@ static AttentionTensorSpec packedRaggedAttentionSpecForTensor(const Tensor& tens
         throw std::runtime_error(std::string("Canonical ragged attention tensor '") + tensor_name +
                                  "' must use packed [T,H,D] storage with a non-zero logical batch.");
     }
+    // T is a whole-batch packed storage capacity. cuDNN's semantic S dimension
+    // must remain the per-row S_max or it will schedule B times too many tiles.
+    // Preserve the legacy fallback only for low-level packed callers that have
+    // not supplied placement-time max_values_per_row metadata.
+    const uint64_t semanticSequenceLength = maxSequenceLength != 0 ? maxSequenceLength : dims[0];
+    if (semanticSequenceLength == 0 || semanticSequenceLength > dims[0]) {
+        throw std::runtime_error(std::string("Canonical ragged attention tensor '") + tensor_name +
+                                 "' has an invalid per-row max sequence length.");
+    }
+    if (batchSize > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+        dims[1] > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+        semanticSequenceLength > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+        dims[2] > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+        dims[0] > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        throw std::runtime_error(std::string("Canonical ragged attention tensor '") + tensor_name +
+                                 "' dimensions exceed int64_t range.");
+    }
+    const uint64_t elementsPerToken = dims[1] * dims[2];
+    if (dims[1] != 0 && elementsPerToken / dims[1] != dims[2]) {
+        throw std::runtime_error(std::string("Canonical ragged attention tensor '") + tensor_name +
+                                 "' elements-per-token overflows uint64_t.");
+    }
+    if (semanticSequenceLength > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / elementsPerToken) {
+        throw std::runtime_error(std::string("Canonical ragged attention tensor '") + tensor_name +
+                                 "' semantic batch stride exceeds int64_t range.");
+    }
     AttentionTensorSpec spec;
     spec.dimensions = {static_cast<int64_t>(batchSize),
                        static_cast<int64_t>(dims[1]),
-                       static_cast<int64_t>(dims[0]),
+                       static_cast<int64_t>(semanticSequenceLength),
                        static_cast<int64_t>(dims[2])};
-    const uint64_t elementsPerToken = dims[1] * dims[2];
-    spec.strides = {static_cast<int64_t>(dims[0] * elementsPerToken),
+    spec.strides = {static_cast<int64_t>(semanticSequenceLength * elementsPerToken),
                     static_cast<int64_t>(dims[2]),
                     static_cast<int64_t>(elementsPerToken),
                     1};
     spec.dataType = tensor.getDataType();
     spec.ragged = true;
+    spec.raggedPackedTokenCapacity = static_cast<int64_t>(dims[0]);
     return spec;
 }
 
@@ -552,13 +579,17 @@ CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
             (oTensor.getDimensions().size() == 3) != queryPackedRagged) {
             throw std::runtime_error("Attention mixed ragged storage requires Q/O and K/V to agree within each sequence domain.");
         }
-        descriptor.q = queryPackedRagged ? packedRaggedAttentionSpecForTensor(qTensor, q_layout, raggedBatchSize, "q")
+        descriptor.q = queryPackedRagged ? packedRaggedAttentionSpecForTensor(
+                                               qTensor, q_layout, raggedBatchSize, ragged_query_max_sequence_length, "q")
                                          : attentionSpecForTensor(qTensor, q_layout, "q");
-        descriptor.o = queryPackedRagged ? packedRaggedAttentionSpecForTensor(oTensor, o_layout, raggedBatchSize, "o")
+        descriptor.o = queryPackedRagged ? packedRaggedAttentionSpecForTensor(
+                                               oTensor, o_layout, raggedBatchSize, ragged_query_max_sequence_length, "o")
                                          : attentionSpecForTensor(oTensor, o_layout, "o");
-        descriptor.k = kvPackedRagged ? packedRaggedAttentionSpecForTensor(kTensor, k_layout, raggedBatchSize, "k")
+        descriptor.k = kvPackedRagged ? packedRaggedAttentionSpecForTensor(
+                                               kTensor, k_layout, raggedBatchSize, ragged_kv_max_sequence_length, "k")
                                       : attentionSpecForTensor(kTensor, k_layout, "k");
-        descriptor.v = kvPackedRagged ? packedRaggedAttentionSpecForTensor(vTensor, v_layout, raggedBatchSize, "v")
+        descriptor.v = kvPackedRagged ? packedRaggedAttentionSpecForTensor(
+                                               vTensor, v_layout, raggedBatchSize, ragged_kv_max_sequence_length, "v")
                                       : attentionSpecForTensor(vTensor, v_layout, "v");
         descriptor.q.ragged = queryRagged;
         descriptor.o.ragged = queryRagged;
@@ -616,13 +647,17 @@ CudnnAttentionDescriptor CompiledAttentionBackward::descriptorFor(const Tensor& 
             (oTensor.getDimensions().size() == 3) != queryPackedRagged) {
             throw std::runtime_error("Attention mixed ragged storage requires Q/O and K/V to agree within each sequence domain.");
         }
-        descriptor.q = queryPackedRagged ? packedRaggedAttentionSpecForTensor(qTensor, q_layout, raggedBatchSize, "q")
+        descriptor.q = queryPackedRagged ? packedRaggedAttentionSpecForTensor(
+                                               qTensor, q_layout, raggedBatchSize, ragged_query_max_sequence_length, "q")
                                          : attentionSpecForTensor(qTensor, q_layout, "q");
-        descriptor.o = queryPackedRagged ? packedRaggedAttentionSpecForTensor(oTensor, o_layout, raggedBatchSize, "o")
+        descriptor.o = queryPackedRagged ? packedRaggedAttentionSpecForTensor(
+                                               oTensor, o_layout, raggedBatchSize, ragged_query_max_sequence_length, "o")
                                          : attentionSpecForTensor(oTensor, o_layout, "o");
-        descriptor.k = kvPackedRagged ? packedRaggedAttentionSpecForTensor(kTensor, k_layout, raggedBatchSize, "k")
+        descriptor.k = kvPackedRagged ? packedRaggedAttentionSpecForTensor(
+                                               kTensor, k_layout, raggedBatchSize, ragged_kv_max_sequence_length, "k")
                                       : attentionSpecForTensor(kTensor, k_layout, "k");
-        descriptor.v = kvPackedRagged ? packedRaggedAttentionSpecForTensor(vTensor, v_layout, raggedBatchSize, "v")
+        descriptor.v = kvPackedRagged ? packedRaggedAttentionSpecForTensor(
+                                               vTensor, v_layout, raggedBatchSize, ragged_kv_max_sequence_length, "v")
                                       : attentionSpecForTensor(vTensor, v_layout, "v");
         descriptor.q.ragged = queryRagged;
         descriptor.o.ragged = queryRagged;

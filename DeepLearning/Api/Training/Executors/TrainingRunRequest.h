@@ -31,8 +31,9 @@ enum class TrainingRunExecutionMode { FIT, EVALUATE };
 // One Nsight Systems capture requested for a named TRAIN phase. startEpoch is
 // 1-based and relative to that fit/training phase: startEpoch=1 means the first
 // epoch of the matching phase regardless of the Trainer's cumulative epoch
-// history. outputPath is consumed by Thor's `thor-nsys-profile` launcher; the
-// CUDA profiler API itself only controls the collection window.
+// history. `thor-nsys-profile` establishes the Nsight session and raw-report
+// control directory; the native runner relocates the finalized report to
+// outputPath synchronously after cudaProfilerStop() returns.
 struct NsightSystemsProfileCaptureConfig {
     std::string phaseName{};
     uint64_t startEpoch = 1;

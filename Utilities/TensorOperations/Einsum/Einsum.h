@@ -135,6 +135,7 @@ class StampedEinsum {
     [[nodiscard]] bool usesStridedBatchedGemm() const { return uses_strided_batched_gemm; }
     [[nodiscard]] std::vector<CubReductionPath> getStandaloneReductionPaths() const;
     [[nodiscard]] std::optional<CubReductionPath> getStandaloneReductionPath() const;
+    [[nodiscard]] std::vector<StampedReductionStageDiagnostic> getStandaloneReductionDiagnostics() const;
     [[nodiscard]] std::vector<std::string> getExpressionStageKindNames() const;
     [[nodiscard]] std::vector<StampedMatmulStageDiagnostic> getExpressionMatmulStageDiagnostics() const;
 

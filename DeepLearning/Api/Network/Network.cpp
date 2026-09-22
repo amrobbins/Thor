@@ -768,15 +768,39 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
     stampedNetwork.bytesRequired = firstInstanceBytes;
     stampedNetwork.batchSize = batchSize;
 
-    // Preserve the same 1 GiB safety reserve used by serialized model
-    // startup. This is only the early model-placement check; the complete
-    // startup transaction checks again after output, dataset-session, and input
-    // staging allocations have also been created.
-    // FIXME: need to determine if this is the not the first instance and use shared weights and shared weights mem requirements
+    // The API-layer byte estimate is intentionally conservative and is not an
+    // allocation plan. In particular, expression-backed training layers account
+    // for backward/error storage using logical input sizes, while the physical
+    // graph may alias, reuse, or otherwise lower that storage differently. Do
+    // not reject a placement because this estimate exceeds currently-free GPU
+    // memory: the serialized device-startup transaction is the authoritative
+    // admission mechanism. It stamps/compiles/autotunes the real physical graph,
+    // preallocates the training slots, executes a real first batch, and then
+    // enforces DEVICE_STARTUP_SAFETY_RESERVE_BYTES on actual remaining memory.
+    //
+    // Keep the estimate for reporting/scheduling metadata, and surface how it
+    // would have behaved under the former coarse gate when memory diagnostics are
+    // enabled. A device that does not even have the required safety reserve free
+    // before stamping can still be rejected immediately: no successful startup
+    // transaction could satisfy the same reserve without first releasing another
+    // resident model.
     const uint64_t freeMemBytes = MachineEvaluator::instance().getFreeMemBytes(gpuNum);
-    if (freeMemBytes <= ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES ||
-        firstInstanceBytes >
-            freeMemBytes - ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES) {
+    if (ThorImplementation::gpuMemoryDiagnosticsEnabled()) {
+        const uint64_t reserveBytes = ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES;
+        const uint64_t legacyBudgetBytes = freeMemBytes > reserveBytes ? freeMemBytes - reserveBytes : 0;
+        std::printf(
+            "INFO Thor API memory estimate: gpu=%u batch_size=%u first_instance=%s non_first_instance=%s free=%s "
+            "startup_reserve=%s legacy_estimate_gate_would_reject=%s\n",
+            gpuNum,
+            batchSize,
+            ThorImplementation::formatGpuMemoryBytes(firstInstanceBytes).c_str(),
+            ThorImplementation::formatGpuMemoryBytes(nonFirstInstanceBytes).c_str(),
+            ThorImplementation::formatGpuMemoryBytes(freeMemBytes).c_str(),
+            ThorImplementation::formatGpuMemoryBytes(reserveBytes).c_str(),
+            firstInstanceBytes > legacyBudgetBytes ? "yes" : "no");
+        std::fflush(stdout);
+    }
+    if (freeMemBytes <= ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES) {
         return StatusCode::GPU_OUT_OF_MEMORY;
     }
 

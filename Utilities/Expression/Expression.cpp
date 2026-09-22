@@ -730,6 +730,8 @@ json exprNodeToJson(const ExprNode& node) {
     j["attention_use_bias"] = node.attention_use_bias;
     j["attention_use_padding_mask"] = node.attention_use_padding_mask;
     j["attention_use_ragged_offsets"] = node.attention_use_ragged_offsets;
+    j["attention_ragged_query_max_sequence_length"] = node.attention_ragged_query_max_sequence_length;
+    j["attention_ragged_kv_max_sequence_length"] = node.attention_ragged_kv_max_sequence_length;
     j["attention_use_paged_kv_cache"] = node.attention_use_paged_kv_cache;
     j["attention_paged_kv_max_sequence_length"] = node.attention_paged_kv_max_sequence_length;
     j["attention_dropout_probability"] = node.attention_dropout_probability;
@@ -998,6 +1000,10 @@ ExprNode exprNodeFromJson(const json& j) {
     node.attention_use_bias = j.value("attention_use_bias", false);
     node.attention_use_padding_mask = j.value("attention_use_padding_mask", false);
     node.attention_use_ragged_offsets = j.value("attention_use_ragged_offsets", false);
+    node.attention_ragged_query_max_sequence_length =
+        j.value("attention_ragged_query_max_sequence_length", uint64_t{0});
+    node.attention_ragged_kv_max_sequence_length =
+        j.value("attention_ragged_kv_max_sequence_length", uint64_t{0});
     node.attention_use_paged_kv_cache = j.value("attention_use_paged_kv_cache", false);
     node.attention_paged_kv_max_sequence_length = j.value("attention_paged_kv_max_sequence_length", int64_t{0});
     node.attention_dropout_probability = j.value("attention_dropout_probability", 0.0f);
@@ -1891,6 +1897,8 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                 ";alibi=" + std::to_string(n.attention_use_alibi_mask ? 1 : 0) + ";bias=" + std::to_string(n.attention_use_bias ? 1 : 0) +
                 ";padding=" + std::to_string(n.attention_use_padding_mask ? 1 : 0) +
                 ";ragged=" + std::to_string(n.attention_use_ragged_offsets ? 1 : 0) +
+                ";raggedQMax=" + std::to_string(n.attention_ragged_query_max_sequence_length) +
+                ";raggedKvMax=" + std::to_string(n.attention_ragged_kv_max_sequence_length) +
                 ";dropout=" + formatFloatCanonical(n.attention_dropout_probability);
             if (n.attention_use_padding_mask) {
                 if (n.attention_seq_len_q_node != UINT32_MAX) {
@@ -2451,6 +2459,29 @@ void ExpressionDefinition::validate() const {
                     "ExpressionDefinition forward matmul epilogue auxiliary state requires a forward GELU MATMUL/GEMM with no backward epilogue.");
             }
         }
+        const bool is_attention_node =
+            node.op == ExprOp::ATTENTION || node.op == ExprOp::ATTENTION_BACKWARD_Q ||
+            node.op == ExprOp::ATTENTION_BACKWARD_K || node.op == ExprOp::ATTENTION_BACKWARD_V ||
+            node.op == ExprOp::ATTENTION_BACKWARD_BIAS;
+        if (!is_attention_node &&
+            (node.attention_ragged_query_max_sequence_length != 0 ||
+             node.attention_ragged_kv_max_sequence_length != 0)) {
+            throw std::runtime_error(
+                "ExpressionDefinition ragged attention max-sequence metadata is valid only on attention nodes.");
+        }
+        if (is_attention_node && !node.attention_use_ragged_offsets &&
+            (node.attention_ragged_query_max_sequence_length != 0 ||
+             node.attention_ragged_kv_max_sequence_length != 0)) {
+            throw std::runtime_error(
+                "ExpressionDefinition attention max-sequence metadata requires ragged offsets.");
+        }
+        if (is_attention_node && node.attention_use_ragged_offsets &&
+            ((node.attention_ragged_query_max_sequence_length == 0) !=
+             (node.attention_ragged_kv_max_sequence_length == 0))) {
+            throw std::runtime_error(
+                "ExpressionDefinition packed-ragged q/kv max-sequence capacities must either both be specified or both use legacy inference.");
+        }
+
         if ((node.op == ExprOp::ATTENTION) && node.attention_use_bias) {
             validateNodeIndex(node.alpha_node, "attention bias");
             if (node.alpha_node >= node_index_u32) {
@@ -4378,6 +4409,8 @@ void applyAttentionOptions(ExprNode& node, const AttentionOptions& options, bool
     node.attention_use_alibi_mask = options.use_alibi_mask;
     node.attention_use_bias = use_bias;
     node.attention_use_padding_mask = options.use_padding_mask;
+    node.attention_ragged_query_max_sequence_length = options.ragged_query_max_sequence_length;
+    node.attention_ragged_kv_max_sequence_length = options.ragged_kv_max_sequence_length;
     node.attention_use_paged_kv_cache = options.use_paged_kv_cache;
     node.attention_paged_kv_max_sequence_length = options.paged_kv_max_sequence_length;
     node.attention_dropout_probability = options.dropout_probability;
@@ -4391,6 +4424,16 @@ void applyAttentionOptions(ExprNode& node, const AttentionOptions& options, bool
 }
 
 void validateAttentionOptions(const AttentionOptions& options, bool use_bias, bool use_ragged_offsets = false) {
+    if (!use_ragged_offsets &&
+        (options.ragged_query_max_sequence_length != 0 || options.ragged_kv_max_sequence_length != 0)) {
+        throw std::runtime_error(
+            "Attention ragged max-sequence capacities are valid only when canonical ragged offsets are supplied.");
+    }
+    if (use_ragged_offsets &&
+        ((options.ragged_query_max_sequence_length == 0) != (options.ragged_kv_max_sequence_length == 0))) {
+        throw std::runtime_error(
+            "Attention packed-ragged q/kv max-sequence capacities must either both be specified or both use legacy inference.");
+    }
     if (use_ragged_offsets && (options.q_layout != AttentionTensorLayout::BSHD || options.k_layout != AttentionTensorLayout::BSHD ||
                                options.v_layout != AttentionTensorLayout::BSHD || options.o_layout != AttentionTensorLayout::BSHD)) {
         throw std::runtime_error(

@@ -135,6 +135,7 @@ void appendSpec(ostringstream& out, string_view name, const AttentionTensorSpec&
     out << name << ".stride=" << joinInts(spec.strides) << ';';
     out << name << ".dtype=" << TensorDescriptor::getElementTypeName(spec.dataType) << ';';
     out << name << ".ragged=" << spec.ragged << ';';
+    out << name << ".packedT=" << spec.raggedPackedTokenCapacity << ';';
 }
 
 bool isFp8(DataType dtype) {
@@ -152,6 +153,30 @@ bool hasBshdPackedStrides(const AttentionTensorSpec& spec) {
     const int64_t sequenceLength = spec.dimensions.at(2);
     const int64_t headDim = spec.dimensions.at(3);
     return spec.strides == vector<int64_t>{sequenceLength * heads * headDim, headDim, heads * headDim, 1};
+}
+
+int64_t semanticMaxTotalTokens(const AttentionTensorSpec& spec, string_view name) {
+    if (spec.dimensions.size() != 4 || spec.dimensions[0] <= 0 || spec.dimensions[2] <= 0) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) +
+                               "' requires positive semantic B and S dimensions.");
+    }
+    const int64_t batch = spec.dimensions[0];
+    const int64_t sequenceLength = spec.dimensions[2];
+    if (batch > numeric_limits<int64_t>::max() / sequenceLength) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) +
+                               "' B*S capacity exceeds int64_t range.");
+    }
+    const int64_t semanticCapacity = batch * sequenceLength;
+    if (!spec.ragged || spec.raggedPackedTokenCapacity == 0) {
+        return semanticCapacity;
+    }
+    if (spec.raggedPackedTokenCapacity < 0) {
+        throw invalid_argument(string("cuDNN ragged attention tensor '") + string(name) +
+                               "' packed token capacity must be non-negative.");
+    }
+    // Packed storage may be deliberately over-provisioned. cuDNN's
+    // max_total_seq_len is a logical token bound, so cap it by B*S_max.
+    return min(spec.raggedPackedTokenCapacity, semanticCapacity);
 }
 
 void requireInitialized(const Tensor& tensor, string_view name) {
@@ -187,7 +212,10 @@ void requireTensorMatchesSpec(const Tensor& tensor, const AttentionTensorSpec& s
         if (spec.dimensions.size() != 4) {
             throw invalid_argument(string("cuDNN ragged attention tensor '") + string(name) + "' descriptor must be rank 4.");
         }
-        const vector<int64_t> expectedPacked{spec.dimensions.at(2), spec.dimensions.at(1), spec.dimensions.at(3)};
+        const int64_t packedTokenCapacity =
+            spec.raggedPackedTokenCapacity > 0 ? spec.raggedPackedTokenCapacity
+                                               : semanticMaxTotalTokens(spec, name);
+        const vector<int64_t> expectedPacked{packedTokenCapacity, spec.dimensions.at(1), spec.dimensions.at(3)};
         if (dims != spec.dimensions && dims != expectedPacked) {
             throw invalid_argument(string("cuDNN ragged attention tensor '") + string(name) +
                                    "' dimension mismatch. Expected BSHD " + joinInts(spec.dimensions) + " or packed THD " +
@@ -789,20 +817,23 @@ class AttentionPlanRepository {
         if (spec.dimensions.size() != spec.strides.size() || spec.dimensions.empty()) {
             throw runtime_error("cuDNN attention autotune requires a valid tensor spec for " + string(label) + ".");
         }
+        if (spec.ragged && spec.raggedPackedTokenCapacity > 0) {
+            if (spec.dimensions.size() != 4 || spec.dimensions[1] <= 0 || spec.dimensions[3] <= 0) {
+                throw runtime_error("cuDNN attention autotune requires valid packed-ragged H/D dimensions for " +
+                                    string(label) + ".");
+            }
+            uint64_t elements = checkedMul(static_cast<uint64_t>(spec.raggedPackedTokenCapacity),
+                                           static_cast<uint64_t>(spec.dimensions[1]),
+                                           label);
+            return checkedMul(elements, static_cast<uint64_t>(spec.dimensions[3]), label);
+        }
         uint64_t maxElement = 0;
         for (size_t i = 0; i < spec.dimensions.size(); ++i) {
             if (spec.dimensions[i] <= 0 || spec.strides[i] < 0) {
                 throw runtime_error("cuDNN attention autotune requires positive dimensions/non-negative strides for " +
                                     string(label) + ".");
             }
-            // A genuinely packed ragged tensor stores one packed token domain even
-            // though its semantic graph descriptor still carries B in dimension 0.
-            // Tune against a legal packed prefix whose total token count is <= S;
-            // ignoring the batch stride therefore matches the storage that cuDNN
-            // reaches through the synthetic ragged offsets below.  Legacy rank-4
-            // ragged storage is over-provisioned relative to this prefix, so this is
-            // safe for that representation too.
-            const uint64_t dim = (spec.ragged && i == 0) ? 1 : static_cast<uint64_t>(spec.dimensions[i]);
+            const uint64_t dim = static_cast<uint64_t>(spec.dimensions[i]);
             if (dim > 1) {
                 const uint64_t term = checkedMul(dim - 1, static_cast<uint64_t>(spec.strides[i]), label);
                 if (term > numeric_limits<uint64_t>::max() - maxElement) {
@@ -870,18 +901,28 @@ class AttentionPlanRepository {
         }
     }
 
-    static vector<int32_t> representativeSequenceLengths(int64_t batchSize, int64_t sequenceCapacity, bool packedRagged) {
+    static vector<int32_t> representativeSequenceLengths(const AttentionTensorSpec& spec, string_view label) {
+        if (spec.dimensions.size() != 4) {
+            throw runtime_error("cuDNN attention autotune sequence tensor must be rank 4 for " + string(label) + ".");
+        }
+        const int64_t batchSize = spec.dimensions[0];
+        const int64_t sequenceCapacity = spec.dimensions[2];
         if (batchSize <= 0 || sequenceCapacity <= 0 || batchSize > numeric_limits<int32_t>::max() ||
             sequenceCapacity > numeric_limits<int32_t>::max()) {
             throw runtime_error("cuDNN attention autotune sequence geometry must fit INT32.");
         }
         vector<int32_t> lengths(static_cast<size_t>(batchSize));
-        if (!packedRagged) {
+        if (!spec.ragged) {
             fill(lengths.begin(), lengths.end(), static_cast<int32_t>(sequenceCapacity));
             return lengths;
         }
-        const int64_t base = sequenceCapacity / batchSize;
-        const int64_t remainder = sequenceCapacity % batchSize;
+
+        const int64_t totalCapacity = semanticMaxTotalTokens(spec, label);
+        const int64_t base = totalCapacity / batchSize;
+        const int64_t remainder = totalCapacity % batchSize;
+        if (base > sequenceCapacity || (remainder != 0 && base == sequenceCapacity)) {
+            throw runtime_error("cuDNN attention autotune ragged total capacity exceeds B*S_max for " + string(label) + ".");
+        }
         for (int64_t i = 0; i < batchSize; ++i) {
             lengths[static_cast<size_t>(i)] = static_cast<int32_t>(base + (i < remainder ? 1 : 0));
         }
@@ -967,10 +1008,8 @@ class AttentionPlanRepository {
         const bool backendKvRagged = descriptor.k.ragged || mixedSequenceDomains;
         const bool backendOutputRagged = descriptor.o.ragged || mixedSequenceDomains;
 
-        const vector<int32_t> queryLengths = representativeSequenceLengths(
-            descriptor.batchSize(), descriptor.queryLength(), descriptor.q.ragged);
-        const vector<int32_t> kvLengths = representativeSequenceLengths(
-            descriptor.batchSize(), descriptor.keyValueLength(), descriptor.k.ragged);
+        const vector<int32_t> queryLengths = representativeSequenceLengths(descriptor.q, "query");
+        const vector<int32_t> kvLengths = representativeSequenceLengths(descriptor.k, "key/value");
 
         if (descriptor.usePaddingMask) {
             addInt32Vector(buffers, placement, UID_SEQ_Q, queryLengths, stream, "query sequence lengths");
@@ -980,8 +1019,7 @@ class AttentionPlanRepository {
         if (backendQueryRagged || backendOutputRagged) {
             const vector<int32_t> backendQueryLengths = descriptor.q.ragged
                                                            ? queryLengths
-                                                           : representativeSequenceLengths(
-                                                                 descriptor.batchSize(), descriptor.queryLength(), false);
+                                                           : representativeSequenceLengths(descriptor.q, "dense query");
             if (backendQueryRagged) {
                 addInt32Vector(buffers,
                                placement,
@@ -1002,8 +1040,7 @@ class AttentionPlanRepository {
         if (backendKvRagged) {
             const vector<int32_t> backendKvLengths = descriptor.k.ragged
                                                         ? kvLengths
-                                                        : representativeSequenceLengths(
-                                                              descriptor.batchSize(), descriptor.keyValueLength(), false);
+                                                        : representativeSequenceLengths(descriptor.k, "dense key/value");
             addInt32Vector(buffers,
                            placement,
                            UID_RAGGED_K,
@@ -1456,23 +1493,15 @@ class AttentionPlanRepository {
                 .set_seq_len_q(seqLen(built.graph, "seq_len_q", UID_SEQ_Q, descriptor.batchSize()))
                 .set_seq_len_kv(seqLen(built.graph, "seq_len_kv", UID_SEQ_KV, descriptor.batchSize()));
         }
-        // cuDNN backward uses these capacities to size THD/ragged workspace.
-        // Thor's genuinely ragged AttentionTensorSpec encodes packed token
-        // capacity in the semantic S dimension.  A logically dense side that is
-        // synthesized as uniform THD for mixed backward instead needs B*S total
-        // tokens. Pass either capacity explicitly rather than relying on cuDNN's
-        // default workspace geometry.
+        // cuDNN backward uses these whole-batch capacities to size THD/ragged
+        // workspace. Keep them distinct from semantic S_max: packed ragged
+        // tensors publish physical T separately, while synthesized dense THD uses
+        // B*S_max.
         if (backendQueryRagged) {
-            const int64_t maxTotalQueryTokens = descriptor.q.ragged
-                                                     ? descriptor.queryLength()
-                                                     : descriptor.batchSize() * descriptor.queryLength();
-            attrs.set_max_total_seq_len_q(maxTotalQueryTokens);
+            attrs.set_max_total_seq_len_q(descriptor.maxTotalQueryTokens());
         }
         if (backendKvRagged) {
-            const int64_t maxTotalKvTokens = descriptor.k.ragged
-                                                 ? descriptor.keyValueLength()
-                                                 : descriptor.batchSize() * descriptor.keyValueLength();
-            attrs.set_max_total_seq_len_kv(maxTotalKvTokens);
+            attrs.set_max_total_seq_len_kv(descriptor.maxTotalKeyValueTokens());
         }
         if (descriptor.useBias) {
             AttentionTensorSpec fallback;
@@ -1562,7 +1591,7 @@ AttentionTensorSpec AttentionTensorSpec::fromLayout(AttentionTensorLayout layout
 string AttentionTensorSpec::toString() const {
     ostringstream out;
     out << "dim=" << joinInts(dimensions) << " stride=" << joinInts(strides) << " dtype=" << TensorDescriptor::getElementTypeName(dataType)
-        << " ragged=" << ragged;
+        << " ragged=" << ragged << " packedT=" << raggedPackedTokenCapacity;
     return out.str();
 }
 
@@ -1571,6 +1600,10 @@ int64_t CudnnAttentionDescriptor::queryHeads() const { return q.dimensions.at(1)
 int64_t CudnnAttentionDescriptor::keyValueHeads() const { return k.dimensions.at(1); }
 int64_t CudnnAttentionDescriptor::queryLength() const { return q.dimensions.at(2); }
 int64_t CudnnAttentionDescriptor::keyValueLength() const { return usePagedKvCache ? pagedKv.maxSequenceLengthKv : k.dimensions.at(2); }
+int64_t CudnnAttentionDescriptor::maxTotalQueryTokens() const { return semanticMaxTotalTokens(q, "q"); }
+int64_t CudnnAttentionDescriptor::maxTotalKeyValueTokens() const {
+    return usePagedKvCache ? batchSize() * keyValueLength() : semanticMaxTotalTokens(k, "k");
+}
 int64_t CudnnAttentionDescriptor::qkHeadDim() const { return q.dimensions.at(3); }
 int64_t CudnnAttentionDescriptor::vHeadDim() const { return v.dimensions.at(3); }
 
@@ -1588,6 +1621,13 @@ void CudnnAttentionDescriptor::validateForward() const {
         }
         if (spec.strides[3] != 1)
             throwInvalidAttention(string(name) + " head dimension must be stride-1 for cuDNN SDPA fast kernels");
+        if (spec.raggedPackedTokenCapacity < 0)
+            throwInvalidAttention(string(name) + " packed ragged token capacity must be non-negative");
+        if (!spec.ragged && spec.raggedPackedTokenCapacity != 0)
+            throwInvalidAttention(string(name) + " dense attention tensor cannot carry a packed ragged token capacity");
+        if (spec.ragged && spec.raggedPackedTokenCapacity > 0 &&
+            spec.raggedPackedTokenCapacity < spec.dimensions[2])
+            throwInvalidAttention(string(name) + " packed ragged token capacity must be >= semantic S_max");
     };
 
     checkSpec(q, "q");

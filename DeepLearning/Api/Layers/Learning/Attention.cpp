@@ -546,6 +546,8 @@ AttentionEpilogueInputDataTypes attentionEpilogueInputDataTypes(
 
 ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequenceLength,
                                                               uint64_t keyValueSequenceLength,
+                                                              uint64_t queryMaxSequenceLength,
+                                                              uint64_t keyValueMaxSequenceLength,
                                                               uint64_t queryInputFeatures,
                                                               uint64_t keyInputFeatures,
                                                               uint64_t valueInputFeatures,
@@ -637,6 +639,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
         {"feature_output"},
         [querySequenceLength,
          keyValueSequenceLength,
+         queryMaxSequenceLength,
+         keyValueMaxSequenceLength,
          queryInputFeatures,
          keyInputFeatures,
          valueInputFeatures,
@@ -1094,6 +1098,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             options.diagonal_left_bound = diagonalLeftBound;
             options.diagonal_right_bound = diagonalRightBound;
             options.use_alibi_mask = useAlibiMask;
+            options.ragged_query_max_sequence_length = useAnyRagged ? queryMaxSequenceLength : 0;
+            options.ragged_kv_max_sequence_length = useAnyRagged ? keyValueMaxSequenceLength : 0;
             options.compute_dtype = computeDType;
             options.output_dtype = outputDType;
             if (attentionScale.has_value()) {
@@ -1397,7 +1403,11 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             };
             if (sdpaDropoutProbability > 0.0f) {
                 auto dropoutState = std::make_shared<AttentionDropoutRuntimeState>(dropoutSeed, dropoutOffset);
-                dropoutState->setOffsetAdvance(checkedDropoutOffsetAdvance(batch, numHeads, querySequenceLength, keyValueSequenceLength));
+                dropoutState->setOffsetAdvance(checkedDropoutOffsetAdvance(
+                    batch,
+                    numHeads,
+                    queryRagged ? queryMaxSequenceLength : querySequenceLength,
+                    keyValueRagged ? keyValueMaxSequenceLength : keyValueSequenceLength));
                 tensorScalarInputs[kAttentionDropoutSeedInputName] = dropoutState->seedBinding(queryInput.getPlacement());
                 tensorScalarInputs[kAttentionDropoutOffsetInputName] = dropoutState->offsetBinding(queryInput.getPlacement());
                 appendPreForwardHook([dropoutState](Stream& runStream) { dropoutState->uploadForForward(runStream); });
@@ -1677,9 +1687,13 @@ void Attention::Builder::verifyConfig() const {
             "Attention keyRopePositionOffsetsInput requires a RaggedTensor key/value input.");
     }
     const uint64_t maximumPossibleQuerySequenceLength =
-        queryRagged ? _raggedQueryInput->getMaxTotalValues() : _queryInput->getDimensions().at(0);
+        queryRagged && _raggedQueryInput->hasMaxValuesPerRow()
+            ? _raggedQueryInput->getMaxValuesPerRow()
+            : _queryInput->getDimensions().at(0);
     const uint64_t maximumPossibleKeySequenceLength =
-        keyValueRagged ? _raggedKeyInput->getMaxTotalValues() : _keyInput->getDimensions().at(0);
+        keyValueRagged && _raggedKeyInput->hasMaxValuesPerRow()
+            ? _raggedKeyInput->getMaxValuesPerRow()
+            : _keyInput->getDimensions().at(0);
     const ThorImplementation::RotaryPositionEmbeddingOptions resolvedRopeOptions =
         _ropeOptions.value_or(ThorImplementation::RotaryPositionEmbeddingOptions{});
     const int64_t queryRopePositionOffset = _queryRopePositionOffset.value_or(resolvedRopeOptions.position_offset);
@@ -1924,6 +1938,14 @@ Attention Attention::Builder::build() {
     const auto valueDims = _valueInput->getDimensions();
     const uint64_t querySequenceLength = queryDims.at(0);
     const uint64_t keyValueSequenceLength = keyDims.at(0);
+    const uint64_t queryMaxSequenceLength =
+        _raggedQueryInput.has_value() && _raggedQueryInput->hasMaxValuesPerRow()
+            ? _raggedQueryInput->getMaxValuesPerRow()
+            : querySequenceLength;
+    const uint64_t keyValueMaxSequenceLength =
+        _raggedKeyInput.has_value() && _raggedKeyInput->hasMaxValuesPerRow()
+            ? _raggedKeyInput->getMaxValuesPerRow()
+            : keyValueSequenceLength;
     const uint64_t queryInputFeatures = queryDims.at(1);
     const uint64_t keyInputFeatures = keyDims.at(1);
     const uint64_t valueInputFeatures = valueDims.at(1);
@@ -1960,6 +1982,8 @@ Attention Attention::Builder::build() {
     Tensor output(_outputDataType.value(), {querySequenceLength, _outputFeatures.value()});
     Attention layer(makeAttentionExpression(querySequenceLength,
                                             keyValueSequenceLength,
+                                            queryMaxSequenceLength,
+                                            keyValueMaxSequenceLength,
                                             queryInputFeatures,
                                             keyInputFeatures,
                                             valueInputFeatures,
@@ -2293,7 +2317,9 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
         }
         Tensor values = network->getApiTensorByOriginalId(raggedJson.at("values").at("id").get<uint64_t>());
         Tensor offsets = network->getApiTensorByOriginalId(raggedJson.at("offsets").at("id").get<uint64_t>());
-        RaggedTensor ragged(values, offsets);
+        RaggedTensor ragged = raggedJson.contains("max_values_per_row")
+                                  ? RaggedTensor(values, offsets, raggedJson.at("max_values_per_row").get<uint64_t>())
+                                  : RaggedTensor(values, offsets);
         if (ragged.getBatchSize() != raggedJson.at("batch_size").get<uint64_t>() ||
             ragged.getMaxTotalValues() != raggedJson.at("max_total_values").get<uint64_t>()) {
             throw std::runtime_error(std::string("Attention serialized ") + fieldName +
@@ -2465,8 +2491,12 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
     if (keyRopePositionOffsetsInput.has_value() && !keyValueRagged) {
         throw std::runtime_error("Attention serialized per-row key RoPE position offsets require ragged key/value inputs.");
     }
-    const uint64_t maxQ = queryRagged ? raggedQueryInput->getMaxTotalValues() : querySequenceLength;
-    const uint64_t maxK = keyValueRagged ? raggedKeyInput->getMaxTotalValues() : keyValueSequenceLength;
+    const uint64_t maxQ = queryRagged && raggedQueryInput->hasMaxValuesPerRow()
+                              ? raggedQueryInput->getMaxValuesPerRow()
+                              : querySequenceLength;
+    const uint64_t maxK = keyValueRagged && raggedKeyInput->hasMaxValuesPerRow()
+                              ? raggedKeyInput->getMaxValuesPerRow()
+                              : keyValueSequenceLength;
     if (const std::optional<std::string> error = ropeFp32SequenceLengthValidationError(
             useRope,
             ropeOptions,
@@ -2515,6 +2545,8 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
 
     Attention layer(makeAttentionExpression(querySequenceLength,
                                             keyValueSequenceLength,
+                                            maxQ,
+                                            maxK,
                                             queryInputFeatures,
                                             keyInputFeatures,
                                             valueInputFeatures,

@@ -2,6 +2,7 @@
 #include "benchmarks/CubReductionBenchmarkCandidate.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Common/Stream.h"
+#include "Utilities/Exceptions.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 
 #include <cuda_runtime.h>
@@ -15,6 +16,8 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <set>
+#include <tuple>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -31,6 +34,9 @@ constexpr uint64_t L2_WORKING_SET_MULTIPLE = 8;
 constexpr int WARMUP_ITERATIONS = 3;
 constexpr int TIMING_SAMPLES = 5;
 constexpr int TIMED_ITERATIONS_PER_SAMPLE = 4;
+constexpr int BROAD_WARMUP_ITERATIONS = 2;
+constexpr int BROAD_TIMING_SAMPLES = 3;
+constexpr uint64_t BROAD_MAX_INPUT_BYTES = 512ULL * MIB;
 
 struct ReductionShape {
     const char* name;
@@ -39,8 +45,8 @@ struct ReductionShape {
 };
 
 struct ExactReductionCase {
-    const char* family;
-    const char* name;
+    std::string family;
+    std::string name;
     std::vector<uint64_t> dimensions;
     std::vector<uint32_t> axes;
     CubReductionPath expected_production_path;
@@ -61,7 +67,7 @@ struct ViewCensusCase {
     std::vector<uint64_t> dimensions;
     std::vector<uint64_t> strides;
     std::vector<uint32_t> axes;
-    CubReductionPath expected_production_path;
+    std::optional<CubReductionPath> expected_production_path;
     bool expect_dense_physical_permutation = false;
 };
 
@@ -75,6 +81,7 @@ struct BenchmarkOptions {
     bool focused_arg_x4 = false;
     bool focused_arg_x4_awkward = false;
     bool reduction_census = false;
+    bool full_row_shard_census = false;
     bool arg_census = false;
     bool view_census = false;
     bool dense_run_stage_census = false;
@@ -222,6 +229,8 @@ const char* operationName(CubReductionOp op) {
             return "l1";
         case CubReductionOp::L2Norm:
             return "l2";
+        case CubReductionOp::SumSquares:
+            return "sum_squares";
     }
     return "unknown";
 }
@@ -244,8 +253,6 @@ const char* pathName(CubReductionPath path) {
             return "contiguous_segment";
         case CubReductionPath::TiledFixedSegment:
             return "tiled_segment";
-        case CubReductionPath::StridedFixedSegment:
-            return "strided_segment";
         case CubReductionPath::OffsetSegmented:
             return "offset_segmented";
         case CubReductionPath::ComposedDense:
@@ -335,7 +342,17 @@ const char* tiledStrategyName(uint64_t inner_size, DataType input_dtype) {
 }
 
 std::string strategyName(const StampedCubReduction& reduction) {
+    if (reduction.getPath() == CubReductionPath::ContiguousFixedSegment
+        && reduction.getGeometry().permutation_aware_contiguous_segments) {
+        return "physical_trailing_contiguous_segments";
+    }
     if (reduction.getPath() == CubReductionPath::TiledFixedSegment) {
+        if (reduction.getGeometry().payload_transpose_tiled_geometry.has_value()) {
+            return "payload_transpose_32x33";
+        }
+        if (reduction.getGeometry().pitched_tiled_geometry.has_value()) {
+            return "pitched_affine_tiled";
+        }
         return tiledStrategyName(reduction.getGeometry().inner_size, reduction.getInputDataType());
     }
     if (reduction.getPath() == CubReductionPath::ComposedDense) {
@@ -623,6 +640,45 @@ ExactTiming timeExactReduction(Tensor& cache_flush, Stream& stream, RunFn&& run)
     return ExactTiming{sample_ms.front(), sample_ms[sample_ms.size() / 2], sample_ms.back()};
 }
 
+
+template <typename RunFn>
+ExactTiming timeBroadReduction(Tensor& cache_flush, Stream& stream, RunFn&& run) {
+    for (int i = 0; i < BROAD_WARMUP_ITERATIONS; ++i) {
+        run();
+    }
+    stream.synchronize();
+
+    cudaEvent_t start = nullptr;
+    cudaEvent_t stop = nullptr;
+    checkCuda(cudaEventCreate(&start), "cudaEventCreate(start)");
+    checkCuda(cudaEventCreate(&stop), "cudaEventCreate(stop)");
+
+    std::vector<double> sample_ms;
+    sample_ms.reserve(BROAD_TIMING_SAMPLES);
+    for (int sample = 0; sample < BROAD_TIMING_SAMPLES; ++sample) {
+        checkCuda(cudaMemsetAsync(cache_flush.getMemPtr<void>(),
+                                  0x73 + sample,
+                                  cache_flush.getArraySizeInBytes(),
+                                  stream.getStream()),
+                  "cudaMemsetAsync(cache_flush)");
+        stream.synchronize();
+
+        checkCuda(cudaEventRecord(start, stream.getStream()), "cudaEventRecord(start)");
+        run();
+        checkCuda(cudaEventRecord(stop, stream.getStream()), "cudaEventRecord(stop)");
+        checkCuda(cudaEventSynchronize(stop), "cudaEventSynchronize(stop)");
+
+        float elapsed_ms = 0.0f;
+        checkCuda(cudaEventElapsedTime(&elapsed_ms, start, stop), "cudaEventElapsedTime");
+        sample_ms.push_back(static_cast<double>(elapsed_ms));
+    }
+    checkCuda(cudaEventDestroy(start), "cudaEventDestroy(start)");
+    checkCuda(cudaEventDestroy(stop), "cudaEventDestroy(stop)");
+
+    std::sort(sample_ms.begin(), sample_ms.end());
+    return ExactTiming{sample_ms.front(), sample_ms[sample_ms.size() / 2], sample_ms.back()};
+}
+
 void printExactResult(const ExactReductionCase& benchmark_case,
                       DataType dtype,
                       CubReductionOp op,
@@ -671,7 +727,8 @@ void runProductionExactCase(const ExactReductionCase& benchmark_case,
                             CubReductionOp op,
                             Tensor& input,
                             Tensor& cache_flush,
-                            Stream& stream) {
+                            Stream& stream,
+                            bool broad_timing = false) {
     std::shared_ptr<StampedCubReduction> stamped = CubReduction(op, benchmark_case.axes).stamp(input, stream);
     if (stamped->getPath() != benchmark_case.expected_production_path) {
         throw std::runtime_error(std::string("Reduction census path drift for case '") + benchmark_case.name
@@ -680,11 +737,11 @@ void runProductionExactCase(const ExactReductionCase& benchmark_case,
                                    "selection changed.");
     }
 
-    const ExactTiming timing = timeExactReduction(cache_flush, stream, [&] { stamped->runOn(stream); });
+    const ExactTiming timing = broad_timing
+                                   ? timeBroadReduction(cache_flush, stream, [&] { stamped->runOn(stream); })
+                                   : timeExactReduction(cache_flush, stream, [&] { stamped->runOn(stream); });
     const Tensor output = stamped->getOutputTensor();
-    const char* index_bits = stamped->getPath() == CubReductionPath::StridedFixedSegment
-                                 ? (stamped->getGeometry().strided_value_indexing_fits_uint32 ? "32" : "64")
-                                 : "n/a";
+    const char* index_bits = "n/a";
 
     printExactResult(benchmark_case,
                      dtype,
@@ -760,7 +817,8 @@ void runCandidateExactCase(const ExactReductionCase& benchmark_case,
                            const ReductionCandidate& candidate,
                            Tensor& input,
                            Tensor& cache_flush,
-                           Stream& stream) {
+                           Stream& stream,
+                           bool broad_timing = false) {
     if (!candidate.supports(op, input.getDescriptor(), benchmark_case.axes)) {
         return;
     }
@@ -776,7 +834,9 @@ void runCandidateExactCase(const ExactReductionCase& benchmark_case,
                                  + "' must report non-empty implementation and strategy names.");
     }
 
-    const ExactTiming timing = timeExactReduction(cache_flush, stream, [&] { stamped->runOn(stream); });
+    const ExactTiming timing = broad_timing
+                                   ? timeBroadReduction(cache_flush, stream, [&] { stamped->runOn(stream); })
+                                   : timeExactReduction(cache_flush, stream, [&] { stamped->runOn(stream); });
     const Tensor& output = stamped->getOutputTensor();
     const CubReductionGeometry geometry = CubReduction::analyzeGeometry(benchmark_case.dimensions, benchmark_case.axes);
     if (output.getDataType() != dtype || output.getDimensions() != geometry.output_dimensions) {
@@ -805,6 +865,179 @@ void runCandidateExactCase(const ExactReductionCase& benchmark_case,
                      input.getArraySizeInBytes(),
                      output.getArraySizeInBytes(),
                      timing);
+}
+
+
+std::vector<ExactReductionCase> makeFullRowShardCensusCases() {
+    std::vector<ExactReductionCase> cases;
+    std::set<std::tuple<uint64_t, uint64_t, uint64_t>> seen;
+
+    auto add_case = [&](std::string family,
+                        std::string name,
+                        uint64_t outer,
+                        uint64_t reduction,
+                        uint64_t inner) {
+        if (!seen.emplace(outer, reduction, inner).second) {
+            return;
+        }
+        cases.push_back(ExactReductionCase{std::move(family),
+                                           std::move(name),
+                                           {outer, reduction, inner},
+                                           {1},
+                                           CubReductionPath::TiledFixedSegment});
+    };
+
+    // Exact product-transformer regime: B=128 and S_max=819 yields T_max=104832.  These widths cover the dense
+    // projections/readouts that exposed the one-CTA full-row pathology in Nsight Systems, including the exact 512- and
+    // 1024-component kernels reported by the production trace.
+    for (uint64_t inner : {128ULL, 256ULL, 384ULL, 511ULL, 512ULL, 513ULL, 768ULL, 769ULL,
+                           1024ULL, 1025ULL, 1536ULL, 2048ULL}) {
+        add_case("transformer_b128_s819",
+                 "o1_r104832_i" + std::to_string(inner),
+                 1,
+                 104832,
+                 inner);
+    }
+
+    // Reduction-depth sweep at one output vector.  This locates the crossover where splitting R becomes worthwhile and
+    // includes both ordinary model dimensions and the packed-history depths reached as batch size grows.
+    for (uint64_t reduction : {127ULL, 256ULL, 512ULL, 819ULL, 1024ULL, 2048ULL, 4096ULL,
+                               8192ULL, 16384ULL, 32768ULL, 65536ULL, 104832ULL, 131072ULL}) {
+        for (uint64_t inner : {128ULL, 512ULL, 1024ULL}) {
+            add_case("reduction_depth",
+                     "o1_r" + std::to_string(reduction) + "_i" + std::to_string(inner),
+                     1,
+                     reduction,
+                     inner);
+        }
+    }
+
+    // Retained-width sweep around every important ownership/vectorization boundary.  Odd widths deliberately change
+    // the alignment of successive source rows so aligned-only wins cannot hide a bad general policy.
+    for (uint64_t inner : {15ULL, 16ULL, 17ULL, 31ULL, 32ULL, 33ULL, 63ULL, 64ULL, 65ULL,
+                           127ULL, 128ULL, 129ULL, 255ULL, 256ULL, 257ULL, 383ULL, 384ULL, 385ULL,
+                           511ULL, 512ULL, 513ULL, 767ULL, 768ULL, 769ULL, 1023ULL, 1024ULL, 1025ULL,
+                           1536ULL, 1537ULL, 2047ULL, 2048ULL, 2049ULL, 2813ULL, 3072ULL, 4095ULL,
+                           4096ULL, 4097ULL}) {
+        add_case("retained_width",
+                 "o1_r32768_i" + std::to_string(inner),
+                 1,
+                 32768,
+                 inner);
+    }
+
+    // Output-count sweep.  R=2048 is long enough for row splitting to matter while keeping the entire O=128/I=1024
+    // corner under the per-case memory ceiling.  This shows exactly where the existing output-parallel full-row
+    // kernels recover enough independent rows that a second reduction stage is no longer justified.
+    for (uint64_t outer : {1ULL, 2ULL, 4ULL, 8ULL, 16ULL, 32ULL, 64ULL, 128ULL}) {
+        for (uint64_t inner : {128ULL, 512ULL, 1024ULL}) {
+            add_case("output_count",
+                     "o" + std::to_string(outer) + "_r2048_i" + std::to_string(inner),
+                     outer,
+                     2048,
+                     inner);
+        }
+    }
+
+    // A second output-count slice at a much larger reduction extent keeps the crossover honest for the regime that
+    // motivated this work.  The 512 MiB per-dtype ceiling below automatically removes only combinations that are too
+    // large for a useful cache-cold benchmark run.
+    for (uint64_t outer : {1ULL, 2ULL, 4ULL, 8ULL, 16ULL}) {
+        add_case("output_count_long_r",
+                 "o" + std::to_string(outer) + "_r32768_i128",
+                 outer,
+                 32768,
+                 128);
+    }
+    for (uint64_t outer : {1ULL, 2ULL, 4ULL, 8ULL, 16ULL}) {
+        add_case("output_count_long_r",
+                 "o" + std::to_string(outer) + "_r32768_i512",
+                 outer,
+                 32768,
+                 512);
+    }
+
+    // Many-output controls include the grid≈256 regime seen in the trace.  They establish the other side of the gate:
+    // once production already has hundreds of CTAs from independent outputs, row sharding should stop winning.
+    for (uint64_t outer : {128ULL, 256ULL, 512ULL, 1024ULL, 2048ULL}) {
+        for (uint64_t inner : {128ULL, 512ULL}) {
+            add_case("many_output_control",
+                     "o" + std::to_string(outer) + "_r256_i" + std::to_string(inner),
+                     outer,
+                     256,
+                     inner);
+        }
+    }
+
+    return cases;
+}
+
+void runFullRowShardCensus(Tensor& cache_flush,
+                           Stream& stream,
+                           const TensorPlacement& gpu_placement,
+                           const std::vector<const ReductionCandidate*>& selected_candidates) {
+    const std::vector<ExactReductionCase> cases = makeFullRowShardCensusCases();
+    const std::vector<DataType> dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
+
+    std::cout << "# mode=full_row_shard_census operation=sum dtypes=fp16|bf16|fp32 cases=" << cases.size()
+              << " max_input_bytes=" << BROAD_MAX_INPUT_BYTES
+              << " broad_warmups=" << BROAD_WARMUP_ITERATIONS
+              << " broad_timing_samples=" << BROAD_TIMING_SAMPLES << '\n';
+    std::cout << "# Exact transformer case: [1,104832,512] axis=1 corresponds to B=128,S_max=819 retained width 512.\n";
+    std::cout << "# Cases whose input exceeds the 512 MiB per-dtype ceiling are omitted; this ceiling does not alter "
+                 "the geometry of any measured case.\n";
+    for (const ReductionCandidate* candidate : selected_candidates) {
+        std::cout << "# candidate=" << candidate->getName()
+                  << " unsupported_cases=omitted production_selector=unchanged\n";
+    }
+    std::cout << "executor,family,case,dimensions,axes,dtype,operation,implementation,strategy,index_bits,"
+                 "output_elements,reduction_elements_per_output,vector_elements_per_load,block_threads,"
+                 "first_stage_blocks,shards_per_output,scratch_bytes,input_bytes,output_bytes,median_ms,best_ms,worst_ms,"
+                 "logical_GBps\n";
+
+    uint64_t measured = 0;
+    uint64_t skipped_for_size = 0;
+    for (const ExactReductionCase& benchmark_case : cases) {
+        const uint64_t elements = checkedMultiply(
+            checkedMultiply(benchmark_case.dimensions[0], benchmark_case.dimensions[1], "broad census elements"),
+            benchmark_case.dimensions[2],
+            "broad census elements");
+        for (DataType dtype : dtypes) {
+            const uint64_t input_bytes = checkedMultiply(
+                elements,
+                static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(dtype)),
+                "broad census input bytes");
+            if (input_bytes > BROAD_MAX_INPUT_BYTES) {
+                ++skipped_for_size;
+                continue;
+            }
+
+            Tensor input(gpu_placement, TensorDescriptor(dtype, benchmark_case.dimensions));
+            if (!selected_candidates.empty()) {
+                input.fillRandom(-0.25, 0.25, stream);
+            } else {
+                checkCuda(cudaMemsetAsync(input.getMemPtr<void>(), 0, input.getArraySizeInBytes(), stream.getStream()),
+                          "cudaMemsetAsync(full_row_shard_input)");
+            }
+            stream.synchronize();
+
+            runProductionExactCase(
+                benchmark_case, dtype, CubReductionOp::Sum, input, cache_flush, stream, true);
+            for (const ReductionCandidate* candidate : selected_candidates) {
+                runCandidateExactCase(benchmark_case,
+                                      dtype,
+                                      CubReductionOp::Sum,
+                                      *candidate,
+                                      input,
+                                      cache_flush,
+                                      stream,
+                                      true);
+            }
+            ++measured;
+        }
+    }
+    std::cout << "# full_row_shard_census_complete measured_case_dtypes=" << measured
+              << " skipped_case_dtypes_over_input_ceiling=" << skipped_for_size << '\n';
 }
 
 template <typename RunFn>
@@ -1309,9 +1542,6 @@ std::string argProductionAccumulatorIndexBits(const StampedCubArgReduction& redu
             return reduction.getGeometry().reduction_size <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())
                        ? "32"
                        : "64";
-        case CubReductionPath::StridedFixedSegment:
-            // The irregular logical-index fallback still carries the legacy uint64_t candidate index.
-            return "64";
         case CubReductionPath::OffsetSegmented:
         case CubReductionPath::ComposedDense:
             return "n/a";
@@ -1682,12 +1912,35 @@ void runViewCensusCase(const ViewCensusCase& benchmark_case,
                        Tensor& cache_flush,
                        Stream& stream,
                        const TensorPlacement& gpu_placement) {
-    const CubReductionGeometry analyzed = CubReduction::analyzeValueGeometry(
-        CubReductionOp::Sum, benchmark_case.dimensions, benchmark_case.strides, benchmark_case.axes);
-    if (analyzed.path != benchmark_case.expected_production_path) {
+    if (!benchmark_case.expected_production_path.has_value()) {
+        bool rejected = false;
+        try {
+            static_cast<void>(CubReduction::analyzeGeometry(
+                benchmark_case.dimensions, benchmark_case.strides, benchmark_case.axes));
+        } catch (const NotImplementedException&) {
+            rejected = true;
+        }
+        if (!rejected) {
+            throw std::runtime_error(std::string("View census unsupported geometry became executable for case '")
+                                     + benchmark_case.name + "'. Update the census intentionally if support was added.");
+        }
+
+        std::cout << benchmark_case.family << ',' << benchmark_case.name << ','
+                  << formatDimensions(benchmark_case.dimensions) << ',' << formatStrides(benchmark_case.strides) << ','
+                  << formatAxes(benchmark_case.axes) << ',' << dataTypeName(dtype)
+                  << ",sum,unsupported,not_implemented,"
+                  << (benchmark_case.expect_dense_physical_permutation ? "true" : "false")
+                  << ",n/a,n/a,n/a," << benchmark_case.dimensions.size()
+                  << ",n/a,n/a,n/a,n/a,n/a,n/a,n/a,n/a,n/a,n/a,not_implemented\n";
+        return;
+    }
+
+    const CubReductionGeometry analyzed =
+        CubReduction::analyzeGeometry(benchmark_case.dimensions, benchmark_case.strides, benchmark_case.axes);
+    if (analyzed.path != benchmark_case.expected_production_path.value()) {
         throw std::runtime_error(std::string("View census path drift for case '") + benchmark_case.name
-                                 + "': expected " + pathName(benchmark_case.expected_production_path) + ", got "
-                                 + pathName(analyzed.path) + ". Update VIEW-1A intentionally if production selection changed.");
+                                 + "': expected " + pathName(benchmark_case.expected_production_path.value()) + ", got "
+                                 + pathName(analyzed.path) + ". Update the census intentionally if production selection changed.");
     }
     if (analyzed.physical_layout_is_dense_permutation != benchmark_case.expect_dense_physical_permutation) {
         throw std::runtime_error(std::string("View census dense-permutation classification drift for case '")
@@ -1697,43 +1950,37 @@ void runViewCensusCase(const ViewCensusCase& benchmark_case,
     const uint64_t storage_elements = viewStorageSpanElements(benchmark_case.dimensions, benchmark_case.strides);
     Tensor storage(gpu_placement, TensorDescriptor(dtype, {storage_elements}));
     Tensor input = storage.aliasView(benchmark_case.dimensions, benchmark_case.strides);
-
-    // Initialization and validation stay outside the timed interval. Zero input gives every logical view, including
-    // overlapping and broadcast aliases, the same exact SUM reference: every output must be zero. VIEW-1A is a path
-    // and performance census rather than a replacement-kernel correctness suite; VIEW-1 will add independent cursor
-    // reference tests when execution changes.
     checkCuda(cudaMemsetAsync(storage.getMemPtr<void>(), 0, storage.getArraySizeInBytes(), stream.getStream()),
               "cudaMemsetAsync(view census storage)");
     stream.synchronize();
 
-    std::shared_ptr<StampedCubReduction> stamped = CubReduction(CubReductionOp::Sum, benchmark_case.axes).stamp(input, stream);
-    if (stamped->getPath() != benchmark_case.expected_production_path) {
+    CubReduction reduction(CubReductionOp::Sum, benchmark_case.axes);
+    std::shared_ptr<StampedCubReduction> stamped = reduction.stamp(input, stream);
+    if (stamped->getPath() != benchmark_case.expected_production_path.value()) {
         throw std::runtime_error(std::string("View census stamped path drift for case '") + benchmark_case.name
-                                 + "': expected " + pathName(benchmark_case.expected_production_path) + ", got "
+                                 + "': expected " + pathName(benchmark_case.expected_production_path.value()) + ", got "
                                  + pathName(stamped->getPath()) + ".");
     }
     validateViewCensusZeroSum(benchmark_case, *stamped, stream);
 
     const ExactTiming timing = timeExactReduction(cache_flush, stream, [&] { stamped->runOn(stream); });
     const Tensor& output = stamped->getOutputTensor();
-    const uint64_t element_bytes =
-        static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(dtype));
+    const uint64_t element_bytes = static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(dtype));
     const uint64_t logical_input_bytes = input.getArraySizeInBytes();
     const uint64_t storage_span_bytes = checkedMultiply(storage_elements, element_bytes, "view storage bytes");
     const uint64_t output_bytes = output.getArraySizeInBytes();
     const uint64_t logical_bytes = logical_input_bytes + output_bytes;
     const double logical_gb_per_second = static_cast<double>(logical_bytes) / (timing.median_ms * 1.0e6);
-    const char* index_bits = stamped->getPath() == CubReductionPath::StridedFixedSegment
-                                 ? (stamped->getGeometry().strided_value_indexing_fits_uint32 ? "32" : "64")
-                                 : "n/a";
 
     std::cout << benchmark_case.family << ',' << benchmark_case.name << ','
               << formatDimensions(benchmark_case.dimensions) << ',' << formatStrides(benchmark_case.strides) << ','
               << formatAxes(benchmark_case.axes) << ',' << dataTypeName(dtype) << ",sum," << pathName(stamped->getPath())
               << ',' << strategyName(*stamped) << ','
               << (stamped->getGeometry().physical_layout_is_dense_permutation ? "true" : "false") << ','
+              << (stamped->getGeometry().permutation_aware_contiguous_segments ? "true" : "false") << ','
               << (stamped->getGeometry().permutation_aware_tiled_geometry.has_value() ? "true" : "false") << ','
-              << index_bits << ',' << stamped->getGeometry().rank << ',' << stamped->getGeometry().output_elements << ','
+              << (stamped->getGeometry().payload_transpose_tiled_geometry.has_value() ? "true" : "false")
+              << ',' << stamped->getGeometry().rank << ',' << stamped->getGeometry().output_elements << ','
               << stamped->getGeometry().reduction_size << ',' << stamped->getWorkspaceSizeInBytes() << ','
               << logical_input_bytes << ',' << storage_span_bytes << ',' << output_bytes << ',' << std::fixed
               << std::setprecision(4) << timing.median_ms << ',' << timing.best_ms << ',' << timing.worst_ms << ','
@@ -1741,32 +1988,35 @@ void runViewCensusCase(const ViewCensusCase& benchmark_case,
 }
 
 void runViewCensus(Tensor& cache_flush, Stream& stream, const TensorPlacement& gpu_placement) {
-    // VIEW-1A freezes the population that still depends on the legacy logical-index mapper before VIEW-1 replaces it.
-    // The final three cases are deliberate controls proving that existing rank-1 affine, supported permutation, and
-    // ordinary dense-composition paths remain outside the arbitrary-view fallback.
+    // The final view census retains the former arbitrary-view population as explicit unsupported controls.
+    // VIEW-PITCHED-TILED promotes the
+    // affine gapped-reduction case to a dedicated coalesced pitched strategy. VIEW-DIRECT-1 promotes the compact full
+    // reduction to DeviceTransformReduce, VIEW-DIRECT-2A promotes the physically trailing compact-permutation case
+    // to direct contiguous segments when retained output order already matches, and VIEW-DIRECT-2B owns the compact
+    // [A,reduction,B,payload] -> [B,A,payload] retained rotation through its fixed 32x33 shared tile.
     const std::vector<ViewCensusCase> cases = {
-        {"arbitrary_gapped", "gapped_reduction_stride", {4096, 127, 65}, {10160, 80, 1}, {1},
-         CubReductionPath::StridedFixedSegment, false},
+        {"pitched_affine", "gapped_reduction_stride", {4096, 127, 65}, {10160, 80, 1}, {1},
+         CubReductionPath::TiledFixedSegment, false},
         {"arbitrary_gapped", "stride2_slice", {2048, 127, 65}, {16510, 130, 2}, {1},
-         CubReductionPath::StridedFixedSegment, false},
+         std::nullopt, false},
         {"arbitrary_broadcast", "zero_stride_reduced_axis", {8192, 127, 65}, {0, 65, 1}, {0},
-         CubReductionPath::StridedFixedSegment, false},
+         std::nullopt, false},
         {"arbitrary_overlap", "overlapping_outer_reduction", {4096, 127, 65}, {65, 65, 1}, {1},
-         CubReductionPath::StridedFixedSegment, false},
+         std::nullopt, false},
         {"compact_permutation_fallback", "split_physical_reduction", {31, 29, 17, 23},
-         {667, 23, 20677, 1}, {1, 2}, CubReductionPath::StridedFixedSegment, true},
-        {"compact_permutation_fallback", "unsupported_retained_order", {31, 29, 17, 23},
-         {667, 23, 20677, 1}, {0}, CubReductionPath::StridedFixedSegment, true},
-        {"compact_permutation_fallback", "physically_trailing_reduction", {256, 257, 127},
-         {1, 32512, 256}, {0}, CubReductionPath::StridedFixedSegment, true},
-        {"compact_permutation_fallback", "full_reduction_rank3", {256, 257, 127},
-         {1, 32512, 256}, {0, 1, 2}, CubReductionPath::StridedFixedSegment, true},
+         {667, 23, 20677, 1}, {1, 2}, std::nullopt, true},
+        {"compact_permutation_direct", "unsupported_retained_order", {31, 29, 17, 23},
+         {667, 23, 20677, 1}, {0}, CubReductionPath::TiledFixedSegment, true},
+        {"compact_permutation_direct", "physically_trailing_reduction", {256, 257, 127},
+         {1, 32512, 256}, {0}, CubReductionPath::ContiguousFixedSegment, true},
+        {"compact_permutation_direct", "full_reduction_rank3", {256, 257, 127},
+         {1, 32512, 256}, {0, 1, 2}, CubReductionPath::DeviceTransformReduce, true},
         {"arbitrary_singleton", "singleton_heavy_gapped", {2048, 1, 127, 1, 65},
-         {10160, 10160, 80, 80, 1}, {0, 2}, CubReductionPath::StridedFixedSegment, false},
-        // The singleton axis contributes no address span but its >UINT32_MAX stride forces the current mapper's
-        // UINT64 metadata/index arithmetic, so VIEW-1 has a baseline for both legacy indexing widths.
+         {10160, 10160, 80, 80, 1}, {0, 2}, std::nullopt, false},
+        // The singleton axis contributes no address span; its intentionally absurd stride remains an explicit unsupported
+        // geometry after DELETE and proves no hidden UINT64 logical-index fallback survives.
         {"arbitrary_index_width", "uint64_indexing_singleton_stride", {2048, 1, 127, 65},
-         {10160, (1ULL << 32), 80, 1}, {0, 2}, CubReductionPath::StridedFixedSegment, false},
+         {10160, (1ULL << 32), 80, 1}, {0, 2}, std::nullopt, false},
 
         {"control_direct", "rank1_affine_stride2", {16777216}, {2}, {0},
          CubReductionPath::DeviceTransformReduce, false},
@@ -1779,13 +2029,17 @@ void runViewCensus(Tensor& cache_flush, Stream& stream, const TensorPlacement& g
     const std::vector<DataType> dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
 
     std::cout << "# mode=view_census operation=sum dtypes=fp16|bf16|fp32 cache_state=cold "
-                 "validation=zero_sum_exact purpose=view1a_legacy_population_baseline\n";
+                 "validation=supported_zero_sum_or_explicit_not_implemented purpose=final_view_ownership_census\n";
     std::cout << "# storage_span_bytes is the address span required by the alias view, not a claim about unique DRAM "
                  "traffic; broadcast and overlapping views intentionally revisit addresses.\n";
-    std::cout << "# The first ten cases are expected to use the legacy arbitrary-view fallback in ThorKernels308. "
-                 "The final three are direct/dense controls that must not be stolen by VIEW-1.\n";
+    std::cout << "# DELETE removed the arbitrary logical-index reducer entirely. Unsupported rows must throw "
+                 "NotImplementedException and are reported without timing; all supported rows execute an ordained path. "
+                 "gapped_reduction_stride is VIEW-PITCHED-TILED; unsupported_retained_order is VIEW-DIRECT-2B; "
+                 "full_reduction_rank3 is VIEW-DIRECT-1 and physically_trailing_reduction is VIEW-DIRECT-2A.\n";
     std::cout << "family,case,dimensions,strides,axes,dtype,operation,path,strategy,physical_dense_permutation,"
-                 "permutation_tiled_candidate,index_bits,rank,output_elements,reduction_elements_per_output,"
+                 "permutation_contiguous_candidate,permutation_tiled_candidate,payload_transpose_candidate,"
+                 "rank,output_elements,"
+                 "reduction_elements_per_output,"
                  "workspace_bytes,logical_input_bytes,storage_span_bytes,output_bytes,median_ms,best_ms,worst_ms,"
                  "logical_GBps,validation\n";
 
@@ -1875,7 +2129,7 @@ void runArgCase(const ReductionShape& shape,
 
 void printUsage(const char* executable) {
     std::cout << "Usage: " << executable
-              << " [--arg-x4-focused|--arg-x4-awkward-focused|--arg-census|--view-census|--reduction-census|--dense-stage-cost-calibration] [--dense-run-stage-census] [--candidate=<name>]...\n"
+              << " [--arg-x4-focused|--arg-x4-awkward-focused|--arg-census|--view-census|--reduction-census|--full-row-shard-census|--dense-stage-cost-calibration] [--dense-run-stage-census] [--candidate=<name>]...\n"
               << "       " << executable << " --list-reduction-candidates\n"
               << "  --arg-x4-focused          Run ARGMIN only for FP8 E4M3/FP16/FP32, R=64/256/1024, and "
                  "D=128/256/512/1024/2048/4096/65536.\n"
@@ -1884,20 +2138,23 @@ void printUsage(const char* executable) {
               << "  --arg-census              Run the cache-cold dense ArgMin/ArgMax performance census. Measures every "
                  "production direct ARG family plus explicit composed-dense execution for disjoint reduced runs; "
                  "composed results must exactly match production indices before timing.\n"
-              << "  --view-census             Run the VIEW-1A cache-cold SUM census over remaining rank>1 arbitrary views "
-                 "plus direct/dense controls. Records logical dimensions/strides, production path, storage span, "
-                 "index width, workspace, and traversal throughput without changing production selection.\n"
+              << "  --view-census             Run the final view-ownership census. Supported rows are timed through production; "
+                 "unsupported arbitrary views must throw NotImplementedException and are reported without timing.\n"
               << "  --reduction-census        Run exact cache-cold SUM cases spanning the current production dense "
                  "value-reduction families. Production path drift is treated as an error.\n"
+              << "  --full-row-shard-census  Run the broad low-output/high-reduction Tiled SUM sweep that targets "
+                 "full-row under-parallelism. Includes transformer-scale exact cases, reduction-depth, retained-width, "
+                 "and output-count sweeps; individual inputs are capped at 512 MiB. If no --candidate is supplied, "
+                 "tiled_row_split_w1/w2/w4/w8 are compared automatically.\n"
               << "  --dense-run-stage-census With --reduction-census, additionally time every reachable direct stage "
                  "of the dense composed cases both cache-cold and L2-hot. This is planner-model evidence only; "
                  "production selection is unchanged.\n"
               << "  --dense-stage-cost-calibration  Benchmark a bounded direct-reducer geometry grid for fitting the "
                  "stamp-time composed-dense stage cost model. Emits cold and hot timings and never changes production "
                  "selection.\n"
-              << "  --candidate=<name>        With --reduction-census, also run a registered benchmark-only "
-                 "candidate on every census case it supports. Repeat the flag to compare multiple candidates in one "
-                 "run. Production selection is unchanged.\n"
+              << "  --candidate=<name>        With --reduction-census or --full-row-shard-census, also run a registered "
+                 "benchmark-only candidate on every census case it supports. Repeat the flag to compare multiple "
+                 "candidates in one run. Production selection is unchanged.\n"
               << "  --list-reduction-candidates  List benchmark-only candidates linked into this executable.\n";
 }
 
@@ -1915,6 +2172,8 @@ BenchmarkOptions parseOptions(int argc, char** argv) {
             options.view_census = true;
         } else if (argument == "--reduction-census") {
             options.reduction_census = true;
+        } else if (argument == "--full-row-shard-census") {
+            options.full_row_shard_census = true;
         } else if (argument == "--dense-run-stage-census") {
             options.dense_run_stage_census = true;
         } else if (argument == "--dense-stage-cost-calibration") {
@@ -1937,12 +2196,14 @@ BenchmarkOptions parseOptions(int argc, char** argv) {
 
     const int mode_count = static_cast<int>(options.focused_arg_x4) + static_cast<int>(options.focused_arg_x4_awkward)
                            + static_cast<int>(options.arg_census) + static_cast<int>(options.view_census)
-                           + static_cast<int>(options.reduction_census) + static_cast<int>(options.dense_stage_cost_calibration);
+                           + static_cast<int>(options.reduction_census)
+                           + static_cast<int>(options.full_row_shard_census)
+                           + static_cast<int>(options.dense_stage_cost_calibration);
     if (mode_count > 1) {
         throw std::invalid_argument("Select at most one focused benchmark mode.");
     }
-    if (!options.candidate_names.empty() && !options.reduction_census) {
-        throw std::invalid_argument("--candidate may only be used with --reduction-census.");
+    if (!options.candidate_names.empty() && !options.reduction_census && !options.full_row_shard_census) {
+        throw std::invalid_argument("--candidate may only be used with --reduction-census or --full-row-shard-census.");
     }
     if (options.dense_run_stage_census && !options.reduction_census) {
         throw std::invalid_argument("--dense-run-stage-census may only be used with --reduction-census.");
@@ -1974,6 +2235,11 @@ int main(int argc, char** argv) {
             }
         }
         return EXIT_SUCCESS;
+    }
+
+    if (options.full_row_shard_census && options.candidate_names.empty()) {
+        options.candidate_names = {
+            "tiled_row_split_w1", "tiled_row_split_w2", "tiled_row_split_w4", "tiled_row_split_w8"};
     }
 
     std::vector<const ReductionCandidate*> selected_candidates;
@@ -2032,9 +2298,10 @@ int main(int argc, char** argv) {
                   << " target_input_bytes=" << target_input_bytes << " free_bytes=" << free_bytes
                   << " total_bytes=" << total_bytes << " target_over_l2=" << std::fixed << std::setprecision(2)
                   << static_cast<double>(target_input_bytes) / l2_cache_bytes << '\n';
-        if (options.reduction_census || options.arg_census || options.view_census || options.dense_stage_cost_calibration) {
+        if (options.reduction_census || options.full_row_shard_census || options.arg_census || options.view_census
+            || options.dense_stage_cost_calibration) {
             std::cout << "# A separate >=8x-L2 cache-flush buffer is touched outside every cache-cold timed sample.\n";
-            if (options.reduction_census) {
+            if (options.reduction_census || options.full_row_shard_census) {
                 std::cout << "# Exact production-census shapes are preserved. Experimental candidates are benchmark-only "
                              "and do not participate in CubReduction production path selection.\n";
             }
@@ -2042,12 +2309,19 @@ int main(int argc, char** argv) {
             std::cout << "# Each timed reduction reads an input >= target_input_bytes. Because the input is >= 8x L2, "
                          "successive iterations cannot benchmark an L2-resident working set.\n";
         }
-        std::cout << "# timing_samples=" << TIMING_SAMPLES;
-        if (options.reduction_census || options.arg_census || options.view_census || options.dense_stage_cost_calibration) {
-            std::cout << " timed_iterations_per_sample=1 reported_time=median\n";
+        if (options.full_row_shard_census) {
+            std::cout << "# timing_samples=" << BROAD_TIMING_SAMPLES
+                      << " warmup_iterations=" << BROAD_WARMUP_ITERATIONS
+                      << " timed_iterations_per_sample=1 reported_time=median\n";
         } else {
-            std::cout << " timed_iterations_per_sample=" << TIMED_ITERATIONS_PER_SAMPLE
-                      << " reported_time=median\n";
+            std::cout << "# timing_samples=" << TIMING_SAMPLES;
+            if (options.reduction_census || options.arg_census || options.view_census
+                || options.dense_stage_cost_calibration) {
+                std::cout << " timed_iterations_per_sample=1 reported_time=median\n";
+            } else {
+                std::cout << " timed_iterations_per_sample=" << TIMED_ITERATIONS_PER_SAMPLE
+                          << " reported_time=median\n";
+            }
         }
         std::cout << "# argmin_index/argmax_index benchmark the production index-only UINT32 path using randomized "
                      "finite input initialized outside the timed interval.\n";
@@ -2076,6 +2350,11 @@ int main(int argc, char** argv) {
         if (options.view_census) {
             Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
             runViewCensus(cache_flush, stream, gpu_placement);
+            return EXIT_SUCCESS;
+        }
+        if (options.full_row_shard_census) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runFullRowShardCensus(cache_flush, stream, gpu_placement, selected_candidates);
             return EXIT_SUCCESS;
         }
         if (!options.reduction_census) {
@@ -2241,6 +2520,19 @@ int main(int argc, char** argv) {
                 {"tiled_middle",
                  "tiled_middle_large",
                  {256, 512, 256},
+                 {1},
+                 CubReductionPath::TiledFixedSegment},
+                // Product-transformer B=128/S_max=819 bias/readout reductions observed as single-CTA
+                // multi-millisecond kernels in Nsight Systems.  These exact cases keep the high-priority production
+                // regression in the compact census while --full-row-shard-census explores the surrounding geometry.
+                {"full_row_low_output",
+                 "product_b128_s819_i512",
+                 {1, 104832, 512},
+                 {1},
+                 CubReductionPath::TiledFixedSegment},
+                {"full_row_low_output",
+                 "product_b128_s819_i1024",
+                 {1, 104832, 1024},
                  {1},
                  CubReductionPath::TiledFixedSegment},
                 // Direct-vs-async Tiled probes. These are exact stage-cost calibration geometries where

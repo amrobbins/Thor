@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 #include "Utilities/Expression/Expression.h"
+#include "Utilities/TensorOperations/Cub/CubReduction.h"
 
 namespace ThorImplementation {
 
@@ -68,6 +70,18 @@ struct StampedMatmulStageDiagnostic {
     uint32_t lane_index = 0;
     uint32_t dependency_count = 0;
     StampedMatmulKernelDiagnostic kernel;
+};
+
+// Read-only stamp-time diagnostics for an Expression reduction stage.  The
+// input geometry is copied from the immutable reduction cache key, so callers
+// can identify exactly which logical view selected a backend path without
+// exposing or mutating the stamped CUB operation itself.
+struct StampedReductionStageDiagnostic {
+    uint32_t stage_index = 0;
+    CubReductionPath path = CubReductionPath::DeviceTransformReduce;
+    std::vector<uint64_t> input_dimensions;
+    std::vector<uint64_t> input_strides_elements;
+    std::vector<uint64_t> reduction_axes;
 };
 
 // Read-only runtime-extent diagnostics for physical consumers that deliberately

@@ -1,4 +1,5 @@
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
+#include "Utilities/Exceptions.h"
 
 #include <array>
 #include <cstdint>
@@ -104,13 +105,59 @@ void expectEveryDenseValueMaskUsesOrdainedPath(const std::vector<uint64_t>& dime
             const CubReductionGeometry structural_geometry = CubReduction::analyzeGeometry(dimensions, axes);
             const CubReductionGeometry geometry = CubReduction::analyzeValueGeometry(op, dimensions, axes);
             EXPECT_EQ(geometry.path, structural_geometry.path);
+            EXPECT_TRUE(isOrdainedDenseValuePath(structural_geometry.path));
             EXPECT_TRUE(isOrdainedDenseValuePath(geometry.path));
-            EXPECT_NE(geometry.path, CubReductionPath::StridedFixedSegment);
+
+            if (structural_geometry.path == CubReductionPath::ComposedDense) {
+                const std::optional<CubReductionDenseCompositionPlan> plan =
+                    CubReduction::analyzeDenseCompositionPlan(dimensions, axes);
+                ASSERT_TRUE(plan.has_value());
+                ASSERT_FALSE(plan->stages.empty());
+                for (const CubReductionDenseCompositionStage& stage : plan->stages) {
+                    EXPECT_TRUE(stage.expected_path == CubReductionPath::DeviceTransformReduce
+                                || stage.expected_path == CubReductionPath::ContiguousFixedSegment
+                                || stage.expected_path == CubReductionPath::TiledFixedSegment);
+                }
+            }
         }
     }
 }
 
 }  // namespace
+
+
+TEST(CubReductionDenseValueGate, StructuralDenseClassifierHasNoLegacyEscapeHatchAcrossAllMasksThroughRankTen) {
+    // DENSE-GATE-FINAL is an operation-independent architecture invariant. Exercise the structural selector directly,
+    // including more masks than the per-operation matrix above, so a future planner regression cannot silently turn a
+    // canonical dense tensor back into the arbitrary-view family before value/ARG wrappers see it.
+    for (uint32_t rank = 1; rank <= 10; ++rank) {
+        std::vector<uint64_t> dimensions;
+        dimensions.reserve(rank);
+        for (uint32_t axis = 0; axis < rank; ++axis) {
+            dimensions.push_back(axis % 3 == 0 ? 2U : axis % 3 == 1 ? 3U : 5U);
+        }
+
+        const uint32_t mask_count = 1U << rank;
+        for (uint32_t mask = 1; mask < mask_count; ++mask) {
+            const std::vector<uint32_t> axes = axesFromMask(rank, mask);
+            SCOPED_TRACE(denseValueGateContext(CubReductionOp::Sum, dimensions, axes));
+            const CubReductionGeometry geometry = CubReduction::analyzeGeometry(dimensions, axes);
+            EXPECT_TRUE(isOrdainedDenseValuePath(geometry.path));
+
+            if (geometry.path == CubReductionPath::ComposedDense) {
+                const std::optional<CubReductionDenseCompositionPlan> plan =
+                    CubReduction::analyzeDenseCompositionPlan(dimensions, axes);
+                ASSERT_TRUE(plan.has_value());
+                ASSERT_FALSE(plan->stages.empty());
+                for (const CubReductionDenseCompositionStage& stage : plan->stages) {
+                    EXPECT_TRUE(stage.expected_path == CubReductionPath::DeviceTransformReduce
+                                || stage.expected_path == CubReductionPath::ContiguousFixedSegment
+                                || stage.expected_path == CubReductionPath::TiledFixedSegment);
+                }
+            }
+        }
+    }
+}
 
 TEST(CubReductionDenseValueGate, EverySupportedOperationAndNonemptyMaskAcrossDenseRanksAvoidsStridedFallback) {
     // Exhaust every reduction mask for every public value operation. Increasing ranks naturally cover prefix, suffix,
@@ -154,22 +201,19 @@ TEST(CubReductionDenseValueGate, DensePhysicalPermutationRemainsOnOrdainedPathFo
         EXPECT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
         EXPECT_TRUE(geometry.physical_layout_is_dense_permutation);
         EXPECT_TRUE(geometry.permutation_aware_tiled_geometry.has_value());
-        EXPECT_NE(geometry.path, CubReductionPath::StridedFixedSegment);
     }
 }
 
 TEST(CubReductionDenseValueGate, GenuineIrregularViewsRemainOutsideTheDenseValueGateForEveryOperation) {
-    // DENSE-VALUE-GATE closes ordinary dense value reductions only. A gapped view remains on the arbitrary-view
-    // fallback until VIEW-1 replaces that machinery.
+    // The structural classifier retains the legacy family only for benchmark/DELETE accounting. Production value
+    // planning rejects it for every operation after UNSUPPORTED-VIEW-GATE.
     const std::vector<uint64_t> dimensions{2, 3, 4};
     const std::vector<uint64_t> strides{20, 4, 1};
     const std::vector<uint32_t> axes{0, 2};
+    EXPECT_THROW((void)CubReduction::analyzeGeometry(dimensions, strides, axes), NotImplementedException);
     for (CubReductionOp op : ALL_VALUE_OPERATIONS) {
         SCOPED_TRACE(valueOperationName(op));
-        const CubReductionGeometry structural_geometry = CubReduction::analyzeGeometry(dimensions, strides, axes);
-        const CubReductionGeometry geometry = CubReduction::analyzeValueGeometry(op, dimensions, strides, axes);
-        EXPECT_EQ(geometry.path, structural_geometry.path);
-        EXPECT_EQ(geometry.path, CubReductionPath::StridedFixedSegment);
-        EXPECT_FALSE(geometry.dense_run_geometry.has_value());
+        EXPECT_THROW((void)CubReduction::analyzeValueGeometry(op, dimensions, strides, axes),
+                     NotImplementedException);
     }
 }

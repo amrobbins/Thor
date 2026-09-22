@@ -59,7 +59,14 @@ class MultiConnectionLayer : public Layer {
     virtual std::vector<Tensor> getFeatureInputs() const { return featureInputs; }
 
     uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
-        return featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes() * batchSize;
+        uint64_t bytes = 0;
+        for (const Tensor& output : featureOutputs) {
+            const uint64_t outputBytes = output.getTotalSizeInBytes();
+            // Apply the batch multiplier per output. A layer may expose physical
+            // batch-capacity tensors whose dimensions already include that factor.
+            bytes += outputTensorDimensionsIncludeBatch(output) ? outputBytes : outputBytes * batchSize;
+        }
+        return bytes;
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {

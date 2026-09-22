@@ -13,6 +13,7 @@ size_t queryAdditiveReductionBytes(DataType input_dtype,
                                    void* output,
                                    const CubReductionGeometry& geometry,
                                    float divisor,
+                                   bool square_root,
                                    float output_scale,
                                    const Stream& stream) {
     return queryOperationReductionBytes(input_dtype,
@@ -24,7 +25,7 @@ size_t queryAdditiveReductionBytes(DataType input_dtype,
                                         cuda::std::plus<float>{},
                                         0.0f,
                                         IdentityFp32{},
-                                        AdditiveFinalizeFp32{divisor},
+                                        AdditiveFinalizeFp32{divisor, square_root},
                                         output_scale,
                                         stream);
 }
@@ -35,6 +36,7 @@ void launchAdditiveReduction(const Tensor& temp_storage,
                              Tensor& output,
                              const CubReductionGeometry& geometry,
                              float divisor,
+                             bool square_root,
                              float output_scale,
                              Stream& stream) {
     launchOperationReduction(temp_storage,
@@ -45,7 +47,7 @@ void launchAdditiveReduction(const Tensor& temp_storage,
                              cuda::std::plus<float>{},
                              0.0f,
                              IdentityFp32{},
-                             AdditiveFinalizeFp32{divisor},
+                             AdditiveFinalizeFp32{divisor, square_root},
                              output_scale,
                              stream);
 }
@@ -67,6 +69,7 @@ size_t querySumReductionBytes(DataType input_dtype,
                                        output,
                                        geometry,
                                        1.0f,
+                                       false,
                                        output_scale,
                                        stream);
 }
@@ -79,7 +82,7 @@ void launchSumReduction(const Tensor& temp_storage,
                         float output_scale,
                         Stream& stream) {
     launchAdditiveReduction(
-        temp_storage, temp_storage_bytes, input, output, geometry, 1.0f, output_scale, stream);
+        temp_storage, temp_storage_bytes, input, output, geometry, 1.0f, false, output_scale, stream);
 }
 
 size_t querySumDivideReductionBytes(DataType input_dtype,
@@ -98,6 +101,7 @@ size_t querySumDivideReductionBytes(DataType input_dtype,
                                        output,
                                        geometry,
                                        static_cast<float>(divisor),
+                                       false,
                                        output_scale,
                                        stream);
 }
@@ -116,8 +120,40 @@ void launchSumDivideReduction(const Tensor& temp_storage,
                             output,
                             geometry,
                             static_cast<float>(divisor),
+                            false,
                             output_scale,
                             stream);
+}
+
+size_t querySumSqrtReductionBytes(DataType input_dtype,
+                                  const void* input,
+                                  uint64_t input_elements,
+                                  DataType output_dtype,
+                                  void* output,
+                                  const CubReductionGeometry& geometry,
+                                  float output_scale,
+                                  const Stream& stream) {
+    return queryAdditiveReductionBytes(input_dtype,
+                                       input,
+                                       input_elements,
+                                       output_dtype,
+                                       output,
+                                       geometry,
+                                       1.0f,
+                                       true,
+                                       output_scale,
+                                       stream);
+}
+
+void launchSumSqrtReduction(const Tensor& temp_storage,
+                            size_t temp_storage_bytes,
+                            const Tensor& input,
+                            Tensor& output,
+                            const CubReductionGeometry& geometry,
+                            float output_scale,
+                            Stream& stream) {
+    launchAdditiveReduction(
+        temp_storage, temp_storage_bytes, input, output, geometry, 1.0f, true, output_scale, stream);
 }
 
 size_t queryMeanReductionBytes(DataType input_dtype,

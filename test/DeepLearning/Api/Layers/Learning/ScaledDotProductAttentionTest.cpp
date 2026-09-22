@@ -236,7 +236,7 @@ TEST(AttentionApi, SdpaBuildsCanonicalRaggedOffsetsWithoutSequenceLengths) {
     Api::Network network("attention_api_sdpa_builds_canonical_ragged_offsets_without_sequence_lengths");
     Api::RaggedTensor q = Api::RaggedNetworkInput::Builder()
                               .network(network).name("q").valuesDataType(DataType::FP16)
-                              .trailingDimensions({8, 32}).maxTotalValues(2).batchSize(1).build();
+                              .trailingDimensions({8, 32}).maxTotalValues(16).maxValuesPerRow(8).batchSize(2).build();
 
     Api::ScaledDotProductAttention attention = Api::ScaledDotProductAttention::Builder()
                                                    .network(network)
@@ -246,6 +246,9 @@ TEST(AttentionApi, SdpaBuildsCanonicalRaggedOffsetsWithoutSequenceLengths) {
     EXPECT_FALSE(attention.getUseSequenceLengths());
     ASSERT_TRUE(attention.getRaggedFeatureOutput().has_value());
     EXPECT_EQ(attention.getRaggedFeatureOutput()->getOffsets(), q.getOffsets());
+    EXPECT_TRUE(attention.getRaggedFeatureOutput()->hasMaxValuesPerRow());
+    EXPECT_EQ(attention.getRaggedFeatureOutput()->getMaxValuesPerRow(), 8u);
+    EXPECT_EQ(attention.getRaggedFeatureOutput()->getMaxTotalValues(), 16u);
     EXPECT_EQ(attention.getRaggedPartitionRequirementForInput(q.getOffsets()),
               Impl::RaggedPartitionRequirement::DEVICE_OFFSETS);
 }

@@ -515,6 +515,99 @@ vector<float> applyCublasLtGeluThenTestEpilogue(const vector<float>& values) {
 
 }  // namespace
 
+TEST(FullyConnectedApi, RaggedMemoryAccountingCountsPackedBatchCapacityExactlyOnce) {
+    constexpr uint64_t sequenceCapacity = 819;
+    constexpr uint64_t inputFeatures = 48;
+    constexpr uint64_t outputFeatures = 80;
+    constexpr uint32_t batch32 = 32;
+    constexpr uint32_t batch64 = 64;
+
+    auto buildRaggedFc = [=](Api::Network& network, uint32_t batchSize) {
+        Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                 .network(network)
+                                 .name("tokens")
+                                 .valuesDataType(DataType::FP32)
+                                 .offsetsDataType(DataType::UINT32)
+                                 .trailingDimensions({inputFeatures})
+                                 .batchSize(batchSize)
+                                 .maxTotalValues(static_cast<uint64_t>(batchSize) * sequenceCapacity)
+                                 .maxValuesPerRow(sequenceCapacity)
+                                 .build();
+        return Api::FullyConnected::Builder()
+            .network(network)
+            .featureInput(input)
+            .numOutputFeatures(outputFeatures)
+            .weightsDataType(DataType::FP32)
+            .computeDataType(DataType::FP32)
+            .outputDataType(DataType::FP32)
+            .noActivation()
+            .build();
+    };
+
+    Api::Network network32("ragged_fc_memory_batch_32");
+    Api::Network network64("ragged_fc_memory_batch_64");
+    Api::FullyConnected fc32 = buildRaggedFc(network32, batch32);
+    Api::FullyConnected fc64 = buildRaggedFc(network64, batch64);
+
+    ASSERT_TRUE(fc32.getRaggedFeatureOutput().has_value());
+    ASSERT_TRUE(fc64.getRaggedFeatureOutput().has_value());
+    const Api::Tensor output32 = fc32.getRaggedFeatureOutput()->getValues();
+    const Api::Tensor output64 = fc64.getRaggedFeatureOutput()->getValues();
+    const uint64_t outputBytes32 = output32.getTotalSizeInBytes();
+    const uint64_t outputBytes64 = output64.getTotalSizeInBytes();
+
+    EXPECT_TRUE(fc32.outputTensorDimensionsIncludeBatch(output32));
+    EXPECT_TRUE(fc64.outputTensorDimensionsIncludeBatch(output64));
+    EXPECT_EQ(outputBytes64, 2 * outputBytes32);
+
+    // Packed ragged values already contain the complete batch capacity T_max.
+    // Memory admission must not multiply that physical tensor by batchSize again.
+    EXPECT_EQ(fc32.getOutputTensorBytes(batch32), outputBytes32);
+    EXPECT_EQ(fc64.getOutputTensorBytes(batch64), outputBytes64);
+    EXPECT_EQ(fc64.getOutputTensorBytes(batch64), 2 * fc32.getOutputTensorBytes(batch32));
+
+    EXPECT_EQ(fc32.getNonFirstInstanceMemRequirementInBytes(batch32, gpuPlacement), outputBytes32);
+    EXPECT_EQ(fc64.getNonFirstInstanceMemRequirementInBytes(batch64, gpuPlacement), outputBytes64);
+    EXPECT_EQ(fc64.getNonFirstInstanceMemRequirementInBytes(batch64, gpuPlacement),
+              2 * fc32.getNonFirstInstanceMemRequirementInBytes(batch32, gpuPlacement));
+
+    ASSERT_EQ(fc32.getParameterBytes(), fc64.getParameterBytes());
+    EXPECT_EQ(fc32.getFirstInstanceMemRequirementInBytes(batch32, gpuPlacement),
+              outputBytes32 + fc32.getParameterBytes());
+    EXPECT_EQ(fc64.getFirstInstanceMemRequirementInBytes(batch64, gpuPlacement),
+              outputBytes64 + fc64.getParameterBytes());
+}
+
+TEST(FullyConnectedApi, DenseMemoryAccountingStillAppliesLogicalBatchExactlyOnce) {
+    constexpr uint64_t inputFeatures = 48;
+    constexpr uint64_t outputFeatures = 80;
+
+    Api::Network network("dense_fc_memory_accounting");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                             .network(network)
+                             .name("features")
+                             .dimensions({inputFeatures})
+                             .dataType(DataType::FP32)
+                             .build();
+    Api::FullyConnected fc = Api::FullyConnected::Builder()
+                            .network(network)
+                            .featureInput(input.getFeatureOutput().value())
+                            .numOutputFeatures(outputFeatures)
+                            .weightsDataType(DataType::FP32)
+                            .computeDataType(DataType::FP32)
+                            .outputDataType(DataType::FP32)
+                            .noActivation()
+                            .build();
+
+    const Api::Tensor output = fc.getFeatureOutput().value();
+    const uint64_t oneExampleBytes = output.getTotalSizeInBytes();
+    EXPECT_FALSE(fc.outputTensorDimensionsIncludeBatch(output));
+    EXPECT_EQ(fc.getOutputTensorBytes(32), 32 * oneExampleBytes);
+    EXPECT_EQ(fc.getOutputTensorBytes(64), 64 * oneExampleBytes);
+    EXPECT_EQ(fc.getNonFirstInstanceMemRequirementInBytes(32, gpuPlacement), 32 * oneExampleBytes);
+    EXPECT_EQ(fc.getNonFirstInstanceMemRequirementInBytes(64, gpuPlacement), 64 * oneExampleBytes);
+}
+
 TEST(FullyConnectedApi, RaggedBuilderPreservesRowPartitionAndUsesTokenWiseOutputShape) {
     Api::Network network("ragged_fc_builder_preserves_partition");
     Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()

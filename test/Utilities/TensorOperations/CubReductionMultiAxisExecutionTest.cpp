@@ -1,4 +1,5 @@
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
+#include "Utilities/Exceptions.h"
 
 #include <cstdint>
 #include <memory>
@@ -286,7 +287,6 @@ TEST(CubReduction, RankNineDenseSumUsesComposedPathRatherThanDynamicStridedMetad
     std::shared_ptr<StampedCubReduction> stamped =
         CubReduction(CubReductionOp::Sum, std::vector<uint32_t>{0, 2, 4, 6}, DataType::FP32).stamp(input, stream);
     EXPECT_EQ(stamped->getPath(), CubReductionPath::ComposedDense);
-    EXPECT_NE(stamped->getPath(), CubReductionPath::StridedFixedSegment);
     EXPECT_EQ(stamped->getGeometry().rank, 9U);
     stamped->run();
     stream.synchronize();
@@ -438,6 +438,243 @@ TEST(CubReduction, PhysicallyContiguousDisjointLogicalAxesUsePermutationAwareTil
     stamped->run();
     stream.synchronize();
     expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
+}
+
+
+TEST(CubReduction, Direct2BPayloadTranspose32x33WritesLogicalBAPOrder) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t reduction_size = 3;
+    constexpr uint64_t b_size = 5;
+    constexpr uint64_t a_size = 2;
+    constexpr uint64_t payload_size = 7;
+    constexpr uint64_t storage_elements = a_size * reduction_size * b_size * payload_size;
+
+    std::vector<float> values(storage_elements);
+    for (uint64_t index = 0; index < storage_elements; ++index) {
+        values[index] = static_cast<float>((index % 19) + 1);
+    }
+    Tensor storage = makeGpuTensor(values, {storage_elements}, stream);
+
+    // Logical [R,B,A,P] aliases compact physical [A,R,B,P]. Reducing R must emit dense logical [B,A,P], so this is
+    // the payload-preserving retained-order rotation [A,B,P] -> [B,A,P] targeted by VIEW-DIRECT-2B.
+    Tensor permuted = storage.aliasView(
+        {reduction_size, b_size, a_size, payload_size},
+        {b_size * payload_size, payload_size, reduction_size * b_size * payload_size, 1},
+        0);
+    auto stamped = CubReduction(CubReductionOp::Sum, 0, DataType::FP32).stamp(permuted, stream);
+
+    ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+    ASSERT_TRUE(stamped->getGeometry().payload_transpose_tiled_geometry.has_value());
+    EXPECT_FALSE(stamped->getGeometry().permutation_aware_tiled_geometry.has_value());
+    EXPECT_FALSE(stamped->getGeometry().pitched_tiled_geometry.has_value());
+    EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 1U);
+
+    const CubReductionPayloadTransposeTiledGeometry& transposed =
+        stamped->getGeometry().payload_transpose_tiled_geometry.value();
+    EXPECT_EQ(transposed.a_size, a_size);
+    EXPECT_EQ(transposed.reduction_size, reduction_size);
+    EXPECT_EQ(transposed.b_size, b_size);
+    EXPECT_EQ(transposed.payload_size, payload_size);
+
+    std::vector<float> expected;
+    expected.reserve(b_size * a_size * payload_size);
+    for (uint64_t b = 0; b < b_size; ++b) {
+        for (uint64_t a = 0; a < a_size; ++a) {
+            for (uint64_t payload = 0; payload < payload_size; ++payload) {
+                float sum = 0.0f;
+                for (uint64_t reduction = 0; reduction < reduction_size; ++reduction) {
+                    const uint64_t physical_index =
+                        (((a * reduction_size + reduction) * b_size + b) * payload_size) + payload;
+                    sum += values[physical_index];
+                }
+                expected.push_back(sum);
+            }
+        }
+    }
+
+    stamped->run();
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
+}
+
+TEST(CubReduction, Direct2BPayloadTranspose32x33SupportsPayloadTilesWiderThanOneWarp) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t reduction_size = 2;
+    constexpr uint64_t b_size = 2;
+    constexpr uint64_t a_size = 3;
+    constexpr uint64_t payload_size = 37;
+    constexpr uint64_t storage_elements = a_size * reduction_size * b_size * payload_size;
+    Tensor storage = makeGpuTensor(std::vector<float>(storage_elements, 1.0f), {storage_elements}, stream);
+    Tensor permuted = storage.aliasView(
+        {reduction_size, b_size, a_size, payload_size},
+        {b_size * payload_size, payload_size, reduction_size * b_size * payload_size, 1},
+        0);
+
+    auto stamped = CubReduction(CubReductionOp::Sum, 0, DataType::FP32).stamp(permuted, stream);
+    ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+    ASSERT_TRUE(stamped->getGeometry().payload_transpose_tiled_geometry.has_value());
+    stamped->run();
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
+                          std::vector<float>(b_size * a_size * payload_size, 2.0f));
+}
+
+TEST(CubReduction, Direct2BPayloadTranspose32x33SupportsEveryValueOperationThroughProductionStamp) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t reduction_size = 4;
+    constexpr uint64_t b_size = 3;
+    constexpr uint64_t a_size = 2;
+    constexpr uint64_t payload_size = 5;
+    constexpr uint64_t storage_elements = a_size * reduction_size * b_size * payload_size;
+    Tensor storage = makeGpuTensor(std::vector<float>(storage_elements, 1.0f), {storage_elements}, stream);
+    Tensor permuted = storage.aliasView(
+        {reduction_size, b_size, a_size, payload_size},
+        {b_size * payload_size, payload_size, reduction_size * b_size * payload_size, 1},
+        0);
+
+    struct OperationCase {
+        CubReductionOp op;
+        float expected;
+    };
+    const std::vector<OperationCase> cases = {
+        {CubReductionOp::Sum, 4.0f},
+        {CubReductionOp::Min, 1.0f},
+        {CubReductionOp::Max, 1.0f},
+        {CubReductionOp::Product, 1.0f},
+        {CubReductionOp::Mean, 1.0f},
+        {CubReductionOp::L1Norm, 4.0f},
+        {CubReductionOp::L2Norm, 2.0f},
+        {CubReductionOp::SumSquares, 4.0f},
+    };
+
+    for (const OperationCase& test_case : cases) {
+        auto stamped = CubReduction(test_case.op, 0, DataType::FP32).stamp(permuted, stream);
+        ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+        ASSERT_TRUE(stamped->getGeometry().payload_transpose_tiled_geometry.has_value());
+        EXPECT_FALSE(stamped->getGeometry().pitched_tiled_geometry.has_value());
+        EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 1U);
+
+        stamped->run();
+        stream.synchronize();
+        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
+                              std::vector<float>(b_size * a_size * payload_size, test_case.expected));
+    }
+}
+
+TEST(CubReduction, PitchedTiledViewReducesDiagonalSlabsWithoutMaterialization) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    std::vector<float> values(24);
+    for (uint64_t i = 0; i < values.size(); ++i) {
+        values[i] = static_cast<float>(i + 1);
+    }
+    Tensor storage = makeGpuTensor(values, {2, 2, 2, 3}, stream);
+
+    // This is the collapsed repeated-label view produced by the lhs of iirk,kj->ij. The second logical i contributes
+    // to the first stride (12 + 6 = 18), leaving two disjoint [reduction=2,inner=3] slabs separated by a physical gap.
+    Tensor diagonal = storage.aliasView({2, 2, 3}, {18, 3, 1}, 0);
+    auto stamped = CubReduction(CubReductionOp::Sum, 1, DataType::FP32).stamp(diagonal, stream);
+
+    ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+    ASSERT_TRUE(stamped->getGeometry().pitched_tiled_geometry.has_value());
+    EXPECT_FALSE(stamped->getGeometry().permutation_aware_tiled_geometry.has_value());
+    EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 1U);
+    const CubReductionPitchedTiledGeometry& pitched = stamped->getGeometry().pitched_tiled_geometry.value();
+    EXPECT_EQ(pitched.outer_size, 2U);
+    EXPECT_EQ(pitched.reduction_size, 2U);
+    EXPECT_EQ(pitched.inner_size, 3U);
+    EXPECT_EQ(pitched.outer_stride, 18U);
+    EXPECT_EQ(pitched.reduction_stride, 3U);
+
+    stamped->run();
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
+                          {5.0f, 7.0f, 9.0f, 41.0f, 43.0f, 45.0f});
+}
+
+
+TEST(CubReduction, PitchedTiledViewSupportsEveryValueOperation) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    std::vector<float> values(106, 1.0f);
+    Tensor storage = makeGpuTensor(values, {106}, stream);
+    Tensor pitched_view = storage.aliasView({3, 4, 5}, {40, 7, 1}, 0);
+
+    struct OperationCase {
+        CubReductionOp op;
+        float expected;
+    };
+    const std::vector<OperationCase> cases = {
+        {CubReductionOp::Sum, 4.0f},
+        {CubReductionOp::Min, 1.0f},
+        {CubReductionOp::Max, 1.0f},
+        {CubReductionOp::Product, 1.0f},
+        {CubReductionOp::Mean, 1.0f},
+        {CubReductionOp::L1Norm, 4.0f},
+        {CubReductionOp::L2Norm, 2.0f},
+        {CubReductionOp::SumSquares, 4.0f},
+    };
+
+    for (const OperationCase& test_case : cases) {
+        auto stamped = CubReduction(test_case.op, 1, DataType::FP32).stamp(pitched_view, stream);
+        ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+        ASSERT_TRUE(stamped->getGeometry().pitched_tiled_geometry.has_value());
+        EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 1U);
+
+        stamped->run();
+        stream.synchronize();
+        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
+                              std::vector<float>(15, test_case.expected));
+    }
+}
+
+TEST(CubReduction, PitchedTiledViewSupportsLeadingReductionWithNoOuterGroup) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    std::vector<float> values(12);
+    for (uint64_t i = 0; i < values.size(); ++i) {
+        values[i] = static_cast<float>(i + 1);
+    }
+    Tensor storage = makeGpuTensor(values, {2, 2, 3}, stream);
+
+    // Collapsed repeated-label view from iir,j->rj: two contiguous r payloads separated by the diagonal i pitch.
+    Tensor diagonal = storage.aliasView({2, 3}, {9, 1}, 0);
+    auto stamped = CubReduction(CubReductionOp::Sum, 0, DataType::FP32).stamp(diagonal, stream);
+
+    ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+    ASSERT_TRUE(stamped->getGeometry().pitched_tiled_geometry.has_value());
+    const CubReductionPitchedTiledGeometry& pitched = stamped->getGeometry().pitched_tiled_geometry.value();
+    EXPECT_EQ(pitched.outer_size, 1U);
+    EXPECT_EQ(pitched.outer_stride, 0U);
+    EXPECT_EQ(pitched.reduction_stride, 9U);
+
+    stamped->run();
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {11.0f, 13.0f, 15.0f});
+}
+
+TEST(CubReduction, UnsupportedViewGateRejectsProductionWhileBenchmarkLegacyHookRemainsExecutable) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    std::vector<float> values(13);
+    for (uint64_t i = 0; i < values.size(); ++i) {
+        values[i] = static_cast<float>(i + 1);
+    }
+    Tensor storage = makeGpuTensor(values, {13}, stream);
+    Tensor unsupported = storage.aliasView({2, 2, 3}, {1, 7, 2}, 0);
+    CubReduction reduction(CubReductionOp::Sum, 2, DataType::FP32);
+
+    EXPECT_THROW((void)CubReduction::analyzeGeometry(
+                     unsupported.getDimensions(), unsupported.getStridesElements(), {2}),
+                 NotImplementedException);
+    EXPECT_THROW(static_cast<void>(reduction.stamp(unsupported, stream)), NotImplementedException);
 }
 
 TEST(CubReduction, RankOneAffineViewUsesDeviceTransformReduceWithoutGeneralIndexMetadata) {

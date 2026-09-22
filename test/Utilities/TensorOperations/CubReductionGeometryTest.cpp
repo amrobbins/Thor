@@ -1,4 +1,5 @@
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
+#include "Utilities/Exceptions.h"
 
 #include "gtest/gtest.h"
 
@@ -149,80 +150,6 @@ TEST(CubReductionGeometry, SupportsRankBeyondFormerCudnnDescriptorLimit) {
     EXPECT_EQ(geometry.reduction_size, 16U);
     EXPECT_EQ(geometry.output_elements, 2U);
     EXPECT_EQ(geometry.output_dimensions, (std::vector<uint64_t>{1, 1, 1, 1, 1, 1, 1, 1, 2}));
-    EXPECT_EQ(geometry.indexing.input_strides.size(), dimensions.size());
-    EXPECT_EQ(geometry.indexing.reduced_axes, axes);
-
-    EXPECT_EQ(CubReduction::mapLogicalReductionIndexToPhysicalIndex(geometry, 0, 15), 30U);
-    EXPECT_EQ(CubReduction::mapLogicalReductionIndexToPhysicalIndex(geometry, 1, 15), 31U);
-}
-
-TEST(CubReductionGeometry, LogicalIndexMappingIsBijectiveAndMatchesRowMajorCoordinates) {
-    const std::vector<std::vector<uint64_t>> shapes = {
-        {2},
-        {2, 3},
-        {2, 1, 3},
-        {2, 3, 2, 1},
-    };
-
-    for (const std::vector<uint64_t>& dimensions : shapes) {
-        const uint32_t rank = static_cast<uint32_t>(dimensions.size());
-        const uint32_t subset_count = 1U << rank;
-        for (uint32_t mask = 1; mask < subset_count; ++mask) {
-            std::vector<uint32_t> axes;
-            std::vector<uint32_t> retained_axes;
-            for (uint32_t axis = 0; axis < rank; ++axis) {
-                if ((mask & (1U << axis)) != 0) {
-                    axes.push_back(axis);
-                } else {
-                    retained_axes.push_back(axis);
-                }
-            }
-
-            const CubReductionGeometry geometry = CubReduction::analyzeGeometry(dimensions, axes);
-            std::vector<bool> visited(geometry.input_elements, false);
-
-            for (uint64_t output_index = 0; output_index < geometry.output_elements; ++output_index) {
-                for (uint64_t reduction_index = 0; reduction_index < geometry.reduction_size; ++reduction_index) {
-                    std::vector<uint64_t> coordinates(rank, 0);
-                    uint64_t remaining_output = output_index;
-                    for (int32_t retained = static_cast<int32_t>(retained_axes.size()) - 1; retained >= 0; --retained) {
-                        const uint32_t axis = retained_axes[retained];
-                        coordinates[axis] = remaining_output % dimensions[axis];
-                        remaining_output /= dimensions[axis];
-                    }
-                    uint64_t remaining_reduction = reduction_index;
-                    for (int32_t reduced = static_cast<int32_t>(axes.size()) - 1; reduced >= 0; --reduced) {
-                        const uint32_t axis = axes[reduced];
-                        coordinates[axis] = remaining_reduction % dimensions[axis];
-                        remaining_reduction /= dimensions[axis];
-                    }
-
-                    uint64_t expected_physical_index = 0;
-                    for (uint32_t dimension = 0; dimension < rank; ++dimension) {
-                        expected_physical_index = expected_physical_index * dimensions[dimension] + coordinates[dimension];
-                    }
-
-                    const uint64_t actual_physical_index = CubReduction::mapLogicalReductionIndexToPhysicalIndex(
-                        geometry, output_index, reduction_index);
-                    EXPECT_EQ(actual_physical_index, expected_physical_index)
-                        << "rank=" << rank << " mask=" << mask << " output=" << output_index
-                        << " reduction=" << reduction_index;
-                    ASSERT_LT(actual_physical_index, visited.size());
-                    EXPECT_FALSE(visited[actual_physical_index]);
-                    visited[actual_physical_index] = true;
-                }
-            }
-            EXPECT_TRUE(std::all_of(visited.begin(), visited.end(), [](bool value) { return value; }));
-        }
-    }
-
-    const CubReductionGeometry geometry = CubReduction::analyzeGeometry({2, 3, 4}, std::vector<uint32_t>{0, 2});
-    EXPECT_THROW(static_cast<void>(CubReduction::mapLogicalReductionIndexToPhysicalIndex(
-                     geometry, geometry.output_elements, 0)),
-                 std::out_of_range);
-    EXPECT_THROW(static_cast<void>(CubReduction::mapLogicalReductionIndexToPhysicalIndex(
-                     geometry, 0, geometry.reduction_size)),
-                 std::out_of_range);
 }
 
 TEST(CubReductionGeometry, SelectsPermutationAwareTiledPathForDensePhysicalPermutation) {
@@ -344,40 +271,62 @@ TEST(CubReductionGeometry, PhysicallyContiguousReductionBlockCanUseTiledPathWhen
     EXPECT_FALSE(geometry.tiled_output_permuted);
 }
 
-TEST(CubReductionGeometry, RejectsGappedOverlappingAndBroadcastStorageAsDensePhysicalPermutations) {
-    const CubReductionGeometry gapped = CubReduction::analyzeGeometry(
-        {2, 2, 3}, {1, 7, 2}, std::vector<uint32_t>{2});
-    EXPECT_EQ(gapped.path, CubReductionPath::StridedFixedSegment);
-    EXPECT_FALSE(gapped.physical_layout_is_dense_permutation);
-    EXPECT_FALSE(gapped.permutation_aware_tiled_geometry.has_value());
-
-    const CubReductionGeometry overlapping = CubReduction::analyzeGeometry(
-        {2, 2, 3}, {1, 1, 2}, std::vector<uint32_t>{2});
-    EXPECT_EQ(overlapping.path, CubReductionPath::StridedFixedSegment);
-    EXPECT_FALSE(overlapping.physical_layout_is_dense_permutation);
-    EXPECT_FALSE(overlapping.permutation_aware_tiled_geometry.has_value());
-
-    const CubReductionGeometry broadcast = CubReduction::analyzeGeometry(
-        {2, 2, 3}, {0, 6, 2}, std::vector<uint32_t>{2});
-    EXPECT_EQ(broadcast.path, CubReductionPath::StridedFixedSegment);
-    EXPECT_FALSE(broadcast.physical_layout_is_dense_permutation);
-    EXPECT_FALSE(broadcast.permutation_aware_tiled_geometry.has_value());
+TEST(CubReductionGeometry, RejectsGappedOverlappingAndBroadcastStorageAfterDelete) {
+    EXPECT_THROW((void)CubReduction::analyzeGeometry(
+                     {2, 2, 3}, {1, 7, 2}, std::vector<uint32_t>{2}),
+                 NotImplementedException);
+    EXPECT_THROW((void)CubReduction::analyzeGeometry(
+                     {2, 2, 3}, {1, 1, 2}, std::vector<uint32_t>{2}),
+                 NotImplementedException);
+    EXPECT_THROW((void)CubReduction::analyzeGeometry(
+                     {2, 2, 3}, {0, 6, 2}, std::vector<uint32_t>{2}),
+                 NotImplementedException);
 }
 
-TEST(CubReductionGeometry, RequiresPhysicallyContiguousReductionBlockAndSupportedRetainedOrder) {
-    // Physical order is [2,0,1,3]. Reducing logical axes 1 and 2 leaves a retained axis between them physically.
-    const CubReductionGeometry split_reduction = CubReduction::analyzeGeometry(
-        {3, 5, 2, 7}, {35, 7, 105, 1}, std::vector<uint32_t>{1, 2});
-    EXPECT_TRUE(split_reduction.physical_layout_is_dense_permutation);
-    EXPECT_EQ(split_reduction.physical_non_singleton_axis_order, (std::vector<uint32_t>{2, 0, 1, 3}));
-    EXPECT_FALSE(split_reduction.permutation_aware_tiled_geometry.has_value());
+TEST(CubReductionGeometry, SplitPhysicalReductionIsUnsupportedAndDirect2BOwnsRetainedRotation) {
+    // Physical order is [2,0,1,3]. Reduction axes {1,2} are split by retained axis 0 in physical order.
+    EXPECT_THROW((void)CubReduction::analyzeGeometry(
+                     {3, 5, 2, 7}, {35, 7, 105, 1}, std::vector<uint32_t>{1, 2}),
+                 NotImplementedException);
 
-    // Reducing logical axis 0 is physically contiguous, but requested logical retained order [1,2,3] is neither
-    // natural [2,1,3] nor the flattened inner/outer rotation [1,3,2].
-    const CubReductionGeometry unsupported_output_order = CubReduction::analyzeGeometry(
+    // Reducing axis 0 is the ordained VIEW-DIRECT-2B [A,R,B,P] -> [B,A,P] retained rotation.
+    const CubReductionGeometry direct2b = CubReduction::analyzeGeometry(
         {3, 5, 2, 7}, {35, 7, 105, 1}, std::vector<uint32_t>{0});
-    EXPECT_TRUE(unsupported_output_order.physical_layout_is_dense_permutation);
-    EXPECT_FALSE(unsupported_output_order.permutation_aware_tiled_geometry.has_value());
+    EXPECT_TRUE(direct2b.physical_layout_is_dense_permutation);
+    EXPECT_EQ(direct2b.path, CubReductionPath::TiledFixedSegment);
+    EXPECT_TRUE(direct2b.payload_transpose_tiled_geometry.has_value());
+}
+
+TEST(CubReductionGeometry, CompactPhysicalPermutationTrailingReductionUsesContiguousSegmentsWhenOutputOrderMatches) {
+    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(
+        {2, 3, 4}, {1, 8, 2}, std::vector<uint32_t>{0});
+
+    EXPECT_TRUE(geometry.physical_layout_is_dense_permutation);
+    EXPECT_EQ(geometry.physical_non_singleton_axis_order, (std::vector<uint32_t>{1, 2, 0}));
+    EXPECT_EQ(geometry.output_elements, 12U);
+    EXPECT_EQ(geometry.reduction_size, 2U);
+    EXPECT_TRUE(geometry.permutation_aware_contiguous_segments);
+    EXPECT_EQ(geometry.path, CubReductionPath::ContiguousFixedSegment);
+    EXPECT_FALSE(geometry.permutation_aware_tiled_geometry.has_value());
+}
+
+TEST(CubReductionGeometry, CompactPhysicalPermutationTrailingRetainedOrderMismatchIsUnsupported) {
+    EXPECT_THROW((void)CubReduction::analyzeGeometry(
+                     {2, 3, 4}, {4, 8, 1}, std::vector<uint32_t>{2}),
+                 NotImplementedException);
+}
+
+TEST(CubReductionGeometry, CompactPhysicalPermutationFullReductionUsesDeviceTransformReduce) {
+    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(
+        {2, 3, 4}, {1, 8, 2}, std::vector<uint32_t>{0, 1, 2});
+
+    EXPECT_TRUE(geometry.physical_layout_is_dense_permutation);
+    EXPECT_EQ(geometry.physical_non_singleton_axis_order, (std::vector<uint32_t>{1, 2, 0}));
+    EXPECT_EQ(geometry.output_elements, 1U);
+    EXPECT_EQ(geometry.reduction_size, 24U);
+    EXPECT_EQ(geometry.path, CubReductionPath::DeviceTransformReduce);
+    EXPECT_FALSE(geometry.device_transform_uses_affine_stride);
+    EXPECT_FALSE(geometry.permutation_aware_tiled_geometry.has_value());
 }
 
 TEST(CubReductionGeometry, DenseAndAffinePathSelectionRemainsUnchanged) {
@@ -394,7 +343,6 @@ TEST(CubReductionGeometry, DenseAndAffinePathSelectionRemainsUnchanged) {
     EXPECT_EQ(diagonal.affine_input_stride, 4U);
     EXPECT_FALSE(diagonal.physical_layout_is_dense_permutation);
     EXPECT_FALSE(diagonal.permutation_aware_tiled_geometry.has_value());
-    EXPECT_EQ(CubReduction::mapLogicalReductionIndexToPhysicalIndex(diagonal, 0, 2), 8U);
 }
 
 TEST(CubReductionGeometry, StampsCollapsedDenseRunsForAlexNetBiasGradient) {
@@ -440,7 +388,6 @@ TEST(CubReductionGeometry, ValuePlanningSelectsGeneralComposedDenseForRkrBeforeS
                               CubReductionOp::SumSquares}) {
         const CubReductionGeometry value = CubReduction::analyzeValueGeometry(op, dimensions, axes);
         EXPECT_EQ(value.path, CubReductionPath::ComposedDense);
-        EXPECT_FALSE(value.strided_value_indexing_fits_uint32);
     }
 }
 
@@ -494,7 +441,6 @@ TEST(CubReductionGeometry, ValuePlanningSelectsGeneralComposedDenseForRkrkrBefor
                               CubReductionOp::SumSquares}) {
         const CubReductionGeometry value = CubReduction::analyzeValueGeometry(op, dimensions, axes);
         EXPECT_EQ(value.path, CubReductionPath::ComposedDense);
-        EXPECT_FALSE(value.strided_value_indexing_fits_uint32);
     }
 }
 
@@ -510,12 +456,10 @@ TEST(CubReductionGeometry, ValuePlanningSelectsComposedDenseForTrailingRetainedT
         const CubReductionGeometry rkrk =
             CubReduction::analyzeValueGeometry(op, {2, 3, 5, 7}, {0, 2});
         EXPECT_EQ(rkrk.path, CubReductionPath::ComposedDense);
-        EXPECT_FALSE(rkrk.strided_value_indexing_fits_uint32);
 
         const CubReductionGeometry krkrk =
             CubReduction::analyzeValueGeometry(op, {2, 3, 5, 7, 11}, {1, 3});
         EXPECT_EQ(krkrk.path, CubReductionPath::ComposedDense);
-        EXPECT_FALSE(krkrk.strided_value_indexing_fits_uint32);
     }
 }
 
@@ -561,8 +505,8 @@ TEST(CubReductionGeometry, DenseValueCompositionValidatesPerStageRatherThanMonol
         CubReductionOp::Sum, {run_extent, 2, run_extent, 2}, {0, 2});
     EXPECT_EQ(sum.path, CubReductionPath::ComposedDense);
 
-    // Every dense value operation validates its direct component stages independently rather than inheriting the
-    // legacy monolithic fixed-segment limit from StridedFixedSegment.
+    // Every dense value operation validates its direct component stages independently rather than inheriting any
+    // obsolete monolithic fallback limit.
     for (CubReductionOp op : {CubReductionOp::Min,
                               CubReductionOp::Max,
                               CubReductionOp::Product,
@@ -640,36 +584,17 @@ TEST(CubReductionGeometry, DenseRunPlanningCollapsesAdjacentRolesAndIgnoresSingl
 }
 
 TEST(CubReductionGeometry, DenseRunPlanningDoesNotPretendArbitraryStridesAreDense) {
-    const CubReductionGeometry gapped =
-        CubReduction::analyzeGeometry({2, 3, 4}, {20, 4, 1}, std::vector<uint32_t>{0, 2});
-    EXPECT_EQ(gapped.path, CubReductionPath::StridedFixedSegment);
-    EXPECT_FALSE(gapped.dense_run_geometry.has_value());
+    EXPECT_THROW((void)CubReduction::analyzeGeometry(
+                     {2, 3, 4}, {20, 4, 1}, std::vector<uint32_t>{0, 2}),
+                 NotImplementedException);
 }
 
-TEST(CubReductionGeometry, SelectsUint32IndexingForIrregularStridedFallbackWhenAllOffsetsFit) {
-    const CubReductionGeometry dense_composed =
-        CubReduction::analyzeGeometry({512, 64, 55, 55}, std::vector<uint32_t>{0, 2, 3});
-    EXPECT_EQ(dense_composed.path, CubReductionPath::ComposedDense);
-    EXPECT_FALSE(dense_composed.strided_value_indexing_fits_uint32);
 
-    const CubReductionGeometry small_irregular =
-        CubReduction::analyzeGeometry({2, 3, 4}, {20, 4, 1}, std::vector<uint32_t>{0, 2});
-    EXPECT_EQ(small_irregular.path, CubReductionPath::StridedFixedSegment);
-    EXPECT_TRUE(small_irregular.strided_value_indexing_fits_uint32);
-}
-
-TEST(CubReductionGeometry, RetainsUint64IndexingWhenLogicalOrPhysicalFallbackDomainExceedsUint32) {
-    // The per-output reduction still fits CUB's signed-int fixed-segment limit, but this overlapping arbitrary view
-    // has a full logical item domain larger than UINT32, so a 32-bit counting iterator would wrap.
-    const CubReductionGeometry large_logical = CubReduction::analyzeGeometry(
-        {65535, 3, 32768}, {1, 1, 1}, std::vector<uint32_t>{0, 2});
-    EXPECT_EQ(large_logical.path, CubReductionPath::StridedFixedSegment);
-    EXPECT_FALSE(large_logical.strided_value_indexing_fits_uint32);
-
-    // A small logical tensor may still address beyond 4 Gi elements through an arbitrary view stride. getMemPtr()
-    // already includes the storage offset, so this specifically tests the relative physical index used by the mapper.
-    const CubReductionGeometry large_physical = CubReduction::analyzeGeometry(
-        {2, 3, 4}, {uint64_t{1} << 32, 4, 1}, std::vector<uint32_t>{0, 2});
-    EXPECT_EQ(large_physical.path, CubReductionPath::StridedFixedSegment);
-    EXPECT_FALSE(large_physical.strided_value_indexing_fits_uint32);
+TEST(CubReductionGeometry, DeleteRejectsFormerLogicalIndexMapperDomains) {
+    EXPECT_THROW((void)CubReduction::analyzeGeometry(
+                     {65535, 3, 32768}, {1, 1, 1}, std::vector<uint32_t>{0, 2}),
+                 NotImplementedException);
+    EXPECT_THROW((void)CubReduction::analyzeGeometry(
+                     {2, 3, 4}, {uint64_t{1} << 32, 4, 1}, std::vector<uint32_t>{0, 2}),
+                 NotImplementedException);
 }

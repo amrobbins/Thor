@@ -82,6 +82,7 @@ TEST(EmbeddingApi, RaggedBuildPreservesPartitionAndUsesPackedCapacityMemoryAccou
     ASSERT_EQ(physicalInputs.size(), 2u);
     EXPECT_EQ(physicalInputs[0], input.getValues());
     EXPECT_EQ(physicalInputs[1], input.getOffsets());
+    EXPECT_TRUE(embedding.outputTensorDimensionsIncludeBatch(output.getValues()));
     EXPECT_EQ(embedding.getOutputTensorBytes(batchSize), output.getValues().getTotalSizeInBytes());
 
     const json architecture = embedding.architectureJson();

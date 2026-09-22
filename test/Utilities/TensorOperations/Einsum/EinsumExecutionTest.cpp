@@ -114,6 +114,19 @@ std::string describeDimensions(const std::vector<std::vector<uint64_t>>& dimensi
     return out.str();
 }
 
+std::string describeVector(const std::vector<uint64_t>& values) {
+    std::ostringstream out;
+    out << '[';
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        out << values[i];
+    }
+    out << ']';
+    return out.str();
+}
+
 std::vector<Tensor> makeGpuTensors(const std::vector<std::vector<uint64_t>>& dimensions,
                                    const std::vector<std::vector<float>>& values,
                                    Stream& stream) {
@@ -335,6 +348,36 @@ RandomizedEinsumDifferentialCase makeRandomizedEinsumDifferentialCase(
     return RandomizedEinsumDifferentialCase{equation.str(), std::move(dimensions)};
 }
 
+bool reductionMatchesOriginalDiagonalView(const EinsumPlan& plan,
+                                         const StampedReductionStageDiagnostic& reduction) {
+    for (const EinsumLogicalOperandPlan& operand : plan.logical_operands) {
+        if (!operand.diagonal_view) {
+            continue;
+        }
+        if (operand.dimensions == reduction.input_dimensions
+            && operand.strides_elements == reduction.input_strides_elements) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void expectEinsumViewGateNoLegacyMapper(const StampedEinsum& einsum, const std::string& context) {
+    const std::vector<StampedReductionStageDiagnostic> reductions =
+        einsum.getStandaloneReductionDiagnostics();
+    for (const StampedReductionStageDiagnostic& reduction : reductions) {
+        EXPECT_TRUE(reduction.path == CubReductionPath::DeviceTransformReduce
+                    || reduction.path == CubReductionPath::ContiguousFixedSegment
+                    || reduction.path == CubReductionPath::TiledFixedSegment
+                    || reduction.path == CubReductionPath::ComposedDense)
+            << "Einsum selected a non-ordained reduction path after DELETE. " << context
+            << " stage_index=" << reduction.stage_index
+            << " input_dimensions=" << describeVector(reduction.input_dimensions)
+            << " input_strides=" << describeVector(reduction.input_strides_elements)
+            << " reduction_axes=" << describeVector(reduction.reduction_axes);
+    }
+}
+
 }  // namespace
 
 TEST(EinsumExecution, DirectGemmUsesMatrixPathWithoutStandaloneReduction) {
@@ -485,8 +528,54 @@ TEST(EinsumExecution, DiagonalPreReductionHappensBeforeGemmWithoutOperandMateria
     EXPECT_EQ(std::count(stage_kinds.begin(), stage_kinds.end(), "Matmul"), 1);
     EXPECT_EQ(std::count(stage_kinds.begin(), stage_kinds.end(), "FusedKernel"), 0);
 
+    const std::vector<StampedReductionStageDiagnostic> reductions =
+        einsum->getStandaloneReductionDiagnostics();
+    ASSERT_EQ(reductions.size(), 1u);
+    // VIEW-PITCHED-TILED takes ownership without materializing the repeated-label diagonal view.
+    EXPECT_EQ(reductions[0].path, CubReductionPath::TiledFixedSegment);
+    EXPECT_EQ(reductions[0].input_dimensions, (std::vector<uint64_t>{2, 2, 3}));
+    EXPECT_EQ(reductions[0].input_strides_elements, (std::vector<uint64_t>{18, 3, 1}));
+    EXPECT_EQ(reductions[0].reduction_axes, (std::vector<uint64_t>{1}));
+    EXPECT_TRUE(reductionMatchesOriginalDiagonalView(einsum->getPlan(), reductions[0]));
+    expectEinsumViewGateNoLegacyMapper(*einsum, "equation=iirk,kj->ij");
+
     einsum->run();
     expectNear(copyToCpu(einsum->getOutputTensor(), stream), {71, 92, 395, 524});
+}
+
+TEST(EinsumExecution, DiagonalLocalReductionBeforePairProductIsTrackedByViewGate) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<uint64_t> lhs_dimensions = {2, 2, 3};
+    const std::vector<uint64_t> rhs_dimensions = {2};
+    const std::vector<float> lhs_values = {1, 2, 3, 4, 5, 6,
+                                           7, 8, 9, 10, 11, 12};
+    const std::vector<float> rhs_values = {2, 3};
+    Tensor lhs = makeGpuTensor(lhs_dimensions, lhs_values, stream);
+    Tensor rhs = makeGpuTensor(rhs_dimensions, rhs_values, stream);
+
+    auto einsum = Einsum("iir,j->rj").stamp({lhs, rhs}, stream);
+    ASSERT_TRUE(einsum->getPlan().pair_product.has_value());
+    EXPECT_TRUE(einsum->getPlan().operands[0].requiresDiagonalExtraction());
+    EXPECT_FALSE(einsum->getPlan().pair_product->lhs_reduction_labels.empty());
+    EXPECT_EQ(einsum->getExecutionPath(), EinsumExecutionPath::PAIR_PRODUCT);
+    EXPECT_TRUE(einsum->usesStandaloneReduction());
+
+    const std::vector<StampedReductionStageDiagnostic> reductions =
+        einsum->getStandaloneReductionDiagnostics();
+    ASSERT_EQ(reductions.size(), 1u);
+    // The same pitched affine family is required outside GEMM lowering.
+    EXPECT_EQ(reductions[0].path, CubReductionPath::TiledFixedSegment);
+    EXPECT_EQ(reductions[0].input_dimensions, (std::vector<uint64_t>{2, 3}));
+    EXPECT_EQ(reductions[0].input_strides_elements, (std::vector<uint64_t>{9, 1}));
+    EXPECT_EQ(reductions[0].reduction_axes, (std::vector<uint64_t>{0}));
+    EXPECT_TRUE(reductionMatchesOriginalDiagonalView(einsum->getPlan(), reductions[0]));
+    expectEinsumViewGateNoLegacyMapper(*einsum, "equation=iir,j->rj");
+
+    einsum->run();
+    const std::vector<float> reference =
+        evaluateEinsumOnHost("iir,j->rj", {lhs_dimensions, rhs_dimensions}, {lhs_values, rhs_values});
+    expectNear(copyToCpu(einsum->getOutputTensor(), stream), reference);
 }
 
 TEST(EinsumExecution, DotProductUsesGemmIntrinsicReductionAndPhysicalScalarOutput) {
@@ -1962,6 +2051,58 @@ TEST(EinsumExecution, ContractionTreePreservesPairLocalSingletonBatchUntilLaterB
                1.0e-4f);
 }
 
+TEST(EinsumExecution, UnsupportedDiagonalPreReductionMaterializesOperandBeforeReduction) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    const std::string equation = "bae,fbefc,edc->ade";
+    const std::vector<std::vector<uint64_t>> dimensions = {
+        {2, 2, 2},
+        {2, 2, 2, 2, 2},
+        {1, 2, 2},
+    };
+    std::vector<std::vector<float>> input_values;
+    input_values.reserve(dimensions.size());
+    for (size_t operand = 0; operand < dimensions.size(); ++operand) {
+        size_t element_count = 1;
+        for (uint64_t dimension : dimensions[operand]) {
+            element_count *= static_cast<size_t>(dimension);
+        }
+        std::vector<float> values(element_count);
+        for (size_t element = 0; element < element_count; ++element) {
+            const int centered = static_cast<int>((element + 3 * operand) % 11) - 5;
+            values[element] = static_cast<float>(centered) * 0.125f;
+        }
+        input_values.push_back(std::move(values));
+    }
+
+    std::vector<Tensor> inputs = makeGpuTensors(dimensions, input_values, stream);
+    const std::vector<float> reference_values =
+        evaluateEinsumOnHost(equation, dimensions, input_values);
+
+    auto einsum = Einsum(equation).stamp(inputs, stream);
+    EXPECT_NE(einsum->getExecutionPath(), EinsumExecutionPath::GENERIC);
+    EXPECT_EQ(einsum->getGenericExecutionReason(), EinsumGenericExecutionReason::NONE);
+    expectEinsumViewGateNoLegacyMapper(*einsum, "equation=" + equation);
+
+    // fbefc diagonalizes to logical [f,b,e,c] with strides [18,8,4,1].
+    // Reducing f directly would require the benchmark-only arbitrary mapper
+    // because retained [b,e,c] contains internal gaps. Einsum should instead
+    // materialize that operand to dense [8,4,2,1] storage before reduction.
+    bool found_materialized_diagonal_reduction = false;
+    for (const StampedReductionStageDiagnostic& reduction : einsum->getStandaloneReductionDiagnostics()) {
+        if (reduction.input_dimensions == (std::vector<uint64_t>{2, 2, 2, 2})
+            && reduction.input_strides_elements == (std::vector<uint64_t>{8, 4, 2, 1})
+            && reduction.reduction_axes == (std::vector<uint64_t>{0})) {
+            found_materialized_diagonal_reduction = true;
+        }
+    }
+    EXPECT_TRUE(found_materialized_diagonal_reduction);
+
+    einsum->run();
+    expectNear(copyToCpu(einsum->getOutputTensor(), stream), reference_values, 1.0e-4f);
+}
+
 TEST(EinsumExecution, RandomizedTwoToTenOperandNetworksMatchHostReference) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -2021,6 +2162,11 @@ TEST(EinsumExecution, RandomizedTwoToTenOperandNetworksMatchHostReference) {
                 if (optimized->getPlan().beam_contraction.has_value()) {
                     assert_no_generic_pair_steps(*optimized->getPlan().beam_contraction);
                 }
+
+                expectEinsumViewGateNoLegacyMapper(
+                    *optimized,
+                    "randomized equation=" + test_case.equation +
+                        " dimensions=" + describeDimensions(test_case.dimensions));
 
                 optimized->run();
                 const std::vector<float> optimized_values = copyToCpu(optimized->getOutputTensor(), stream);

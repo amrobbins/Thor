@@ -1,4 +1,5 @@
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
+#include "Utilities/Exceptions.h"
 
 #include "gtest/gtest.h"
 
@@ -77,8 +78,20 @@ void expectEveryDenseArgMaskUsesOrdainedPath(const std::vector<uint64_t>& dimens
             const CubReductionGeometry structural_geometry = CubReduction::analyzeGeometry(dimensions, axes);
             const CubReductionGeometry geometry = CubArgReduction::analyzeDenseGeometry(dimensions, axes);
             EXPECT_EQ(geometry.path, structural_geometry.path);
+            EXPECT_TRUE(isOrdainedDenseArgPath(structural_geometry.path));
             EXPECT_TRUE(isOrdainedDenseArgPath(geometry.path));
-            EXPECT_NE(geometry.path, CubReductionPath::StridedFixedSegment);
+
+            if (geometry.path == CubReductionPath::ComposedDense) {
+                const std::optional<CubArgReductionDenseCompositionPlan> plan =
+                    CubArgReduction::analyzeDenseCompositionPlan(dimensions, axes);
+                ASSERT_TRUE(plan.has_value());
+                ASSERT_FALSE(plan->topology.stages.empty());
+                for (const CubReductionDenseCompositionStage& stage : plan->topology.stages) {
+                    EXPECT_TRUE(stage.expected_path == CubReductionPath::DeviceTransformReduce
+                                || stage.expected_path == CubReductionPath::ContiguousFixedSegment
+                                || stage.expected_path == CubReductionPath::TiledFixedSegment);
+                }
+            }
         }
     }
 }
@@ -146,7 +159,5 @@ TEST(CubArgReductionDenseGate, GenuineIrregularViewRemainsOnIrregularFallback) {
     const std::vector<uint64_t> dimensions{2, 3, 4};
     const std::vector<uint64_t> strides{20, 4, 1};
     const std::vector<uint32_t> axes{0, 2};
-    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(dimensions, strides, axes);
-    EXPECT_EQ(geometry.path, CubReductionPath::StridedFixedSegment);
-    EXPECT_FALSE(geometry.dense_run_geometry.has_value());
+    EXPECT_THROW((void)CubReduction::analyzeGeometry(dimensions, strides, axes), NotImplementedException);
 }

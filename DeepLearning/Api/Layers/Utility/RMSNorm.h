@@ -43,6 +43,17 @@ class RMSNorm : public TrainableLayer {
     double getEpsilon() const { return epsilon; }
     DataType getParameterDataType() const { return parameterDataType; }
     [[nodiscard]] bool getUseRagged() const { return !raggedFeatureInputs.empty(); }
+    [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {
+        bool isFeatureOutput = false;
+        for (const Tensor& output : featureOutputs) {
+            if (output == outputTensor) {
+                isFeatureOutput = true;
+                break;
+            }
+        }
+        THOR_THROW_IF_FALSE(isFeatureOutput);
+        return !raggedFeatureOutputs.empty();
+    }
     [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureInput(uint32_t index = 0) const {
         if (index >= raggedFeatureInputs.size()) return std::nullopt;
         return raggedFeatureInputs[index];

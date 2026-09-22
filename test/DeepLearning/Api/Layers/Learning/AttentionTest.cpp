@@ -4068,7 +4068,8 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveCanonicalRaggedTensorIn
                                   .valuesDataType(DataType::FP16)
                                   .offsetsDataType(DataType::UINT64)
                                   .trailingDimensions({64})
-                                  .maxTotalValues(8)
+                                  .maxTotalValues(16)
+                                  .maxValuesPerRow(8)
                                   .batchSize(2)
                                   .build();
 
@@ -4089,6 +4090,9 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveCanonicalRaggedTensorIn
     ASSERT_TRUE(arch.contains("ragged_query_input"));
     ASSERT_TRUE(arch.contains("ragged_feature_output"));
     EXPECT_EQ(arch.at("ragged_query_input").at("offsets").at("data_type").get<DataType>(), DataType::UINT64);
+    EXPECT_EQ(arch.at("ragged_query_input").at("max_total_values").get<uint64_t>(), 16u);
+    EXPECT_EQ(arch.at("ragged_query_input").at("max_values_per_row").get<uint64_t>(), 8u);
+    EXPECT_EQ(arch.at("ragged_feature_output").at("max_values_per_row").get<uint64_t>(), 8u);
 
     const uint32_t previousTrainableLayerCount = network.getNumTrainableLayers();
     shared_ptr<thor_file::TarReader> archiveReader;
@@ -4101,6 +4105,11 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveCanonicalRaggedTensorIn
     ASSERT_TRUE(restored->getRaggedQueryInput().has_value());
     ASSERT_TRUE(restored->getRaggedFeatureOutput().has_value());
     EXPECT_EQ(restored->getRaggedQueryInput()->getOffsetsDataType(), DataType::UINT64);
+    EXPECT_TRUE(restored->getRaggedQueryInput()->hasMaxValuesPerRow());
+    EXPECT_EQ(restored->getRaggedQueryInput()->getMaxValuesPerRow(), 8u);
+    EXPECT_EQ(restored->getRaggedQueryInput()->getMaxTotalValues(), 16u);
+    EXPECT_TRUE(restored->getRaggedFeatureOutput()->hasMaxValuesPerRow());
+    EXPECT_EQ(restored->getRaggedFeatureOutput()->getMaxValuesPerRow(), 8u);
     EXPECT_EQ(restored->getRaggedFeatureOutput()->getOffsets(), restored->getRaggedQueryInput()->getOffsets());
     EXPECT_EQ(restored->getInputNames(),
               (std::vector<std::string>{"query_input", "key_input", "value_input", "query_row_partition", "key_value_row_partition"}));

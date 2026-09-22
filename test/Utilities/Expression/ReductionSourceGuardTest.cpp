@@ -155,3 +155,96 @@ TEST(ExpressionReductionArchitecture, GeneralReductionsAreCentralizedUnderCubRed
                                            return message.str();
                                        }();
 }
+
+TEST(ExpressionReductionArchitecture, ArgReductionDoesNotRetainSupersededKernelFamilies) {
+    const std::filesystem::path path =
+        std::filesystem::path(SOURCE_DIR) / "Utilities/TensorOperations/Cub/CubArgReductionOperation.cuh";
+    ASSERT_TRUE(std::filesystem::exists(path));
+    const std::string contents = readTextFile(path);
+
+    const std::vector<std::string> forbidden_tokens = {
+        "vectorizedDirectFullRowArgReductionKernel",
+        "vectorizedDirectGroupedFullRowArgReductionKernel",
+        "vectorizedDirectBlockShardedArgReductionKernel",
+        "alignmentSafeVectorizedShardRangeArgReductionKernel",
+        "StridedArgCandidateInput",
+        "makeStridedArgCandidateIterator",
+        "struct ContiguousArgCandidateInput {",
+        "makeContiguousArgCandidateIterator",
+        "struct DeviceArgCandidateInput {",
+        "struct CompactContiguousArgCandidateInput {",
+        "makeCompactContiguousArgCandidateIterator",
+    };
+
+    for (const std::string& token : forbidden_tokens) {
+        EXPECT_EQ(contents.find(token), std::string::npos)
+            << "Superseded/dead ARG reduction implementation must remain deleted: " << token;
+    }
+
+    // The three benchmarked production fast families and the one conservative exceptional-domain fallback remain.
+    EXPECT_NE(contents.find("alignedContiguousSegmentArgReductionKernel"), std::string::npos);
+    EXPECT_NE(contents.find("alignedAsyncNarrowTiledArgReductionKernel"), std::string::npos);
+    EXPECT_NE(contents.find("alignedCooperativeTiledArgReductionKernel"), std::string::npos);
+    EXPECT_NE(contents.find("directTiledFixedSegmentArgReductionKernel"), std::string::npos);
+}
+TEST(ExpressionReductionArchitecture, ValueReductionSharesAdditiveTemplateMatrices) {
+    const std::filesystem::path cub_root =
+        std::filesystem::path(SOURCE_DIR) / "Utilities/TensorOperations/Cub";
+    const std::string operation_header = readTextFile(cub_root / "CubReductionOperation.cuh");
+    const std::string sum_source = readTextFile(cub_root / "CubReductionSum.cu");
+    const std::string sum_squares_source = readTextFile(cub_root / "CubReductionSumSquares.cu");
+    const std::string mean_source = readTextFile(cub_root / "CubReductionMean.cu");
+    const std::string l2_source = readTextFile(cub_root / "CubReductionL2Norm.cu");
+
+    EXPECT_EQ(operation_header.find("SquareRootFinalizeFp32"), std::string::npos)
+        << "L2 must not regain an independent square-root finalizer template type.";
+    EXPECT_NE(operation_header.find("bool square_root"), std::string::npos);
+
+    EXPECT_NE(sum_source.find("AdditiveFinalizeFp32{divisor, square_root}"), std::string::npos);
+    EXPECT_NE(sum_source.find("querySumSqrtReductionBytes"), std::string::npos);
+    EXPECT_NE(sum_squares_source.find("AdditiveFinalizeFp32{1.0f, square_root}"), std::string::npos);
+    EXPECT_NE(sum_squares_source.find("queryL2NormReductionBytes"), std::string::npos);
+
+    EXPECT_EQ(mean_source.find("CubReductionOperation.cuh"), std::string::npos)
+        << "Mean must remain template-free and share CubReductionSum.cu instantiations.";
+    EXPECT_EQ(l2_source.find("CubReductionOperation.cuh"), std::string::npos)
+        << "L2 must remain template-free and share Sum/SumSquares instantiations.";
+    EXPECT_EQ(l2_source.find("queryOperationReductionBytes"), std::string::npos);
+    EXPECT_EQ(l2_source.find("launchOperationReduction"), std::string::npos);
+}
+
+TEST(ExpressionReductionArchitecture, ValueReductionDoesNotRetainLegacyLogicalIndexFallback) {
+    const std::filesystem::path cub_root =
+        std::filesystem::path(SOURCE_DIR) / "Utilities/TensorOperations/Cub";
+
+    EXPECT_FALSE(std::filesystem::exists(cub_root / "CubReductionIndexing.cuh"))
+        << "DELETE requires the legacy logical-index mapper header to stay removed.";
+
+    const std::vector<std::filesystem::path> files = {
+        cub_root / "CubReduction.h",
+        cub_root / "CubReduction.cpp",
+        cub_root / "CubReductionOperation.cuh",
+        cub_root / "CubArgReductionOperation.cuh",
+    };
+    const std::vector<std::string> forbidden_tokens = {
+        "StridedFixedSegment",
+        "CubReductionIndexing",
+        "CubReductionDeviceIndexing",
+        "LogicalAxesToFp32",
+        "makeStridedFp32Iterator",
+        "mapLogicalReductionIndex",
+        "stampDeviceIndexingMetadata",
+        "stampLegacyStridedForBenchmark",
+        "strided_value_indexing_fits_uint32",
+    };
+
+    for (const std::filesystem::path& path : files) {
+        ASSERT_TRUE(std::filesystem::exists(path)) << path;
+        const std::string contents = readTextFile(path);
+        for (const std::string& token : forbidden_tokens) {
+            EXPECT_EQ(contents.find(token), std::string::npos)
+                << "DELETE requires legacy value-reduction machinery to stay removed: " << token
+                << " in " << path;
+        }
+    }
+}

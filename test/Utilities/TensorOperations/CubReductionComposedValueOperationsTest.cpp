@@ -1,4 +1,5 @@
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
+#include "Utilities/Exceptions.h"
 
 #include <algorithm>
 #include <cmath>
@@ -251,10 +252,11 @@ TEST(CubReduction, ComposedProductPreservesZeroSignAndInfinitySemantics) {
     expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {0.0f, 24.0f, infinity, -infinity});
 }
 
-TEST(CubReduction, IrregularViewValueOperationsStillUseStridedFallback) {
+TEST(CubReduction, IrregularViewValueOperationsAreRejectedInsteadOfUsingStridedFallback) {
     const std::vector<uint64_t> dimensions{2, 3, 4};
     const std::vector<uint64_t> strides{20, 4, 1};
     const std::vector<uint32_t> axes{0, 2};
+    EXPECT_THROW((void)CubReduction::analyzeGeometry(dimensions, strides, axes), NotImplementedException);
     for (CubReductionOp op : {CubReductionOp::Sum,
                               CubReductionOp::Min,
                               CubReductionOp::Max,
@@ -263,7 +265,7 @@ TEST(CubReduction, IrregularViewValueOperationsStillUseStridedFallback) {
                               CubReductionOp::L1Norm,
                               CubReductionOp::L2Norm,
                               CubReductionOp::SumSquares}) {
-        EXPECT_EQ(CubReduction::analyzeValueGeometry(op, dimensions, strides, axes).path,
-                  CubReductionPath::StridedFixedSegment);
+        EXPECT_THROW((void)CubReduction::analyzeValueGeometry(op, dimensions, strides, axes),
+                     NotImplementedException);
     }
 }

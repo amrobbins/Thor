@@ -345,6 +345,8 @@ struct CompiledAttention {
     bool use_bias = false;
     bool use_padding_mask = false;
     bool use_ragged_offsets = false;
+    uint64_t ragged_query_max_sequence_length = 0;
+    uint64_t ragged_kv_max_sequence_length = 0;
     bool use_paged_kv_cache = false;
     int64_t paged_kv_max_sequence_length = 0;
     float dropout_probability = 0.0f;
@@ -425,6 +427,8 @@ struct CompiledAttentionBackward {
     bool use_bias = false;
     bool use_padding_mask = false;
     bool use_ragged_offsets = false;
+    uint64_t ragged_query_max_sequence_length = 0;
+    uint64_t ragged_kv_max_sequence_length = 0;
     bool use_paged_kv_cache = false;
     int64_t paged_kv_max_sequence_length = 0;
     float dropout_probability = 0.0f;
@@ -640,6 +644,19 @@ class StampedReduction {
             throw std::runtime_error("StampedReduction has no CUB reduction backend.");
         }
         return cub_reduction->getPath();
+    }
+
+    [[nodiscard]] StampedReductionStageDiagnostic diagnostic(uint32_t stage_index) const {
+        if (!built_reduction || !cub_reduction) {
+            throw std::runtime_error("StampedReduction diagnostic requires a complete stamped reduction.");
+        }
+        StampedReductionStageDiagnostic result;
+        result.stage_index = stage_index;
+        result.path = cub_reduction->getPath();
+        result.input_dimensions = built_reduction->key.input_dims;
+        result.input_strides_elements = built_reduction->key.input_strides;
+        result.reduction_axes = built_reduction->key.reduction_axes;
+        return result;
     }
 
     StampedReduction(std::shared_ptr<BuiltReduction> built,
@@ -3043,6 +3060,24 @@ class StampedExecutionPlan {
                 }
                 out.push_back(step.reduction->getPath());
             }
+        }
+        return out;
+    }
+
+    [[nodiscard]] std::vector<StampedReductionStageDiagnostic> reductionStageDiagnostics() const {
+        std::vector<StampedReductionStageDiagnostic> out;
+        for (size_t stage_index = 0; stage_index < steps.size(); ++stage_index) {
+            const StampedExecutionStage& step = steps[stage_index];
+            if (step.kind != StampedExecutionStage::Kind::Reduction) {
+                continue;
+            }
+            if (!step.reduction) {
+                throw std::runtime_error("Reduction execution stage is missing its stamped reduction.");
+            }
+            if (stage_index > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+                throw std::overflow_error("Reduction stage index exceeds uint32 diagnostic representation.");
+            }
+            out.push_back(step.reduction->diagnostic(static_cast<uint32_t>(stage_index)));
         }
         return out;
     }

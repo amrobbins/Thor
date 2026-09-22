@@ -1169,6 +1169,8 @@ TEST(ExpressionPersistentDagInvariant, AttentionMetadataDependenciesPreserveAuth
         options.k_layout = AttentionTensorLayout::BSHD;
         options.v_layout = AttentionTensorLayout::BSHD;
         options.o_layout = AttentionTensorLayout::BSHD;
+        options.ragged_query_max_sequence_length = 819;
+        options.ragged_kv_max_sequence_length = 819;
         const Expression attention = Expression::scaledDotProductAttentionRagged(q, k, v, shared, shared, options);
         expect_shared_dependency(attention, LogicalDependencyKind::AttentionRaggedOffsetQ);
         expect_shared_dependency(attention, LogicalDependencyKind::AttentionRaggedOffsetKv);
@@ -1176,6 +1178,8 @@ TEST(ExpressionPersistentDagInvariant, AttentionMetadataDependenciesPreserveAuth
         const PhysicalOutputs outputs = Expression::outputs({{"y", attention}}).physicalOutputs();
         const ExprNode& physical = outputs.expr->nodes.at(outputs.outputs.front().node_idx);
         EXPECT_TRUE(physical.attention_use_ragged_offsets);
+        EXPECT_EQ(physical.attention_ragged_query_max_sequence_length, 819u);
+        EXPECT_EQ(physical.attention_ragged_kv_max_sequence_length, 819u);
         ASSERT_NE(physical.attention_ragged_offset_q_node, UINT32_MAX);
         EXPECT_EQ(physical.attention_ragged_offset_q_node, physical.attention_ragged_offset_kv_node);
     }
@@ -2959,6 +2963,59 @@ TEST(ExpressionPersistentDagInvariant, RmsNormBackwardMergePreservesDistinctRunt
     EXPECT_NE(*dx_value, *dscale_value);
     EXPECT_EQ(countStageOutputsWithValueId(plan.stages, *dx_value), 1u);
     EXPECT_EQ(countStageOutputsWithValueId(plan.stages, *dscale_value), 1u);
+}
+
+// PERSISTENT-DAG INVARIANT:
+// Canonical packed ragged attention carries two different sequence capacities:
+// physical T (the packed token buffer) and semantic S_max (the maximum row
+// length). Autodiff must preserve S_max on every synthesized attention-backward
+// route. Losing it here recreates the production failure where [T,H,D] with
+// T=B*S_max was presented to cuDNN as semantic [B,H,T,D].
+TEST(ExpressionPersistentDagInvariant, RaggedAttentionBackwardPreservesSemanticMaxSequenceLengths) {
+    constexpr uint64_t batch = 32;
+    constexpr uint64_t max_sequence_length = 819;
+    constexpr uint64_t packed_tokens = batch * max_sequence_length;
+
+    const Expression q = Expression::input("ragged_attn_q", DataType::BF16, DataType::FP32);
+    const Expression k = Expression::input("ragged_attn_k", DataType::BF16, DataType::FP32);
+    const Expression v = Expression::input("ragged_attn_v", DataType::BF16, DataType::FP32);
+    const Expression offsets = Expression::input("ragged_attn_offsets", DataType::UINT32, DataType::UINT32);
+
+    AttentionOptions options;
+    options.q_layout = AttentionTensorLayout::BSHD;
+    options.k_layout = AttentionTensorLayout::BSHD;
+    options.v_layout = AttentionTensorLayout::BSHD;
+    options.o_layout = AttentionTensorLayout::BSHD;
+    options.compute_dtype = DataType::FP32;
+    options.output_dtype = DataType::BF16;
+    options.ragged_query_max_sequence_length = max_sequence_length;
+    options.ragged_kv_max_sequence_length = max_sequence_length;
+
+    const Expression y = Expression::scaledDotProductAttentionRagged(q, k, v, offsets, offsets, options);
+    const PhysicalOutputs forward = Expression::outputs({{"y", y}}).physicalOutputs();
+
+    const PhysicalOutputs backward = buildDeferredShapeBackwardOutputsTemplate(
+        forward, {"ragged_attn_q", "ragged_attn_k", "ragged_attn_v"}, std::optional<std::string>{"dy"});
+
+    uint32_t backward_route_count = 0;
+    for (const ExprNode& node : backward.expr->nodes) {
+        if (node.op != ExprOp::ATTENTION_BACKWARD_Q && node.op != ExprOp::ATTENTION_BACKWARD_K &&
+            node.op != ExprOp::ATTENTION_BACKWARD_V) {
+            continue;
+        }
+        ++backward_route_count;
+        EXPECT_TRUE(node.attention_use_ragged_offsets);
+        EXPECT_EQ(node.attention_ragged_query_max_sequence_length, max_sequence_length);
+        EXPECT_EQ(node.attention_ragged_kv_max_sequence_length, max_sequence_length);
+        EXPECT_NE(node.attention_ragged_query_max_sequence_length, packed_tokens)
+            << "Autodiff must not replace per-row S_max with packed T.";
+    }
+    EXPECT_EQ(backward_route_count, 3u);
+
+    // Keep the exact production geometry visible in this regression: a 64-token
+    // tile count must be ceil(819/64)=13, never ceil((32*819)/64)=410.
+    EXPECT_EQ((max_sequence_length + 63u) / 64u, 13u);
+    EXPECT_EQ((packed_tokens + 63u) / 64u, 410u);
 }
 
 // PERSISTENT-DAG INVARIANT:

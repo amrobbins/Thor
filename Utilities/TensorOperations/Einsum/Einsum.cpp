@@ -4,6 +4,7 @@
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/StampedEquation.h"
+#include "Utilities/Exceptions.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -247,6 +248,46 @@ void markLogicalOperandPreReduced(LogicalEinsumOperand& operand,
     operand.dense_storage = true;
 }
 
+[[nodiscard]] bool reductionHasOrdainedValuePath(const LogicalEinsumOperand& operand,
+                                                   const std::vector<uint64_t>& reduction_axes) {
+    std::vector<uint32_t> narrowed_axes;
+    narrowed_axes.reserve(reduction_axes.size());
+    for (uint64_t axis : reduction_axes) {
+        if (axis > UINT32_MAX) {
+            throw std::runtime_error("Einsum reduction axis exceeds UINT32_MAX.");
+        }
+        narrowed_axes.push_back(static_cast<uint32_t>(axis));
+    }
+
+    try {
+        static_cast<void>(CubReduction::analyzeGeometry(operand.dimensions, operand.strides, narrowed_axes));
+        return true;
+    } catch (const NotImplementedException&) {
+        return false;
+    }
+}
+
+void materializeLogicalOperandForReduction(LogicalEinsumOperand& operand, DataType output_dtype) {
+    // UNSUPPORTED-VIEW-GATE intentionally removed the arbitrary logical-index
+    // mapper from production. Repeated-label einsum diagonals are still kept
+    // zero-copy whenever an ordained reducer owns their real stride pattern
+    // (for example VIEW-PITCHED-TILED). A rarer diagonal can expose internal
+    // gaps in the retained payload, though, and no reduction kernel should be
+    // generalized merely to recover that theoretical view. Materialize only
+    // that operand into dense logical order, then let the ordinary dense
+    // reduction paths take over.
+    //
+    // The cast is an intentional Expression stage boundary, as in matrix-operand
+    // materialization below. Matrix lowering normally requests the existing
+    // storage dtype. Pair-product lowering requests FP32; in that case widening
+    // before the reduction is semantically equivalent to the reduction's
+    // existing FP32 input conversion and keeps the resulting temporary in the
+    // dtype already required downstream.
+    operand.expression = operand.expression.cast(output_dtype);
+    operand.strides = denseStrides(operand.dimensions);
+    operand.dense_storage = true;
+}
+
 [[nodiscard]] LogicalEinsumOperand preReduceLogicalOperand(LogicalEinsumOperand operand,
                                                               const std::vector<int32_t>& reduction_labels,
                                                               DataType output_dtype) {
@@ -255,13 +296,21 @@ void markLogicalOperandPreReduced(LogicalEinsumOperand& operand,
         return operand;
     }
 
+    // Prefer the zero-copy logical view when one of Thor's ordained value
+    // reducers can consume it directly. If UNSUPPORTED-VIEW-GATE says the view
+    // has no ordained reducer after DELETE, materialize only this operand
+    // before the local reduction. This keeps the production reduction gate
+    // strict while preserving the full einsum surface, including repeated-label
+    // diagonals whose retained axes contain internal storage gaps.
+    if (!operand.dense_storage && !reductionHasOrdainedValuePath(operand, reduction_axes)) {
+        materializeLogicalOperandForReduction(operand, output_dtype);
+    }
+
     // Accumulate through centralized CubReduction in FP32 and store in the
     // dtype requested by the downstream lowering. Matrix lowering requests the
     // einsum storage dtype to satisfy Thor's no-implicit-conversion matmul
     // contract; pair-product lowering can retain FP32 through its final fused
-    // multiply. CubReduction receives the logical view strides directly, so
-    // diagonal extraction stays zero-copy and removable axes disappear before
-    // any possible operand materialization.
+    // multiply.
     operand.expression =
         operand.expression.reduce_sum(reduction_axes, reduction_axes, DataType::FP32).withOutputDType(output_dtype);
     markLogicalOperandPreReduced(operand, reduction_labels);
@@ -1701,6 +1750,10 @@ std::optional<CubReductionPath> StampedEinsum::getStandaloneReductionPath() cons
             "StampedEinsum has multiple standalone Expression reduction stages; use getStandaloneReductionPaths().");
     }
     return paths.front();
+}
+
+std::vector<StampedReductionStageDiagnostic> StampedEinsum::getStandaloneReductionDiagnostics() const {
+    return execution->reductionStageDiagnostics();
 }
 
 std::vector<std::string> StampedEinsum::getExpressionStageKindNames() const { return execution->stageKindNames(); }

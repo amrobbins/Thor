@@ -101,8 +101,6 @@ void checkCuda(cudaError_t status, const char* operation) {
             return "contiguous_segment";
         case CubReductionPath::TiledFixedSegment:
             return "tiled_segment";
-        case CubReductionPath::StridedFixedSegment:
-            return "strided_segment";
         case CubReductionPath::OffsetSegmented:
             return "offset_segmented";
         case CubReductionPath::ComposedDense:

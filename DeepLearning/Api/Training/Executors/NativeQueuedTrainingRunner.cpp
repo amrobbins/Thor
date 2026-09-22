@@ -55,6 +55,7 @@
 #include <stdexcept>
 #include <string>
 #include <sstream>
+#include <system_error>
 #include <thread>
 #include <tuple>
 #include <type_traits>
@@ -68,19 +69,132 @@ namespace Thor {
 namespace {
 
 constexpr const char* kThorNsightControlDirectoryEnvironment = "THOR_NSYS_CONTROL_DIR";
-constexpr const char* kThorNsightProfileOutputRequestPrefix = "profile_output_path.";
-constexpr const char* kThorNsightProfileReportOutputPrefix = "report_output_path.";
-constexpr std::chrono::seconds kThorNsightReportRelocationStatusInterval{60};
-constexpr std::chrono::milliseconds kThorNsightReportRelocationPollInterval{20};
 
 std::atomic<bool>& nsightSystemsCaptureClaimedForProcess() {
     static std::atomic<bool> claimed{false};
     return claimed;
 }
 
-std::atomic<uint64_t>& nsightSystemsCaptureSequenceForProcess() {
-    static std::atomic<uint64_t> sequence{0};
-    return sequence;
+[[nodiscard]] bool isNsightSystemsRawReport(const std::filesystem::path& path) {
+    const std::string fileName = path.filename().string();
+    return fileName.starts_with("capture-") && fileName.ends_with(".nsys-rep");
+}
+
+[[nodiscard]] std::set<std::filesystem::path> listNsightSystemsRawReports(
+    const std::filesystem::path& controlDirectory,
+    std::error_code& error) {
+    std::set<std::filesystem::path> reports;
+    error.clear();
+    std::filesystem::directory_iterator iterator(controlDirectory, error);
+    const std::filesystem::directory_iterator end;
+    while (!error && iterator != end) {
+        const std::filesystem::directory_entry& entry = *iterator;
+        std::error_code entryError;
+        if (entry.is_regular_file(entryError) && !entryError && isNsightSystemsRawReport(entry.path())) {
+            reports.insert(entry.path().lexically_normal());
+        }
+        iterator.increment(error);
+    }
+    return reports;
+}
+
+[[nodiscard]] bool relocateFinalizedNsightSystemsReport(
+    const std::filesystem::path& source,
+    const std::filesystem::path& destination,
+    std::string& failure) {
+    std::error_code error;
+    std::filesystem::create_directories(destination.parent_path(), error);
+    if (error) {
+        failure = "could not create destination directory '" + destination.parent_path().string() + "': " +
+                  error.message();
+        return false;
+    }
+
+    error.clear();
+    if (std::filesystem::exists(destination, error)) {
+        failure = "refusing to overwrite existing destination '" + destination.string() + "'";
+        return false;
+    }
+    if (error) {
+        failure = "could not inspect destination '" + destination.string() + "': " + error.message();
+        return false;
+    }
+
+    error.clear();
+    std::filesystem::rename(source, destination, error);
+    if (!error) {
+        return true;
+    }
+    if (error != std::make_error_code(std::errc::cross_device_link)) {
+        failure = "could not move finalized report '" + source.string() + "' to '" + destination.string() +
+                  "': " + error.message();
+        return false;
+    }
+
+    // rename(2) cannot cross filesystem boundaries. Copy to a private sibling
+    // of the requested output and atomically publish it with a same-filesystem
+    // rename only after the copy has completed.
+    const auto temporaryNonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path temporaryDestination =
+        destination.parent_path() /
+        ("." + destination.filename().string() + ".thor-nsys-tmp-" + std::to_string(temporaryNonce));
+    error.clear();
+    if (std::filesystem::exists(temporaryDestination, error)) {
+        failure = "temporary Nsight destination already exists: '" + temporaryDestination.string() + "'";
+        return false;
+    }
+    if (error) {
+        failure = "could not inspect temporary Nsight destination '" + temporaryDestination.string() + "': " +
+                  error.message();
+        return false;
+    }
+
+    error.clear();
+    std::filesystem::copy_file(source, temporaryDestination, std::filesystem::copy_options::none, error);
+    if (error) {
+        std::error_code ignored;
+        std::filesystem::remove(temporaryDestination, ignored);
+        failure = "could not copy finalized report across filesystems to '" + temporaryDestination.string() +
+                  "': " + error.message();
+        return false;
+    }
+
+    error.clear();
+    if (std::filesystem::exists(destination, error)) {
+        std::error_code ignored;
+        std::filesystem::remove(temporaryDestination, ignored);
+        failure = "refusing to overwrite destination that appeared during Nsight relocation: '" +
+                  destination.string() + "'";
+        return false;
+    }
+    if (error) {
+        std::error_code ignored;
+        std::filesystem::remove(temporaryDestination, ignored);
+        failure = "could not re-inspect destination '" + destination.string() + "': " + error.message();
+        return false;
+    }
+
+    error.clear();
+    std::filesystem::rename(temporaryDestination, destination, error);
+    if (error) {
+        std::error_code ignored;
+        std::filesystem::remove(temporaryDestination, ignored);
+        failure = "could not atomically publish copied Nsight report at '" + destination.string() + "': " +
+                  error.message();
+        return false;
+    }
+
+    std::error_code removeError;
+    std::filesystem::remove(source, removeError);
+    if (removeError) {
+        std::fprintf(stderr,
+                     "Thor: finalized Nsight Systems report is ready at '%s', but the original raw report '%s' "
+                     "could not be removed: %s.\n",
+                     destination.string().c_str(),
+                     source.string().c_str(),
+                     removeError.message().c_str());
+    }
+    return true;
 }
 
 class NsightSystemsEpochCapture {
@@ -175,34 +289,14 @@ class NsightSystemsEpochCapture {
                 return;
             }
 
-            try {
-                const uint64_t sequence =
-                    nsightSystemsCaptureSequenceForProcess().fetch_add(1, std::memory_order_relaxed);
-                std::ostringstream requestFileName;
-                requestFileName << kThorNsightProfileOutputRequestPrefix << std::setfill('0') << std::setw(20)
-                                << sequence;
-                capture.requestFile = controlDirectoryPath / requestFileName.str();
-                std::ostringstream reportMarkerFileName;
-                reportMarkerFileName << kThorNsightProfileReportOutputPrefix << std::setfill('0') << std::setw(20)
-                                     << sequence;
-                capture.reportMarkerFile = controlDirectoryPath / reportMarkerFileName.str();
-                std::ofstream outputRequest(capture.requestFile, std::ios::out | std::ios::trunc);
-                if (!outputRequest.is_open()) {
-                    throw std::runtime_error(
-                        "could not create Nsight output request file '" + capture.requestFile.string() + "'");
-                }
-                outputRequest << capture.outputPath.string() << '\n';
-                outputRequest.flush();
-                if (!outputRequest.good()) {
-                    throw std::runtime_error(
-                        "could not write Nsight output request file '" + capture.requestFile.string() + "'");
-                }
-            } catch (const std::exception& error) {
+            std::error_code reportScanError;
+            capture.rawReportsBeforeStart = listNsightSystemsRawReports(controlDirectoryPath, reportScanError);
+            if (reportScanError) {
                 std::fprintf(stderr,
-                             "Thor: Nsight profiling disabled before training-phase epoch %lu: %s. Training will "
-                             "continue.\n",
+                             "Thor: Nsight profiling disabled before training-phase epoch %lu because the profiler "
+                             "control directory could not be scanned: %s. Training will continue.\n",
                              static_cast<unsigned long>(phaseEpoch.value()),
-                             error.what());
+                             reportScanError.message().c_str());
                 nsightSystemsCaptureClaimedForProcess().store(false, std::memory_order_release);
                 return;
             }
@@ -214,8 +308,6 @@ class NsightSystemsEpochCapture {
                              "continue without this profile capture.\n",
                              static_cast<unsigned long>(phaseEpoch.value()),
                              cudaGetErrorString(status));
-                std::error_code ignored;
-                std::filesystem::remove(capture.requestFile, ignored);
                 nsightSystemsCaptureClaimedForProcess().store(false, std::memory_order_release);
                 return;
             }
@@ -246,8 +338,7 @@ class NsightSystemsEpochCapture {
     struct CaptureState {
         NsightSystemsProfileCaptureConfig config{};
         std::filesystem::path outputPath{};
-        std::filesystem::path requestFile{};
-        std::filesystem::path reportMarkerFile{};
+        std::set<std::filesystem::path> rawReportsBeforeStart{};
         uint64_t endPhaseEpoch = 0;
         bool attempted = false;
         bool started = false;
@@ -274,73 +365,68 @@ class NsightSystemsEpochCapture {
         capture.started = false;
         const cudaError_t status = cudaProfilerStop();
         if (status != cudaSuccess) {
-            std::error_code ignored;
-            std::filesystem::remove(capture.requestFile, ignored);
             nsightSystemsCaptureClaimedForProcess().store(false, std::memory_order_release);
             std::fprintf(stderr,
                          "Thor: cudaProfilerStop() failed: %s. Training will continue; the Nsight report may be "
-                         "incomplete.\n",
-                         cudaGetErrorString(status));
+                         "incomplete. Profiler files are preserved in '%s'.\n",
+                         cudaGetErrorString(status),
+                         controlDirectoryPath.string().c_str());
             return;
         }
 
-        // thor-nsys-profile launches Nsight with --capture-range-end=repeat:sync,
-        // so cudaProfilerStop() does not return until Nsight has finalized the
-        // current .nsys-rep. The report-ready callback then relocates that file
-        // to the exact Trainer-requested destination and atomically publishes a
-        // marker containing that destination. Require both artifacts before
-        // resuming training: the marker alone is not sufficient proof that the
-        // requested output path is actually present.
-        const auto relocationCompleted = [&capture]() -> bool {
-            if (capture.reportMarkerFile.empty() || capture.outputPath.empty()) {
-                return false;
-            }
-            std::error_code error;
-            if (!std::filesystem::exists(capture.reportMarkerFile, error) || error) {
-                return false;
-            }
-            error.clear();
-            if (!std::filesystem::is_regular_file(capture.outputPath, error) || error) {
-                return false;
-            }
+        // thor-nsys-profile launches Nsight with --capture-range-end=repeat:sync.
+        // Therefore cudaProfilerStop() is the report-finalization barrier: once
+        // it returns, no callback or marker is needed. Identify the report that
+        // appeared during this capture and relocate it synchronously before
+        // releasing the process-wide profiling claim.
+        std::error_code reportScanError;
+        const std::set<std::filesystem::path> reportsAfterStop =
+            listNsightSystemsRawReports(controlDirectoryPath, reportScanError);
+        if (reportScanError) {
+            nsightSystemsCaptureClaimedForProcess().store(false, std::memory_order_release);
+            std::fprintf(stderr,
+                         "Thor: Nsight Systems finalized the capture after training-phase epoch %lu, but Thor "
+                         "could not scan the profiler control directory '%s': %s. Training will continue and the "
+                         "profiler files will be preserved.\n",
+                         static_cast<unsigned long>(capture.endPhaseEpoch),
+                         controlDirectoryPath.string().c_str(),
+                         reportScanError.message().c_str());
+            return;
+        }
 
-            std::ifstream marker(capture.reportMarkerFile);
-            std::string relocatedPath;
-            if (!marker.is_open() || !std::getline(marker, relocatedPath) || relocatedPath.empty()) {
-                return false;
+        std::vector<std::filesystem::path> newReports;
+        for (const std::filesystem::path& report : reportsAfterStop) {
+            if (!capture.rawReportsBeforeStart.contains(report)) {
+                newReports.push_back(report);
             }
-            const std::filesystem::path markerPath =
-                std::filesystem::absolute(std::filesystem::path(relocatedPath)).lexically_normal();
-            return markerPath == capture.outputPath;
-        };
+        }
+        if (newReports.size() != 1) {
+            nsightSystemsCaptureClaimedForProcess().store(false, std::memory_order_release);
+            std::fprintf(stderr,
+                         "Thor: Nsight Systems finalized the capture after training-phase epoch %lu, but Thor "
+                         "found %zu newly created capture-*.nsys-rep files in '%s' instead of exactly one. "
+                         "Training will continue and the profiler files will be preserved.\n",
+                         static_cast<unsigned long>(capture.endPhaseEpoch),
+                         newReports.size(),
+                         controlDirectoryPath.string().c_str());
+            return;
+        }
 
-        // Profiling was explicitly requested, so do not abandon a finalized
-        // capture merely because Nsight/report relocation takes longer than an
-        // arbitrary wall-clock deadline.  In particular, report generation can
-        // legitimately take more than a minute on systems with slow profiler
-        // post-processing.  Keep the training phase paused until the callback
-        // has both placed the report at the requested path and published the
-        // matching marker.  Emit a periodic diagnostic so a long wait remains
-        // observable rather than looking like a hang.
-        auto nextRelocationStatus =
-            std::chrono::steady_clock::now() + kThorNsightReportRelocationStatusInterval;
-        while (!relocationCompleted()) {
-            const auto now = std::chrono::steady_clock::now();
-            if (now >= nextRelocationStatus) {
-                std::fprintf(
-                    stderr,
-                    "Thor: still waiting for the Nsight Systems report after training-phase epoch %lu to be "
-                    "relocated to '%s'. Training remains paused; profiler control files are in '%s'.\n",
-                    static_cast<unsigned long>(capture.endPhaseEpoch),
-                    capture.outputPath.string().c_str(),
-                    controlDirectoryPath.string().c_str());
-                nextRelocationStatus = now + kThorNsightReportRelocationStatusInterval;
-            }
-            std::this_thread::sleep_for(kThorNsightReportRelocationPollInterval);
+        std::string relocationFailure;
+        if (!relocateFinalizedNsightSystemsReport(newReports.front(), capture.outputPath, relocationFailure)) {
+            nsightSystemsCaptureClaimedForProcess().store(false, std::memory_order_release);
+            std::fprintf(stderr,
+                         "Thor: Nsight Systems finalized the capture after training-phase epoch %lu, but Thor "
+                         "could not relocate the report to '%s': %s. Training will continue and the raw report "
+                         "will remain in '%s'.\n",
+                         static_cast<unsigned long>(capture.endPhaseEpoch),
+                         capture.outputPath.string().c_str(),
+                         relocationFailure.c_str(),
+                         controlDirectoryPath.string().c_str());
+            return;
         }
 
         nsightSystemsCaptureClaimedForProcess().store(false, std::memory_order_release);
-
         std::fprintf(stderr,
                      "Thor: Nsight Systems capture stopped after training-phase epoch %lu and the finalized report "
                      "is ready at '%s'. Training continues normally.\n",
