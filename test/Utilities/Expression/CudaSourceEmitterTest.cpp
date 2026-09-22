@@ -283,6 +283,10 @@ void expectSameDTypeCastSupportedByVectorizedSpecializedBroadcast(DataType dtype
     std::string source;
     ASSERT_NO_THROW(source = CudaSourceEmitter::emitSpecializedBroadcast(stage, {group}, "fused_kernel"));
     EXPECT_NE(source.find("t1 = t0;"), std::string::npos);
+    EXPECT_NE(source.find("in0_native_aligned"), std::string::npos);
+    EXPECT_NE(source.find("out0_native_aligned"), std::string::npos);
+    EXPECT_NE(source.find("reinterpret_cast<unsigned long long>(in0 + in0_offset0)"), std::string::npos);
+    EXPECT_NE(source.find("out0[idx0] = out0_packed_scalars[0]"), std::string::npos);
 }
 
 }  // namespace
@@ -335,6 +339,352 @@ TEST(CudaSourceEmitter, RaggedSpecializedBroadcastUsesDeviceActiveExtentAndSkips
     EXPECT_NE(source.find("idx += grid_stride"), std::string::npos);
     EXPECT_EQ(source.find("in1_offset"), std::string::npos);
 }
+
+TEST(CudaSourceEmitter, RaggedSpecializedBroadcastUsesEightScalarBf16PacketsWhenRowsArePacketAligned) {
+    const Expression values = Expression::input("values", DataType::BF16, DataType::BF16);
+    const Expression bias = Expression::input("bias", DataType::BF16, DataType::BF16);
+    const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression marked = (values + bias).withRaggedRuntimeExtent(
+        active_count, 2, 6, 8, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    PhysicalOutputs outputs = Expression::outputs({{"output", marked}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(outputs, {DataType::BF16, DataType::BF16, DataType::UINT32});
+
+    const NamedOutput& output = onlyOutput(outputs);
+    CompiledExecutionStage stage(
+        *outputs.expr,
+        std::shared_ptr<CompiledEquation>{},
+        {0u, 1u, 2u},
+        {CompiledStageOutput{
+            .name = output.name,
+            .local_node_idx = output.node_idx,
+            .value_id = 3u,
+        }});
+
+    SpecializedBroadcastGroup group;
+    group.numel = 48u;
+    group.output_dims = {6u, 8u};
+    group.output_indices = {0u};
+    group.used_input_slots = {0u, 1u};
+    group.used_input_broadcast_offset_required = {true, true};
+    group.used_input_visible_dims = {{6u, 8u}, {1u, 8u}};
+    group.used_input_visible_strides = {{8u, 1u}, {8u, 1u}};
+    group.used_input_load_kinds = {SpecializedInputLoadKind::NativeVector, SpecializedInputLoadKind::NativeVector};
+    group.active_axes = {
+        SpecializedBroadcastAxis{.dim = 6u, .output_stride = 8u, .input_strides = {8u, 0u}},
+        SpecializedBroadcastAxis{.dim = 8u, .output_stride = 1u, .input_strides = {1u, 1u}},
+    };
+
+    EXPECT_EQ(CudaSourceEmitter::specializedBroadcastElementsPerThread(stage, {group}), 8u);
+
+    std::string source;
+    ASSERT_NO_THROW(source = CudaSourceEmitter::emitSpecializedBroadcast(stage, {group}, "fused_kernel"));
+    EXPECT_NE(source.find("active_values_raw = static_cast<unsigned long long>(in2[0ULL])"), std::string::npos);
+    EXPECT_NE(source.find("packet_count_g0"), std::string::npos);
+    EXPECT_NE(source.find("const float4 in0_packet"), std::string::npos);
+    EXPECT_NE(source.find("const float4 in1_packet"), std::string::npos);
+    EXPECT_NE(source.find("reinterpret_cast<float4*>(out0 + scalar_base)"), std::string::npos);
+    EXPECT_EQ(source.find("in2_offset"), std::string::npos);
+}
+
+TEST(CudaSourceEmitter, RaggedSpecializedBroadcastReusesScalarOperandAcrossEightScalarPacket) {
+    const Expression values = Expression::input("values", DataType::BF16, DataType::BF16);
+    const Expression bias = Expression::input("bias", DataType::BF16, DataType::BF16);
+    const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression marked = (values + bias).withRaggedRuntimeExtent(
+        active_count, 2, 6, 8, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    PhysicalOutputs outputs = Expression::outputs({{"output", marked}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(outputs, {DataType::BF16, DataType::BF16, DataType::UINT32});
+    const NamedOutput& output = onlyOutput(outputs);
+    CompiledExecutionStage stage(
+        *outputs.expr,
+        std::shared_ptr<CompiledEquation>{},
+        {0u, 1u, 2u},
+        {CompiledStageOutput{.name = output.name, .local_node_idx = output.node_idx, .value_id = 3u}});
+
+    SpecializedBroadcastGroup group;
+    group.numel = 48u;
+    group.output_dims = {6u, 8u};
+    group.output_indices = {0u};
+    group.used_input_slots = {0u, 1u};
+    group.used_input_broadcast_offset_required = {true, true};
+    group.used_input_visible_dims = {{6u, 8u}, {1u, 1u}};
+    group.used_input_visible_strides = {{8u, 1u}, {1u, 1u}};
+    group.used_input_load_kinds = {SpecializedInputLoadKind::NativeVector, SpecializedInputLoadKind::ScalarPack};
+    group.active_axes = {
+        SpecializedBroadcastAxis{.dim = 6u, .output_stride = 8u, .input_strides = {8u, 0u}},
+        SpecializedBroadcastAxis{.dim = 8u, .output_stride = 1u, .input_strides = {1u, 0u}},
+    };
+
+    EXPECT_EQ(CudaSourceEmitter::specializedBroadcastElementsPerThread(stage, {group}), 8u);
+    std::string source;
+    ASSERT_NO_THROW(source = CudaSourceEmitter::emitSpecializedBroadcast(stage, {group}, "fused_kernel"));
+    EXPECT_NE(source.find("const __nv_bfloat16 in1_packet_scalar = in1[in1_offset_base]"), std::string::npos);
+    EXPECT_EQ(source.find("in1_offset_base + 1"), std::string::npos);
+}
+
+TEST(CudaSourceEmitter, RaggedSpecializedBroadcastFallsBackForNonPacketAlignedRowWidth) {
+    const Expression values = Expression::input("values", DataType::BF16, DataType::BF16);
+    const Expression bias = Expression::input("bias", DataType::BF16, DataType::BF16);
+    const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression marked = (values + bias).withRaggedRuntimeExtent(
+        active_count, 2, 6, 7, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    PhysicalOutputs outputs = Expression::outputs({{"output", marked}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(outputs, {DataType::BF16, DataType::BF16, DataType::UINT32});
+    const NamedOutput& output = onlyOutput(outputs);
+    CompiledExecutionStage stage(
+        *outputs.expr,
+        std::shared_ptr<CompiledEquation>{},
+        {0u, 1u, 2u},
+        {CompiledStageOutput{.name = output.name, .local_node_idx = output.node_idx, .value_id = 3u}});
+
+    SpecializedBroadcastGroup group;
+    group.numel = 42u;
+    group.output_dims = {6u, 7u};
+    group.output_indices = {0u};
+    group.used_input_slots = {0u, 1u};
+    group.used_input_broadcast_offset_required = {true, true};
+    group.used_input_visible_dims = {{6u, 7u}, {1u, 7u}};
+    group.used_input_visible_strides = {{7u, 1u}, {7u, 1u}};
+    group.used_input_load_kinds = {SpecializedInputLoadKind::ScalarPack, SpecializedInputLoadKind::ScalarPack};
+    group.active_axes = {
+        SpecializedBroadcastAxis{.dim = 6u, .output_stride = 7u, .input_strides = {7u, 0u}},
+        SpecializedBroadcastAxis{.dim = 7u, .output_stride = 1u, .input_strides = {1u, 1u}},
+    };
+
+    EXPECT_EQ(CudaSourceEmitter::specializedBroadcastElementsPerThread(stage, {group}), 1u);
+    std::string source;
+    ASSERT_NO_THROW(source = CudaSourceEmitter::emitSpecializedBroadcast(stage, {group}, "fused_kernel"));
+    EXPECT_EQ(source.find("const float4 in0_packet"), std::string::npos);
+    EXPECT_NE(source.find("idx += grid_stride"), std::string::npos);
+}
+
+
+TEST(CudaSourceEmitter, RaggedMixedSpecializedBroadcastUsesFourScalarPacketsWithDenseMixedChunkWidths) {
+    const Expression values = Expression::input("values", DataType::BF16, DataType::BF16);
+    const Expression bias = Expression::input("bias", DataType::FP32, DataType::FP32);
+    const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression marked = (values + bias).withOutputDType(DataType::FP32).withRaggedRuntimeExtent(
+        active_count, 2, 6, 8, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    PhysicalOutputs outputs = Expression::outputs({{"output", marked}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(outputs, {DataType::BF16, DataType::FP32, DataType::UINT32});
+    const NamedOutput& output = onlyOutput(outputs);
+    CompiledExecutionStage stage(
+        *outputs.expr,
+        std::shared_ptr<CompiledEquation>{},
+        {0u, 1u, 2u},
+        {CompiledStageOutput{.name = output.name, .local_node_idx = output.node_idx, .value_id = 3u}});
+
+    SpecializedBroadcastGroup group;
+    group.numel = 48u;
+    group.output_dims = {6u, 8u};
+    group.output_indices = {0u};
+    group.used_input_slots = {0u, 1u};
+    group.used_input_broadcast_offset_required = {true, true};
+    group.used_input_visible_dims = {{6u, 8u}, {1u, 8u}};
+    group.used_input_visible_strides = {{8u, 1u}, {8u, 1u}};
+    group.used_input_load_kinds = {SpecializedInputLoadKind::NativeVector, SpecializedInputLoadKind::NativeVector};
+    group.active_axes = {
+        SpecializedBroadcastAxis{.dim = 6u, .output_stride = 8u, .input_strides = {8u, 0u}},
+        SpecializedBroadcastAxis{.dim = 8u, .output_stride = 1u, .input_strides = {1u, 1u}},
+    };
+
+    EXPECT_EQ(CudaSourceEmitter::specializedBroadcastElementsPerThread(stage, {group}), 4u);
+    std::string source;
+    ASSERT_NO_THROW(source = CudaSourceEmitter::emitSpecializedBroadcast(stage, {group}, "fused_kernel"));
+    EXPECT_NE(source.find("const unsigned long long in0_packet"), std::string::npos);
+    EXPECT_NE(source.find("const float4 in1_packet"), std::string::npos);
+    EXPECT_NE(source.find("float4 out0_packet"), std::string::npos);
+    EXPECT_NE(source.find("packet_count_g0"), std::string::npos);
+    EXPECT_EQ(source.find("const float4 in0_packet"), std::string::npos);
+    EXPECT_EQ(source.find("in2_offset"), std::string::npos);
+}
+
+TEST(CudaSourceEmitter, RaggedMixedSpecializedBroadcastReusesFp32ScalarAcrossFourScalarPacket) {
+    const Expression values = Expression::input("values", DataType::BF16, DataType::BF16);
+    const Expression scale = Expression::input("scale", DataType::FP32, DataType::FP32);
+    const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression marked = (values + scale).withOutputDType(DataType::FP32).withRaggedRuntimeExtent(
+        active_count, 2, 6, 8, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    PhysicalOutputs outputs = Expression::outputs({{"output", marked}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(outputs, {DataType::BF16, DataType::FP32, DataType::UINT32});
+    const NamedOutput& output = onlyOutput(outputs);
+    CompiledExecutionStage stage(
+        *outputs.expr,
+        std::shared_ptr<CompiledEquation>{},
+        {0u, 1u, 2u},
+        {CompiledStageOutput{.name = output.name, .local_node_idx = output.node_idx, .value_id = 3u}});
+
+    SpecializedBroadcastGroup group;
+    group.numel = 48u;
+    group.output_dims = {6u, 8u};
+    group.output_indices = {0u};
+    group.used_input_slots = {0u, 1u};
+    group.used_input_broadcast_offset_required = {true, true};
+    group.used_input_visible_dims = {{6u, 8u}, {1u, 1u}};
+    group.used_input_visible_strides = {{8u, 1u}, {1u, 1u}};
+    group.used_input_load_kinds = {SpecializedInputLoadKind::NativeVector, SpecializedInputLoadKind::ScalarPack};
+    group.active_axes = {
+        SpecializedBroadcastAxis{.dim = 6u, .output_stride = 8u, .input_strides = {8u, 0u}},
+        SpecializedBroadcastAxis{.dim = 8u, .output_stride = 1u, .input_strides = {1u, 0u}},
+    };
+
+    EXPECT_EQ(CudaSourceEmitter::specializedBroadcastElementsPerThread(stage, {group}), 4u);
+    const std::string source = CudaSourceEmitter::emitSpecializedBroadcast(stage, {group}, "fused_kernel");
+    EXPECT_NE(source.find("const float in1_packet_scalar = in1[in1_offset_base]"), std::string::npos);
+    EXPECT_EQ(source.find("in1_offset_base + 1"), std::string::npos);
+}
+
+TEST(CudaSourceEmitter, RaggedMixedSpecializedBroadcastFallsBackWhenRowIsNotFourScalarAligned) {
+    const Expression values = Expression::input("values", DataType::BF16, DataType::BF16);
+    const Expression bias = Expression::input("bias", DataType::FP32, DataType::FP32);
+    const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression marked = (values + bias).withOutputDType(DataType::FP32).withRaggedRuntimeExtent(
+        active_count, 2, 6, 7, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    PhysicalOutputs outputs = Expression::outputs({{"output", marked}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(outputs, {DataType::BF16, DataType::FP32, DataType::UINT32});
+    const NamedOutput& output = onlyOutput(outputs);
+    CompiledExecutionStage stage(
+        *outputs.expr,
+        std::shared_ptr<CompiledEquation>{},
+        {0u, 1u, 2u},
+        {CompiledStageOutput{.name = output.name, .local_node_idx = output.node_idx, .value_id = 3u}});
+
+    SpecializedBroadcastGroup group;
+    group.numel = 42u;
+    group.output_dims = {6u, 7u};
+    group.output_indices = {0u};
+    group.used_input_slots = {0u, 1u};
+    group.used_input_broadcast_offset_required = {true, true};
+    group.used_input_visible_dims = {{6u, 7u}, {1u, 7u}};
+    group.used_input_visible_strides = {{7u, 1u}, {7u, 1u}};
+    group.used_input_load_kinds = {SpecializedInputLoadKind::ScalarPack, SpecializedInputLoadKind::ScalarPack};
+    group.active_axes = {
+        SpecializedBroadcastAxis{.dim = 6u, .output_stride = 7u, .input_strides = {7u, 0u}},
+        SpecializedBroadcastAxis{.dim = 7u, .output_stride = 1u, .input_strides = {1u, 1u}},
+    };
+
+    EXPECT_EQ(CudaSourceEmitter::specializedBroadcastElementsPerThread(stage, {group}), 1u);
+    const std::string source = CudaSourceEmitter::emitSpecializedBroadcast(stage, {group}, "fused_kernel");
+    EXPECT_EQ(source.find("in0_packet"), std::string::npos);
+}
+
+TEST(CudaSourceEmitter, RaggedFp32SpecializedBroadcastUsesFourScalarFloat4PacketsWhenRowsAreAligned) {
+    const Expression values = Expression::input("values", DataType::FP32, DataType::FP32);
+    const Expression bias = Expression::input("bias", DataType::FP32, DataType::FP32);
+    const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression marked = (values + bias).withRaggedRuntimeExtent(
+        active_count, 2, 6, 8, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    PhysicalOutputs outputs = Expression::outputs({{"output", marked}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(outputs, {DataType::FP32, DataType::FP32, DataType::UINT32});
+    const NamedOutput& output = onlyOutput(outputs);
+    CompiledExecutionStage stage(
+        *outputs.expr,
+        std::shared_ptr<CompiledEquation>{},
+        {0u, 1u, 2u},
+        {CompiledStageOutput{.name = output.name, .local_node_idx = output.node_idx, .value_id = 3u}});
+
+    SpecializedBroadcastGroup group;
+    group.numel = 48u;
+    group.output_dims = {6u, 8u};
+    group.output_indices = {0u};
+    group.used_input_slots = {0u, 1u};
+    group.used_input_broadcast_offset_required = {true, true};
+    group.used_input_visible_dims = {{6u, 8u}, {1u, 8u}};
+    group.used_input_visible_strides = {{8u, 1u}, {8u, 1u}};
+    group.used_input_load_kinds = {SpecializedInputLoadKind::NativeVector, SpecializedInputLoadKind::NativeVector};
+    group.active_axes = {
+        SpecializedBroadcastAxis{.dim = 6u, .output_stride = 8u, .input_strides = {8u, 0u}},
+        SpecializedBroadcastAxis{.dim = 8u, .output_stride = 1u, .input_strides = {1u, 1u}},
+    };
+
+    EXPECT_EQ(CudaSourceEmitter::specializedBroadcastElementsPerThread(stage, {group}), 4u);
+    const std::string source = CudaSourceEmitter::emitSpecializedBroadcast(stage, {group}, "fused_kernel");
+    EXPECT_NE(source.find("const float4 in0_packet"), std::string::npos);
+    EXPECT_NE(source.find("const float4 in1_packet"), std::string::npos);
+    EXPECT_NE(source.find("float4 out0_packet"), std::string::npos);
+    EXPECT_NE(source.find("reinterpret_cast<float4*>(out0 + scalar_base)"), std::string::npos);
+    EXPECT_EQ(source.find("in2_offset"), std::string::npos);
+}
+
+TEST(CudaSourceEmitter, RaggedFp32SpecializedBroadcastReusesScalarAcrossFourScalarPacket) {
+    const Expression values = Expression::input("values", DataType::FP32, DataType::FP32);
+    const Expression scale = Expression::input("scale", DataType::FP32, DataType::FP32);
+    const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression marked = (values + scale).withRaggedRuntimeExtent(
+        active_count, 2, 6, 8, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    PhysicalOutputs outputs = Expression::outputs({{"output", marked}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(outputs, {DataType::FP32, DataType::FP32, DataType::UINT32});
+    const NamedOutput& output = onlyOutput(outputs);
+    CompiledExecutionStage stage(
+        *outputs.expr,
+        std::shared_ptr<CompiledEquation>{},
+        {0u, 1u, 2u},
+        {CompiledStageOutput{.name = output.name, .local_node_idx = output.node_idx, .value_id = 3u}});
+
+    SpecializedBroadcastGroup group;
+    group.numel = 48u;
+    group.output_dims = {6u, 8u};
+    group.output_indices = {0u};
+    group.used_input_slots = {0u, 1u};
+    group.used_input_broadcast_offset_required = {true, true};
+    group.used_input_visible_dims = {{6u, 8u}, {1u, 1u}};
+    group.used_input_visible_strides = {{8u, 1u}, {1u, 1u}};
+    group.used_input_load_kinds = {SpecializedInputLoadKind::NativeVector, SpecializedInputLoadKind::ScalarPack};
+    group.active_axes = {
+        SpecializedBroadcastAxis{.dim = 6u, .output_stride = 8u, .input_strides = {8u, 0u}},
+        SpecializedBroadcastAxis{.dim = 8u, .output_stride = 1u, .input_strides = {1u, 0u}},
+    };
+
+    EXPECT_EQ(CudaSourceEmitter::specializedBroadcastElementsPerThread(stage, {group}), 4u);
+    const std::string source = CudaSourceEmitter::emitSpecializedBroadcast(stage, {group}, "fused_kernel");
+    EXPECT_NE(source.find("const float in1_packet_scalar = in1[in1_offset_base]"), std::string::npos);
+    EXPECT_EQ(source.find("in1_offset_base + 1"), std::string::npos);
+}
+
+TEST(CudaSourceEmitter, RaggedFp32SpecializedBroadcastFallsBackWhenRowIsNotFourScalarAligned) {
+    const Expression values = Expression::input("values", DataType::FP32, DataType::FP32);
+    const Expression bias = Expression::input("bias", DataType::FP32, DataType::FP32);
+    const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression marked = (values + bias).withRaggedRuntimeExtent(
+        active_count, 2, 6, 7, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    PhysicalOutputs outputs = Expression::outputs({{"output", marked}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(outputs, {DataType::FP32, DataType::FP32, DataType::UINT32});
+    const NamedOutput& output = onlyOutput(outputs);
+    CompiledExecutionStage stage(
+        *outputs.expr,
+        std::shared_ptr<CompiledEquation>{},
+        {0u, 1u, 2u},
+        {CompiledStageOutput{.name = output.name, .local_node_idx = output.node_idx, .value_id = 3u}});
+
+    SpecializedBroadcastGroup group;
+    group.numel = 42u;
+    group.output_dims = {6u, 7u};
+    group.output_indices = {0u};
+    group.used_input_slots = {0u, 1u};
+    group.used_input_broadcast_offset_required = {true, true};
+    group.used_input_visible_dims = {{6u, 7u}, {1u, 7u}};
+    group.used_input_visible_strides = {{7u, 1u}, {7u, 1u}};
+    group.used_input_load_kinds = {SpecializedInputLoadKind::ScalarPack, SpecializedInputLoadKind::ScalarPack};
+    group.active_axes = {
+        SpecializedBroadcastAxis{.dim = 6u, .output_stride = 7u, .input_strides = {7u, 0u}},
+        SpecializedBroadcastAxis{.dim = 7u, .output_stride = 1u, .input_strides = {1u, 1u}},
+    };
+
+    EXPECT_EQ(CudaSourceEmitter::specializedBroadcastElementsPerThread(stage, {group}), 1u);
+    const std::string source = CudaSourceEmitter::emitSpecializedBroadcast(stage, {group}, "fused_kernel");
+    EXPECT_EQ(source.find("float4 in0_packet"), std::string::npos);
+}
+
+
 
 TEST(CudaSourceEmitter, VectorizedFlatSupportsFp8StorageWithExplicitBf16Compute) {
     expectExplicitBf16Fp8FlatVectorization(DataType::FP8_E4M3);

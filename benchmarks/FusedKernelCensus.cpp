@@ -64,6 +64,12 @@ struct CensusCase {
     std::vector<InputSpec> inputs;
     std::vector<uint64_t> output_dimensions;
     DataType output_dtype = DataType::FP32;
+    // Set only when the benchmark deliberately forces an arithmetic precision
+    // rather than merely allowing the expression type resolver to choose it.
+    std::optional<DataType> explicit_compute_dtype;
+    // Targeted ordained-path cases can state their expected packet ownership so
+    // the census fails loudly if dispatch silently regresses before timing.
+    std::optional<uint32_t> expected_elements_per_thread;
     // Root tensor operands logically read per output element.  This deliberately
     // preserves the historical/effective bandwidth interpretation for broadcast
     // cases.  Structural metadata inputs are excluded.
@@ -203,19 +209,52 @@ struct LaunchGeometry {
     return "unknown";
 }
 
-[[nodiscard]] std::string selectedPathName(const CompiledEquation& compiled) {
+[[nodiscard]] std::string selectedPathName(const CensusCase& c, const CompiledEquation& compiled) {
     if (compiled.launch_kind == CompiledEquation::LaunchKind::FusedTiledTranspose) {
         return "fused_tiled_transpose";
     }
-    if (compiled.launch_kind == CompiledEquation::LaunchKind::BroadcastSingle ||
-        compiled.launch_kind == CompiledEquation::LaunchKind::BroadcastGrouped) {
-        if (compiled.uses_device_runtime_extent) {
-            return compiled.elements_per_thread > 1 ? "ragged_broadcast_vector" : "ragged_broadcast_scalar";
+    // A one-group specialized broadcast currently retains LaunchKind::Flat, so
+    // use the census case family to distinguish its actual emitter.  This keeps
+    // selected_path tied to the code we timed rather than to legacy launch-kind
+    // bookkeeping.
+    if (c.family == "ragged_broadcast") {
+        if (compiled.elements_per_thread == 8u) return "ragged_broadcast_vector8";
+        if (compiled.elements_per_thread == 4u) {
+            const bool homogeneous_fp32 = c.output_dtype == DataType::FP32 &&
+                std::all_of(c.effective_input_dtypes.begin(), c.effective_input_dtypes.end(),
+                            [](DataType dtype) { return dtype == DataType::FP32; });
+            return homogeneous_fp32 ? "ragged_broadcast_vector4" : "ragged_mixed_broadcast_vector4";
         }
+        return "ragged_broadcast_scalar";
+    }
+    if (c.family == "broadcast" || c.family == "mixed_broadcast") {
         return compiled.elements_per_thread > 1 ? "broadcast_vector" : "broadcast_scalar";
     }
+    if (c.family == "indexed") {
+        // Forward STRIDED_VIEW nodes are storage aliases in the compiled plan: by
+        // the time a fused kernel is stamped, those cases are ordinary runtime
+        // tensor views and use the broadcast/flat machinery appropriate to their
+        // visible strides. Reserve the indexed label for genuinely index-aware
+        // operations such as TAKE_ALONG_AXIS.
+        if (c.name.find("take_along_axis") != std::string::npos) {
+            return "indexed_gather_scalar";
+        }
+        if (compiled.elements_per_thread == 8u) return "strided_alias_vector8";
+        if (compiled.elements_per_thread == 4u) return "strided_alias_vector4";
+        if (compiled.elements_per_thread == 2u) return "strided_alias_vector2";
+        return "strided_alias_scalar";
+    }
     if (compiled.uses_device_runtime_extent) {
-        return compiled.elements_per_thread > 1 ? "ragged_flat_vector" : "ragged_flat_scalar";
+        if (c.family == "ragged_fp32_compute") {
+            if (compiled.elements_per_thread == 8u) return "ragged_fp32_compute_vector8";
+            if (compiled.elements_per_thread == 4u) return "ragged_fp32_compute_vector4";
+            return "ragged_fp32_compute_scalar";
+        }
+        if (compiled.elements_per_thread == 8u) return "ragged_flat_vector8";
+        if (compiled.elements_per_thread == 4u) {
+            return c.family == "ragged_mixed" ? "ragged_mixed_flat_vector4" : "ragged_flat_vector4";
+        }
+        return "ragged_flat_scalar";
     }
     return compiled.elements_per_thread > 1 ? "flat_vector" : "flat_scalar";
 }
@@ -242,6 +281,25 @@ struct LaunchGeometry {
 
 [[nodiscard]] uint64_t outputPacketBytes(const CensusCase& c, const CompiledEquation& compiled) {
     return checkedMultiply(packetScalars(compiled), dataTypeBytes(c.output_dtype), "output packet bytes");
+}
+
+[[nodiscard]] uint64_t maxNominalPacketBytes(const CensusCase& c, const CompiledEquation& compiled) {
+    const uint32_t scalars = packetScalars(compiled);
+    uint64_t max_bytes = outputPacketBytes(c, compiled);
+    for (const InputSpec& input : c.inputs) {
+        if (input.structural_metadata) continue;
+        max_bytes = std::max(max_bytes,
+                             checkedMultiply(scalars, dataTypeBytes(input.dtype), "max nominal packet bytes"));
+    }
+    return max_bytes;
+}
+
+[[nodiscard]] std::string explicitComputeDTypeName(const CensusCase& c) {
+    return c.explicit_compute_dtype.has_value() ? dataTypeName(c.explicit_compute_dtype.value()) : "resolved";
+}
+
+[[nodiscard]] std::string expectedElementsPerThreadName(const CensusCase& c) {
+    return c.expected_elements_per_thread.has_value() ? std::to_string(c.expected_elements_per_thread.value()) : "none";
 }
 
 void checkCuda(cudaError_t status, const char* where) {
@@ -437,7 +495,9 @@ class L2Evictor {
                                            bool ragged,
                                            uint64_t ragged_batch_size = 0,
                                            uint64_t ragged_max_active_values = 0,
-                                           uint64_t ragged_elements_per_value = 0) {
+                                           uint64_t ragged_elements_per_value = 0,
+                                           bool deep = false,
+                                           bool force_fp32_compute = false) {
     CensusCase c;
     c.family = ragged ? "ragged_broadcast" :
                (lhs_dtype == rhs_dtype && lhs_dtype == output_dtype ? "broadcast" : "mixed_broadcast");
@@ -452,6 +512,12 @@ class L2Evictor {
     }
     c.output_dimensions = std::move(output_shape);
     c.output_dtype = output_dtype;
+    if (force_fp32_compute) {
+        c.explicit_compute_dtype = DataType::FP32;
+        const bool has_fp32_storage = lhs_dtype == DataType::FP32 || rhs_dtype == DataType::FP32 ||
+                                      output_dtype == DataType::FP32;
+        c.expected_elements_per_thread = has_fp32_storage ? 4u : 8u;
+    }
     c.effective_input_dtypes = {lhs_dtype, rhs_dtype};
     c.build_output = [lhs_dtype,
                       rhs_dtype,
@@ -459,10 +525,15 @@ class L2Evictor {
                       ragged,
                       ragged_batch_size,
                       ragged_max_active_values,
-                      ragged_elements_per_value] {
+                      ragged_elements_per_value,
+                      deep,
+                      force_fp32_compute] {
         const Expression x = typedInput("x", lhs_dtype);
         const Expression y = typedInput("y", rhs_dtype);
-        Expression out = arithmeticBinary(x, y, output_dtype);
+        Expression out = deep ? arithmeticDeep(x, y, output_dtype) : arithmeticBinary(x, y, output_dtype);
+        if (force_fp32_compute) {
+            out = out.withComputeDType(DataType::FP32);
+        }
         if (ragged) {
             const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
             out = out.withRaggedRuntimeExtent(active_count,
@@ -539,12 +610,85 @@ class L2Evictor {
     return c;
 }
 
+[[nodiscard]] CensusCase makeRaggedFp32ComputeValuewiseCase(std::string name,
+                                                            DataType input_storage_dtype,
+                                                            DataType output_storage_dtype,
+                                                            uint64_t active_values,
+                                                            uint64_t width) {
+    const std::vector<uint64_t> shape{active_values, width};
+    CensusCase c;
+    c.family = "ragged_fp32_compute";
+    c.name = std::move(name);
+    c.inputs = {
+        {"x", input_storage_dtype, shape, std::nullopt, false, std::nullopt},
+        {"active_count", DataType::UINT32, {1}, 1, true, static_cast<uint32_t>(active_values)},
+    };
+    c.output_dimensions = shape;
+    c.output_dtype = output_storage_dtype;
+    c.explicit_compute_dtype = DataType::FP32;
+    c.expected_elements_per_thread =
+        (input_storage_dtype == DataType::FP32 || output_storage_dtype == DataType::FP32) ? 4u : 8u;
+    c.effective_input_dtypes = {input_storage_dtype};
+    c.build_output = [input_storage_dtype, output_storage_dtype, active_values, width] {
+        const Expression x = Expression::input("x", DataType::FP32, input_storage_dtype);
+        const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+        const Expression fp32_valuewise = (x * x).withComputeDType(DataType::FP32).withOutputDType(output_storage_dtype);
+        return fp32_valuewise.withRaggedRuntimeExtent(active_count,
+                                                       128,
+                                                       active_values,
+                                                       width,
+                                                       RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+    };
+    return c;
+}
+
+[[nodiscard]] CensusCase makeRaggedFp32ComputeBinaryCase(std::string name,
+                                                         DataType storage_dtype,
+                                                         uint64_t active_values,
+                                                         uint64_t width,
+                                                         bool deep) {
+    const std::vector<uint64_t> shape{active_values, width};
+    CensusCase c;
+    c.family = "ragged_fp32_compute";
+    c.name = std::move(name);
+    c.inputs = {
+        {"x", storage_dtype, shape, std::nullopt, false, std::nullopt},
+        {"y", storage_dtype, shape, std::nullopt, false, std::nullopt},
+        {"active_count", DataType::UINT32, {1}, 1, true, static_cast<uint32_t>(active_values)},
+    };
+    c.output_dimensions = shape;
+    c.output_dtype = storage_dtype;
+    c.explicit_compute_dtype = DataType::FP32;
+    c.expected_elements_per_thread = storage_dtype == DataType::FP32 ? 4u : 8u;
+    c.effective_input_dtypes = {storage_dtype, storage_dtype};
+    c.build_output = [storage_dtype, active_values, width, deep] {
+        const Expression x = Expression::input("x", DataType::FP32, storage_dtype);
+        const Expression y = Expression::input("y", DataType::FP32, storage_dtype);
+        const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+        Expression out = deep ? arithmeticDeep(x, y, storage_dtype) : arithmeticBinary(x, y, storage_dtype);
+        out = out.withComputeDType(DataType::FP32).withOutputDType(storage_dtype);
+        return out.withRaggedRuntimeExtent(active_count,
+                                           128,
+                                           active_values,
+                                           width,
+                                           RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+    };
+    return c;
+}
+
 [[nodiscard]] CensusCase makeIndexedInnerSpanCase(std::string name,
                                                   DataType dtype,
                                                   uint64_t rows,
                                                   uint64_t width,
-                                                  uint64_t element_offset) {
-    const std::vector<uint64_t> source_shape{rows, width * 2};
+                                                  uint64_t element_offset,
+                                                  uint64_t source_row_stride = 0,
+                                                  uint64_t inner_stride = 1) {
+    if (source_row_stride == 0) source_row_stride = width * 2;
+    const uint64_t required_row_elements = element_offset + (width - 1ULL) * inner_stride + 1ULL;
+    if (source_row_stride < required_row_elements) {
+        throw std::invalid_argument("indexed census source row stride is too small for the requested view");
+    }
+    const std::vector<uint64_t> source_shape{rows, source_row_stride};
     const std::vector<uint64_t> output_shape{rows, width};
     CensusCase c;
     c.family = "indexed";
@@ -556,11 +700,67 @@ class L2Evictor {
     c.output_dimensions = output_shape;
     c.output_dtype = dtype;
     c.effective_input_dtypes = {dtype, dtype};
-    c.build_output = [dtype, rows, width, element_offset] {
+    c.build_output = [dtype, rows, width, element_offset, source_row_stride, inner_stride] {
         const Expression storage = typedInput("x_storage", dtype);
         const Expression y = typedInput("y", dtype);
-        const Expression x = storage.stridedView({rows, width}, {width * 2, 1}, element_offset);
+        const Expression x = storage.stridedView({rows, width}, {source_row_stride, inner_stride}, element_offset);
         return arithmeticBinary(x, y, dtype);
+    };
+    return c;
+}
+
+[[nodiscard]] CensusCase makeRaggedIndexedSwiGluCase(std::string name,
+                                                       DataType dtype,
+                                                       uint64_t active_values,
+                                                       uint64_t width) {
+    const std::vector<uint64_t> source_shape{active_values, width * 2};
+    const std::vector<uint64_t> output_shape{active_values, width};
+    CensusCase c;
+    c.family = "indexed";
+    c.name = std::move(name);
+    c.inputs = {
+        {"x_storage", dtype, source_shape, std::nullopt, false, std::nullopt},
+        {"active_count", DataType::UINT32, {1}, 1, true, static_cast<uint32_t>(active_values)},
+    };
+    c.output_dimensions = output_shape;
+    c.output_dtype = dtype;
+    c.effective_input_dtypes = {dtype, dtype};
+    c.build_output = [dtype, active_values, width] {
+        const Expression storage = typedInput("x_storage", dtype);
+        const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+        const std::vector<uint64_t> half_dims{active_values, width};
+        const std::vector<uint64_t> full_strides{width * 2, 1};
+        const Expression value = storage.stridedView(half_dims, full_strides, 0);
+        const Expression gate = storage.stridedView(half_dims, full_strides, width);
+        return (value * gate.swish())
+            .withRaggedRuntimeExtent(active_count,
+                                     128,
+                                     active_values,
+                                     width,
+                                     RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+    };
+    return c;
+}
+
+[[nodiscard]] CensusCase makeTakeAlongAxisCase(std::string name,
+                                                DataType dtype,
+                                                uint64_t rows,
+                                                uint64_t width) {
+    const std::vector<uint64_t> shape{rows, width};
+    CensusCase c;
+    c.family = "indexed";
+    c.name = std::move(name);
+    c.inputs = {
+        {"values", dtype, shape, std::nullopt, false, std::nullopt},
+        {"indices", DataType::UINT32, shape, std::nullopt, false, std::nullopt},
+    };
+    c.output_dimensions = shape;
+    c.output_dtype = dtype;
+    c.effective_input_dtypes = {dtype};
+    c.build_output = [dtype] {
+        const Expression values = typedInput("values", dtype);
+        const Expression indices = Expression::input("indices", DataType::UINT32, DataType::UINT32);
+        return values.takeAlongAxis(indices, 1);
     };
     return c;
 }
@@ -679,6 +879,8 @@ class L2Evictor {
     cases.push_back(makeRaggedValuewiseCase("ragged_awkward_bf16_t16385_w127", DataType::BF16, 16385, 127, false));
     cases.push_back(makeRaggedValuewiseCase("ragged_product_fp16_t104832_w128", DataType::FP16, PRODUCT_T, 128, false));
     cases.push_back(makeRaggedValuewiseCase("ragged_product_fp32_t104832_w128", DataType::FP32, PRODUCT_T, 128, false));
+    cases.push_back(makeRaggedValuewiseCase("ragged_medium_fp32_t8192_w96", DataType::FP32, 8192, 96, false));
+    cases.push_back(makeRaggedValuewiseCase("ragged_awkward_fp32_t16385_w127", DataType::FP32, 16385, 127, false));
     cases.push_back(makeRaggedMixedValuewiseCase("ragged_mixed_bf16_bf16_to_fp32_t104832_w128",
                                                   DataType::BF16,
                                                   DataType::BF16,
@@ -691,6 +893,122 @@ class L2Evictor {
                                                   DataType::FP32,
                                                   PRODUCT_T,
                                                   128));
+    cases.push_back(makeRaggedMixedValuewiseCase("ragged_mixed_bf16_fp32_to_fp32_t8192_w96",
+                                                  DataType::BF16,
+                                                  DataType::FP32,
+                                                  DataType::FP32,
+                                                  8192,
+                                                  96));
+    cases.push_back(makeRaggedMixedValuewiseCase("ragged_mixed_fp32_bf16_to_bf16_t8192_w96",
+                                                  DataType::FP32,
+                                                  DataType::BF16,
+                                                  DataType::BF16,
+                                                  8192,
+                                                  96));
+    cases.push_back(makeRaggedMixedValuewiseCase("ragged_mixed_bf16_fp32_to_fp32_t512_w64",
+                                                  DataType::BF16,
+                                                  DataType::FP32,
+                                                  DataType::FP32,
+                                                  512,
+                                                  64));
+    cases.push_back(makeRaggedMixedValuewiseCase("ragged_mixed_bf16_fp32_to_fp32_t16385_w127",
+                                                  DataType::BF16,
+                                                  DataType::FP32,
+                                                  DataType::FP32,
+                                                  16385,
+                                                  127));
+
+    // FUSED-FP32-COMPUTE: benchmark the storage-driven packet rule directly.
+    // Low-precision storage on both sides must remain vector8 even though every
+    // lane computes in FP32.  Any actual FP32 storage boundary is vector4 so no
+    // tensor exceeds one naturally aligned 16-byte transaction per thread on
+    // either sm89 or sm120.
+    cases.push_back(makeRaggedFp32ComputeValuewiseCase(
+        "ragged_fp32_compute_bf16_to_bf16_t104832_w128", DataType::BF16, DataType::BF16, PRODUCT_T, 128));
+    cases.push_back(makeRaggedFp32ComputeValuewiseCase(
+        "ragged_fp32_compute_fp16_to_fp16_t104832_w128", DataType::FP16, DataType::FP16, PRODUCT_T, 128));
+    cases.push_back(makeRaggedFp32ComputeValuewiseCase(
+        "ragged_fp32_compute_bf16_to_fp32_t104832_w128", DataType::BF16, DataType::FP32, PRODUCT_T, 128));
+    cases.push_back(makeRaggedFp32ComputeValuewiseCase(
+        "ragged_fp32_compute_fp16_to_fp32_t104832_w128", DataType::FP16, DataType::FP32, PRODUCT_T, 128));
+    cases.push_back(makeRaggedFp32ComputeValuewiseCase(
+        "ragged_fp32_compute_fp32_to_bf16_t104832_w128", DataType::FP32, DataType::BF16, PRODUCT_T, 128));
+    cases.push_back(makeRaggedFp32ComputeValuewiseCase(
+        "ragged_fp32_compute_fp32_to_fp16_t104832_w128", DataType::FP32, DataType::FP16, PRODUCT_T, 128));
+
+    // Product-scale two-input and deeper expressions make sure vector8 remains
+    // worthwhile when FP32 arithmetic/register pressure is closer to the real
+    // transformer post-op workloads than the unary square probe.
+    cases.push_back(makeRaggedFp32ComputeBinaryCase(
+        "ragged_fp32_compute_binary_bf16_t104832_w128", DataType::BF16, PRODUCT_T, 128, false));
+    cases.push_back(makeRaggedFp32ComputeBinaryCase(
+        "ragged_fp32_compute_binary_fp16_t104832_w128", DataType::FP16, PRODUCT_T, 128, false));
+    cases.push_back(makeRaggedFp32ComputeBinaryCase(
+        "ragged_fp32_compute_deep_bf16_t104832_w128", DataType::BF16, PRODUCT_T, 128, true));
+    cases.push_back(makeRaggedFp32ComputeBinaryCase(
+        "ragged_fp32_compute_deep_fp16_t104832_w128", DataType::FP16, PRODUCT_T, 128, true));
+
+    // Scale/tail controls cover both sides of the 16-byte storage rule.  The
+    // partial case has a flattened active length that is not divisible by either
+    // vector8 or vector4, so it exercises the safe final packet.
+    for (uint64_t active_values : {8192ULL, 512ULL}) {
+        const std::string t = std::to_string(active_values);
+        cases.push_back(makeRaggedFp32ComputeValuewiseCase(
+            "ragged_fp32_compute_bf16_to_bf16_t" + t + "_w128", DataType::BF16, DataType::BF16, active_values, 128));
+        cases.push_back(makeRaggedFp32ComputeValuewiseCase(
+            "ragged_fp32_compute_bf16_to_fp32_t" + t + "_w128", DataType::BF16, DataType::FP32, active_values, 128));
+        cases.push_back(makeRaggedFp32ComputeValuewiseCase(
+            "ragged_fp32_compute_fp32_to_bf16_t" + t + "_w128", DataType::FP32, DataType::BF16, active_values, 128));
+    }
+    cases.push_back(makeRaggedFp32ComputeValuewiseCase(
+        "ragged_fp32_compute_bf16_to_bf16_t16385_w127_partial", DataType::BF16, DataType::BF16, 16385, 127));
+    cases.push_back(makeRaggedFp32ComputeValuewiseCase(
+        "ragged_fp32_compute_bf16_to_fp32_t16385_w127_partial", DataType::BF16, DataType::FP32, 16385, 127));
+    cases.push_back(makeRaggedFp32ComputeValuewiseCase(
+        "ragged_fp32_compute_fp32_to_bf16_t16385_w127_partial", DataType::FP32, DataType::BF16, 16385, 127));
+
+    // The same storage/compute split also matters for aligned ragged broadcasts:
+    // the bias mapping is structural, but packet ownership still follows the
+    // physical tensor storage rather than the FP32 arithmetic precision.
+    cases.push_back(makeBroadcastCase("ragged_broadcast_fp32_compute_bf16_t104832_w128",
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      {PRODUCT_T, 128},
+                                      {1, 128},
+                                      {PRODUCT_T, 128},
+                                      true,
+                                      128,
+                                      PRODUCT_T,
+                                      128,
+                                      false,
+                                      true));
+    cases.push_back(makeBroadcastCase("ragged_broadcast_fp32_compute_fp16_t104832_w128",
+                                      DataType::FP16,
+                                      DataType::FP16,
+                                      DataType::FP16,
+                                      {PRODUCT_T, 128},
+                                      {1, 128},
+                                      {PRODUCT_T, 128},
+                                      true,
+                                      128,
+                                      PRODUCT_T,
+                                      128,
+                                      false,
+                                      true));
+    cases.push_back(makeBroadcastCase("ragged_broadcast_fp32_compute_bf16_t8192_w128",
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      {8192, 128},
+                                      {1, 128},
+                                      {8192, 128},
+                                      true,
+                                      128,
+                                      8192,
+                                      128,
+                                      false,
+                                      true));
 
     // Ragged channel/scalar broadcasts.  The first operand is the packed value;
     // the second is broadcast over the trailing width.
@@ -707,6 +1025,175 @@ class L2Evictor {
                                           PRODUCT_T,
                                           width));
     }
+
+    // Non-transformer ragged-broadcast coverage.  Keep these separate from the
+    // product-shape sweep so the census proves that the packet rule generalizes
+    // across active-value counts and does not merely fit transformer widths.
+    //
+    // Medium-T aligned widths exercise every important packet-friendly width,
+    // including boundaries around the transformer's W=80 and W=128 cases.
+    for (uint64_t width : {8ULL, 24ULL, 64ULL, 80ULL, 96ULL, 128ULL, 192ULL}) {
+        cases.push_back(makeBroadcastCase("ragged_broadcast_medium_aligned_bf16_t8192_w" + std::to_string(width),
+                                          DataType::BF16,
+                                          DataType::BF16,
+                                          DataType::BF16,
+                                          {8192, width},
+                                          {1, width},
+                                          {8192, width},
+                                          true,
+                                          128,
+                                          8192,
+                                          width));
+    }
+
+    // Small-T cases are intentionally latency-sensitive and use a few very
+    // different packet-aligned widths.
+    for (uint64_t width : {8ULL, 64ULL, 128ULL}) {
+        cases.push_back(makeBroadcastCase("ragged_broadcast_small_aligned_bf16_t512_w" + std::to_string(width),
+                                          DataType::BF16,
+                                          DataType::BF16,
+                                          DataType::BF16,
+                                          {512, width},
+                                          {1, width},
+                                          {512, width},
+                                          true,
+                                          128,
+                                          512,
+                                          width));
+    }
+
+    // An odd active-value count makes sure packet eligibility is independent of
+    // T divisibility as long as each ragged value itself is packet aligned.
+    for (uint64_t width : {24ULL, 96ULL, 192ULL}) {
+        cases.push_back(makeBroadcastCase("ragged_broadcast_odd_t_aligned_bf16_t16385_w" + std::to_string(width),
+                                          DataType::BF16,
+                                          DataType::BF16,
+                                          DataType::BF16,
+                                          {16385, width},
+                                          {1, width},
+                                          {16385, width},
+                                          true,
+                                          128,
+                                          16385,
+                                          width));
+    }
+
+    // These widths deliberately do not fit an 8-scalar packet.  T=8192 is a
+    // multiple of 8, so the *whole tensor* element count is nevertheless
+    // divisible by 8.  They prove dispatch rejects packetization because an
+    // 8-wide packet can cross a ragged-row/broadcast-cycle boundary, rather
+    // than accepting it based on total-numel divisibility.
+    for (uint64_t width : {7ULL, 15ULL, 79ULL, 81ULL, 127ULL, 129ULL}) {
+        cases.push_back(makeBroadcastCase("ragged_broadcast_total8_row_awkward_bf16_t8192_w" + std::to_string(width),
+                                          DataType::BF16,
+                                          DataType::BF16,
+                                          DataType::BF16,
+                                          {8192, width},
+                                          {1, width},
+                                          {8192, width},
+                                          true,
+                                          128,
+                                          8192,
+                                          width));
+    }
+
+    // Scalar-broadcast controls at non-transformer scales verify that loading a
+    // scalar once per packet remains profitable for small, medium, and odd-T
+    // ragged extents.
+    cases.push_back(makeBroadcastCase("ragged_broadcast_scalar_bf16_t512_w64",
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      {512, 64},
+                                      {1, 1},
+                                      {512, 64},
+                                      true,
+                                      128,
+                                      512,
+                                      64));
+    cases.push_back(makeBroadcastCase("ragged_broadcast_scalar_bf16_t8192_w96",
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      {8192, 96},
+                                      {1, 1},
+                                      {8192, 96},
+                                      true,
+                                      128,
+                                      8192,
+                                      96));
+    cases.push_back(makeBroadcastCase("ragged_broadcast_scalar_bf16_t16385_w192",
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      {16385, 192},
+                                      {1, 1},
+                                      {16385, 192},
+                                      true,
+                                      128,
+                                      16385,
+                                      192));
+
+    // Additional broadcast patterns exercise per-row scalar reuse and a pair of
+    // broadcast operands, rather than only [T,W] + [1,W] channel broadcast.
+    cases.push_back(makeBroadcastCase("ragged_broadcast_column_bf16_t8192_w96",
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      {8192, 96},
+                                      {8192, 1},
+                                      {8192, 96},
+                                      true,
+                                      128,
+                                      8192,
+                                      96));
+    cases.push_back(makeBroadcastCase("ragged_broadcast_outer_bf16_t8192_w96",
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      {8192, 1},
+                                      {1, 96},
+                                      {8192, 96},
+                                      true,
+                                      128,
+                                      8192,
+                                      96));
+
+    // Representative FP16 non-transformer cases make sure the shared
+    // half2/bfloat162 wide implementation behaves consistently outside BF16.
+    cases.push_back(makeBroadcastCase("ragged_broadcast_medium_aligned_fp16_t8192_w96",
+                                      DataType::FP16,
+                                      DataType::FP16,
+                                      DataType::FP16,
+                                      {8192, 96},
+                                      {1, 96},
+                                      {8192, 96},
+                                      true,
+                                      128,
+                                      8192,
+                                      96));
+    cases.push_back(makeBroadcastCase("ragged_broadcast_scalar_fp16_t8192_w96",
+                                      DataType::FP16,
+                                      DataType::FP16,
+                                      DataType::FP16,
+                                      {8192, 96},
+                                      {1, 1},
+                                      {8192, 96},
+                                      true,
+                                      128,
+                                      8192,
+                                      96));
+    cases.push_back(makeBroadcastCase("ragged_broadcast_total8_row_awkward_fp16_t8192_w127",
+                                      DataType::FP16,
+                                      DataType::FP16,
+                                      DataType::FP16,
+                                      {8192, 127},
+                                      {1, 127},
+                                      {8192, 127},
+                                      true,
+                                      128,
+                                      8192,
+                                      127));
     cases.push_back(makeBroadcastCase("ragged_broadcast_scalar_bf16_t104832_w128",
                                       DataType::BF16,
                                       DataType::BF16,
@@ -718,6 +1205,84 @@ class L2Evictor {
                                       128,
                                       PRODUCT_T,
                                       128));
+    cases.push_back(makeBroadcastCase("ragged_broadcast_deep_bf16_t104832_w128",
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      {PRODUCT_T, 128},
+                                      {1, 128},
+                                      {PRODUCT_T, 128},
+                                      true,
+                                      128,
+                                      PRODUCT_T,
+                                      128,
+                                      true));
+    cases.push_back(makeBroadcastCase("ragged_broadcast_product_fp16_t104832_w128",
+                                      DataType::FP16,
+                                      DataType::FP16,
+                                      DataType::FP16,
+                                      {PRODUCT_T, 128},
+                                      {1, 128},
+                                      {PRODUCT_T, 128},
+                                      true,
+                                      128,
+                                      PRODUCT_T,
+                                      128));
+    cases.push_back(makeBroadcastCase("ragged_broadcast_product_fp32_t104832_w128",
+                                      DataType::FP32,
+                                      DataType::FP32,
+                                      DataType::FP32,
+                                      {PRODUCT_T, 128},
+                                      {1, 128},
+                                      {PRODUCT_T, 128},
+                                      true,
+                                      128,
+                                      PRODUCT_T,
+                                      128));
+    cases.push_back(makeBroadcastCase("ragged_broadcast_scalar_fp32_t104832_w128",
+                                      DataType::FP32,
+                                      DataType::FP32,
+                                      DataType::FP32,
+                                      {PRODUCT_T, 128},
+                                      {1, 1},
+                                      {PRODUCT_T, 128},
+                                      true,
+                                      128,
+                                      PRODUCT_T,
+                                      128));
+    cases.push_back(makeBroadcastCase("ragged_broadcast_medium_fp32_t8192_w96",
+                                      DataType::FP32,
+                                      DataType::FP32,
+                                      DataType::FP32,
+                                      {8192, 96},
+                                      {1, 96},
+                                      {8192, 96},
+                                      true,
+                                      128,
+                                      8192,
+                                      96));
+    cases.push_back(makeBroadcastCase("ragged_broadcast_awkward_fp32_t8192_w127",
+                                      DataType::FP32,
+                                      DataType::FP32,
+                                      DataType::FP32,
+                                      {8192, 127},
+                                      {1, 127},
+                                      {8192, 127},
+                                      true,
+                                      128,
+                                      8192,
+                                      127));
+    cases.push_back(makeBroadcastCase("ragged_broadcast_awkward_bf16_t16385_w127",
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      {16385, 127},
+                                      {1, 127},
+                                      {16385, 127},
+                                      true,
+                                      128,
+                                      16385,
+                                      127));
     cases.push_back(makeBroadcastCase("ragged_mixed_broadcast_bf16_fp32_to_fp32_t104832_w128",
                                       DataType::BF16,
                                       DataType::FP32,
@@ -729,10 +1294,97 @@ class L2Evictor {
                                       128,
                                       PRODUCT_T,
                                       128));
+    for (uint64_t width : {80ULL, 256ULL}) {
+        cases.push_back(makeBroadcastCase("ragged_mixed_broadcast_bf16_fp32_to_fp32_t104832_w" + std::to_string(width),
+                                          DataType::BF16,
+                                          DataType::FP32,
+                                          DataType::FP32,
+                                          {PRODUCT_T, width},
+                                          {1, width},
+                                          {PRODUCT_T, width},
+                                          true,
+                                          128,
+                                          PRODUCT_T,
+                                          width));
+    }
+    cases.push_back(makeBroadcastCase("ragged_mixed_broadcast_fp32_bf16_to_fp32_t104832_w128",
+                                      DataType::FP32,
+                                      DataType::BF16,
+                                      DataType::FP32,
+                                      {PRODUCT_T, 128},
+                                      {1, 128},
+                                      {PRODUCT_T, 128},
+                                      true,
+                                      128,
+                                      PRODUCT_T,
+                                      128));
+    cases.push_back(makeBroadcastCase("ragged_mixed_broadcast_fp32_bf16_to_bf16_t8192_w96",
+                                      DataType::FP32,
+                                      DataType::BF16,
+                                      DataType::BF16,
+                                      {8192, 96},
+                                      {1, 96},
+                                      {8192, 96},
+                                      true,
+                                      128,
+                                      8192,
+                                      96));
+    cases.push_back(makeBroadcastCase("ragged_mixed_broadcast_scalar_fp32_t8192_w96",
+                                      DataType::BF16,
+                                      DataType::FP32,
+                                      DataType::FP32,
+                                      {8192, 96},
+                                      {1, 1},
+                                      {8192, 96},
+                                      true,
+                                      128,
+                                      8192,
+                                      96));
+    cases.push_back(makeBroadcastCase("ragged_mixed_broadcast_medium_bf16_fp32_to_fp32_t8192_w96",
+                                      DataType::BF16,
+                                      DataType::FP32,
+                                      DataType::FP32,
+                                      {8192, 96},
+                                      {1, 96},
+                                      {8192, 96},
+                                      true,
+                                      128,
+                                      8192,
+                                      96));
+    cases.push_back(makeBroadcastCase("ragged_mixed_broadcast_awkward_bf16_fp32_to_fp32_t8192_w127",
+                                      DataType::BF16,
+                                      DataType::FP32,
+                                      DataType::FP32,
+                                      {8192, 127},
+                                      {1, 127},
+                                      {8192, 127},
+                                      true,
+                                      128,
+                                      8192,
+                                      127));
 
-    cases.push_back(makeIndexedInnerSpanCase("indexed_inner_contiguous_bf16_aligned", DataType::BF16, PRODUCT_T, 128, 0));
-    cases.push_back(makeIndexedInnerSpanCase("indexed_inner_contiguous_bf16_misaligned", DataType::BF16, PRODUCT_T, 128, 1));
-    cases.push_back(makeIndexedInnerSpanCase("indexed_inner_contiguous_fp32_aligned", DataType::FP32, PRODUCT_T, 128, 0));
+    cases.push_back(makeIndexedInnerSpanCase("indexed_inner_contiguous_bf16_t104832_w80", DataType::BF16, PRODUCT_T, 80, 0));
+    cases.push_back(makeIndexedInnerSpanCase("indexed_inner_contiguous_bf16_t104832_w128", DataType::BF16, PRODUCT_T, 128, 0));
+    cases.push_back(makeIndexedInnerSpanCase("indexed_inner_contiguous_bf16_second_half_t104832_w128", DataType::BF16, PRODUCT_T, 128, 128));
+    cases.push_back(makeIndexedInnerSpanCase("indexed_inner_contiguous_bf16_t104832_w256", DataType::BF16, PRODUCT_T, 256, 0));
+    cases.push_back(makeIndexedInnerSpanCase("indexed_inner_contiguous_fp16_t104832_w128", DataType::FP16, PRODUCT_T, 128, 0));
+    cases.push_back(makeIndexedInnerSpanCase("indexed_inner_contiguous_fp32_t104832_w128", DataType::FP32, PRODUCT_T, 128, 0));
+    cases.push_back(makeIndexedInnerSpanCase("indexed_inner_contiguous_bf16_t8192_w96", DataType::BF16, 8192, 96, 0));
+
+    // Deliberate fallbacks: the packet fast path requires a packet-aligned view
+    // origin, a packet-aligned row cycle, and a unit-stride contiguous inner run.
+    cases.push_back(makeIndexedInnerSpanCase("indexed_inner_misaligned_offset_bf16_t104832_w128", DataType::BF16, PRODUCT_T, 128, 1));
+    cases.push_back(makeIndexedInnerSpanCase("indexed_inner_awkward_width_bf16_t8192_w127", DataType::BF16, 8192, 127, 0));
+    cases.push_back(makeIndexedInnerSpanCase("indexed_inner_stride2_bf16_t8192_w64", DataType::BF16, 8192, 64, 0, 128, 2));
+    cases.push_back(makeIndexedInnerSpanCase("indexed_outer_stride_misaligned_bf16_t8192_w128", DataType::BF16, 8192, 128, 0, 257, 1));
+
+    // Exact forward-strided-view pattern used by the ragged transformer SwiGLU.
+    cases.push_back(makeRaggedIndexedSwiGluCase("indexed_ragged_swiglu_bf16_t104832_w128", DataType::BF16, PRODUCT_T, 128));
+    cases.push_back(makeRaggedIndexedSwiGluCase("indexed_ragged_swiglu_fp16_t104832_w128", DataType::FP16, PRODUCT_T, 128));
+    cases.push_back(makeRaggedIndexedSwiGluCase("indexed_ragged_swiglu_bf16_t8192_w96", DataType::BF16, 8192, 96));
+
+    // Runtime-data-dependent gather control. This should remain scalar/indexed.
+    cases.push_back(makeTakeAlongAxisCase("indexed_take_along_axis_bf16_t8192_w128", DataType::BF16, 8192, 128));
 
     cases.push_back(makeTransposeCase("transpose_dense_bf16", DataType::BF16, DataType::BF16, dense_shape));
     cases.push_back(makeTransposeCase("transpose_dense_fp32", DataType::FP32, DataType::FP32, dense_shape));
@@ -800,29 +1452,18 @@ void initializeInput(const InputSpec& spec, Tensor& tensor, Stream& stream) {
     return inputs;
 }
 
-[[nodiscard]] const CompiledEquation& requireSingleFusedKernel(const std::shared_ptr<CompiledOutputs>& compiled,
-                                                               const CensusCase& c) {
-    if (!compiled) {
-        throw std::runtime_error(c.name + " compiled to a null output plan");
+[[nodiscard]] const CompiledEquation& requireSingleStampedFusedKernel(const StampedExecutionPlan& plan,
+                                                                      const CensusCase& c) {
+    const std::vector<std::string> stage_names = plan.stageKindNames();
+    if (stage_names.size() != 1 || stage_names.front() != "FusedKernel") {
+        throw std::runtime_error(c.name + " stamped plan is not exactly one FusedKernel stage");
     }
-    const CompiledEquation* fused = nullptr;
-    for (const CompiledExecutionStage& stage : compiled->stages) {
-        if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
-            throw std::runtime_error(c.name + " expected an isolated FusedKernel stage but compiled stage " +
-                                     CompiledExecutionStage::kindToString(stage.kind));
-        }
-        if (fused != nullptr) {
-            throw std::runtime_error(c.name + " expected one FusedKernel stage but compiled more than one");
-        }
-        if (!stage.flat) {
-            throw std::runtime_error(c.name + " fused stage is missing its CompiledEquation payload");
-        }
-        fused = stage.flat.get();
+    const std::vector<std::shared_ptr<CompiledEquation>> fused =
+        plan.fusedKernelCompiledEquationsForDiagnostics();
+    if (fused.size() != 1 || !fused.front()) {
+        throw std::runtime_error(c.name + " stamped plan did not expose exactly one compiled fused kernel");
     }
-    if (fused == nullptr) {
-        throw std::runtime_error(c.name + " did not compile a FusedKernel stage");
-    }
-    return *fused;
+    return *fused.front();
 }
 
 [[nodiscard]] TimingSummary timePool(const std::vector<PoolSlot>& pool,
@@ -892,7 +1533,7 @@ void initializeInput(const InputSpec& spec, Tensor& tensor, Stream& stream) {
                 << "Thor fused-kernel census\n\n"
                 << "Options:\n"
                 << "  --device=N                 CUDA device (default 0)\n"
-                << "  --family=NAME              run one family (dense, mixed, broadcast, mixed_broadcast, ragged, ragged_mixed, ragged_broadcast, indexed, transpose)\n"
+                << "  --family=NAME              run one family (dense, mixed, broadcast, mixed_broadcast, ragged, ragged_mixed, ragged_fp32_compute, ragged_broadcast, indexed, transpose)\n"
                 << "  --case=SUBSTRING           run cases whose names contain SUBSTRING\n"
                 << "  --l2-multiple=N            rotating touched working set target / L2 (default 8)\n"
                 << "  --max-rotation-slots=N     cap stamped allocation rotation (default 64); smaller cases use untimed L2 eviction\n"
@@ -996,11 +1637,16 @@ void runCase(const CensusCase& c,
     }
     stream.synchronize();
 
-    const std::shared_ptr<CompiledOutputs> compiled_outputs = equation.compileForInputs(pool.front().inputs);
-    const CompiledEquation& compiled = requireSingleFusedKernel(compiled_outputs, c);
-    const std::vector<std::string> stage_names = pool.front().plan->stageKindNames();
-    if (stage_names.size() != 1 || stage_names.front() != "FusedKernel") {
-        throw std::runtime_error(c.name + " stamped plan is not exactly one FusedKernel stage");
+    // Runtime shape specialization (broadcast/indexed layouts in particular)
+    // can bind a different CompiledEquation into the stamped plan than the
+    // stage's cached flat fallback. Report the kernel that is actually timed.
+    const CompiledEquation& compiled = requireSingleStampedFusedKernel(*pool.front().plan, c);
+    if (c.expected_elements_per_thread.has_value() &&
+        compiled.elements_per_thread != c.expected_elements_per_thread.value()) {
+        std::ostringstream message;
+        message << c.name << " expected " << c.expected_elements_per_thread.value()
+                << " elements/thread but production dispatch selected " << compiled.elements_per_thread;
+        throw std::runtime_error(message.str());
     }
 
     const uint64_t model_logical_bytes = pool.front().plan->logicalByteCount();
@@ -1023,10 +1669,12 @@ void runCase(const CensusCase& c,
         functionAttribute(compiled.kernel, CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, "cuFuncGetAttribute(SHARED_SIZE_BYTES)");
 
     std::cout << c.family << ',' << c.name << ',' << inputDTypesString(c) << ',' << dataTypeName(c.output_dtype) << ','
+              << explicitComputeDTypeName(c) << ',' << expectedElementsPerThreadName(c) << ','
               << inputShapesString(c) << ',' << dimensionsString(c.output_dimensions) << ',' << compiled.kernel_name << ','
-              << launchKindName(compiled.launch_kind) << ',' << selectedPathName(compiled) << ','
+              << launchKindName(compiled.launch_kind) << ',' << selectedPathName(c, compiled) << ','
               << compiled.elements_per_thread << ',' << packetScalars(compiled) << ','
               << nominalInputPacketBytes(c, compiled) << ',' << outputPacketBytes(c, compiled) << ','
+              << maxNominalPacketBytes(c, compiled) << ','
               << geometry.grid_x << ',' << geometry.grid_y << ',' << geometry.grid_z << ','
               << geometry.block_x << ',' << geometry.block_y << ',' << geometry.block_z << ','
               << registers_per_thread << ',' << local_bytes_per_thread << ',' << static_shared_bytes << ','
@@ -1088,10 +1736,13 @@ int main(int argc, char** argv) {
                   << " warmup_rounds=" << options.warmup_rounds << " timing_samples=" << options.timing_samples << '\n'
                   << "# effective_bytes charges one root payload read per output element plus the output write; for broadcasts this is intentionally a logical/effective metric.\n"
                   << "# compulsory_bytes counts unique target tensor bytes touched once per launch, including structural metadata actually read and the output write.\n"
+                  << "# explicit_compute_dtype reports only a benchmark-requested arithmetic override; resolved means no explicit root override is recorded.\n"
+                  << "# expected_elements_per_thread is populated for ordained targeted cases and is validated before timing.\n"
                   << "# input_packet_bytes are nominal contiguous value spans implied by packet_scalars; broadcast/indexed operands can legitimately load/reuse less or use indexed scalar traffic.\n"
+                  << "# max_packet_bytes is the largest nominal per-thread value packet among materialized inputs/output; the portable sm89/sm120 fused target is <=16 B.\n"
                   << "# cache_control=rotation means the intervening reuse distance itself is >= requested L2 multiple; rotation_plus_eviction adds an untimed device-read eviction pass before each timed sample.\n"
                   << "# each timing sample contains exactly one production fused-kernel launch; slot rotation/cache eviction occurs outside that event interval.\n";
-        std::cout << "family,case,input_dtypes,output_dtype,input_shapes,output_shape,kernel_name,launch_kind,selected_path,elements_per_thread,packet_scalars,input_packet_bytes,output_packet_bytes,grid_x,grid_y,grid_z,block_x,block_y,block_z,registers_per_thread,local_bytes_per_thread,static_shared_bytes,device_runtime_extent,runtime_extent_source,pool_slots,pool_touched_bytes,pool_over_l2,reuse_distance_bytes,reuse_distance_over_l2,cache_control,effective_bytes,compulsory_bytes,model_logical_bytes,median_ms,best_ms,worst_ms,effective_gb_s,compulsory_gb_s\n";
+        std::cout << "family,case,input_dtypes,output_dtype,explicit_compute_dtype,expected_elements_per_thread,input_shapes,output_shape,kernel_name,launch_kind,selected_path,elements_per_thread,packet_scalars,input_packet_bytes,output_packet_bytes,max_packet_bytes,grid_x,grid_y,grid_z,block_x,block_y,block_z,registers_per_thread,local_bytes_per_thread,static_shared_bytes,device_runtime_extent,runtime_extent_source,pool_slots,pool_touched_bytes,pool_over_l2,reuse_distance_bytes,reuse_distance_over_l2,cache_control,effective_bytes,compulsory_bytes,model_logical_bytes,median_ms,best_ms,worst_ms,effective_gb_s,compulsory_gb_s\n";
 
         size_t selected_count = 0;
         for (const CensusCase& c : cases) {

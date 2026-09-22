@@ -1489,7 +1489,7 @@ TEST(CudaSourceEmitter, RaggedValuewiseKernelReadsOffsetsBatchElementOnDevice) {
     ASSERT_EQ(stages.size(), 1U);
     ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
     EXPECT_FALSE(CudaSourceEmitter::getVectorizedStageStorageDType(stages[0]).has_value());
-    EXPECT_EQ(CudaSourceEmitter::flatElementsPerThread(stages[0]), 1U);
+    EXPECT_EQ(CudaSourceEmitter::flatElementsPerThread(stages[0]), 4U);
 
     uint32_t offsets_input_slot = UINT32_MAX;
     for (uint32_t slot = 0; slot < stages[0].expr.inputs.size(); ++slot) {
@@ -1505,7 +1505,148 @@ TEST(CudaSourceEmitter, RaggedValuewiseKernelReadsOffsetsBatchElementOnDevice) {
         "active_values_raw = static_cast<unsigned long long>(in" + std::to_string(offsets_input_slot) + "[4ULL])";
     EXPECT_NE(source.find(active_count_load), std::string::npos);
     EXPECT_NE(source.find("runtime_numel_u64 = active_values * 1ULL"), std::string::npos);
-    EXPECT_NE(source.find("for (; idx < runtime_numel; idx += grid_stride)"), std::string::npos);
+    EXPECT_NE(source.find("packet_count = (runtime_numel + 3U) / 4U"), std::string::npos);
+    EXPECT_NE(source.find("const float4 in"), std::string::npos);
+    EXPECT_NE(source.find("float4 out0_chunk"), std::string::npos);
+    EXPECT_NE(source.find("packet_grid_stride"), std::string::npos);
+}
+
+TEST(CudaSourceEmitter, RaggedBf16ValuewiseUsesSixteenBytePacketsAndKeepsPartitionMetadataScalar) {
+    const RaggedTensorDescriptor descriptor(DataType::BF16, {}, 4, 12, DataType::UINT32);
+    const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+    auto physical = Expression::outputs({{"y", ragged.relu().getValues()}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::BF16, DataType::UINT32});
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    // Public vector eligibility intentionally remains false for ragged because
+    // specialized-broadcast compilation uses that query. The flat emitter has a
+    // narrower FUSED-RAGGED-FLAT opt-in.
+    EXPECT_FALSE(CudaSourceEmitter::getVectorizedStageStorageDType(stages[0]).has_value());
+    EXPECT_EQ(CudaSourceEmitter::flatElementsPerThread(stages[0]), 8U);
+
+    uint32_t values_input_slot = UINT32_MAX;
+    uint32_t offsets_input_slot = UINT32_MAX;
+    for (uint32_t slot = 0; slot < stages[0].expr.inputs.size(); ++slot) {
+        if (stages[0].expr.inputs[slot].name == "x.values") values_input_slot = slot;
+        if (stages[0].expr.inputs[slot].name == "x.offsets") offsets_input_slot = slot;
+    }
+    ASSERT_NE(values_input_slot, UINT32_MAX);
+    ASSERT_NE(offsets_input_slot, UINT32_MAX);
+
+    const std::string source = CudaSourceEmitter::emitFlat(stages[0], "ragged_bf16_vectorized");
+    EXPECT_NE(source.find("const float4* in" + std::to_string(values_input_slot)), std::string::npos);
+    EXPECT_NE(source.find("const unsigned int* in" + std::to_string(offsets_input_slot)), std::string::npos);
+    EXPECT_NE(source.find("packet_scalars = 8"), std::string::npos);
+    EXPECT_NE(source.find("for (; idx < packet_count; idx += grid_stride)"), std::string::npos);
+    EXPECT_NE(source.find("const float4 in" + std::to_string(values_input_slot) + "_chunk = in" +
+                          std::to_string(values_input_slot) + "[idx]"),
+              std::string::npos);
+    EXPECT_NE(source.find("full_active_packet"), std::string::npos);
+    EXPECT_NE(source.find("reinterpret_cast<__nv_bfloat16*>(out0)[scalar_base"), std::string::npos);
+}
+
+TEST(CudaSourceEmitter, RaggedLowPrecisionStorageWithFp32ComputeUsesWideScalarPackets) {
+    for (DataType storage_dtype : {DataType::BF16, DataType::FP16}) {
+        const Expression x = Expression::input("x", DataType::FP32, storage_dtype);
+        const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+        const Expression out = (x * x)
+                                   .withComputeDType(DataType::FP32)
+                                   .withOutputDType(storage_dtype)
+                                   .withRaggedRuntimeExtent(
+                                       active_count, 4, 12, 5, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+        auto physical = Expression::outputs({{"out", out}}).physicalOutputs();
+        resolveOutputsDTypesInPlace(physical, {storage_dtype, DataType::UINT32});
+        auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+        ASSERT_EQ(stages.size(), 1U);
+        ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+        EXPECT_EQ(CudaSourceEmitter::flatElementsPerThread(stages[0]), 8U);
+
+        const std::string source = CudaSourceEmitter::emitFlat(stages[0], "ragged_lowp_fp32_compute_vectorized");
+        EXPECT_NE(source.find("packet_count = (runtime_numel + 7U) / 8U"), std::string::npos);
+        EXPECT_NE(source.find("const float4 in0_chunk = *reinterpret_cast<const float4*>(in0 + base)"), std::string::npos);
+        EXPECT_NE(source.find("float4 out0_chunk"), std::string::npos);
+        EXPECT_NE(source.find("const float t"), std::string::npos);
+        EXPECT_NE(source.find("packet_grid_stride"), std::string::npos);
+    }
+}
+
+TEST(CudaSourceEmitter, RaggedPhysicalBf16InputPromotedToFp32StillUsesWidePhysicalLoad) {
+    // Mirrors context.input(output_dtype=fp32, compute_dtype=fp32) connected to a
+    // BF16 producer: the expression input is logically FP32, but the stage ABI
+    // must load the physical BF16 tensor in a coalesced packet before promotion.
+    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression out = (x * x)
+                               .withComputeDType(DataType::FP32)
+                               .withOutputDType(DataType::FP32)
+                               .withRaggedRuntimeExtent(
+                                   active_count, 4, 12, 5, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    auto physical = Expression::outputs({{"out", out}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::BF16, DataType::UINT32});
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    EXPECT_EQ(CudaSourceEmitter::flatElementsPerThread(stages[0]), 4U);
+
+    const std::string source = CudaSourceEmitter::emitFlat(stages[0], "ragged_physical_bf16_logical_fp32");
+    EXPECT_NE(source.find("const __nv_bfloat16* in0"), std::string::npos);
+    EXPECT_NE(source.find("const unsigned long long in0_chunk"), std::string::npos);
+    EXPECT_NE(source.find("float4 out0_chunk"), std::string::npos);
+    EXPECT_NE(source.find("const float t"), std::string::npos);
+    EXPECT_NE(source.find("packet_count = (runtime_numel + 3U) / 4U"), std::string::npos);
+}
+
+TEST(CudaSourceEmitter, RaggedLowPrecisionFp32StorageBoundaryUsesFourScalarPackets) {
+    const Expression x = Expression::input("x", DataType::FP32, DataType::BF16);
+    const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression out = (x * x)
+                               .withComputeDType(DataType::FP32)
+                               .withOutputDType(DataType::FP32)
+                               .withRaggedRuntimeExtent(
+                                   active_count, 4, 12, 5, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    auto physical = Expression::outputs({{"out", out}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::BF16, DataType::UINT32});
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    EXPECT_EQ(CudaSourceEmitter::flatElementsPerThread(stages[0]), 4U);
+
+    const std::string source = CudaSourceEmitter::emitFlat(stages[0], "ragged_lowp_to_fp32_vectorized");
+    EXPECT_NE(source.find("const unsigned long long in0_chunk"), std::string::npos);
+    EXPECT_NE(source.find("float4 out0_chunk"), std::string::npos);
+    EXPECT_NE(source.find("packet_count = (runtime_numel + 3U) / 4U"), std::string::npos);
+}
+
+TEST(CudaSourceEmitter, RaggedMixedValuewiseUsesProvenFourScalarDenseMixedPackets) {
+    const Expression x = Expression::input("x", DataType::BF16, DataType::BF16);
+    const Expression y = Expression::input("y", DataType::FP32, DataType::FP32);
+    const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression out = (x + y).withOutputDType(DataType::FP32).withRaggedRuntimeExtent(
+        active_count, 4, 12, 5, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    auto physical = Expression::outputs({{"out", out}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::BF16, DataType::FP32, DataType::UINT32});
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    EXPECT_FALSE(CudaSourceEmitter::getVectorizedStageStorageDType(stages[0]).has_value());
+    EXPECT_EQ(CudaSourceEmitter::flatElementsPerThread(stages[0]), 4U);
+
+    const std::string source = CudaSourceEmitter::emitFlat(stages[0], "ragged_mixed_vectorized");
+    EXPECT_NE(source.find("const unsigned long long in0_chunk"), std::string::npos);
+    EXPECT_NE(source.find("const float4 in1_chunk"), std::string::npos);
+    EXPECT_NE(source.find("float4 out0_chunk"), std::string::npos);
+    EXPECT_NE(source.find("packet_count = (runtime_numel + 3U) / 4U"), std::string::npos);
+    EXPECT_NE(source.find("packet_grid_stride"), std::string::npos);
 }
 
 TEST(CudaSourceEmitter, RaggedValuewiseKernelReadsManagedActiveCountScalarAndSeparatesCacheIdentity) {
@@ -1745,6 +1886,33 @@ TEST(EquationCompiler, TerminalStridedViewRemainsAStorageAliasWithoutKernelStage
     auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
 
     EXPECT_TRUE(stages.empty());
+}
+
+TEST(EquationCompiler, RaggedTerminalSliceOverRootInputExternalizesStorageAlias) {
+    const RaggedTensorDescriptor descriptor(DataType::BF16, {256}, 128, 104832, DataType::UINT32);
+    const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+    const RaggedExpression half = ragged.sliceLastDimension(128, 128);
+    auto physical = Expression::outputs({{"half", half.getValues()}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::BF16, DataType::UINT32});
+
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    ASSERT_EQ(stages[0].outputs.size(), 1U);
+
+    bool has_strided_view = false;
+    std::optional<uint64_t> runtime_width;
+    for (const ExprNode& node : stages[0].expr.nodes) {
+        has_strided_view = has_strided_view || node.op == ExprOp::STRIDED_VIEW;
+        if (node.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+            ASSERT_FALSE(runtime_width.has_value());
+            runtime_width = node.ragged_runtime_elements_per_value;
+        }
+    }
+    EXPECT_FALSE(has_strided_view);
+    ASSERT_TRUE(runtime_width.has_value());
+    EXPECT_EQ(runtime_width.value(), 128U);
 }
 
 TEST(EquationCompiler, RaggedTerminalOutputsWithDifferentRowWidthsUseSeparateFusedStages) {

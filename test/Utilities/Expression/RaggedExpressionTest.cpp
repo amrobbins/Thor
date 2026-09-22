@@ -3222,6 +3222,387 @@ TEST(RaggedExpression, ValuewiseExecutionReadsActiveExtentOnDeviceAndReusesOneSt
                 888.0F, 888.0F});
 }
 
+TEST(RaggedExpression, Bf16ValuewiseVectorPacketsPreserveInactiveCapacityAcrossPartialPacketTail) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t capacity = 13;
+    const RaggedExpression ragged =
+        RaggedExpression::input("x", makeDescriptor(DataType::BF16, {}, 3, capacity));
+    const Expression output_expression = ragged.relu().getValues();
+
+    Tensor values = makeGpuTensorFromFloats({capacity},
+                                            {-1.0F, 2.0F, -3.0F, 4.0F, 5.0F, -6.0F, 7.0F,
+                                             -8.0F, 9.0F, -10.0F, 11.0F, -12.0F, 13.0F},
+                                            DataType::BF16,
+                                            stream);
+    Tensor offsets = makeGpuTensor<uint32_t>({4}, {0U, 2U, 2U, 5U}, stream);
+    Tensor output(gpuPlacement, TensorDescriptor(DataType::BF16, {capacity}));
+    output.fill(77.0, stream);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", output_expression}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp({{"x.values", values}, {"x.offsets", offsets}}, stream, {}, {{"y", output}});
+    plan.run();
+    expectNear(copyToCpuFloatValues(output, stream),
+               {0.0F, 2.0F, 0.0F, 4.0F, 5.0F,
+                77.0F, 77.0F, 77.0F, 77.0F, 77.0F, 77.0F, 77.0F, 77.0F},
+               2.0e-2F);
+
+    // Exercise the final packet at full logical capacity. Its 16-byte load may
+    // extend into Thor's terminal tensor guard, while the masked store writes
+    // only the thirteen logical values.
+    overwriteGpuTensor<uint32_t>(offsets, {0U, 4U, 9U, 13U}, stream);
+    output.fill(88.0, stream);
+    plan.run();
+    expectNear(copyToCpuFloatValues(output, stream),
+               {0.0F, 2.0F, 0.0F, 4.0F, 5.0F, 0.0F, 7.0F,
+                0.0F, 9.0F, 0.0F, 11.0F, 0.0F, 13.0F},
+               2.0e-2F);
+}
+
+TEST(RaggedExpression, LowPrecisionStorageFp32ComputeWidePacketsPreserveInactiveCapacityAndPartialTail) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t capacity = 13;
+    const std::vector<float> values{-1.25F, 2.0F, -3.5F, 4.25F, 5.0F, -6.5F, 7.25F,
+                                    -8.0F, 9.5F, -10.25F, 11.0F, -12.5F, 13.25F};
+
+    for (DataType storage_dtype : {DataType::BF16, DataType::FP16}) {
+        Tensor x = makeGpuTensorFromFloats({capacity}, values, storage_dtype, stream);
+        Tensor active_count = makeGpuTensor<uint32_t>({1}, {5U}, stream);
+        Tensor output(gpuPlacement, TensorDescriptor(storage_dtype, {capacity}));
+        output.fill(77.0, stream);
+
+        const Expression ex = Expression::input("x", DataType::FP32, storage_dtype);
+        const Expression count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+        const Expression expression = (ex * ex)
+                                          .withComputeDType(DataType::FP32)
+                                          .withOutputDType(storage_dtype)
+                                          .withRaggedRuntimeExtent(
+                                              count, 3, capacity, 1, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+        FusedEquation equation = FusedEquation::compile(Expression::outputs({{"out", expression}}).physicalOutputs(), 0);
+        StampedExecutionPlan plan = equation.stamp(
+            {{"x", x}, {"active_count", active_count}}, stream, {}, {{"out", output}});
+
+        auto quantize_to_storage = [&](float value) {
+            switch (storage_dtype) {
+                case DataType::BF16:
+                    return __bfloat162float(__float2bfloat16(value));
+                case DataType::FP16:
+                    return __half2float(__float2half(value));
+                default:
+                    throw std::runtime_error("low-precision FP32-compute test expected BF16 or FP16 storage.");
+            }
+        };
+        auto expected_for_active = [&](uint64_t active, float sentinel) {
+            std::vector<float> expected(capacity, quantize_to_storage(sentinel));
+            for (uint64_t i = 0; i < active; ++i) {
+                const float stored_input = quantize_to_storage(values[i]);
+                expected[i] = quantize_to_storage(stored_input * stored_input);
+            }
+            return expected;
+        };
+
+        plan.run();
+        expectNear(copyToCpuFloatValues(output, stream), expected_for_active(5, 77.0F), 1.0e-3F);
+
+        // Replay the same stamped plan with a changed device extent. Capacity 13
+        // forces the last vector8 packet through the masked scalar tail store.
+        overwriteGpuTensor<uint32_t>(active_count, {13U}, stream);
+        output.fill(88.0, stream);
+        plan.run();
+        expectNear(copyToCpuFloatValues(output, stream), expected_for_active(13, 88.0F), 1.0e-3F);
+    }
+}
+
+TEST(RaggedExpression, Bf16RaggedBroadcastVectorPacketsPreserveInactiveCapacityAndReplayActiveExtent) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t capacity = 13;
+    constexpr uint64_t width = 8;
+    constexpr float sentinel_first = 77.0F;
+    constexpr float sentinel_second = 88.0F;
+
+    std::vector<float> values(capacity * width);
+    for (uint64_t row = 0; row < capacity; ++row) {
+        for (uint64_t col = 0; col < width; ++col) {
+            values[row * width + col] = static_cast<float>(row * 3) + static_cast<float>(col) * 0.25F - 4.0F;
+        }
+    }
+    const std::vector<float> bias{0.5F, -1.0F, 1.5F, -2.0F, 2.5F, -3.0F, 3.5F, -4.0F};
+
+    Tensor gpu_values = makeGpuTensorFromFloats({capacity, width}, values, DataType::BF16, stream);
+    Tensor gpu_bias = makeGpuTensorFromFloats({1, width}, bias, DataType::BF16, stream);
+    Tensor active_count = makeGpuTensor<uint32_t>({1}, {5U}, stream);
+    Tensor output(gpuPlacement, TensorDescriptor(DataType::BF16, {capacity, width}));
+    output.fill(sentinel_first, stream);
+
+    const Expression x = Expression::input("x", DataType::BF16, DataType::BF16);
+    const Expression y = Expression::input("bias", DataType::BF16, DataType::BF16);
+    const Expression count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression expression = (x + y).withRaggedRuntimeExtent(
+        count, 3, capacity, width, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"out", expression}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp(
+        {{"x", gpu_values}, {"bias", gpu_bias}, {"active_count", active_count}}, stream, {}, {{"out", output}});
+
+    auto expected_for_active = [&](uint64_t active, float inactive_sentinel) {
+        std::vector<float> expected(capacity * width, inactive_sentinel);
+        for (uint64_t row = 0; row < active; ++row) {
+            for (uint64_t col = 0; col < width; ++col) {
+                expected[row * width + col] = values[row * width + col] + bias[col];
+            }
+        }
+        return expected;
+    };
+
+    plan.run();
+    expectNear(copyToCpuFloatValues(output, stream), expected_for_active(5, sentinel_first), 3.0e-2F);
+
+    overwriteGpuTensor<uint32_t>(active_count, {13U}, stream);
+    output.fill(sentinel_second, stream);
+    plan.run();
+    expectNear(copyToCpuFloatValues(output, stream), expected_for_active(capacity, sentinel_second), 3.0e-2F);
+}
+
+TEST(RaggedExpression, Bf16StorageFp32ComputeBroadcastKeepsVector8AndReplaysActiveExtent) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t capacity = 13;
+    constexpr uint64_t width = 8;
+    std::vector<float> values(capacity * width);
+    for (uint64_t row = 0; row < capacity; ++row) {
+        for (uint64_t col = 0; col < width; ++col) {
+            values[row * width + col] = static_cast<float>(row) * 0.75F + static_cast<float>(col) * 0.125F - 2.0F;
+        }
+    }
+    const std::vector<float> bias{0.5F, -1.0F, 1.5F, -2.0F, 2.5F, -3.0F, 3.5F, -4.0F};
+
+    Tensor gpu_values = makeGpuTensorFromFloats({capacity, width}, values, DataType::BF16, stream);
+    Tensor gpu_bias = makeGpuTensorFromFloats({1, width}, bias, DataType::BF16, stream);
+    Tensor active_count = makeGpuTensor<uint32_t>({1}, {5U}, stream);
+    Tensor output(gpuPlacement, TensorDescriptor(DataType::BF16, {capacity, width}));
+    output.fill(77.0, stream);
+
+    const Expression x = Expression::input("x", DataType::FP32, DataType::BF16);
+    const Expression y = Expression::input("bias", DataType::FP32, DataType::BF16);
+    const Expression count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression expression = (x + y)
+                                      .withComputeDType(DataType::FP32)
+                                      .withOutputDType(DataType::BF16)
+                                      .withRaggedRuntimeExtent(
+                                          count, 3, capacity, width, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"out", expression}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp(
+        {{"x", gpu_values}, {"bias", gpu_bias}, {"active_count", active_count}}, stream, {}, {{"out", output}});
+
+    auto expected_for_active = [&](uint64_t active, float sentinel) {
+        std::vector<float> expected(capacity * width, sentinel);
+        for (uint64_t row = 0; row < active; ++row) {
+            for (uint64_t col = 0; col < width; ++col) {
+                expected[row * width + col] = values[row * width + col] + bias[col];
+            }
+        }
+        return expected;
+    };
+
+    plan.run();
+    expectNear(copyToCpuFloatValues(output, stream), expected_for_active(5, 77.0F), 3.0e-2F);
+
+    overwriteGpuTensor<uint32_t>(active_count, {13U}, stream);
+    output.fill(88.0, stream);
+    plan.run();
+    expectNear(copyToCpuFloatValues(output, stream), expected_for_active(13, 88.0F), 3.0e-2F);
+}
+
+TEST(RaggedExpression, Fp32ValuewiseFourScalarPacketsPreserveInactiveCapacityAndPartialTail) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t capacity = 13;
+    const std::vector<float> values{-1.0F, 2.0F, -3.0F, 4.0F, 5.0F, -6.0F, 7.0F,
+                                    -8.0F, 9.0F, -10.0F, 11.0F, -12.0F, 13.0F};
+    Tensor x = makeGpuTensorFromFloats({capacity}, values, DataType::FP32, stream);
+    Tensor active_count = makeGpuTensor<uint32_t>({1}, {5U}, stream);
+    Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity}));
+    output.fill(77.0, stream);
+
+    const Expression ex = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression expression = ex.relu().withRaggedRuntimeExtent(
+        count, 3, capacity, 1, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"out", expression}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp(
+        {{"x", x}, {"active_count", active_count}}, stream, {}, {{"out", output}});
+
+    auto expected_for_active = [&](uint64_t active, float sentinel) {
+        std::vector<float> expected(capacity, sentinel);
+        for (uint64_t i = 0; i < active; ++i) expected[i] = std::max(values[i], 0.0F);
+        return expected;
+    };
+
+    plan.run();
+    expectNear(copyToCpuFloatValues(output, stream), expected_for_active(5, 77.0F), 1.0e-5F);
+
+    overwriteGpuTensor<uint32_t>(active_count, {13U}, stream);
+    output.fill(88.0, stream);
+    plan.run();
+    expectNear(copyToCpuFloatValues(output, stream), expected_for_active(13, 88.0F), 1.0e-5F);
+}
+
+TEST(RaggedExpression, Fp32BroadcastFourScalarPacketsPreserveInactiveCapacityAndReplayActiveExtent) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t capacity = 13;
+    constexpr uint64_t width = 8;
+    std::vector<float> values(capacity * width);
+    for (uint64_t row = 0; row < capacity; ++row) {
+        for (uint64_t col = 0; col < width; ++col) {
+            values[row * width + col] = static_cast<float>(row * 2) + static_cast<float>(col) * 0.125F - 3.0F;
+        }
+    }
+    const std::vector<float> bias{0.5F, -1.0F, 1.5F, -2.0F, 2.5F, -3.0F, 3.5F, -4.0F};
+
+    Tensor gpu_values = makeGpuTensorFromFloats({capacity, width}, values, DataType::FP32, stream);
+    Tensor gpu_bias = makeGpuTensorFromFloats({1, width}, bias, DataType::FP32, stream);
+    Tensor active_count = makeGpuTensor<uint32_t>({1}, {5U}, stream);
+    Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, width}));
+    output.fill(77.0, stream);
+
+    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression y = Expression::input("bias", DataType::FP32, DataType::FP32);
+    const Expression count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression expression = (x + y).withRaggedRuntimeExtent(
+        count, 3, capacity, width, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"out", expression}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp(
+        {{"x", gpu_values}, {"bias", gpu_bias}, {"active_count", active_count}}, stream, {}, {{"out", output}});
+
+    auto expected_for_active = [&](uint64_t active, float sentinel) {
+        std::vector<float> expected(capacity * width, sentinel);
+        for (uint64_t row = 0; row < active; ++row) {
+            for (uint64_t col = 0; col < width; ++col) {
+                expected[row * width + col] = values[row * width + col] + bias[col];
+            }
+        }
+        return expected;
+    };
+
+    plan.run();
+    expectNear(copyToCpuFloatValues(output, stream), expected_for_active(5, 77.0F), 1.0e-5F);
+
+    overwriteGpuTensor<uint32_t>(active_count, {13U}, stream);
+    output.fill(88.0, stream);
+    plan.run();
+    expectNear(copyToCpuFloatValues(output, stream), expected_for_active(13, 88.0F), 1.0e-5F);
+}
+
+TEST(RaggedExpression, MixedValuewiseFourScalarPacketsPreserveInactiveCapacityAndPartialTail) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t capacity = 13;
+    Tensor x = makeGpuTensorFromFloats({capacity},
+                                       {-1.0F, 2.0F, -3.0F, 4.0F, 5.0F, -6.0F, 7.0F,
+                                        -8.0F, 9.0F, -10.0F, 11.0F, -12.0F, 13.0F},
+                                       DataType::BF16,
+                                       stream);
+    Tensor y = makeGpuTensorFromFloats({capacity},
+                                       {0.25F, 0.5F, 0.75F, 1.0F, 1.25F, 1.5F, 1.75F,
+                                        2.0F, 2.25F, 2.5F, 2.75F, 3.0F, 3.25F},
+                                       DataType::FP32,
+                                       stream);
+    Tensor active_count = makeGpuTensor<uint32_t>({1}, {5U}, stream);
+    Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity}));
+    output.fill(77.0, stream);
+
+    const Expression ex = Expression::input("x", DataType::BF16, DataType::BF16);
+    const Expression ey = Expression::input("y", DataType::FP32, DataType::FP32);
+    const Expression count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression expression = (ex + ey).withOutputDType(DataType::FP32).withRaggedRuntimeExtent(
+        count, 3, capacity, 1, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"out", expression}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp(
+        {{"x", x}, {"y", y}, {"active_count", active_count}}, stream, {}, {{"out", output}});
+
+    auto expected_for_active = [&](uint64_t active, float sentinel) {
+        const std::vector<float> xv{-1.0F, 2.0F, -3.0F, 4.0F, 5.0F, -6.0F, 7.0F,
+                                    -8.0F, 9.0F, -10.0F, 11.0F, -12.0F, 13.0F};
+        const std::vector<float> yv{0.25F, 0.5F, 0.75F, 1.0F, 1.25F, 1.5F, 1.75F,
+                                    2.0F, 2.25F, 2.5F, 2.75F, 3.0F, 3.25F};
+        std::vector<float> expected(capacity, sentinel);
+        for (uint64_t i = 0; i < active; ++i) expected[i] = xv[i] + yv[i];
+        return expected;
+    };
+
+    plan.run();
+    expectNear(copyToCpuFloatValues(output, stream), expected_for_active(5, 77.0F), 3.0e-2F);
+
+    overwriteGpuTensor<uint32_t>(active_count, {13U}, stream);
+    output.fill(88.0, stream);
+    plan.run();
+    expectNear(copyToCpuFloatValues(output, stream), expected_for_active(13, 88.0F), 3.0e-2F);
+}
+
+TEST(RaggedExpression, MixedBroadcastFourScalarPacketsPreserveInactiveCapacityAndReplayActiveExtent) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t capacity = 13;
+    constexpr uint64_t width = 8;
+    std::vector<float> values(capacity * width);
+    for (uint64_t row = 0; row < capacity; ++row) {
+        for (uint64_t col = 0; col < width; ++col) {
+            values[row * width + col] = static_cast<float>(row * 2) + static_cast<float>(col) * 0.125F - 3.0F;
+        }
+    }
+    const std::vector<float> bias{0.5F, -1.0F, 1.5F, -2.0F, 2.5F, -3.0F, 3.5F, -4.0F};
+
+    Tensor gpu_values = makeGpuTensorFromFloats({capacity, width}, values, DataType::BF16, stream);
+    Tensor gpu_bias = makeGpuTensorFromFloats({1, width}, bias, DataType::FP32, stream);
+    Tensor active_count = makeGpuTensor<uint32_t>({1}, {5U}, stream);
+    Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, width}));
+    output.fill(77.0, stream);
+
+    const Expression x = Expression::input("x", DataType::BF16, DataType::BF16);
+    const Expression y = Expression::input("bias", DataType::FP32, DataType::FP32);
+    const Expression count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+    const Expression expression = (x + y).withOutputDType(DataType::FP32).withRaggedRuntimeExtent(
+        count, 3, capacity, width, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"out", expression}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp(
+        {{"x", gpu_values}, {"bias", gpu_bias}, {"active_count", active_count}}, stream, {}, {{"out", output}});
+
+    auto expected_for_active = [&](uint64_t active, float sentinel) {
+        std::vector<float> expected(capacity * width, sentinel);
+        for (uint64_t row = 0; row < active; ++row) {
+            for (uint64_t col = 0; col < width; ++col) {
+                expected[row * width + col] = values[row * width + col] + bias[col];
+            }
+        }
+        return expected;
+    };
+
+    plan.run();
+    expectNear(copyToCpuFloatValues(output, stream), expected_for_active(5, 77.0F), 3.0e-2F);
+
+    overwriteGpuTensor<uint32_t>(active_count, {13U}, stream);
+    output.fill(88.0, stream);
+    plan.run();
+    expectNear(copyToCpuFloatValues(output, stream), expected_for_active(13, 88.0F), 3.0e-2F);
+}
+
 TEST(RaggedExpression, SegmentSumMinMaxAndMeanExecuteForEmptyAndSkewedRows) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);

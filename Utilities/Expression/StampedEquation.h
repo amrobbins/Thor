@@ -541,6 +541,13 @@ class StampedEquation {
         return compiledEquation->raggedPartitionRequirement();
     }
 
+    // Diagnostic/introspection only: benchmarks and tests that need to report
+    // the kernel selected after runtime-shape specialization must inspect the
+    // compiled equation bound into the stamp, not the stage's flat fallback.
+    [[nodiscard]] const std::shared_ptr<CompiledEquation>& compiledEquationForDiagnostics() const noexcept {
+        return compiledEquation;
+    }
+
     static std::vector<uint64_t> computeReductionOutputDims(const std::vector<uint64_t>& input_dims,
                                                             const std::vector<uint64_t>& reduction_axes,
                                                             const std::vector<uint64_t>& squeeze_axes);
@@ -2928,6 +2935,20 @@ class StampedExecutionPlan {
         out.reserve(steps.size());
         for (const StampedExecutionStage& step : steps) {
             out.push_back(StampedExecutionStage::kindToString(step.kind));
+        }
+        return out;
+    }
+
+    [[nodiscard]] std::vector<std::shared_ptr<CompiledEquation>> fusedKernelCompiledEquationsForDiagnostics() const {
+        std::vector<std::shared_ptr<CompiledEquation>> out;
+        for (const StampedExecutionStage& step : steps) {
+            if (step.kind != StampedExecutionStage::Kind::FusedKernel) {
+                continue;
+            }
+            if (!step.kernel) {
+                throw std::runtime_error("Fused execution stage is missing its stamped equation.");
+            }
+            out.push_back(step.kernel->compiledEquationForDiagnostics());
         }
         return out;
     }

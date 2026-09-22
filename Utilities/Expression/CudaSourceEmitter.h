@@ -32,6 +32,8 @@ class CudaSourceEmitter {
                                                 const std::vector<SpecializedBroadcastGroup>& groups,
                                                 const std::string& kernel_name);
     static bool specializedBroadcastUsesUInt32IndexMath(const std::vector<SpecializedBroadcastGroup>& groups);
+    static uint32_t specializedBroadcastElementsPerThread(const CompiledExecutionStage& stage,
+                                                          const std::vector<SpecializedBroadcastGroup>& groups);
     static bool specializedBroadcastUsesTiledLogicalTransposeConsumerLaunch(const CompiledExecutionStage& stage,
                                                                             const std::vector<SpecializedBroadcastGroup>& groups);
     static uint32_t tiledLogicalTransposeConsumerSlotBytes(const CompiledExecutionStage& stage,
@@ -45,6 +47,18 @@ class CudaSourceEmitter {
 
     static std::optional<DataType> getVectorizedStageStorageDType(const PhysicalExecutionStage& stage);
     static std::optional<DataType> getVectorizedStageStorageDType(const CompiledExecutionStage& stage);
+
+    // FUSED-GATE is deliberately independent from the emitter-selection helpers below.
+    // These queries classify only ordinary, benchmark-ordained fast-path shapes.
+    // EquationCompiler compares the selected launch width against the returned minimum
+    // and fails compilation if a future dispatch change silently narrows an eligible
+    // stage. std::nullopt means the case is intentionally outside the gate (for
+    // example genuine gathers/scatters, awkward broadcast cycles, transposes, or
+    // unbenchmarked dtype/layout combinations).
+    static std::optional<uint32_t> fusedGateRequiredFlatElementsPerThread(const PhysicalExecutionStage& stage);
+    static std::optional<uint32_t> fusedGateRequiredSpecializedBroadcastElementsPerThread(
+        const CompiledExecutionStage& stage, const std::vector<SpecializedBroadcastGroup>& groups);
+
     static uint32_t flatElementsPerThread(const PhysicalExecutionStage& stage);
     static uint32_t tiledTransposePackScalars(const PhysicalExecutionStage& stage);
     static uint32_t tiledTransposePackScalars(const CompiledExecutionStage& stage);

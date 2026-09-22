@@ -44,6 +44,16 @@ bool experimentalCudnnRaggedBiasBackwardProbeEnabled() {
     return (value != nullptr && std::string_view(value) == "1") || experimentalCudnnAttentionSupportSurfaceProbeEnabled();
 }
 
+void enforceFusedFastPathGate(std::string_view path, std::optional<uint32_t> required, uint32_t selected) {
+    if (!required.has_value() || selected >= required.value()) {
+        return;
+    }
+    throw std::runtime_error(
+        "FUSED-GATE: ordinary eligible " + std::string(path) + " stage requires at least " +
+        std::to_string(required.value()) + " elements/thread, but dispatch selected " + std::to_string(selected) +
+        ". Update the fast path or explicitly narrow the gate only with benchmark evidence.");
+}
+
 }  // namespace
 
 
@@ -1883,6 +1893,11 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
 
     ensureCudaContextCurrent(sig.device_num);
 
+    const uint32_t selected_flat_elements_per_thread =
+        stageHasTransposedMaterializedOutput(stage.outputs) ? 1u : CudaSourceEmitter::flatElementsPerThread(stage);
+    enforceFusedFastPathGate(
+        "flat", CudaSourceEmitter::fusedGateRequiredFlatElementsPerThread(stage), selected_flat_elements_per_thread);
+
     EquationCacheKey key(canonicalize(stage), sig, use_uint32_index_math);
     shared_ptr<CompiledEquation> hit = cacheLookup(key);
     if (hit)
@@ -1943,7 +1958,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
         compiled->uses_uint32_numel_arg = false;
         compiled->uses_uint32_tiled_transpose_index_math = use_uint32_index_math;
     } else {
-        compiled->elements_per_thread = CudaSourceEmitter::flatElementsPerThread(stage);
+        compiled->elements_per_thread = selected_flat_elements_per_thread;
         compiled->uses_uint32_numel_arg = use_uint32_index_math;
     }
     compiled->uses_device_runtime_extent = uses_device_ragged_runtime_extent;
@@ -4028,6 +4043,36 @@ static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
         throw std::runtime_error("collectFusableRegionStoppingAt root cannot be a forced boundary node.");
     }
 
+    auto canTraverseInternalStridedView = [&](uint32_t view_idx) -> bool {
+        if (!allow_internal_strided_view || view_idx >= expr.nodes.size() || expr.nodes[view_idx].op != ExprOp::STRIDED_VIEW) {
+            return false;
+        }
+
+        // A ragged trailing slice over an already-materialized value (most notably
+        // the [T, 2H] projection feeding SwiGLU) should remain a runtime storage
+        // alias, not an index-mapped fused operation.  Walking the STRIDED_VIEW
+        // into the fused region hides that alias from the runtime broadcast planner
+        // and forces the device-runtime ragged stage onto the scalar indexed emitter.
+        //
+        // Keep an internal view only when externalizing it would require materializing
+        // an otherwise-fusable producer. Storage-alias chains that ultimately rest on
+        // a root input or an existing stage boundary are free to externalize.
+        uint32_t source_idx = expr.nodes[view_idx].lhs;
+        while (source_idx < expr.nodes.size() &&
+               (expr.nodes[source_idx].op == ExprOp::STRIDED_VIEW || expr.nodes[source_idx].op == ExprOp::RESHAPE)) {
+            source_idx = expr.nodes[source_idx].lhs;
+        }
+        if (source_idx >= expr.nodes.size()) {
+            throw std::runtime_error("Internal strided-view source is out of range.");
+        }
+
+        const ExprNode& source = expr.nodes[source_idx];
+        if (source.op == ExprOp::INPUT) {
+            return inputRequiresMaterialization(source);
+        }
+        return !isStageBoundaryOp(source.op);
+    };
+
     std::vector<uint32_t> stack{root_idx};
 
     while (!stack.empty()) {
@@ -4043,7 +4088,7 @@ static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
         }
 
         const ExprNode& node = expr.nodes[node_idx];
-        if (isStageBoundaryOp(node.op) && !(allow_internal_strided_view && node.op == ExprOp::STRIDED_VIEW)) {
+        if (isStageBoundaryOp(node.op) && !canTraverseInternalStridedView(node_idx)) {
             throw std::runtime_error("collectFusableRegion called on stage-boundary root.");
         }
 
@@ -4057,7 +4102,7 @@ static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
         }
 
         const ExprNode& lhs = expr.nodes[lhs_idx];
-        if ((!isStageBoundaryOp(lhs.op) || (allow_internal_strided_view && lhs.op == ExprOp::STRIDED_VIEW)) &&
+        if ((!isStageBoundaryOp(lhs.op) || canTraverseInternalStridedView(lhs_idx)) &&
             !forced_boundary_nodes.count(lhs_idx)) {
             stack.push_back(lhs_idx);
         }
@@ -4067,8 +4112,7 @@ static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
             if (effective_idx >= expr.nodes.size()) {
                 throw std::runtime_error("Invalid RoPE effective sequence length node index in expression.");
             }
-            if ((!isStageBoundaryOp(expr.nodes[effective_idx].op) ||
-                 (allow_internal_strided_view && expr.nodes[effective_idx].op == ExprOp::STRIDED_VIEW)) &&
+            if ((!isStageBoundaryOp(expr.nodes[effective_idx].op) || canTraverseInternalStridedView(effective_idx)) &&
                 !forced_boundary_nodes.count(effective_idx)) {
                 stack.push_back(effective_idx);
             }
@@ -4078,8 +4122,7 @@ static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
             if (position_ids_idx >= expr.nodes.size()) {
                 throw std::runtime_error("Invalid RoPE position ids node index in expression.");
             }
-            if ((!isStageBoundaryOp(expr.nodes[position_ids_idx].op) ||
-                 (allow_internal_strided_view && expr.nodes[position_ids_idx].op == ExprOp::STRIDED_VIEW)) &&
+            if ((!isStageBoundaryOp(expr.nodes[position_ids_idx].op) || canTraverseInternalStridedView(position_ids_idx)) &&
                 !forced_boundary_nodes.count(position_ids_idx)) {
                 stack.push_back(position_ids_idx);
             }
@@ -4092,7 +4135,7 @@ static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
             }
 
             const ExprNode& rhs = expr.nodes[rhs_idx];
-            if ((!isStageBoundaryOp(rhs.op) || (allow_internal_strided_view && rhs.op == ExprOp::STRIDED_VIEW)) &&
+            if ((!isStageBoundaryOp(rhs.op) || canTraverseInternalStridedView(rhs_idx)) &&
                 !forced_boundary_nodes.count(rhs_idx)) {
                 stack.push_back(rhs_idx);
             }
@@ -4105,7 +4148,7 @@ static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
             }
 
             const ExprNode& aux = expr.nodes[aux_idx];
-            if ((!isStageBoundaryOp(aux.op) || (allow_internal_strided_view && aux.op == ExprOp::STRIDED_VIEW)) &&
+            if ((!isStageBoundaryOp(aux.op) || canTraverseInternalStridedView(aux_idx)) &&
                 !forced_boundary_nodes.count(aux_idx)) {
                 stack.push_back(aux_idx);
             }
@@ -9506,6 +9549,13 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
 
     ensureCudaContextCurrent(sig.device_num);
 
+    const uint32_t selected_specialized_elements_per_thread =
+        CudaSourceEmitter::specializedBroadcastElementsPerThread(stage, groups);
+    enforceFusedFastPathGate(
+        "specialized broadcast",
+        CudaSourceEmitter::fusedGateRequiredSpecializedBroadcastElementsPerThread(stage, groups),
+        selected_specialized_elements_per_thread);
+
     const std::string kernel_name = "fused_kernel";
     const std::string cuda_src = CudaSourceEmitter::emitSpecializedBroadcast(stage, groups, kernel_name);
 
@@ -9566,8 +9616,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
         compiled->tiled_logical_transpose_vectorized_output_count =
             CudaSourceEmitter::tiledLogicalTransposeConsumerVectorizedOutputCount(stage, groups);
     } else {
-        const std::optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
-        compiled->elements_per_thread = vectorized_dtype.has_value() ? 2u : 1u;
+        compiled->elements_per_thread = selected_specialized_elements_per_thread;
 
         if (groups.size() > 1) {
             compiled->launch_kind = CompiledEquation::LaunchKind::BroadcastGrouped;

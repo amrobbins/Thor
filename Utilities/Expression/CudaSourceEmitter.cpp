@@ -998,9 +998,11 @@ static std::optional<DataType> getVectorizedStageComputeDTypeImpl(const Physical
     return maybe_compute_dtype;
 }
 
-static std::optional<DataType> getVectorizedStageStorageDTypeImpl(const PhysicalExpression& expr,
-                                                                  const std::vector<DataType>& input_dtypes,
-                                                                  const std::vector<DataType>& output_dtypes) {
+static std::optional<DataType> getVectorizedStageStorageDTypeImpl(
+    const PhysicalExpression& expr,
+    const std::vector<DataType>& input_dtypes,
+    const std::vector<DataType>& output_dtypes,
+    const std::unordered_set<uint32_t>* ignored_tensor_input_slots = nullptr) {
     if (input_dtypes.empty() || output_dtypes.empty()) {
         return std::nullopt;
     }
@@ -1010,7 +1012,8 @@ static std::optional<DataType> getVectorizedStageStorageDTypeImpl(const Physical
 
     std::optional<DataType> maybe_stage_dtype = std::nullopt;
     for (uint32_t slot = 0; slot < expr.inputs.size(); ++slot) {
-        if (expr.inputs[slot].kind != NamedInput::Kind::Tensor) {
+        if (expr.inputs[slot].kind != NamedInput::Kind::Tensor ||
+            (ignored_tensor_input_slots != nullptr && ignored_tensor_input_slots->contains(slot))) {
             continue;
         }
 
@@ -1048,6 +1051,9 @@ static std::optional<DataType> getVectorizedStageStorageDTypeImpl(const Physical
         }
 
         if (node.op == ExprOp::INPUT) {
+            if (ignored_tensor_input_slots != nullptr && ignored_tensor_input_slots->contains(node.input_slot)) {
+                continue;
+            }
             if (requireNodeInputTensorDType(node) != stage_dtype) {
                 return std::nullopt;
             }
@@ -1352,10 +1358,16 @@ static uint64_t specializedRaggedGroupElementsPerValue(const RaggedValuewiseExte
     return elements_per_value;
 }
 
+static std::unordered_set<uint32_t> raggedValuewiseExtentPartitionInputSlots(const PhysicalExpression& expr);
+
 std::optional<DataType> CudaSourceEmitter::getVectorizedStageStorageDType(const PhysicalExecutionStage& stage) {
     if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
         return std::nullopt;
     }
+    // Device-ragged stages use dedicated packet eligibility.  The ordinary
+    // homogeneous check cannot treat the structural partition tensor as value
+    // data, and specialized broadcast must additionally prove packet-aligned
+    // row boundaries before widening.
     if (hasAnyRaggedValuewiseExtentMarker(stage.expr)) {
         return std::nullopt;
     }
@@ -1370,6 +1382,180 @@ std::optional<DataType> CudaSourceEmitter::getVectorizedStageStorageDType(const 
         return std::nullopt;
     }
     return getVectorizedStageStorageDTypeImpl(stage.expr, collectInputSlotDTypes(stage.expr), collectOutputDTypes(stage));
+}
+
+static std::optional<DataType> getRaggedFlatVectorizedStageStorageDType(const PhysicalExecutionStage& stage) {
+    if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel ||
+        !findRaggedValuewiseExtentSpec(stage.expr).has_value() ||
+        stageHasTransposedMaterializedOutput(stage.outputs) || expressionHasIndexAwareOps(stage.expr)) {
+        return std::nullopt;
+    }
+    const std::unordered_set<uint32_t> structural_slots =
+        raggedValuewiseExtentPartitionInputSlots(stage.expr);
+    return getVectorizedStageStorageDTypeImpl(
+        stage.expr, collectInputSlotDTypes(stage.expr), collectOutputDTypes(stage), &structural_slots);
+}
+
+
+static uint64_t specializedBroadcastInnermostInputStride(const SpecializedBroadcastGroup& group, size_t used_input_index) {
+    if (used_input_index >= group.used_input_slots.size()) {
+        throw runtime_error("specialized broadcast used-input index out of range.");
+    }
+    for (const SpecializedBroadcastAxis& axis : group.active_axes) {
+        if (axis.output_stride == 1ULL) {
+            if (used_input_index >= axis.input_strides.size()) {
+                throw runtime_error("specialized broadcast input stride metadata is incomplete.");
+            }
+            return axis.input_strides[used_input_index];
+        }
+    }
+    return 0ULL;
+}
+
+static std::optional<DataType> getRaggedSpecializedBroadcastVectorizedStageStorageDType(
+    const CompiledExecutionStage& stage,
+    const std::vector<SpecializedBroadcastGroup>& groups) {
+    const bool has_index_mapped_ops = std::any_of(stage.expr.nodes.begin(), stage.expr.nodes.end(), [](const ExprNode& node) {
+        return node.op == ExprOp::TAKE_ALONG_AXIS || node.op == ExprOp::STRIDED_VIEW;
+    });
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel || groups.empty() ||
+        stageHasTransposedMaterializedOutput(stage.outputs) || expressionHasIndexAwareOps(stage.expr) || has_index_mapped_ops) {
+        return std::nullopt;
+    }
+
+    const std::optional<RaggedValuewiseExtentEmissionSpec> ragged_extent = findRaggedValuewiseExtentSpec(stage.expr);
+    if (!ragged_extent.has_value()) {
+        return std::nullopt;
+    }
+
+    const std::unordered_set<uint32_t> structural_slots = raggedValuewiseExtentPartitionInputSlots(stage.expr);
+    const std::optional<DataType> storage_dtype = getVectorizedStageStorageDTypeImpl(
+        stage.expr, collectInputSlotDTypes(stage.expr), collectOutputDTypes(stage), &structural_slots);
+    if (!storage_dtype.has_value() ||
+        (storage_dtype.value() != DataType::BF16 && storage_dtype.value() != DataType::FP16)) {
+        return std::nullopt;
+    }
+
+    constexpr uint64_t packet_scalars = 8ULL;
+    for (const SpecializedBroadcastGroup& group : groups) {
+        if (group.output_dims.empty() || group.used_input_slots.size() != group.used_input_load_kinds.size()) {
+            return std::nullopt;
+        }
+        if ((group.output_dims.back() % packet_scalars) != 0ULL || (group.numel % packet_scalars) != 0ULL) {
+            return std::nullopt;
+        }
+        if ((specializedRaggedGroupElementsPerValue(ragged_extent.value(), group) % packet_scalars) != 0ULL) {
+            return std::nullopt;
+        }
+
+        for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
+            if (structural_slots.contains(group.used_input_slots[used_i])) {
+                return std::nullopt;
+            }
+            if (group.used_input_load_kinds[used_i] == SpecializedInputLoadKind::NativeVector &&
+                specializedBroadcastInnermostInputStride(group, used_i) != 1ULL) {
+                return std::nullopt;
+            }
+        }
+    }
+
+    return storage_dtype;
+}
+
+static uint32_t raggedWideScalarSpecializedBroadcastElementsPerThread(
+    const CompiledExecutionStage& stage,
+    const std::vector<SpecializedBroadcastGroup>& groups) {
+    const bool has_index_mapped_ops = std::any_of(stage.expr.nodes.begin(), stage.expr.nodes.end(), [](const ExprNode& node) {
+        return node.op == ExprOp::TAKE_ALONG_AXIS || node.op == ExprOp::STRIDED_VIEW;
+    });
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel || groups.empty() ||
+        stageHasTransposedMaterializedOutput(stage.outputs) || expressionHasIndexAwareOps(stage.expr) || has_index_mapped_ops) {
+        return 1u;
+    }
+
+    const std::optional<RaggedValuewiseExtentEmissionSpec> ragged_extent = findRaggedValuewiseExtentSpec(stage.expr);
+    if (!ragged_extent.has_value()) {
+        return 1u;
+    }
+
+    const std::unordered_set<uint32_t> structural_slots = raggedValuewiseExtentPartitionInputSlots(stage.expr);
+    const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
+    const std::vector<DataType> output_dtypes = collectOutputDTypes(stage);
+    bool saw_bf16 = false;
+    bool saw_fp16 = false;
+    bool saw_fp32 = false;
+    auto accept_value_dtype = [&](DataType dtype) {
+        if (dtype == DataType::BF16) {
+            saw_bf16 = true;
+            return true;
+        }
+        if (dtype == DataType::FP16) {
+            saw_fp16 = true;
+            return true;
+        }
+        if (dtype == DataType::FP32) {
+            saw_fp32 = true;
+            return true;
+        }
+        return false;
+    };
+
+    // First classify the physical value-storage family.  Compute dtype is
+    // deliberately absent from this decision: the scalar-per-lane wide emitter
+    // performs any BF16/FP16 -> FP32 promotion after the coalesced packet load.
+    for (const SpecializedBroadcastGroup& group : groups) {
+        if (group.output_dims.empty() || group.used_input_slots.size() != group.used_input_load_kinds.size()) {
+            return 1u;
+        }
+
+        for (uint32_t slot : group.used_input_slots) {
+            if (slot >= stage.expr.inputs.size() || structural_slots.contains(slot) ||
+                stage.expr.inputs[slot].kind != NamedInput::Kind::Tensor || !accept_value_dtype(input_dtypes.at(slot))) {
+                return 1u;
+            }
+        }
+        for (uint32_t out_idx : group.output_indices) {
+            if (out_idx >= output_dtypes.size() || !accept_value_dtype(output_dtypes[out_idx])) {
+                return 1u;
+            }
+        }
+    }
+
+    uint32_t packet_scalars = 1u;
+    if (saw_fp32) {
+        // Preserve one float4 transaction per FP32 tensor/thread.
+        packet_scalars = 4u;
+    } else if (saw_bf16 != saw_fp16) {
+        // Homogeneous low-precision storage owns one 16-byte packet/thread even
+        // if the expression computes in FP32.
+        packet_scalars = 8u;
+    } else {
+        // Mixed BF16/FP16 without FP32 remains uncensused.
+        return 1u;
+    }
+
+    // Then prove the broadcast mapping can preserve that packet ownership: the
+    // packet may not cross a row/cycle boundary, native operands must be
+    // contiguous, and scalar broadcasts must truly be invariant across it.
+    for (const SpecializedBroadcastGroup& group : groups) {
+        if ((group.output_dims.back() % packet_scalars) != 0ULL || (group.numel % packet_scalars) != 0ULL ||
+            (specializedRaggedGroupElementsPerValue(ragged_extent.value(), group) % packet_scalars) != 0ULL) {
+            return 1u;
+        }
+
+        for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
+            const uint64_t inner_stride = specializedBroadcastInnermostInputStride(group, used_i);
+            if (group.used_input_load_kinds[used_i] == SpecializedInputLoadKind::NativeVector) {
+                if (inner_stride != 1ULL) {
+                    return 1u;
+                }
+            } else if (inner_stride != 0ULL) {
+                return 1u;
+            }
+        }
+    }
+
+    return packet_scalars;
 }
 
 static std::optional<DataType> getSingleTensorInputStorageDType(const PhysicalExpression& expr, const std::vector<DataType>& input_dtypes) {
@@ -1622,11 +1808,159 @@ static uint32_t flatScalarElementsPerThreadImpl(const std::vector<DataType>& inp
     return std::max<uint32_t>(1, 16u / max_storage_bytes);
 }
 
+static uint32_t raggedWideScalarFlatElementsPerThread(const PhysicalExecutionStage& stage) {
+    if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel ||
+        !findRaggedValuewiseExtentSpec(stage.expr).has_value() ||
+        stageHasTransposedMaterializedOutput(stage.outputs) || expressionHasIndexAwareOps(stage.expr)) {
+        return 1u;
+    }
+
+    const std::unordered_set<uint32_t> structural_slots =
+        raggedValuewiseExtentPartitionInputSlots(stage.expr);
+    const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
+    const std::vector<DataType> output_dtypes = collectOutputDTypes(stage);
+
+    bool saw_bf16 = false;
+    bool saw_fp16 = false;
+    bool saw_fp32 = false;
+    auto accept_value_dtype = [&](DataType dtype) {
+        if (dtype == DataType::BF16) {
+            saw_bf16 = true;
+            return true;
+        }
+        if (dtype == DataType::FP16) {
+            saw_fp16 = true;
+            return true;
+        }
+        if (dtype == DataType::FP32) {
+            saw_fp32 = true;
+            return true;
+        }
+        return false;
+    };
+
+    for (uint32_t slot = 0; slot < stage.expr.inputs.size(); ++slot) {
+        if (structural_slots.contains(slot)) {
+            continue;
+        }
+        // Keep runtime scalars and other non-tensor operands on the existing
+        // scalar path until that ABI has its own benchmark-backed wide family.
+        if (stage.expr.inputs[slot].kind != NamedInput::Kind::Tensor) {
+            return 1u;
+        }
+        if (!accept_value_dtype(input_dtypes.at(slot))) {
+            return 1u;
+        }
+    }
+    for (DataType dtype : output_dtypes) {
+        if (!accept_value_dtype(dtype)) {
+            return 1u;
+        }
+    }
+
+    // Packet ownership follows physical storage, not arithmetic precision.
+    // Homogeneous BF16/FP16 storage therefore keeps the proven eight-scalar /
+    // 16-byte transaction even when the expression computes in FP32: the wide
+    // scalar emitter unpacks each lane after the coalesced load, evaluates it in
+    // the resolved compute dtype, then repacks the low-precision output.
+    if (!saw_fp32 && (saw_bf16 != saw_fp16)) {
+        return 8u;
+    }
+
+    // Whenever FP32 storage participates, use the proven four-scalar ownership
+    // so each FP32 tensor issues exactly one contiguous float4 transaction per
+    // thread.  Do not widen to eight values: two float4 instructions per thread
+    // would interleave each warp transaction.
+    if (saw_fp32) {
+        return 4u;
+    }
+
+    // Mixed BF16/FP16 without FP32 storage remains outside the benchmark-backed
+    // family for now.
+    return 1u;
+}
+
+
+static bool expressionHasLogicalTransposeOp(const PhysicalExpression& expr);
+static bool expressionHasTakeAlongAxisOp(const PhysicalExpression& expr);
+static bool expressionHasStridedViewOp(const PhysicalExpression& expr);
+
+static bool fusedGateOrdinaryFloatDType(DataType dtype) {
+    return dtype == DataType::BF16 || dtype == DataType::FP16 || dtype == DataType::FP32;
+}
+
+static bool fusedGateAllSameDType(const std::vector<DataType>& dtypes, DataType dtype) {
+    return !dtypes.empty() && std::all_of(dtypes.begin(), dtypes.end(), [dtype](DataType candidate) {
+        return candidate == dtype;
+    });
+}
+
+std::optional<uint32_t> CudaSourceEmitter::fusedGateRequiredFlatElementsPerThread(
+    const PhysicalExecutionStage& stage) {
+    if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel ||
+        stageHasTransposedMaterializedOutput(stage.outputs) || expressionHasIndexAwareOps(stage.expr) ||
+        expressionHasStridedViewOp(stage.expr) || expressionHasTakeAlongAxisOp(stage.expr) ||
+        expressionHasLogicalTransposeOp(stage.expr)) {
+        return std::nullopt;
+    }
+
+    const bool is_ragged = hasAnyRaggedValuewiseExtentMarker(stage.expr);
+    const std::unordered_set<uint32_t> structural_slots =
+        is_ragged ? raggedValuewiseExtentPartitionInputSlots(stage.expr) : std::unordered_set<uint32_t>{};
+    const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
+    const std::vector<DataType> output_dtypes = collectOutputDTypes(stage);
+
+    std::vector<DataType> value_dtypes;
+    value_dtypes.reserve(stage.expr.inputs.size() + output_dtypes.size());
+    for (uint32_t slot = 0; slot < stage.expr.inputs.size(); ++slot) {
+        if (structural_slots.contains(slot)) {
+            continue;
+        }
+        // FUSED-GATE intentionally covers the ordinary tensor-streaming families
+        // established by the census. Runtime scalar and other non-tensor inputs are
+        // left outside the invariant until separately benchmarked.
+        if (stage.expr.inputs[slot].kind != NamedInput::Kind::Tensor) {
+            return std::nullopt;
+        }
+        const DataType dtype = input_dtypes.at(slot);
+        if (!fusedGateOrdinaryFloatDType(dtype)) {
+            return std::nullopt;
+        }
+        value_dtypes.push_back(dtype);
+    }
+    for (DataType dtype : output_dtypes) {
+        if (!fusedGateOrdinaryFloatDType(dtype)) {
+            return std::nullopt;
+        }
+        value_dtypes.push_back(dtype);
+    }
+    if (value_dtypes.empty()) {
+        return std::nullopt;
+    }
+
+    // Homogeneous BF16/FP16 flat streaming is ordained at one 16-byte packet
+    // (eight logical scalars) per thread for both dense and packed-ragged stages.
+    if (fusedGateAllSameDType(value_dtypes, DataType::BF16) ||
+        fusedGateAllSameDType(value_dtypes, DataType::FP16)) {
+        return 8u;
+    }
+
+    // Homogeneous FP32 and every benchmarked BF16/FP16<->FP32 mixed flat family
+    // use the proven dense-mixed ownership rule: four logical values per thread,
+    // preserving one coalesced float4 transaction for every FP32 tensor.
+    if (std::any_of(value_dtypes.begin(), value_dtypes.end(), [](DataType dtype) {
+            return dtype == DataType::FP32;
+        })) {
+        return 4u;
+    }
+
+    // Mixed BF16/FP16 without FP32 is intentionally not gated yet; it was not part
+    // of the benchmark-supported sequence and should not be constrained by inference.
+    return std::nullopt;
+}
+
 uint32_t CudaSourceEmitter::flatElementsPerThread(const PhysicalExecutionStage& stage) {
     if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
-        return 1;
-    }
-    if (hasAnyRaggedValuewiseExtentMarker(stage.expr)) {
         return 1;
     }
     if (stageHasTransposedMaterializedOutput(stage.outputs)) {
@@ -1636,7 +1970,9 @@ uint32_t CudaSourceEmitter::flatElementsPerThread(const PhysicalExecutionStage& 
         return 1;
     }
 
-    const std::optional<DataType> vectorized_dtype = getVectorizedStageStorageDType(stage);
+    const std::optional<DataType> vectorized_dtype = hasAnyRaggedValuewiseExtentMarker(stage.expr)
+                                                        ? getRaggedFlatVectorizedStageStorageDType(stage)
+                                                        : getVectorizedStageStorageDType(stage);
     if (vectorized_dtype.has_value()) {
         switch (vectorized_dtype.value()) {
             case DataType::FP16:
@@ -1648,6 +1984,14 @@ uint32_t CudaSourceEmitter::flatElementsPerThread(const PhysicalExecutionStage& 
             default:
                 break;
         }
+    }
+
+    // FUSED-RAGGED-FLAT handles packed low-precision arithmetic above.  The
+    // wide-scalar fallback is storage-driven: homogeneous BF16/FP16 storage uses
+    // eight logical values/thread even when compute is FP32, while any FP32
+    // storage uses the proven four-value mixed geometry.
+    if (hasAnyRaggedValuewiseExtentMarker(stage.expr)) {
+        return raggedWideScalarFlatElementsPerThread(stage);
     }
 
     return flatScalarElementsPerThreadImpl(collectInputSlotDTypes(stage.expr), collectOutputDTypes(stage));
@@ -4704,7 +5048,8 @@ static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
                                                 const std::string& indent,
                                                 const std::function<std::string(uint32_t)>& input_slot_value,
                                                 const std::function<std::string(uint32_t)>& scalar_const_value = {},
-                                                bool input_slot_value_is_compute = false) {
+                                                bool input_slot_value_is_compute = false,
+                                                const std::function<bool(uint32_t)>& should_emit_node = {}) {
     std::string compute_dtype_vector;
     if (compute_dtype == DataType::BF16) {
         compute_dtype_vector = "__nv_bfloat162";
@@ -4715,6 +5060,9 @@ static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
     }
 
     for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
+        if (should_emit_node && !should_emit_node(node_idx)) {
+            continue;
+        }
         const auto& n = expr.nodes[node_idx];
         switch (n.op) {
             case ExprOp::INPUT: {
@@ -4901,6 +5249,9 @@ static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                    << emitVector2Normcdf(refWithSuffix(n.lhs, suffix), compute_dtype) << ";\n";
                 break;
+            case ExprOp::RAGGED_VALUEWISE_EXTENT:
+            case ExprOp::BROADCAST_TO:
+            case ExprOp::CAST:
             case ExprOp::RESHAPE:
             case ExprOp::UNSQUEEZE:
             case ExprOp::SQUEEZE:
@@ -4927,7 +5278,7 @@ static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
                    << emitVector2MinMaxGradMask(n.op, refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix), compute_dtype) << ";\n";
                 break;
             default:
-                throw runtime_error("Unsupported op in vectorized fused transpose emitter: " + to_string((int32_t)n.op));
+                throw runtime_error("Unsupported op in vectorized fused emitter: " + to_string((int32_t)n.op));
         }
     }
 }
@@ -5655,6 +6006,10 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
     const uint32_t num_inputs = stage.expr.numInputs();
     const std::string index_type = emittedIndexType(use_uint32_index_math);
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
+    const std::optional<RaggedValuewiseExtentEmissionSpec> ragged_extent =
+        findRaggedValuewiseExtentSpec(stage.expr);
+    const std::unordered_set<uint32_t> structural_partition_slots =
+        raggedValuewiseExtentPartitionInputSlots(stage.expr);
 
     // CUDA vector builtins are available to NVRTC without <vector_types.h>;
     // CUDA 13.3 bundled headers do not include that legacy top-level header.
@@ -5664,6 +6019,11 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
     for (uint32_t i = 0; i < num_inputs; ++i) {
         if (stage.expr.inputs[i].kind == NamedInput::Kind::RuntimeScalarFp32) {
             ss << scalarStorageType(input_dtypes[i]) << " in" << i;
+        } else if (structural_partition_slots.contains(i)) {
+            // Ragged row-partition / active-count metadata is not value data and
+            // must retain its scalar pointer ABI even when the packed values are
+            // loaded as 16-byte float4 packets.
+            ss << "const " << scalarStorageType(input_dtypes[i]) << "* in" << i;
         } else {
             ss << "const float4* in" << i;
         }
@@ -5675,15 +6035,34 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
     }
 
     ss << index_type << " numel) {\n";
-    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
-    ss << "  const " << index_type << " packed_numel = (numel + " << emitUnsignedLiteral(1, use_uint32_index_math) << ") >> 1;\n";
-    ss << "  const " << index_type << " packed_base = idx * "
-       << emitUnsignedLiteral(static_cast<uint64_t>(packs_per_thread), use_uint32_index_math) << ";\n";
-    ss << "  if (packed_base >= packed_numel) return;\n\n";
+    if (ragged_extent.has_value()) {
+        const RaggedValuewiseExtentEmissionSpec& extent = ragged_extent.value();
+        ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in"
+           << extent.partition_input_slot << "[" << raggedActiveValueCountLoadIndex(extent) << "]);\n";
+        ss << "  const unsigned long long active_values = active_values_raw < " << extent.max_active_values
+           << "ULL ? active_values_raw : " << extent.max_active_values << "ULL;\n";
+        ss << "  const unsigned long long runtime_numel_u64 = active_values * " << extent.elements_per_value << "ULL;\n";
+        ss << "  const " << index_type << " runtime_numel = static_cast<" << index_type
+           << ">(runtime_numel_u64 < static_cast<unsigned long long>(numel) ? runtime_numel_u64 : static_cast<unsigned long long>(numel));\n";
+        ss << "  const " << index_type << " packet_scalars = "
+           << emitUnsignedLiteral(static_cast<uint64_t>(packs_per_thread * 2U), use_uint32_index_math) << ";\n";
+        ss << "  const " << index_type << " packet_count = (runtime_numel + packet_scalars - "
+           << emitUnsignedLiteral(1, use_uint32_index_math) << ") / packet_scalars;\n";
+        ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
+        ss << "  const " << index_type << " grid_stride = static_cast<" << index_type
+           << ">(blockDim.x) * static_cast<" << index_type << ">(gridDim.x);\n";
+        ss << "  for (; idx < packet_count; idx += grid_stride) {\n";
+    } else {
+        ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
+        ss << "  const " << index_type << " packed_numel = (numel + " << emitUnsignedLiteral(1, use_uint32_index_math) << ") >> 1;\n";
+        ss << "  const " << index_type << " packed_base = idx * "
+           << emitUnsignedLiteral(static_cast<uint64_t>(packs_per_thread), use_uint32_index_math) << ";\n";
+        ss << "  if (packed_base >= packed_numel) return;\n\n";
+    }
 
     bool emitted_any_tensor_chunk = false;
     for (uint32_t i = 0; i < num_inputs; ++i) {
-        if (stage.expr.inputs[i].kind != NamedInput::Kind::Tensor) {
+        if (stage.expr.inputs[i].kind != NamedInput::Kind::Tensor || structural_partition_slots.contains(i)) {
             continue;
         }
         emitted_any_tensor_chunk = true;
@@ -5711,11 +6090,20 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
             const auto& n = stage.expr.nodes[node_idx];
             switch (n.op) {
                 case ExprOp::INPUT: {
+                    if (structural_partition_slots.contains(n.input_slot)) {
+                        // Structural partition inputs are consumed only by the
+                        // runtime-extent prologue and do not produce a value lane.
+                        break;
+                    }
                     const std::string variable = "in" + to_string(n.input_slot) + "_chunk_data[" + std::to_string(pack) + "]";
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << vector_compute_conversion(storage_dtype_vector, variable, vector_compute_dtype) << ";\n";
                     break;
                 }
+                case ExprOp::RAGGED_VALUEWISE_EXTENT:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << refWithSuffix(n.lhs, suffix) << ";\n";
+                    break;
                 case ExprOp::RUNTIME_SCALAR:
                 case ExprOp::TENSOR_RUNTIME_SCALAR:
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
@@ -5935,8 +6323,39 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
         ss << "\n";
     }
 
-    for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
-        ss << "  out" << out_idx << "[idx] = out" << out_idx << "_chunk;\n";
+    if (ragged_extent.has_value()) {
+        const uint32_t packet_scalars = packs_per_thread * 2U;
+        ss << "  const " << index_type << " scalar_base = idx * "
+           << emitUnsignedLiteral(static_cast<uint64_t>(packet_scalars), use_uint32_index_math) << ";\n";
+        ss << "  const bool full_active_packet = scalar_base + "
+           << emitUnsignedLiteral(static_cast<uint64_t>(packet_scalars), use_uint32_index_math)
+           << " <= runtime_numel;\n";
+        ss << "  if (full_active_packet) {\n";
+        for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
+            ss << "    out" << out_idx << "[idx] = out" << out_idx << "_chunk;\n";
+        }
+        ss << "  } else {\n";
+        // The allocator's 128-byte terminal guard makes the final vector read
+        // safe even when active==capacity.  Stores are masked because the
+        // inactive ragged-capacity region is observable in preallocated outputs
+        // and must retain the historical execute-only-active-prefix semantics.
+        for (uint32_t lane = 0; lane < packet_scalars; ++lane) {
+            ss << "    if (scalar_base + " << emitUnsignedLiteral(static_cast<uint64_t>(lane), use_uint32_index_math)
+               << " < runtime_numel) {\n";
+            for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
+                ss << "      reinterpret_cast<" << scalarStorageType(storage_dtype) << "*>(out" << out_idx << ")[scalar_base + "
+                   << emitUnsignedLiteral(static_cast<uint64_t>(lane), use_uint32_index_math) << "] = "
+                   << "reinterpret_cast<const " << scalarStorageType(storage_dtype) << "*>(&out" << out_idx << "_chunk)[" << lane
+                   << "];\n";
+            }
+            ss << "    }\n";
+        }
+        ss << "  }\n";
+        ss << "  }\n";
+    } else {
+        for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
+            ss << "  out" << out_idx << "[idx] = out" << out_idx << "_chunk;\n";
+        }
     }
 
     ss << "}\n";
@@ -5962,11 +6381,18 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
                                       uint32_t elements_per_thread) {
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
     const std::vector<DataType> output_dtypes = collectOutputDTypes(stage);
+    const std::optional<RaggedValuewiseExtentEmissionSpec> ragged_extent = findRaggedValuewiseExtentSpec(stage.expr);
+    const std::unordered_set<uint32_t> structural_slots =
+        raggedValuewiseExtentPartitionInputSlots(stage.expr);
 
     std::vector<std::string> input_chunk_types;
     input_chunk_types.reserve(input_dtypes.size());
-    for (DataType input_dtype : input_dtypes) {
-        input_chunk_types.push_back(chunkScalarTypeForBytes(dataTypeStorageBytes(input_dtype) * elements_per_thread));
+    for (uint32_t i = 0; i < input_dtypes.size(); ++i) {
+        if (structural_slots.contains(i)) {
+            input_chunk_types.emplace_back();
+        } else {
+            input_chunk_types.push_back(chunkScalarTypeForBytes(dataTypeStorageBytes(input_dtypes[i]) * elements_per_thread));
+        }
     }
 
     std::vector<std::string> output_chunk_types;
@@ -6012,13 +6438,35 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
     const std::string index_type = emittedIndexType(use_uint32_index_math);
     ss << index_type << " numel) {\n";
 
-    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
-    ss << "  const " << index_type << " base = idx * "
-       << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math) << ";\n";
-    ss << "  if (base >= numel) return;\n\n";
+    if (ragged_extent.has_value()) {
+        const RaggedValuewiseExtentEmissionSpec& extent = ragged_extent.value();
+        ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in" << extent.partition_input_slot << "["
+           << raggedActiveValueCountLoadIndex(extent) << "]);\n";
+        ss << "  const unsigned long long active_values = active_values_raw < " << extent.max_active_values
+           << "ULL ? active_values_raw : " << extent.max_active_values << "ULL;\n";
+        ss << "  const unsigned long long runtime_numel_u64 = active_values * " << extent.elements_per_value << "ULL;\n";
+        ss << "  const " << index_type << " runtime_numel = static_cast<" << index_type
+           << ">(runtime_numel_u64 < static_cast<unsigned long long>(numel) ? runtime_numel_u64 : static_cast<unsigned long long>(numel));\n";
+        ss << "  const " << index_type << " thread_packet = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
+        ss << "  const " << index_type << " packet_grid_stride = static_cast<" << index_type
+           << ">(blockDim.x) * static_cast<" << index_type << ">(gridDim.x);\n";
+        ss << "  const " << index_type << " packet_count = (runtime_numel + "
+           << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread - 1u), use_uint32_index_math) << ") / "
+           << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math) << ";\n";
+        ss << "  for (" << index_type << " idx = thread_packet; idx < packet_count; idx += packet_grid_stride) {\n";
+        ss << "  const " << index_type << " base = idx * "
+           << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math) << ";\n";
+    } else {
+        ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
+        ss << "  const " << index_type << " base = idx * "
+           << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math) << ";\n";
+        ss << "  if (base >= numel) return;\n";
+    }
+    ss << "\n";
 
     ss << "  const bool full_chunk = base + "
-       << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math) << " <= numel;\n";
+       << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math)
+       << (ragged_extent.has_value() ? " <= runtime_numel;\n" : " <= numel;\n");
     ss << "  const bool chunk_aligned = ";
     bool emitted_alignment_term = false;
     auto emit_alignment_term = [&](const std::string& pointer_expr, uint64_t alignment) {
@@ -6029,7 +6477,7 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
         ss << "((reinterpret_cast<unsigned long long>(" << pointer_expr << ") & " << (alignment - 1ULL) << "ULL) == 0ULL)";
     };
     for (uint32_t i = 0; i < input_dtypes.size(); ++i) {
-        if (stage.expr.inputs[i].kind != NamedInput::Kind::Tensor) {
+        if (stage.expr.inputs[i].kind != NamedInput::Kind::Tensor || structural_slots.contains(i)) {
             continue;
         }
         emit_alignment_term("in" + std::to_string(i), dataTypeStorageBytes(input_dtypes[i]) * elements_per_thread);
@@ -6045,7 +6493,7 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
     ss << "  if (full_chunk && chunk_aligned) {\n";
     bool emitted_any_tensor_chunk = false;
     for (uint32_t i = 0; i < input_dtypes.size(); ++i) {
-        if (stage.expr.inputs[i].kind != NamedInput::Kind::Tensor) {
+        if (stage.expr.inputs[i].kind != NamedInput::Kind::Tensor || structural_slots.contains(i)) {
             continue;
         }
         emitted_any_tensor_chunk = true;
@@ -6076,7 +6524,9 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
         const std::string lane_idx_expr = "base + " + emitUnsignedLiteral(static_cast<uint64_t>(lane), use_uint32_index_math);
 
         for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
-            if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+            const ExprNode& node = stage.expr.nodes[node_idx];
+            if ((node.op == ExprOp::INPUT && structural_slots.contains(node.input_slot)) ||
+                !shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
                 continue;
             }
             emitScalarNodeSuffixed(ss,
@@ -6108,7 +6558,7 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
         ss << "    *reinterpret_cast<" << output_chunk_types[out_idx] << "*>(out" << out_idx << " + base) = out" << out_idx
            << "_chunk;\n";
     }
-    ss << "    return;\n";
+    ss << (ragged_extent.has_value() ? "    continue;\n" : "    return;\n");
     ss << "  }\n\n";
 
     // Unaligned aliases and the final partial chunk use naturally aligned scalar accesses.
@@ -6116,10 +6566,12 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
         const std::string suffix = "_scalar_l" + std::to_string(lane);
         const std::string lane_idx_expr = "base + " + emitUnsignedLiteral(static_cast<uint64_t>(lane), use_uint32_index_math);
         ss << "  const " << index_type << " lane_idx_" << lane << " = " << lane_idx_expr << ";\n";
-        ss << "  if (lane_idx_" << lane << " < numel) {\n";
+        ss << "  if (lane_idx_" << lane << (ragged_extent.has_value() ? " < runtime_numel) {\n" : " < numel) {\n");
 
         for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
-            if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+            const ExprNode& node = stage.expr.nodes[node_idx];
+            if ((node.op == ExprOp::INPUT && structural_slots.contains(node.input_slot)) ||
+                !shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
                 continue;
             }
             emitScalarNodeSuffixed(ss, stage.expr, node_idx, "lane_idx_" + std::to_string(lane), suffix, "    ");
@@ -6132,6 +6584,391 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
                << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
         }
         ss << "  }\n";
+    }
+
+    if (ragged_extent.has_value()) {
+        ss << "  }\n";
+    }
+    ss << "}\n";
+    return ss.str();
+}
+
+static std::string emitRaggedWideSpecializedBroadcast(const CompiledExecutionStage& stage,
+                                                       const std::vector<SpecializedBroadcastGroup>& groups,
+                                                       DataType storage_dtype_kind,
+                                                       DataType vector_compute_dtype,
+                                                       const std::string& kernel_name) {
+    constexpr uint32_t packet_scalars = 8U;
+    constexpr uint32_t packs_per_thread = packet_scalars / 2U;
+
+    if (storage_dtype_kind != DataType::BF16 && storage_dtype_kind != DataType::FP16) {
+        throw runtime_error("emitRaggedWideSpecializedBroadcast requires BF16 or FP16 storage.");
+    }
+    if (!supportsVectorizedComputeDTypeForStorage(storage_dtype_kind, vector_compute_dtype)) {
+        throw runtime_error("emitRaggedWideSpecializedBroadcast called with unsupported storage/compute dtype combination.");
+    }
+
+    const std::optional<RaggedValuewiseExtentEmissionSpec> ragged_extent = findRaggedValuewiseExtentSpec(stage.expr);
+    if (!ragged_extent.has_value()) {
+        throw runtime_error("emitRaggedWideSpecializedBroadcast requires a device ragged runtime extent.");
+    }
+    const std::unordered_set<uint32_t> structural_slots = raggedValuewiseExtentPartitionInputSlots(stage.expr);
+    const bool use_uint32_index_math = groupsSupportUInt32IndexMath(groups);
+    const std::string index_type = emittedIndexType(use_uint32_index_math);
+    const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
+
+    std::string storage_dtype;
+    std::string storage_dtype_vector;
+    if (storage_dtype_kind == DataType::BF16) {
+        storage_dtype = "__nv_bfloat16";
+        storage_dtype_vector = "__nv_bfloat162";
+    } else {
+        storage_dtype = "half";
+        storage_dtype_vector = "half2";
+    }
+
+    std::ostringstream ss;
+    emitCudaFp16Header(ss);
+    if (storage_dtype_kind == DataType::BF16 || vector_compute_dtype == DataType::BF16) {
+        ss << "#include <cuda_bf16.h>\n";
+    }
+
+    ss << "extern \"C\" __global__\n";
+    ss << "void " << kernel_name << "(";
+    bool first_arg = true;
+    for (uint32_t i = 0; i < stage.expr.numInputs(); ++i) {
+        if (!first_arg) ss << ", ";
+        first_arg = false;
+        if (stage.expr.inputs[i].kind == NamedInput::Kind::RuntimeScalarFp32) {
+            ss << scalarStorageType(input_dtypes[i]) << " in" << i;
+        } else if (structural_slots.contains(i)) {
+            ss << "const " << scalarStorageType(input_dtypes[i]) << "* in" << i;
+        } else {
+            ss << "const " << storage_dtype << "* in" << i;
+        }
+    }
+    for (uint32_t i = 0; i < stage.outputs.size(); ++i) {
+        if (!first_arg) ss << ", ";
+        first_arg = false;
+        ss << storage_dtype << "* out" << i;
+    }
+    ss << ") {\n";
+
+    const RaggedValuewiseExtentEmissionSpec& extent = ragged_extent.value();
+    ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in" << extent.partition_input_slot << "["
+       << raggedActiveValueCountLoadIndex(extent) << "]);\n";
+    ss << "  const unsigned long long active_values = active_values_raw < " << extent.max_active_values
+       << "ULL ? active_values_raw : " << extent.max_active_values << "ULL;\n";
+    ss << "  const " << index_type << " thread_packet = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
+    ss << "  const " << index_type << " packet_grid_stride = static_cast<" << index_type
+       << ">(blockDim.x) * static_cast<" << index_type << ">(gridDim.x);\n\n";
+
+    for (uint32_t g = 0; g < groups.size(); ++g) {
+        const SpecializedBroadcastGroup& group = groups[g];
+        const uint64_t group_elements_per_value = specializedRaggedGroupElementsPerValue(extent, group);
+        if ((group_elements_per_value % packet_scalars) != 0ULL || (group.numel % packet_scalars) != 0ULL) {
+            throw runtime_error("wide ragged specialized broadcast requires an eight-scalar aligned active row width.");
+        }
+
+        const std::vector<uint32_t> required_nodes = orderedRequiredNodesForGroup(stage, group.output_indices);
+        const std::unordered_set<uint32_t> required_node_set(required_nodes.begin(), required_nodes.end());
+        std::unordered_map<uint32_t, size_t> used_index_by_slot;
+        used_index_by_slot.reserve(group.used_input_slots.size());
+        for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
+            used_index_by_slot.emplace(group.used_input_slots[used_i], used_i);
+        }
+        std::vector<size_t> all_used_indices(group.used_input_slots.size());
+        std::iota(all_used_indices.begin(), all_used_indices.end(), 0);
+
+        ss << "  const unsigned long long runtime_numel_g" << g << "_u64 = active_values * " << group_elements_per_value << "ULL;\n";
+        ss << "  const " << index_type << " runtime_numel_g" << g << " = static_cast<" << index_type
+           << ">(runtime_numel_g" << g << "_u64 < " << emitUnsignedLiteral(group.numel, false)
+           << " ? runtime_numel_g" << g << "_u64 : " << emitUnsignedLiteral(group.numel, false) << ");\n";
+        ss << "  const " << index_type << " packet_count_g" << g << " = runtime_numel_g" << g << " / "
+           << emitUnsignedLiteral(packet_scalars, use_uint32_index_math) << ";\n";
+        ss << "  for (" << index_type << " packet_idx = thread_packet; packet_idx < packet_count_g" << g
+           << "; packet_idx += packet_grid_stride) {\n";
+        ss << "    const " << index_type << " scalar_base = packet_idx * "
+           << emitUnsignedLiteral(packet_scalars, use_uint32_index_math) << ";\n";
+
+        for (uint32_t input_slot : group.used_input_slots) {
+            ss << "    " << index_type << " in" << input_slot << "_offset_base = "
+               << emitUnsignedLiteral(0, use_uint32_index_math) << ";\n";
+        }
+        if (!group.active_axes.empty()) {
+            emitSpecializedBroadcastOffsetMath(
+                ss, group, all_used_indices, "scalar_base", "_base", "    ", use_uint32_index_math);
+        }
+        ss << "\n";
+
+        for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
+            const uint32_t input_slot = group.used_input_slots[used_i];
+            const uint64_t inner_stride = specializedBroadcastInnermostInputStride(group, used_i);
+            const SpecializedInputLoadKind load_kind = group.used_input_load_kinds[used_i];
+            if (load_kind == SpecializedInputLoadKind::NativeVector) {
+                if (inner_stride != 1ULL) {
+                    throw runtime_error("native-vector ragged broadcast input lost unit innermost stride.");
+                }
+                ss << "    const float4 in" << input_slot << "_packet = *reinterpret_cast<const float4*>(in" << input_slot
+                   << " + in" << input_slot << "_offset_base);\n";
+                ss << "    const " << storage_dtype_vector << "* in" << input_slot
+                   << "_packet_data = reinterpret_cast<const " << storage_dtype_vector << "*>(&in" << input_slot << "_packet);\n";
+            } else if (inner_stride == 0ULL) {
+                ss << "    const " << storage_dtype << " in" << input_slot << "_packet_scalar = in" << input_slot
+                   << "[in" << input_slot << "_offset_base];\n";
+            }
+        }
+
+        for (uint32_t out_idx : group.output_indices) {
+            ss << "    float4 out" << out_idx << "_packet;\n";
+            ss << "    " << storage_dtype_vector << "* out" << out_idx
+               << "_packet_data = reinterpret_cast<" << storage_dtype_vector << "*>(&out" << out_idx << "_packet);\n";
+        }
+        ss << "\n";
+
+        for (uint32_t pack = 0; pack < packs_per_thread; ++pack) {
+            const std::string suffix = "_rbp" + std::to_string(pack);
+            emitVector2NodeDefinitionsForSuffix(
+                ss,
+                stage.expr,
+                vector_compute_dtype,
+                storage_dtype_vector,
+                suffix,
+                "    ",
+                [&](uint32_t input_slot) {
+                    const auto used_it = used_index_by_slot.find(input_slot);
+                    if (used_it == used_index_by_slot.end()) {
+                        throw runtime_error("wide ragged broadcast node references an input outside its broadcast group.");
+                    }
+                    const size_t used_i = used_it->second;
+                    const uint64_t inner_stride = specializedBroadcastInnermostInputStride(group, used_i);
+                    if (group.used_input_load_kinds[used_i] == SpecializedInputLoadKind::NativeVector) {
+                        return vector_compute_conversion(storage_dtype_vector,
+                                                         "in" + std::to_string(input_slot) + "_packet_data[" + std::to_string(pack) + "]",
+                                                         vector_compute_dtype);
+                    }
+                    if (inner_stride == 0ULL) {
+                        const std::string scalar = "in" + std::to_string(input_slot) + "_packet_scalar";
+                        return emitVector2BroadcastPackLoad(storage_dtype, scalar, scalar, vector_compute_dtype);
+                    }
+                    const uint64_t lane0 = static_cast<uint64_t>(pack) * 2ULL;
+                    const uint64_t lane1 = lane0 + 1ULL;
+                    const std::string base = "in" + std::to_string(input_slot) + "_offset_base";
+                    const std::string offset0 = base + " + " + emitUnsignedLiteral(lane0 * inner_stride, use_uint32_index_math);
+                    const std::string offset1 = base + " + " + emitUnsignedLiteral(lane1 * inner_stride, use_uint32_index_math);
+                    const std::string var0 = "in" + std::to_string(input_slot) + "[" + offset0 + "]";
+                    const std::string var1 = "in" + std::to_string(input_slot) + "[" + offset1 + "]";
+                    return emitVector2BroadcastPackLoad(storage_dtype, var0, var1, vector_compute_dtype);
+                },
+                {},
+                true,
+                [&](uint32_t node_idx) {
+                    if (!required_node_set.contains(node_idx)) return false;
+                    const ExprNode& node = stage.expr.nodes[node_idx];
+                    return !(node.op == ExprOp::INPUT && structural_slots.contains(node.input_slot));
+                });
+
+            for (uint32_t out_idx : group.output_indices) {
+                const CompiledStageOutput& output = stage.outputs[out_idx];
+                ss << "    out" << out_idx << "_packet_data[" << pack << "] = "
+                   << vector_storage_conversion(storage_dtype_vector,
+                                                refWithSuffix(output.local_node_idx, suffix),
+                                                vector_compute_dtype)
+                   << ";\n";
+            }
+            ss << "\n";
+        }
+
+        for (uint32_t out_idx : group.output_indices) {
+            ss << "    *reinterpret_cast<float4*>(out" << out_idx << " + scalar_base) = out" << out_idx << "_packet;\n";
+        }
+        ss << "  }\n\n";
+    }
+
+    ss << "}\n";
+    return ss.str();
+}
+
+static std::string emitRaggedWideScalarSpecializedBroadcast(const CompiledExecutionStage& stage,
+                                                            const std::vector<SpecializedBroadcastGroup>& groups,
+                                                            const std::string& kernel_name,
+                                                            uint32_t packet_scalars) {
+    const uint32_t selected_packet_scalars = raggedWideScalarSpecializedBroadcastElementsPerThread(stage, groups);
+    if (selected_packet_scalars <= 1u || selected_packet_scalars != packet_scalars) {
+        throw runtime_error("emitRaggedWideScalarSpecializedBroadcast called with an ineligible packet width.");
+    }
+
+    const std::optional<RaggedValuewiseExtentEmissionSpec> ragged_extent = findRaggedValuewiseExtentSpec(stage.expr);
+    if (!ragged_extent.has_value()) {
+        throw runtime_error("wide-scalar ragged specialized broadcast requires a device ragged runtime extent.");
+    }
+
+    const std::unordered_set<uint32_t> structural_slots = raggedValuewiseExtentPartitionInputSlots(stage.expr);
+    const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
+    const std::vector<DataType> output_dtypes = collectOutputDTypes(stage);
+    const bool use_uint32_index_math = groupsSupportUInt32IndexMath(groups);
+    const std::string index_type = emittedIndexType(use_uint32_index_math);
+
+    std::ostringstream ss;
+    emitRequiredHeaders(stage.expr, ss);
+    ss << "extern \"C\" __global__\n";
+    ss << "void " << kernel_name << "(";
+
+    bool first_arg = true;
+    for (uint32_t i = 0; i < stage.expr.numInputs(); ++i) {
+        if (!first_arg) ss << ", ";
+        first_arg = false;
+        if (stage.expr.inputs[i].kind == NamedInput::Kind::RuntimeScalarFp32) {
+            ss << scalarStorageType(input_dtypes[i]) << " in" << i;
+        } else {
+            ss << "const " << scalarStorageType(input_dtypes[i]) << "* in" << i;
+        }
+    }
+    for (uint32_t i = 0; i < stage.outputs.size(); ++i) {
+        if (!first_arg) ss << ", ";
+        first_arg = false;
+        ss << scalarStorageType(output_dtypes[i]) << "* out" << i;
+    }
+    ss << ") {\n";
+
+    const RaggedValuewiseExtentEmissionSpec& extent = ragged_extent.value();
+    ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in" << extent.partition_input_slot << "["
+       << raggedActiveValueCountLoadIndex(extent) << "]);\n";
+    ss << "  const unsigned long long active_values = active_values_raw < " << extent.max_active_values
+       << "ULL ? active_values_raw : " << extent.max_active_values << "ULL;\n";
+    ss << "  const " << index_type << " thread_packet = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
+    ss << "  const " << index_type << " packet_grid_stride = static_cast<" << index_type
+       << ">(blockDim.x) * static_cast<" << index_type << ">(gridDim.x);\n\n";
+
+    for (uint32_t g = 0; g < groups.size(); ++g) {
+        const SpecializedBroadcastGroup& group = groups[g];
+        const uint64_t group_elements_per_value = specializedRaggedGroupElementsPerValue(extent, group);
+        const std::vector<uint32_t> required_nodes = orderedRequiredNodesForGroup(stage, group.output_indices);
+        std::unordered_map<uint32_t, size_t> used_index_by_slot;
+        used_index_by_slot.reserve(group.used_input_slots.size());
+        for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
+            used_index_by_slot.emplace(group.used_input_slots[used_i], used_i);
+        }
+        std::vector<size_t> all_used_indices(group.used_input_slots.size());
+        std::iota(all_used_indices.begin(), all_used_indices.end(), 0);
+
+        ss << "  const unsigned long long runtime_numel_g" << g << "_u64 = active_values * " << group_elements_per_value << "ULL;\n";
+        ss << "  const " << index_type << " runtime_numel_g" << g << " = static_cast<" << index_type
+           << ">(runtime_numel_g" << g << "_u64 < " << emitUnsignedLiteral(group.numel, false)
+           << " ? runtime_numel_g" << g << "_u64 : " << emitUnsignedLiteral(group.numel, false) << ");\n";
+        ss << "  const " << index_type << " packet_count_g" << g << " = runtime_numel_g" << g << " / "
+           << emitUnsignedLiteral(packet_scalars, use_uint32_index_math) << ";\n";
+        ss << "  for (" << index_type << " packet_idx = thread_packet; packet_idx < packet_count_g" << g
+           << "; packet_idx += packet_grid_stride) {\n";
+        ss << "    const " << index_type << " scalar_base = packet_idx * "
+           << emitUnsignedLiteral(packet_scalars, use_uint32_index_math) << ";\n";
+
+        for (uint32_t input_slot : group.used_input_slots) {
+            ss << "    " << index_type << " in" << input_slot << "_offset_base = "
+               << emitUnsignedLiteral(0, use_uint32_index_math) << ";\n";
+        }
+        if (!group.active_axes.empty()) {
+            emitSpecializedBroadcastOffsetMath(
+                ss, group, all_used_indices, "scalar_base", "_base", "    ", use_uint32_index_math);
+        }
+        ss << "\n";
+
+        std::unordered_map<uint32_t, std::string> input_chunk_types;
+        for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
+            const uint32_t input_slot = group.used_input_slots[used_i];
+            const DataType input_dtype = input_dtypes.at(input_slot);
+            const uint64_t inner_stride = specializedBroadcastInnermostInputStride(group, used_i);
+            if (group.used_input_load_kinds[used_i] == SpecializedInputLoadKind::NativeVector) {
+                const std::string chunk_type = chunkScalarTypeForBytes(dataTypeStorageBytes(input_dtype) * packet_scalars);
+                input_chunk_types.emplace(input_slot, chunk_type);
+                ss << "    const " << chunk_type << " in" << input_slot << "_packet = *reinterpret_cast<const "
+                   << chunk_type << "*>(in" << input_slot << " + in" << input_slot << "_offset_base);\n";
+                if (!(chunk_type == "float4" && input_dtype == DataType::FP32)) {
+                    ss << "    const " << scalarStorageType(input_dtype) << "* in" << input_slot
+                       << "_packet_data = reinterpret_cast<const " << scalarStorageType(input_dtype) << "*>(&in" << input_slot
+                       << "_packet);\n";
+                }
+            } else if (inner_stride == 0ULL) {
+                ss << "    const " << scalarStorageType(input_dtype) << " in" << input_slot << "_packet_scalar = in" << input_slot
+                   << "[in" << input_slot << "_offset_base];\n";
+            }
+        }
+
+        std::vector<std::string> output_chunk_types(stage.outputs.size());
+        for (uint32_t out_idx : group.output_indices) {
+            const DataType output_dtype = output_dtypes.at(out_idx);
+            const std::string chunk_type = chunkScalarTypeForBytes(dataTypeStorageBytes(output_dtype) * packet_scalars);
+            output_chunk_types[out_idx] = chunk_type;
+            ss << "    " << chunk_type << " out" << out_idx << "_packet;\n";
+            if (!(chunk_type == "float4" && output_dtype == DataType::FP32)) {
+                ss << "    " << scalarStorageType(output_dtype) << "* out" << out_idx
+                   << "_packet_data = reinterpret_cast<" << scalarStorageType(output_dtype) << "*>(&out" << out_idx << "_packet);\n";
+            }
+        }
+        ss << "\n";
+
+        for (uint32_t lane = 0; lane < packet_scalars; ++lane) {
+            const std::string suffix = "_rmp_l" + std::to_string(lane);
+            const std::string lane_idx = "scalar_base + " + emitUnsignedLiteral(lane, use_uint32_index_math);
+
+            auto input_value = [&](uint32_t input_slot) -> std::string {
+                const auto used_it = used_index_by_slot.find(input_slot);
+                if (used_it == used_index_by_slot.end()) {
+                    throw runtime_error("wide-scalar ragged broadcast node references an input outside its broadcast group.");
+                }
+                const size_t used_i = used_it->second;
+                const DataType input_dtype = input_dtypes.at(input_slot);
+                const uint64_t inner_stride = specializedBroadcastInnermostInputStride(group, used_i);
+                if (group.used_input_load_kinds[used_i] == SpecializedInputLoadKind::NativeVector) {
+                    const std::string& chunk_type = input_chunk_types.at(input_slot);
+                    const std::string chunk_data = (chunk_type == "float4" && input_dtype == DataType::FP32)
+                                                       ? std::string{}
+                                                       : "in" + std::to_string(input_slot) + "_packet_data";
+                    return emitChunkLaneReadExpr("in" + std::to_string(input_slot) + "_packet",
+                                                 chunk_type,
+                                                 input_dtype,
+                                                 std::to_string(lane),
+                                                 chunk_data);
+                }
+                if (inner_stride == 0ULL) {
+                    return "in" + std::to_string(input_slot) + "_packet_scalar";
+                }
+                return "in" + std::to_string(input_slot) + "[in" + std::to_string(input_slot) + "_offset_base + " +
+                       emitUnsignedLiteral(static_cast<uint64_t>(lane) * inner_stride, use_uint32_index_math) + "]";
+            };
+
+            for (uint32_t node_idx : required_nodes) {
+                const ExprNode& node = stage.expr.nodes[node_idx];
+                if ((node.op == ExprOp::INPUT && structural_slots.contains(node.input_slot)) ||
+                    !shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                    continue;
+                }
+                emitScalarNodeSuffixed(ss, stage.expr, node_idx, lane_idx, suffix, "    ", "", 0, input_value);
+            }
+
+            for (uint32_t out_idx : group.output_indices) {
+                const CompiledStageOutput& output = stage.outputs[out_idx];
+                const DataType output_dtype = output_dtypes.at(out_idx);
+                const std::string& chunk_type = output_chunk_types[out_idx];
+                const std::string chunk_data = (chunk_type == "float4" && output_dtype == DataType::FP32)
+                                                   ? std::string{}
+                                                   : "out" + std::to_string(out_idx) + "_packet_data";
+                ss << emitChunkLaneWriteStmt("out" + std::to_string(out_idx) + "_packet",
+                                             chunk_type,
+                                             output_dtype,
+                                             lane,
+                                             emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix),
+                                             "    ",
+                                             chunk_data);
+            }
+            ss << "\n";
+        }
+
+        for (uint32_t out_idx : group.output_indices) {
+            ss << "    *reinterpret_cast<" << output_chunk_types[out_idx] << "*>(out" << out_idx << " + scalar_base) = out" << out_idx
+               << "_packet;\n";
+        }
+        ss << "  }\n\n";
     }
 
     ss << "}\n";
@@ -6208,11 +7045,16 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
         ss << ", ";
     }
     for (uint32_t i = 0; i < stage.outputs.size(); ++i) {
-        ss << storage_dtype_vector << "* out" << i;
+        // Keep the output ABI scalar-typed. Runtime storage aliases can begin at
+        // an element-aligned but vector-misaligned offset; the generated store
+        // below uses the packed path only when the actual address is aligned.
+        ss << storage_dtype << "* out" << i;
         if (i + 1 < stage.outputs.size()) {
             ss << ", ";
         }
     }
+
+    const uint32_t storage_vector_alignment = scalarStorageTypeSizeBytes(storage_dtype_kind) * 2u;
 
     ss << ") {\n";
     ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n\n";
@@ -6279,8 +7121,22 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                     if (kind_it->second == SpecializedInputLoadKind::NativeVector) {
                         const std::string base = "in" + std::to_string(slot);
                         const std::string offset0 = "in" + std::to_string(slot) + "_offset0";
-                        ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
-                           << emitVector2BroadcastNativeLoad(storage_dtype_vector, base, offset0, vector_compute_dtype) << ";\n";
+                        // A strided storage alias can preserve unit inner stride while
+                        // shifting the visible base by one scalar. Such an address is
+                        // valid for scalar access but can be misaligned for half2 /
+                        // bfloat162 / fp8x2. Preserve the native vector load for the
+                        // ordinary aligned case and fall back to two adjacent scalar
+                        // loads when the runtime address does not meet vector alignment.
+                        ss << "    const bool in" << slot << "_native_aligned = "
+                           << "((reinterpret_cast<unsigned long long>(" << base << " + " << offset0 << ") & "
+                           << (storage_vector_alignment - 1u) << "ULL) == 0ULL);\n";
+                        ss << "    " << compute_dtype_vector << " t" << node_idx << " = in" << slot << "_native_aligned ? "
+                           << emitVector2BroadcastNativeLoad(storage_dtype_vector, base, offset0, vector_compute_dtype) << " : "
+                           << emitVector2BroadcastPackLoad(storage_dtype,
+                                                           base + "[" + offset0 + "]",
+                                                           base + "[" + offset0 + " + 1]",
+                                                           vector_compute_dtype)
+                           << ";\n";
                     } else {
                         const std::string var0 = "in" + std::to_string(slot) + "[in" + std::to_string(slot) + "_offset0]";
                         const std::string var1 = "in" + std::to_string(slot) + "[in" + std::to_string(slot) + "_offset1]";
@@ -6504,8 +7360,25 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
         ss << "\n";
         for (uint32_t out_idx : group.output_indices) {
             const CompiledStageOutput& output = stage.outputs[out_idx];
-            ss << "    out" << out_idx
-               << "[idx] = " << vector_storage_conversion(storage_dtype_vector, CudaSourceEmitter::ref(output.local_node_idx), vector_compute_dtype) << ";\n";
+            const std::string packed_value = "out" + std::to_string(out_idx) + "_packed";
+            ss << "    const " << storage_dtype_vector << " " << packed_value << " = "
+               << vector_storage_conversion(storage_dtype_vector, CudaSourceEmitter::ref(output.local_node_idx), vector_compute_dtype) << ";\n";
+            ss << "    const bool out" << out_idx << "_native_aligned = "
+               << "((reinterpret_cast<unsigned long long>(out" << out_idx << " + idx0) & "
+               << (storage_vector_alignment - 1u) << "ULL) == 0ULL);\n";
+            ss << "    if (out" << out_idx << "_native_aligned) {\n";
+            ss << "      *reinterpret_cast<" << storage_dtype_vector << "*>(out" << out_idx << " + idx0) = "
+               << packed_value << ";\n";
+            ss << "    } else {\n";
+            ss << "      const " << storage_dtype << "* out" << out_idx
+               << "_packed_scalars = reinterpret_cast<const " << storage_dtype << "*>(&" << packed_value << ");\n";
+            ss << "      out" << out_idx << "[idx0] = out" << out_idx << "_packed_scalars[0];\n";
+            ss << "      if (idx0 + " << emitUnsignedLiteral(1, use_uint32_index_math) << " < "
+               << emitUnsignedLiteral(group.numel, use_uint32_index_math) << ") {\n";
+            ss << "        out" << out_idx << "[idx0 + " << emitUnsignedLiteral(1, use_uint32_index_math)
+               << "] = out" << out_idx << "_packed_scalars[1];\n";
+            ss << "      }\n";
+            ss << "    }\n";
         }
 
         ss << "  }\n\n";
@@ -7019,7 +7892,9 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
         return emitTiledTransposeMaterializedFused(stage, kernel_name, use_uint32_index_math);
     }
 
-    std::optional<DataType> vectorized_dtype = getVectorizedStageStorageDType(stage);
+    std::optional<DataType> vectorized_dtype = ragged_extent.has_value()
+                                                   ? getRaggedFlatVectorizedStageStorageDType(stage)
+                                                   : getVectorizedStageStorageDType(stage);
     if (vectorized_dtype.has_value()) {
         const std::optional<DataType> vector_compute_dtype = getVectorizedStageComputeDTypeImpl(stage.expr, vectorized_dtype.value());
         if (!vector_compute_dtype.has_value()) {
@@ -8155,6 +9030,125 @@ bool CudaSourceEmitter::specializedBroadcastUsesTiledLogicalTransposeConsumerLau
     return tryFindTiledLogicalTransposeConsumerFrontiers(stage, groups).has_value();
 }
 
+
+std::optional<uint32_t> CudaSourceEmitter::fusedGateRequiredSpecializedBroadcastElementsPerThread(
+    const CompiledExecutionStage& stage,
+    const std::vector<SpecializedBroadcastGroup>& groups) {
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel || groups.empty() ||
+        stageHasTransposedMaterializedOutput(stage.outputs) || expressionHasIndexAwareOps(stage.expr) ||
+        expressionHasStridedViewOp(stage.expr) || expressionHasTakeAlongAxisOp(stage.expr) ||
+        expressionHasLogicalTransposeOp(stage.expr)) {
+        return std::nullopt;
+    }
+
+    const std::optional<RaggedValuewiseExtentEmissionSpec> ragged_extent = findRaggedValuewiseExtentSpec(stage.expr);
+    const bool is_ragged = ragged_extent.has_value();
+    const std::unordered_set<uint32_t> structural_slots =
+        is_ragged ? raggedValuewiseExtentPartitionInputSlots(stage.expr) : std::unordered_set<uint32_t>{};
+    const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
+    const std::vector<DataType> output_dtypes = collectOutputDTypes(stage);
+
+    std::vector<DataType> value_dtypes;
+    for (const SpecializedBroadcastGroup& group : groups) {
+        if (group.output_dims.empty() || group.used_input_slots.size() != group.used_input_load_kinds.size()) {
+            return std::nullopt;
+        }
+        for (uint32_t slot : group.used_input_slots) {
+            if (slot >= stage.expr.inputs.size() || structural_slots.contains(slot) ||
+                stage.expr.inputs[slot].kind != NamedInput::Kind::Tensor) {
+                return std::nullopt;
+            }
+            const DataType dtype = input_dtypes.at(slot);
+            if (!fusedGateOrdinaryFloatDType(dtype)) {
+                return std::nullopt;
+            }
+            value_dtypes.push_back(dtype);
+        }
+        for (uint32_t out_idx : group.output_indices) {
+            if (out_idx >= output_dtypes.size() || !fusedGateOrdinaryFloatDType(output_dtypes[out_idx])) {
+                return std::nullopt;
+            }
+            value_dtypes.push_back(output_dtypes[out_idx]);
+        }
+    }
+    if (value_dtypes.empty()) {
+        return std::nullopt;
+    }
+
+    uint32_t required_elements_per_thread = 0u;
+    if (is_ragged) {
+        if (fusedGateAllSameDType(value_dtypes, DataType::BF16) ||
+            fusedGateAllSameDType(value_dtypes, DataType::FP16)) {
+            required_elements_per_thread = 8u;
+        } else if (std::any_of(value_dtypes.begin(), value_dtypes.end(), [](DataType dtype) {
+                       return dtype == DataType::FP32;
+                   })) {
+            required_elements_per_thread = 4u;
+        } else {
+            // As with flat FUSED-GATE, mixed BF16/FP16 without FP32 remains
+            // intentionally outside the benchmark-backed invariant.
+            return std::nullopt;
+        }
+    } else {
+        // Dense BF16/FP16 specialized broadcast was benchmarked and ordained at
+        // the existing vector2 ownership. Dense FP32 and mixed dense broadcast
+        // are intentionally scalar today but already saturate their useful
+        // bandwidth regime, so FUSED-GATE does not manufacture a wider mandate.
+        if (fusedGateAllSameDType(value_dtypes, DataType::BF16) ||
+            fusedGateAllSameDType(value_dtypes, DataType::FP16)) {
+            required_elements_per_thread = 2u;
+        } else {
+            return std::nullopt;
+        }
+    }
+
+    for (const SpecializedBroadcastGroup& group : groups) {
+        const uint64_t packet_scalars = required_elements_per_thread;
+        if ((group.output_dims.back() % packet_scalars) != 0ULL ||
+            (group.numel % packet_scalars) != 0ULL) {
+            return std::nullopt;
+        }
+        if (is_ragged &&
+            (specializedRaggedGroupElementsPerValue(ragged_extent.value(), group) % packet_scalars) != 0ULL) {
+            return std::nullopt;
+        }
+
+        for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
+            const uint64_t inner_stride = specializedBroadcastInnermostInputStride(group, used_i);
+            if (group.used_input_load_kinds[used_i] == SpecializedInputLoadKind::NativeVector) {
+                if (inner_stride != 1ULL) {
+                    return std::nullopt;
+                }
+            } else if (inner_stride != 0ULL) {
+                // Gate only the packet mappings proven by the census: contiguous
+                // native-vector operands and true scalar broadcasts reused across
+                // the packet. Row/column/outer forms that lower to these patterns
+                // are included; exotic scalar-pack coordinate mappings are not.
+                return std::nullopt;
+            }
+        }
+    }
+
+    return required_elements_per_thread;
+}
+
+uint32_t CudaSourceEmitter::specializedBroadcastElementsPerThread(
+    const CompiledExecutionStage& stage,
+    const std::vector<SpecializedBroadcastGroup>& groups) {
+    if (getRaggedSpecializedBroadcastVectorizedStageStorageDType(stage, groups).has_value()) {
+        return 8u;
+    }
+    const uint32_t ragged_wide_scalar_elements_per_thread =
+        raggedWideScalarSpecializedBroadcastElementsPerThread(stage, groups);
+    if (ragged_wide_scalar_elements_per_thread > 1u) {
+        return ragged_wide_scalar_elements_per_thread;
+    }
+    // Preserve the pre-existing launch width for every non-ragged specialized
+    // broadcast path. Ragged low-precision vector8 and FP32/mixed vector4 paths
+    // opt in above.
+    return getVectorizedStageStorageDType(stage).has_value() ? 2u : 1u;
+}
+
 std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionStage& stage,
                                                         const std::vector<SpecializedBroadcastGroup>& groups,
                                                         const std::string& kernel_name) {
@@ -8195,6 +9189,25 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
 
     if (expressionHasTakeAlongAxisOp(stage.expr) || expressionHasStridedViewOp(stage.expr)) {
         return emitIndexMappedSpecializedBroadcast(stage, groups, kernel_name);
+    }
+
+    const std::optional<DataType> ragged_vectorized_dtype =
+        getRaggedSpecializedBroadcastVectorizedStageStorageDType(stage, groups);
+    if (ragged_vectorized_dtype.has_value()) {
+        const std::optional<DataType> vector_compute_dtype =
+            getVectorizedStageComputeDTypeImpl(stage.expr, ragged_vectorized_dtype.value());
+        if (!vector_compute_dtype.has_value()) {
+            throw runtime_error("Wide ragged specialized-broadcast stage lost its compute dtype after eligibility selection.");
+        }
+        return emitRaggedWideSpecializedBroadcast(
+            stage, groups, ragged_vectorized_dtype.value(), vector_compute_dtype.value(), kernel_name);
+    }
+
+    const uint32_t ragged_wide_scalar_elements_per_thread =
+        raggedWideScalarSpecializedBroadcastElementsPerThread(stage, groups);
+    if (ragged_wide_scalar_elements_per_thread > 1u) {
+        return emitRaggedWideScalarSpecializedBroadcast(
+            stage, groups, kernel_name, ragged_wide_scalar_elements_per_thread);
     }
 
     std::optional<DataType> vectorized_dtype = getVectorizedStageStorageDType(stage);
