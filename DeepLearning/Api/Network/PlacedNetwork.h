@@ -182,9 +182,9 @@ class PlacedNetwork {
     void copyMatchingTrainingStateFrom(PlacedNetwork& source);
 
     // Load parameter/optimizer state directly from a saved artifact produced by
-    // the same API network instance.  Matching uses the serialized API layer id
-    // (layer<N>) plus parameter name; this is the strict direct-artifact variant
-    // of copyTrainingStateFrom() and does not guess by ordinal/type/name.
+    // the same reconstructed API graph. Matching uses stable serialized layer
+    // position plus parameter name, with layer type/version and tensor-size
+    // compatibility checks, so process-global API layer ids need not match.
     void loadTrainingStateFromSameNetworkArtifact(const std::string& artifactDirectory, const std::string& artifactNetworkName);
 
     // Load matching parameter/optimizer state directly from a saved artifact into

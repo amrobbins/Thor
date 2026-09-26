@@ -9,6 +9,7 @@
 #include <cub/device/device_segmented_reduce.cuh>
 #include <cub/warp/warp_reduce.cuh>
 #include <cuda/std/bit>
+#include <cuda/std/functional>
 #include <cooperative_groups.h>
 #include <cuda/pipeline>
 #include <cuda_bf16.h>
@@ -2519,6 +2520,513 @@ template <int RowLanes>
     return warps_per_tile;
 }
 
+// Adaptive cooperative tiled-value primitive. One CTA owns one retained-component tile while a geometry-selected
+// power-of-two number of physical warps split the reduction rows. Unlike the older full-row exact-width kernels, this
+// primitive derives its cooperative width from actual output-tile parallelism and may use up to a full 32-warp CUDA
+// block when those extra warps all cooperate on the same reduction. When fewer than 8 warps cooperate, independent
+// output tiles share one <=256-thread CTA so the small-group regime does not devolve into tiny one-warp blocks. The
+// read-side packet is a compile-time 4/8/16-byte width; the production-control launcher remains fixed at 16 bytes/thread.
+//
+// Tail handling deliberately relies on Thor's tensor allocation contract: every tensor has 128 bytes of physical
+// backing padding after its logical storage. A lane whose packet *starts* inside the retained row therefore issues the
+// same fixed-width alignment-safe load even when that packet crosses the logical row end. For non-final reduction rows
+// the harmless over-read lands in the next packed row; for the final row it lands in the 128-byte backing pad. Values
+// beyond inner_size are accumulated but never stored. Lanes whose packet starts outside the logical row do not load,
+// which bounds the maximum final-tensor over-read to one alignment-safe packet window (<=32 bytes here). Output stores
+// remain predicated because output rows are logically adjacent and an over-store could corrupt the next result row.
+constexpr size_t ADAPTIVE_COOPERATIVE_TILED_MAX_VECTOR_BYTES = 16;
+constexpr size_t ADAPTIVE_COOPERATIVE_TILED_MIN_VECTOR_BYTES = 4;
+constexpr int ADAPTIVE_COOPERATIVE_TILED_MAX_WARPS = 32;
+constexpr uint64_t ADAPTIVE_COOPERATIVE_TILED_TARGET_ACTIVE_WARPS =
+    TILED_REDUCTION_TARGET_ACTIVE_WARPS * CubReductionTiledPolicy::ROW_SPLIT_TARGET_SM_WAVES;
+
+template <typename InputT, size_t PacketBytes>
+[[nodiscard]] constexpr int adaptiveCooperativeTiledItemsPerLane() {
+    static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
+    static_assert(PacketBytes >= sizeof(InputT));
+    static_assert(PacketBytes % sizeof(InputT) == 0);
+    constexpr int items = static_cast<int>(PacketBytes / sizeof(InputT));
+    static_assert(items >= 1 && items <= 8,
+                  "adaptive cooperative tiled reduction currently targets FP16/BF16/FP32 storage");
+    return items;
+}
+
+template <typename InputT, size_t PacketBytes>
+[[nodiscard]] inline int chooseAdaptiveCooperativeTiledWarpsPerTile(const CubReductionGeometry& geometry) {
+    constexpr int items_per_lane = adaptiveCooperativeTiledItemsPerLane<InputT, PacketBytes>();
+    constexpr uint64_t components_per_tile =
+        static_cast<uint64_t>(TILED_REDUCTION_WARP_THREADS) * static_cast<uint64_t>(items_per_lane);
+    const uint64_t component_tiles = ceilDivideU64(geometry.inner_size, components_per_tile);
+    uint64_t output_tiles = std::numeric_limits<uint64_t>::max();
+    if (component_tiles == 0) {
+        output_tiles = 1;
+    } else if (geometry.outer_size <= std::numeric_limits<uint64_t>::max() / component_tiles) {
+        output_tiles = std::max<uint64_t>(1, geometry.outer_size * component_tiles);
+    }
+
+    const uint64_t desired_warps = ceilDivideU64(
+        ADAPTIVE_COOPERATIVE_TILED_TARGET_ACTIVE_WARPS, std::max<uint64_t>(output_tiles, 1));
+    int warps = 1;
+    while (warps < ADAPTIVE_COOPERATIVE_TILED_MAX_WARPS
+           && static_cast<uint64_t>(warps) < desired_warps
+           && static_cast<uint64_t>(warps) < geometry.reduction_size) {
+        warps <<= 1;
+    }
+
+    // When a warp revisits multiple rows, prefer a cooperative width whose row-to-row byte stride preserves the
+    // 16-byte packet alignment. This lets every warp see one stable row-head alignment through its reduction slice.
+    // If the reduction is already no deeper than the cooperative group, every warp owns at most one row and no such
+    // stride constraint exists. loadAlignmentSafeInputPacket remains the correctness fallback either way.
+    while (warps < ADAPTIVE_COOPERATIVE_TILED_MAX_WARPS
+           && geometry.reduction_size > static_cast<uint64_t>(warps)
+           && (geometry.inner_size * static_cast<uint64_t>(sizeof(InputT)) * static_cast<uint64_t>(warps))
+                  % PacketBytes
+                  != 0) {
+        warps <<= 1;
+    }
+    return warps;
+}
+
+template <typename InputT,
+          typename ReductionOpT,
+          typename InputTransformT,
+          typename OutputFinalizeT,
+          int WarpsPerTile,
+          int ItemsPerLane,
+          bool NaturallyAlignedRows>
+__global__ void adaptiveCooperativeTiledFixedSegmentReductionKernel(const InputT* input,
+                                                                    void* output,
+                                                                    DataType output_dtype,
+                                                                    uint64_t outer_size,
+                                                                    uint64_t reduction_size,
+                                                                    uint64_t inner_size,
+                                                                    uint64_t output_outer_stride,
+                                                                    uint64_t output_inner_stride,
+                                                                    ReductionOpT reduction_op,
+                                                                    float init,
+                                                                    InputTransformT input_transform,
+                                                                    OutputFinalizeT output_finalize,
+                                                                    float output_scale) {
+    static_assert(WarpsPerTile == 1 || WarpsPerTile == 2 || WarpsPerTile == 4 || WarpsPerTile == 8
+                  || WarpsPerTile == 16 || WarpsPerTile == 32);
+    constexpr size_t packet_bytes = sizeof(InputT) * ItemsPerLane;
+    static_assert(packet_bytes == 4 || packet_bytes == 8 || packet_bytes == 16);
+    constexpr uint64_t components_per_tile =
+        static_cast<uint64_t>(TILED_REDUCTION_WARP_THREADS) * static_cast<uint64_t>(ItemsPerLane);
+    constexpr int block_warps = WarpsPerTile < TILED_REDUCTION_WARPS_PER_BLOCK
+                                    ? TILED_REDUCTION_WARPS_PER_BLOCK
+                                    : WarpsPerTile;
+    constexpr int groups_per_block = block_warps / WarpsPerTile;
+    static_assert(block_warps <= ADAPTIVE_COOPERATIVE_TILED_MAX_WARPS);
+    static_assert(block_warps % WarpsPerTile == 0);
+
+    __shared__ float partials[block_warps][ItemsPerLane][TILED_REDUCTION_WARP_THREADS];
+
+    const int physical_warp = static_cast<int>(threadIdx.x) / TILED_REDUCTION_WARP_THREADS;
+    const int group_in_block = physical_warp / WarpsPerTile;
+    const int warp_in_tile = physical_warp % WarpsPerTile;
+    const int lane = static_cast<int>(threadIdx.x) % TILED_REDUCTION_WARP_THREADS;
+    const uint64_t component_tiles = ceilDivideU64(inner_size, components_per_tile);
+    const uint64_t total_work = outer_size * component_tiles;
+    const uint64_t grid_stride = static_cast<uint64_t>(gridDim.x) * static_cast<uint64_t>(groups_per_block);
+
+    for (uint64_t block_work_begin =
+             static_cast<uint64_t>(blockIdx.x) * static_cast<uint64_t>(groups_per_block);
+         block_work_begin < total_work;
+         block_work_begin += grid_stride) {
+        const uint64_t work_index = block_work_begin + static_cast<uint64_t>(group_in_block);
+        const bool active_group = work_index < total_work;
+        const uint64_t outer_index = active_group ? work_index / component_tiles : 0;
+        const uint64_t component_tile = active_group ? work_index - outer_index * component_tiles : 0;
+        const uint64_t packet_component_begin =
+            component_tile * components_per_tile
+            + static_cast<uint64_t>(lane) * static_cast<uint64_t>(ItemsPerLane);
+        const bool owns_packet_start = active_group && packet_component_begin < inner_size;
+
+        float local[ItemsPerLane];
+#pragma unroll
+        for (int item = 0; item < ItemsPerLane; ++item) {
+            local[item] = init;
+        }
+
+        if (owns_packet_start) {
+            const uint64_t first_row = static_cast<uint64_t>(warp_in_tile);
+            if (first_row < reduction_size) {
+                uint64_t input_index =
+                    (outer_index * reduction_size + first_row) * inner_size + packet_component_begin;
+                const uint64_t row_stride = static_cast<uint64_t>(WarpsPerTile) * inner_size;
+                for (uint64_t row = first_row; row < reduction_size; row += static_cast<uint64_t>(WarpsPerTile)) {
+                    const PackedInputValues<InputT, ItemsPerLane> values = [&]() {
+                        if constexpr (NaturallyAlignedRows) {
+                            return loadVectorizedInputPacket<InputT, ItemsPerLane>(input + input_index);
+                        } else {
+                            return loadAlignmentSafeInputPacket<InputT, ItemsPerLane>(input + input_index);
+                        }
+                    }();
+#pragma unroll
+                    for (int item = 0; item < ItemsPerLane; ++item) {
+                        local[item] = reduction_op(
+                            local[item], input_transform(ToFp32<InputT>{}(values.values[item])));
+                    }
+                    input_index += row_stride;
+                }
+            }
+        }
+
+        if constexpr (WarpsPerTile == 1) {
+            if (owns_packet_start) {
+#pragma unroll
+                for (int item = 0; item < ItemsPerLane; ++item) {
+                    const uint64_t component = packet_component_begin + static_cast<uint64_t>(item);
+                    if (component < inner_size) {
+                        const float finalized = output_finalize(local[item]) * output_scale;
+                        storeFp32AsRuntimeDType(output,
+                                                output_dtype,
+                                                tiledReductionOutputIndex(outer_index,
+                                                                          component,
+                                                                          output_outer_stride,
+                                                                          output_inner_stride),
+                                                finalized);
+                    }
+                }
+            }
+        } else {
+#pragma unroll
+            for (int item = 0; item < ItemsPerLane; ++item) {
+                partials[physical_warp][item][lane] = local[item];
+            }
+            __syncthreads();
+
+#pragma unroll
+            for (int stride = WarpsPerTile / 2; stride > 0; stride >>= 1) {
+                if (warp_in_tile < stride) {
+#pragma unroll
+                    for (int item = 0; item < ItemsPerLane; ++item) {
+                        partials[physical_warp][item][lane] = reduction_op(
+                            partials[physical_warp][item][lane], partials[physical_warp + stride][item][lane]);
+                    }
+                }
+                __syncthreads();
+            }
+
+            if (warp_in_tile == 0 && owns_packet_start) {
+#pragma unroll
+                for (int item = 0; item < ItemsPerLane; ++item) {
+                    const uint64_t component = packet_component_begin + static_cast<uint64_t>(item);
+                    if (component < inner_size) {
+                        const float finalized =
+                            output_finalize(partials[group_in_block * WarpsPerTile][item][lane]) * output_scale;
+                        storeFp32AsRuntimeDType(output,
+                                                output_dtype,
+                                                tiledReductionOutputIndex(outer_index,
+                                                                          component,
+                                                                          output_outer_stride,
+                                                                          output_inner_stride),
+                                                finalized);
+                    }
+                }
+            }
+            __syncthreads();
+        }
+    }
+}
+
+template <typename InputT,
+          typename ReductionOpT,
+          typename InputTransformT,
+          typename OutputFinalizeT,
+          int WarpsPerTile,
+          size_t PacketBytes,
+          bool NaturallyAlignedRows>
+void launchAdaptiveCooperativeTiledFixedSegmentReductionForWarps(const InputT* input,
+                                                                 void* output,
+                                                                 DataType output_dtype,
+                                                                 const CubReductionGeometry& geometry,
+                                                                 ReductionOpT reduction_op,
+                                                                 float init,
+                                                                 InputTransformT input_transform,
+                                                                 OutputFinalizeT output_finalize,
+                                                                 float output_scale,
+                                                                 cudaStream_t stream) {
+    constexpr int items_per_lane = adaptiveCooperativeTiledItemsPerLane<InputT, PacketBytes>();
+    constexpr uint64_t components_per_tile =
+        static_cast<uint64_t>(TILED_REDUCTION_WARP_THREADS) * static_cast<uint64_t>(items_per_lane);
+    const uint64_t component_tiles = ceilDivideU64(geometry.inner_size, components_per_tile);
+    const uint64_t total_work = geometry.outer_size * component_tiles;
+    constexpr int block_warps = WarpsPerTile < TILED_REDUCTION_WARPS_PER_BLOCK
+                                    ? TILED_REDUCTION_WARPS_PER_BLOCK
+                                    : WarpsPerTile;
+    constexpr int groups_per_block = block_warps / WarpsPerTile;
+    const uint64_t required_blocks = ceilDivideU64(total_work, static_cast<uint64_t>(groups_per_block));
+    const unsigned int grid_blocks = static_cast<unsigned int>(
+        std::min<uint64_t>(required_blocks, TILED_REDUCTION_MAX_GRID_BLOCKS));
+    constexpr int block_threads = block_warps * TILED_REDUCTION_WARP_THREADS;
+
+    adaptiveCooperativeTiledFixedSegmentReductionKernel<InputT,
+                                                        ReductionOpT,
+                                                        InputTransformT,
+                                                        OutputFinalizeT,
+                                                        WarpsPerTile,
+                                                        items_per_lane,
+                                                        NaturallyAlignedRows>
+        <<<grid_blocks, block_threads, 0, stream>>>(input,
+                                                    output,
+                                                    output_dtype,
+                                                    geometry.outer_size,
+                                                    geometry.reduction_size,
+                                                    geometry.inner_size,
+                                                    geometry.tiled_output_outer_stride,
+                                                    geometry.tiled_output_inner_stride,
+                                                    reduction_op,
+                                                    init,
+                                                    input_transform,
+                                                    output_finalize,
+                                                    output_scale);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+template <typename InputT,
+          typename ReductionOpT,
+          typename InputTransformT,
+          typename OutputFinalizeT,
+          size_t PacketBytes>
+void launchAdaptiveCooperativeTiledFixedSegmentReductionForPacketBytes(const InputT* input,
+                                                                        void* output,
+                                                                        DataType output_dtype,
+                                                                        const CubReductionGeometry& geometry,
+                                                                        ReductionOpT reduction_op,
+                                                                        float init,
+                                                                        InputTransformT input_transform,
+                                                                        OutputFinalizeT output_finalize,
+                                                                        float output_scale,
+                                                                        cudaStream_t stream) {
+    static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
+    const int warps = chooseAdaptiveCooperativeTiledWarpsPerTile<InputT, PacketBytes>(geometry);
+    const bool naturally_aligned_rows =
+        (geometry.inner_size * static_cast<uint64_t>(sizeof(InputT))) % PacketBytes == 0;
+
+    // 8- and 4-byte packets are only selected by the packet-adaptive host policy when every row begins naturally
+    // aligned to that packet width. The 16-byte path remains the general awkward-row path and can use Thor's existing
+    // alignment-safe 16/32-byte window loader plus the 128-byte backing pad.
+    if constexpr (PacketBytes < 16) {
+        if (!naturally_aligned_rows) {
+            throw std::logic_error("Adaptive cooperative tiled sub-16-byte packet selected for an unaligned row stride.");
+        }
+    }
+
+    const auto launch_for_alignment = [&]<bool NaturallyAlignedRows>() {
+        switch (warps) {
+            case 1:
+                launchAdaptiveCooperativeTiledFixedSegmentReductionForWarps<InputT, ReductionOpT, InputTransformT, OutputFinalizeT, 1, PacketBytes, NaturallyAlignedRows>(
+                    input, output, output_dtype, geometry, reduction_op, init, input_transform, output_finalize, output_scale, stream);
+                return;
+            case 2:
+                launchAdaptiveCooperativeTiledFixedSegmentReductionForWarps<InputT, ReductionOpT, InputTransformT, OutputFinalizeT, 2, PacketBytes, NaturallyAlignedRows>(
+                    input, output, output_dtype, geometry, reduction_op, init, input_transform, output_finalize, output_scale, stream);
+                return;
+            case 4:
+                launchAdaptiveCooperativeTiledFixedSegmentReductionForWarps<InputT, ReductionOpT, InputTransformT, OutputFinalizeT, 4, PacketBytes, NaturallyAlignedRows>(
+                    input, output, output_dtype, geometry, reduction_op, init, input_transform, output_finalize, output_scale, stream);
+                return;
+            case 8:
+                launchAdaptiveCooperativeTiledFixedSegmentReductionForWarps<InputT, ReductionOpT, InputTransformT, OutputFinalizeT, 8, PacketBytes, NaturallyAlignedRows>(
+                    input, output, output_dtype, geometry, reduction_op, init, input_transform, output_finalize, output_scale, stream);
+                return;
+            case 16:
+                launchAdaptiveCooperativeTiledFixedSegmentReductionForWarps<InputT, ReductionOpT, InputTransformT, OutputFinalizeT, 16, PacketBytes, NaturallyAlignedRows>(
+                    input, output, output_dtype, geometry, reduction_op, init, input_transform, output_finalize, output_scale, stream);
+                return;
+            case 32:
+                launchAdaptiveCooperativeTiledFixedSegmentReductionForWarps<InputT, ReductionOpT, InputTransformT, OutputFinalizeT, 32, PacketBytes, NaturallyAlignedRows>(
+                    input, output, output_dtype, geometry, reduction_op, init, input_transform, output_finalize, output_scale, stream);
+                return;
+            default:
+                throw std::logic_error("Adaptive cooperative tiled reduction selected an invalid warp count.");
+        }
+    };
+
+    if constexpr (PacketBytes == 16) {
+        if (naturally_aligned_rows) {
+            launch_for_alignment.template operator()<true>();
+        } else {
+            launch_for_alignment.template operator()<false>();
+        }
+    } else {
+        // The host packet chooser guarantees this for narrow packets, avoiding any scalar/misaligned fallback.
+        launch_for_alignment.template operator()<true>();
+    }
+}
+
+template <typename InputT>
+[[nodiscard]] inline size_t chooseAdaptiveCooperativeTiledPacketBytes(const CubReductionGeometry& geometry) {
+    constexpr uint64_t warp_lanes = static_cast<uint64_t>(TILED_REDUCTION_WARP_THREADS);
+    constexpr uint64_t items_16 = 16 / sizeof(InputT);
+    constexpr uint64_t items_8 = 8 / sizeof(InputT);
+    constexpr uint64_t components_16 = warp_lanes * items_16;
+    constexpr uint64_t components_8 = warp_lanes * items_8;
+
+    const uint64_t row_bytes = geometry.inner_size * static_cast<uint64_t>(sizeof(InputT));
+
+    // Keep the widest packet unless a single retained tile would use no more than half of a physical warp's
+    // 16-byte component capacity. In that under-filled regime, halve the packet so all 32 lanes can participate.
+    // Repeat once more for 4-byte packets, which is the production hard lower bound. Never choose a narrow
+    // packet when the packed row stride is not naturally aligned to that width; awkward rows stay on the proven
+    // 16-byte alignment-safe path.
+    size_t packet_bytes = ADAPTIVE_COOPERATIVE_TILED_MAX_VECTOR_BYTES;
+    if (geometry.inner_size <= components_16 / 2 && row_bytes % 8 == 0) {
+        packet_bytes = 8;
+        if (geometry.inner_size <= components_8 / 2 && row_bytes % 4 == 0) {
+            packet_bytes = ADAPTIVE_COOPERATIVE_TILED_MIN_VECTOR_BYTES;
+        }
+    }
+    return packet_bytes;
+}
+
+template <typename InputT>
+[[nodiscard]] constexpr bool packetAdaptiveCooperativeInputTypeIsProductionSupported() {
+    return std::is_same_v<InputT, __half> || std::is_same_v<InputT, __nv_bfloat16>
+           || std::is_same_v<InputT, float>;
+}
+
+template <typename ReductionOpT>
+[[nodiscard]] constexpr bool packetAdaptiveCooperativeReductionOpIsProductionSupported() {
+    // The release census currently covers the additive value-reduction family. This includes Sum/Mean directly and
+    // L1/L2/SumSquares through their existing FP32 input transforms/finalizers. Product/Min/Max remain on their
+    // previously ordained tiled kernels until they receive equivalent calibration.
+    return std::is_same_v<std::decay_t<ReductionOpT>, cuda::std::plus<float>>;
+}
+
+template <typename InputT>
+[[nodiscard]] inline int choosePacketAdaptiveCooperativeTiledWarpsPerTile(const CubReductionGeometry& geometry) {
+    switch (chooseAdaptiveCooperativeTiledPacketBytes<InputT>(geometry)) {
+        case 16:
+            return chooseAdaptiveCooperativeTiledWarpsPerTile<InputT, 16>(geometry);
+        case 8:
+            return chooseAdaptiveCooperativeTiledWarpsPerTile<InputT, 8>(geometry);
+        case 4:
+            return chooseAdaptiveCooperativeTiledWarpsPerTile<InputT, 4>(geometry);
+        default:
+            throw std::logic_error("Packet-adaptive cooperative tiled reduction selected an invalid packet width.");
+    }
+}
+
+template <typename InputT, typename ReductionOpT>
+[[nodiscard]] bool shouldUsePacketAdaptiveCooperativeTiledReduction(const CubReductionGeometry& geometry) {
+    if constexpr (!packetAdaptiveCooperativeInputTypeIsProductionSupported<InputT>()
+                  || !packetAdaptiveCooperativeReductionOpIsProductionSupported<ReductionOpT>()) {
+        return false;
+    } else {
+        // Keep production on the exact dense/natural-output contract measured by the release census. View/permuted,
+        // pitched, payload-transpose, and shared-transpose cases retain their dedicated ownership/store policies.
+        if (geometry.path != CubReductionPath::TiledFixedSegment
+            || geometry.permutation_aware_tiled_geometry.has_value()
+            || geometry.payload_transpose_tiled_geometry.has_value()
+            || geometry.pitched_tiled_geometry.has_value()
+            || geometry.tiled_output_permuted
+            || geometry.tiled_output_shared_transpose
+            || geometry.tiled_output_outer_stride != geometry.inner_size
+            || geometry.tiled_output_inner_stride != 1) {
+            return false;
+        }
+
+        using namespace CubReductionTiledPolicy;
+        if (geometry.reduction_size < PACKET_COOPERATIVE_MIN_REDUCTION_SIZE
+            || geometry.inner_size < PACKET_COOPERATIVE_MIN_INNER_SIZE
+            || geometry.inner_size > PACKET_COOPERATIVE_MAX_INNER_SIZE) {
+            return false;
+        }
+
+        // The many-output sweep produced a clean crossover: every measured 16/8/4-byte case whose packet-aware
+        // geometry wanted >=4 physical warps per retained tile beat the existing direct production reducer, while
+        // W=1/2 contains the direct/cooperative crossover. Keep that crossover on the established direct path rather
+        // than encoding dtype/shape-specific thresholds.
+        return static_cast<uint64_t>(choosePacketAdaptiveCooperativeTiledWarpsPerTile<InputT>(geometry))
+               >= PACKET_COOPERATIVE_MIN_WARPS_PER_TILE;
+    }
+}
+
+template <typename InputT, typename ReductionOpT, typename InputTransformT, typename OutputFinalizeT>
+void launchAdaptiveCooperativeTiledFixedSegmentReduction(const InputT* input,
+                                                         void* output,
+                                                         DataType output_dtype,
+                                                         const CubReductionGeometry& geometry,
+                                                         ReductionOpT reduction_op,
+                                                         float init,
+                                                         InputTransformT input_transform,
+                                                         OutputFinalizeT output_finalize,
+                                                         float output_scale,
+                                                         cudaStream_t stream) {
+    launchAdaptiveCooperativeTiledFixedSegmentReductionForPacketBytes<InputT,
+                                                                      ReductionOpT,
+                                                                      InputTransformT,
+                                                                      OutputFinalizeT,
+                                                                      16>(input,
+                                                                          output,
+                                                                          output_dtype,
+                                                                          geometry,
+                                                                          reduction_op,
+                                                                          init,
+                                                                          input_transform,
+                                                                          output_finalize,
+                                                                          output_scale,
+                                                                          stream);
+}
+
+template <typename InputT, typename ReductionOpT, typename InputTransformT, typename OutputFinalizeT>
+void launchPacketAdaptiveCooperativeTiledFixedSegmentReduction(const InputT* input,
+                                                               void* output,
+                                                               DataType output_dtype,
+                                                               const CubReductionGeometry& geometry,
+                                                               ReductionOpT reduction_op,
+                                                               float init,
+                                                               InputTransformT input_transform,
+                                                               OutputFinalizeT output_finalize,
+                                                               float output_scale,
+                                                               cudaStream_t stream) {
+    // launchTiledFixedSegmentReduction is instantiated for every storage type / reduction operation supported by
+    // CubReduction. A normal runtime `if (shouldUse...)` at that call site does not prevent the compiler from
+    // instantiating this function template. Keep the packet-aware kernel family behind the same compile-time support
+    // boundary as the selector so FP8, Product, Min, Max, and other unsupported combinations never instantiate the
+    // 16/8/4-byte packet geometry templates. Their established production paths remain unchanged.
+    if constexpr (!packetAdaptiveCooperativeInputTypeIsProductionSupported<InputT>()
+                  || !packetAdaptiveCooperativeReductionOpIsProductionSupported<ReductionOpT>()) {
+        throw std::logic_error(
+            "Packet-adaptive cooperative tiled reduction was launched for an unsupported input/op combination.");
+    } else {
+        switch (chooseAdaptiveCooperativeTiledPacketBytes<InputT>(geometry)) {
+            case 16:
+                launchAdaptiveCooperativeTiledFixedSegmentReductionForPacketBytes<InputT,
+                                                                                  ReductionOpT,
+                                                                                  InputTransformT,
+                                                                                  OutputFinalizeT,
+                                                                                  16>(input, output, output_dtype, geometry,
+                                                                                      reduction_op, init, input_transform,
+                                                                                      output_finalize, output_scale, stream);
+                return;
+            case 8:
+                launchAdaptiveCooperativeTiledFixedSegmentReductionForPacketBytes<InputT,
+                                                                                  ReductionOpT,
+                                                                                  InputTransformT,
+                                                                                  OutputFinalizeT,
+                                                                                  8>(input, output, output_dtype, geometry,
+                                                                                     reduction_op, init, input_transform,
+                                                                                     output_finalize, output_scale, stream);
+                return;
+            case 4:
+                launchAdaptiveCooperativeTiledFixedSegmentReductionForPacketBytes<InputT,
+                                                                                  ReductionOpT,
+                                                                                  InputTransformT,
+                                                                                  OutputFinalizeT,
+                                                                                  4>(input, output, output_dtype, geometry,
+                                                                                     reduction_op, init, input_transform,
+                                                                                     output_finalize, output_scale, stream);
+                return;
+            default:
+                throw std::logic_error("Adaptive cooperative tiled reduction selected an invalid packet width.");
+        }
+    }
+}
+
 template <typename InputT,
           typename ReductionOpT,
           typename InputTransformT,
@@ -3334,6 +3842,20 @@ void launchTiledFixedSegmentReduction(const InputT* input,
                                                                       stream);
             return;
         }
+    }
+
+    if (shouldUsePacketAdaptiveCooperativeTiledReduction<InputT, ReductionOpT>(geometry)) {
+        launchPacketAdaptiveCooperativeTiledFixedSegmentReduction<InputT>(input,
+                                                                           output,
+                                                                           output_dtype,
+                                                                           geometry,
+                                                                           reduction_op,
+                                                                           init,
+                                                                           input_transform,
+                                                                           output_finalize,
+                                                                           output_scale,
+                                                                           stream);
+        return;
     }
 
     if (geometry.inner_size == 32) {

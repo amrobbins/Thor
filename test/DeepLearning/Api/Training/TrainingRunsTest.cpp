@@ -215,6 +215,24 @@ std::shared_ptr<TrainingData> makeFakeTrainingData() {
                                           "fake_dataset");
 }
 
+std::shared_ptr<TrainingData> makeFakeTrainingDataWithoutSplits() {
+    auto dataset = std::make_shared<FakeDataset>();
+    return std::make_shared<TrainingData>(dataset,
+                                          std::optional<DatasetSplitManifest>{},
+                                          BatchPolicy(4, false),
+                                          DatasetAccessPolicy{.deviceStorage = DeviceDatasetStorage::OFF},
+                                          "fake_dataset");
+}
+
+std::shared_ptr<TrainingData> makeFakeTrainingDataWithAlternateSplits() {
+    auto dataset = std::make_shared<FakeDataset>();
+    return std::make_shared<TrainingData>(dataset,
+                                          DatasetSplitManifest(*dataset, {}, {0}),
+                                          BatchPolicy(4, false),
+                                          DatasetAccessPolicy{.deviceStorage = DeviceDatasetStorage::OFF},
+                                          "fake_dataset");
+}
+
 std::shared_ptr<TrainingData> makeFakeTestData(bool includeTestPartition) {
     auto dataset = std::make_shared<FakeDataset>();
     return std::make_shared<TrainingData>(
@@ -671,6 +689,24 @@ class ArchitectureSavingExecutor final : public TrainingExecutor {
     }
 
     uint32_t calls = 0;
+};
+
+class SaveDirectoryRecordingExecutor final : public TrainingExecutor {
+   public:
+    void fit(const TrainingRunRequest& request, TrainingObserver& observer) override {
+        saveModelDirectories.push_back(request.saveModelDirectory);
+        saveModelOverwriteValues.push_back(request.saveModelOverwrite);
+        TrainingStatsSnapshot stats = makeStats(request, 1);
+        stats.epoch = request.initialCompletedEpochs + request.epochs;
+        stats.epochs = stats.epoch;
+        observer.onTrainingEvent(TrainingEvent::statsUpdated(stats));
+        if (request.completedTrainingEpochs != nullptr) {
+            *request.completedTrainingEpochs = stats.epoch;
+        }
+    }
+
+    std::vector<std::optional<std::string>> saveModelDirectories{};
+    std::vector<bool> saveModelOverwriteValues{};
 };
 
 
@@ -1286,6 +1322,18 @@ std::shared_ptr<Trainer> makeTrainerWithData(std::shared_ptr<Network> network,
                                          .build());
 }
 
+std::shared_ptr<Trainer> makeTrainerWithRepositoryData(std::shared_ptr<Network> network,
+                                                      std::shared_ptr<TrainingExecutor> executor,
+                                                      std::shared_ptr<const TrainingData> data) {
+    ensureMinimalValidTrainingRunsTestNetwork(network);
+    return std::make_shared<Trainer>(Trainer::Builder()
+                                         .network(std::move(network))
+                                         .data(std::move(data))
+                                         .executor(std::move(executor))
+                                         .observer(std::make_shared<NullTrainingObserver>())
+                                         .build());
+}
+
 std::shared_ptr<Network> makePhaseHistoryNetwork(const std::string& networkName,
                                                      const std::string& predictionName,
                                                      const std::string& lossName) {
@@ -1510,6 +1558,234 @@ TEST(TrainingRuns, RejectsInvalidRunSpecs) {
 }
 
 
+
+TEST(TrainingRuns, RepositoryDirectoryOwnsDeterministicPerRunArtifactPaths) {
+    const std::filesystem::path root = uniqueTempPath("thor-training-runs-repository-paths");
+    std::filesystem::remove_all(root);
+
+    auto executor0 = std::make_shared<SaveDirectoryRecordingExecutor>();
+    auto executor1 = std::make_shared<SaveDirectoryRecordingExecutor>();
+    auto trainer0 = makeTrainer(std::make_shared<Network>("repository-path-fold-0"), executor0);
+    auto trainer1 = makeTrainer(std::make_shared<Network>("repository-path-fold-1"), executor1);
+
+    TrainingRuns runs(
+        {TrainingRunsSpec{"fold/0", trainer0}, TrainingRunsSpec{"fold_1", trainer1}},
+        TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+        2.0,
+        2u,
+        {},
+        root.string());
+    TrainingRunsSessionOptions session;
+    session.evaluation.evaluateTrainingPopulation = false;
+    const TrainingRunsResult result = runs.fit(TrainerFitOptions{.epochs = 1}, session);
+
+    const std::filesystem::path expected0 =
+        root / "runs" / "fold%2F0" / "stages" / "standalone" / "model";
+    const std::filesystem::path expected1 =
+        root / "runs" / "fold_1" / "stages" / "standalone" / "model";
+    ASSERT_EQ(executor0->saveModelDirectories.size(), 1u);
+    ASSERT_EQ(executor1->saveModelDirectories.size(), 1u);
+    ASSERT_TRUE(executor0->saveModelDirectories[0].has_value());
+    ASSERT_TRUE(executor1->saveModelDirectories[0].has_value());
+    EXPECT_EQ(std::filesystem::path(executor0->saveModelDirectories[0].value()), expected0);
+    EXPECT_EQ(std::filesystem::path(executor1->saveModelDirectories[0].value()), expected1);
+    ASSERT_EQ(executor0->saveModelOverwriteValues.size(), 1u);
+    ASSERT_EQ(executor1->saveModelOverwriteValues.size(), 1u);
+    EXPECT_TRUE(executor0->saveModelOverwriteValues[0]);
+    EXPECT_TRUE(executor1->saveModelOverwriteValues[0]);
+    ASSERT_EQ(result.size(), 2u);
+    EXPECT_EQ(result["fold/0"].savedModelDirectory, std::optional<std::string>(expected0.string()));
+    EXPECT_EQ(result["fold_1"].savedModelDirectory, std::optional<std::string>(expected1.string()));
+    ASSERT_TRUE(runs.getRepositoryDirectory().has_value());
+    EXPECT_EQ(std::filesystem::path(runs.getRepositoryDirectory().value()), root);
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(TrainingRuns, RepositoryDirectoryPersistsSplitAndResumeAllowsOmittedSplit) {
+    const std::filesystem::path root = uniqueTempPath("thor-training-runs-repository-split-resume");
+    std::filesystem::remove_all(root);
+
+    auto firstExecutor = std::make_shared<SaveDirectoryRecordingExecutor>();
+    auto firstTrainer = makeTrainer(std::make_shared<Network>("repository-split-first"), firstExecutor);
+    TrainingRuns firstRuns(
+        {TrainingRunsSpec{"fold_0", firstTrainer}},
+        TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+        2.0,
+        1u,
+        {},
+        root.string());
+    TrainingRunsSessionOptions session;
+    session.evaluation.evaluateTrainingPopulation = false;
+    (void)firstRuns.fit(TrainerFitOptions{.epochs = 1}, session);
+
+    const std::filesystem::path splitPath = root / "runs" / "fold_0" / "split_manifest.json";
+    ASSERT_TRUE(std::filesystem::is_regular_file(splitPath));
+    const DatasetSplitManifest persisted = DatasetSplitManifest::load(splitPath);
+    EXPECT_EQ(persisted, firstTrainer->getTrainingData()->getSplits());
+
+    auto resumedExecutor = std::make_shared<SaveDirectoryRecordingExecutor>();
+    auto resumedTrainer = makeTrainerWithRepositoryData(
+        std::make_shared<Network>("repository-split-resumed"),
+        resumedExecutor,
+        makeFakeTrainingDataWithoutSplits());
+    ASSERT_FALSE(resumedTrainer->getTrainingData()->hasSplits());
+
+    TrainingRuns resumedRuns(
+        {TrainingRunsSpec{"fold_0", resumedTrainer}},
+        TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+        2.0,
+        1u,
+        {},
+        root.string());
+    (void)resumedRuns.fit(TrainerFitOptions{.epochs = 1}, session);
+
+    ASSERT_TRUE(resumedTrainer->getTrainingData()->hasSplits());
+    EXPECT_EQ(resumedTrainer->getTrainingData()->getSplits(), persisted);
+    ASSERT_EQ(resumedExecutor->saveModelDirectories.size(), 1u);
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(TrainingRuns, RepositoryDirectoryPersistedSplitOverridesDifferentSuppliedSplitWithWarning) {
+    const std::filesystem::path root = uniqueTempPath("thor-training-runs-repository-split-override");
+    std::filesystem::remove_all(root);
+
+    auto firstExecutor = std::make_shared<SaveDirectoryRecordingExecutor>();
+    auto firstTrainer = makeTrainer(std::make_shared<Network>("repository-split-original"), firstExecutor);
+    TrainingRuns firstRuns(
+        {TrainingRunsSpec{"fold_0", firstTrainer}},
+        TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+        2.0,
+        1u,
+        {},
+        root.string());
+    TrainingRunsSessionOptions session;
+    session.evaluation.evaluateTrainingPopulation = false;
+    (void)firstRuns.fit(TrainerFitOptions{.epochs = 1}, session);
+    const DatasetSplitManifest originalSplit = firstTrainer->getTrainingData()->getSplits();
+
+    auto resumedExecutor = std::make_shared<SaveDirectoryRecordingExecutor>();
+    auto resumedTrainer = makeTrainerWithRepositoryData(
+        std::make_shared<Network>("repository-split-override-resumed"),
+        resumedExecutor,
+        makeFakeTrainingDataWithAlternateSplits());
+    ASSERT_NE(resumedTrainer->getTrainingData()->getSplits(), originalSplit);
+    TrainingRuns resumedRuns(
+        {TrainingRunsSpec{"fold_0", resumedTrainer}},
+        TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+        2.0,
+        1u,
+        {},
+        root.string());
+
+    testing::internal::CaptureStderr();
+    (void)resumedRuns.fit(TrainerFitOptions{.epochs = 1}, session);
+    const std::string warning = testing::internal::GetCapturedStderr();
+
+    EXPECT_NE(warning.find("persisted original split is authoritative and will be used instead"),
+              std::string::npos);
+    ASSERT_TRUE(resumedTrainer->getTrainingData()->hasSplits());
+    EXPECT_EQ(resumedTrainer->getTrainingData()->getSplits(), originalSplit);
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(TrainingRuns, RepositoryDirectoryNewRunRequiresSplit) {
+    const std::filesystem::path root = uniqueTempPath("thor-training-runs-repository-split-required");
+    std::filesystem::remove_all(root);
+
+    auto executor = std::make_shared<SaveDirectoryRecordingExecutor>();
+    auto trainer = makeTrainerWithRepositoryData(
+        std::make_shared<Network>("repository-split-required"),
+        executor,
+        makeFakeTrainingDataWithoutSplits());
+    TrainingRuns runs(
+        {TrainingRunsSpec{"fold_0", trainer}},
+        TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+        2.0,
+        1u,
+        {},
+        root.string());
+    TrainingRunsSessionOptions session;
+    session.evaluation.evaluateTrainingPopulation = false;
+
+    EXPECT_THROW((void)runs.fit(TrainerFitOptions{.epochs = 1}, session), std::runtime_error);
+    EXPECT_EQ(executor->saveModelDirectories.size(), 0u);
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(TrainingRuns, RepositoryDirectoryUsesCurrentTrainingPhaseAsStageIdentity) {
+    const std::filesystem::path root = uniqueTempPath("thor-training-runs-repository-phase");
+    std::filesystem::remove_all(root);
+
+    auto executor = std::make_shared<SaveDirectoryRecordingExecutor>();
+    auto trainer = makePhaseTrainerForValidation("repository_phase_member", executor);
+    TrainingRuns runs(
+        {TrainingRunsSpec{"fold_0", trainer}},
+        TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+        2.0,
+        1u,
+        {},
+        root.string());
+    TrainingRunsSessionOptions session;
+    session.evaluation.evaluateTrainingPopulation = false;
+    const TrainingRunsResult result = runs.fit(TrainerFitOptions{.epochs = 1}, session);
+
+    const std::filesystem::path expected =
+        root / "runs" / "fold_0" / "stages" / "phase" / "model";
+    ASSERT_EQ(executor->saveModelDirectories.size(), 1u);
+    ASSERT_TRUE(executor->saveModelDirectories[0].has_value());
+    EXPECT_EQ(std::filesystem::path(executor->saveModelDirectories[0].value()), expected);
+    EXPECT_EQ(result["fold_0"].savedModelDirectory, std::optional<std::string>(expected.string()));
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(TrainingRuns, RepositoryDirectoryRejectsConflictingTrainerSaveModelDirectory) {
+    const std::filesystem::path root = uniqueTempPath("thor-training-runs-repository-conflict");
+    auto executor = std::make_shared<SaveDirectoryRecordingExecutor>();
+    auto trainer = makeTrainer(
+        std::make_shared<Network>("repository-explicit-save-dir"),
+        executor,
+        (root / "explicit-model").string());
+
+    EXPECT_THROW(
+        (TrainingRuns(
+            {TrainingRunsSpec{"fold_0", trainer}},
+            TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+            2.0,
+            1u,
+            {},
+            root.string())),
+        std::runtime_error);
+}
+
+TEST(TrainingRuns, RepositoryDirectoryRefusesUnownedExistingModelArtifact) {
+    const std::filesystem::path root = uniqueTempPath("thor-training-runs-repository-unowned-artifact");
+    const std::filesystem::path model =
+        root / "runs" / "fold_0" / "stages" / "standalone" / "model";
+    std::filesystem::create_directories(model);
+
+    auto executor = std::make_shared<SaveDirectoryRecordingExecutor>();
+    auto trainer = makeTrainer(std::make_shared<Network>("repository-unowned-artifact"), executor);
+    TrainingRuns runs(
+        {TrainingRunsSpec{"fold_0", trainer}},
+        TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+        2.0,
+        1u,
+        {},
+        root.string());
+    TrainingRunsSessionOptions session;
+    session.evaluation.evaluateTrainingPopulation = false;
+
+    EXPECT_THROW((void)runs.fit(TrainerFitOptions{.epochs = 1}, session), std::runtime_error);
+    EXPECT_TRUE(std::filesystem::is_directory(model));
+    EXPECT_EQ(executor->saveModelDirectories.size(), 0u);
+
+    std::filesystem::remove_all(root);
+}
 
 TEST(TrainingRuns, ValidatesEachNetworkOnceAndReusesStartupSnapshotDuringFit) {
     auto network = std::make_shared<CountingTrainingValidationNetwork>("training-runs-validation-snapshot");

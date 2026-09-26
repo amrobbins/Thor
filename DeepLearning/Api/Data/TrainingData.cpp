@@ -53,6 +53,17 @@ TrainingData::TrainingData(std::shared_ptr<const NamedDataset> dataset,
                            BatchPolicy batching,
                            DatasetAccessPolicy accessPolicy,
                            std::string datasetName)
+    : TrainingData(std::move(dataset),
+                   std::optional<DatasetSplitManifest>(std::move(splits)),
+                   std::move(batching),
+                   accessPolicy,
+                   std::move(datasetName)) {}
+
+TrainingData::TrainingData(std::shared_ptr<const NamedDataset> dataset,
+                           std::optional<DatasetSplitManifest> splits,
+                           BatchPolicy batching,
+                           DatasetAccessPolicy accessPolicy,
+                           std::string datasetName)
     : dataset(std::move(dataset)),
       splits(std::move(splits)),
       batching(std::move(batching)),
@@ -64,7 +75,18 @@ TrainingData::TrainingData(std::shared_ptr<const NamedDataset> dataset,
     if (this->datasetName.empty()) {
         throw std::runtime_error("TrainingData dataset_name must not be empty.");
     }
-    this->splits.validateAgainst(*this->dataset);
+    if (this->splits.has_value()) {
+        this->splits->validateAgainst(*this->dataset);
+    }
+}
+
+const DatasetSplitManifest &TrainingData::getSplits() const {
+    if (!splits.has_value()) {
+        throw std::runtime_error(
+            "TrainingData has no dataset split manifest. Provide splits for a new training run, or use a "
+            "repository-backed TrainingRuns resume with a previously persisted split.");
+    }
+    return splits.value();
 }
 
 void TrainingData::requireNonEmptyPartition(ExampleType exampleType, const std::string& context) const {
@@ -72,15 +94,15 @@ void TrainingData::requireNonEmptyPartition(ExampleType exampleType, const std::
     const char* partitionName = nullptr;
     switch (exampleType) {
         case ExampleType::TRAIN:
-            partition = &splits.getTrain();
+            partition = &getSplits().getTrain();
             partitionName = "train";
             break;
         case ExampleType::VALIDATE:
-            partition = &splits.getValidate();
+            partition = &getSplits().getValidate();
             partitionName = "validate";
             break;
         case ExampleType::TEST:
-            partition = &splits.getTest();
+            partition = &getSplits().getTest();
             partitionName = "test";
             break;
         default:
@@ -106,7 +128,7 @@ std::shared_ptr<BatchSession> TrainingData::openSession(
         : fieldRequirements;
     validateFieldRequirements(dataset->getSchema(), effectiveRequirements, batching.getBatchSize());
     std::shared_ptr<BatchSession> session = dataset->openBatchSession(
-        splits, batching, accessPolicy, maxInFlightBatches, effectiveRequirements);
+        getSplits(), batching, accessPolicy, maxInFlightBatches, effectiveRequirements);
     if (session == nullptr) {
         throw std::runtime_error("NamedDataset backend returned a null BatchSession.");
     }
@@ -128,12 +150,12 @@ std::shared_ptr<BatchSession> TrainingData::openValidationSession(
     if (maxInFlightBatches == 0) {
         throw std::runtime_error("TrainingData max_in_flight_batches must be >= 1.");
     }
-    (void)splits.getValidation(validationPopulation);
+    (void)getSplits().getValidation(validationPopulation);
     DatasetFieldMaterializationRequirements effectiveRequirements = fieldRequirements.empty()
         ? allFieldRequirementsOrThrow(dataset->getSchema())
         : fieldRequirements;
     validateFieldRequirements(dataset->getSchema(), effectiveRequirements, batching.getBatchSize());
-    DatasetSplitManifest selectedSplits = splits.withDefaultValidation(validationPopulation);
+    DatasetSplitManifest selectedSplits = getSplits().withDefaultValidation(validationPopulation);
     std::shared_ptr<BatchSession> session = dataset->openBatchSession(
         selectedSplits, batching, accessPolicy, maxInFlightBatches, effectiveRequirements);
     if (session == nullptr) {

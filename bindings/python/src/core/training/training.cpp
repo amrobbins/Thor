@@ -2434,11 +2434,19 @@ fields reuse a named window source and store only compact row references.
 
     auto training_data = nb::class_<Thor::TrainingData>(training, "TrainingData", nb::is_weak_referenceable());
     training_data.attr("__module__") = "thor.data";
+    training_data.attr("__doc__") = R"nbdoc(
+Training data configuration for one dataset.
+
+Pass ``splits=None`` only when resuming repository-backed ``TrainingRuns``.
+Thor will load the original persisted split from the repository, validate it
+against ``dataset``, and use it for the resumed run. New runs and direct
+``Trainer.fit`` calls require a dataset split manifest.
+)nbdoc";
     training_data.def_static(
         "__new__",
         [](nb::handle cls,
            std::shared_ptr<Thor::NamedDataset> dataset,
-           Thor::DatasetSplitManifest splits,
+           nb::object splits,
            Thor::BatchPolicy batching,
            std::string datasetName,
            nb::object deviceStorage,
@@ -2452,26 +2460,30 @@ fields reuse a named window source and store only compact row references.
                     std::move(deviceStorage), "device_storage"),
                 .windowedDeviceCache = windowedDeviceCacheFromPython(
                     std::move(windowedDeviceCache), "windowed_device_cache")};
+            std::optional<Thor::DatasetSplitManifest> optionalSplits;
+            if (!splits.is_none()) {
+                optionalSplits.emplace(nb::cast<Thor::DatasetSplitManifest>(splits));
+            }
             return std::make_shared<Thor::TrainingData>(
                 std::move(dataset),
-                std::move(splits),
+                std::move(optionalSplits),
                 std::move(batching),
                 accessPolicy,
                 std::move(datasetName));
         },
         "cls"_a,
         "dataset"_a,
-        "splits"_a,
+        "splits"_a.none(),
         "batching"_a,
         "dataset_name"_a = "dataset",
         "device_storage"_a = "off",
         "windowed_device_cache"_a = "auto");
     training_data.def(
         "__init__",
-        [](Thor::TrainingData*, std::shared_ptr<Thor::NamedDataset>, Thor::DatasetSplitManifest,
+        [](Thor::TrainingData*, std::shared_ptr<Thor::NamedDataset>, nb::object,
            Thor::BatchPolicy, std::string, nb::object, nb::object) {},
         "dataset"_a,
-        "splits"_a,
+        "splits"_a.none(),
         "batching"_a,
         "dataset_name"_a = "dataset",
         "device_storage"_a = "off",
@@ -2495,8 +2507,13 @@ fields reuse a named window source and store only compact row references.
     training_data.def_prop_ro("dataset", [](const Thor::TrainingData& self) {
         return std::const_pointer_cast<Thor::NamedDataset>(self.getDataset());
     });
-    training_data.def_prop_ro("splits", &Thor::TrainingData::getSplits,
-                              nb::rv_policy::reference_internal);
+    training_data.def_prop_ro("has_splits", &Thor::TrainingData::hasSplits);
+    training_data.def_prop_ro(
+        "splits",
+        [](const Thor::TrainingData& self) -> const Thor::DatasetSplitManifest* {
+            return self.hasSplits() ? &self.getSplits() : nullptr;
+        },
+        nb::rv_policy::reference_internal);
     training_data.def_prop_ro("batching", &Thor::TrainingData::getBatching,
                               nb::rv_policy::reference_internal);
     training_data.def_prop_ro("dataset_name", &Thor::TrainingData::getDatasetName,
@@ -2833,7 +2850,9 @@ staged fits, for example a GLM pretrain and a later Transformer phase.
         .def_rw("epochs", &TrainerFitOptions::epochs)
         .def_rw("check_best_model_every_epochs", &TrainerFitOptions::checkBestModelEveryEpochs)
         .def_rw("first_model_selection_epoch", &TrainerFitOptions::firstModelSelectionEpoch)
-        .def_rw("max_training_batches_per_epoch", &TrainerFitOptions::maxTrainingBatchesPerEpoch);
+        .def_rw("max_training_batches_per_epoch", &TrainerFitOptions::maxTrainingBatchesPerEpoch)
+        .def_rw("checkpoint_every_epochs", &TrainerFitOptions::checkpointEveryEpochs)
+        .def_rw("retain_previous_checkpoints", &TrainerFitOptions::retainPreviousCheckpoints);
 
     auto trainer = nb::class_<Trainer>(training, "Trainer", nb::type_slots(trainer_type_slots));
     trainer.attr("__module__") = "thor.training";
@@ -2948,13 +2967,17 @@ staged fits, for example a GLM pretrain and a later Transformer phase.
            uint64_t first_model_selection_epoch,
            nb::object restart_conditions,
            nb::object early_completion_policies,
-           nb::object max_training_batches_per_epoch) -> nb::object {
+           nb::object max_training_batches_per_epoch,
+           uint32_t checkpoint_every_epochs,
+           bool retain_previous_checkpoints) -> nb::object {
             TrainerFitOptions options;
             options.epochs = epochs;
             options.checkBestModelEveryEpochs = check_best_model_every_epochs;
             options.firstModelSelectionEpoch = first_model_selection_epoch;
             options.maxTrainingBatchesPerEpoch = optionalUint64FromPython(std::move(max_training_batches_per_epoch),
                                                                           "max_training_batches_per_epoch");
+            options.checkpointEveryEpochs = checkpoint_every_epochs;
+            options.retainPreviousCheckpoints = retain_previous_checkpoints;
             options.restartConditions = trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/true);
             TrainingEarlyCompletionPoliciesBinding earlyPolicies = trainingEarlyCompletionPoliciesFromPython(early_completion_policies);
             options.earlyCompletionPolicies = std::move(earlyPolicies.policies);
@@ -2970,7 +2993,9 @@ staged fits, for example a GLM pretrain and a later Transformer phase.
         "first_model_selection_epoch"_a = 0,
         "restart_conditions"_a.none() = nb::none(),
         "early_completion_policies"_a.none() = nb::none(),
-        "max_training_batches_per_epoch"_a.none() = nb::none());
+        "max_training_batches_per_epoch"_a.none() = nb::none(),
+        "checkpoint_every_epochs"_a = 0,
+        "retain_previous_checkpoints"_a = false);
     trainer.def(
         "set_data",
         [](Trainer& self, std::shared_ptr<Thor::TrainingData> data) {
@@ -3378,14 +3403,16 @@ staged fits, for example a GLM pretrain and a later Transformer phase.
            const std::string& failure_policy,
            double max_summary_logs_per_second,
            std::optional<size_t> max_parallel_runs,
-           nb::object min_successful_models) -> nb::object {
+           nb::object min_successful_models,
+           nb::object repository_dir) -> nb::object {
             (void)cls;
             std::vector<TrainingRunsSpec> boundRuns = trainingRunsSpecsFromPython(runs);
             auto self = std::make_shared<TrainingRuns>(std::move(boundRuns),
                                                        trainingRunsFailurePolicyFromString(failure_policy),
                                                        max_summary_logs_per_second,
                                                        max_parallel_runs,
-                                                       trainingRunsMinSuccessfulModelsFromPython(min_successful_models));
+                                                       trainingRunsMinSuccessfulModelsFromPython(min_successful_models),
+                                                       optionalPathStringFromPython(repository_dir, "repository_dir"));
             return nb::cast(std::move(self));
         },
         "cls"_a,
@@ -3393,7 +3420,8 @@ staged fits, for example a GLM pretrain and a later Transformer phase.
         "failure_policy"_a = "cancel_siblings",
         "max_summary_logs_per_second"_a = 2.0,
         "max_parallel_runs"_a.none() = size_t{3},
-        "min_successful_models"_a.none() = nb::none());
+        "min_successful_models"_a.none() = nb::none(),
+        "repository_dir"_a.none() = nb::none());
     training_runs.def(
         "__init__",
         [](TrainingRuns*,
@@ -3401,12 +3429,14 @@ staged fits, for example a GLM pretrain and a later Transformer phase.
            const std::string&,
            double,
            std::optional<size_t>,
+           nb::object,
            nb::object) {},
         "runs"_a,
         "failure_policy"_a = "cancel_siblings",
         "max_summary_logs_per_second"_a = 2.0,
         "max_parallel_runs"_a.none() = size_t{3},
-        "min_successful_models"_a.none() = nb::none());
+        "min_successful_models"_a.none() = nb::none(),
+        "repository_dir"_a.none() = nb::none());
     training_runs.def_prop_ro("max_parallel_runs", [](const TrainingRuns& self) -> nb::object {
         std::optional<size_t> maxParallelRuns = self.getMaxParallelRuns();
         if (!maxParallelRuns.has_value()) {
@@ -3415,6 +3445,12 @@ staged fits, for example a GLM pretrain and a later Transformer phase.
         return nb::cast(maxParallelRuns.value());
     });
     training_runs.def_prop_ro("effective_max_parallel_runs", &TrainingRuns::getEffectiveMaxParallelRuns);
+    training_runs.def_prop_ro("repository_dir", [](const TrainingRuns& self) -> nb::object {
+        if (!self.getRepositoryDirectory().has_value()) {
+            return nb::none();
+        }
+        return nb::cast(self.getRepositoryDirectory().value());
+    });
     training_runs.def_prop_ro("reports", [](const TrainingRuns& self) { return self.getReports(); });
     training_runs.def(
         "fit",
@@ -3427,13 +3463,17 @@ staged fits, for example a GLM pretrain and a later Transformer phase.
            nb::object early_completion_rules,
            nb::object reports,
            bool evaluate_training_population,
-           nb::object max_training_batches_per_epoch) {
+           nb::object max_training_batches_per_epoch,
+           uint32_t checkpoint_every_epochs,
+           bool retain_previous_checkpoints) {
             TrainerFitOptions options;
             options.epochs = epochs;
             options.checkBestModelEveryEpochs = check_best_model_every_epochs;
             options.firstModelSelectionEpoch = first_model_selection_epoch;
             options.maxTrainingBatchesPerEpoch = optionalUint64FromPython(std::move(max_training_batches_per_epoch),
                                                                           "max_training_batches_per_epoch");
+            options.checkpointEveryEpochs = checkpoint_every_epochs;
+            options.retainPreviousCheckpoints = retain_previous_checkpoints;
             TrainingRunsSessionOptions sessionOptions;
             sessionOptions.restartConditions = trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/false);
             TrainingRunsEarlyCompletionRulesBinding earlyRules = trainingRunsEarlyCompletionRulesFromPython(early_completion_rules);
@@ -3452,7 +3492,9 @@ staged fits, for example a GLM pretrain and a later Transformer phase.
         "early_completion_rules"_a.none() = nb::none(),
         "reports"_a.none() = nb::none(),
         "evaluate_training_population"_a = true,
-        "max_training_batches_per_epoch"_a.none() = nb::none());
+        "max_training_batches_per_epoch"_a.none() = nb::none(),
+        "checkpoint_every_epochs"_a = 0,
+        "retain_previous_checkpoints"_a = false);
 
     auto gradient_clear_policy = nb::enum_<TrainingStep::GradientClearPolicy>(training, "GradientClearPolicy")
                                      .value("clear_before_step", TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP)

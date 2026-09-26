@@ -595,6 +595,31 @@ TEST(CubReduction, TiledFixedSegmentCoversWidthPoliciesAndAsyncStaging) {
     }
 }
 
+TEST(CubReduction, PacketAdaptiveCooperativeTiledPathPreservesAdditiveTransformsAndFinalizers) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer_size = 1;
+    constexpr uint64_t reduction_size = 205;
+    constexpr uint64_t inner_size = 128;
+    Tensor input = makeGpuTensor(std::vector<float>(outer_size * reduction_size * inner_size, 1.0f),
+                                 {outer_size, reduction_size, inner_size},
+                                 stream,
+                                 DataType::BF16);
+
+    // This is the ordinary second-stage geometry produced by a 512-row shard of the deep transformer reduction.
+    // It is inside the release-calibrated packet-adaptive cooperative gate (8-byte BF16 packets, many cooperating
+    // warps) but still exercises the generic additive transforms/finalizers rather than a Sum-only special case.
+    const std::vector<OperationExpectation> expectations = {
+        {CubReductionOp::Sum, std::vector<float>(inner_size, 205.0f), 0.0f},
+        {CubReductionOp::Mean, std::vector<float>(inner_size, 1.0f), 0.0f},
+        {CubReductionOp::L1Norm, std::vector<float>(inner_size, 205.0f), 0.0f},
+        {CubReductionOp::L2Norm, std::vector<float>(inner_size, std::sqrt(205.0f)), 1.0e-4f},
+        {CubReductionOp::SumSquares, std::vector<float>(inner_size, 205.0f), 0.0f},
+    };
+    expectOperations(input, 1, expectations, stream);
+}
+
 TEST(CubReduction, RowSplitFullRowProductionPathCoversDirectAndGroupedTransformerRegimes) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);

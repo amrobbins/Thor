@@ -137,22 +137,27 @@ std::optional<std::string> stateMatchKeyForParameter(Network& network, const Par
     return cloneKey.value() + ":" + reference.getParameterName();
 }
 
-std::string sameNetworkStateKeyForParameter(const ParameterReference& reference) {
-    return "layer" + std::to_string(reference.getParameterizableId()) + ":" + reference.getParameterName();
+size_t sameNetworkLayerIndexForParameter(Network& network, const ParameterReference& reference) {
+    for (size_t layerIndex = 0; layerIndex < network.getNumLayers(); ++layerIndex) {
+        const std::shared_ptr<Layer> layer = network.getLayer(static_cast<uint32_t>(layerIndex));
+        if (layer != nullptr && layer->getId() == reference.getParameterizableId()) {
+            return layerIndex;
+        }
+    }
+
+    throw std::runtime_error(
+        "PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: destination parameter '" +
+        reference.getParameterName() + "' refers to API layer id " +
+        std::to_string(reference.getParameterizableId()) + " which is not present in the destination network.");
 }
 
-std::optional<std::string> sameNetworkStateKeyForSerializedParameter(const json& layerJson,
-                                                                     const std::string& parameterName) {
-    if (!layerJson.contains("layer_name") || !layerJson.at("layer_name").is_string()) {
-        return std::nullopt;
-    }
+std::string sameNetworkStateKeyForParameter(Network& network, const ParameterReference& reference) {
+    return "layer_index_" + std::to_string(sameNetworkLayerIndexForParameter(network, reference)) + ":" +
+           reference.getParameterName();
+}
 
-    const std::string layerName = layerJson.at("layer_name").get<std::string>();
-    if (layerName.empty()) {
-        return std::nullopt;
-    }
-
-    return layerName + ":" + parameterName;
+std::string sameNetworkStateKeyForSerializedParameter(size_t layerIndex, const std::string& parameterName) {
+    return "layer_index_" + std::to_string(layerIndex) + ":" + parameterName;
 }
 
 
@@ -220,6 +225,8 @@ struct ArchiveParameterState {
     std::string storageFile;
     json optimizerJson;
     std::string description;
+    std::string layerType;
+    std::string layerVersion;
 };
 
 std::unordered_map<size_t, std::string> cloneSourceKeyByLayerIndex(const json& modelJson) {
@@ -335,13 +342,7 @@ std::unordered_map<std::string, ArchiveParameterState> archiveParameterStateBySa
                 continue;
             }
 
-            const std::optional<std::string> key = sameNetworkStateKeyForSerializedParameter(layerJson, parameterName);
-            if (!key.has_value()) {
-                throw std::runtime_error(
-                    "PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: serialized trainable parameter '" +
-                    parameterName + "' in artifact layer " + std::to_string(layerIndex) +
-                    " is missing layer_name; same-network restore requires exact API layer identity.");
-            }
+            const std::string key = sameNetworkStateKeyForSerializedParameter(layerIndex, parameterName);
 
             ArchiveParameterState state;
             state.storageFile = parameterJson.at(storageFileKey).get<std::string>();
@@ -351,12 +352,18 @@ std::unordered_map<std::string, ArchiveParameterState> archiveParameterStateBySa
                 state.optimizerJson = parameterJson.at("optimizer");
             }
             state.description = "artifact layer " + std::to_string(layerIndex) + " parameter '" + parameterName + "'";
+            if (layerJson.contains("layer_type") && layerJson.at("layer_type").is_string()) {
+                state.layerType = layerJson.at("layer_type").get<std::string>();
+            }
+            if (layerJson.contains("version") && layerJson.at("version").is_string()) {
+                state.layerVersion = layerJson.at("version").get<std::string>();
+            }
 
-            auto insertResult = result.emplace(key.value(), state);
+            auto insertResult = result.emplace(key, state);
             if (!insertResult.second) {
                 throw std::runtime_error(
-                    "PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: duplicate API-layer parameter key '" +
-                    key.value() + "' in serialized artifact.");
+                    "PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: duplicate stable layer-position parameter key '" +
+                    key + "' in serialized artifact.");
             }
         }
     }
@@ -1159,7 +1166,7 @@ void PlacedNetwork::loadTrainingStateFromSameNetworkArtifact(const std::string& 
         archiveParameterStateBySameNetworkKey(modelJson);
     if (sourceParameterByStateKey.empty()) {
         throw std::runtime_error(
-            "PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: artifact contains no API-layer keyed trainable parameter state.");
+            "PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: artifact contains no trainable parameter state.");
     }
 
     uint64_t registeredStateLoads = 0;
@@ -1167,13 +1174,53 @@ void PlacedNetwork::loadTrainingStateFromSameNetworkArtifact(const std::string& 
         ThorImplementation::StampedNetwork& destinationStamp = stampedNetworks[stampIndex];
 
         for (const ParameterReference& destinationReference : destinationParameterReferences) {
-            const std::string destinationKey = sameNetworkStateKeyForParameter(destinationReference);
+            const size_t destinationLayerIndex = sameNetworkLayerIndexForParameter(network, destinationReference);
+            const std::string destinationKey = sameNetworkStateKeyForParameter(network, destinationReference);
 
             auto sourceIt = sourceParameterByStateKey.find(destinationKey);
             if (sourceIt == sourceParameterByStateKey.end()) {
                 throw std::runtime_error(
-                    "PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: artifact has no saved state for exact API-layer parameter key '" +
+                    "PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: artifact has no saved state for stable layer-position parameter key '" +
                     destinationKey + "'.");
+            }
+
+            const std::shared_ptr<Layer> destinationLayer = network.getLayer(static_cast<uint32_t>(destinationLayerIndex));
+            if (destinationLayer == nullptr) {
+                throw std::runtime_error(
+                    "PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: destination layer at index " +
+                    std::to_string(destinationLayerIndex) + " is null.");
+            }
+            // Compare against the destination's serialized architecture rather than getLayerType().
+            // Serialized artifacts use canonical layer_type names such as "fully_connected", while
+            // getLayerType() intentionally returns API-facing class names such as "FullyConnected".
+            // Recovery must compare like-for-like serialization identities so an equivalent graph
+            // reconstructed in a fresh process is not rejected merely because of naming convention.
+            const json destinationArchitecture = destinationLayer->architectureJson();
+            if (!sourceIt->second.layerType.empty()) {
+                if (!destinationArchitecture.contains("layer_type") ||
+                    !destinationArchitecture.at("layer_type").is_string()) {
+                    throw std::runtime_error(
+                        "PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: destination layer at stable layer index " +
+                        std::to_string(destinationLayerIndex) + " has no serialized layer_type for compatibility checking.");
+                }
+                const std::string destinationLayerType = destinationArchitecture.at("layer_type").get<std::string>();
+                if (sourceIt->second.layerType != destinationLayerType) {
+                    throw std::runtime_error(
+                        "PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: layer type mismatch at stable layer index " +
+                        std::to_string(destinationLayerIndex) + " (artifact='" + sourceIt->second.layerType +
+                        "', destination='" + destinationLayerType + "').");
+                }
+            }
+            if (!sourceIt->second.layerVersion.empty() &&
+                destinationArchitecture.contains("version") &&
+                destinationArchitecture.at("version").is_string()) {
+                const std::string destinationVersion = destinationArchitecture.at("version").get<std::string>();
+                if (destinationVersion != sourceIt->second.layerVersion) {
+                    throw std::runtime_error(
+                        "PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: layer version mismatch at stable layer index " +
+                        std::to_string(destinationLayerIndex) + " (artifact='" + sourceIt->second.layerVersion +
+                        "', destination='" + destinationVersion + "').");
+                }
             }
 
             std::shared_ptr<ThorImplementation::PhysicalParameter> destinationParameter =
@@ -1187,7 +1234,7 @@ void PlacedNetwork::loadTrainingStateFromSameNetworkArtifact(const std::string& 
                                          destinationReference.getParameterName() + "': destination parameter storage is not initialized.");
             }
 
-            const std::string description = "API-layer state key '" + destinationKey + "' parameter '" +
+            const std::string description = "stable layer-position state key '" + destinationKey + "' parameter '" +
                                             destinationReference.getParameterName() + "'";
             ThorImplementation::Tensor destinationStorage = destinationParameter->getStorage().value();
             registerArchiveTensorReadWithSizeCheck(*archiveReader,

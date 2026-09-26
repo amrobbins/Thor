@@ -6,6 +6,15 @@
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/vector.h>
 
+#include <cerrno>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+
+#if defined(__linux__)
+#include <sys/resource.h>
+#endif
+
 namespace nb = nanobind;
 using namespace nb::literals;
 
@@ -15,6 +24,36 @@ using namespace nb::literals;
 #include "bindings/python/src/core/network_registry.h"
 
 using DataType = ThorImplementation::DataType;
+
+namespace {
+
+void raiseOpenFileSoftLimitToHardLimit() {
+#if defined(__linux__)
+    struct rlimit limit {};
+    if (::getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+        const int errorNumber = errno;
+        throw std::runtime_error(
+            std::string("Thor failed to read RLIMIT_NOFILE during import: ") + std::strerror(errorNumber));
+    }
+
+    if (limit.rlim_cur == limit.rlim_max) {
+        return;
+    }
+
+    const rlim_t oldSoftLimit = limit.rlim_cur;
+    limit.rlim_cur = limit.rlim_max;
+    if (::setrlimit(RLIMIT_NOFILE, &limit) != 0) {
+        const int errorNumber = errno;
+        throw std::runtime_error(
+            std::string("Thor failed to raise the RLIMIT_NOFILE soft limit from ") +
+            std::to_string(static_cast<unsigned long long>(oldSoftLimit)) + " to the process hard limit " +
+            std::to_string(static_cast<unsigned long long>(limit.rlim_max)) + " during import: " +
+            std::strerror(errorNumber));
+    }
+#endif
+}
+
+}  // namespace
 
 // Forward declarations for per-feature binders
 void bind_version(nb::module_ &thor);
@@ -35,6 +74,8 @@ void bind_physical(nb::module_ &physical);
 void bind_random(nb::module_ &random);
 
 NB_MODULE(_thor, thor) {
+    raiseOpenFileSoftLimitToHardLimit();
+
     thor.doc() = "Thor Python bindings";
 
     bind_version(thor);

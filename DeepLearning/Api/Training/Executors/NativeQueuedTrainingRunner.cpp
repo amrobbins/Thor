@@ -22,7 +22,9 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
 #include "DeepLearning/Implementation/Training/PhaseWallThroughputTracker.h"
+#include "DeepLearning/Implementation/Training/TrainingCheckpointRepository.h"
 #include "Utilities/Common/ScopedGpu.h"
+#include "Utilities/Common/FilesystemDurability.h"
 #include "Utilities/Expression/CudaHelpers.h"
 
 #include <cuda_runtime_api.h>
@@ -63,6 +65,7 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include <nlohmann/json.hpp>
 
 namespace Thor {
 
@@ -664,6 +667,14 @@ struct QueuedWorkSegmentState {
     bool isDefaultValidationPopulation = false;
     std::optional<uint64_t> maxBatchesToRun;
 
+    // When populated, this segment is the first optimizer-bearing work after
+    // a trained model-selection epoch. The resident scheduler may resolve the
+    // segment and acquire its first batch while that host decision is pending,
+    // but it must not mutate optimizer state or submit the batch to a network
+    // stamp until score evaluation, any synchronous best-candidate save, and
+    // early-completion evaluation for that epoch have finished.
+    std::optional<uint64_t> requiredHostDecisionEpoch;
+
     // Mutable BatchSession cursor-derived fields are intentionally resolved by
     // the scheduler worker immediately before this segment is scheduled. Do not
     // freeze them while a future scheduling window is built on the control thread.
@@ -741,6 +752,16 @@ struct NativeQueuedSchedulingWindowState {
     std::shared_ptr<NativeQueuedRunState> runState;
     std::vector<std::shared_ptr<QueuedWorkSegmentState>> segments;
     uint64_t completedBatchCallbacks = 0;
+
+    // Model-selection decisions are host-side semantic barriers, but they do
+    // not require a new scheduling window.  The producer remains resident and
+    // waits here before submitting the first segment of the following epoch.
+    // The same run-state mutex protects these fields so cancellation/failure
+    // and host-decision wakeups cannot race past one another.
+    std::condition_variable hostDecisionFinished;
+    uint64_t latestResolvedHostDecisionEpoch = 0;
+    bool stopSchedulingAfterHostDecision = false;
+
     bool schedulingFinished = false;
 };
 
@@ -781,6 +802,35 @@ void requestQueuedTrainingCancellation(const std::shared_ptr<NativeQueuedSchedul
     }
     state->runState->batchFinished.notify_all();
     state->runState->batchPopped.notify_all();
+    state->hostDecisionFinished.notify_all();
+}
+
+void continueQueuedTrainingAfterHostDecision(
+    const std::shared_ptr<NativeQueuedSchedulingWindowState>& state,
+    uint64_t completedEpoch) {
+    THOR_THROW_IF_FALSE(state != nullptr);
+    {
+        std::lock_guard<std::mutex> lock(state->runState->mutex);
+        THOR_THROW_IF_FALSE(!state->stopSchedulingAfterHostDecision);
+        THOR_THROW_IF_FALSE(
+            completedEpoch >= state->latestResolvedHostDecisionEpoch);
+        state->latestResolvedHostDecisionEpoch = completedEpoch;
+    }
+    state->hostDecisionFinished.notify_all();
+}
+
+void stopQueuedTrainingAfterHostDecision(
+    const std::shared_ptr<NativeQueuedSchedulingWindowState>& state,
+    uint64_t completedEpoch) {
+    THOR_THROW_IF_FALSE(state != nullptr);
+    {
+        std::lock_guard<std::mutex> lock(state->runState->mutex);
+        THOR_THROW_IF_FALSE(
+            completedEpoch >= state->latestResolvedHostDecisionEpoch);
+        state->latestResolvedHostDecisionEpoch = completedEpoch;
+        state->stopSchedulingAfterHostDecision = true;
+    }
+    state->hostDecisionFinished.notify_all();
 }
 
 std::set<std::string> networkOutputNames(Network& network) {
@@ -1201,6 +1251,101 @@ void emitNativeQueueScheduleTimingDiagnostic(TrainingEventPhase phase,
     std::fflush(stderr);
 }
 
+bool modelSelectionDiagnosticsEnabled() {
+    const char* enabled = std::getenv("THOR_MODEL_SELECTION_DIAGNOSTICS");
+    return enabled != nullptr && enabled[0] != '\0' &&
+           !(enabled[0] == '0' && enabled[1] == '\0');
+}
+
+using ModelSelectionDiagnosticTimePoint =
+    std::chrono::high_resolution_clock::time_point;
+
+ModelSelectionDiagnosticTimePoint modelSelectionDiagnosticNow(bool enabled) {
+    return enabled ? std::chrono::high_resolution_clock::now()
+                   : ModelSelectionDiagnosticTimePoint{};
+}
+
+uint64_t modelSelectionElapsedMicros(ModelSelectionDiagnosticTimePoint start,
+                                     ModelSelectionDiagnosticTimePoint finish) {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(finish - start)
+            .count());
+}
+
+void emitNativeHostDecisionGateTimingDiagnostic(
+    TrainingEventPhase phase,
+    uint64_t epoch,
+    uint64_t requiredDecisionEpoch,
+    uint64_t prefetchMicros,
+    uint64_t gateWaitMicros,
+    uint64_t optimizerMicros,
+    uint64_t reserveMicros,
+    uint64_t bindSubmitMicros,
+    uint64_t gateReleaseToSubmitMicros,
+    uint64_t gateReleaseToScheduleEndMicros,
+    bool continued) {
+    if (!modelSelectionDiagnosticsEnabled()) {
+        return;
+    }
+    std::fprintf(
+        stderr,
+        "THOR_MODEL_SELECTION_DIAGNOSTIC event=host_decision_gate_timing phase=%s epoch=%lu "
+        "required_decision_epoch=%lu prefetch_us=%lu gate_wait_us=%lu optimizer_us=%lu reserve_us=%lu "
+        "bind_submit_us=%lu gate_release_to_submit_us=%lu gate_release_to_schedule_end_us=%lu continued=%u\n",
+        phaseName(phase).c_str(),
+        epoch + 1,
+        requiredDecisionEpoch,
+        prefetchMicros,
+        gateWaitMicros,
+        optimizerMicros,
+        reserveMicros,
+        bindSubmitMicros,
+        gateReleaseToSubmitMicros,
+        gateReleaseToScheduleEndMicros,
+        continued ? 1u : 0u);
+    std::fflush(stderr);
+}
+
+void emitNativeModelSelectionTimingDiagnostic(
+    uint64_t epoch,
+    uint64_t completionCallbackToDecisionMicros,
+    uint64_t popReturnToDecisionMicros,
+    uint64_t completionCallbackToGateReleaseMicros,
+    uint64_t contextAndScoreMicros,
+    uint64_t snapshotMicros,
+    uint64_t earlyCompletionMicros,
+    uint64_t gateSignalMicros,
+    uint64_t decisionTotalMicros,
+    bool newBest,
+    bool checkpointWritten,
+    bool earlyCompletionRequested,
+    bool gatedLaterWork) {
+    if (!modelSelectionDiagnosticsEnabled()) {
+        return;
+    }
+    std::fprintf(
+        stderr,
+        "THOR_MODEL_SELECTION_DIAGNOSTIC event=model_selection_timing epoch=%lu "
+        "completion_callback_to_decision_us=%lu pop_return_to_decision_us=%lu "
+        "completion_callback_to_gate_release_us=%lu context_score_us=%lu snapshot_us=%lu "
+        "early_completion_us=%lu gate_signal_us=%lu decision_total_us=%lu "
+        "new_best=%u checkpoint_written=%u early_complete=%u gated_later_work=%u\n",
+        epoch,
+        completionCallbackToDecisionMicros,
+        popReturnToDecisionMicros,
+        completionCallbackToGateReleaseMicros,
+        contextAndScoreMicros,
+        snapshotMicros,
+        earlyCompletionMicros,
+        gateSignalMicros,
+        decisionTotalMicros,
+        newBest ? 1u : 0u,
+        checkpointWritten ? 1u : 0u,
+        earlyCompletionRequested ? 1u : 0u,
+        gatedLaterWork ? 1u : 0u);
+    std::fflush(stderr);
+}
+
 void emitNativeQueueCompletionTimingDiagnostic(TrainingEventPhase phase,
                                                uint64_t epoch,
                                                uint64_t batch,
@@ -1467,33 +1612,86 @@ struct TrainingSelectionMetadata {
 
 class TrainingArtifactManager {
    public:
-    TrainingArtifactManager(std::optional<std::string> saveModelDirectory, bool overwrite)
-        : saveModelDirectory(std::move(saveModelDirectory)), overwrite(overwrite) {}
-
-    ~TrainingArtifactManager() {
-        if (bestCandidate.has_value() && bestCandidate->directory.has_value()) {
-            std::error_code errorCode;
-            std::filesystem::remove_all(bestCandidate->directory.value(), errorCode);
+    TrainingArtifactManager(std::optional<std::string> saveModelDirectory,
+                            bool overwrite,
+                            uint64_t phaseStartCompletedEpoch,
+                            uint32_t checkBestModelEveryEpochs,
+                            uint64_t firstModelSelectionEpoch,
+                            uint32_t checkpointEveryEpochs,
+                            bool retainPreviousCheckpoints,
+                            uint32_t requestedEpochs)
+        : saveModelDirectory(std::move(saveModelDirectory)),
+          overwrite(overwrite),
+          phaseStartCompletedEpoch(phaseStartCompletedEpoch),
+          checkBestModelEveryEpochs(checkBestModelEveryEpochs),
+          firstModelSelectionEpoch(firstModelSelectionEpoch),
+          checkpointEveryEpochs(checkpointEveryEpochs),
+          retainPreviousCheckpoints(retainPreviousCheckpoints),
+          requestedEpochs(requestedEpochs) {
+        if (this->saveModelDirectory.has_value()) {
+            checkpointRepository = std::make_unique<ThorImplementation::TrainingCheckpointRepository>(
+                ThorImplementation::TrainingCheckpointRepository::repositoryDirectoryForModelArtifact(
+                    this->saveModelDirectory.value()));
+            const std::optional<ThorImplementation::TrainingCheckpointRepository::RecoveryState> recovery =
+                checkpointRepository->readRecoveryState();
+            if (recovery.has_value()) {
+                deviceDatasetStorageReport = recovery->current.deviceDatasetStorageReport;
+            }
+            if (recovery.has_value() && recovery->bestGeneration.has_value()) {
+                THOR_THROW_IF_FALSE(recovery->best.has_value());
+                THOR_THROW_IF_FALSE(recovery->bestDirectory.has_value());
+                THOR_THROW_IF_FALSE(recovery->best->bestEpoch.has_value());
+                THOR_THROW_IF_FALSE(recovery->best->bestScore.has_value());
+                BestCandidate recoveredBest;
+                recoveredBest.epoch = recovery->best->bestEpoch.value();
+                recoveredBest.score = recovery->best->bestScore.value();
+                recoveredBest.context.epoch = recoveredBest.epoch;
+                recoveredBest.generationName = recovery->bestGeneration;
+                recoveredBest.directory = recovery->bestDirectory;
+                bestCandidate = std::move(recoveredBest);
+            }
         }
     }
 
+    ~TrainingArtifactManager() = default;
+
     [[nodiscard]] bool enabled() const { return saveModelDirectory.has_value(); }
 
+    void setDeviceDatasetStorageReport(const DeviceDatasetStorageReport& report) {
+        deviceDatasetStorageReport = report;
+    }
+
+    [[nodiscard]] const DeviceDatasetStorageReport& getDeviceDatasetStorageReport() const {
+        return deviceDatasetStorageReport;
+    }
+
     void clearBestCandidate() {
-        if (bestCandidate.has_value() && bestCandidate->directory.has_value()) {
-            removePathIfExists(bestCandidate->directory.value());
+        if (bestCandidate.has_value() && bestCandidate->generationName.has_value()) {
+            THOR_THROW_IF_FALSE(checkpointRepository != nullptr);
+            const std::string generationName = bestCandidate->generationName.value();
+            checkpointRepository->removePointerIfMatches(
+                ThorImplementation::TrainingCheckpointRepository::Pointer::CURRENT,
+                generationName);
+            checkpointRepository->removePointerIfMatches(
+                ThorImplementation::TrainingCheckpointRepository::Pointer::BEST,
+                generationName);
+            // Startup-retry candidates belong to a failed placement attempt and
+            // are not checkpoint history. Retire them even when historical
+            // checkpoint retention is enabled.
+            checkpointRepository->retireGenerationIfUnreferenced(generationName);
         }
         bestCandidate.reset();
     }
 
-    void maybeSnapshotBestCandidate(PlacedNetwork& placedNetwork,
+    // Returns true only when a durable repository generation was written.
+    bool maybeSnapshotBestCandidate(PlacedNetwork& placedNetwork,
                                     const TrainingModelSelectionContext& context,
                                     std::optional<double> score) {
         if (!score.has_value() || !std::isfinite(score.value())) {
-            return;
+            return false;
         }
         if (bestCandidate.has_value() && score.value() >= bestCandidate->score) {
-            return;
+            return false;
         }
 
         BestCandidate nextCandidate;
@@ -1502,33 +1700,39 @@ class TrainingArtifactManager {
         nextCandidate.context = context;
         if (!enabled()) {
             bestCandidate = std::move(nextCandidate);
+            return false;
+        }
+
+        const PublishedCheckpoint checkpoint = publishCheckpoint(
+            placedNetwork,
+            context.epoch,
+            /*updateBest=*/true,
+            "best",
+            context.epoch,
+            score.value());
+        nextCandidate.generationName = checkpoint.generationName;
+        nextCandidate.directory = checkpoint.directory;
+        bestCandidate = std::move(nextCandidate);
+        return true;
+    }
+
+    void snapshotCurrentCheckpoint(PlacedNetwork& placedNetwork,
+                                   uint64_t completedEpoch) {
+        if (!enabled()) {
             return;
         }
-
-        const std::filesystem::path newCandidate = uniqueCandidateDirectory(context.epoch);
-        const std::filesystem::path tmpCandidate = uniqueTemporaryDirectory(context.epoch);
-        removePathIfExists(tmpCandidate);
-        removePathIfExists(newCandidate);
-
-        try {
-            placedNetwork.save(tmpCandidate.string(), /*overwrite=*/true, /*saveOptimizerState=*/true);
-            std::filesystem::rename(tmpCandidate, newCandidate);
-        } catch (...) {
-            removePathIfExists(tmpCandidate);
-            removePathIfExists(newCandidate);
-            throw;
-        }
-
-        if (bestCandidate.has_value() && bestCandidate->directory.has_value()) {
-            removePathIfExists(bestCandidate->directory.value());
-        }
-        nextCandidate.directory = newCandidate;
-        bestCandidate = std::move(nextCandidate);
+        publishCheckpoint(placedNetwork,
+                          completedEpoch,
+                          /*updateBest=*/false,
+                          "periodic",
+                          getBestEpoch(),
+                          getBestScore());
     }
 
     void finalize(PlacedNetwork& placedNetwork,
                   const TrainingSelectionMetadata& metadata,
-                  bool persistLatestArtifact) {
+                  bool persistLatestArtifact,
+                  double completedTrainingElapsedSeconds) {
         if (!enabled()) {
             return;
         }
@@ -1536,11 +1740,123 @@ class TrainingArtifactManager {
             throw std::runtime_error(
                 "Training artifact finalization requires either a latest artifact or a persisted best candidate.");
         }
+        THOR_THROW_IF_FALSE(checkpointRepository != nullptr);
 
-        const std::filesystem::path artifactRoot = std::filesystem::path(saveModelDirectory.value());
-        if (std::filesystem::exists(artifactRoot) && !overwrite) {
-            throw std::runtime_error("Training artifact cannot replace existing save_model_dir '" + artifactRoot.string() +
-                                     "' because save_model_overwrite is false.");
+        std::optional<std::string> latestGeneration{};
+        if (persistLatestArtifact) {
+            const std::optional<std::string> current = checkpointRepository->readPointer(
+                ThorImplementation::TrainingCheckpointRepository::Pointer::CURRENT);
+            if (current.has_value() &&
+                checkpointRepository->readCheckpointState(current.value()).completedEpoch == metadata.completedEpoch) {
+                latestGeneration = current;
+            } else {
+                latestGeneration = publishCheckpoint(
+                    placedNetwork,
+                    metadata.completedEpoch,
+                    /*updateBest=*/false,
+                    "completed_latest",
+                    getBestEpoch(),
+                    getBestScore()).generationName;
+            }
+        }
+
+        const std::optional<std::string> bestGeneration = hasBestCandidateArtifact()
+            ? bestCandidate->generationName
+            : std::nullopt;
+        const std::string selectedGeneration = bestGeneration.has_value()
+            ? bestGeneration.value()
+            : latestGeneration.value();
+        const std::string selectedArtifactKind = bestGeneration.has_value() ? "best" : "latest";
+        const uint64_t selectedEpoch = bestGeneration.has_value()
+            ? bestCandidate->epoch
+            : metadata.completedEpoch;
+
+        const auto completion = makeCompletionState(metadata,
+                                                    selectedGeneration,
+                                                    selectedArtifactKind,
+                                                    latestGeneration,
+                                                    bestGeneration,
+                                                    placedNetwork.getNetworkName(),
+                                                    selectedEpoch,
+                                                    completedTrainingElapsedSeconds);
+        // Record terminal training state before touching the legacy final model
+        // root. If the process dies during finalization, reopening the repository
+        // finishes publication from these immutable generations without replaying
+        // optimizer work (including early-completed stages whose CURRENT epoch is
+        // earlier than the phase target).
+        checkpointRepository->prepareCompletion(completion);
+        finalizePreparedCompletion(completion);
+    }
+
+    void finalizeRecovered(const TrainingSelectionMetadata& metadata,
+                           bool persistLatestArtifact,
+                           const std::string& networkName,
+                           double completedTrainingElapsedSeconds) {
+        if (!enabled()) {
+            return;
+        }
+        THOR_THROW_IF_FALSE(checkpointRepository != nullptr);
+        const std::optional<std::string> currentGeneration = checkpointRepository->readPointer(
+            ThorImplementation::TrainingCheckpointRepository::Pointer::CURRENT);
+        if (!currentGeneration.has_value()) {
+            throw std::runtime_error("Recovered training finalization requires a CURRENT checkpoint generation.");
+        }
+        if (!persistLatestArtifact && !hasBestCandidateArtifact()) {
+            throw std::runtime_error(
+                "Recovered training finalization requires either CURRENT/latest or a persisted BEST candidate.");
+        }
+
+        const std::optional<std::string> latestGeneration = persistLatestArtifact
+            ? currentGeneration
+            : std::nullopt;
+        const std::optional<std::string> bestGeneration = hasBestCandidateArtifact()
+            ? bestCandidate->generationName
+            : std::nullopt;
+        const std::string selectedGeneration = bestGeneration.has_value()
+            ? bestGeneration.value()
+            : latestGeneration.value();
+        const std::string selectedArtifactKind = bestGeneration.has_value() ? "best" : "latest";
+        const uint64_t selectedEpoch = bestGeneration.has_value()
+            ? bestCandidate->epoch
+            : metadata.completedEpoch;
+
+        const auto completion = makeCompletionState(metadata,
+                                                    selectedGeneration,
+                                                    selectedArtifactKind,
+                                                    latestGeneration,
+                                                    bestGeneration,
+                                                    networkName,
+                                                    selectedEpoch,
+                                                    completedTrainingElapsedSeconds);
+        checkpointRepository->prepareCompletion(completion);
+        finalizePreparedCompletion(completion);
+    }
+
+    void finalizePreparedCompletion(
+        const ThorImplementation::TrainingCheckpointRepository::CompletionState& completion) {
+        if (!enabled()) {
+            return;
+        }
+        THOR_THROW_IF_FALSE(checkpointRepository != nullptr);
+
+        const TrainingSelectionMetadata metadata = selectionMetadataFromCompletion(completion);
+        const std::filesystem::path artifactRoot(saveModelDirectory.value());
+        std::error_code errorCode;
+        const bool artifactExists = std::filesystem::exists(artifactRoot, errorCode);
+        if (errorCode) {
+            throw std::runtime_error("Failed to inspect training artifact root '" + artifactRoot.string() +
+                                     "': " + errorCode.message());
+        }
+        if (artifactExists && !overwrite) {
+            if (!existingFinalArtifactMatches(artifactRoot,
+                                             metadata,
+                                             completion.latestGeneration.has_value(),
+                                             completion.bestGeneration.has_value())) {
+                throw std::runtime_error("Training artifact cannot replace existing save_model_dir '" +
+                                         artifactRoot.string() + "' because save_model_overwrite is false.");
+            }
+            commitPreparedCompletion();
+            return;
         }
 
         const std::filesystem::path finalTemporaryDirectory = uniqueFinalTemporaryDirectory();
@@ -1549,31 +1865,25 @@ class TrainingArtifactManager {
         removePathIfExists(replacementBackupDirectory);
 
         try {
-            std::filesystem::create_directories(finalTemporaryDirectory);
-
-            if (persistLatestArtifact) {
-                const std::filesystem::path latestDirectory = finalTemporaryDirectory / "latest";
-                const std::filesystem::path latestTemporaryDirectory = finalTemporaryDirectory / ".latest.tmp";
-                removePathIfExists(latestTemporaryDirectory);
-                placedNetwork.save(latestTemporaryDirectory.string(), /*overwrite=*/true, /*saveOptimizerState=*/true);
-                std::filesystem::rename(latestTemporaryDirectory, latestDirectory);
+            FilesystemDurability::createDirectoriesDurably(finalTemporaryDirectory);
+            if (completion.latestGeneration.has_value()) {
+                checkpointRepository->copyGenerationDurably(
+                    completion.latestGeneration.value(), finalTemporaryDirectory / "latest");
             }
-
-            if (hasBestCandidateArtifact()) {
-                const std::filesystem::path bestDirectory = finalTemporaryDirectory / "best";
-                removePathIfExists(bestDirectory);
-                std::filesystem::rename(bestCandidate->directory.value(), bestDirectory);
-                bestCandidate->directory.reset();
+            if (completion.bestGeneration.has_value()) {
+                checkpointRepository->copyGenerationDurably(
+                    completion.bestGeneration.value(), finalTemporaryDirectory / "best");
             }
-
             writeSelectionMetadata(finalTemporaryDirectory, metadata);
+            FilesystemDurability::syncDirectory(finalTemporaryDirectory);
             replaceArtifactRoot(finalTemporaryDirectory, artifactRoot, replacementBackupDirectory);
         } catch (...) {
             restoreArtifactRootIfNeeded(artifactRoot, replacementBackupDirectory);
             removePathIfExists(finalTemporaryDirectory);
-            removePathIfExists(replacementBackupDirectory);
             throw;
         }
+
+        commitPreparedCompletion();
     }
 
     [[nodiscard]] std::optional<double> getBestScore() const {
@@ -1586,10 +1896,161 @@ class TrainingArtifactManager {
         return bestCandidate.has_value() ? std::optional<TrainingModelSelectionContext>(bestCandidate->context) : std::nullopt;
     }
     [[nodiscard]] bool hasBestCandidateArtifact() const {
-        return bestCandidate.has_value() && bestCandidate->directory.has_value();
+        return bestCandidate.has_value() && bestCandidate->generationName.has_value() && bestCandidate->directory.has_value();
     }
 
    private:
+    ThorImplementation::TrainingCheckpointRepository::CompletionState makeCompletionState(
+        const TrainingSelectionMetadata& metadata,
+        const std::string& selectedGeneration,
+        const std::string& selectedArtifactKind,
+        std::optional<std::string> latestGeneration,
+        std::optional<std::string> bestGeneration,
+        const std::string& networkName,
+        uint64_t selectedEpoch,
+        double completedTrainingElapsedSeconds) const {
+        ThorImplementation::TrainingCheckpointRepository::CompletionState completion;
+        completion.schemaVersion = 1;
+        completion.selectedGeneration = selectedGeneration;
+        completion.selectedArtifactKind = selectedArtifactKind;
+        completion.latestGeneration = std::move(latestGeneration);
+        completion.bestGeneration = std::move(bestGeneration);
+        completion.networkName = networkName;
+        completion.phaseStartCompletedEpoch = phaseStartCompletedEpoch;
+        completion.requestedPhaseEpochs = requestedEpochs;
+        completion.phaseTargetCompletedEpoch = phaseStartCompletedEpoch + requestedEpochs;
+        completion.completedEpoch = metadata.completedEpoch;
+        completion.selectedEpoch = selectedEpoch;
+        completion.completionReason = metadata.completionReason;
+        completion.bestEpoch = metadata.bestEpoch;
+        completion.bestScore = metadata.bestScore;
+        completion.latestScore = metadata.latestScore;
+        completion.latestTrainingLoss = metadata.latestTrainingLoss;
+        completion.latestValidationLoss = metadata.latestValidationLoss;
+        completion.completedTrainingElapsedSeconds = completedTrainingElapsedSeconds;
+        completion.checkBestModelEveryEpochs = metadata.checkBestModelEveryEpochs;
+        completion.firstModelSelectionEpoch = metadata.firstModelSelectionEpoch;
+        completion.deviceDatasetStorageReport = deviceDatasetStorageReport;
+        return completion;
+    }
+
+    static TrainingSelectionMetadata selectionMetadataFromCompletion(
+        const ThorImplementation::TrainingCheckpointRepository::CompletionState& completion) {
+        TrainingSelectionMetadata metadata;
+        metadata.bestEpoch = completion.bestEpoch;
+        metadata.bestScore = completion.bestScore;
+        metadata.latestEpoch = completion.completedEpoch;
+        metadata.latestScore = completion.latestScore;
+        metadata.latestTrainingLoss = completion.latestTrainingLoss;
+        metadata.latestValidationLoss = completion.latestValidationLoss;
+        metadata.completedEpoch = completion.completedEpoch;
+        metadata.completionReason = completion.completionReason;
+        metadata.checkBestModelEveryEpochs = completion.checkBestModelEveryEpochs;
+        metadata.firstModelSelectionEpoch = completion.firstModelSelectionEpoch;
+        return metadata;
+    }
+
+    void commitPreparedCompletion() {
+        THOR_THROW_IF_FALSE(checkpointRepository != nullptr);
+        checkpointRepository->commitCompletion();
+        if (!retainPreviousCheckpoints) {
+            // Cleanup is deliberately after COMPLETED. Failure can only leave
+            // redundant generations/pointers, never remove the selected state.
+            try {
+                checkpointRepository->compactCompletedRepository();
+            } catch (...) {
+            }
+        }
+    }
+
+    struct PublishedCheckpoint {
+        std::string generationName{};
+        std::filesystem::path directory{};
+    };
+
+    PublishedCheckpoint publishCheckpoint(PlacedNetwork& placedNetwork,
+                                          uint64_t completedEpoch,
+                                          bool updateBest,
+                                          const char* reason,
+                                          std::optional<uint64_t> checkpointBestEpoch,
+                                          std::optional<double> checkpointBestScore) {
+        THOR_THROW_IF_FALSE(checkpointRepository != nullptr);
+        const std::optional<std::string> previousCurrent = checkpointRepository->readPointer(
+            ThorImplementation::TrainingCheckpointRepository::Pointer::CURRENT);
+        const std::optional<std::string> previousBest = updateBest
+            ? checkpointRepository->readPointer(
+                  ThorImplementation::TrainingCheckpointRepository::Pointer::BEST)
+            : std::nullopt;
+
+        const auto generation = checkpointRepository->prepareGeneration(completedEpoch);
+        bool generationPublished = false;
+        try {
+            placedNetwork.save(
+                generation.temporaryDirectory.string(),
+                /*overwrite=*/true,
+                /*saveOptimizerState=*/true);
+            writeCheckpointMetadata(generation.temporaryDirectory,
+                                    completedEpoch,
+                                    reason,
+                                    checkpointBestEpoch,
+                                    checkpointBestScore);
+
+            // Create before destroy: make the complete immutable generation
+            // durable before either pointer can expose it.
+            checkpointRepository->publishGeneration(generation);
+            generationPublished = true;
+
+            // CURRENT moves first. If BEST also advances and power is lost in
+            // between, both pointer targets remain complete recoverable
+            // generations. Old generations are considered for retirement only
+            // after every required pointer update has durably completed.
+            checkpointRepository->updatePointer(
+                ThorImplementation::TrainingCheckpointRepository::Pointer::CURRENT,
+                generation.name);
+            if (updateBest) {
+                checkpointRepository->updatePointer(
+                    ThorImplementation::TrainingCheckpointRepository::Pointer::BEST,
+                    generation.name);
+            }
+        } catch (...) {
+            // Once publication succeeds, never destroy the generation on an
+            // error path: CURRENT may already refer to it. An unreferenced
+            // immutable generation is harmless and can be collected later.
+            if (!generationPublished) {
+                removePathIfExists(generation.temporaryDirectory);
+            }
+            throw;
+        }
+
+        if (!retainPreviousCheckpoints) {
+            // Garbage collection is explicitly after the durable commit. A
+            // generation still referenced by CURRENT or BEST is protected by
+            // retireGenerationIfUnreferenced(). Cleanup failure only consumes
+            // disk space and must not fail otherwise-successful training.
+            std::set<std::string> generationsToRetire;
+            if (previousCurrent.has_value()) {
+                generationsToRetire.insert(previousCurrent.value());
+            }
+            if (previousBest.has_value()) {
+                generationsToRetire.insert(previousBest.value());
+            }
+            for (const std::string& oldGeneration : generationsToRetire) {
+                if (oldGeneration == generation.name) {
+                    continue;
+                }
+                try {
+                    checkpointRepository->retireGenerationIfUnreferenced(oldGeneration);
+                } catch (...) {
+                }
+            }
+        }
+
+        return PublishedCheckpoint{
+            .generationName = generation.name,
+            .directory = generation.directory,
+        };
+    }
+
     static void removePathIfExists(const std::filesystem::path& path) {
         std::error_code errorCode;
         if (!std::filesystem::exists(path, errorCode) && !errorCode) {
@@ -1614,18 +2075,6 @@ class TrainingArtifactManager {
         return parent / out.str();
     }
 
-    [[nodiscard]] std::filesystem::path uniqueCandidateDirectory(uint64_t epoch) const {
-        std::ostringstream out;
-        out << baseCandidatePrefix().string() << ".epoch_" << epoch;
-        return std::filesystem::path(out.str());
-    }
-
-    [[nodiscard]] std::filesystem::path uniqueTemporaryDirectory(uint64_t epoch) const {
-        std::ostringstream out;
-        out << baseCandidatePrefix().string() << ".epoch_" << epoch << ".tmp";
-        return std::filesystem::path(out.str());
-    }
-
     [[nodiscard]] std::filesystem::path uniqueFinalTemporaryDirectory() const {
         std::ostringstream out;
         out << baseCandidatePrefix().string() << ".final.tmp";
@@ -1648,41 +2097,58 @@ class TrainingArtifactManager {
         }
 
         if (hadPreviousRoot) {
-            std::filesystem::rename(artifactRoot, replacementBackupDirectory, errorCode);
-            if (errorCode) {
-                throw std::runtime_error("Failed to stage replacement of training artifact root '" + artifactRoot.string() +
-                                         "': " + errorCode.message());
-            }
+            // First give the old artifact a durable backup name. A crash from
+            // this point onward can therefore recover either the previous root
+            // or this backup until the new root has been durably published.
+            FilesystemDurability::durableRename(artifactRoot, replacementBackupDirectory);
         }
 
-        errorCode.clear();
-        std::filesystem::rename(finalTemporaryDirectory, artifactRoot, errorCode);
-        if (errorCode) {
+        try {
+            // finalTemporaryDirectory has already had its contents fsync'd.
+            // Publishing it and fsync'ing the parent is the commit point for
+            // the replacement artifact.
+            FilesystemDurability::durableRename(finalTemporaryDirectory, artifactRoot);
+        } catch (...) {
             restoreArtifactRootIfNeeded(artifactRoot, replacementBackupDirectory);
-            throw std::runtime_error("Failed to finalize training artifact root '" + artifactRoot.string() + "': " + errorCode.message());
+            throw;
         }
 
         if (hadPreviousRoot) {
-            removePathIfExists(replacementBackupDirectory);
+            // Destroy the old artifact only after the new root's directory
+            // entry is durable. This is the filesystem-level create-before-
+            // destroy invariant required for checkpoint recovery.
+            FilesystemDurability::durableRemoveAll(replacementBackupDirectory);
         }
     }
 
-    static void restoreArtifactRootIfNeeded(const std::filesystem::path& artifactRoot,
-                                            const std::filesystem::path& replacementBackupDirectory) {
+    static bool restoreArtifactRootIfNeeded(const std::filesystem::path& artifactRoot,
+                                            const std::filesystem::path& replacementBackupDirectory) noexcept {
         std::error_code errorCode;
         const bool backupExists = std::filesystem::exists(replacementBackupDirectory, errorCode);
         if (errorCode || !backupExists) {
-            return;
+            return !errorCode;
         }
 
         errorCode.clear();
         const bool artifactRootExists = std::filesystem::exists(artifactRoot, errorCode);
-        if (errorCode || artifactRootExists) {
-            return;
+        if (errorCode) {
+            return false;
+        }
+        if (artifactRootExists) {
+            // A root is already published. Leave the backup untouched on this
+            // error path rather than risking destruction of the last known-good
+            // artifact. A later successful overwrite can clean it up.
+            return true;
         }
 
-        errorCode.clear();
-        std::filesystem::rename(replacementBackupDirectory, artifactRoot, errorCode);
+        try {
+            FilesystemDurability::durableRename(replacementBackupDirectory, artifactRoot);
+            return true;
+        } catch (...) {
+            // Deliberately leave replacementBackupDirectory in place. Cleanup
+            // must never turn a recoverable finalization failure into data loss.
+            return false;
+        }
     }
 
     static void writeOptionalUint64(std::ostream& out, std::optional<uint64_t> value) {
@@ -1701,8 +2167,141 @@ class TrainingArtifactManager {
         }
     }
 
+    static nlohmann::json deviceDatasetStorageReportJson(
+        const DeviceDatasetStorageReport& report) {
+        nlohmann::json windowed;
+        windowed["requested"] = windowedDeviceCacheName(report.windowedDeviceCache.requested);
+        windowed["attempted"] = report.windowedDeviceCache.attempted;
+        windowed["used"] = report.windowedDeviceCache.used;
+        windowed["reason"] = report.windowedDeviceCache.reason;
+        windowed["eligible_sources"] = report.windowedDeviceCache.eligibleSources;
+        windowed["active_sources"] = report.windowedDeviceCache.activeSources;
+        windowed["eligible_source_bytes"] = report.windowedDeviceCache.eligibleSourceBytes;
+        windowed["budget_bytes"] = report.windowedDeviceCache.budgetBytes;
+        windowed["max_access_policy_window_bytes"] =
+            report.windowedDeviceCache.maxAccessPolicyWindowBytes;
+        windowed["active_unique_bytes"] = report.windowedDeviceCache.activeUniqueBytes;
+        windowed["hit_ratio"] = report.windowedDeviceCache.hitRatio;
+
+        nlohmann::json storage;
+        storage["requested"] = deviceDatasetStorageName(report.requested);
+        storage["attempted"] = report.attempted;
+        storage["used"] = report.used;
+        storage["reason"] = report.reason;
+        storage["examples"] = report.examples;
+        storage["required_bytes"] = report.requiredBytes;
+        storage["available_bytes_after_placement"] = report.availableBytesAfterPlacement;
+        storage["resident_bytes"] = report.residentBytes;
+        storage["resident_cache_hit"] = report.residentCacheHit;
+        storage["resident_construction_joined"] = report.residentConstructionJoined;
+        storage["resident_construction_started"] = report.residentConstructionStarted;
+        storage["materialization_seconds"] = report.materializationSeconds;
+        storage["windowed_device_cache"] = std::move(windowed);
+        return storage;
+    }
+
+    void writeCheckpointMetadata(const std::filesystem::path& generationDirectory,
+                                 uint64_t completedEpoch,
+                                 const char* reason,
+                                 std::optional<uint64_t> checkpointBestEpoch,
+                                 std::optional<double> checkpointBestScore) const {
+        const std::filesystem::path metadataPath = generationDirectory / "checkpoint_state.json";
+        {
+            std::ofstream out(metadataPath, std::ios::binary | std::ios::trunc);
+            if (!out) {
+                throw std::runtime_error("Unable to open training checkpoint metadata file for writing: " +
+                                         metadataPath.string());
+            }
+            out << "{\n";
+            out << "  \"schema_version\": 1,\n";
+            out << "  \"checkpoint_reason\": \"" << reason << "\",\n";
+            out << "  \"completed_epoch\": " << completedEpoch << ",\n";
+            out << "  \"phase_start_completed_epoch\": " << phaseStartCompletedEpoch << ",\n";
+            out << "  \"requested_phase_epochs\": " << requestedEpochs << ",\n";
+            out << "  \"phase_target_completed_epoch\": "
+                << (phaseStartCompletedEpoch + requestedEpochs) << ",\n";
+            out << "  \"best_epoch\": ";
+            writeOptionalUint64(out, checkpointBestEpoch);
+            out << ",\n";
+            out << "  \"best_score\": ";
+            writeOptionalDouble(out, checkpointBestScore);
+            out << ",\n";
+            out << "  \"check_best_model_every_epochs\": " << checkBestModelEveryEpochs << ",\n";
+            out << "  \"first_model_selection_epoch\": " << firstModelSelectionEpoch << ",\n";
+            out << "  \"checkpoint_every_epochs\": " << checkpointEveryEpochs << ",\n";
+            out << "  \"device_dataset_storage\": "
+                << deviceDatasetStorageReportJson(deviceDatasetStorageReport).dump() << "\n";
+            out << "}\n";
+            out.flush();
+            if (!out) {
+                throw std::runtime_error("Failed while writing training checkpoint metadata file: " +
+                                         metadataPath.string());
+            }
+        }
+        // PlacedNetwork::save() made the model artifact durable before this
+        // metadata was added. Sync the added state and containing generation
+        // before the repository publishes the immutable directory name.
+        FilesystemDurability::syncFile(metadataPath);
+        FilesystemDurability::syncDirectory(generationDirectory);
+    }
+
+    static bool existingFinalArtifactMatches(const std::filesystem::path& artifactRoot,
+                                             const TrainingSelectionMetadata& metadata,
+                                             bool persistLatestArtifact,
+                                             bool persistBestArtifact) {
+        std::error_code errorCode;
+        if (!std::filesystem::is_directory(artifactRoot, errorCode) || errorCode) {
+            return false;
+        }
+        if (persistLatestArtifact) {
+            errorCode.clear();
+            if (!std::filesystem::is_directory(artifactRoot / "latest", errorCode) || errorCode) {
+                return false;
+            }
+        }
+        if (persistBestArtifact) {
+            errorCode.clear();
+            if (!std::filesystem::is_directory(artifactRoot / "best", errorCode) || errorCode) {
+                return false;
+            }
+        }
+
+        const std::filesystem::path metadataPath = artifactRoot / "training_selection_metadata.json";
+        std::ifstream in(metadataPath, std::ios::binary);
+        if (!in) {
+            return false;
+        }
+        nlohmann::json persisted;
+        try {
+            in >> persisted;
+            if (!persisted.is_object() || persisted.value("schema_version", 0) != 2 ||
+                persisted.value("latest_epoch", std::numeric_limits<uint64_t>::max()) != metadata.latestEpoch ||
+                persisted.value("completed_epoch", std::numeric_limits<uint64_t>::max()) != metadata.completedEpoch ||
+                persisted.value("completion_reason", std::string{}) != metadata.completionReason ||
+                persisted.value("check_best_model_every_epochs", std::numeric_limits<uint32_t>::max()) !=
+                    metadata.checkBestModelEveryEpochs ||
+                persisted.value("first_model_selection_epoch", std::numeric_limits<uint64_t>::max()) !=
+                    metadata.firstModelSelectionEpoch) {
+                return false;
+            }
+            const bool persistedHasBest = persisted.value("has_best_candidate", false);
+            if (persistedHasBest != metadata.bestEpoch.has_value()) {
+                return false;
+            }
+            if (metadata.bestEpoch.has_value()) {
+                if (!persisted.contains("best_epoch") || !persisted.at("best_epoch").is_number_unsigned() ||
+                    persisted.at("best_epoch").get<uint64_t>() != metadata.bestEpoch.value()) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
     static void writeSelectionMetadata(const std::filesystem::path& artifactRoot, const TrainingSelectionMetadata& metadata) {
-        std::filesystem::create_directories(artifactRoot);
+        FilesystemDurability::createDirectoriesDurably(artifactRoot);
         const std::filesystem::path metadataPath = artifactRoot / "training_selection_metadata.json";
         const std::filesystem::path tmpPath = artifactRoot / ".training_selection_metadata.json.tmp";
 
@@ -1738,19 +2337,20 @@ class TrainingArtifactManager {
             if (!out) {
                 throw std::runtime_error("Failed while writing training selection metadata file: " + tmpPath.string());
             }
+            out.flush();
+            if (!out) {
+                throw std::runtime_error("Failed while flushing training selection metadata file: " + tmpPath.string());
+            }
         }
 
-        std::error_code errorCode;
-        std::filesystem::rename(tmpPath, metadataPath, errorCode);
-        if (errorCode) {
-            removePathIfExists(metadataPath);
-            errorCode.clear();
-            std::filesystem::rename(tmpPath, metadataPath, errorCode);
-            if (errorCode) {
-                removePathIfExists(tmpPath);
-                throw std::runtime_error("Failed to finalize training selection metadata file '" + metadataPath.string() +
-                                         "': " + errorCode.message());
-            }
+        // Persist file contents before exposing the final metadata name, then
+        // persist that rename in the containing artifact directory.
+        FilesystemDurability::syncFile(tmpPath);
+        try {
+            FilesystemDurability::durableRename(tmpPath, metadataPath);
+        } catch (...) {
+            removePathIfExists(tmpPath);
+            throw;
         }
     }
 
@@ -1758,11 +2358,20 @@ class TrainingArtifactManager {
         uint64_t epoch = 0;
         double score = 0.0;
         TrainingModelSelectionContext context{};
+        std::optional<std::string> generationName{};
         std::optional<std::filesystem::path> directory{};
     };
 
     std::optional<std::string> saveModelDirectory{};
     bool overwrite = false;
+    uint64_t phaseStartCompletedEpoch = 0;
+    uint32_t checkBestModelEveryEpochs = 0;
+    uint64_t firstModelSelectionEpoch = 0;
+    uint32_t checkpointEveryEpochs = 0;
+    bool retainPreviousCheckpoints = false;
+    uint32_t requestedEpochs = 0;
+    DeviceDatasetStorageReport deviceDatasetStorageReport{};
+    std::unique_ptr<ThorImplementation::TrainingCheckpointRepository> checkpointRepository{};
     std::optional<BestCandidate> bestCandidate{};
 };
 
@@ -2380,6 +2989,7 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
         params->completionCallbackFinished = true;
     }
     state->runState->batchFinished.notify_all();
+    state->hostDecisionFinished.notify_all();
 }
 
 bool isBatchDataReadyUnlocked(const NativeQueuedSchedulingWindowState& state) {
@@ -2685,6 +3295,31 @@ void prepareQueuedWorkSegmentForScheduling(
     const std::shared_ptr<NativeQueuedSchedulingWindowState>& state,
     const std::shared_ptr<QueuedWorkSegmentState>& segment);
 
+bool waitForRequiredHostDecision(
+    const std::shared_ptr<NativeQueuedSchedulingWindowState>& state,
+    const std::shared_ptr<QueuedWorkSegmentState>& segment) {
+    THOR_THROW_IF_FALSE(state != nullptr);
+    THOR_THROW_IF_FALSE(segment != nullptr);
+    if (!segment->requiredHostDecisionEpoch.has_value()) {
+        return true;
+    }
+
+    const uint64_t requiredEpoch =
+        segment->requiredHostDecisionEpoch.value();
+    std::unique_lock<std::mutex> lock(state->runState->mutex);
+    state->hostDecisionFinished.wait(lock, [&]() {
+        return state->runState->failure != nullptr ||
+               state->runState->cancelRequested ||
+               state->stopSchedulingAfterHostDecision ||
+               state->latestResolvedHostDecisionEpoch >= requiredEpoch;
+    });
+
+    return state->runState->failure == nullptr &&
+           !state->runState->cancelRequested &&
+           !state->stopSchedulingAfterHostDecision &&
+           state->latestResolvedHostDecisionEpoch >= requiredEpoch;
+}
+
 struct NativeQueuedSchedulerResources {
     NativeQueuedSchedulerResources(
         std::shared_ptr<PlacedNetwork> placedNetwork,
@@ -2830,13 +3465,104 @@ class NativeQueuedSegmentScheduler {
         const std::vector<StepExecutable>& steps = plan->getSteps();
         uint64_t validExamplesScheduled = initialValidExamples;
 
+        // A model-selection gate is deliberately placed after acquiring the
+        // first batch of the next TRAIN segment. BatchSession acquisition can
+        // include host I/O, device gathers, ragged preparation, or waits for a
+        // reusable dataset slot, all of which are safe to overlap with score
+        // evaluation/checkpoint persistence because they do not touch the
+        // placed network's parameter or optimizer state. Keep exactly one
+        // speculative lease so memory remains bounded by the normal batch
+        // footprint. If the host decides to stop, RAII returns that lease to
+        // the session without ever submitting it to the network.
+        BatchLease prefetchedFirstBatchLease;
+        uint64_t prefetchedFirstBatchValidExampleCount = 0;
+        uint64_t prefetchedFirstBatchAcquireMicros = 0;
+        const bool collectHostDecisionDiagnostics =
+            segment->requiredHostDecisionEpoch.has_value() &&
+            modelSelectionDiagnosticsEnabled();
+        uint64_t hostDecisionPrefetchMicros = 0;
+        uint64_t hostDecisionGateWaitMicros = 0;
+        ModelSelectionDiagnosticTimePoint hostDecisionGateReleasedAt{};
+        bool hostDecisionGateContinued = false;
+        if (segment->requiredHostDecisionEpoch.has_value() && batches > 0) {
+            const auto hostDecisionPrefetchStart =
+                modelSelectionDiagnosticNow(collectHostDecisionDiagnostics);
+            const auto acquireBatchStart = diagnosticNow(collectQueueDiagnostics);
+            uint64_t sessionBatchNum = initialSessionBatchNum;
+            prefetchedFirstBatchLease =
+                batchSession->leaseBatch(exampleType, sessionBatchNum);
+            prefetchedFirstBatchValidExampleCount =
+                prefetchedFirstBatchLease.get().getValidExampleCount().value_or(
+                    static_cast<uint32_t>(batchSession->getBatchSize()));
+            if (prefetchedFirstBatchValidExampleCount == 0 ||
+                prefetchedFirstBatchValidExampleCount > batchSession->getBatchSize()) {
+                throw std::runtime_error(
+                    "BatchSession returned an invalid valid-example count.");
+            }
+            const auto acquireBatchFinish = diagnosticNow(collectQueueDiagnostics);
+            const auto hostDecisionPrefetchFinish =
+                modelSelectionDiagnosticNow(collectHostDecisionDiagnostics);
+            prefetchedFirstBatchAcquireMicros =
+                collectQueueDiagnostics
+                    ? elapsedMicros(acquireBatchStart, acquireBatchFinish)
+                    : 0;
+            if (collectHostDecisionDiagnostics) {
+                hostDecisionPrefetchMicros = modelSelectionElapsedMicros(
+                    hostDecisionPrefetchStart, hostDecisionPrefetchFinish);
+            }
+
+            const auto gateWaitStart =
+                modelSelectionDiagnosticNow(collectHostDecisionDiagnostics);
+            hostDecisionGateContinued = waitForRequiredHostDecision(state, segment);
+            const auto gateWaitFinish =
+                modelSelectionDiagnosticNow(collectHostDecisionDiagnostics);
+            if (collectHostDecisionDiagnostics) {
+                hostDecisionGateWaitMicros =
+                    modelSelectionElapsedMicros(gateWaitStart, gateWaitFinish);
+                hostDecisionGateReleasedAt = gateWaitFinish;
+            }
+            if (!hostDecisionGateContinued) {
+                if (collectHostDecisionDiagnostics) {
+                    emitNativeHostDecisionGateTimingDiagnostic(
+                        diagnosticPhase,
+                        currentEpoch,
+                        segment->requiredHostDecisionEpoch.value(),
+                        hostDecisionPrefetchMicros,
+                        hostDecisionGateWaitMicros,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        false);
+                }
+                return;
+            }
+
+            // Active TRAIN throughput must exclude time spent waiting for the
+            // host decision. The speculative batch acquisition above happened
+            // while the previous epoch/model-selection work was still active,
+            // so the new phase begins only when submission is actually allowed.
+            {
+                std::lock_guard<std::mutex> lock(state->runState->mutex);
+                segment->schedulingStartedAt =
+                    std::chrono::high_resolution_clock::now();
+            }
+        }
+
         for (uint64_t batch = 0; batch < batches; ++batch) {
             if (cancellationToken.isCancellationRequested()) {
                 requestQueuedTrainingCancellation(state);
                 return;
             }
+            const bool measureFirstPostGateBatch =
+                collectHostDecisionDiagnostics &&
+                hostDecisionGateContinued &&
+                batch == 0;
             const auto scheduleIterationStart = diagnosticNow(collectQueueDiagnostics);
             const uint64_t epochBatchNum = initialEpochBatchNum + batch;
+            const auto hostDecisionOptimizerStart =
+                modelSelectionDiagnosticNow(measureFirstPostGateBatch);
             const auto optimizerStart = diagnosticNow(collectQueueDiagnostics);
             // Hyper-parameter schedules advance with optimizer updates. Validation is
             // forward-only, so it must neither traverse nor mutate optimizer state.
@@ -2844,9 +3570,13 @@ class NativeQueuedSegmentScheduler {
                 Optimizer::updateHyperParameters(placedNetwork.get(), currentEpoch, epochBatchNum, batchesPerEpoch);
             }
             const auto optimizerFinish = diagnosticNow(collectQueueDiagnostics);
+            const auto hostDecisionOptimizerFinish =
+                modelSelectionDiagnosticNow(measureFirstPostGateBatch);
 
             uint64_t slotIndex = 0;
             uint64_t inFlightAfterReserve = 0;
+            const auto hostDecisionReserveStart =
+                modelSelectionDiagnosticNow(measureFirstPostGateBatch);
             const auto reserveStart = diagnosticNow(collectQueueDiagnostics);
             {
                 std::unique_lock<std::mutex> lock(state->runState->mutex);
@@ -2881,6 +3611,8 @@ class NativeQueuedSegmentScheduler {
                 inFlightAfterReserve = state->runState->inFlightBatches;
             }
             const auto reserveFinish = diagnosticNow(collectQueueDiagnostics);
+            const auto hostDecisionReserveFinish =
+                modelSelectionDiagnosticNow(measureFirstPostGateBatch);
             if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1)) {
                 emitNativeQueueDiagnostic("reserve",
                                           diagnosticPhase,
@@ -2913,17 +3645,33 @@ class NativeQueuedSegmentScheduler {
                 scalarStatSource = ScalarStatSource::UNRESOLVED;
             }
 
-            const auto acquireBatchStart = diagnosticNow(collectQueueDiagnostics);
-            uint64_t sessionBatchNum =
-                initialSessionBatchNum + batch;
-            params->batchLease = batchSession->leaseBatch(exampleType, sessionBatchNum);
-            params->validExampleCount =
-                params->batchLease.get().getValidExampleCount().value_or(
-                    static_cast<uint32_t>(batchSession->getBatchSize()));
-            if (params->validExampleCount == 0 ||
-                params->validExampleCount > batchSession->getBatchSize()) {
-                throw std::runtime_error(
-                    "BatchSession returned an invalid valid-example count.");
+            uint64_t acquireBatchWaitMicros = 0;
+            if (batch == 0 && !prefetchedFirstBatchLease.empty()) {
+                params->batchLease = std::move(prefetchedFirstBatchLease);
+                params->validExampleCount =
+                    prefetchedFirstBatchValidExampleCount;
+                acquireBatchWaitMicros = prefetchedFirstBatchAcquireMicros;
+            } else {
+                const auto acquireBatchStart =
+                    diagnosticNow(collectQueueDiagnostics);
+                uint64_t sessionBatchNum =
+                    initialSessionBatchNum + batch;
+                params->batchLease =
+                    batchSession->leaseBatch(exampleType, sessionBatchNum);
+                params->validExampleCount =
+                    params->batchLease.get().getValidExampleCount().value_or(
+                        static_cast<uint32_t>(batchSession->getBatchSize()));
+                if (params->validExampleCount == 0 ||
+                    params->validExampleCount > batchSession->getBatchSize()) {
+                    throw std::runtime_error(
+                        "BatchSession returned an invalid valid-example count.");
+                }
+                const auto acquireBatchFinish =
+                    diagnosticNow(collectQueueDiagnostics);
+                acquireBatchWaitMicros =
+                    collectQueueDiagnostics
+                        ? elapsedMicros(acquireBatchStart, acquireBatchFinish)
+                        : 0;
             }
             {
                 std::lock_guard<std::mutex> lock(state->runState->mutex);
@@ -2934,8 +3682,6 @@ class NativeQueuedSegmentScheduler {
                 slot.validExamplesThroughBatch =
                     validExamplesScheduled;
             }
-            const auto acquireBatchFinish = diagnosticNow(collectQueueDiagnostics);
-            const uint64_t acquireBatchWaitMicros = collectQueueDiagnostics ? elapsedMicros(acquireBatchStart, acquireBatchFinish) : 0;
             if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1, acquireBatchWaitMicros)) {
                 emitNativeQueueDiagnostic("acquire_batch_done",
                                           diagnosticPhase,
@@ -2948,6 +3694,8 @@ class NativeQueuedSegmentScheduler {
                                           acquireBatchWaitMicros);
             }
 
+            const auto hostDecisionSubmitStart =
+                modelSelectionDiagnosticNow(measureFirstPostGateBatch);
             const auto submitStart = diagnosticNow(collectQueueDiagnostics);
             uint64_t bindMicros = 0;
             uint64_t submitBatchMicros = 0;
@@ -3047,6 +3795,8 @@ class NativeQueuedSegmentScheduler {
                 slot.logicalWork = params->logicalWork;
             }
             const auto submitFinish = diagnosticNow(collectQueueDiagnostics);
+            const auto hostDecisionSubmitFinish =
+                modelSelectionDiagnosticNow(measureFirstPostGateBatch);
 
             // Metric aggregation metadata follows the public metric output. Ratio
             // metrics additionally expose slot-local host numerator/denominator
@@ -3177,6 +3927,8 @@ class NativeQueuedSegmentScheduler {
                 static_cast<uint32_t>(slotIndex));
             const auto extendOutputsFinish = diagnosticNow(collectQueueDiagnostics);
             const auto completionSetupFinish = extendOutputsFinish;
+            const auto hostDecisionScheduleEnd =
+                modelSelectionDiagnosticNow(measureFirstPostGateBatch);
             recordNativeQueuedBatchSubmissionForTests(currentEpoch);
 
             if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1)) {
@@ -3229,6 +3981,35 @@ class NativeQueuedSegmentScheduler {
                                                         elapsedMicros(submitStart, submitFinish),
                                                         elapsedMicros(completionSetupStart, completionSetupFinish),
                                                         elapsedMicros(scheduleIterationStart, completionSetupFinish));
+            }
+            if (measureFirstPostGateBatch &&
+                segment->requiredHostDecisionEpoch.has_value()) {
+                // Emit only after the first post-gate batch has been submitted
+                // and its completion tail has been installed. Diagnostic I/O
+                // therefore cannot inflate the gate-release-to-submit interval
+                // that this measurement is intended to explain.
+                emitNativeHostDecisionGateTimingDiagnostic(
+                    diagnosticPhase,
+                    currentEpoch,
+                    segment->requiredHostDecisionEpoch.value(),
+                    hostDecisionPrefetchMicros,
+                    hostDecisionGateWaitMicros,
+                    modelSelectionElapsedMicros(
+                        hostDecisionOptimizerStart,
+                        hostDecisionOptimizerFinish),
+                    modelSelectionElapsedMicros(
+                        hostDecisionReserveStart,
+                        hostDecisionReserveFinish),
+                    modelSelectionElapsedMicros(
+                        hostDecisionSubmitStart,
+                        hostDecisionSubmitFinish),
+                    modelSelectionElapsedMicros(
+                        hostDecisionGateReleasedAt,
+                        hostDecisionSubmitFinish),
+                    modelSelectionElapsedMicros(
+                        hostDecisionGateReleasedAt,
+                        hostDecisionScheduleEnd),
+                    true);
             }
 
             if (options.synchronizeAfterEveryBatch) {
@@ -3283,8 +4064,9 @@ struct NativeQueuedSchedulerCommand {
 
 // Keep one producer worker alive for the placed run and feed it one
 // non-overlapping scheduling-window command at a time. Ordinary epoch/phase
-// boundaries may live inside a command; a new command is reserved for a true
-// host-side decision boundary or an explicitly isolated scheduling operation.
+// boundaries and model-selection host decisions may live inside a command; the
+// producer waits at explicit decision gates before later optimizer work. New
+// commands are reserved for explicitly isolated scheduling operations.
 class NativeQueuedSchedulerWorker {
    public:
     NativeQueuedSchedulerWorker(
@@ -3449,6 +4231,14 @@ class NativeQueuedSchedulerWorker {
             for (const std::shared_ptr<QueuedWorkSegmentState>& segment :
                  command.segments) {
                 scheduler(segment);
+                {
+                    std::lock_guard<std::mutex> lock(command.state->runState->mutex);
+                    if (command.state->runState->failure != nullptr ||
+                        command.state->runState->cancelRequested ||
+                        command.state->stopSchedulingAfterHostDecision) {
+                        break;
+                    }
+                }
             }
             {
                 std::lock_guard<std::mutex> lock(command.state->runState->mutex);
@@ -3581,6 +4371,16 @@ void prepareQueuedWorkSegmentForScheduling(
     state->runState->batchFinished.notify_all();
 }
 
+bool isTrainedModelSelectionDecisionEpoch(
+    const TrainingRunRequest& request,
+    uint64_t cumulativeEpoch);
+bool isPeriodicCheckpointEpoch(
+    const TrainingRunRequest& request,
+    uint64_t cumulativeEpoch);
+bool isHostDecisionBoundaryEpoch(
+    const TrainingRunRequest& request,
+    uint64_t cumulativeEpoch);
+
 std::vector<std::shared_ptr<QueuedWorkSegmentState>>
 buildQueuedSchedulingWindowSegments(
     const TrainingRunRequest& request,
@@ -3609,7 +4409,9 @@ buildQueuedSchedulingWindowSegments(
                              uint64_t optimizerEpoch,
                              uint64_t reportedEpoch,
                              const std::optional<QueuedValidationPopulationMetadata>&
-                                 populationMetadata) {
+                                 populationMetadata,
+                             std::optional<uint64_t> requiredHostDecisionEpoch =
+                                 std::nullopt) {
         THOR_THROW_IF_FALSE(batchSession != nullptr);
         request.cancellationToken.throwIfCancellationRequested();
         auto segment = std::make_shared<QueuedWorkSegmentState>();
@@ -3618,6 +4420,7 @@ buildQueuedSchedulingWindowSegments(
         segment->phase = phase;
         segment->optimizerEpoch = optimizerEpoch;
         segment->reportedEpoch = reportedEpoch;
+        segment->requiredHostDecisionEpoch = requiredHostDecisionEpoch;
         if (!evaluateOnly && phase == TrainingEventPhase::TRAIN &&
             request.maxTrainingBatchesPerEpoch.has_value()) {
             segment->maxBatchesToRun = request.maxTrainingBatchesPerEpoch;
@@ -3638,6 +4441,14 @@ buildQueuedSchedulingWindowSegments(
     for (uint32_t epochOffset = 0; epochOffset < epochsToSchedule; ++epochOffset) {
         const uint64_t optimizerEpoch = firstOptimizerEpoch + epochOffset;
         const uint64_t reportedEpoch = firstReportedEpoch + epochOffset;
+        std::optional<uint64_t> requiredHostDecisionEpoch;
+        if (!evaluateOnly && epochOffset > 0) {
+            const uint64_t previousReportedEpoch = reportedEpoch - 1;
+            if (isHostDecisionBoundaryEpoch(
+                    request, previousReportedEpoch)) {
+                requiredHostDecisionEpoch = previousReportedEpoch;
+            }
+        }
         if (evaluateOnly) {
             appendSegment(effectiveSession,
                           request.evaluationExampleType,
@@ -3651,7 +4462,8 @@ buildQueuedSchedulingWindowSegments(
                           TrainingEventPhase::TRAIN,
                           optimizerEpoch,
                           reportedEpoch,
-                          std::nullopt);
+                          std::nullopt,
+                          requiredHostDecisionEpoch);
             appendSegment(effectiveSession,
                           ExampleType::VALIDATE,
                           TrainingEventPhase::VALIDATE,
@@ -3753,31 +4565,34 @@ bool isTrainedModelSelectionDecisionEpoch(
             0);
 }
 
-uint32_t schedulingWindowEpochCountThroughNextHostDecision(
+bool isPeriodicCheckpointEpoch(
     const TrainingRunRequest& request,
+    uint64_t cumulativeEpoch) {
+    if (request.checkpointEveryEpochs == 0) {
+        return false;
+    }
+    THOR_THROW_IF_FALSE(cumulativeEpoch >= request.initialCompletedEpochs);
+    const uint64_t phaseLocalEpoch =
+        cumulativeEpoch - request.initialCompletedEpochs;
+    return phaseLocalEpoch > 0 &&
+           (phaseLocalEpoch % request.checkpointEveryEpochs) == 0;
+}
+
+bool isHostDecisionBoundaryEpoch(
+    const TrainingRunRequest& request,
+    uint64_t cumulativeEpoch) {
+    return isTrainedModelSelectionDecisionEpoch(request, cumulativeEpoch) ||
+           isPeriodicCheckpointEpoch(request, cumulativeEpoch);
+}
+
+uint32_t schedulingWindowEpochCountForPersistentRun(
     bool evaluateOnly,
-    uint64_t currentCompletedEpoch,
     uint32_t remainingEpochs) {
     THOR_THROW_IF_FALSE(remainingEpochs >= 1);
-    if (evaluateOnly) {
-        return 1;
-    }
-
-    // Epoch/phase transitions are not barriers. Keep submitting through the
-    // persistent ring until validation results are actually needed by the host
-    // to decide whether future optimizer work is allowed to proceed. Today that
-    // semantic barrier is a trained model-selection / early-completion decision.
-    if (request.checkBestModelEveryEpochs == 0) {
-        return remainingEpochs;
-    }
-
-    for (uint32_t epochOffset = 1; epochOffset <= remainingEpochs; ++epochOffset) {
-        if (isTrainedModelSelectionDecisionEpoch(
-                request, currentCompletedEpoch + epochOffset)) {
-            return epochOffset;
-        }
-    }
-    return remainingEpochs;
+    // Training keeps one scheduler command/window resident for the entire
+    // remaining run. Model-selection boundaries are represented by scheduler
+    // gates inside that command rather than by command teardown/relaunch.
+    return evaluateOnly ? 1 : remainingEpochs;
 }
 
 NativeQueuedSchedulingWindowExecution launchNativeQueuedSchedulingWindow(
@@ -3938,6 +4753,7 @@ bool abortNativeQueuedSchedulingWindowExecution(
     }
     execution.state->runState->batchFinished.notify_all();
     execution.state->runState->batchPopped.notify_all();
+    execution.state->hostDecisionFinished.notify_all();
 
     std::set<BatchSession*> cancelledSessions;
     for (const std::shared_ptr<QueuedWorkSegmentState>& segment :
@@ -4459,6 +5275,8 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
                     attempt.schedulerResources, attempt.runState);
 
             if (initialModelSelectionArtifacts != nullptr) {
+                initialModelSelectionArtifacts->setDeviceDatasetStorageReport(
+                    attempt.deviceDatasetStorageReport);
                 // firstModelSelectionEpoch=0 means the exact model entering this
                 // fit/phase is a candidate.  Evaluate and snapshot it before the
                 // startup warmup can execute the first optimizer update.
@@ -4492,10 +5310,8 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
             // path and lazy allocations work. The scheduler continues filling
             // the remaining queue depth concurrently after admission.
             const uint32_t startupSchedulingWindowEpochs =
-                schedulingWindowEpochCountThroughNextHostDecision(
-                    request,
+                schedulingWindowEpochCountForPersistentRun(
                     evaluateOnly,
-                    currentEpoch,
                     request.epochs);
             attempt.firstSchedulingWindowExecution.emplace(
                 launchNativeQueuedSchedulingWindow(
@@ -4688,7 +5504,8 @@ nativeQueuedSchedulerResourceDiagnosticsForTests() {
 
 }  // namespace detail
 
-void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver& observer, const NativeQueuedTrainingOptions& options) {
+void runNativeQueuedTraining(const TrainingRunRequest& inputRequest, TrainingObserver& observer, const NativeQueuedTrainingOptions& options) {
+    TrainingRunRequest request = inputRequest;
     NativeQueuedSigintScope sigintScope;
 
     THOR_THROW_IF_FALSE(request.network != nullptr || request.trainingProgram != nullptr);
@@ -4700,12 +5517,163 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     request.cancellationToken.throwIfCancellationRequested();
 
     const bool evaluateOnly = request.executionMode == TrainingRunExecutionMode::EVALUATE;
-    NsightSystemsEpochCapture nsightSystemsEpochCapture(request, evaluateOnly);
+
+    // A durable COMPLETED record makes repository-backed fit idempotent. It is
+    // published only after the normal save_model_dir artifact is durable, so a
+    // later invocation can return the selected result without placing a network
+    // or scheduling optimizer work.
+    if (!evaluateOnly && request.saveModelDirectory.has_value()) {
+        ThorImplementation::TrainingCheckpointRepository completedRepository(
+            ThorImplementation::TrainingCheckpointRepository::repositoryDirectoryForModelArtifact(
+                request.saveModelDirectory.value()));
+        std::optional<ThorImplementation::TrainingCheckpointRepository::CompletionState> completion =
+            completedRepository.readCompleted();
+        if (!completion.has_value()) {
+            const std::optional<ThorImplementation::TrainingCheckpointRepository::CompletionState> completing =
+                completedRepository.readCompleting();
+            if (completing.has_value()) {
+                // Training itself already reached a terminal state before the
+                // crash. Finish (or recognize) the normal save_model_dir
+                // publication from immutable repository generations; never
+                // replay optimizer epochs merely because final artifact
+                // publication was interrupted.
+                TrainingArtifactManager finalizer(
+                    request.saveModelDirectory,
+                    request.saveModelOverwrite,
+                    completing->phaseStartCompletedEpoch,
+                    completing->checkBestModelEveryEpochs,
+                    completing->firstModelSelectionEpoch,
+                    request.checkpointEveryEpochs,
+                    request.retainPreviousCheckpoints,
+                    completing->requestedPhaseEpochs);
+                finalizer.finalizePreparedCompletion(completing.value());
+                completion = completedRepository.readCompleted();
+                THOR_THROW_IF_FALSE(completion.has_value());
+            }
+        }
+        if (completion.has_value()) {
+            const std::filesystem::path artifactRoot(request.saveModelDirectory.value());
+            const std::filesystem::path selectedArtifact = artifactRoot / completion->selectedArtifactKind;
+            std::error_code errorCode;
+            if (!std::filesystem::is_directory(selectedArtifact, errorCode) || errorCode) {
+                throw std::runtime_error(
+                    "Completed training repository names a missing final selected artifact '" +
+                    selectedArtifact.string() + "'.");
+            }
+            errorCode.clear();
+            if (!std::filesystem::is_regular_file(
+                    artifactRoot / "training_selection_metadata.json", errorCode) || errorCode) {
+                throw std::runtime_error(
+                    "Completed training repository is missing final training_selection_metadata.json under '" +
+                    artifactRoot.string() + "'.");
+            }
+
+            if (request.completedPlacedNetwork != nullptr) {
+                request.completedPlacedNetwork->reset();
+            }
+            if (request.completedArtifactNetworkName != nullptr) {
+                *request.completedArtifactNetworkName = completion->networkName;
+            }
+            if (request.completedTrainingEpochs != nullptr) {
+                *request.completedTrainingEpochs = completion->selectedEpoch;
+            }
+            if (request.completedTrainingElapsedSeconds != nullptr) {
+                *request.completedTrainingElapsedSeconds = completion->completedTrainingElapsedSeconds;
+            }
+
+            TrainingStatsSnapshot startedStats;
+            startedStats.networkName = completion->networkName;
+            startedStats.datasetName = request.batchSession->getDatasetName();
+            startedStats.phase = TrainingEventPhase::UNKNOWN;
+            startedStats.epoch = completion->completedEpoch;
+            startedStats.epochs = completion->phaseTargetCompletedEpoch;
+            startedStats.batchSize = request.batchSession->getBatchSize();
+            startedStats.elapsedSeconds = completion->completedTrainingElapsedSeconds;
+            startedStats.deviceDatasetStorage = completion->deviceDatasetStorageReport;
+            emitTrainingEvent(observer, TrainingEvent::runStarted(std::move(startedStats)));
+
+            TrainingStatsSnapshot finishedStats;
+            finishedStats.networkName = completion->networkName;
+            finishedStats.datasetName = request.batchSession->getDatasetName();
+            finishedStats.phase = TrainingEventPhase::UNKNOWN;
+            finishedStats.epoch = completion->completedEpoch;
+            finishedStats.epochs = completion->phaseTargetCompletedEpoch;
+            finishedStats.batchSize = request.batchSession->getBatchSize();
+            finishedStats.elapsedSeconds = completion->completedTrainingElapsedSeconds;
+            finishedStats.deviceDatasetStorage = completion->deviceDatasetStorageReport;
+            finishedStats.metrics["completed_epoch"] = static_cast<double>(completion->completedEpoch);
+            finishedStats.metrics["selected_epoch"] = static_cast<double>(completion->selectedEpoch);
+            finishedStats.metrics["first_model_selection_epoch"] =
+                static_cast<double>(completion->firstModelSelectionEpoch);
+            if (completion->bestEpoch.has_value()) {
+                finishedStats.metrics["best_epoch"] = static_cast<double>(completion->bestEpoch.value());
+            }
+            if (completion->bestScore.has_value()) {
+                finishedStats.metrics["best_score"] = completion->bestScore.value();
+            }
+            if (completion->latestScore.has_value()) {
+                finishedStats.metrics["latest_score"] = completion->latestScore.value();
+            }
+            emitTrainingEvent(
+                observer,
+                TrainingEvent::runFinished(
+                    std::move(finishedStats), completion->completionReason));
+            return;
+        }
+    }
+
+    std::optional<ThorImplementation::TrainingCheckpointRepository::RecoveryState> recoveryState{};
+    if (!evaluateOnly && request.saveModelDirectory.has_value()) {
+        ThorImplementation::TrainingCheckpointRepository repository(
+            ThorImplementation::TrainingCheckpointRepository::repositoryDirectoryForModelArtifact(
+                request.saveModelDirectory.value()));
+        recoveryState = repository.readRecoveryState();
+        if (recoveryState.has_value()) {
+            const auto& checkpoint = recoveryState->current;
+            const uint64_t remainingEpochs =
+                checkpoint.phaseTargetCompletedEpoch - checkpoint.completedEpoch;
+            if (remainingEpochs > std::numeric_limits<uint32_t>::max()) {
+                throw std::runtime_error("Training checkpoint remaining epoch count exceeds Trainer fit range.");
+            }
+            request.initialCompletedEpochs = checkpoint.phaseStartCompletedEpoch;
+            request.checkBestModelEveryEpochs = checkpoint.checkBestModelEveryEpochs;
+            request.firstModelSelectionEpoch = checkpoint.firstModelSelectionEpoch;
+            request.epochs = static_cast<uint32_t>(remainingEpochs);
+        }
+    }
+    TrainingRunRequest profilingRequest = request;
+    if (recoveryState.has_value()) {
+        profilingRequest.epochs = recoveryState->current.requestedPhaseEpochs;
+        if (profilingRequest.runtime.nsightSystemsProfile.has_value()) {
+            const uint64_t completedPhaseEpochs =
+                recoveryState->current.completedEpoch -
+                recoveryState->current.phaseStartCompletedEpoch;
+            auto& captures = profilingRequest.runtime.nsightSystemsProfile->captures;
+            captures.erase(
+                std::remove_if(
+                    captures.begin(),
+                    captures.end(),
+                    [&](const NsightSystemsProfileCaptureConfig& capture) {
+                        // A resumed run never replays completed epochs. Profiling
+                        // windows that already started are historical runtime
+                        // controls, not checkpoint compatibility requirements.
+                        return capture.startEpoch <= completedPhaseEpochs;
+                    }),
+                captures.end());
+            if (captures.empty()) {
+                profilingRequest.runtime.nsightSystemsProfile.reset();
+            }
+        }
+    }
+    NsightSystemsEpochCapture nsightSystemsEpochCapture(profilingRequest, evaluateOnly);
     if (!evaluateOnly && request.checkBestModelEveryEpochs == 0 && !request.earlyCompletionPolicies.empty()) {
         throw std::runtime_error("Trainer early_completion_policies require check_best_model_every_epochs > 0.");
     }
     if (request.maxTrainingBatchesPerEpoch.has_value() && request.maxTrainingBatchesPerEpoch.value() == 0) {
         throw std::runtime_error("Trainer max_training_batches_per_epoch must be >= 1 or None.");
+    }
+    if (request.checkpointEveryEpochs > 0 && !request.saveModelDirectory.has_value()) {
+        throw std::runtime_error("Trainer checkpoint_every_epochs requires save_model_dir.");
     }
     if (request.defaultValidationPopulation.empty()) {
         throw std::runtime_error("TrainingRunRequest default validation population must not be empty.");
@@ -4741,6 +5709,15 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
     NativeQueuedExecutionGraph executionGraph = resolveNativeQueuedExecutionGraph(request, requestedTrainingProgram, evaluateOnly);
     std::shared_ptr<Network> executionNetwork = executionGraph.network;
+
+    if (recoveryState.has_value()) {
+        // CURRENT supersedes any in-memory/previous-phase handoff supplied by
+        // the caller: it is the durable state of this interrupted fit.
+        request.previousPlacedNetwork.reset();
+        request.previousModelArtifactDirectory = recoveryState->currentDirectory.string();
+        request.previousModelNetworkName = executionNetwork->getNetworkName();
+    }
+
     if (evaluateOnly && request.evaluationPhase == TrainingEventPhase::UNKNOWN) {
         throw std::runtime_error("Trainer evaluation requires a concrete evaluation phase.");
     }
@@ -4795,15 +5772,104 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     const std::vector<std::string> scalarTensorNames(
         runtime.scalarTensorsToReport.begin(),
         runtime.scalarTensorsToReport.end());
-    uint64_t currentEpoch =
-        evaluateOnly ? 0 : request.initialCompletedEpochs;
+    uint64_t currentEpoch = evaluateOnly
+        ? 0
+        : (recoveryState.has_value()
+               ? recoveryState->current.completedEpoch
+               : request.initialCompletedEpochs);
 
+    const uint32_t repositoryRequestedEpochs = recoveryState.has_value()
+        ? recoveryState->current.requestedPhaseEpochs
+        : request.epochs;
     TrainingArtifactManager trainingArtifacts(
-        request.saveModelDirectory, request.saveModelOverwrite);
+        request.saveModelDirectory,
+        request.saveModelOverwrite,
+        request.initialCompletedEpochs,
+        request.checkBestModelEveryEpochs,
+        request.firstModelSelectionEpoch,
+        request.checkpointEveryEpochs,
+        request.retainPreviousCheckpoints,
+        repositoryRequestedEpochs);
     TrainingArtifactManager* initialModelSelectionArtifacts =
-        modelSelectionEnabled && request.firstModelSelectionEpoch == 0
+        !recoveryState.has_value() &&
+                modelSelectionEnabled && request.firstModelSelectionEpoch == 0
             ? &trainingArtifacts
             : nullptr;
+
+    if (recoveryState.has_value() && request.epochs == 0) {
+        // The crash may have occurred after the final epoch checkpoint was
+        // committed but before legacy final-artifact publication. No optimizer
+        // work remains: promote the durable repository state directly without
+        // replaying the final epoch.
+        TrainingSelectionMetadata selectionMetadata;
+        selectionMetadata.bestEpoch = trainingArtifacts.getBestEpoch();
+        selectionMetadata.bestScore = trainingArtifacts.getBestScore();
+        selectionMetadata.latestEpoch = currentEpoch;
+        selectionMetadata.completedEpoch = currentEpoch;
+        selectionMetadata.completionReason = "completed";
+        selectionMetadata.checkBestModelEveryEpochs = request.checkBestModelEveryEpochs;
+        selectionMetadata.firstModelSelectionEpoch = request.firstModelSelectionEpoch;
+
+        const bool persistLatestArtifact =
+            request.earlyCompletionPolicies.empty() ||
+            !trainingArtifacts.hasBestCandidateArtifact();
+        trainingArtifacts.finalizeRecovered(selectionMetadata,
+                                                  persistLatestArtifact,
+                                                  executionNetwork->getNetworkName(),
+                                                  request.initialElapsedSeconds);
+
+        const uint64_t selectedEpoch = trainingArtifacts.hasBestCandidateArtifact()
+            ? trainingArtifacts.getBestEpoch().value()
+            : currentEpoch;
+        if (request.completedPlacedNetwork != nullptr) {
+            request.completedPlacedNetwork->reset();
+        }
+        if (request.completedArtifactNetworkName != nullptr) {
+            *request.completedArtifactNetworkName = executionNetwork->getNetworkName();
+        }
+        if (request.completedTrainingEpochs != nullptr) {
+            *request.completedTrainingEpochs = selectedEpoch;
+        }
+        if (request.completedTrainingElapsedSeconds != nullptr) {
+            *request.completedTrainingElapsedSeconds = request.initialElapsedSeconds;
+        }
+
+        TrainingStatsSnapshot startedStats;
+        startedStats.networkName = executionNetwork->getNetworkName();
+        startedStats.datasetName = request.batchSession->getDatasetName();
+        startedStats.phase = TrainingEventPhase::UNKNOWN;
+        startedStats.epoch = currentEpoch;
+        startedStats.epochs = recoveryState->current.phaseTargetCompletedEpoch;
+        startedStats.batchSize = batchSize;
+        startedStats.deviceDatasetStorage = trainingArtifacts.getDeviceDatasetStorageReport();
+        emitTrainingEvent(observer, TrainingEvent::runStarted(std::move(startedStats)));
+
+        TrainingStatsSnapshot finishedStats;
+        finishedStats.networkName = executionNetwork->getNetworkName();
+        finishedStats.datasetName = request.batchSession->getDatasetName();
+        finishedStats.phase = TrainingEventPhase::UNKNOWN;
+        finishedStats.epoch = currentEpoch;
+        finishedStats.epochs = recoveryState->current.phaseTargetCompletedEpoch;
+        finishedStats.batchSize = batchSize;
+        finishedStats.deviceDatasetStorage = trainingArtifacts.getDeviceDatasetStorageReport();
+        finishedStats.metrics["completed_epoch"] = static_cast<double>(currentEpoch);
+        finishedStats.metrics["selected_epoch"] = static_cast<double>(selectedEpoch);
+        finishedStats.metrics["first_model_selection_epoch"] =
+            static_cast<double>(request.firstModelSelectionEpoch);
+        if (trainingArtifacts.getBestEpoch().has_value()) {
+            finishedStats.metrics["best_epoch"] =
+                static_cast<double>(trainingArtifacts.getBestEpoch().value());
+        }
+        if (trainingArtifacts.getBestScore().has_value()) {
+            finishedStats.metrics["best_score"] = trainingArtifacts.getBestScore().value();
+        }
+        emitTrainingEvent(observer,
+                          TrainingEvent::runFinished(
+                              std::move(finishedStats),
+                              "completed",
+                              trainingArtifacts.getBestModelSelectionContext()));
+        return;
+    }
 
     NativeQueuedStartupState startup =
         startNativeQueuedTrainingWithMemoryAdmissionRetry(
@@ -4841,6 +5907,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         std::move(startup.additionalValidationSessions);
     DeviceDatasetStorageReport deviceDatasetStorageReport =
         std::move(startup.deviceDatasetStorageReport);
+    trainingArtifacts.setDeviceDatasetStorageReport(deviceDatasetStorageReport);
     const std::optional<double> initialModelSelectionScore =
         startup.initialModelSelectionScore;
     std::optional<NativeQueuedSchedulingWindowExecution> firstSchedulingWindowExecution =
@@ -4983,10 +6050,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 const uint32_t remainingEpochs =
                     request.epochs - epochOffset;
                 const uint32_t epochsToSchedule =
-                    schedulingWindowEpochCountThroughNextHostDecision(
-                        request,
+                    schedulingWindowEpochCountForPersistentRun(
                         evaluateOnly,
-                        currentEpoch,
                         remainingEpochs);
                 activeSchedulingWindowExecution.emplace(
                     launchNativeQueuedSchedulingWindow(
@@ -5084,6 +6149,14 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 placedNetwork->getStampedNetwork(0).getGpuNum());
         };
 
+        const bool collectModelSelectionDiagnostics =
+            modelSelectionDiagnosticsEnabled() &&
+            modelSelectionEnabled &&
+            isTrainedModelSelectionDecisionEpoch(request, cumulativeEpoch);
+        ModelSelectionDiagnosticTimePoint lastEpochBatchPopReturnedAt{};
+        ModelSelectionDiagnosticTimePoint lastEpochBatchCompletionAt{};
+        bool haveLastEpochBatchTiming = false;
+
         auto requestExternalCancel = [&]() {
             if (request.cancellationToken.isCancellationRequested()) {
                 requestQueuedTrainingCancellation(state);
@@ -5098,6 +6171,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 }
                 state->runState->batchFinished.notify_all();
                 state->runState->batchPopped.notify_all();
+                state->hostDecisionFinished.notify_all();
                 cancelBatchSession(effectiveSession);
                 cancelAdditionalValidationSessions();
             }
@@ -5130,6 +6204,21 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                                               completedBatch.inFlightAfterPop,
                                               completedBatch.poppedInEpoch,
                                               completedBatch.batchesInEpoch);
+                }
+
+                if (collectModelSelectionDiagnostics &&
+                    completedBatch.segment.get() == segments.back().get() &&
+                    completedBatch.poppedInEpoch >=
+                        completedBatch.batchesInEpoch) {
+                    // Keep only the final current-epoch batch timestamps so the
+                    // decision diagnostic can separate GPU/completion-tail
+                    // latency from host-side stats/lifecycle processing. Set
+                    // the pop-return timestamp after any per-pop diagnostic I/O
+                    // so our own logging is not charged to the measured gap.
+                    lastEpochBatchCompletionAt = completedBatch.completionTime;
+                    lastEpochBatchPopReturnedAt =
+                        modelSelectionDiagnosticNow(true);
+                    haveLastEpochBatchTiming = true;
                 }
 
                 {
@@ -5240,25 +6329,143 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         const bool modelSelectionEligible =
             modelSelectionEnabled &&
             isTrainedModelSelectionDecisionEpoch(request, cumulativeEpoch);
-        if (modelSelectionEligible) {
-            if (epochOffset + 1 < request.epochs) {
+        const bool periodicCheckpointEligible =
+            trainingArtifacts.enabled() &&
+            isPeriodicCheckpointEpoch(request, cumulativeEpoch);
+        const bool hostDecisionRequired =
+            modelSelectionEligible || periodicCheckpointEligible;
+        const bool hostDecisionGatesLaterWork =
+            hostDecisionRequired && schedulingWindowContinuesPastEpoch;
+        if (hostDecisionRequired) {
+            const auto decisionBegin =
+                modelSelectionDiagnosticNow(collectModelSelectionDiagnostics);
+            uint64_t completionCallbackToDecisionMicros = 0;
+            uint64_t popReturnToDecisionMicros = 0;
+            if (collectModelSelectionDiagnostics &&
+                haveLastEpochBatchTiming) {
+                completionCallbackToDecisionMicros =
+                    modelSelectionElapsedMicros(
+                        lastEpochBatchCompletionAt, decisionBegin);
+                popReturnToDecisionMicros =
+                    modelSelectionElapsedMicros(lastEpochBatchPopReturnedAt, decisionBegin);
+            }
+
+            if (hostDecisionGatesLaterWork) {
                 recordNativeQueuedHostDecisionBarrierForTests();
             }
-            const TrainingModelSelectionContext currentSelectionContext =
-                epochLosses.modelSelectionContext(
+
+            std::optional<double> currentScore{};
+            bool newBest = false;
+            const auto contextAndScoreStart =
+                modelSelectionDiagnosticNow(collectModelSelectionDiagnostics);
+            TrainingModelSelectionContext currentSelectionContext;
+            if (modelSelectionEligible) {
+                currentSelectionContext = epochLosses.modelSelectionContext(
                     cumulativeEpoch, request.defaultValidationPopulation);
-            const std::optional<double> currentScore = request.modelSelectionScore.evaluate(currentSelectionContext);
-            latestModelSelectionScore = currentScore;
-            trainingArtifacts.maybeSnapshotBestCandidate(*placedNetwork, currentSelectionContext, currentScore);
-            const std::optional<double> bestScore = trainingArtifacts.getBestScore();
-            const std::optional<uint64_t> bestCumulativeEpoch = trainingArtifacts.getBestEpoch();
-            if (currentScore.has_value() && std::isfinite(currentScore.value()) && bestScore.has_value() && bestCumulativeEpoch.has_value()) {
-                for (const TrainingEarlyCompletionPolicy& policy : request.earlyCompletionPolicies) {
-                    if (policy.shouldComplete(currentScore.value(), bestScore.value(), cumulativeEpoch, bestCumulativeEpoch.value())) {
-                        earlyCompletionRequested = true;
-                        break;
+                currentScore =
+                    request.modelSelectionScore.evaluate(currentSelectionContext);
+                latestModelSelectionScore = currentScore;
+                const std::optional<double> bestScoreBeforeSnapshot =
+                    trainingArtifacts.getBestScore();
+                newBest =
+                    currentScore.has_value() &&
+                    std::isfinite(currentScore.value()) &&
+                    (!bestScoreBeforeSnapshot.has_value() ||
+                     currentScore.value() < bestScoreBeforeSnapshot.value());
+            }
+            const auto contextAndScoreFinish =
+                modelSelectionDiagnosticNow(collectModelSelectionDiagnostics);
+
+            const auto snapshotStart =
+                modelSelectionDiagnosticNow(collectModelSelectionDiagnostics);
+            bool checkpointWritten = false;
+            if (modelSelectionEligible) {
+                checkpointWritten =
+                    trainingArtifacts.maybeSnapshotBestCandidate(
+                        *placedNetwork, currentSelectionContext, currentScore);
+            }
+            // A new-best snapshot already advanced CURRENT at exactly this
+            // trained state. Do not serialize an identical periodic checkpoint
+            // for the same epoch. If the score did not improve (or this is not
+            // a model-selection epoch), periodic checkpointing advances CURRENT
+            // while BEST remains untouched.
+            if (periodicCheckpointEligible && !checkpointWritten) {
+                trainingArtifacts.snapshotCurrentCheckpoint(
+                    *placedNetwork, cumulativeEpoch);
+                checkpointWritten = true;
+            }
+            const auto snapshotFinish =
+                modelSelectionDiagnosticNow(collectModelSelectionDiagnostics);
+
+            const auto earlyCompletionStart =
+                modelSelectionDiagnosticNow(collectModelSelectionDiagnostics);
+            if (modelSelectionEligible) {
+                const std::optional<double> bestScore =
+                    trainingArtifacts.getBestScore();
+                const std::optional<uint64_t> bestCumulativeEpoch =
+                    trainingArtifacts.getBestEpoch();
+                if (currentScore.has_value() &&
+                    std::isfinite(currentScore.value()) &&
+                    bestScore.has_value() &&
+                    bestCumulativeEpoch.has_value()) {
+                    for (const TrainingEarlyCompletionPolicy& policy :
+                         request.earlyCompletionPolicies) {
+                        if (policy.shouldComplete(
+                                currentScore.value(),
+                                bestScore.value(),
+                                cumulativeEpoch,
+                                bestCumulativeEpoch.value())) {
+                            earlyCompletionRequested = true;
+                            break;
+                        }
                     }
                 }
+            }
+            const auto earlyCompletionFinish =
+                modelSelectionDiagnosticNow(collectModelSelectionDiagnostics);
+
+            // The scheduler may prefetch the next TRAIN batch, but a host
+            // decision boundary prevents any next-epoch optimizer mutation or
+            // network submission. Release that gate only after model selection
+            // and/or periodic checkpoint persistence has finished.
+            const auto gateSignalStart =
+                modelSelectionDiagnosticNow(collectModelSelectionDiagnostics);
+            if (hostDecisionGatesLaterWork) {
+                if (earlyCompletionRequested) {
+                    stopQueuedTrainingAfterHostDecision(
+                        state, cumulativeEpoch);
+                } else {
+                    continueQueuedTrainingAfterHostDecision(
+                        state, cumulativeEpoch);
+                }
+            }
+            const auto gateSignalFinish =
+                modelSelectionDiagnosticNow(collectModelSelectionDiagnostics);
+
+            if (collectModelSelectionDiagnostics) {
+                // Emit only after the decision gate has been signalled so the
+                // fprintf/flush itself cannot enlarge the GPU-idle interval we
+                // are trying to measure. The scheduler-side diagnostic is also
+                // deferred until after the first post-gate submit.
+                emitNativeModelSelectionTimingDiagnostic(
+                    cumulativeEpoch,
+                    completionCallbackToDecisionMicros,
+                    popReturnToDecisionMicros,
+                    haveLastEpochBatchTiming
+                        ? modelSelectionElapsedMicros(
+                              lastEpochBatchCompletionAt, gateSignalFinish)
+                        : 0,
+                    modelSelectionElapsedMicros(contextAndScoreStart, contextAndScoreFinish),
+                    modelSelectionElapsedMicros(snapshotStart, snapshotFinish),
+                    modelSelectionElapsedMicros(earlyCompletionStart, earlyCompletionFinish),
+                    hostDecisionGatesLaterWork
+                        ? modelSelectionElapsedMicros(gateSignalStart, gateSignalFinish)
+                        : 0,
+                    modelSelectionElapsedMicros(decisionBegin, gateSignalFinish),
+                    newBest,
+                    checkpointWritten,
+                    earlyCompletionRequested,
+                    hostDecisionGatesLaterWork);
             }
         }
 
@@ -5272,6 +6479,16 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             activeSchedulingWindowExecution.reset();
         }
         if (earlyCompletionRequested) {
+            if (schedulingWindowContinuesPastEpoch) {
+                // The stop decision wakes the resident producer at its gate.
+                // Join this command before leaving the loop so normal shutdown
+                // does not have to convert an intentional early completion
+                // into queue cancellation. No later optimizer work is submitted.
+                waitForSchedulerCommandCompletion(
+                    schedulingWindowExecution);
+                throwIfSchedulingWindowStateFailed(state);
+                activeSchedulingWindowExecution.reset();
+            }
             runEarlyCompleted = true;
             completedEpoch = cumulativeEpoch;
             break;
@@ -5292,11 +6509,16 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         modelSelectionEnabled &&
         finalCompletedPhaseEpoch >=
             firstTrainedModelSelectionEpochForRequest(request);
-    if (finalModelSelectionEligible) {
+    const bool finalModelSelectionAlreadyEvaluated =
+        finalModelSelectionEligible &&
+        isTrainedModelSelectionDecisionEpoch(request, finalCompletedEpoch);
+    if (finalModelSelectionEligible && !finalModelSelectionAlreadyEvaluated) {
         // The final/latest state is the handoff and deployment boundary. If best
         // candidate tracking is enabled and the fit has reached the model-selection
-        // eligibility threshold, always consider the final state for best even when
-        // the final epoch does not fall on the periodic cadence.
+        // eligibility threshold, consider the final state for best only when it was
+        // not already evaluated at an ordinary model-selection decision boundary.
+        // Re-evaluating an on-cadence final epoch would invoke user score callbacks
+        // twice for the same trained state and can duplicate externally visible work.
         TrainingModelSelectionContext finalSelectionContext;
         if (latestEpochSelectionContextValid) {
             finalSelectionContext = latestEpochSelectionContext;
@@ -5343,7 +6565,10 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         // placement resident for the full archive write even though latest will
         // never be consumed. Keep latest only as the fallback when no best
         // candidate exists. Fixed-length training still persists latest.
-        trainingArtifacts.finalize(*placedNetwork, selectionMetadata, persistLatestArtifact);
+        trainingArtifacts.finalize(*placedNetwork,
+                                   selectionMetadata,
+                                   persistLatestArtifact,
+                                   elapsedSinceRunStart());
         // fit() completion is a semantic boundary: even when no save_model_dir is
         // configured, callers may immediately reuse, inspect, save, or pass the
         // completed PlacedNetwork into a follow-up phase.  Preserve the pipelined
@@ -5353,6 +6578,9 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         placedNetwork->synchronize();
         if (request.completedPlacedNetwork != nullptr) {
             *request.completedPlacedNetwork = placedNetwork;
+        }
+        if (request.completedArtifactNetworkName != nullptr) {
+            *request.completedArtifactNetworkName = placedNetwork->getNetworkName();
         }
         if (request.completedTrainingEpochs != nullptr) {
             *request.completedTrainingEpochs = selectedArtifactEpoch.value_or(finalCompletedEpoch);

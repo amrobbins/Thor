@@ -1,6 +1,7 @@
 #include "Utilities/TarFile/TarWriter.h"
 
 #include "Utilities/TarFile/ArchiveShardWriterWorker.h"
+#include "Utilities/Common/FilesystemDurability.h"
 
 #include <algorithm>
 
@@ -203,7 +204,7 @@ string TarWriter::createArchive(filesystem::path archiveDirectory, bool overwrit
     if (archiveDirectory.empty())
         archiveDirectory = filesystem::path(".");
     if (!filesystem::exists(archiveDirectory)) {
-        filesystem::create_directories(archiveDirectory);
+        Thor::FilesystemDurability::createDirectoriesDurably(archiveDirectory);
     }
 
     // Scan for any existing shard *paths* matching this prefix (any type: file/dir/symlink/etc.)
@@ -314,6 +315,14 @@ string TarWriter::createArchive(filesystem::path archiveDirectory, bool overwrit
         out.flush();
         if (!out)
             throw runtime_error("createArchive: flush failed: " + archiveShardPath);
+        out.close();
+        if (!out)
+            throw runtime_error("createArchive: close failed: " + archiveShardPath);
+
+        // ArchiveShardWriterWorker fsyncs the tar payload before returning.
+        // The index/footer is appended afterward, so sync the complete shard
+        // again before any .incomplete name is published.
+        Thor::FilesystemDurability::syncFile(archiveShardPath);
     }
 
     // Ensure no files in the way, right before attempting move
@@ -329,7 +338,10 @@ string TarWriter::createArchive(filesystem::path archiveDirectory, bool overwrit
         }
     }
 
-    // Move files to their permanent names
+    // Move files to their permanent names. The complete shard bytes were
+    // fsync'd above; one directory fsync after the batch of renames makes the
+    // archive namespace publication durable without paying one directory
+    // barrier per shard.
     for (uint32_t shard_idx = 0; shard_idx < num_shards; ++shard_idx) {
         string temp_path = (archiveDirectory / archiveShardCreationPlan[shard_idx].archiveShardPath).string();
         string permanent_path = strip_suffix_or_throw(temp_path, ".incomplete", num_shards);
@@ -340,6 +352,7 @@ string TarWriter::createArchive(filesystem::path archiveDirectory, bool overwrit
             throw std::runtime_error("createArchive: rename failed: " + temp_path + " -> " + permanent_path + " (" + ec.message() + ")");
         }
     }
+    Thor::FilesystemDurability::syncDirectory(archiveDirectory);
 
     return archiveId;
 }

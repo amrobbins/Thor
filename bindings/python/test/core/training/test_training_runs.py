@@ -1245,6 +1245,7 @@ def _make_signature_only_trainer(
 def _make_tiny_regression_trainer(
     name: str,
     *,
+    data=None,
     optimizer=True,
     optimizer_obj=None,
     save_model_dir=None,
@@ -1258,7 +1259,7 @@ def _make_tiny_regression_trainer(
         optimizer_obj = thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0) if optimizer else None
     return thor.training.Trainer(
         _build_tiny_regressor(name),
-        data=_regression_one_batch_data(),
+        data=_regression_one_batch_data() if data is None else data,
         optimizer=optimizer_obj,
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1674,6 +1675,177 @@ def test_training_runs_binding_rejects_invalid_reported_losses():
         )
 
 
+def test_training_runs_binding_accepts_pathlike_repository_dir(tmp_path):
+    trainer = _make_tiny_regression_trainer("training_runs_repository_dir")
+    repository_dir = tmp_path / "training_repository"
+
+    runs = thor.training.TrainingRuns(
+        [("fold_0", trainer)],
+        repository_dir=repository_dir,
+    )
+
+    assert runs.repository_dir == str(repository_dir)
+
+
+def test_training_data_binding_allows_explicit_none_split_for_repository_resume():
+    source = _regression_one_batch_data()
+    data = thor.data.TrainingData(
+        source.dataset,
+        None,
+        source.batching,
+        dataset_name=source.dataset_name,
+        device_storage=source.device_storage,
+        windowed_device_cache=source.windowed_device_cache,
+    )
+
+    assert data.has_splits is False
+    assert data.splits is None
+    assert data.dataset.id == source.dataset.id
+    assert data.batching.batch_size == source.batching.batch_size
+
+
+def test_training_data_binding_requires_explicit_splits_argument():
+    source = _regression_one_batch_data()
+
+    with pytest.raises(TypeError):
+        thor.data.TrainingData(
+            source.dataset,
+            source.batching,
+            dataset_name=source.dataset_name,
+        )
+
+
+def test_training_runs_binding_rejects_repository_dir_with_explicit_trainer_save_model_dir(tmp_path):
+    trainer = _make_tiny_regression_trainer(
+        "training_runs_repository_dir_conflict",
+        save_model_dir=tmp_path / "explicit_model",
+    )
+
+    with pytest.raises(RuntimeError, match="save_model_dir.*repository_dir"):
+        thor.training.TrainingRuns(
+            [("fold_0", trainer)],
+            repository_dir=tmp_path / "training_repository",
+        )
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_training_runs_repository_mixes_completed_resumed_and_new_members(tmp_path):
+    repository_dir = tmp_path / "training_runs_repository"
+    repository_data = _regression_one_batch_data()
+
+    completed_seed = _make_tiny_regression_trainer(
+        "repository_mix_fold_0",
+        data=repository_data,
+        model_selection_score=lambda validation_loss, training_loss, epoch: float(epoch),
+    )
+    completed_seed_runs = thor.training.TrainingRuns(
+        [("fold_0", completed_seed)],
+        repository_dir=repository_dir,
+    )
+    completed_seed_result = completed_seed_runs.fit(
+        epochs=3,
+        check_best_model_every_epochs=1,
+        first_model_selection_epoch=1,
+        checkpoint_every_epochs=1,
+        evaluate_training_population=False,
+    )
+    assert completed_seed_result["fold_0"].status == "completed"
+    assert completed_seed_result["fold_0"].completed_epoch == 3
+
+    def interrupt_after_epoch_two(validation_loss, training_loss, epoch):
+        if epoch >= 3:
+            raise RuntimeError("planned checkpoint interruption")
+        return float(epoch)
+
+    interrupted_seed = _make_tiny_regression_trainer(
+        "repository_mix_fold_1",
+        data=repository_data,
+        model_selection_score=interrupt_after_epoch_two,
+    )
+    interrupted_seed_runs = thor.training.TrainingRuns(
+        [("fold_1", interrupted_seed)],
+        failure_policy="continue",
+        repository_dir=repository_dir,
+    )
+    interrupted_seed_result = interrupted_seed_runs.fit(
+        epochs=5,
+        check_best_model_every_epochs=1,
+        first_model_selection_epoch=1,
+        checkpoint_every_epochs=1,
+        evaluate_training_population=False,
+    )
+    assert interrupted_seed_result["fold_1"].status == "failed"
+
+    completed_callback_epochs = []
+    resumed_callback_epochs = []
+    new_callback_epochs = []
+
+    def completed_score(validation_loss, training_loss, epoch):
+        completed_callback_epochs.append(epoch)
+        raise AssertionError("completed repository member scheduled new model-selection work")
+
+    def resumed_score(validation_loss, training_loss, epoch):
+        resumed_callback_epochs.append(epoch)
+        return float(epoch)
+
+    def new_score(validation_loss, training_loss, epoch):
+        new_callback_epochs.append(epoch)
+        return float(epoch)
+
+    resume_data_without_split = thor.data.TrainingData(
+        repository_data.dataset,
+        None,
+        repository_data.batching,
+        dataset_name=repository_data.dataset_name,
+        device_storage=repository_data.device_storage,
+        windowed_device_cache=repository_data.windowed_device_cache,
+    )
+
+    resumed_runs = thor.training.TrainingRuns(
+        [
+            ("fold_0", _make_tiny_regression_trainer(
+                "repository_mix_fold_0", data=resume_data_without_split,
+                model_selection_score=completed_score), "repo_ensemble"),
+            ("fold_1", _make_tiny_regression_trainer(
+                "repository_mix_fold_1", data=resume_data_without_split,
+                model_selection_score=resumed_score), "repo_ensemble"),
+            ("fold_2", _make_tiny_regression_trainer(
+                "repository_mix_fold_2", data=repository_data,
+                model_selection_score=new_score), "repo_ensemble"),
+        ],
+        failure_policy="continue",
+        max_parallel_runs=2,
+        min_successful_models={"repo_ensemble": 2},
+        repository_dir=repository_dir,
+    )
+    result = resumed_runs.fit(
+        epochs=5,
+        check_best_model_every_epochs=1,
+        first_model_selection_epoch=1,
+        checkpoint_every_epochs=1,
+        evaluate_training_population=False,
+    )
+
+    assert result.all_completed()
+    assert result["fold_0"].completed_epoch == 3
+    assert result["fold_1"].completed_epoch == 5
+    assert result["fold_2"].completed_epoch == 5
+    assert completed_callback_epochs == []
+    assert resumed_callback_epochs == [3, 4, 5]
+    assert new_callback_epochs == [1, 2, 3, 4, 5]
+    ensemble = result.ensemble("repo_ensemble")
+    assert ensemble.successful_models == 3
+    assert ensemble.required_successful_models == 2
+
+
 def test_trainer_binding_accepts_pathlike_save_model_dir_for_training_runs_artifact(tmp_path):
     trainer = _make_tiny_regression_trainer(
         "training_runs_pathlike_save_model_dir",
@@ -1726,6 +1898,8 @@ def test_trainer_binding_accepts_first_model_selection_epoch_and_fit_options_cad
     options.check_best_model_every_epochs = 2
     options.first_model_selection_epoch = 7
     options.max_training_batches_per_epoch = 500
+    options.checkpoint_every_epochs = 11
+    options.retain_previous_checkpoints = True
 
     assert trainer is not None
     assert trainer.completed_training_epochs == 0
@@ -1733,12 +1907,16 @@ def test_trainer_binding_accepts_first_model_selection_epoch_and_fit_options_cad
     assert options.check_best_model_every_epochs == 2
     assert options.first_model_selection_epoch == 7
     assert options.max_training_batches_per_epoch == 500
+    assert options.checkpoint_every_epochs == 11
+    assert options.retain_previous_checkpoints is True
 
 
 def test_trainer_fit_options_default_to_full_training_epoch():
     options = thor.training.TrainerFitOptions()
 
     assert options.max_training_batches_per_epoch is None
+    assert options.checkpoint_every_epochs == 0
+    assert options.retain_previous_checkpoints is False
 
 
 def test_device_dataset_storage_is_not_a_fit_option():

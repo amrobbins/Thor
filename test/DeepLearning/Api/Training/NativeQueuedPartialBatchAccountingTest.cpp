@@ -20,6 +20,7 @@
 #include "DeepLearning/Api/Training/TrainingInputBinding.h"
 #include "DeepLearning/Implementation/Data/Sessions/BatchSessionRuntimeAccess.h"
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
+#include "DeepLearning/Implementation/Training/TrainingCheckpointRepository.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
@@ -29,15 +30,18 @@
 #include "gtest/gtest.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <filesystem>
 #include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <system_error>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -47,6 +51,49 @@
 using namespace Thor;
 
 namespace {
+
+class ScopedCheckpointTestDirectory {
+   public:
+    explicit ScopedCheckpointTestDirectory(const std::string& stem) {
+        const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
+        path = std::filesystem::temp_directory_path() /
+               (stem + "_" + std::to_string(unique));
+        std::filesystem::create_directories(path);
+    }
+
+    ~ScopedCheckpointTestDirectory() {
+        std::error_code errorCode;
+        std::filesystem::remove_all(path, errorCode);
+    }
+
+    std::filesystem::path path{};
+};
+
+size_t checkpointGenerationCount(
+    const ThorImplementation::TrainingCheckpointRepository& repository) {
+    const std::filesystem::path generations = repository.getGenerationsDirectory();
+    std::error_code errorCode;
+    if (!std::filesystem::exists(generations, errorCode) || errorCode) {
+        return 0;
+    }
+    size_t count = 0;
+    std::filesystem::directory_iterator iterator(generations, errorCode);
+    const std::filesystem::directory_iterator end;
+    while (!errorCode && iterator != end) {
+        std::error_code entryError;
+        const std::string generationName = iterator->path().filename().string();
+        if (iterator->is_directory(entryError) && !entryError &&
+            !generationName.empty() && generationName.front() != '.') {
+            ++count;
+        }
+        iterator.increment(errorCode);
+    }
+    if (errorCode) {
+        throw std::runtime_error("Failed to enumerate checkpoint generations: " +
+                                 errorCode.message());
+    }
+    return count;
+}
 
 class ExactPopulationBatchSession final : public BatchSession {
    public:
@@ -164,6 +211,34 @@ class CapturingObserver final : public TrainingObserver {
     std::vector<TrainingEvent> events;
 };
 
+class ThrowOnTrainEpochStartedObserver final : public TrainingObserver {
+   public:
+    explicit ThrowOnTrainEpochStartedObserver(uint64_t throwEpoch) : throwEpoch(throwEpoch) {}
+
+    void onTrainingEvent(const TrainingEvent& event) override {
+        events.push_back(event);
+        if (event.type == TrainingEventType::EPOCH_STARTED &&
+            event.stats.phase == TrainingEventPhase::TRAIN &&
+            event.stats.epoch >= throwEpoch) {
+            throw std::runtime_error("intentional checkpoint recovery interruption");
+        }
+    }
+
+    uint64_t throwEpoch = 0;
+    std::vector<TrainingEvent> events{};
+};
+
+std::vector<uint64_t> trainEpochsStarted(const std::vector<TrainingEvent>& events) {
+    std::vector<uint64_t> epochs;
+    for (const TrainingEvent& event : events) {
+        if (event.type == TrainingEventType::EPOCH_STARTED &&
+            event.stats.phase == TrainingEventPhase::TRAIN) {
+            epochs.push_back(event.stats.epoch);
+        }
+    }
+    return epochs;
+}
+
 std::shared_ptr<Network> makeInputLossNetwork(bool requiresFullBatch = false) {
     auto network = std::make_shared<Network>("partial_batch_accounting");
     NetworkInput predictions =
@@ -260,9 +335,11 @@ std::shared_ptr<Network> makeInputLossNetwork(bool requiresFullBatch = false) {
 class DeterministicTrainableBatchSession final : public BatchSession {
    public:
     explicit DeterministicTrainableBatchSession(
-        std::function<void(ExampleType)> nextBatchObserver = {})
+        std::function<void(ExampleType)> nextBatchObserver = {},
+        std::function<void(ExampleType)> acquireBatchObserver = {})
         : BatchSession("native_queue_trainable_oracle"),
-          nextBatchObserver(std::move(nextBatchObserver)) {
+          nextBatchObserver(std::move(nextBatchObserver)),
+          acquireBatchObserver(std::move(acquireBatchObserver)) {
         batchSize = 2;
     }
 
@@ -324,6 +401,9 @@ class DeterministicTrainableBatchSession final : public BatchSession {
         Batch batch;
         batch.insert("features", featuresTensor);
         batch.insert("labels", labelsTensor);
+        if (acquireBatchObserver) {
+            acquireBatchObserver(exampleType);
+        }
         return batch;
     }
 
@@ -332,6 +412,7 @@ class DeterministicTrainableBatchSession final : public BatchSession {
     uint64_t nextTrainBatch = 0;
     uint64_t nextValidateBatch = 0;
     std::function<void(ExampleType)> nextBatchObserver;
+    std::function<void(ExampleType)> acquireBatchObserver;
 };
 
 struct HyperParameterUpdateInvocation {
@@ -765,7 +846,7 @@ TEST(NativeQueuedPartialBatchAccounting, QueuedTrainingMatchesSynchronizedRefere
     EXPECT_NEAR(queued.finalWeight, reference.finalWeight, 1e-6);
 }
 
-TEST(NativeQueuedPartialBatchAccounting, SchedulerResourcesPersistAcrossSchedulingWindows) {
+TEST(NativeQueuedPartialBatchAccounting, SchedulerResourcesPersistAcrossModelSelectionGate) {
     detail::resetNativeQueuedSchedulerResourceDiagnosticsForTests();
 
     TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
@@ -802,7 +883,7 @@ TEST(NativeQueuedPartialBatchAccounting, SchedulerResourcesPersistAcrossScheduli
         detail::nativeQueuedSchedulerResourceDiagnosticsForTests();
     EXPECT_EQ(diagnostics.resourceConstructionCount, 1u);
     EXPECT_EQ(diagnostics.runStateConstructionCount, 1u);
-    EXPECT_EQ(diagnostics.schedulingWindowCount, 2u);
+    EXPECT_EQ(diagnostics.schedulingWindowCount, 1u);
     EXPECT_EQ(diagnostics.hostDecisionBarrierCount, 1u);
     EXPECT_EQ(diagnostics.workerThreadStartCount, 1u);
     EXPECT_EQ(diagnostics.distinctWorkerThreadsObserved, 1u);
@@ -1073,7 +1154,753 @@ TEST(NativeQueuedPartialBatchAccounting, NamedValidationPopulationFeedsModelSele
     EXPECT_EQ(diagnostics.hostDecisionBarrierCount, 0u);
 }
 
-TEST(NativeQueuedPartialBatchAccounting, ModelSelectionRetainsSchedulingWindowBarrier) {
+TEST(NativeQueuedPartialBatchAccounting, PeriodicCheckpointDefaultReplacesPreviousCurrentGeneration) {
+    ScopedCheckpointTestDirectory temp("thor_periodic_checkpoint_replace");
+    const std::filesystem::path saveModelDirectory = temp.path / "model";
+    // Force finalization to fail after training so the in-progress repository
+    // remains available for inspection instead of being retired on success.
+    std::filesystem::create_directories(saveModelDirectory);
+
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    auto session = std::make_shared<DeterministicTrainableBatchSession>();
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = session;
+    request.optimizer = Sgd::Builder()
+                            .initialLearningRate(0.01f)
+                            .decay(0.0f)
+                            .momentum(0.0f)
+                            .build();
+    request.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 3;
+    request.saveModelDirectory = saveModelDirectory.string();
+    request.saveModelOverwrite = false;
+    request.checkpointEveryEpochs = 1;
+
+    CapturingObserver observer;
+    EXPECT_THROW(
+        runNativeQueuedTraining(
+            request,
+            observer,
+            NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                        .synchronizeAfterEveryBatch = false}),
+        std::runtime_error);
+
+    ThorImplementation::TrainingCheckpointRepository repository(
+        temp.path / ".model.training_repository");
+    EXPECT_EQ(checkpointGenerationCount(repository), 1u);
+    const std::optional<std::string> current = repository.readPointer(
+        ThorImplementation::TrainingCheckpointRepository::Pointer::CURRENT);
+    ASSERT_TRUE(current.has_value());
+    EXPECT_TRUE(std::filesystem::is_regular_file(
+        repository.getGenerationDirectory(current.value()) / "checkpoint_state.json"));
+    EXPECT_FALSE(repository.readPointer(
+        ThorImplementation::TrainingCheckpointRepository::Pointer::BEST).has_value());
+}
+
+TEST(NativeQueuedPartialBatchAccounting, PeriodicCheckpointReplacementPreservesDistinctBestGeneration) {
+    ScopedCheckpointTestDirectory temp("thor_periodic_checkpoint_preserve_best");
+    const std::filesystem::path saveModelDirectory = temp.path / "model";
+    std::filesystem::create_directories(saveModelDirectory);
+
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    auto session = std::make_shared<DeterministicTrainableBatchSession>();
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = session;
+    request.optimizer = Sgd::Builder()
+                            .initialLearningRate(0.01f)
+                            .decay(0.0f)
+                            .momentum(0.0f)
+                            .build();
+    request.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 3;
+    request.saveModelDirectory = saveModelDirectory.string();
+    request.saveModelOverwrite = false;
+    request.checkBestModelEveryEpochs = 1;
+    request.firstModelSelectionEpoch = 1;
+    request.modelSelectionScore = TrainingModelSelectionScore(
+        [](const TrainingModelSelectionContext& context) {
+            // Lower is better, so epoch one remains BEST while periodic
+            // checkpoints continue to advance CURRENT.
+            return static_cast<double>(context.epoch);
+        });
+    request.checkpointEveryEpochs = 1;
+
+    CapturingObserver observer;
+    EXPECT_THROW(
+        runNativeQueuedTraining(
+            request,
+            observer,
+            NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                        .synchronizeAfterEveryBatch = false}),
+        std::runtime_error);
+
+    ThorImplementation::TrainingCheckpointRepository repository(
+        temp.path / ".model.training_repository");
+    EXPECT_EQ(checkpointGenerationCount(repository), 2u);
+    const std::optional<std::string> current = repository.readPointer(
+        ThorImplementation::TrainingCheckpointRepository::Pointer::CURRENT);
+    const std::optional<std::string> best = repository.readPointer(
+        ThorImplementation::TrainingCheckpointRepository::Pointer::BEST);
+    ASSERT_TRUE(current.has_value());
+    ASSERT_TRUE(best.has_value());
+    EXPECT_NE(current.value(), best.value());
+    EXPECT_TRUE(std::filesystem::is_directory(
+        repository.getGenerationDirectory(current.value())));
+    EXPECT_TRUE(std::filesystem::is_directory(
+        repository.getGenerationDirectory(best.value())));
+}
+
+TEST(NativeQueuedPartialBatchAccounting, PeriodicCheckpointCanRetainPreviousGenerations) {
+    ScopedCheckpointTestDirectory temp("thor_periodic_checkpoint_retain");
+    const std::filesystem::path saveModelDirectory = temp.path / "model";
+    std::filesystem::create_directories(saveModelDirectory);
+
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    auto session = std::make_shared<DeterministicTrainableBatchSession>();
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = session;
+    request.optimizer = Sgd::Builder()
+                            .initialLearningRate(0.01f)
+                            .decay(0.0f)
+                            .momentum(0.0f)
+                            .build();
+    request.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 3;
+    request.saveModelDirectory = saveModelDirectory.string();
+    request.saveModelOverwrite = false;
+    request.checkpointEveryEpochs = 1;
+    request.retainPreviousCheckpoints = true;
+
+    CapturingObserver observer;
+    EXPECT_THROW(
+        runNativeQueuedTraining(
+            request,
+            observer,
+            NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                        .synchronizeAfterEveryBatch = false}),
+        std::runtime_error);
+
+    ThorImplementation::TrainingCheckpointRepository repository(
+        temp.path / ".model.training_repository");
+    EXPECT_EQ(checkpointGenerationCount(repository), 3u);
+    EXPECT_TRUE(repository.readPointer(
+        ThorImplementation::TrainingCheckpointRepository::Pointer::CURRENT).has_value());
+    EXPECT_FALSE(repository.readPointer(
+        ThorImplementation::TrainingCheckpointRepository::Pointer::BEST).has_value());
+}
+
+TEST(NativeQueuedPartialBatchAccounting, ResumeFromCurrentContinuesAtNextEpochAndFinishesOriginalCeiling) {
+    ScopedCheckpointTestDirectory temp("thor_checkpoint_resume_current");
+    const std::filesystem::path saveModelDirectory = temp.path / "model";
+
+    {
+        TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+        auto session = std::make_shared<DeterministicTrainableBatchSession>();
+        TrainingRunRequest request;
+        request.network = fixture.network;
+        request.batchSession = session;
+        request.optimizer = Sgd::Builder()
+                                .initialLearningRate(0.01f)
+                                .decay(0.0f)
+                                .momentum(0.9f)
+                                .build();
+        request.datasetInputBindings = {
+            TrainingInputBinding("features", "features"),
+            TrainingInputBinding("labels", "labels")};
+        request.runtime.scalarTensorsToReport = {"loss"};
+        request.epochs = 5;
+        request.saveModelDirectory = saveModelDirectory.string();
+        request.checkpointEveryEpochs = 1;
+
+        ThrowOnTrainEpochStartedObserver interrupted(/*throwEpoch=*/3);
+        EXPECT_THROW(
+            runNativeQueuedTraining(
+                request,
+                interrupted,
+                NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                            .synchronizeAfterEveryBatch = false}),
+            std::runtime_error);
+    }
+
+    ThorImplementation::TrainingCheckpointRepository repository(
+        temp.path / ".model.training_repository");
+    const auto beforeResume = repository.readRecoveryState();
+    ASSERT_TRUE(beforeResume.has_value());
+    EXPECT_EQ(beforeResume->current.completedEpoch, 2u);
+    EXPECT_EQ(beforeResume->current.phaseTargetCompletedEpoch, 5u);
+
+    TrainableOracleNetwork resumedFixture = makeTrainableOracleNetwork();
+    auto resumedSession = std::make_shared<DeterministicTrainableBatchSession>();
+    TrainingRunRequest resumedRequest;
+    resumedRequest.network = resumedFixture.network;
+    resumedRequest.batchSession = resumedSession;
+    resumedRequest.optimizer = Sgd::Builder()
+                                   .initialLearningRate(0.01f)
+                                   .decay(0.0f)
+                                   .momentum(0.9f)
+                                   .build();
+    resumedRequest.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    resumedRequest.runtime.scalarTensorsToReport = {"loss"};
+    // Deliberately repeat the original ceiling. Recovery must not interpret
+    // this as five additional epochs after CURRENT epoch 2.
+    resumedRequest.epochs = 5;
+    resumedRequest.saveModelDirectory = saveModelDirectory.string();
+    resumedRequest.checkpointEveryEpochs = 1;
+    uint64_t completedTrainingEpochs = 0;
+    resumedRequest.completedTrainingEpochs = &completedTrainingEpochs;
+
+    CapturingObserver resumedObserver;
+    runNativeQueuedTraining(
+        resumedRequest,
+        resumedObserver,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                    .synchronizeAfterEveryBatch = false});
+
+    EXPECT_EQ(completedTrainingEpochs, 5u);
+    EXPECT_EQ(trainEpochsStarted(resumedObserver.events),
+              (std::vector<uint64_t>{3u, 4u, 5u}));
+    EXPECT_TRUE(std::filesystem::is_directory(saveModelDirectory / "latest"));
+    const auto completed = repository.readCompleted();
+    ASSERT_TRUE(completed.has_value());
+    EXPECT_EQ(completed->completedEpoch, 5u);
+    EXPECT_EQ(completed->selectedEpoch, 5u);
+    EXPECT_EQ(checkpointGenerationCount(repository), 1u);
+}
+
+TEST(NativeQueuedPartialBatchAccounting, ResumeRestoresBestIndependentlyFromCurrent) {
+    ScopedCheckpointTestDirectory temp("thor_checkpoint_resume_best");
+    const std::filesystem::path saveModelDirectory = temp.path / "model";
+    auto scoreByEpoch = [](const TrainingModelSelectionContext& context) {
+        return static_cast<double>(context.epoch);
+    };
+
+    {
+        TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+        auto session = std::make_shared<DeterministicTrainableBatchSession>();
+        TrainingRunRequest request;
+        request.network = fixture.network;
+        request.batchSession = session;
+        request.optimizer = Sgd::Builder()
+                                .initialLearningRate(0.01f)
+                                .decay(0.0f)
+                                .momentum(0.9f)
+                                .build();
+        request.datasetInputBindings = {
+            TrainingInputBinding("features", "features"),
+            TrainingInputBinding("labels", "labels")};
+        request.runtime.scalarTensorsToReport = {"loss"};
+        request.epochs = 5;
+        request.saveModelDirectory = saveModelDirectory.string();
+        request.checkBestModelEveryEpochs = 1;
+        request.firstModelSelectionEpoch = 1;
+        request.modelSelectionScore = TrainingModelSelectionScore(scoreByEpoch);
+        request.checkpointEveryEpochs = 1;
+        request.retainPreviousCheckpoints = true;
+
+        ThrowOnTrainEpochStartedObserver interrupted(/*throwEpoch=*/4);
+        EXPECT_THROW(
+            runNativeQueuedTraining(
+                request,
+                interrupted,
+                NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                            .synchronizeAfterEveryBatch = false}),
+            std::runtime_error);
+    }
+
+    ThorImplementation::TrainingCheckpointRepository repository(
+        temp.path / ".model.training_repository");
+    const auto beforeResume = repository.readRecoveryState();
+    ASSERT_TRUE(beforeResume.has_value());
+    EXPECT_EQ(beforeResume->current.completedEpoch, 3u);
+    ASSERT_TRUE(beforeResume->best.has_value());
+    ASSERT_TRUE(beforeResume->best->bestEpoch.has_value());
+    EXPECT_EQ(beforeResume->best->bestEpoch.value(), 1u);
+
+    TrainableOracleNetwork resumedFixture = makeTrainableOracleNetwork();
+    auto resumedSession = std::make_shared<DeterministicTrainableBatchSession>();
+    TrainingRunRequest resumedRequest;
+    resumedRequest.network = resumedFixture.network;
+    resumedRequest.batchSession = resumedSession;
+    resumedRequest.optimizer = Sgd::Builder()
+                                   .initialLearningRate(0.01f)
+                                   .decay(0.0f)
+                                   .momentum(0.9f)
+                                   .build();
+    resumedRequest.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    resumedRequest.runtime.scalarTensorsToReport = {"loss"};
+    resumedRequest.epochs = 99;  // repository target remains epoch 5
+    resumedRequest.saveModelDirectory = saveModelDirectory.string();
+    // Deliberately disagree with the original selection cadence. The existing
+    // repository owns the interrupted phase's selection cadence.
+    resumedRequest.checkBestModelEveryEpochs = 7;
+    resumedRequest.firstModelSelectionEpoch = 7;
+    resumedRequest.modelSelectionScore = TrainingModelSelectionScore(scoreByEpoch);
+    resumedRequest.checkpointEveryEpochs = 1;
+    resumedRequest.retainPreviousCheckpoints = true;
+    uint64_t completedTrainingEpochs = 0;
+    resumedRequest.completedTrainingEpochs = &completedTrainingEpochs;
+
+    CapturingObserver resumedObserver;
+    runNativeQueuedTraining(
+        resumedRequest,
+        resumedObserver,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                    .synchronizeAfterEveryBatch = false});
+
+    EXPECT_EQ(trainEpochsStarted(resumedObserver.events),
+              (std::vector<uint64_t>{4u, 5u}));
+    // Lower epoch score is better, so the pre-crash epoch-1 BEST must remain
+    // selected after CURRENT resumes from epoch 3.
+    EXPECT_EQ(completedTrainingEpochs, 1u);
+    EXPECT_TRUE(std::filesystem::is_directory(saveModelDirectory / "best"));
+
+    const auto afterResume = repository.readRecoveryState();
+    ASSERT_TRUE(afterResume.has_value());
+    EXPECT_EQ(afterResume->current.completedEpoch, 5u);
+    ASSERT_TRUE(afterResume->best.has_value());
+    ASSERT_TRUE(afterResume->best->bestEpoch.has_value());
+    EXPECT_EQ(afterResume->best->bestEpoch.value(), 1u);
+}
+
+TEST(NativeQueuedPartialBatchAccounting, ResumeAtTargetFinalizesWithoutReplayingEpoch) {
+    ScopedCheckpointTestDirectory temp("thor_checkpoint_resume_at_target");
+    const std::filesystem::path saveModelDirectory = temp.path / "model";
+    // Make the first finalization fail after CURRENT has reached the requested
+    // target. Removing this blocker then exercises the zero-remaining recovery
+    // path without replaying the last epoch.
+    std::filesystem::create_directories(saveModelDirectory);
+
+    {
+        TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+        auto session = std::make_shared<DeterministicTrainableBatchSession>();
+        TrainingRunRequest request;
+        request.network = fixture.network;
+        request.batchSession = session;
+        request.optimizer = Sgd::Builder()
+                                .initialLearningRate(0.01f)
+                                .decay(0.0f)
+                                .momentum(0.9f)
+                                .build();
+        request.datasetInputBindings = {
+            TrainingInputBinding("features", "features"),
+            TrainingInputBinding("labels", "labels")};
+        request.runtime.scalarTensorsToReport = {"loss"};
+        request.epochs = 2;
+        request.saveModelDirectory = saveModelDirectory.string();
+        request.checkpointEveryEpochs = 1;
+        request.deviceDatasetStorageReport.requested = DeviceDatasetStorage::STRICT;
+        request.deviceDatasetStorageReport.attempted = true;
+        request.deviceDatasetStorageReport.used = true;
+        request.deviceDatasetStorageReport.reason = "strict_resident_before_finalization";
+        request.deviceDatasetStorageReport.examples = 64;
+        request.deviceDatasetStorageReport.residentBytes = 2048;
+
+        CapturingObserver observer;
+        EXPECT_THROW(
+            runNativeQueuedTraining(
+                request,
+                observer,
+                NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                            .synchronizeAfterEveryBatch = false}),
+            std::runtime_error);
+    }
+
+    std::filesystem::remove_all(saveModelDirectory);
+    ThorImplementation::TrainingCheckpointRepository repository(
+        temp.path / ".model.training_repository");
+    const auto beforeResume = repository.readRecoveryState();
+    ASSERT_TRUE(beforeResume.has_value());
+    EXPECT_EQ(beforeResume->current.completedEpoch, 2u);
+    EXPECT_EQ(beforeResume->current.deviceDatasetStorageReport.requested,
+              DeviceDatasetStorage::STRICT);
+    EXPECT_TRUE(beforeResume->current.deviceDatasetStorageReport.used);
+    EXPECT_EQ(beforeResume->current.deviceDatasetStorageReport.reason,
+              "strict_resident_before_finalization");
+    EXPECT_EQ(beforeResume->current.deviceDatasetStorageReport.examples, 64u);
+    EXPECT_EQ(beforeResume->current.deviceDatasetStorageReport.residentBytes, 2048u);
+
+    TrainableOracleNetwork resumedFixture = makeTrainableOracleNetwork();
+    auto resumedSession = std::make_shared<DeterministicTrainableBatchSession>();
+    TrainingRunRequest resumedRequest;
+    resumedRequest.network = resumedFixture.network;
+    resumedRequest.batchSession = resumedSession;
+    resumedRequest.optimizer = Sgd::Builder()
+                                   .initialLearningRate(0.01f)
+                                   .decay(0.0f)
+                                   .momentum(0.9f)
+                                   .build();
+    resumedRequest.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    resumedRequest.runtime.scalarTensorsToReport = {"loss"};
+    resumedRequest.epochs = 2;
+    resumedRequest.saveModelDirectory = saveModelDirectory.string();
+    resumedRequest.checkpointEveryEpochs = 1;
+    uint64_t completedTrainingEpochs = 0;
+    resumedRequest.completedTrainingEpochs = &completedTrainingEpochs;
+
+    CapturingObserver resumedObserver;
+    runNativeQueuedTraining(
+        resumedRequest,
+        resumedObserver,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                    .synchronizeAfterEveryBatch = false});
+
+    EXPECT_TRUE(trainEpochsStarted(resumedObserver.events).empty());
+    EXPECT_EQ(completedTrainingEpochs, 2u);
+    EXPECT_TRUE(std::filesystem::is_directory(saveModelDirectory / "latest"));
+    ASSERT_FALSE(resumedObserver.events.empty());
+    const DeviceDatasetStorageReport& restoredReport =
+        resumedObserver.events.back().stats.deviceDatasetStorage;
+    EXPECT_EQ(restoredReport.requested, DeviceDatasetStorage::STRICT);
+    EXPECT_TRUE(restoredReport.used);
+    EXPECT_EQ(restoredReport.reason, "strict_resident_before_finalization");
+    EXPECT_EQ(restoredReport.examples, 64u);
+    EXPECT_EQ(restoredReport.residentBytes, 2048u);
+    const auto completed = repository.readCompleted();
+    ASSERT_TRUE(completed.has_value());
+    EXPECT_EQ(completed->deviceDatasetStorageReport.requested, DeviceDatasetStorage::STRICT);
+    EXPECT_TRUE(completed->deviceDatasetStorageReport.used);
+}
+
+
+TEST(NativeQueuedPartialBatchAccounting, CompletedRepositoryReturnsWithoutSchedulingTraining) {
+    ScopedCheckpointTestDirectory temp("thor_checkpoint_completed_noop");
+    const std::filesystem::path saveModelDirectory = temp.path / "model";
+
+    {
+        TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+        auto session = std::make_shared<DeterministicTrainableBatchSession>();
+        TrainingRunRequest request;
+        request.network = fixture.network;
+        request.batchSession = session;
+        request.optimizer = Sgd::Builder()
+                                .initialLearningRate(0.01f)
+                                .decay(0.0f)
+                                .momentum(0.9f)
+                                .build();
+        request.datasetInputBindings = {
+            TrainingInputBinding("features", "features"),
+            TrainingInputBinding("labels", "labels")};
+        request.runtime.scalarTensorsToReport = {"loss"};
+        request.epochs = 3;
+        request.saveModelDirectory = saveModelDirectory.string();
+        request.checkpointEveryEpochs = 1;
+        request.deviceDatasetStorageReport.requested = DeviceDatasetStorage::STRICT;
+        request.deviceDatasetStorageReport.attempted = true;
+        request.deviceDatasetStorageReport.used = true;
+        request.deviceDatasetStorageReport.reason = "strict_resident";
+        request.deviceDatasetStorageReport.examples = 128;
+        request.deviceDatasetStorageReport.requiredBytes = 8192;
+        request.deviceDatasetStorageReport.availableBytesAfterPlacement = 16384;
+        request.deviceDatasetStorageReport.residentBytes = 8192;
+        request.deviceDatasetStorageReport.residentCacheHit = true;
+        request.deviceDatasetStorageReport.materializationSeconds = 0.125;
+        request.deviceDatasetStorageReport.windowedDeviceCache.requested = WindowedDeviceCache::REQUIRED;
+        request.deviceDatasetStorageReport.windowedDeviceCache.attempted = true;
+        request.deviceDatasetStorageReport.windowedDeviceCache.used = true;
+        request.deviceDatasetStorageReport.windowedDeviceCache.reason = "persisting_l2";
+        request.deviceDatasetStorageReport.windowedDeviceCache.eligibleSources = 2;
+        request.deviceDatasetStorageReport.windowedDeviceCache.eligibleSourceBytes = 4096;
+        request.deviceDatasetStorageReport.windowedDeviceCache.hitRatio = 0.75f;
+
+        CapturingObserver observer;
+        runNativeQueuedTraining(
+            request,
+            observer,
+            NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                        .synchronizeAfterEveryBatch = false});
+    }
+
+    ThorImplementation::TrainingCheckpointRepository repository(
+        temp.path / ".model.training_repository");
+    const auto completed = repository.readCompleted();
+    ASSERT_TRUE(completed.has_value());
+    EXPECT_EQ(completed->completedEpoch, 3u);
+    EXPECT_EQ(completed->selectedEpoch, 3u);
+    EXPECT_EQ(completed->selectedArtifactKind, "latest");
+    EXPECT_EQ(completed->deviceDatasetStorageReport.requested, DeviceDatasetStorage::STRICT);
+    EXPECT_TRUE(completed->deviceDatasetStorageReport.attempted);
+    EXPECT_TRUE(completed->deviceDatasetStorageReport.used);
+    EXPECT_EQ(completed->deviceDatasetStorageReport.reason, "strict_resident");
+    EXPECT_EQ(completed->deviceDatasetStorageReport.residentBytes, 8192u);
+    EXPECT_EQ(completed->deviceDatasetStorageReport.windowedDeviceCache.requested,
+              WindowedDeviceCache::REQUIRED);
+    EXPECT_TRUE(completed->deviceDatasetStorageReport.windowedDeviceCache.used);
+    EXPECT_FLOAT_EQ(completed->deviceDatasetStorageReport.windowedDeviceCache.hitRatio, 0.75f);
+    EXPECT_EQ(checkpointGenerationCount(repository), 1u);
+    EXPECT_FALSE(repository.readPointer(
+        ThorImplementation::TrainingCheckpointRepository::Pointer::CURRENT).has_value());
+    EXPECT_FALSE(repository.readPointer(
+        ThorImplementation::TrainingCheckpointRepository::Pointer::BEST).has_value());
+
+    TrainableOracleNetwork reopenedFixture = makeTrainableOracleNetwork();
+    auto reopenedSession = std::make_shared<DeterministicTrainableBatchSession>();
+    TrainingRunRequest reopenedRequest;
+    reopenedRequest.network = reopenedFixture.network;
+    reopenedRequest.batchSession = reopenedSession;
+    reopenedRequest.optimizer = Sgd::Builder()
+                                    .initialLearningRate(0.01f)
+                                    .decay(0.0f)
+                                    .momentum(0.9f)
+                                    .build();
+    reopenedRequest.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    reopenedRequest.runtime.scalarTensorsToReport = {"loss"};
+    reopenedRequest.epochs = 99;  // COMPLETED owns the established run.
+    reopenedRequest.saveModelDirectory = saveModelDirectory.string();
+    uint64_t selectedTrainingEpoch = 0;
+    reopenedRequest.completedTrainingEpochs = &selectedTrainingEpoch;
+
+    CapturingObserver reopenedObserver;
+    runNativeQueuedTraining(
+        reopenedRequest,
+        reopenedObserver,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                    .synchronizeAfterEveryBatch = false});
+
+    EXPECT_TRUE(trainEpochsStarted(reopenedObserver.events).empty());
+    EXPECT_EQ(selectedTrainingEpoch, 3u);
+    ASSERT_FALSE(reopenedObserver.events.empty());
+    EXPECT_EQ(reopenedObserver.events.back().type, TrainingEventType::RUN_FINISHED);
+    EXPECT_EQ(reopenedObserver.events.back().stats.metrics.at("completed_epoch"), 3.0);
+    EXPECT_EQ(reopenedObserver.events.back().stats.metrics.at("selected_epoch"), 3.0);
+    const DeviceDatasetStorageReport& restoredReport =
+        reopenedObserver.events.back().stats.deviceDatasetStorage;
+    EXPECT_EQ(restoredReport.requested, DeviceDatasetStorage::STRICT);
+    EXPECT_TRUE(restoredReport.attempted);
+    EXPECT_TRUE(restoredReport.used);
+    EXPECT_EQ(restoredReport.reason, "strict_resident");
+    EXPECT_EQ(restoredReport.examples, 128u);
+    EXPECT_EQ(restoredReport.requiredBytes, 8192u);
+    EXPECT_EQ(restoredReport.availableBytesAfterPlacement, 16384u);
+    EXPECT_EQ(restoredReport.residentBytes, 8192u);
+    EXPECT_TRUE(restoredReport.residentCacheHit);
+    EXPECT_DOUBLE_EQ(restoredReport.materializationSeconds, 0.125);
+    EXPECT_EQ(restoredReport.windowedDeviceCache.requested, WindowedDeviceCache::REQUIRED);
+    EXPECT_TRUE(restoredReport.windowedDeviceCache.used);
+    EXPECT_EQ(restoredReport.windowedDeviceCache.reason, "persisting_l2");
+    EXPECT_FLOAT_EQ(restoredReport.windowedDeviceCache.hitRatio, 0.75f);
+}
+
+TEST(NativeQueuedPartialBatchAccounting, CompletedRepositoryRestoresSelectedBestWithoutTraining) {
+    ScopedCheckpointTestDirectory temp("thor_checkpoint_completed_best_noop");
+    const std::filesystem::path saveModelDirectory = temp.path / "model";
+    auto scoreByEpoch = [](const TrainingModelSelectionContext& context) {
+        return static_cast<double>(context.epoch);
+    };
+
+    {
+        TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+        auto session = std::make_shared<DeterministicTrainableBatchSession>();
+        TrainingRunRequest request;
+        request.network = fixture.network;
+        request.batchSession = session;
+        request.optimizer = Sgd::Builder()
+                                .initialLearningRate(0.01f)
+                                .decay(0.0f)
+                                .momentum(0.9f)
+                                .build();
+        request.datasetInputBindings = {
+            TrainingInputBinding("features", "features"),
+            TrainingInputBinding("labels", "labels")};
+        request.runtime.scalarTensorsToReport = {"loss"};
+        request.epochs = 3;
+        request.saveModelDirectory = saveModelDirectory.string();
+        request.checkBestModelEveryEpochs = 1;
+        request.firstModelSelectionEpoch = 1;
+        request.modelSelectionScore = TrainingModelSelectionScore(scoreByEpoch);
+        request.checkpointEveryEpochs = 1;
+
+        CapturingObserver observer;
+        runNativeQueuedTraining(
+            request,
+            observer,
+            NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                        .synchronizeAfterEveryBatch = false});
+    }
+
+    ThorImplementation::TrainingCheckpointRepository repository(
+        temp.path / ".model.training_repository");
+    const auto completed = repository.readCompleted();
+    ASSERT_TRUE(completed.has_value());
+    EXPECT_EQ(completed->completedEpoch, 3u);
+    EXPECT_EQ(completed->selectedEpoch, 1u);
+    EXPECT_EQ(completed->selectedArtifactKind, "best");
+    ASSERT_TRUE(completed->bestEpoch.has_value());
+    EXPECT_EQ(completed->bestEpoch.value(), 1u);
+    EXPECT_EQ(checkpointGenerationCount(repository), 1u);
+
+    TrainableOracleNetwork reopenedFixture = makeTrainableOracleNetwork();
+    auto reopenedSession = std::make_shared<DeterministicTrainableBatchSession>();
+    TrainingRunRequest reopenedRequest;
+    reopenedRequest.network = reopenedFixture.network;
+    reopenedRequest.batchSession = reopenedSession;
+    reopenedRequest.optimizer = Sgd::Builder()
+                                    .initialLearningRate(0.01f)
+                                    .decay(0.0f)
+                                    .momentum(0.9f)
+                                    .build();
+    reopenedRequest.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    reopenedRequest.runtime.scalarTensorsToReport = {"loss"};
+    reopenedRequest.epochs = 999;
+    reopenedRequest.saveModelDirectory = saveModelDirectory.string();
+    uint64_t selectedTrainingEpoch = 0;
+    reopenedRequest.completedTrainingEpochs = &selectedTrainingEpoch;
+
+    CapturingObserver reopenedObserver;
+    runNativeQueuedTraining(
+        reopenedRequest,
+        reopenedObserver,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                    .synchronizeAfterEveryBatch = false});
+
+    EXPECT_TRUE(trainEpochsStarted(reopenedObserver.events).empty());
+    EXPECT_EQ(selectedTrainingEpoch, 1u);
+    ASSERT_FALSE(reopenedObserver.events.empty());
+    EXPECT_EQ(reopenedObserver.events.back().stats.metrics.at("completed_epoch"), 3.0);
+    EXPECT_EQ(reopenedObserver.events.back().stats.metrics.at("selected_epoch"), 1.0);
+    EXPECT_EQ(reopenedObserver.events.back().stats.metrics.at("best_epoch"), 1.0);
+}
+
+TEST(NativeQueuedPartialBatchAccounting, FinalArtifactCommittedBeforeCompletedCanFinishCommitWithoutRetraining) {
+    ScopedCheckpointTestDirectory temp("thor_checkpoint_complete_commit_window");
+    const std::filesystem::path saveModelDirectory = temp.path / "model";
+
+    {
+        TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+        auto session = std::make_shared<DeterministicTrainableBatchSession>();
+        TrainingRunRequest request;
+        request.network = fixture.network;
+        request.batchSession = session;
+        request.optimizer = Sgd::Builder()
+                                .initialLearningRate(0.01f)
+                                .decay(0.0f)
+                                .momentum(0.9f)
+                                .build();
+        request.datasetInputBindings = {
+            TrainingInputBinding("features", "features"),
+            TrainingInputBinding("labels", "labels")};
+        request.runtime.scalarTensorsToReport = {"loss"};
+        request.epochs = 2;
+        request.saveModelDirectory = saveModelDirectory.string();
+        request.checkpointEveryEpochs = 1;
+        request.retainPreviousCheckpoints = true;
+
+        CapturingObserver observer;
+        runNativeQueuedTraining(
+            request,
+            observer,
+            NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                        .synchronizeAfterEveryBatch = false});
+    }
+
+    ThorImplementation::TrainingCheckpointRepository repository(
+        temp.path / ".model.training_repository");
+    ASSERT_TRUE(repository.readCompleted().has_value());
+    ASSERT_TRUE(repository.readRecoveryState().has_value());
+
+    // Simulate power loss after save_model_dir became durable but immediately
+    // before the terminal COMPLETED rename. CURRENT remains a valid target-epoch
+    // checkpoint and the final artifact already exists.
+    std::filesystem::rename(repository.getCompletedPath(), repository.getCompletingPath());
+    ASSERT_FALSE(repository.readCompleted().has_value());
+    ASSERT_TRUE(repository.readCompleting().has_value());
+
+    TrainableOracleNetwork reopenedFixture = makeTrainableOracleNetwork();
+    auto reopenedSession = std::make_shared<DeterministicTrainableBatchSession>();
+    TrainingRunRequest reopenedRequest;
+    reopenedRequest.network = reopenedFixture.network;
+    reopenedRequest.batchSession = reopenedSession;
+    reopenedRequest.optimizer = Sgd::Builder()
+                                    .initialLearningRate(0.01f)
+                                    .decay(0.0f)
+                                    .momentum(0.9f)
+                                    .build();
+    reopenedRequest.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    reopenedRequest.runtime.scalarTensorsToReport = {"loss"};
+    reopenedRequest.epochs = 2;
+    reopenedRequest.saveModelDirectory = saveModelDirectory.string();
+    reopenedRequest.checkpointEveryEpochs = 1;
+    reopenedRequest.retainPreviousCheckpoints = true;
+    uint64_t selectedTrainingEpoch = 0;
+    reopenedRequest.completedTrainingEpochs = &selectedTrainingEpoch;
+
+    CapturingObserver reopenedObserver;
+    runNativeQueuedTraining(
+        reopenedRequest,
+        reopenedObserver,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                    .synchronizeAfterEveryBatch = false});
+
+    EXPECT_TRUE(trainEpochsStarted(reopenedObserver.events).empty());
+    EXPECT_EQ(selectedTrainingEpoch, 2u);
+    EXPECT_TRUE(repository.readCompleted().has_value());
+}
+
+TEST(NativeQueuedPartialBatchAccounting, PeriodicCheckpointGateRetainsPersistentSchedulingWindow) {
+    detail::resetNativeQueuedSchedulerResourceDiagnosticsForTests();
+    ScopedCheckpointTestDirectory temp("thor_periodic_checkpoint_gate");
+
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    auto session = std::make_shared<DeterministicTrainableBatchSession>();
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = session;
+    request.optimizer = Sgd::Builder()
+                            .initialLearningRate(0.01f)
+                            .decay(0.0f)
+                            .momentum(0.0f)
+                            .build();
+    request.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 2;
+    request.saveModelDirectory = (temp.path / "model").string();
+    request.saveModelOverwrite = true;
+    request.checkpointEveryEpochs = 1;
+
+    CapturingObserver observer;
+    runNativeQueuedTraining(
+        request,
+        observer,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                    .synchronizeAfterEveryBatch = false});
+
+    const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
+        detail::nativeQueuedSchedulerResourceDiagnosticsForTests();
+    EXPECT_EQ(diagnostics.schedulingWindowCount, 1u);
+    EXPECT_EQ(diagnostics.hostDecisionBarrierCount, 1u);
+    EXPECT_GE(diagnostics.maxOptimizerEpochSubmitted, 1u);
+}
+
+TEST(NativeQueuedPartialBatchAccounting, ModelSelectionGateRetainsPersistentSchedulingWindow) {
     detail::resetNativeQueuedSchedulerResourceDiagnosticsForTests();
 
     TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
@@ -1128,11 +1955,100 @@ TEST(NativeQueuedPartialBatchAccounting, ModelSelectionRetainsSchedulingWindowBa
     EXPECT_FALSE(observer.epochTwoWasSubmittedBeforeEpochOneDecision);
     const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
         detail::nativeQueuedSchedulerResourceDiagnosticsForTests();
-    EXPECT_EQ(diagnostics.schedulingWindowCount, 2u);
+    EXPECT_EQ(diagnostics.schedulingWindowCount, 1u);
     // Epoch one gates epoch two. The final epoch's selection has no subsequent
     // optimizer work to hold back, so it is not a scheduling barrier.
     EXPECT_EQ(diagnostics.hostDecisionBarrierCount, 1u);
     EXPECT_TRUE(diagnostics.hasSubmittedBatch);
+    EXPECT_GE(diagnostics.maxOptimizerEpochSubmitted, 1u);
+}
+
+TEST(NativeQueuedPartialBatchAccounting, ModelSelectionGatePrefetchesNextEpochFirstBatchBeforeContinue) {
+    detail::resetNativeQueuedSchedulerResourceDiagnosticsForTests();
+
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    std::atomic<uint64_t> trainBatchAcquisitions{0};
+    auto session = std::make_shared<DeterministicTrainableBatchSession>(
+        std::function<void(ExampleType)>{},
+        [&](ExampleType exampleType) {
+            if (exampleType == ExampleType::TRAIN) {
+                trainBatchAcquisitions.fetch_add(1, std::memory_order_release);
+            }
+        });
+    auto hyperParameterRecorder =
+        std::make_shared<HyperParameterUpdateRecorder>();
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = session;
+    request.optimizer =
+        std::make_shared<CountingHyperParameterOptimizer>(
+            hyperParameterRecorder);
+    request.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 2;
+    request.checkBestModelEveryEpochs = 1;
+    request.firstModelSelectionEpoch = 1;
+
+    bool observedEpochOneDecision = false;
+    bool epochTwoFirstBatchWasPrefetched = false;
+    bool epochTwoWasSubmittedBeforeContinue = false;
+    bool epochTwoOptimizerWasUpdatedBeforeContinue = false;
+    request.modelSelectionScore = TrainingModelSelectionScore(
+        [&](const TrainingModelSelectionContext& context) {
+            if (context.epoch == 1) {
+                observedEpochOneDecision = true;
+
+                // Epoch one has three TRAIN batches. The resident producer is
+                // allowed to acquire exactly the first TRAIN batch for epoch
+                // two while this host decision remains unresolved.
+                const auto deadline =
+                    std::chrono::steady_clock::now() +
+                    std::chrono::seconds(1);
+                while (trainBatchAcquisitions.load(std::memory_order_acquire) < 4 &&
+                       std::chrono::steady_clock::now() < deadline) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                epochTwoFirstBatchWasPrefetched =
+                    trainBatchAcquisitions.load(std::memory_order_acquire) >= 4;
+
+                const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
+                    detail::peekNativeQueuedSchedulerResourceDiagnosticsForTests();
+                epochTwoWasSubmittedBeforeContinue =
+                    diagnostics.hasSubmittedBatch &&
+                    diagnostics.maxOptimizerEpochSubmitted >= 1;
+
+                const std::vector<HyperParameterUpdateInvocation> invocations =
+                    hyperParameterRecorder->snapshot();
+                epochTwoOptimizerWasUpdatedBeforeContinue =
+                    std::any_of(
+                        invocations.begin(),
+                        invocations.end(),
+                        [](const HyperParameterUpdateInvocation& invocation) {
+                            return invocation.epoch >= 1;
+                        });
+            }
+            return context.validationLoss();
+        });
+
+    CapturingObserver observer;
+    runNativeQueuedTraining(
+        request,
+        observer,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 32,
+                                    .synchronizeAfterEveryBatch = false});
+
+    EXPECT_TRUE(observedEpochOneDecision);
+    EXPECT_TRUE(epochTwoFirstBatchWasPrefetched);
+    EXPECT_FALSE(epochTwoWasSubmittedBeforeContinue);
+    EXPECT_FALSE(epochTwoOptimizerWasUpdatedBeforeContinue);
+
+    const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
+        detail::nativeQueuedSchedulerResourceDiagnosticsForTests();
+    EXPECT_EQ(diagnostics.schedulingWindowCount, 1u);
+    EXPECT_EQ(diagnostics.hostDecisionBarrierCount, 1u);
     EXPECT_GE(diagnostics.maxOptimizerEpochSubmitted, 1u);
 }
 
@@ -1213,12 +2129,85 @@ TEST(NativeQueuedPartialBatchAccounting, ModelSelectionCadenceStreamsUntilDecisi
 
     const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
         detail::nativeQueuedSchedulerResourceDiagnosticsForTests();
-    // Epochs 1..3 form the first window through the decision epoch. Epoch 4 is
-    // submitted only after that decision returns, in a second window.
-    EXPECT_EQ(diagnostics.schedulingWindowCount, 2u);
+    // One persistent scheduling window spans all four epochs. The resident
+    // producer waits at the epoch-3 host-decision gate before it may submit
+    // epoch-4 optimizer work.
+    EXPECT_EQ(diagnostics.schedulingWindowCount, 1u);
     EXPECT_EQ(diagnostics.hostDecisionBarrierCount, 1u);
     EXPECT_TRUE(diagnostics.hasSubmittedBatch);
     EXPECT_GE(diagnostics.maxOptimizerEpochSubmitted, 3u);
+}
+
+TEST(NativeQueuedPartialBatchAccounting, FinalOnCadenceModelSelectionIsNotEvaluatedTwice) {
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    auto session = std::make_shared<DeterministicTrainableBatchSession>();
+    std::vector<uint64_t> scoreEpochs;
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = session;
+    request.optimizer = Sgd::Builder()
+                            .initialLearningRate(0.01f)
+                            .decay(0.0f)
+                            .momentum(0.0f)
+                            .build();
+    request.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 3;
+    request.checkBestModelEveryEpochs = 1;
+    request.firstModelSelectionEpoch = 1;
+    request.modelSelectionScore = TrainingModelSelectionScore(
+        [&](const TrainingModelSelectionContext& context) {
+            scoreEpochs.push_back(context.epoch);
+            return context.validationLoss();
+        });
+
+    CapturingObserver observer;
+    runNativeQueuedTraining(
+        request,
+        observer,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 8,
+                                    .synchronizeAfterEveryBatch = false});
+
+    EXPECT_EQ(scoreEpochs, (std::vector<uint64_t>{1u, 2u, 3u}));
+}
+
+TEST(NativeQueuedPartialBatchAccounting, FinalOffCadenceModelSelectionIsEvaluatedOnceAtFinalization) {
+    TrainableOracleNetwork fixture = makeTrainableOracleNetwork();
+    auto session = std::make_shared<DeterministicTrainableBatchSession>();
+    std::vector<uint64_t> scoreEpochs;
+
+    TrainingRunRequest request;
+    request.network = fixture.network;
+    request.batchSession = session;
+    request.optimizer = Sgd::Builder()
+                            .initialLearningRate(0.01f)
+                            .decay(0.0f)
+                            .momentum(0.0f)
+                            .build();
+    request.datasetInputBindings = {
+        TrainingInputBinding("features", "features"),
+        TrainingInputBinding("labels", "labels")};
+    request.runtime.scalarTensorsToReport = {"loss"};
+    request.epochs = 4;
+    request.checkBestModelEveryEpochs = 3;
+    request.firstModelSelectionEpoch = 3;
+    request.modelSelectionScore = TrainingModelSelectionScore(
+        [&](const TrainingModelSelectionContext& context) {
+            scoreEpochs.push_back(context.epoch);
+            return context.validationLoss();
+        });
+
+    CapturingObserver observer;
+    runNativeQueuedTraining(
+        request,
+        observer,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 8,
+                                    .synchronizeAfterEveryBatch = false});
+
+    EXPECT_EQ(scoreEpochs, (std::vector<uint64_t>{3u, 4u}));
 }
 
 TEST(NativeQueuedPartialBatchAccounting, EarlyCompletionDecisionDoesNotSubmitNextWindow) {
@@ -1268,8 +2257,9 @@ TEST(NativeQueuedPartialBatchAccounting, EarlyCompletionDecisionDoesNotSubmitNex
 
     const detail::NativeQueuedSchedulerResourceDiagnosticsForTests diagnostics =
         detail::nativeQueuedSchedulerResourceDiagnosticsForTests();
-    // The first window ends at the epoch-3 decision. Early completion prevents
-    // any second window, so epoch-4 optimizer work is never even submitted.
+    // The one persistent window stops at the epoch-3 decision gate. Early
+    // completion wakes the resident producer with STOP, so epoch-4 optimizer
+    // work is never submitted.
     EXPECT_EQ(diagnostics.schedulingWindowCount, 1u);
     EXPECT_EQ(diagnostics.hostDecisionBarrierCount, 1u);
     ASSERT_TRUE(diagnostics.hasSubmittedBatch);

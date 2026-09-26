@@ -901,9 +901,9 @@ std::vector<ExactReductionCase> makeFullRowShardCensusCases() {
 
     // Reduction-depth sweep at one output vector.  This locates the crossover where splitting R becomes worthwhile and
     // includes both ordinary model dimensions and the packed-history depths reached as batch size grows.
-    for (uint64_t reduction : {127ULL, 256ULL, 512ULL, 819ULL, 1024ULL, 2048ULL, 4096ULL,
+    for (uint64_t reduction : {103ULL, 127ULL, 205ULL, 256ULL, 410ULL, 512ULL, 819ULL, 1024ULL, 2048ULL, 4096ULL,
                                8192ULL, 16384ULL, 32768ULL, 65536ULL, 104832ULL, 131072ULL}) {
-        for (uint64_t inner : {128ULL, 512ULL, 1024ULL}) {
+        for (uint64_t inner : {32ULL, 64ULL, 128ULL, 256ULL, 384ULL, 512ULL, 768ULL, 1024ULL}) {
             add_case("reduction_depth",
                      "o1_r" + std::to_string(reduction) + "_i" + std::to_string(inner),
                      1,
@@ -930,7 +930,7 @@ std::vector<ExactReductionCase> makeFullRowShardCensusCases() {
     // corner under the per-case memory ceiling.  This shows exactly where the existing output-parallel full-row
     // kernels recover enough independent rows that a second reduction stage is no longer justified.
     for (uint64_t outer : {1ULL, 2ULL, 4ULL, 8ULL, 16ULL, 32ULL, 64ULL, 128ULL}) {
-        for (uint64_t inner : {128ULL, 512ULL, 1024ULL}) {
+        for (uint64_t inner : {128ULL, 256ULL, 512ULL, 1024ULL}) {
             add_case("output_count",
                      "o" + std::to_string(outer) + "_r2048_i" + std::to_string(inner),
                      outer,
@@ -957,10 +957,12 @@ std::vector<ExactReductionCase> makeFullRowShardCensusCases() {
                  512);
     }
 
-    // Many-output controls include the grid≈256 regime seen in the trace.  They establish the other side of the gate:
-    // once production already has hundreds of CTAs from independent outputs, row sharding should stop winning.
+    // Many-output controls include the grid≈256 regime seen in the trace. They establish the other side of the gate:
+    // once production already has hundreds of CTAs from independent outputs, row sharding should stop winning. K=32
+    // and K=64 additionally exercise the packet-adaptive 4-/8-byte floor under enough independent work to measure
+    // bandwidth rather than one-output launch starvation.
     for (uint64_t outer : {128ULL, 256ULL, 512ULL, 1024ULL, 2048ULL}) {
-        for (uint64_t inner : {128ULL, 512ULL}) {
+        for (uint64_t inner : {32ULL, 64ULL, 128ULL, 256ULL, 512ULL}) {
             add_case("many_output_control",
                      "o" + std::to_string(outer) + "_r256_i" + std::to_string(inner),
                      outer,

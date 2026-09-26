@@ -9,18 +9,28 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace Thor {
 
 /**
- * Immutable recipe connecting one dataset, one split manifest and batching
- * policy.  Opening the recipe creates a fresh mutable BatchSession.
+ * Immutable recipe connecting one dataset, an optional split manifest and a
+ * batching policy. Opening the recipe creates a fresh mutable BatchSession.
+ *
+ * The split may be absent only while constructing a repository-backed resume.
+ * TrainingRuns installs the persisted original split before any training
+ * session is opened. A new run and direct Trainer::fit both require a split.
  */
 class TrainingData {
    public:
     TrainingData(std::shared_ptr<const NamedDataset> dataset,
                  DatasetSplitManifest splits,
+                 BatchPolicy batching,
+                 DatasetAccessPolicy accessPolicy = {},
+                 std::string datasetName = "dataset");
+    TrainingData(std::shared_ptr<const NamedDataset> dataset,
+                 std::optional<DatasetSplitManifest> splits,
                  BatchPolicy batching,
                  DatasetAccessPolicy accessPolicy = {},
                  std::string datasetName = "dataset");
@@ -38,7 +48,8 @@ class TrainingData {
         const DatasetFieldMaterializationRequirements& fieldRequirements) const;
 
     [[nodiscard]] const std::shared_ptr<const NamedDataset> &getDataset() const { return dataset; }
-    [[nodiscard]] const DatasetSplitManifest &getSplits() const { return splits; }
+    [[nodiscard]] bool hasSplits() const { return splits.has_value(); }
+    [[nodiscard]] const DatasetSplitManifest &getSplits() const;
     [[nodiscard]] const BatchPolicy &getBatching() const { return batching; }
     [[nodiscard]] const DatasetAccessPolicy &getAccessPolicy() const { return accessPolicy; }
     [[nodiscard]] const std::string &getDatasetName() const { return datasetName; }
@@ -47,7 +58,7 @@ class TrainingData {
 
    private:
     std::shared_ptr<const NamedDataset> dataset;
-    DatasetSplitManifest splits;
+    std::optional<DatasetSplitManifest> splits;
     BatchPolicy batching;
     DatasetAccessPolicy accessPolicy;
     std::string datasetName;

@@ -17,7 +17,9 @@
 #include "DeepLearning/Api/Training/PhaseGraphConnector.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
 #include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
+#include "DeepLearning/Implementation/Training/TrainingCheckpointRepository.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/Common/FilesystemDurability.h"
 
 #include <algorithm>
 #include <atomic>
@@ -46,6 +48,7 @@
 #include <cctype>
 #include <utility>
 #include <optional>
+#include <unistd.h>
 
 namespace Thor {
 
@@ -219,6 +222,33 @@ std::string normalizedOutputPathForCollisionCheck(const std::string& path) {
         outputPath = std::filesystem::current_path() / outputPath;
     }
     return outputPath.lexically_normal().string();
+}
+
+std::string trainingRepositoryPathComponent(std::string_view value) {
+    if (value.empty()) {
+        throw std::runtime_error("TrainingRuns repository path component must not be empty.");
+    }
+
+    std::ostringstream encoded;
+    encoded << std::uppercase << std::hex << std::setfill('0');
+    for (unsigned char ch : value) {
+        const bool safe = std::isalnum(ch) != 0 || ch == '-' || ch == '_' || ch == '.';
+        if (safe && ch != '%') {
+            encoded << static_cast<char>(ch);
+        } else {
+            encoded << '%' << std::setw(2) << static_cast<unsigned int>(ch);
+        }
+    }
+    const std::string result = encoded.str();
+    if (result == "." || result == "..") {
+        std::ostringstream escaped;
+        for (unsigned char ch : value) {
+            escaped << '%' << std::uppercase << std::hex << std::setw(2) << std::setfill('0')
+                    << static_cast<unsigned int>(ch);
+        }
+        return escaped.str();
+    }
+    return result;
 }
 
 std::filesystem::path selectedTrainingArtifactModelDirectory(const std::filesystem::path& artifactRoot) {
@@ -1296,12 +1326,14 @@ TrainingRuns::TrainingRuns(std::vector<TrainingRunsSpec> runs,
                            TrainingRunsFailurePolicy failurePolicy,
                            double maxSummaryLogsPerSecond,
                            std::optional<size_t> maxParallelRuns,
-                           std::map<std::string, size_t> minSuccessfulModels)
+                           std::map<std::string, size_t> minSuccessfulModels,
+                           std::optional<std::string> repositoryDirectory)
     : runs(std::move(runs)),
       failurePolicy(failurePolicy),
       maxSummaryLogsPerSecond(maxSummaryLogsPerSecond),
       maxParallelRuns(maxParallelRuns),
-      minSuccessfulModels(std::move(minSuccessfulModels)) {
+      minSuccessfulModels(std::move(minSuccessfulModels)),
+      repositoryDirectory(std::move(repositoryDirectory)) {
     const auto constructionStart = std::chrono::steady_clock::now();
     std::fprintf(stderr, "INFO TrainingRuns startup validation starting: runs=%zu\n", this->runs.size());
     std::fflush(stderr);
@@ -1311,6 +1343,26 @@ TrainingRuns::TrainingRuns(std::vector<TrainingRunsSpec> runs,
     }
     if (maxParallelRuns.has_value() && maxParallelRuns.value() == 0) {
         throw std::runtime_error("TrainingRuns maxParallelRuns must be >= 1 when specified.");
+    }
+    if (this->repositoryDirectory.has_value()) {
+        if (this->repositoryDirectory->empty()) {
+            throw std::runtime_error("TrainingRuns repositoryDirectory must not be empty when specified.");
+        }
+        std::error_code errorCode;
+        const std::filesystem::path root(*this->repositoryDirectory);
+        const bool exists = std::filesystem::exists(root, errorCode);
+        if (errorCode) {
+            throw std::runtime_error("TrainingRuns could not inspect repositoryDirectory '" + root.string() +
+                                     "': " + errorCode.message());
+        }
+        if (exists && !std::filesystem::is_directory(root, errorCode)) {
+            if (errorCode) {
+                throw std::runtime_error("TrainingRuns could not inspect repositoryDirectory '" + root.string() +
+                                         "': " + errorCode.message());
+            }
+            throw std::runtime_error("TrainingRuns repositoryDirectory '" + root.string() +
+                                     "' exists but is not a directory.");
+        }
     }
     validateRunSpecs();
     validateMinSuccessfulModels();
@@ -1329,6 +1381,196 @@ size_t TrainingRuns::getEffectiveMaxParallelRuns() const {
         return runs.size();
     }
     return std::min(maxParallelRuns.value(), runs.size());
+}
+
+std::filesystem::path TrainingRuns::repositoryModelDirectoryForRun(
+    const TrainingRunsSpec& spec, const std::optional<std::string>& phaseHistoryLabel) const {
+    if (!repositoryDirectory.has_value()) {
+        throw std::logic_error("TrainingRuns repository model directory requested without repositoryDirectory.");
+    }
+    const std::string stageName = phaseHistoryLabel.has_value() && !phaseHistoryLabel->empty()
+        ? phaseHistoryLabel.value()
+        : "standalone";
+    return std::filesystem::path(repositoryDirectory.value()) /
+           "runs" / trainingRepositoryPathComponent(spec.runName) /
+           "stages" / trainingRepositoryPathComponent(stageName) / "model";
+}
+
+std::filesystem::path TrainingRuns::repositorySplitManifestPathForRun(
+    const TrainingRunsSpec& spec) const {
+    if (!repositoryDirectory.has_value()) {
+        throw std::logic_error("TrainingRuns repository split manifest requested without repositoryDirectory.");
+    }
+    return std::filesystem::path(repositoryDirectory.value()) /
+           "runs" / trainingRepositoryPathComponent(spec.runName) / "split_manifest.json";
+}
+
+void TrainingRuns::configureRepositorySplitsForFit() {
+    if (!repositoryDirectory.has_value()) {
+        for (const TrainingRunsSpec& spec : runs) {
+            THOR_THROW_IF_FALSE(spec.trainer != nullptr);
+            const std::shared_ptr<const TrainingData> data = spec.trainer->getTrainingData();
+            if (data == nullptr || !data->hasSplits()) {
+                throw std::runtime_error(
+                    "TrainingRuns run '" + spec.runName +
+                    "' has no dataset split manifest. A split may be omitted only when repository_dir "
+                    "resumes a run with a previously persisted split.");
+            }
+        }
+        return;
+    }
+
+    static std::atomic<uint64_t> splitTemporarySequence{0};
+    for (TrainingRunsSpec& spec : runs) {
+        THOR_THROW_IF_FALSE(spec.trainer != nullptr);
+        const std::shared_ptr<const TrainingData> configuredData = spec.trainer->getTrainingData();
+        if (configuredData == nullptr || configuredData->getDataset() == nullptr) {
+            throw std::runtime_error(
+                "TrainingRuns run '" + spec.runName + "' requires TrainingData with a dataset.");
+        }
+
+        const std::filesystem::path splitPath = repositorySplitManifestPathForRun(spec);
+        std::error_code errorCode;
+        const bool splitExists = std::filesystem::exists(splitPath, errorCode);
+        if (errorCode) {
+            throw std::runtime_error(
+                "TrainingRuns could not inspect persisted split manifest '" + splitPath.string() +
+                "': " + errorCode.message());
+        }
+
+        if (splitExists) {
+            std::optional<DatasetSplitManifest> persistedSplit;
+            try {
+                persistedSplit.emplace(DatasetSplitManifest::load(splitPath));
+                persistedSplit->validateAgainst(*configuredData->getDataset());
+            } catch (const std::exception& error) {
+                throw std::runtime_error(
+                    "TrainingRuns run '" + spec.runName +
+                    "' cannot resume because its persisted dataset split is incompatible with the supplied dataset: " +
+                    error.what());
+            }
+
+            THOR_THROW_IF_FALSE(persistedSplit.has_value());
+            if (configuredData->hasSplits()) {
+                std::fprintf(
+                    stderr,
+                    "Thor warning: TrainingRuns run '%s' is resuming from repository '%s'. "
+                    "A dataset split was supplied for the resumed run, but the persisted original split "
+                    "is authoritative and will be used instead. Pass splits=None when constructing "
+                    "TrainingData for resume if you do not need to provide a throwaway split.\n",
+                    spec.runName.c_str(),
+                    repositoryDirectory->c_str());
+                std::fflush(stderr);
+            }
+
+            spec.trainer->trainingData = std::make_shared<TrainingData>(
+                configuredData->getDataset(),
+                std::move(persistedSplit.value()),
+                configuredData->getBatching(),
+                configuredData->getAccessPolicy(),
+                configuredData->getDatasetName());
+            continue;
+        }
+
+        const std::filesystem::path runDirectory = splitPath.parent_path();
+        const std::filesystem::path stagesDirectory = runDirectory / "stages";
+        errorCode.clear();
+        const bool stagesExist = std::filesystem::exists(stagesDirectory, errorCode);
+        if (errorCode) {
+            throw std::runtime_error(
+                "TrainingRuns could not inspect repository stages for run '" + spec.runName +
+                "': " + errorCode.message());
+        }
+        if (stagesExist) {
+            throw std::runtime_error(
+                "TrainingRuns run '" + spec.runName +
+                "' has checkpoint stage state but no persisted dataset split manifest. Refusing to resume because "
+                "the original train/validation split cannot be established.");
+        }
+        if (!configuredData->hasSplits()) {
+            throw std::runtime_error(
+                "TrainingRuns run '" + spec.runName +
+                "' is starting a new repository-backed run and requires a dataset split manifest.");
+        }
+
+        configuredData->getSplits().validateAgainst(*configuredData->getDataset());
+        Thor::FilesystemDurability::createDirectoriesDurably(runDirectory);
+        const uint64_t sequence = splitTemporarySequence.fetch_add(1, std::memory_order_relaxed);
+        const std::filesystem::path temporarySplitPath =
+            runDirectory /
+            (".split_manifest.json.tmp." + std::to_string(static_cast<uint64_t>(::getpid())) + "." +
+             std::to_string(sequence));
+        try {
+            configuredData->getSplits().save(temporarySplitPath);
+            Thor::FilesystemDurability::syncFile(temporarySplitPath);
+            Thor::FilesystemDurability::durableRename(temporarySplitPath, splitPath);
+        } catch (...) {
+            std::error_code cleanupError;
+            std::filesystem::remove(temporarySplitPath, cleanupError);
+            throw;
+        }
+    }
+}
+
+void TrainingRuns::configureRepositoryArtifactsForFit(
+    const std::vector<std::optional<std::string>>& phaseHistoryLabels) {
+    if (!repositoryDirectory.has_value()) {
+        return;
+    }
+    if (phaseHistoryLabels.size() != runs.size()) {
+        throw std::logic_error("TrainingRuns repository phase-label count does not match run count.");
+    }
+
+    std::set<std::string> normalizedDirectories;
+    for (size_t i = 0; i < runs.size(); ++i) {
+        TrainingRunsSpec& spec = runs[i];
+        THOR_THROW_IF_FALSE(spec.trainer != nullptr);
+        if (spec.trainer->saveModelDirectory.has_value() &&
+            !spec.trainer->saveModelDirectoryManagedByTrainingRuns) {
+            throw std::runtime_error(
+                "TrainingRuns run '" + spec.runName +
+                "' configures trainer save_model_dir while TrainingRuns repository_dir is also configured. "
+                "Let TrainingRuns own member artifact paths when repository_dir is used.");
+        }
+
+        const std::filesystem::path modelDirectory =
+            repositoryModelDirectoryForRun(spec, phaseHistoryLabels[i]);
+        const std::string normalized = normalizedOutputPathForCollisionCheck(modelDirectory.string());
+        if (!normalizedDirectories.insert(normalized).second) {
+            throw std::runtime_error(
+                "TrainingRuns repository path collision for run '" + spec.runName +
+                "' at '" + normalized + "'.");
+        }
+
+        std::error_code errorCode;
+        const bool artifactExists = std::filesystem::exists(modelDirectory, errorCode);
+        if (errorCode) {
+            throw std::runtime_error("TrainingRuns could not inspect repository-managed model artifact '" +
+                                     modelDirectory.string() + "': " + errorCode.message());
+        }
+        const std::filesystem::path checkpointRepository =
+            ThorImplementation::TrainingCheckpointRepository::repositoryDirectoryForModelArtifact(modelDirectory);
+        errorCode.clear();
+        const bool checkpointRepositoryExists = std::filesystem::exists(checkpointRepository, errorCode);
+        if (errorCode) {
+            throw std::runtime_error("TrainingRuns could not inspect checkpoint repository '" +
+                                     checkpointRepository.string() + "': " + errorCode.message());
+        }
+        if (artifactExists && !checkpointRepositoryExists) {
+            throw std::runtime_error(
+                "TrainingRuns repository-managed model artifact '" + modelDirectory.string() +
+                "' already exists without its checkpoint repository. Refusing to overwrite an unrelated artifact.");
+        }
+
+        // A TrainingRuns repository is intentionally reopenable. Trainer's
+        // legacy save_model_overwrite gate predates the durable CURRENT/BEST/
+        // COMPLETED protocol, so repository-owned artifacts always permit the
+        // native finalizer to recognize or replace the artifact root that is
+        // transactionally paired with this stage repository.
+        spec.trainer->saveModelDirectory = modelDirectory.string();
+        spec.trainer->saveModelOverwrite = true;
+        spec.trainer->saveModelDirectoryManagedByTrainingRuns = true;
+    }
 }
 
 bool TrainingRuns::hasEnsembleGroups() const {
@@ -1382,6 +1624,19 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
 
     const TrainingRunsEvaluationOptions& evaluationOptions = sessionOptions.evaluation;
 
+    // The repository's split is a member-level training invariant shared by
+    // every stage. Establish or restore it before deriving stage artifact
+    // paths or constructing any training sessions. On resume the persisted
+    // split is authoritative over a newly supplied split.
+    configureRepositorySplitsForFit();
+
+    std::vector<std::optional<std::string>> phaseHistoryLabels;
+    phaseHistoryLabels.reserve(runs.size());
+    for (const TrainingRunsSpec& spec : runs) {
+        phaseHistoryLabels.push_back(spec.trainer->currentTrainingPhaseHistoryLabel());
+    }
+    configureRepositoryArtifactsForFit(phaseHistoryLabels);
+
     const auto fitPreflightStart = std::chrono::steady_clock::now();
     std::fprintf(stderr, "INFO TrainingRuns fit preflight validation starting: runs=%zu\n", runs.size());
     std::fflush(stderr);
@@ -1431,13 +1686,10 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
 
     auto statsReporter =
         std::make_shared<TrainingRunsStatsReporter>(stdout, combinedTrainingRunsColorMode(runs), maxSummaryLogsPerSecond);
-    std::vector<std::optional<std::string>> phaseHistoryLabels;
     std::vector<std::vector<std::string>> phaseReportOrders;
-    phaseHistoryLabels.reserve(runs.size());
     phaseReportOrders.reserve(runs.size());
     for (const TrainingRunsSpec& spec : runs) {
         const TrainingRuntimeConfig& runtime = spec.trainer->getRuntimeConfig();
-        phaseHistoryLabels.push_back(spec.trainer->currentTrainingPhaseHistoryLabel());
         phaseReportOrders.push_back(reportedScalarTensorNamesForSpec(spec));
         statsReporter->configureRun(spec.runName,
                                     TrainingRunsStatsReporter::RunConfig{runtime.statsIntervalSeconds,
@@ -1951,7 +2203,14 @@ void TrainingRuns::validateRunSpecs() {
         }
 
         const std::optional<std::string>& saveModelDirectory = spec.trainer->getSaveModelDirectory();
-        if (saveModelDirectory.has_value()) {
+        if (repositoryDirectory.has_value() && saveModelDirectory.has_value() &&
+            !spec.trainer->saveModelDirectoryManagedByTrainingRuns) {
+            throw std::runtime_error(
+                "TrainingRuns run '" + spec.runName +
+                "' configures trainer save_model_dir while TrainingRuns repository_dir is also configured. "
+                "Let TrainingRuns own member artifact paths when repository_dir is used.");
+        }
+        if (saveModelDirectory.has_value() && !repositoryDirectory.has_value()) {
             if (saveModelDirectory->empty()) {
                 throw std::runtime_error("TrainingRuns run '" + spec.runName + "' has an empty trainer save_model_dir.");
             }

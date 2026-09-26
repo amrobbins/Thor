@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <optional>
@@ -91,11 +92,21 @@ class TrainingRunsResult {
 
 class TrainingRuns {
    public:
+    // repositoryDirectory opts TrainingRuns into durable idempotent member
+    // storage. Each run also persists its original DatasetSplitManifest at the
+    // member level. On later fits that persisted split is validated against the
+    // supplied dataset and is authoritative over any newly supplied split.
+    // Each fit derives a member artifact from repository/run/stage, where stage
+    // is the currently trainable TrainingPhase label (or "standalone" for a
+    // single-network Trainer). The Trainer's native CURRENT/BEST/COMPLETED
+    // repository then decides whether that member is new, resumable, or already
+    // complete. When omitted, Trainer save-model behavior remains unchanged.
     explicit TrainingRuns(std::vector<TrainingRunsSpec> runs,
                           TrainingRunsFailurePolicy failurePolicy = TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
                           double maxSummaryLogsPerSecond = 2.0,
                           std::optional<size_t> maxParallelRuns = std::optional<size_t>{3},
-                          std::map<std::string, size_t> minSuccessfulModels = {});
+                          std::map<std::string, size_t> minSuccessfulModels = {},
+                          std::optional<std::string> repositoryDirectory = std::nullopt);
 
     [[nodiscard]] TrainingRunsResult fit(uint32_t epochs);
     [[nodiscard]] TrainingRunsResult fit(uint32_t epochs, std::shared_ptr<const TrainingData> testData);
@@ -108,6 +119,7 @@ class TrainingRuns {
     [[nodiscard]] double getMaxSummaryLogsPerSecond() const { return maxSummaryLogsPerSecond; }
     [[nodiscard]] std::optional<size_t> getMaxParallelRuns() const { return maxParallelRuns; }
     [[nodiscard]] const std::map<std::string, size_t>& getMinSuccessfulModels() const { return minSuccessfulModels; }
+    [[nodiscard]] const std::optional<std::string>& getRepositoryDirectory() const { return repositoryDirectory; }
     [[nodiscard]] const std::vector<TrainingRunsRestartPolicy>& getRestartConditions() const { return restartConditions; }
     [[nodiscard]] const std::vector<TrainingRunsEarlyCompletionRule>& getEarlyCompletionRules() const { return earlyCompletionRules; }
     [[nodiscard]] const std::map<std::string, std::vector<std::string>>& getReports() const { return reports; }
@@ -131,6 +143,12 @@ class TrainingRuns {
     };
 
     void validateRunSpecs();
+    void configureRepositorySplitsForFit();
+    void configureRepositoryArtifactsForFit(const std::vector<std::optional<std::string>>& phaseHistoryLabels);
+    [[nodiscard]] std::filesystem::path repositorySplitManifestPathForRun(
+        const TrainingRunsSpec& spec) const;
+    [[nodiscard]] std::filesystem::path repositoryModelDirectoryForRun(
+        const TrainingRunsSpec& spec, const std::optional<std::string>& phaseHistoryLabel) const;
     [[nodiscard]] const ValidatedRunMetadata& validatedMetadataForSpec(const TrainingRunsSpec& spec) const;
     void validateMinSuccessfulModels() const;
     [[nodiscard]] bool failedRunShouldTriggerCancellation(size_t runIndex, const std::vector<TrainingRunResult>& results) const;
@@ -165,6 +183,7 @@ class TrainingRuns {
     double maxSummaryLogsPerSecond = 2.0;
     std::optional<size_t> maxParallelRuns{};
     std::map<std::string, size_t> minSuccessfulModels{};
+    std::optional<std::string> repositoryDirectory{};
     std::vector<TrainingRunsRestartPolicy> restartConditions{};
     std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules{};
     std::map<std::string, std::vector<std::string>> reports{};

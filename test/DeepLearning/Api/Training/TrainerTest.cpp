@@ -144,6 +144,8 @@ class CapturingExecutor : public TrainingExecutor {
         lastSaveModelOverwrite = request.saveModelOverwrite;
         lastCheckBestModelEveryEpochs = request.checkBestModelEveryEpochs;
         lastFirstModelSelectionEpoch = request.firstModelSelectionEpoch;
+        lastCheckpointEveryEpochs = request.checkpointEveryEpochs;
+        lastRetainPreviousCheckpoints = request.retainPreviousCheckpoints;
         lastMaxTrainingBatchesPerEpoch = request.maxTrainingBatchesPerEpoch;
         lastTrainingData = request.trainingData;
         lastBatchSessionSize = request.batchSession != nullptr ? request.batchSession->getBatchSize() : 0;
@@ -175,6 +177,8 @@ class CapturingExecutor : public TrainingExecutor {
     bool lastSaveModelOverwrite = false;
     uint32_t lastCheckBestModelEveryEpochs = 0;
     uint64_t lastFirstModelSelectionEpoch = 0;
+    uint32_t lastCheckpointEveryEpochs = 0;
+    bool lastRetainPreviousCheckpoints = false;
     std::optional<uint64_t> lastMaxTrainingBatchesPerEpoch{};
     std::shared_ptr<const TrainingData> lastTrainingData = nullptr;
     uint64_t lastBatchSessionSize = 0;
@@ -236,6 +240,28 @@ class MetricAggregationExecutor final : public TrainingExecutor {
         observer.onTrainingEvent(TrainingEvent::runFinished(std::move(finished)));
         if (request.completedTrainingEpochs != nullptr) {
             *request.completedTrainingEpochs = request.initialCompletedEpochs + request.epochs;
+        }
+    }
+};
+
+class CompletedResumeReportingExecutor final : public TrainingExecutor {
+   public:
+    void fit(const TrainingRunRequest& request, TrainingObserver& observer) override {
+        TrainingStatsSnapshot finished;
+        finished.networkName = request.network != nullptr ? request.network->getNetworkName() : std::string{};
+        finished.datasetName = request.batchSession != nullptr ? request.batchSession->getDatasetName() : std::string{};
+        finished.epoch = 741;
+        finished.metrics["completed_epoch"] = 741.0;
+        finished.metrics["selected_epoch"] = 491.0;
+        finished.deviceDatasetStorage.requested = DeviceDatasetStorage::STRICT;
+        finished.deviceDatasetStorage.attempted = true;
+        finished.deviceDatasetStorage.used = true;
+        finished.deviceDatasetStorage.reason = "strict_resident_restored";
+        finished.deviceDatasetStorage.examples = 128000;
+        finished.deviceDatasetStorage.residentBytes = 4096;
+        observer.onTrainingEvent(TrainingEvent::runFinished(std::move(finished), "early_completed"));
+        if (request.completedTrainingEpochs != nullptr) {
+            *request.completedTrainingEpochs = 491;
         }
     }
 };
@@ -449,6 +475,35 @@ TEST(Trainer, FitSuppliesFreshBatchSessionFactoryForStartupRetry) {
     executor->retrySession1.reset();
     executor->retrySession2.reset();
     std::filesystem::remove_all(path);
+}
+
+TEST(Trainer, CompletedResumeTerminalEventPreservesDeviceDatasetResidencyInResult) {
+    auto data = makeFakeTrainingData();
+    auto executor = std::make_shared<CompletedResumeReportingExecutor>();
+    Trainer trainer = Trainer::Builder()
+                          .network(makeFakePhaseNetwork("trainer-completed-resume-report", "output"))
+                          .data(data)
+                          .executor(executor)
+                          .observer(std::make_shared<NullTrainingObserver>())
+                          .build();
+
+    const TrainingRunResult result = trainer.fit(1);
+
+    ASSERT_TRUE(result.completed());
+    ASSERT_TRUE(result.finalTrainingStats.has_value());
+    const DeviceDatasetStorageReport& report =
+        result.finalTrainingStats->deviceDatasetStorage;
+    EXPECT_EQ(report.requested, DeviceDatasetStorage::STRICT);
+    EXPECT_TRUE(report.attempted);
+    EXPECT_TRUE(report.used);
+    EXPECT_EQ(report.reason, "strict_resident_restored");
+    EXPECT_EQ(report.examples, 128000u);
+    EXPECT_EQ(report.residentBytes, 4096u);
+    EXPECT_TRUE(result.earlyCompleted());
+    ASSERT_TRUE(result.completedEpoch.has_value());
+    EXPECT_EQ(result.completedEpoch.value(), 741u);
+    ASSERT_TRUE(result.selectedEpoch.has_value());
+    EXPECT_EQ(result.selectedEpoch.value(), 491u);
 }
 
 TEST(Trainer, BuilderPropagatesPhaseRelativeNsightProfileConfig) {
@@ -774,6 +829,8 @@ TEST(Trainer, FitPassesBestModelCandidateOptionsAsRunParameters) {
     options.epochs = 5;
     options.checkBestModelEveryEpochs = 3;
     options.firstModelSelectionEpoch = 7;
+    options.checkpointEveryEpochs = 11;
+    options.retainPreviousCheckpoints = true;
     trainer.fit(options);
 
     EXPECT_EQ(executor->calls, 1u);
@@ -782,7 +839,29 @@ TEST(Trainer, FitPassesBestModelCandidateOptionsAsRunParameters) {
     EXPECT_TRUE(executor->lastSaveModelOverwrite);
     EXPECT_EQ(executor->lastCheckBestModelEveryEpochs, 3u);
     EXPECT_EQ(executor->lastFirstModelSelectionEpoch, 7u);
+    EXPECT_EQ(executor->lastCheckpointEveryEpochs, 11u);
+    EXPECT_TRUE(executor->lastRetainPreviousCheckpoints);
     EXPECT_FALSE(executor->lastMaxTrainingBatchesPerEpoch.has_value());
+}
+
+TEST(Trainer, PeriodicCheckpointingRequiresSaveModelDirectory) {
+    auto network = std::make_shared<Network>("trainer-periodic-checkpoint-requires-save-dir");
+    auto data = makeFakeTrainingData();
+    auto executor = std::make_shared<CapturingExecutor>();
+    auto observer = std::make_shared<NullTrainingObserver>();
+
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .data(data)
+                          .executor(executor)
+                          .observer(observer)
+                          .build();
+
+    TrainerFitOptions options;
+    options.epochs = 3;
+    options.checkpointEveryEpochs = 1;
+    EXPECT_THROW(trainer.fit(options), std::runtime_error);
+    EXPECT_EQ(executor->calls, 0u);
 }
 
 TEST(Trainer, FitPassesMaxTrainingBatchesPerEpochAsRunParameter) {

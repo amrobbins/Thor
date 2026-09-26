@@ -75,6 +75,16 @@ inline constexpr uint64_t ROW_SPLIT_MAX_OUTER_SIZE = 128;
 inline constexpr uint64_t ROW_SPLIT_MIN_INNER_SIZE = 15;
 inline constexpr uint64_t ROW_SPLIT_MAX_INNER_SIZE = FULL_ROW_GROUP_MAX_INNER_SIZE;
 inline constexpr uint64_t ROW_SPLIT_TARGET_SM_WAVES = 2;
+
+// PACKET-ADAPTIVE-COOPERATIVE: ordinary middle-axis reductions can also become under-parallel when the number of
+// independent retained/output tiles is small, even when the reduction is not deep enough to justify an intermediate
+// row-split stage. Release census measurements show that the cooperative tiled reducer is a consistent win once the
+// packet-aware geometry wants at least four physical warps per retained tile. Keep the production gate inside the
+// measured ordinary-stage regime for now; wider/shorter geometries remain on the previously ordained direct kernels.
+inline constexpr uint64_t PACKET_COOPERATIVE_MIN_REDUCTION_SIZE = 64;
+inline constexpr uint64_t PACKET_COOPERATIVE_MIN_INNER_SIZE = 32;
+inline constexpr uint64_t PACKET_COOPERATIVE_MAX_INNER_SIZE = 1024;
+inline constexpr uint64_t PACKET_COOPERATIVE_MIN_WARPS_PER_TILE = 4;
 }  // namespace CubReductionTiledPolicy
 
 /** Role of one collapsed run in a dense row-major reduction traversal. */

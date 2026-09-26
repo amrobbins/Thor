@@ -72,6 +72,11 @@ using TrainingRunsRestartConditionSpec = TrainingRestartPolicy;
 
 
 struct TrainerFitOptions {
+    // With save_model_dir, the durable training repository is idempotent by
+    // default. An incomplete stage resumes automatically; an already-completed
+    // stage returns its selected artifact without scheduling training. Recovery
+    // finishes the repository's original phase epoch ceiling rather than adding
+    // `epochs` more work after CURRENT.
     uint32_t epochs = 1;
     uint32_t checkBestModelEveryEpochs = 0;
     // 0 means score/save the phase-entry model before its first optimizer update.
@@ -80,6 +85,18 @@ struct TrainerFitOptions {
     std::optional<uint64_t> maxTrainingBatchesPerEpoch{};
     std::vector<TrainingRestartCondition> restartConditions{};
     std::vector<TrainingEarlyCompletionPolicy> earlyCompletionPolicies{};
+
+    // Independently of best-model selection, persist CURRENT after every N
+    // completed phase-local epochs when save_model_dir is configured. A value
+    // of 0 disables periodic CURRENT checkpoints. New best candidates are still
+    // checkpointed immediately whenever best-model selection is enabled.
+    uint32_t checkpointEveryEpochs = 0;
+
+    // By default, once CURRENT/BEST safely point away from an older generation,
+    // that unreferenced generation is removed. Set this to retain immutable
+    // historical generations for debugging/auditing. Generations still named by
+    // CURRENT or BEST are never removed regardless of this setting.
+    bool retainPreviousCheckpoints = false;
 };
 
 class PlacedNetwork;
@@ -191,6 +208,7 @@ class Trainer {
     std::shared_ptr<TrainingObserver> observer = nullptr;
     std::optional<std::string> saveModelDirectory{};
     bool saveModelOverwrite = false;
+    bool saveModelDirectoryManagedByTrainingRuns = false;
     TrainingModelSelectionScore modelSelectionScore{};
     std::shared_ptr<PlacedNetwork> placedNetworkAfterLastFit = nullptr;
     std::optional<std::string> lastCompletedArtifactDirectory{};

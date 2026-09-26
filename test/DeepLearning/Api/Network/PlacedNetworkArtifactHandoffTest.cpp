@@ -170,7 +170,8 @@ std::shared_ptr<Api::Network> buildFullyConnectedPhaseNetwork(const std::string&
                                                               bool attachAdamOptimizers = true,
                                                               Impl::DataType inputDataType = kDataType,
                                                               Impl::DataType weightsDataType = kDataType,
-                                                              Impl::DataType computeDataType = kDataType) {
+                                                              Impl::DataType computeDataType = kDataType,
+                                                              uint32_t numOutputFeatures = kNumOutputFeatures) {
     auto network = std::make_shared<Api::Network>(networkName);
     Api::NetworkInput input = Api::NetworkInput::Builder()
                                   .network(*network)
@@ -182,7 +183,7 @@ std::shared_ptr<Api::Network> buildFullyConnectedPhaseNetwork(const std::string&
     Api::FullyConnected::Builder fcBuilder = Api::FullyConnected::Builder()
                                                  .network(*network)
                                                  .featureInput(input.getFeatureOutput().value())
-                                                 .numOutputFeatures(kNumOutputFeatures)
+                                                 .numOutputFeatures(numOutputFeatures)
                                                  .hasBias(true)
                                                  .weightsDataType(weightsDataType)
                                                  .computeDataType(computeDataType)
@@ -657,20 +658,79 @@ TEST(PlacedNetworkArtifactHandoff, DirectSameNetworkArtifactLoadRestoresApiLayer
     std::filesystem::remove_all(archiveDir);
 }
 
-TEST(PlacedNetworkArtifactHandoff, DirectSameNetworkArtifactLoadRejectsDifferentApiLayerIdentity) {
-    const std::filesystem::path archiveDir = makeUniqueTestArchiveDir("direct_same_network_handoff_wrong_identity");
+TEST(PlacedNetworkArtifactHandoff, DirectSameNetworkArtifactLoadRestoresAcrossReconstructedEquivalentNetwork) {
+    const std::vector<float> weightValues = {-0.75f, 0.125f, 0.5f, 1.0f, -1.25f, 1.75f};
+    const std::vector<float> weightsMValues = {0.31f, -0.32f, 0.33f, -0.34f, 0.35f, -0.36f};
+    const std::filesystem::path archiveDir = makeUniqueTestArchiveDir("direct_same_network_handoff_reconstructed");
     try {
         PlacedFcGraph source = placeNetworkWithSingleFc(buildFullyConnectedPhaseNetwork("same_network_source"));
-        source.placed->save(archiveDir.string(), /*overwrite=*/true, /*saveOptimizerState=*/false);
+        Stream sourceStream = source.physicalFc->getStreams()[0];
+        std::shared_ptr<Impl::PhysicalParameter> sourceWeights = source.physicalFc->getParameter("weights");
+        ASSERT_NE(sourceWeights, nullptr);
+        ASSERT_TRUE(sourceWeights->getStorage().has_value());
+        ASSERT_NE(sourceWeights->getOptimizer(), nullptr);
+        ASSERT_TRUE(sourceWeights->getOptimizer()->isCompiled());
+        std::shared_ptr<Impl::Adam> sourceWeightsAdam = std::dynamic_pointer_cast<Impl::Adam>(sourceWeights->getOptimizer());
+        ASSERT_NE(sourceWeightsAdam, nullptr);
+        sourceWeightsAdam->setT(29.0f);
+        setDeviceTensor(sourceWeights->getStorage().value(), weightValues, sourceStream);
+        setDeviceTensor(sourceWeights->getOptimizer()->getOptimizerParameterTensor("m"), weightsMValues, sourceStream);
+        sourceStream.synchronize();
+        source.placed->save(archiveDir.string(), /*overwrite=*/true, /*saveOptimizerState=*/true);
 
-        PlacedFcGraph differentDestination =
-            placeNetworkWithSingleFc(buildFullyConnectedPhaseNetwork("same_network_different_destination"));
+        // Reconstructing the same API graph allocates new process-global layer
+        // ids. Crash recovery must match the stable serialized layer position,
+        // not those ephemeral ids.
+        PlacedFcGraph reconstructed =
+            placeNetworkWithSingleFc(buildFullyConnectedPhaseNetwork("same_network_reconstructed"));
+        ASSERT_NE(source.apiFc, nullptr);
+        ASSERT_NE(reconstructed.apiFc, nullptr);
+        ASSERT_NE(source.apiFc->getId(), reconstructed.apiFc->getId());
+        reconstructed.placed->loadTrainingStateFromSameNetworkArtifact(archiveDir.string(),
+                                                                        source.network->getNetworkName());
+
+        Stream destinationStream = reconstructed.physicalFc->getStreams()[0];
+        std::shared_ptr<Impl::PhysicalParameter> destinationWeights = reconstructed.physicalFc->getParameter("weights");
+        ASSERT_NE(destinationWeights, nullptr);
+        ASSERT_TRUE(destinationWeights->getStorage().has_value());
+        ASSERT_NE(destinationWeights->getOptimizer(), nullptr);
+        ASSERT_TRUE(destinationWeights->getOptimizer()->isCompiled());
+        std::shared_ptr<Impl::Adam> destinationWeightsAdam =
+            std::dynamic_pointer_cast<Impl::Adam>(destinationWeights->getOptimizer());
+        ASSERT_NE(destinationWeightsAdam, nullptr);
+        EXPECT_FLOAT_EQ(destinationWeightsAdam->getT(), 29.0f);
+        expectAllClose(readDeviceTensor(destinationWeights->getStorage().value(), destinationStream),
+                       weightValues,
+                       "reconstructed same-network weights");
+        expectAllClose(readDeviceTensor(destinationWeights->getOptimizer()->getOptimizerParameterTensor("m"), destinationStream),
+                       weightsMValues,
+                       "reconstructed same-network weights Adam m");
+    } catch (...) {
+        std::filesystem::remove_all(archiveDir);
+        throw;
+    }
+    std::filesystem::remove_all(archiveDir);
+}
+
+TEST(PlacedNetworkArtifactHandoff, DirectSameNetworkArtifactLoadRejectsStructurallyIncompatibleNetwork) {
+    const std::filesystem::path archiveDir = makeUniqueTestArchiveDir("direct_same_network_handoff_incompatible");
+    try {
+        PlacedFcGraph source = placeNetworkWithSingleFc(buildFullyConnectedPhaseNetwork("same_network_source"));
+        source.placed->save(archiveDir.string(), /*overwrite=*/true, /*saveOptimizerState=*/true);
+
+        PlacedFcGraph incompatible = placeNetworkWithSingleFc(
+            buildFullyConnectedPhaseNetwork("same_network_incompatible",
+                                            /*attachAdamOptimizers=*/true,
+                                            kDataType,
+                                            kDataType,
+                                            kDataType,
+                                            kNumOutputFeatures + 1));
         expectRuntimeErrorContains(
             [&]() {
-                differentDestination.placed->loadTrainingStateFromSameNetworkArtifact(archiveDir.string(),
-                                                                                      source.network->getNetworkName());
+                incompatible.placed->loadTrainingStateFromSameNetworkArtifact(archiveDir.string(),
+                                                                               source.network->getNetworkName());
             },
-            "artifact has no saved state for exact API-layer parameter key");
+            "archive tensor byte size");
     } catch (...) {
         std::filesystem::remove_all(archiveDir);
         throw;

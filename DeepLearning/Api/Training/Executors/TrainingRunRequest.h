@@ -127,6 +127,16 @@ struct TrainingRunRequest {
     // early-completion policies because no training has occurred in the phase yet.
     uint64_t firstModelSelectionEpoch = 0;
 
+    // Independently of model-selection cadence, persist the current model and
+    // optimizer state after every N completed phase-local epochs. A value of 0
+    // disables periodic CURRENT checkpointing. Requires saveModelDirectory.
+    uint32_t checkpointEveryEpochs = 0;
+
+    // When false (the default), an older checkpoint generation is garbage-
+    // collected only after CURRENT/BEST have been durably advanced and no
+    // pointer still references it. When true, unreferenced generations are kept.
+    bool retainPreviousCheckpoints = false;
+
     // Optional cap for the TRAIN phase only. When unset, a training epoch drains
     // the session's full training split as before. When set, each public training
     // epoch consumes at most this many batches and the session continues from its
@@ -186,8 +196,17 @@ struct TrainingRunRequest {
 
     std::shared_ptr<PlacedNetwork>* completedPlacedNetwork = nullptr;
 
-    // Cumulative continuation epoch before/after this request. FIT trains `epochs`
-    // additional epochs starting after initialCompletedEpochs. Public stats,
+    // Network name serialized into a successful saved artifact. Native resume
+    // can finalize a checkpoint whose phase target was already reached without
+    // creating a new placed network, so this output cannot always be derived
+    // from completedPlacedNetwork.
+    std::optional<std::string>* completedArtifactNetworkName = nullptr;
+
+    // Cumulative continuation epoch before/after this request. Normally FIT
+    // trains `epochs` additional epochs starting after initialCompletedEpochs.
+    // When saveModelDirectory contains a durable incomplete CURRENT checkpoint,
+    // the native runner instead resumes CURRENT and finishes the original phase
+    // target recorded by that repository. Public stats,
     // model-selection callbacks, early-completion policies, snapshots, and
     // metadata use cumulative epoch numbers. Phase-local options such as
     // firstModelSelectionEpoch are evaluated relative to initialCompletedEpochs.

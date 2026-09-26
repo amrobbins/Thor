@@ -7,6 +7,7 @@
 #include "DeepLearning/Api/Training/PhaseGraphConnector.h"
 #include "DeepLearning/Api/Training/MetricEpochAccumulator.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Implementation/Training/TrainingCheckpointRepository.h"
 
 #include <algorithm>
 #include <cmath>
@@ -71,6 +72,11 @@ std::shared_ptr<const TrainingData> trainingDataForFit(
     const std::shared_ptr<const TrainingData>& configuredTrainingData) {
     if (configuredTrainingData == nullptr) {
         throw std::runtime_error("Trainer::fit requires TrainingData.");
+    }
+    if (!configuredTrainingData->hasSplits()) {
+        throw std::runtime_error(
+            "Trainer::fit requires a dataset split manifest. A split may be omitted only when TrainingRuns "
+            "repository_dir restores a previously persisted split before fit.");
     }
 
     const BatchPolicy& configuredBatching = configuredTrainingData->getBatching();
@@ -245,8 +251,11 @@ Trainer Trainer::Builder::build() const {
         DatasetInputBindings bindings = datasetInputBindings_.has_value()
                                             ? datasetInputBindings_.value()
                                             : DatasetInputBindings::byExactName(*network_, *trainingData_->getDataset());
+        const uint64_t bindingBatchSize = trainingData_->hasSplits()
+            ? effectiveTrainingBatchSize(*trainingData_)
+            : trainingData_->getBatching().getBatchSize();
         CompiledDatasetInputBindings compiled = bindings.compile(
-            *network_, *trainingData_->getDataset(), effectiveTrainingBatchSize(*trainingData_));
+            *network_, *trainingData_->getDataset(), bindingBatchSize);
         trainer.datasetInputBindings = std::move(compiled.trainingInputBindings);
         trainer.requiredDatasetFieldRequirements = std::move(compiled.fieldRequirements);
     }
@@ -368,6 +377,21 @@ class ResultCapturingTrainingObserver : public TrainingObserver {
                 finalTestStats = testLoss.update(event.stats);
             }
         } else if (event.type == TrainingEventType::RUN_FINISHED) {
+            // Repository-backed resume can complete without scheduling any train
+            // batches. In that path the native runner restores the durable device
+            // dataset residency report onto the terminal event, but there are no
+            // TRAIN STATS events from which to populate finalTrainingStats. Preserve
+            // that restored report so TrainingRunResult keeps the same residency
+            // contract for resumed-completed runs as for normally executed runs.
+            if (event.stats.deviceDatasetStorage.requested != DeviceDatasetStorage::OFF) {
+                if (!finalTrainingStats.has_value()) {
+                    TrainingStatsSnapshot restoredTrainingStats = event.stats;
+                    restoredTrainingStats.phase = TrainingEventPhase::TRAIN;
+                    finalTrainingStats = std::move(restoredTrainingStats);
+                } else {
+                    finalTrainingStats->deviceDatasetStorage = event.stats.deviceDatasetStorage;
+                }
+            }
             completionReason = event.message == "early_completed" ? TrainingRunCompletionReason::EARLY_COMPLETED
                                                                   : TrainingRunCompletionReason::COMPLETED;
             completedEpoch = uintMetric(event.stats, "completed_epoch");
@@ -727,7 +751,9 @@ TrainingRunResult Trainer::fit(const TrainerFitOptions& options) {
                                                   capturingObserver.bestEpoch,
                                                   capturingObserver.bestScore,
                                                   saveModelDirectory,
-                                                  trainedArtifactNetworkName(placedNetworkAfterLastFit, network),
+                                                  lastCompletedArtifactNetworkName.has_value()
+                                                      ? lastCompletedArtifactNetworkName
+                                                      : trainedArtifactNetworkName(placedNetworkAfterLastFit, network),
                                                   capturingObserver.finalValidationStatsByPopulation,
                                                   capturingObserver.selectedEpoch,
                                                   capturingObserver.latestScore,
@@ -957,6 +983,8 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.saveModelOverwrite = saveModelOverwrite;
     request.checkBestModelEveryEpochs = options.checkBestModelEveryEpochs;
     request.firstModelSelectionEpoch = options.firstModelSelectionEpoch;
+    request.checkpointEveryEpochs = options.checkpointEveryEpochs;
+    request.retainPreviousCheckpoints = options.retainPreviousCheckpoints;
     request.maxTrainingBatchesPerEpoch = options.maxTrainingBatchesPerEpoch;
     request.trainingData = fitTrainingData;
     request.deviceDatasetStorageReport.requested = fitTrainingData->getAccessPolicy().deviceStorage;
@@ -982,6 +1010,8 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
         request.previousPlacedNetwork = placedNetworkAfterLastFit;
     }
     request.completedPlacedNetwork = &placedNetworkAfterLastFit;
+    std::optional<std::string> completedArtifactNetworkNameOutput{};
+    request.completedArtifactNetworkName = &completedArtifactNetworkNameOutput;
     request.completedTrainingEpochs = &completedTrainingEpochs;
     request.completedTrainingElapsedSeconds = &completedTrainingElapsedSeconds;
 
@@ -996,7 +1026,9 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
 
     if (saveModelDirectory.has_value()) {
         lastCompletedArtifactDirectory = selectedTrainingArtifactModelDirectory(saveModelDirectory);
-        lastCompletedArtifactNetworkName = trainedArtifactNetworkName(placedNetworkAfterLastFit, network);
+        lastCompletedArtifactNetworkName = completedArtifactNetworkNameOutput.has_value()
+            ? completedArtifactNetworkNameOutput
+            : trainedArtifactNetworkName(placedNetworkAfterLastFit, network);
         if (!lastCompletedArtifactDirectory.has_value()) {
             lastCompletedArtifactNetworkName.reset();
         }
@@ -1092,6 +1124,16 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
         releasePlacedNetworkAfterLastFit();
     }
 
+    auto discardCheckpointRepositoryForControlledRestart = [&]() {
+        if (!saveModelDirectory.has_value()) {
+            return;
+        }
+        ThorImplementation::TrainingCheckpointRepository repository(
+            ThorImplementation::TrainingCheckpointRepository::repositoryDirectoryForModelArtifact(
+                saveModelDirectory.value()));
+        repository.removeRepositoryDurably();
+    };
+
     const uint32_t nonFiniteLossMaxRestarts = std::max_element(
         combinedConditions.begin(),
         combinedConditions.end(),
@@ -1143,6 +1185,10 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
 
             state->failedAttempts.push_back(e.progress());
             if (state->failedAttempts.size() <= state->condition->maxRestarts) {
+                // A configured restart intentionally discards this attempt. Do
+                // not let crash-recovery semantics turn the retry into a resume
+                // of the state that the restart policy just rejected.
+                discardCheckpointRepositoryForControlledRestart();
                 // The native runner drains the failed attempt's own streams and
                 // callbacks while unwinding. Do not stall unrelated models with a
                 // process-wide/device-wide synchronization at this boundary.
@@ -1162,6 +1208,9 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
             attemptObserver.flush();
             nonFiniteLossFailedAttempts.push_back(e.what());
             if (nonFiniteLossFailedAttempts.size() <= nonFiniteLossMaxRestarts) {
+                // Non-finite-loss retry has the same discard-attempt semantics
+                // as an explicit restart condition.
+                discardCheckpointRepositoryForControlledRestart();
                 // The native runner drains the failed attempt's own streams and
                 // callbacks while unwinding. Do not stall unrelated models with a
                 // process-wide/device-wide synchronization at this boundary.
@@ -1228,7 +1277,9 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
                                                   capturingObserver.bestEpoch,
                                                   capturingObserver.bestScore,
                                                   saveModelDirectory,
-                                                  trainedArtifactNetworkName(placedNetworkAfterLastFit, network),
+                                                  lastCompletedArtifactNetworkName.has_value()
+                                                      ? lastCompletedArtifactNetworkName
+                                                      : trainedArtifactNetworkName(placedNetworkAfterLastFit, network),
                                                   capturingObserver.finalValidationStatsByPopulation,
                                                   capturingObserver.selectedEpoch,
                                                   capturingObserver.latestScore,
@@ -1402,6 +1453,9 @@ void Trainer::validateFitOptions(const TrainerFitOptions& options) const {
     }
     if (options.maxTrainingBatchesPerEpoch.has_value() && options.maxTrainingBatchesPerEpoch.value() == 0) {
         throw std::runtime_error("Trainer::fit max_training_batches_per_epoch must be >= 1 or None.");
+    }
+    if (options.checkpointEveryEpochs > 0 && !saveModelDirectory.has_value()) {
+        throw std::runtime_error("Trainer::fit checkpoint_every_epochs requires save_model_dir.");
     }
     validateRestartConditions(options.restartConditions);
     validateEarlyCompletionPolicies(options.earlyCompletionPolicies);
