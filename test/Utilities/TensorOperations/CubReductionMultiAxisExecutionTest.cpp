@@ -155,19 +155,13 @@ TEST(CubReduction, GeneralDenseSumPlannerExecutesManyAlternatingRunsAndSingleton
     EXPECT_EQ(alternating->getWorkspaceSizeInBytes(), alternating_workspace);
     const std::vector<std::vector<uint32_t>> alternating_stage_axes = alternating->getComposedStageAxes();
     ASSERT_EQ(alternating_stage_axes.size(), 4U);
-    std::vector<uint32_t> remaining_reduced_runs{0, 2, 4, 6};
+    // Dense VALUE cutover replans from the canonical current-run problem after every pass. The reported axes are
+    // therefore current physical run indices, not persistent original-axis identities. Planner selection/order is
+    // covered by CubDenseReductionPlannerTest; this execution test only requires one physical reduction axis per pass
+    // and verifies the resulting values below.
     for (const std::vector<uint32_t>& stage_axes : alternating_stage_axes) {
-        ASSERT_FALSE(stage_axes.empty());
-        const uint32_t selected_run = stage_axes.front();
-        ASSERT_FALSE(remaining_reduced_runs.empty());
-        if (selected_run == remaining_reduced_runs.front()) {
-            remaining_reduced_runs.erase(remaining_reduced_runs.begin());
-        } else {
-            EXPECT_EQ(selected_run, remaining_reduced_runs.back());
-            remaining_reduced_runs.pop_back();
-        }
+        ASSERT_EQ(stage_axes.size(), 1U);
     }
-    EXPECT_TRUE(remaining_reduced_runs.empty());
     alternating->run();
 
     std::vector<float> singleton_values(12);

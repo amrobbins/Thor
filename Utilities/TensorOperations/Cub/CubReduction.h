@@ -2,12 +2,16 @@
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
+#include "Utilities/TensorOperations/Cub/CubReductionPassRole.h"
+#include "Utilities/TensorOperations/Cub/DenseReductionFamilies.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace ThorImplementation {
@@ -48,9 +52,9 @@ enum class CubReductionTiledRetainedOutputOrder : uint8_t {
     PermutedInnerOuter = 1,
 };
 
-// Host/device-independent launch-policy constants shared by the tuned TiledFixedSegment implementation, the dense
-// composition cost planner, and reduction benchmarks. Keeping these values in the common reduction header prevents
-// the planner from silently estimating a different full-row ownership model than the kernels actually launch.
+// Host/device-independent launch-policy constants shared by the tuned TiledFixedSegment implementation, dense
+// physical-pass planning/cost models, and reduction benchmarks. Keeping these values in the common reduction header
+// prevents host policy from silently estimating a different ownership model than the kernels actually launch.
 namespace CubReductionTiledPolicy {
 inline constexpr uint64_t WARP_THREADS = 32;
 inline constexpr uint64_t WARPS_PER_BLOCK = 8;
@@ -63,24 +67,13 @@ inline constexpr uint64_t FULL_ROW_GROUP_MAX_INNER_SIZE =
 inline constexpr uint64_t FULL_ROW_COMPONENTS_PER_BLOCK = FULL_ROW_GROUP_MAX_INNER_SIZE;
 inline constexpr uint64_t ASYNC_STAGE_BYTES_PER_WARP = 2048;
 
-// ROW-SPLIT-FULL-ROW: the direct/vectorized full-row kernels deliberately derive their parallelism from independent
-// output rows.  That is ideal for ordinary dense reductions, but release benchmarking on SM120 shows a distinct
-// regime where there are only a few output rows and an enormous reduction depth: one/few CTAs otherwise serialize a
-// very large memory stream while most of the GPU is idle.  In that regime production splits each output's reduction
-// rows across enough independent CTAs for roughly two SM waves, writes FP32 partial vectors, then performs one tiny
-// deterministic final reduction.  Keep the gate intentionally conservative: every measured FP16/BF16/FP32 case with
-// reduction >= 1024 and outer <= 128 won decisively, while the existing kernels remain ordained outside this regime.
-inline constexpr uint64_t ROW_SPLIT_MIN_REDUCTION_SIZE = 1024;
-inline constexpr uint64_t ROW_SPLIT_MAX_OUTER_SIZE = 128;
-inline constexpr uint64_t ROW_SPLIT_MIN_INNER_SIZE = 15;
-inline constexpr uint64_t ROW_SPLIT_MAX_INNER_SIZE = FULL_ROW_GROUP_MAX_INNER_SIZE;
-inline constexpr uint64_t ROW_SPLIT_TARGET_SM_WAVES = 2;
+// Dense RK staged reducers target roughly two SM waves when extra R parallelism is needed. This is a modern
+// family-planning target, not ownership by any historical row-split implementation.
+inline constexpr uint64_t DENSE_RK_TARGET_SM_WAVES = 2;
 
-// PACKET-ADAPTIVE-COOPERATIVE: ordinary middle-axis reductions can also become under-parallel when the number of
-// independent retained/output tiles is small, even when the reduction is not deep enough to justify an intermediate
-// row-split stage. Release census measurements show that the cooperative tiled reducer is a consistent win once the
-// packet-aware geometry wants at least four physical warps per retained tile. Keep the production gate inside the
-// measured ordinary-stage regime for now; wider/shorter geometries remain on the previously ordained direct kernels.
+// PACKET-ADAPTIVE-COOPERATIVE: ordinary middle-axis reductions can become under-parallel when the number of
+// independent retained/output tiles is small. Release census measurements show that the cooperative tiled reducer is
+// a consistent win once packet-aware geometry wants at least four physical warps per retained tile.
 inline constexpr uint64_t PACKET_COOPERATIVE_MIN_REDUCTION_SIZE = 64;
 inline constexpr uint64_t PACKET_COOPERATIVE_MIN_INNER_SIZE = 32;
 inline constexpr uint64_t PACKET_COOPERATIVE_MAX_INNER_SIZE = 1024;
@@ -122,16 +115,12 @@ struct CubReductionDenseRunGeometry {
     uint32_t retained_run_count = 0;
 };
 
-/** Execution position of one direct stage inside a dense reduction composition. */
-enum class CubReductionDenseCompositionStageRole : uint8_t {
-    Complete = 0,
-    First = 1,
-    Intermediate = 2,
-    Final = 3,
-};
+// Transitional role name retained by structural ComposedDense metadata and the ARG interval executor. Ordinary
+// dense VALUE execution uses DensePassRole directly through DenseExecutablePlan.
+using CubReductionDenseCompositionStageRole = CubReductionPassRole;
 
 /**
- * Host-side description of one direct stage selected by the dense composition planner.
+ * Host-side description of one direct stage in the transitional/structural dense composition model.
  *
  * reduced_run_ordinal is the ordinal among the original tensor's non-singleton reduced runs. dense_run_index is the
  * corresponding index in CubReductionDenseRunGeometry::runs when such a physical run exists. It is nullopt only for
@@ -315,6 +304,45 @@ struct CubReductionGeometry {
 
     CubReductionPath path = CubReductionPath::DeviceTransformReduce;
 };
+namespace CubReductionInternal {
+
+/**
+ * One bound ordinary-dense physical pass.
+ *
+ * The family-local physical plan stays type-erased at the execution-plan level. role is explicit so semantic placement
+ * never depends on reducer-owned continuation state. The pass owns both any persistent intermediate output and any
+ * direct-backend temporary storage queried at stamp time, so execution needs no reducer-owned continuation state.
+ */
+struct DenseExecutablePass {
+    std::shared_ptr<const DenseReductionPhysicalPlan> physical_plan;
+    DensePassRole role = DensePassRole::Complete;
+    Tensor input;
+    mutable Tensor output;
+    CubReductionGeometry geometry;
+
+    // Persistent storage owned by this physical pass. intermediate_bytes accounts for a non-final aggregate output;
+    // temp_storage_bytes/temp_storage are direct-backend scratch queried at stamp time. Modern RK kernels currently need
+    // no separate launch scratch. Keeping both here makes the flat pass representation sufficient for R/KR/RK.
+    size_t intermediate_bytes = 0;
+    size_t temp_storage_bytes = 0;
+    Tensor temp_storage;
+
+    [[nodiscard]] size_t workspaceBytes() const {
+        if (intermediate_bytes > std::numeric_limits<size_t>::max() - temp_storage_bytes) {
+            throw std::overflow_error("Dense executable pass workspace size overflows size_t.");
+        }
+        return intermediate_bytes + temp_storage_bytes;
+    }
+};
+
+/** Flat ordered physical-pass representation for ordinary dense execution. */
+struct DenseExecutablePlan {
+    std::vector<DenseExecutablePass> passes;
+    size_t workspace_size_bytes = 0;
+};
+
+}  // namespace CubReductionInternal
+
 
 class StampedCubReduction;
 class StampedCubArgReduction;
@@ -379,10 +407,10 @@ class CubReduction {
     /**
      * Returns the executable geometry for a value reduction.
      *
-     * analyzeGeometry() already selects the final operation-independent execution family, including ComposedDense for
-     * ordinary dense disjoint reductions. This wrapper validates the value operation and fixed-segment limits so
-     * callers that cache a value-reduction plan observe the same path that stamp() will execute. Unsupported views are
-     * rejected directly by analyzeGeometry(); there is no arbitrary logical-index execution family after DELETE.
+     * analyzeGeometry() classifies structural access/shape, including the transitional ComposedDense geometry tag for
+     * ordinary dense disjoint reductions. VALUE stamping now feeds every ordinary dense R/KR/RK problem through the
+     * flat dense planner; special views remain on their ordained view executors. This wrapper validates the value
+     * operation and fixed-segment limits while preserving that structural geometry metadata.
      */
     [[nodiscard]] static CubReductionGeometry analyzeValueGeometry(CubReductionOp op,
                                                                     const std::vector<uint64_t>& input_dimensions,
@@ -416,6 +444,27 @@ class CubReduction {
                                                                       const Tensor& output,
                                                                       const CubReductionGeometry& geometry,
                                                                       const Stream& stream) const;
+
+    [[nodiscard]] static size_t queryPhysicalStageWorkspace(CubReductionOp op,
+                                                             const TensorDescriptor& input_descriptor,
+                                                             DataType output_dtype,
+                                                             const CubReductionGeometry& geometry,
+                                                             bool apply_input_transform,
+                                                             bool apply_output_finalize,
+                                                             uint64_t semantic_total_reduction_size,
+                                                             float output_scale,
+                                                             const Stream& stream);
+
+    [[nodiscard]] static std::shared_ptr<StampedCubReduction> stampPhysicalStage(
+        CubReductionOp op,
+        const Tensor& input,
+        const Tensor& output,
+        CubReductionGeometry geometry,
+        bool apply_input_transform,
+        bool apply_output_finalize,
+        uint64_t semantic_total_reduction_size,
+        float output_scale,
+        const Stream& stream);
 
     std::optional<DataType> output_dtype;
     float output_scale;
@@ -804,12 +853,25 @@ class StampedCubReduction {
     [[nodiscard]] DataType getAccumulatorDataType() const { return DataType::FP32; }
     [[nodiscard]] const CubReductionGeometry& getGeometry() const { return geometry; }
     /**
-     * Returns the public reduction axes executed by each direct pass of a ComposedDense reduction, in execution order.
-     * Non-composed reductions return an empty vector. This is planning metadata only; run() never consults it.
+     * Returns the current-run reduction axis executed by each physical VALUE pass when the structural geometry is
+     * ComposedDense. Ordinary dense VALUE always sources this from DenseExecutablePlan.
+     * This is diagnostic planning metadata only; run() never consults it.
      */
     [[nodiscard]] std::vector<std::vector<uint32_t>> getComposedStageAxes() const;
     [[nodiscard]] size_t getWorkspaceSizeInBytes() const { return temp_storage_bytes; }
     [[nodiscard]] float getOutputScale() const { return output_scale; }
+
+    /** True when ordinary dense execution is represented as a flat ordered physical-pass plan. */
+    [[nodiscard]] bool usesDenseExecutablePlan() const { return !dense_executable_plan.passes.empty(); }
+    [[nodiscard]] size_t getDenseExecutablePassCount() const { return dense_executable_plan.passes.size(); }
+
+    // Transitional RK diagnostics retained for the census; mixed R/KR/RK plans simply report false here.
+    [[nodiscard]] bool usesModernRKFamilyPlan() const;
+    [[nodiscard]] const std::string& getModernRKStrategyChain() const { return modern_rk_strategy_chain; }
+    [[nodiscard]] size_t getModernRKFirstPacketBytes() const;
+    [[nodiscard]] uint32_t getModernRKFirstBlockThreads() const;
+    [[nodiscard]] uint64_t getModernRKFirstStageBlocks() const;
+    [[nodiscard]] uint64_t getModernRKFirstShardsPerOutput() const;
 
    private:
     friend class CubReduction;
@@ -820,6 +882,9 @@ class StampedCubReduction {
                         const Tensor& output,
                         size_t temp_storage_bytes,
                         const Tensor& temp_storage,
+                        bool apply_input_transform,
+                        bool apply_output_finalize,
+                        uint64_t semantic_total_reduction_size,
                         float output_scale,
                         const Stream& stream);
 
@@ -827,8 +892,11 @@ class StampedCubReduction {
                         CubReductionGeometry geometry,
                         const Tensor& input,
                         const Tensor& output,
-                        size_t workspace_size_bytes,
-                        std::vector<std::shared_ptr<StampedCubReduction>> composed_stages,
+                        CubReductionInternal::DenseExecutablePlan dense_executable_plan,
+                        std::string modern_rk_strategy_chain,
+                        bool apply_input_transform,
+                        bool apply_output_finalize,
+                        uint64_t semantic_total_reduction_size,
                         float output_scale,
                         const Stream& stream);
 
@@ -838,7 +906,15 @@ class StampedCubReduction {
     mutable Tensor output;
     const size_t temp_storage_bytes;
     Tensor temp_storage;
-    std::vector<std::shared_ptr<StampedCubReduction>> composed_stages;
+    CubReductionInternal::DenseExecutablePlan dense_executable_plan;
+    std::string modern_rk_strategy_chain;
+
+    // Physical passes need the logical operation's transform/finalizer placement, not merely the public operation.
+    // This prevents L1/L2/SumSquares transforms from being re-applied to FP32 shard partials.
+    bool apply_input_transform = true;
+    bool apply_output_finalize = true;
+    uint64_t semantic_total_reduction_size = 1;
+
     const float output_scale;
     Stream stream;
 };

@@ -180,6 +180,11 @@ TEST(CubReduction, AwkwardLargeVectorizedShardsHandleAlignmentAndPaddedInputTail
         std::shared_ptr<StampedCubReduction> stamped =
             CubReduction(CubReductionOp::Sum, 1, DataType::FP32).stamp(input, stream);
         EXPECT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+        if (dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP32) {
+            EXPECT_TRUE(stamped->usesModernRKFamilyPlan());
+        } else {
+            EXPECT_FALSE(stamped->usesModernRKFamilyPlan());
+        }
         stamped->run();
         stream.synchronize();
         expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);

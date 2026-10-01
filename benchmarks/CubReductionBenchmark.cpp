@@ -4,6 +4,7 @@
 #include "Utilities/Common/Stream.h"
 #include "Utilities/Exceptions.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
+#include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 
 #include <cuda_runtime.h>
 
@@ -37,6 +38,12 @@ constexpr int TIMED_ITERATIONS_PER_SAMPLE = 4;
 constexpr int BROAD_WARMUP_ITERATIONS = 2;
 constexpr int BROAD_TIMING_SAMPLES = 3;
 constexpr uint64_t BROAD_MAX_INPUT_BYTES = 512ULL * MIB;
+constexpr uint64_t AWKWARD_SHARD_MAX_INPUT_BYTES = 768ULL * MIB;
+constexpr uint64_t SUB4096_AWKWARD_SHARD_MAX_INPUT_BYTES = 2048ULL * MIB;
+constexpr uint64_t SUB512_AWKWARD_SHARD_MAX_INPUT_BYTES = 512ULL * MIB;
+constexpr uint64_t SUB256_AWKWARD_SHARD_MAX_INPUT_BYTES = 512ULL * MIB;
+constexpr uint64_t SUB64_AWKWARD_SHARD_MAX_INPUT_BYTES = 512ULL * MIB;
+constexpr uint64_t WIDE_AWKWARD_2D_TARGET_INPUT_BYTES = 640ULL * MIB;
 
 struct ReductionShape {
     const char* name;
@@ -77,11 +84,30 @@ struct ExactTiming {
     double worst_ms = 0.0;
 };
 
+const ReductionCandidate* findReductionCandidate(std::string_view name);
+
 struct BenchmarkOptions {
     bool focused_arg_x4 = false;
     bool focused_arg_x4_awkward = false;
     bool reduction_census = false;
     bool full_row_shard_census = false;
+    bool wide_awkward_2d_census = false;
+    bool awkward_shard_census = false;
+    bool sub4096_awkward_shard_census = false;
+    bool sub512_awkward_shard_census = false;
+    bool sub256_awkward_shard_census = false;
+    bool sub64_awkward_shard_census = false;
+    bool rk_census_gate = false;
+    bool rk_modern_single_pass_sweep = false;
+    bool rk_modern_single_pass_focus = false;
+    bool rk_modern_gap_census = false;
+    bool rk_narrow_low_precision_calibration = false;
+    bool rk_lean_complete_calibration = false;
+    bool rk_kparallel_stage_crossover_calibration = false;
+    bool rk_kparallel_staged_geometry_calibration = false;
+    bool rk_kparallel_end_to_end_crossover_calibration = false;
+    bool rk_realistic_end_to_end_progress_calibration = false;
+    bool rk_family_boundary_calibration = false;
     bool arg_census = false;
     bool view_census = false;
     bool dense_run_stage_census = false;
@@ -342,6 +368,9 @@ const char* tiledStrategyName(uint64_t inner_size, DataType input_dtype) {
 }
 
 std::string strategyName(const StampedCubReduction& reduction) {
+    if (reduction.usesModernRKFamilyPlan()) {
+        return reduction.getModernRKStrategyChain();
+    }
     if (reduction.getPath() == CubReductionPath::ContiguousFixedSegment
         && reduction.getGeometry().permutation_aware_contiguous_segments) {
         return "physical_trailing_contiguous_segments";
@@ -728,7 +757,8 @@ void runProductionExactCase(const ExactReductionCase& benchmark_case,
                             Tensor& input,
                             Tensor& cache_flush,
                             Stream& stream,
-                            bool broad_timing = false) {
+                            bool broad_timing = false,
+                            bool require_modern_rk = false) {
     std::shared_ptr<StampedCubReduction> stamped = CubReduction(op, benchmark_case.axes).stamp(input, stream);
     if (stamped->getPath() != benchmark_case.expected_production_path) {
         throw std::runtime_error(std::string("Reduction census path drift for case '") + benchmark_case.name
@@ -737,25 +767,35 @@ void runProductionExactCase(const ExactReductionCase& benchmark_case,
                                    "selection changed.");
     }
 
+    if (require_modern_rk && !stamped->usesModernRKFamilyPlan()) {
+        throw std::logic_error(std::string("Post-delete RK census case '") + benchmark_case.name
+                               + "' did not stamp through the modern DenseRK family.");
+    }
+
     const ExactTiming timing = broad_timing
                                    ? timeBroadReduction(cache_flush, stream, [&] { stamped->runOn(stream); })
                                    : timeExactReduction(cache_flush, stream, [&] { stamped->runOn(stream); });
     const Tensor output = stamped->getOutputTensor();
     const char* index_bits = "n/a";
 
+    const bool modern_rk = stamped->usesModernRKFamilyPlan();
+    const size_t modern_packet_bytes = modern_rk ? stamped->getModernRKFirstPacketBytes() : 0;
+    const size_t dtype_bytes = TensorDescriptor::getElementSizeInBytes(dtype);
     printExactResult(benchmark_case,
                      dtype,
                      op,
                      "production",
-                     pathName(stamped->getPath()),
+                     modern_rk ? "dense_rk_family" : pathName(stamped->getPath()),
                      strategyName(*stamped),
                      index_bits,
                      stamped->getGeometry().output_elements,
                      stamped->getGeometry().reduction_size,
-                     std::nullopt,
-                     std::nullopt,
-                     std::nullopt,
-                     std::nullopt,
+                     modern_rk && modern_packet_bytes != 0 && dtype_bytes != 0
+                         ? std::optional<uint32_t>(static_cast<uint32_t>(modern_packet_bytes / dtype_bytes))
+                         : std::nullopt,
+                     modern_rk ? std::optional<uint32_t>(stamped->getModernRKFirstBlockThreads()) : std::nullopt,
+                     modern_rk ? std::optional<uint64_t>(stamped->getModernRKFirstStageBlocks()) : std::nullopt,
+                     modern_rk ? std::optional<uint64_t>(stamped->getModernRKFirstShardsPerOutput()) : std::nullopt,
                      stamped->getWorkspaceSizeInBytes(),
                      input.getArraySizeInBytes(),
                      output.getArraySizeInBytes(),
@@ -974,14 +1014,387 @@ std::vector<ExactReductionCase> makeFullRowShardCensusCases() {
     return cases;
 }
 
+uint64_t wideAwkward2dOuterFor(DataType dtype, uint64_t reduction, uint64_t inner) {
+    const uint64_t element_bytes =
+        static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(dtype));
+    const uint64_t bytes_per_outer = checkedMultiply(
+        checkedMultiply(reduction, inner, "wide awkward 2-D bytes per outer"),
+        element_bytes,
+        "wide awkward 2-D bytes per outer");
+    return std::max<uint64_t>(1, WIDE_AWKWARD_2D_TARGET_INPUT_BYTES / bytes_per_outer);
+}
+
+ExactReductionCase makeWideAwkward2dCase(DataType dtype, uint64_t reduction, uint64_t inner) {
+    const uint64_t outer = wideAwkward2dOuterFor(dtype, reduction, inner);
+    return ExactReductionCase{
+        "wide_awkward_2d",
+        "o" + std::to_string(outer) + "_r" + std::to_string(reduction) + "_i" + std::to_string(inner),
+        {outer, reduction, inner},
+        {1},
+        CubReductionPath::TiledFixedSegment};
+}
+
+std::vector<ExactReductionCase> makeAwkwardShardCensusCases() {
+    std::vector<ExactReductionCase> cases;
+    std::set<std::tuple<uint64_t, uint64_t, uint64_t>> seen;
+
+    auto add_case = [&](std::string family,
+                        std::string name,
+                        uint64_t outer,
+                        uint64_t reduction,
+                        uint64_t inner) {
+        if (!seen.emplace(outer, reduction, inner).second) {
+            return;
+        }
+        cases.push_back(ExactReductionCase{std::move(family),
+                                           std::move(name),
+                                           {outer, reduction, inner},
+                                           {1},
+                                           CubReductionPath::TiledFixedSegment});
+    };
+
+    // Primary awkward-retained-width sweep. R=16384 keeps enough independent R shards for rows1024 to expose
+    // substantial device parallelism while the largest FP32 case (K=8193) is only 512.0625 MiB. The dedicated
+    // 768 MiB ceiling below therefore retains FP32 coverage for every width instead of silently dropping the
+    // most important tail case at the broad census's 512 MiB boundary.
+    for (uint64_t inner : {4097ULL, 4098ULL, 4100ULL, 4103ULL, 4104ULL, 4105ULL, 4111ULL, 4127ULL,
+                           4351ULL, 4352ULL, 4353ULL, 6143ULL, 6145ULL, 8191ULL, 8193ULL}) {
+        add_case("awkward_width_o1_r16384",
+                 "o1_r16384_i" + std::to_string(inner),
+                 1,
+                 16384,
+                 inner);
+    }
+
+    // Output-parallelism control at the same total element count. These representative residues cover the immediate
+    // 4096 boundary, a nontrivial 16-byte alignment rotation, a wider tail, and the first element above 8192.
+    for (uint64_t inner : {4097ULL, 4103ULL, 4353ULL, 6145ULL, 8193ULL}) {
+        add_case("awkward_width_o2_r8192",
+                 "o2_r8192_i" + std::to_string(inner),
+                 2,
+                 8192,
+                 inner);
+    }
+
+    return cases;
+}
+
+std::vector<ExactReductionCase> makeSub4096AwkwardShardCensusCases() {
+    std::vector<ExactReductionCase> cases;
+    std::set<std::tuple<uint64_t, uint64_t, uint64_t>> seen;
+
+    auto add_case = [&](std::string family,
+                        std::string name,
+                        uint64_t outer,
+                        uint64_t reduction,
+                        uint64_t inner) {
+        if (!seen.emplace(outer, reduction, inner).second) {
+            return;
+        }
+        cases.push_back(ExactReductionCase{std::move(family),
+                                           std::move(name),
+                                           {outer, reduction, inner},
+                                           {1},
+                                           CubReductionPath::TiledFixedSegment});
+    };
+
+    // Primary transformer-depth slice requested by the reduction handoff.  These widths straddle packet/tile and
+    // power-of-two boundaries while remaining below 4096, where production commonly selects async/grouped full-row
+    // strategies.  The 2 GiB per-input ceiling keeps the largest FP32 case (about 1.60 GiB) in the experiment.
+    for (uint64_t inner : {513ULL, 514ULL, 519ULL, 527ULL, 767ULL, 769ULL, 1023ULL, 1025ULL,
+                           1535ULL, 1537ULL, 2047ULL, 2049ULL, 3071ULL, 3073ULL, 4095ULL}) {
+        add_case("sub4096_awkward_o1_r104832",
+                 "o1_r104832_i" + std::to_string(inner),
+                 1,
+                 104832,
+                 inner);
+    }
+
+    // Smaller-R / extra-output control.  This checks whether the preferred shard depth changes once production and
+    // the candidate both receive more output-level parallelism, without multiplying the already-large primary sweep.
+    for (uint64_t inner : {513ULL, 769ULL, 1025ULL, 2049ULL, 4095ULL}) {
+        add_case("sub4096_awkward_o2_r32768",
+                 "o2_r32768_i" + std::to_string(inner),
+                 2,
+                 32768,
+                 inner);
+    }
+
+    return cases;
+}
+
+std::vector<ExactReductionCase> makeSub512AwkwardShardCensusCases() {
+    std::vector<ExactReductionCase> cases;
+    std::set<std::tuple<uint64_t, uint64_t, uint64_t>> seen;
+
+    auto add_case = [&](std::string family,
+                        std::string name,
+                        uint64_t outer,
+                        uint64_t reduction,
+                        uint64_t inner) {
+        if (!seen.emplace(outer, reduction, inner).second) {
+            return;
+        }
+        cases.push_back(ExactReductionCase{std::move(family),
+                                           std::move(name),
+                                           {outer, reduction, inner},
+                                           {1},
+                                           CubReductionPath::TiledFixedSegment});
+    };
+
+    // Next unresolved deep-R island below the now-productionized K>512 awkward regime. These odd widths force
+    // packet misalignment for FP16/BF16 and FP32 while staying inside the old x16 full-row ownership band.
+    // R=104832 gives rows1024 enough shard depth to expose at least one device wave throughout this slice.
+    for (uint64_t inner : {257ULL, 259ULL, 263ULL, 271ULL, 383ULL, 385ULL, 511ULL}) {
+        add_case("sub512_awkward_o1_r104832",
+                 "o1_r104832_i" + std::to_string(inner),
+                 1,
+                 104832,
+                 inner);
+    }
+
+    // Smaller-R / extra-output control deliberately approaches the parallelism boundary. In particular, the
+    // rows1024 candidate can expose materially fewer first-stage CTAs here, so all four shard depths must remain in
+    // the comparison rather than assuming the wider-K rows1024 result carries over.
+    for (uint64_t inner : {257ULL, 383ULL, 511ULL}) {
+        add_case("sub512_awkward_o2_r32768",
+                 "o2_r32768_i" + std::to_string(inner),
+                 2,
+                 32768,
+                 inner);
+    }
+
+    return cases;
+}
+
+std::vector<ExactReductionCase> makeSub256AwkwardShardCensusCases() {
+    std::vector<ExactReductionCase> cases;
+    std::set<std::tuple<uint64_t, uint64_t, uint64_t>> seen;
+
+    auto add_case = [&](std::string family,
+                        std::string name,
+                        uint64_t outer,
+                        uint64_t reduction,
+                        uint64_t inner) {
+        if (!seen.emplace(outer, reduction, inner).second) {
+            return;
+        }
+        cases.push_back(ExactReductionCase{std::move(family),
+                                           std::move(name),
+                                           {outer, reduction, inner},
+                                           {1},
+                                           CubReductionPath::TiledFixedSegment});
+    };
+
+    // Probe the next narrow awkward-width band without assuming the rotated sharded design should replace the
+    // existing packet-adaptive cooperative reducer.  Every selected width is misaligned to a 16-byte row stride for
+    // FP16/BF16 and FP32, so this isolates the alignment-safe 16-byte ownership question rather than narrow-packet
+    // 8/4-byte controls.  The slice deliberately crosses the K=128 boundary and approaches K=256 from below.
+    for (uint64_t inner : {65ULL, 67ULL, 95ULL, 97ULL, 127ULL, 129ULL, 191ULL, 193ULL, 255ULL}) {
+        add_case("sub256_awkward_o1_r104832",
+                 "o1_r104832_i" + std::to_string(inner),
+                 1,
+                 104832,
+                 inner);
+    }
+
+    // Smaller-R / extra-output controls test whether the rotated design still exposes enough first-stage CTAs once a
+    // single retained tile no longer provides the deep slice's launch count.  Keep all four shard depths visible.
+    for (uint64_t inner : {65ULL, 129ULL, 255ULL}) {
+        add_case("sub256_awkward_o2_r32768",
+                 "o2_r32768_i" + std::to_string(inner),
+                 2,
+                 32768,
+                 inner);
+    }
+
+    return cases;
+}
+
+
+std::vector<ExactReductionCase> makeSub64AwkwardShardCensusCases() {
+    std::vector<ExactReductionCase> cases;
+    std::set<std::tuple<uint64_t, uint64_t, uint64_t>> seen;
+
+    auto add_case = [&](std::string family,
+                        std::string name,
+                        uint64_t outer,
+                        uint64_t reduction,
+                        uint64_t inner) {
+        if (!seen.emplace(outer, reduction, inner).second) {
+            return;
+        }
+        cases.push_back(ExactReductionCase{std::move(family),
+                                           std::move(name),
+                                           {outer, reduction, inner},
+                                           {1},
+                                           CubReductionPath::TiledFixedSegment});
+    };
+
+    // Final awkward-width ownership band above the compact K<=32 family. These widths are deliberately odd so every
+    // dtype in the census has a 16-byte-row-misaligned stride. Aligned neighbors in this range are already eligible for
+    // the packet-adaptive cooperative reducer, so this isolates the remaining misaligned deep/full-row island.
+    for (uint64_t inner : {33ULL, 35ULL, 47ULL, 49ULL, 63ULL}) {
+        add_case("sub64_awkward_o1_r104832",
+                 "o1_r104832_i" + std::to_string(inner),
+                 1,
+                 104832,
+                 inner);
+    }
+
+    // Smaller-R / extra-output controls test whether the shard depth needs to step down near the device-concurrency
+    // boundary, just as it did in the wider awkward bands.
+    for (uint64_t inner : {33ULL, 49ULL, 63ULL}) {
+        add_case("sub64_awkward_o2_r32768",
+                 "o2_r32768_i" + std::to_string(inner),
+                 2,
+                 32768,
+                 inner);
+    }
+
+    return cases;
+}
+
+
+std::vector<ExactReductionCase> makeRKSemanticSentinelCases() {
+    return {
+        {"semantic_complete", "complete_many_outputs", {128, 256, 128}, {1}, CubReductionPath::TiledFixedSegment},
+        {"semantic_rcoop_aligned", "deep_aligned_rcoop", {1, 8192, 512}, {1}, CubReductionPath::TiledFixedSegment},
+        {"semantic_kparallel", "deep_aligned_kparallel", {1, 8192, 1536}, {1}, CubReductionPath::TiledFixedSegment},
+        {"semantic_rotated_narrow", "deep_rotated_i33", {1, 32768, 33}, {1}, CubReductionPath::TiledFixedSegment},
+        {"semantic_rotated_mid", "deep_rotated_i513", {1, 32768, 513}, {1}, CubReductionPath::TiledFixedSegment},
+        {"semantic_rotated_wide", "wide_rotated_i4097", {1, 16384, 4097}, {1}, CubReductionPath::TiledFixedSegment},
+    };
+}
+
+bool runRKGateCandidateCase(const ExactReductionCase& benchmark_case,
+                            DataType dtype,
+                            CubReductionOp op,
+                            const ReductionCandidate& candidate,
+                            Tensor& input,
+                            Tensor& cache_flush,
+                            Stream& stream) {
+    if (!candidate.supports(op, input.getDescriptor(), benchmark_case.axes)) {
+        std::cout << "# rk_gate_coverage_gap family=" << benchmark_case.family
+                  << " case=" << benchmark_case.name
+                  << " dimensions=" << formatDimensions(benchmark_case.dimensions)
+                  << " dtype=" << dataTypeName(dtype)
+                  << " operation=" << operationName(op)
+                  << " reason=structurally_unsupported\n";
+        return false;
+    }
+    try {
+        runCandidateExactCase(benchmark_case, dtype, op, candidate, input, cache_flush, stream, true);
+        return true;
+    } catch (const ReductionCandidateCoverageGap& error) {
+        std::cout << "# rk_gate_coverage_gap family=" << benchmark_case.family
+                  << " case=" << benchmark_case.name
+                  << " dimensions=" << formatDimensions(benchmark_case.dimensions)
+                  << " dtype=" << dataTypeName(dtype)
+                  << " operation=" << operationName(op)
+                  << " reason=modern_family_uncovered detail=\"" << error.what() << "\"\n";
+        return false;
+    }
+}
+
+struct RKGatePhase {
+    const char* name;
+    std::vector<ExactReductionCase> cases;
+    uint64_t max_input_bytes;
+    std::vector<CubReductionOp> operations;
+};
+
+void runRKFamilyCensusGate(Tensor& cache_flush,
+                           Stream& stream,
+                           const TensorPlacement& gpu_placement) {
+    const std::vector<DataType> dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
+    const std::vector<CubReductionOp> core_ops = {
+        CubReductionOp::Sum, CubReductionOp::Min, CubReductionOp::Max, CubReductionOp::Product};
+    const std::vector<CubReductionOp> transformed_additive_ops = {
+        CubReductionOp::Mean, CubReductionOp::L1Norm, CubReductionOp::L2Norm, CubReductionOp::SumSquares};
+
+    std::vector<RKGatePhase> phases;
+    phases.push_back({"full_row", makeFullRowShardCensusCases(), BROAD_MAX_INPUT_BYTES, core_ops});
+    phases.push_back({"awkward_wide", makeAwkwardShardCensusCases(), AWKWARD_SHARD_MAX_INPUT_BYTES, core_ops});
+    phases.push_back({"awkward_sub4096", makeSub4096AwkwardShardCensusCases(), SUB4096_AWKWARD_SHARD_MAX_INPUT_BYTES,
+                      {CubReductionOp::Sum}});
+    phases.push_back({"awkward_sub512", makeSub512AwkwardShardCensusCases(), SUB512_AWKWARD_SHARD_MAX_INPUT_BYTES,
+                      {CubReductionOp::Sum}});
+    phases.push_back({"awkward_sub256", makeSub256AwkwardShardCensusCases(), SUB256_AWKWARD_SHARD_MAX_INPUT_BYTES,
+                      {CubReductionOp::Sum}});
+    phases.push_back({"awkward_sub64", makeSub64AwkwardShardCensusCases(), SUB64_AWKWARD_SHARD_MAX_INPUT_BYTES,
+                      {CubReductionOp::Sum}});
+    phases.push_back({"transformed_additive", makeRKSemanticSentinelCases(), BROAD_MAX_INPUT_BYTES,
+                      transformed_additive_ops});
+
+    std::cout << "# mode=rk_census_gate executor=production_modern_rk\n";
+    std::cout << "# purpose=validate post-delete KParallel+RCooperative production coverage/performance\n";
+    std::cout << "# ordinary dense RK production is the modern family; historical VALUE overlap is no longer compiled.\n";
+    std::cout << "# broad_warmups=" << BROAD_WARMUP_ITERATIONS
+              << " broad_timing_samples=" << BROAD_TIMING_SAMPLES << '\n';
+    std::cout << "executor,family,case,dimensions,axes,dtype,operation,implementation,strategy,index_bits,"
+                 "output_elements,reduction_elements_per_output,vector_elements_per_load,block_threads,"
+                 "first_stage_blocks,shards_per_output,scratch_bytes,input_bytes,output_bytes,median_ms,best_ms,worst_ms,"
+                 "logical_GBps\n";
+
+    uint64_t measured = 0;
+    uint64_t coverage_gaps = 0;
+    uint64_t skipped_for_size = 0;
+    for (const RKGatePhase& phase : phases) {
+        std::cout << "# rk_gate_phase=" << phase.name << " cases=" << phase.cases.size()
+                  << " max_input_bytes=" << phase.max_input_bytes << '\n';
+        for (const ExactReductionCase& benchmark_case : phase.cases) {
+            uint64_t elements = 1;
+            for (uint64_t dimension : benchmark_case.dimensions) {
+                elements = checkedMultiply(elements, dimension, "RK census gate input elements");
+            }
+            for (DataType dtype : dtypes) {
+                const uint64_t input_bytes = checkedMultiply(
+                    elements,
+                    static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(dtype)),
+                    "RK census gate input bytes");
+                if (input_bytes > phase.max_input_bytes) {
+                    ++skipped_for_size;
+                    continue;
+                }
+
+                Tensor input(gpu_placement, TensorDescriptor(dtype, benchmark_case.dimensions));
+                input.fillRandom(-0.25, 0.25, stream);
+                stream.synchronize();
+
+                for (CubReductionOp op : phase.operations) {
+                    try {
+                        runProductionExactCase(benchmark_case, dtype, op, input, cache_flush, stream, true, true);
+                    } catch (const std::logic_error& error) {
+                        std::cout << "# rk_gate_coverage_gap family=" << benchmark_case.family
+                                  << " case=" << benchmark_case.name
+                                  << " dimensions=" << formatDimensions(benchmark_case.dimensions)
+                                  << " dtype=" << dataTypeName(dtype)
+                                  << " operation=" << operationName(op)
+                                  << " reason=modern_production_uncovered detail=\"" << error.what() << "\"\n";
+                        ++coverage_gaps;
+                    }
+                    ++measured;
+                }
+            }
+        }
+    }
+
+    std::cout << "# rk_census_gate_complete measured_case_dtype_operations=" << measured
+              << " coverage_gaps=" << coverage_gaps
+              << " skipped_case_dtypes_over_input_ceiling=" << skipped_for_size << '\n';
+}
+
 void runFullRowShardCensus(Tensor& cache_flush,
                            Stream& stream,
                            const TensorPlacement& gpu_placement,
                            const std::vector<const ReductionCandidate*>& selected_candidates) {
     const std::vector<ExactReductionCase> cases = makeFullRowShardCensusCases();
     const std::vector<DataType> dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
+    const std::vector<CubReductionOp> operations = {
+        CubReductionOp::Sum, CubReductionOp::Min, CubReductionOp::Max, CubReductionOp::Product};
 
-    std::cout << "# mode=full_row_shard_census operation=sum dtypes=fp16|bf16|fp32 cases=" << cases.size()
+    std::cout << "# mode=full_row_shard_census operations=sum|min|max|product dtypes=fp16|bf16|fp32 cases=" << cases.size()
               << " max_input_bytes=" << BROAD_MAX_INPUT_BYTES
               << " broad_warmups=" << BROAD_WARMUP_ITERATIONS
               << " broad_timing_samples=" << BROAD_TIMING_SAMPLES << '\n';
@@ -1023,6 +1436,135 @@ void runFullRowShardCensus(Tensor& cache_flush,
             }
             stream.synchronize();
 
+            for (CubReductionOp op : operations) {
+                runProductionExactCase(benchmark_case, dtype, op, input, cache_flush, stream, true);
+                for (const ReductionCandidate* candidate : selected_candidates) {
+                    runCandidateExactCase(benchmark_case,
+                                          dtype,
+                                          op,
+                                          *candidate,
+                                          input,
+                                          cache_flush,
+                                          stream,
+                                          true);
+                }
+                ++measured;
+            }
+        }
+    }
+    std::cout << "# full_row_shard_census_complete measured_case_dtype_operations=" << measured
+              << " skipped_case_dtypes_over_input_ceiling=" << skipped_for_size << '\n';
+}
+
+void runWideAwkward2dCensus(Tensor& cache_flush,
+                             Stream& stream,
+                             const TensorPlacement& gpu_placement,
+                             const std::vector<const ReductionCandidate*>& selected_candidates) {
+    const std::vector<uint64_t> reductions = {512ULL, 1024ULL, 2048ULL, 4096ULL};
+    const std::vector<uint64_t> inners = {
+        4096ULL, 4097ULL, 8192ULL, 8193ULL, 16384ULL, 16385ULL, 65536ULL, 65537ULL};
+    const std::vector<DataType> dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
+    const std::vector<CubReductionOp> production_operations = {
+        CubReductionOp::Sum, CubReductionOp::Min, CubReductionOp::Max, CubReductionOp::Product};
+
+    std::cout << "# mode=wide_awkward_2d_census operations=sum|min|max|product dtypes=fp16|bf16|fp32"
+              << " target_input_bytes=" << WIDE_AWKWARD_2D_TARGET_INPUT_BYTES
+              << " reductions=512|1024|2048|4096"
+              << " retained_pairs=4096/4097|8192/8193|16384/16385|65536/65537"
+              << " broad_warmups=" << BROAD_WARMUP_ITERATIONS
+              << " broad_timing_samples=" << BROAD_TIMING_SAMPLES << '\n';
+    std::cout << "# outer is chosen independently per dtype/shape as max(1,target_input_bytes/(R*K*sizeof(dtype))). "
+                 "Very large single-output cases may therefore exceed the target rather than being omitted.\n";
+    std::cout << "# Every production shape/dtype and every supported explicit benchmark-only candidate is timed "
+                 "for SUM, MIN, MAX, and PRODUCT.\n";
+    std::cout << "# Even retained widths are packet-aligned controls for tiled_middle_sharded candidates; odd widths "
+                 "exercise the alignment-rotated 2-D sharded candidates.\n";
+    for (const ReductionCandidate* candidate : selected_candidates) {
+        std::cout << "# candidate=" << candidate->getName()
+                  << " operations=sum|min|max|product unsupported_cases=omitted production_selector=unchanged\n";
+    }
+    std::cout << "executor,family,case,dimensions,axes,dtype,operation,implementation,strategy,index_bits,"
+                 "output_elements,reduction_elements_per_output,vector_elements_per_load,block_threads,"
+                 "first_stage_blocks,shards_per_output,scratch_bytes,input_bytes,output_bytes,median_ms,best_ms,worst_ms,"
+                 "logical_GBps\n";
+
+    uint64_t measured_shape_dtypes = 0;
+    uint64_t production_rows = 0;
+    for (uint64_t reduction : reductions) {
+        for (uint64_t inner : inners) {
+            for (DataType dtype : dtypes) {
+                const ExactReductionCase benchmark_case = makeWideAwkward2dCase(dtype, reduction, inner);
+                Tensor input(gpu_placement, TensorDescriptor(dtype, benchmark_case.dimensions));
+                input.fillRandom(-0.25, 0.25, stream);
+                stream.synchronize();
+
+                for (CubReductionOp op : production_operations) {
+                    runProductionExactCase(benchmark_case, dtype, op, input, cache_flush, stream, true);
+                    ++production_rows;
+
+                    for (const ReductionCandidate* candidate : selected_candidates) {
+                        runCandidateExactCase(benchmark_case,
+                                              dtype,
+                                              op,
+                                              *candidate,
+                                              input,
+                                              cache_flush,
+                                              stream,
+                                              true);
+                    }
+                }
+                ++measured_shape_dtypes;
+            }
+        }
+    }
+    std::cout << "# wide_awkward_2d_census_complete measured_shape_dtypes=" << measured_shape_dtypes
+              << " production_rows=" << production_rows << '\n';
+}
+
+void runAwkwardShardCensus(Tensor& cache_flush,
+                           Stream& stream,
+                           const TensorPlacement& gpu_placement,
+                           const std::vector<const ReductionCandidate*>& selected_candidates) {
+    const std::vector<ExactReductionCase> cases = makeAwkwardShardCensusCases();
+    const std::vector<DataType> dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
+
+    std::cout << "# mode=awkward_shard_census operation=sum dtypes=fp16|bf16|fp32 cases=" << cases.size()
+              << " max_input_bytes=" << AWKWARD_SHARD_MAX_INPUT_BYTES
+              << " broad_warmups=" << BROAD_WARMUP_ITERATIONS
+              << " broad_timing_samples=" << BROAD_TIMING_SAMPLES << '\n';
+    std::cout << "# Primary slice: O=1,R=16384 with awkward K residues above 4096 through 8193; "
+                 "control slice: O=2,R=8192 at representative residues.\n";
+    std::cout << "# The 768 MiB ceiling intentionally keeps K=8193 FP32 in the census. Production rows use the current selector; explicit candidates are benchmark-only.\n";
+    for (const ReductionCandidate* candidate : selected_candidates) {
+        std::cout << "# candidate=" << candidate->getName()
+                  << " unsupported_cases=omitted benchmark_only=1 production_selector=current\n";
+    }
+    std::cout << "executor,family,case,dimensions,axes,dtype,operation,implementation,strategy,index_bits,"
+                 "output_elements,reduction_elements_per_output,vector_elements_per_load,block_threads,"
+                 "first_stage_blocks,shards_per_output,scratch_bytes,input_bytes,output_bytes,median_ms,best_ms,worst_ms,"
+                 "logical_GBps\n";
+
+    uint64_t measured = 0;
+    uint64_t skipped_for_size = 0;
+    for (const ExactReductionCase& benchmark_case : cases) {
+        const uint64_t elements = checkedMultiply(
+            checkedMultiply(benchmark_case.dimensions[0], benchmark_case.dimensions[1], "awkward census elements"),
+            benchmark_case.dimensions[2],
+            "awkward census elements");
+        for (DataType dtype : dtypes) {
+            const uint64_t input_bytes = checkedMultiply(
+                elements,
+                static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(dtype)),
+                "awkward census input bytes");
+            if (input_bytes > AWKWARD_SHARD_MAX_INPUT_BYTES) {
+                ++skipped_for_size;
+                continue;
+            }
+
+            Tensor input(gpu_placement, TensorDescriptor(dtype, benchmark_case.dimensions));
+            input.fillRandom(-0.25, 0.25, stream);
+            stream.synchronize();
+
             runProductionExactCase(
                 benchmark_case, dtype, CubReductionOp::Sum, input, cache_flush, stream, true);
             for (const ReductionCandidate* candidate : selected_candidates) {
@@ -1038,7 +1580,261 @@ void runFullRowShardCensus(Tensor& cache_flush,
             ++measured;
         }
     }
-    std::cout << "# full_row_shard_census_complete measured_case_dtypes=" << measured
+    std::cout << "# awkward_shard_census_complete measured_case_dtypes=" << measured
+              << " skipped_case_dtypes_over_input_ceiling=" << skipped_for_size << '\n';
+}
+
+void runSub4096AwkwardShardCensus(Tensor& cache_flush,
+                                  Stream& stream,
+                                  const TensorPlacement& gpu_placement,
+                                  const std::vector<const ReductionCandidate*>& selected_candidates) {
+    const std::vector<ExactReductionCase> cases = makeSub4096AwkwardShardCensusCases();
+    const std::vector<DataType> dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
+
+    std::cout << "# mode=sub4096_awkward_shard_census operation=sum dtypes=fp16|bf16|fp32 cases=" << cases.size()
+              << " max_input_bytes=" << SUB4096_AWKWARD_SHARD_MAX_INPUT_BYTES
+              << " broad_warmups=" << BROAD_WARMUP_ITERATIONS
+              << " broad_timing_samples=" << BROAD_TIMING_SAMPLES << '\n';
+    std::cout << "# Primary slice: O=1,R=104832 with awkward retained widths 513..4095; "
+                 "control slice: O=2,R=32768 at representative widths.\n";
+    std::cout << "# The 2 GiB ceiling intentionally keeps the primary K=4095 FP32 case. Production rows use the current selector; explicit candidates are benchmark-only.\n";
+    for (const ReductionCandidate* candidate : selected_candidates) {
+        std::cout << "# candidate=" << candidate->getName()
+                  << " unsupported_cases=omitted benchmark_only=1 production_selector=current\n";
+    }
+    std::cout << "executor,family,case,dimensions,axes,dtype,operation,implementation,strategy,index_bits,"
+                 "output_elements,reduction_elements_per_output,vector_elements_per_load,block_threads,"
+                 "first_stage_blocks,shards_per_output,scratch_bytes,input_bytes,output_bytes,median_ms,best_ms,worst_ms,"
+                 "logical_GBps\n";
+
+    uint64_t measured = 0;
+    uint64_t skipped_for_size = 0;
+    for (const ExactReductionCase& benchmark_case : cases) {
+        const uint64_t elements = checkedMultiply(
+            checkedMultiply(benchmark_case.dimensions[0], benchmark_case.dimensions[1], "sub4096 awkward census elements"),
+            benchmark_case.dimensions[2],
+            "sub4096 awkward census elements");
+        for (DataType dtype : dtypes) {
+            const uint64_t input_bytes = checkedMultiply(
+                elements,
+                static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(dtype)),
+                "sub4096 awkward census input bytes");
+            if (input_bytes > SUB4096_AWKWARD_SHARD_MAX_INPUT_BYTES) {
+                ++skipped_for_size;
+                continue;
+            }
+
+            Tensor input(gpu_placement, TensorDescriptor(dtype, benchmark_case.dimensions));
+            input.fillRandom(-0.25, 0.25, stream);
+            stream.synchronize();
+
+            runProductionExactCase(
+                benchmark_case, dtype, CubReductionOp::Sum, input, cache_flush, stream, true);
+            for (const ReductionCandidate* candidate : selected_candidates) {
+                runCandidateExactCase(benchmark_case,
+                                      dtype,
+                                      CubReductionOp::Sum,
+                                      *candidate,
+                                      input,
+                                      cache_flush,
+                                      stream,
+                                      true);
+            }
+            ++measured;
+        }
+    }
+    std::cout << "# sub4096_awkward_shard_census_complete measured_case_dtypes=" << measured
+              << " skipped_case_dtypes_over_input_ceiling=" << skipped_for_size << '\n';
+}
+
+void runSub512AwkwardShardCensus(Tensor& cache_flush,
+                                 Stream& stream,
+                                 const TensorPlacement& gpu_placement,
+                                 const std::vector<const ReductionCandidate*>& selected_candidates) {
+    const std::vector<ExactReductionCase> cases = makeSub512AwkwardShardCensusCases();
+    const std::vector<DataType> dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
+
+    std::cout << "# mode=sub512_awkward_shard_census operation=sum dtypes=fp16|bf16|fp32 cases=" << cases.size()
+              << " max_input_bytes=" << SUB512_AWKWARD_SHARD_MAX_INPUT_BYTES
+              << " broad_warmups=" << BROAD_WARMUP_ITERATIONS
+              << " broad_timing_samples=" << BROAD_TIMING_SAMPLES << '\n';
+    std::cout << "# Primary slice: O=1,R=104832 with packet-misaligned retained widths 257..511; "
+                 "control slice: O=2,R=32768 at representative widths.\n";
+    std::cout << "# Production may select the rotated staged path for this band; explicit candidates are benchmark-only comparisons.\n";
+    for (const ReductionCandidate* candidate : selected_candidates) {
+        std::cout << "# candidate=" << candidate->getName()
+                  << " unsupported_cases=omitted benchmark_only=1 production_selector=current\n";
+    }
+    std::cout << "executor,family,case,dimensions,axes,dtype,operation,implementation,strategy,index_bits,"
+                 "output_elements,reduction_elements_per_output,vector_elements_per_load,block_threads,"
+                 "first_stage_blocks,shards_per_output,scratch_bytes,input_bytes,output_bytes,median_ms,best_ms,worst_ms,"
+                 "logical_GBps\n";
+
+    uint64_t measured = 0;
+    uint64_t skipped_for_size = 0;
+    for (const ExactReductionCase& benchmark_case : cases) {
+        const uint64_t elements = checkedMultiply(
+            checkedMultiply(benchmark_case.dimensions[0], benchmark_case.dimensions[1], "sub512 awkward census elements"),
+            benchmark_case.dimensions[2],
+            "sub512 awkward census elements");
+        for (DataType dtype : dtypes) {
+            const uint64_t input_bytes = checkedMultiply(
+                elements,
+                static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(dtype)),
+                "sub512 awkward census input bytes");
+            if (input_bytes > SUB512_AWKWARD_SHARD_MAX_INPUT_BYTES) {
+                ++skipped_for_size;
+                continue;
+            }
+
+            Tensor input(gpu_placement, TensorDescriptor(dtype, benchmark_case.dimensions));
+            input.fillRandom(-0.25, 0.25, stream);
+            stream.synchronize();
+
+            runProductionExactCase(
+                benchmark_case, dtype, CubReductionOp::Sum, input, cache_flush, stream, true);
+            for (const ReductionCandidate* candidate : selected_candidates) {
+                runCandidateExactCase(benchmark_case,
+                                      dtype,
+                                      CubReductionOp::Sum,
+                                      *candidate,
+                                      input,
+                                      cache_flush,
+                                      stream,
+                                      true);
+            }
+            ++measured;
+        }
+    }
+    std::cout << "# sub512_awkward_shard_census_complete measured_case_dtypes=" << measured
+              << " skipped_case_dtypes_over_input_ceiling=" << skipped_for_size << '\n';
+}
+
+
+void runSub256AwkwardShardCensus(Tensor& cache_flush,
+                                 Stream& stream,
+                                 const TensorPlacement& gpu_placement,
+                                 const std::vector<const ReductionCandidate*>& selected_candidates) {
+    const std::vector<ExactReductionCase> cases = makeSub256AwkwardShardCensusCases();
+    const std::vector<DataType> dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
+
+    std::cout << "# mode=sub256_awkward_shard_census operation=sum dtypes=fp16|bf16|fp32 cases=" << cases.size()
+              << " max_input_bytes=" << SUB256_AWKWARD_SHARD_MAX_INPUT_BYTES
+              << " broad_warmups=" << BROAD_WARMUP_ITERATIONS
+              << " broad_timing_samples=" << BROAD_TIMING_SAMPLES << '\n';
+    std::cout << "# Primary slice: O=1,R=104832 with 16-byte-row-misaligned retained widths 65..255; "
+                 "control slice: O=2,R=32768 at representative widths.\n";
+    std::cout << "# Production rows use the current selector for this band; explicit candidates compare alternate rotated shard depths without overriding it.\n";
+    for (const ReductionCandidate* candidate : selected_candidates) {
+        std::cout << "# candidate=" << candidate->getName()
+                  << " unsupported_cases=omitted benchmark_only=1 production_selector=current\n";
+    }
+    std::cout << "executor,family,case,dimensions,axes,dtype,operation,implementation,strategy,index_bits,"
+                 "output_elements,reduction_elements_per_output,vector_elements_per_load,block_threads,"
+                 "first_stage_blocks,shards_per_output,scratch_bytes,input_bytes,output_bytes,median_ms,best_ms,worst_ms,"
+                 "logical_GBps\n";
+
+    uint64_t measured = 0;
+    uint64_t skipped_for_size = 0;
+    for (const ExactReductionCase& benchmark_case : cases) {
+        const uint64_t elements = checkedMultiply(
+            checkedMultiply(benchmark_case.dimensions[0], benchmark_case.dimensions[1], "sub256 awkward census elements"),
+            benchmark_case.dimensions[2],
+            "sub256 awkward census elements");
+        for (DataType dtype : dtypes) {
+            const uint64_t input_bytes = checkedMultiply(
+                elements,
+                static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(dtype)),
+                "sub256 awkward census input bytes");
+            if (input_bytes > SUB256_AWKWARD_SHARD_MAX_INPUT_BYTES) {
+                ++skipped_for_size;
+                continue;
+            }
+
+            Tensor input(gpu_placement, TensorDescriptor(dtype, benchmark_case.dimensions));
+            input.fillRandom(-0.25, 0.25, stream);
+            stream.synchronize();
+
+            runProductionExactCase(
+                benchmark_case, dtype, CubReductionOp::Sum, input, cache_flush, stream, true);
+            for (const ReductionCandidate* candidate : selected_candidates) {
+                runCandidateExactCase(benchmark_case,
+                                      dtype,
+                                      CubReductionOp::Sum,
+                                      *candidate,
+                                      input,
+                                      cache_flush,
+                                      stream,
+                                      true);
+            }
+            ++measured;
+        }
+    }
+    std::cout << "# sub256_awkward_shard_census_complete measured_case_dtypes=" << measured
+              << " skipped_case_dtypes_over_input_ceiling=" << skipped_for_size << '\n';
+}
+
+
+void runSub64AwkwardShardCensus(Tensor& cache_flush,
+                                Stream& stream,
+                                const TensorPlacement& gpu_placement,
+                                const std::vector<const ReductionCandidate*>& selected_candidates) {
+    const std::vector<ExactReductionCase> cases = makeSub64AwkwardShardCensusCases();
+    const std::vector<DataType> dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
+
+    std::cout << "# mode=sub64_awkward_shard_census operation=sum dtypes=fp16|bf16|fp32 cases=" << cases.size()
+              << " max_input_bytes=" << SUB64_AWKWARD_SHARD_MAX_INPUT_BYTES
+              << " broad_warmups=" << BROAD_WARMUP_ITERATIONS
+              << " broad_timing_samples=" << BROAD_TIMING_SAMPLES << '\n';
+    std::cout << "# Primary slice: O=1,R=104832 with 16-byte-row-misaligned retained widths 33..63; "
+                 "control slice: O=2,R=32768 at representative widths.\n";
+    std::cout << "# Production may select the rotated staged path for this band; explicit candidates are benchmark-only comparisons.\n";
+    for (const ReductionCandidate* candidate : selected_candidates) {
+        std::cout << "# candidate=" << candidate->getName()
+                  << " unsupported_cases=omitted benchmark_only=1 production_selector=current\n";
+    }
+    std::cout << "executor,family,case,dimensions,axes,dtype,operation,implementation,strategy,index_bits,"
+                 "output_elements,reduction_elements_per_output,vector_elements_per_load,block_threads,"
+                 "first_stage_blocks,shards_per_output,scratch_bytes,input_bytes,output_bytes,median_ms,best_ms,worst_ms,"
+                 "logical_GBps\n";
+
+    uint64_t measured = 0;
+    uint64_t skipped_for_size = 0;
+    for (const ExactReductionCase& benchmark_case : cases) {
+        const uint64_t elements = checkedMultiply(
+            checkedMultiply(benchmark_case.dimensions[0], benchmark_case.dimensions[1], "sub64 awkward census elements"),
+            benchmark_case.dimensions[2],
+            "sub64 awkward census elements");
+        for (DataType dtype : dtypes) {
+            const uint64_t input_bytes = checkedMultiply(
+                elements,
+                static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(dtype)),
+                "sub64 awkward census input bytes");
+            if (input_bytes > SUB64_AWKWARD_SHARD_MAX_INPUT_BYTES) {
+                ++skipped_for_size;
+                continue;
+            }
+
+            Tensor input(gpu_placement, TensorDescriptor(dtype, benchmark_case.dimensions));
+            input.fillRandom(-0.25, 0.25, stream);
+            stream.synchronize();
+
+            runProductionExactCase(
+                benchmark_case, dtype, CubReductionOp::Sum, input, cache_flush, stream, true);
+            for (const ReductionCandidate* candidate : selected_candidates) {
+                runCandidateExactCase(benchmark_case,
+                                      dtype,
+                                      CubReductionOp::Sum,
+                                      *candidate,
+                                      input,
+                                      cache_flush,
+                                      stream,
+                                      true);
+            }
+            ++measured;
+        }
+    }
+    std::cout << "# sub64_awkward_shard_census_complete measured_case_dtypes=" << measured
               << " skipped_case_dtypes_over_input_ceiling=" << skipped_for_size << '\n';
 }
 
@@ -2131,7 +2927,7 @@ void runArgCase(const ReductionShape& shape,
 
 void printUsage(const char* executable) {
     std::cout << "Usage: " << executable
-              << " [--arg-x4-focused|--arg-x4-awkward-focused|--arg-census|--view-census|--reduction-census|--full-row-shard-census|--dense-stage-cost-calibration] [--dense-run-stage-census] [--candidate=<name>]...\n"
+              << " [--arg-x4-focused|--arg-x4-awkward-focused|--arg-census|--view-census|--reduction-census|--full-row-shard-census|--wide-awkward-2d-census|--awkward-shard-census|--sub4096-awkward-shard-census|--sub512-awkward-shard-census|--sub256-awkward-shard-census|--sub64-awkward-shard-census|--rk-census-gate|--rk-modern-single-pass-sweep|--rk-modern-single-pass-focus|--rk-modern-gap-census|--rk-narrow-low-precision-calibration|--rk-lean-complete-calibration|--rk-kparallel-stage-crossover-calibration|--rk-kparallel-staged-geometry-calibration|--rk-kparallel-end-to-end-crossover-calibration|--rk-realistic-end-to-end-progress-calibration|--rk-family-boundary-calibration|--dense-stage-cost-calibration] [--dense-run-stage-census] [--candidate=<name>]...\n"
               << "       " << executable << " --list-reduction-candidates\n"
               << "  --arg-x4-focused          Run ARGMIN only for FP8 E4M3/FP16/FP32, R=64/256/1024, and "
                  "D=128/256/512/1024/2048/4096/65536.\n"
@@ -2146,17 +2942,69 @@ void printUsage(const char* executable) {
                  "value-reduction families. Production path drift is treated as an error.\n"
               << "  --full-row-shard-census  Run the broad low-output/high-reduction Tiled SUM sweep that targets "
                  "full-row under-parallelism. Includes transformer-scale exact cases, reduction-depth, retained-width, "
-                 "and output-count sweeps; individual inputs are capped at 512 MiB. If no --candidate is supplied, "
-                 "tiled_row_split_w1/w2/w4/w8 are compared automatically.\n"
+                 "and output-count sweeps; individual inputs are capped at 512 MiB. Historical row-split candidates are no longer compiled.\n"
+              << "  --wide-awkward-2d-census Run the cache-cold moderate-R/wide-K SUM/MIN/MAX/PRODUCT production matrix for "
+                 "R=512/1024/2048/4096 and aligned/awkward K pairs 4096/4097 through 65536/65537. Outer is "
+                 "dtype/shape-adaptive around 640 MiB. By default this measures production only; --candidate may add "
+                 "an explicitly linked experimental implementation.\n"
+              << "  --awkward-shard-census   Run the targeted awkward retained-width SUM sweep above K=4096. Covers "
+                 "alignment residues/tails through K=8193 for FP16/BF16/FP32 with a 768 MiB input ceiling. "
+                 "By default this measures production only; --candidate may add an explicitly linked experiment.\n"
+              << "  --sub4096-awkward-shard-census  Run the targeted deep-R awkward retained-width SUM sweep below K=4096. "
+                 "The primary slice uses O=1,R=104832 and K=513..4095 with a 2 GiB input ceiling, plus a smaller-R "
+                 "control slice. By default this measures production only; --candidate may add an explicitly linked experiment.\n"
+              << "  --sub512-awkward-shard-census  Run the targeted packet-misaligned K=257..511 deep-R SUM sweep. "
+                 "The primary slice uses O=1,R=104832 with a smaller O=2,R=32768 control. By default this measures "
+                 "production only; --candidate may add an explicitly linked experiment.\n"
+              << "  --sub256-awkward-shard-census  Run the targeted 16-byte-row-misaligned K=65..255 deep-R SUM sweep. "
+                 "Production rows report the current selector. --candidate may add an explicitly linked experiment without "
+                 "changing production selection.\n"
+              << "  --sub64-awkward-shard-census   Run the targeted 16-byte-row-misaligned K=33..63 deep-R SUM sweep. "
+                 "Production rows report the current selector for the band immediately above K<=32. --candidate may add an "
+                 "explicitly linked experiment.\n"
+              << "  --rk-census-gate          Run the post-delete gate for the modern dense RK production inventory across aligned, awkward, deep-R, output-count, operation, and dtype coverage. Historical VALUE RK reference kernels are not compiled.\n"
+              << "  --rk-modern-single-pass-sweep  Sweep the production modern RK primitives one physical pass at a time. "
+                 "No row launches a continuation. SUM is swept across FP16/BF16/FP32, deep-R retained-width boundaries, "
+                 "reduction depth, output count, and wide aligned/awkward controls. K-parallel packet/shard geometry and "
+                 "R-cooperative aligned/rotated staged geometry are forced explicitly; Complete and Staged rows are "
+                 "reported separately.\n"
+              << "  --rk-modern-single-pass-focus  Run the second-pass device-aware RK comfort-boundary sweep. It remains "
+                 "strictly single-pass and SUM-only, but concentrates on Complete/Staged supply boundaries and K-parallel "
+                 "versus aligned/rotated R-cooperative crossovers. Cases are generated from the current GPU SM count, and "
+                 "each row reports CTA supply per SM plus a thread-capacity upper bound for resident CTAs/waves; this is not "
+                 "a substitute for exact kernel resource occupancy.\n"
+              << "  --rk-modern-gap-census  Run the focused single-pass census for the two remaining modern RK gaps: "
+                 "native MIN/MAX combine throughput in forced K-parallel geometry and narrow awkward FP16/BF16 K. The latter "
+                 "compares the current rotated staged kernel against the flat-eight-row 16-byte-packet kernel.\n"
+              << "  --rk-narrow-low-precision-calibration  Sweep K=1..32 at O=64,R=32768 for FP16/BF16 SUM/MIN/MAX. "
+                 "Every row is one physical pass; flat-row and rotated R-cooperative staged geometries are compared at "
+                 "rows/shard 128/256/512/1024, with all legal K-parallel staged packet geometries included for packet-legal K.\n"
+              << "  --rk-lean-complete-calibration  Compare current KParallel Complete against a benchmark-only lean Complete "
+                 "specialization that removes shard/general-work decoding, with the current production selector as reference. "
+                 "Targets O=1/2/4, R=64/103/127/205/256/410, K=32..1024, FP16/BF16/FP32 SUM.\n"
+              << "  --rk-kparallel-stage-crossover-calibration  Compare benchmark-only lean KParallel Complete against "
+                 "modern staged KParallel first passes over R at rows/shard 16/32/64/128, retaining production timing as a "
+                 "reference. Targets the same O=1/2/4 low-output SUM regime.\n"
+              << "  --rk-kparallel-staged-geometry-calibration  Hold staged KParallel at 16 rows/shard and sweep every legal "
+                 "4/8/16-byte packet with CTA widths 32/64/128/256 threads. Targets O=1/2/4, R=103/127/205/256/410, "
+                 "K=32..1024, FP16/BF16/FP32 SUM to calibrate packet/CTA geometry independently of topology.\n"
+              << "  --rk-kparallel-end-to-end-crossover-calibration  Compare total reduction latency for benchmark-only lean "
+                 "KParallel Complete against a forced staged KParallel first pass (rows/shard 16 or 32) followed by fresh "
+                 "normal ReducersDenseRK replanning until Complete. Retains current production timing as reference.\n"
+              << "  --rk-family-boundary-calibration  Calibrate DenseRK family choice across K packet alignment and serial R depth using full end-to-end timing.\n"
+              << "  --rk-realistic-end-to-end-progress-calibration  Calibrate first-pass reduction progress on realistic expensive "
+                 "RK shapes spanning moderate/high-output and deep-R cases. Times the full reduction sequence, compares "
+                 "production/current-modern against forced staged first passes followed by normal replanning, and is intended "
+                 "to be analyzed by absolute total microseconds and microseconds saved rather than tiny-kernel ratios.\n"
               << "  --dense-run-stage-census With --reduction-census, additionally time every reachable direct stage "
                  "of the dense composed cases both cache-cold and L2-hot. This is planner-model evidence only; "
                  "production selection is unchanged.\n"
               << "  --dense-stage-cost-calibration  Benchmark a bounded direct-reducer geometry grid for fitting the "
                  "stamp-time composed-dense stage cost model. Emits cold and hot timings and never changes production "
                  "selection.\n"
-              << "  --candidate=<name>        With --reduction-census or --full-row-shard-census, also run a registered "
-                 "benchmark-only candidate on every census case it supports. Repeat the flag to compare multiple "
-                 "candidates in one run. Production selection is unchanged.\n"
+              << "  --candidate=<name>        With --reduction-census, --full-row-shard-census, --wide-awkward-2d-census, --awkward-shard-census, --sub4096-awkward-shard-census, --sub512-awkward-shard-census, --sub256-awkward-shard-census, or --sub64-awkward-shard-census, "
+                 "also run a registered benchmark-only candidate on every census case it supports. Repeat the flag to compare multiple "
+                 "candidates in one run. Candidate runs never override production selection.\n"
               << "  --list-reduction-candidates  List benchmark-only candidates linked into this executable.\n";
 }
 
@@ -2176,6 +3024,40 @@ BenchmarkOptions parseOptions(int argc, char** argv) {
             options.reduction_census = true;
         } else if (argument == "--full-row-shard-census") {
             options.full_row_shard_census = true;
+        } else if (argument == "--wide-awkward-2d-census") {
+            options.wide_awkward_2d_census = true;
+        } else if (argument == "--awkward-shard-census") {
+            options.awkward_shard_census = true;
+        } else if (argument == "--sub4096-awkward-shard-census") {
+            options.sub4096_awkward_shard_census = true;
+        } else if (argument == "--sub512-awkward-shard-census") {
+            options.sub512_awkward_shard_census = true;
+        } else if (argument == "--sub256-awkward-shard-census") {
+            options.sub256_awkward_shard_census = true;
+        } else if (argument == "--sub64-awkward-shard-census") {
+            options.sub64_awkward_shard_census = true;
+        } else if (argument == "--rk-census-gate") {
+            options.rk_census_gate = true;
+        } else if (argument == "--rk-modern-single-pass-sweep") {
+            options.rk_modern_single_pass_sweep = true;
+        } else if (argument == "--rk-modern-single-pass-focus") {
+            options.rk_modern_single_pass_focus = true;
+        } else if (argument == "--rk-modern-gap-census") {
+            options.rk_modern_gap_census = true;
+        } else if (argument == "--rk-narrow-low-precision-calibration") {
+            options.rk_narrow_low_precision_calibration = true;
+        } else if (argument == "--rk-lean-complete-calibration") {
+            options.rk_lean_complete_calibration = true;
+        } else if (argument == "--rk-kparallel-stage-crossover-calibration") {
+            options.rk_kparallel_stage_crossover_calibration = true;
+        } else if (argument == "--rk-kparallel-staged-geometry-calibration") {
+            options.rk_kparallel_staged_geometry_calibration = true;
+        } else if (argument == "--rk-kparallel-end-to-end-crossover-calibration") {
+            options.rk_kparallel_end_to_end_crossover_calibration = true;
+        } else if (argument == "--rk-realistic-end-to-end-progress-calibration") {
+            options.rk_realistic_end_to_end_progress_calibration = true;
+        } else if (argument == "--rk-family-boundary-calibration") {
+            options.rk_family_boundary_calibration = true;
         } else if (argument == "--dense-run-stage-census") {
             options.dense_run_stage_census = true;
         } else if (argument == "--dense-stage-cost-calibration") {
@@ -2200,12 +3082,35 @@ BenchmarkOptions parseOptions(int argc, char** argv) {
                            + static_cast<int>(options.arg_census) + static_cast<int>(options.view_census)
                            + static_cast<int>(options.reduction_census)
                            + static_cast<int>(options.full_row_shard_census)
+                           + static_cast<int>(options.wide_awkward_2d_census)
+                           + static_cast<int>(options.awkward_shard_census)
+                           + static_cast<int>(options.sub4096_awkward_shard_census)
+                           + static_cast<int>(options.sub512_awkward_shard_census)
+                           + static_cast<int>(options.sub256_awkward_shard_census)
+                           + static_cast<int>(options.sub64_awkward_shard_census)
+                           + static_cast<int>(options.rk_census_gate)
+                           + static_cast<int>(options.rk_modern_single_pass_sweep)
+                           + static_cast<int>(options.rk_modern_single_pass_focus)
+                           + static_cast<int>(options.rk_modern_gap_census)
+                           + static_cast<int>(options.rk_narrow_low_precision_calibration)
+                           + static_cast<int>(options.rk_lean_complete_calibration)
+                           + static_cast<int>(options.rk_kparallel_stage_crossover_calibration)
+                           + static_cast<int>(options.rk_kparallel_staged_geometry_calibration)
+                           + static_cast<int>(options.rk_kparallel_end_to_end_crossover_calibration)
+                           + static_cast<int>(options.rk_realistic_end_to_end_progress_calibration)
+                           + static_cast<int>(options.rk_family_boundary_calibration)
                            + static_cast<int>(options.dense_stage_cost_calibration);
     if (mode_count > 1) {
         throw std::invalid_argument("Select at most one focused benchmark mode.");
     }
-    if (!options.candidate_names.empty() && !options.reduction_census && !options.full_row_shard_census) {
-        throw std::invalid_argument("--candidate may only be used with --reduction-census or --full-row-shard-census.");
+    if (!options.candidate_names.empty() && !options.reduction_census && !options.full_row_shard_census
+        && !options.wide_awkward_2d_census && !options.awkward_shard_census && !options.sub4096_awkward_shard_census
+        && !options.sub512_awkward_shard_census && !options.sub256_awkward_shard_census
+        && !options.sub64_awkward_shard_census) {
+        throw std::invalid_argument(
+            "--candidate may only be used with --reduction-census, --full-row-shard-census, --wide-awkward-2d-census, --awkward-shard-census, "
+            "--sub4096-awkward-shard-census, --sub512-awkward-shard-census, --sub256-awkward-shard-census, or "
+            "--sub64-awkward-shard-census.");
     }
     if (options.dense_run_stage_census && !options.reduction_census) {
         throw std::invalid_argument("--dense-run-stage-census may only be used with --reduction-census.");
@@ -2237,11 +3142,6 @@ int main(int argc, char** argv) {
             }
         }
         return EXIT_SUCCESS;
-    }
-
-    if (options.full_row_shard_census && options.candidate_names.empty()) {
-        options.candidate_names = {
-            "tiled_row_split_w1", "tiled_row_split_w2", "tiled_row_split_w4", "tiled_row_split_w8"};
     }
 
     std::vector<const ReductionCandidate*> selected_candidates;
@@ -2300,10 +3200,15 @@ int main(int argc, char** argv) {
                   << " target_input_bytes=" << target_input_bytes << " free_bytes=" << free_bytes
                   << " total_bytes=" << total_bytes << " target_over_l2=" << std::fixed << std::setprecision(2)
                   << static_cast<double>(target_input_bytes) / l2_cache_bytes << '\n';
-        if (options.reduction_census || options.full_row_shard_census || options.arg_census || options.view_census
-            || options.dense_stage_cost_calibration) {
+        if (options.reduction_census || options.full_row_shard_census || options.wide_awkward_2d_census || options.awkward_shard_census
+            || options.sub4096_awkward_shard_census || options.sub512_awkward_shard_census
+            || options.sub256_awkward_shard_census || options.sub64_awkward_shard_census
+            || options.rk_census_gate || options.rk_modern_single_pass_sweep || options.rk_modern_single_pass_focus
+            || options.rk_modern_gap_census || options.rk_lean_complete_calibration || options.rk_kparallel_stage_crossover_calibration || options.rk_kparallel_staged_geometry_calibration || options.rk_kparallel_end_to_end_crossover_calibration || options.rk_realistic_end_to_end_progress_calibration || options.rk_family_boundary_calibration || options.arg_census || options.view_census || options.dense_stage_cost_calibration) {
             std::cout << "# A separate >=8x-L2 cache-flush buffer is touched outside every cache-cold timed sample.\n";
-            if (options.reduction_census || options.full_row_shard_census) {
+            if (options.reduction_census || options.full_row_shard_census || options.wide_awkward_2d_census || options.awkward_shard_census
+                || options.sub4096_awkward_shard_census || options.sub512_awkward_shard_census
+                || options.sub256_awkward_shard_census || options.sub64_awkward_shard_census) {
                 std::cout << "# Exact production-census shapes are preserved. Experimental candidates are benchmark-only "
                              "and do not participate in CubReduction production path selection.\n";
             }
@@ -2311,7 +3216,11 @@ int main(int argc, char** argv) {
             std::cout << "# Each timed reduction reads an input >= target_input_bytes. Because the input is >= 8x L2, "
                          "successive iterations cannot benchmark an L2-resident working set.\n";
         }
-        if (options.full_row_shard_census) {
+        if (options.full_row_shard_census || options.wide_awkward_2d_census || options.awkward_shard_census
+                   || options.sub4096_awkward_shard_census || options.sub512_awkward_shard_census
+                   || options.sub256_awkward_shard_census || options.sub64_awkward_shard_census
+                   || options.rk_census_gate || options.rk_modern_single_pass_sweep || options.rk_modern_single_pass_focus
+                   || options.rk_modern_gap_census || options.rk_lean_complete_calibration || options.rk_kparallel_stage_crossover_calibration || options.rk_kparallel_staged_geometry_calibration || options.rk_kparallel_end_to_end_crossover_calibration || options.rk_realistic_end_to_end_progress_calibration || options.rk_family_boundary_calibration) {
             std::cout << "# timing_samples=" << BROAD_TIMING_SAMPLES
                       << " warmup_iterations=" << BROAD_WARMUP_ITERATIONS
                       << " timed_iterations_per_sample=1 reported_time=median\n";
@@ -2354,9 +3263,94 @@ int main(int argc, char** argv) {
             runViewCensus(cache_flush, stream, gpu_placement);
             return EXIT_SUCCESS;
         }
+        if (options.rk_census_gate) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runRKFamilyCensusGate(cache_flush, stream, gpu_placement);
+            return EXIT_SUCCESS;
+        }
+        if (options.rk_modern_single_pass_sweep) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runModernRKSinglePassSweep(cache_flush, stream);
+            return EXIT_SUCCESS;
+        }
+        if (options.rk_modern_single_pass_focus) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runModernRKSinglePassFocusSweep(cache_flush, stream);
+            return EXIT_SUCCESS;
+        }
+        if (options.rk_modern_gap_census) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runModernRKGapCensus(cache_flush, stream);
+            return EXIT_SUCCESS;
+        }
+        if (options.rk_narrow_low_precision_calibration) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runRKNarrowLowPrecisionCalibration(cache_flush, stream);
+            return EXIT_SUCCESS;
+        }
+        if (options.rk_lean_complete_calibration) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runRKLeanCompleteCalibration(cache_flush, stream);
+            return EXIT_SUCCESS;
+        }
+        if (options.rk_kparallel_stage_crossover_calibration) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runRKKParallelStageCrossoverCalibration(cache_flush, stream);
+            return EXIT_SUCCESS;
+        }
+        if (options.rk_kparallel_staged_geometry_calibration) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runRKKParallelStagedGeometryCalibration(cache_flush, stream);
+            return EXIT_SUCCESS;
+        }
+        if (options.rk_kparallel_end_to_end_crossover_calibration) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runRKKParallelEndToEndCrossoverCalibration(cache_flush, stream);
+            return EXIT_SUCCESS;
+        }
+        if (options.rk_realistic_end_to_end_progress_calibration) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runRKRealisticEndToEndProgressCalibration(cache_flush, stream);
+            return EXIT_SUCCESS;
+        }
+        if (options.rk_family_boundary_calibration) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runRKFamilyBoundaryCalibration(cache_flush, stream);
+            return EXIT_SUCCESS;
+        }
         if (options.full_row_shard_census) {
             Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
             runFullRowShardCensus(cache_flush, stream, gpu_placement, selected_candidates);
+            return EXIT_SUCCESS;
+        }
+        if (options.wide_awkward_2d_census) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runWideAwkward2dCensus(cache_flush, stream, gpu_placement, selected_candidates);
+            return EXIT_SUCCESS;
+        }
+        if (options.awkward_shard_census) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runAwkwardShardCensus(cache_flush, stream, gpu_placement, selected_candidates);
+            return EXIT_SUCCESS;
+        }
+        if (options.sub4096_awkward_shard_census) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runSub4096AwkwardShardCensus(cache_flush, stream, gpu_placement, selected_candidates);
+            return EXIT_SUCCESS;
+        }
+        if (options.sub512_awkward_shard_census) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runSub512AwkwardShardCensus(cache_flush, stream, gpu_placement, selected_candidates);
+            return EXIT_SUCCESS;
+        }
+        if (options.sub256_awkward_shard_census) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runSub256AwkwardShardCensus(cache_flush, stream, gpu_placement, selected_candidates);
+            return EXIT_SUCCESS;
+        }
+        if (options.sub64_awkward_shard_census) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runSub64AwkwardShardCensus(cache_flush, stream, gpu_placement, selected_candidates);
             return EXIT_SUCCESS;
         }
         if (!options.reduction_census) {
@@ -2537,9 +3531,7 @@ int main(int argc, char** argv) {
                  {1, 104832, 1024},
                  {1},
                  CubReductionPath::TiledFixedSegment},
-                // Direct-vs-async Tiled probes. These are exact stage-cost calibration geometries where
-                // FP16/BF16 async full-row throughput collapsed while FP32 remained fast. The benchmark-only
-                // tiled_direct_component_fallback candidate forces Thor's existing direct component-tiled backend.
+                // Historical direct-vs-async Tiled probe geometries retained as production regression cases.
                 {"tiled_async_probe",
                  "async_x8_r127_i193",
                  {5476, 127, 193},

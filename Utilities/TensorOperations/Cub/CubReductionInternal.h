@@ -7,12 +7,8 @@
 
 namespace ThorImplementation::CubReductionInternal {
 
-enum class CubReductionStageRole : uint8_t {
-    Complete = 0,
-    First = 1,
-    Intermediate = 2,
-    Final = 3,
-};
+// Physical execution and dense composition share one semantic pass-role vocabulary.
+using CubReductionStageRole = CubReductionPassRole;
 
 enum class CubReductionStageInputTransform : uint8_t {
     Identity = 0,
@@ -31,6 +27,41 @@ enum class CubReductionStageFinalize : uint8_t {
     Identity = 0,
     Divide = 1,
     SquareRoot = 2,
+};
+
+/**
+ * Physical topology of one TiledRK reduction stage.
+ *
+ * This is deliberately independent of CubReductionStageRole/CubReductionStageSemantics. A mathematically Final pass
+ * may still use Staged topology and defer its finalizer to the independently planned continuation, while a
+ * mathematically First pass may use Complete topology and write its direct FP32 stage output without finalizing the
+ * overall reduction operation.
+ */
+enum class TiledRKStageTopology : uint8_t {
+    Complete = 0,
+    Staged = 1,
+};
+
+struct KParallelTiledStagePlan {
+    TiledRKStageTopology topology = TiledRKStageTopology::Staged;
+    size_t packet_bytes = 0;
+    uint32_t block_threads = 0;
+    uint64_t shards_per_output = 0;
+};
+
+/**
+ * Exact CUDA resource/occupancy metadata for one concrete kernel specialization.
+ *
+ * max_active_blocks_per_sm is reported by cudaOccupancyMaxActiveBlocksPerMultiprocessor() for the supplied CTA width
+ * and dynamic shared-memory size. It therefore includes architectural, thread, register, and shared-memory residency
+ * limits for that exact specialization.
+ */
+struct CubKernelOccupancyInfo {
+    int registers_per_thread = 0;
+    size_t static_shared_bytes = 0;
+    size_t dynamic_shared_bytes = 0;
+    int max_active_blocks_per_sm = 0;
+    int max_active_warps_per_sm = 0;
 };
 
 /**
@@ -53,6 +84,86 @@ struct CubReductionStageSemantics {
 [[nodiscard]] CubReductionStageSemantics makeValueReductionStageSemantics(CubReductionOp op,
                                                                            CubReductionStageRole role,
                                                                            uint64_t total_reduction_size);
+
+/**
+ * Launches the benchmark-proven cooperative y8/16-byte-packet first stage for a natural dense tiled reduction.
+ * The stage applies only the logical input transform and associative SUM combine, emitting FP32
+ * [outer,shards,inner] partials. Finalization and output scaling belong to the normally stamped remainder stage.
+ */
+void launchCooperativeShardedTiledFirstStage(const CubReductionStageSemantics& semantics,
+                                             const Tensor& input,
+                                             Tensor& fp32_partials,
+                                             const CubReductionGeometry& geometry,
+                                             uint64_t rows_per_shard,
+                                             uint64_t shards_per_output,
+                                             Stream& stream);
+
+/** Query exact CUDA occupancy metadata for the SUM/identity aligned R-cooperative staged specialization. */
+[[nodiscard]] CubKernelOccupancyInfo queryCooperativeShardedTiledFirstStageOccupancy(DataType input_dtype,
+                                                                                     uint64_t rows_per_shard);
+
+/**
+ * Launches one aligned K-parallel TiledRK stage. Packet width, CTA width, and R shard depth are planner geometry, not
+ * distinct reducer families. Warps own independent K outputs, so the stage requires no inter-warp reduction.
+ *
+ * Staged topology requires shards_per_output > 1 and emits FP32 [outer,shards,inner] partials. It intentionally does
+ * not apply semantics.finalize or output_scale; those belong to the independently stamped continuation. Complete
+ * topology requires shards_per_output == 1 and writes the supplied stage output directly, applying the semantic
+ * finalizer, runtime output scale, and output dtype conversion for this mathematical pass.
+ *
+ * packet_bytes is the naturally aligned per-lane input transaction width (4/8/16 B). block_threads must select one of
+ * the compile-time-specialized 32/64/128/256-thread kernels.
+ */
+void launchKParallelTiledStage(const CubReductionStageSemantics& semantics,
+                               const Tensor& input,
+                               Tensor& stage_output,
+                               const CubReductionGeometry& geometry,
+                               const KParallelTiledStagePlan& plan,
+                               float output_scale,
+                               Stream& stream);
+
+/** Query exact CUDA occupancy metadata for the SUM/identity K-parallel specialization selected by plan. */
+[[nodiscard]] CubKernelOccupancyInfo queryKParallelTiledStageOccupancy(DataType input_dtype,
+                                                                       const KParallelTiledStagePlan& plan);
+
+/**
+ * Launches exactly one rotated R-cooperative TiledRK stage. The stage applies the input transform and associative
+ * combine for the nominated R shard geometry, emitting FP32 [outer,shards,inner] partials. It never applies the final
+ * semantic finalizer/output scale and never launches or selects a successor reducer.
+ */
+void launchAwkwardAlignmentRotatedShardedFirstStage(const CubReductionStageSemantics& semantics,
+                                                     const Tensor& input,
+                                                     Tensor& fp32_partials,
+                                                     const CubReductionGeometry& geometry,
+                                                     uint64_t rows_per_shard,
+                                                     uint64_t shards_per_output,
+                                                     Stream& stream);
+
+/** Query exact CUDA occupancy metadata for the SUM/identity rotated R-cooperative staged specialization. */
+[[nodiscard]] CubKernelOccupancyInfo queryAwkwardAlignmentRotatedShardedFirstStageOccupancy(
+    DataType input_dtype, uint64_t rows_per_shard);
+
+/**
+ * Experimental modern R-cooperative primitive for FP16/BF16 K<=32. Each warp reads eight complete logical rows as
+ * one flat contiguous 16-byte-packet window, reconstructs [row,K] ownership in shared memory, and emits one FP32
+ * partial per [outer,shard,K]. The stage is intentionally one physical pass and owns no continuation.
+ *
+ * It is production-quality code exposed to the benchmark, but it is not yet admitted to DenseRKInventory or selected
+ * by ReducersDenseRK; the focused gap census must first establish that it earns a real performance region.
+ */
+void launchNarrowLowPrecisionFlatRCooperativeFirstStage(const CubReductionStageSemantics& semantics,
+                                                         const Tensor& input,
+                                                         Tensor& fp32_partials,
+                                                         const CubReductionGeometry& geometry,
+                                                         uint64_t rows_per_shard,
+                                                         uint64_t shards_per_output,
+                                                         Stream& stream);
+
+/** Query exact CUDA occupancy metadata for the SUM/identity narrow-flat specialization. */
+[[nodiscard]] CubKernelOccupancyInfo queryNarrowLowPrecisionFlatRCooperativeFirstStageOccupancy(
+    DataType input_dtype, uint64_t rows_per_shard);
+
+
 
 size_t querySumReductionBytes(DataType input_dtype,
                               const void* input,

@@ -21,8 +21,8 @@ implementation. Expression's vector-valued segmented forward caller is migrated 
 1. Device transform-reduce when the result contains one element.
 2. CUB fixed-size segmented reduction when each reduction domain is physically contiguous (`inner_size == 1`).
 3. A tiled row-vector CUDA/CUB-warp backend when the reduced axes are one contiguous block with trailing values.
-4. Arbitrary ordinary-dense combinations of reduced/retained runs use a stamped `ComposedDense` plan. The planner removes one reduced run at a time through only the proven direct families above, keeps every non-final aggregate in FP32, and chooses pass order at stamp time with the dense-stage cost model. For transformed/finalized operations, only the first pass applies the public input transform and only the final pass applies the public finalizer/output scale.
-5. Fixed-size segmented reduction over a logical counting/transform iterator remains only as the correctness fallback for genuinely irregular/non-dense views while that traversal is being replaced.
+4. Arbitrary ordinary-dense combinations of reduced/retained runs are structurally classified as `ComposedDense`, but VALUE execution is not a composed parent/child executor. `planDenseReduction()` selects one R/KR/RK physical pass, produces a fresh intermediate problem, and replans globally until complete. The selected passes are materialized as one flat `DenseExecutablePlan`; every non-final VALUE aggregate is FP32, only the first logical pass applies the public input transform, and only the final logical pass applies the public finalizer/output scale.
+5. Non-dense inputs remain outside the ordinary-dense planner. Proven compact/permutation/pitched layouts use their ordained view reducers; unsupported arbitrary views fail structural analysis rather than entering a generic logical-index fallback.
 
 The tiled path also accepts zero-copy logical permutations when stride analysis proves that the visible source is physically dense `[outer, reduction, inner]` storage. In that case the reducer traverses the physical source layout directly and writes the requested retained-axis dense order without materializing the permutation. Natural `[outer,inner]` output keeps the ordinary tuned store mapping. Production `[inner,outer]` output uses the shared-transpose retained writer described below so final global stores remain coalesced.
 
@@ -72,11 +72,11 @@ small widths can place multiple logical reductions in one warp, medium widths us
 one cooperative block per output, and very large widths use multiple independent component blocks per output. All tiled
 backends accumulate and finalize in FP32 and require no stamped dynamic workspace.
 
-Dense reduction rank is dynamic. `ComposedDense` value reductions do not stamp logical-index metadata; all child
-reductions and their First/Intermediate/Final semantics are fully planned while stamping and `run()` launches them
-consecutively on the caller stream with no host synchronization, allocation, or runtime planning. Only the remaining
-genuinely irregular-view fallback packs dimensions, strides, and axis lists into a rank-sized GPU metadata tensor while
-stamping. There is no cuDNN-derived rank-8 limit; the only representation bound is that axis identifiers are `uint32_t`.
+Dense reduction rank is dynamic. Structurally `ComposedDense` VALUE reductions stamp a flat sequence of physical
+R/KR/RK passes in `DenseExecutablePlan`; there is no VALUE parent executor or child-stage continuation. `run()` launches
+that ordered pass list on the caller stream with no host synchronization, allocation, or runtime planning. Only the
+ordinary dense planning needs no per-element logical-index metadata. There is no cuDNN-derived rank-8 limit; the only
+representation bound is that axis identifiers are `uint32_t`.
 
 Value reductions support sum, product, mean, min, max, L1 norm, L2 norm, and sum-of-squares. VALUE-BINARY-CLEANUP keeps input transforms and reduction operators compile-time specialized while sharing additive finalization at output granularity: Sum, Mean, and the final composed L2 stage use one `IdentityFp32 + AdditiveFinalizeFp32` kernel matrix, while SumSquares and complete L2 use one `SquareFp32 + AdditiveFinalizeFp32` matrix. Division and optional square root are runtime finalizer data paid once per output, so L2 does not instantiate independent copies of every tiled/CUB reduction geometry. `CubReductionMean.cu` and `CubReductionL2Norm.cu` remain intentionally template-free. Dense argmin/argmax use the same geometry
 classification. ARG-DIRECT-1 keeps the device-wide CUB path but narrows its candidate index to UINT32 whenever the full
@@ -126,8 +126,9 @@ reduction is reported as `ComposedDense` immediately, and DENSE-GATE-FINAL makes
 invariant: canonical dense geometry must resolve to `DeviceTransformReduce`, `ContiguousFixedSegment`,
 `TiledFixedSegment`, or `ComposedDense`. The structural dense planner must produce a complete all-direct composition for
 every disjoint mask; failure is an internal logic error rather than an invitation to enter a catch-all view reducer.
-Operation-specific value and ARG planners choose only the detailed legal stage order inside `ComposedDense`; they do not
-rewrite the execution family.
+For VALUE, `ComposedDense` is now only that structural classification: `planDenseReduction()` chooses the actual
+R/KR/RK pass sequence and globally replans after each pass. ARG still uses the transitional interval-composition
+executor until DENSE-ARG-CUTOVER; it must ultimately move onto the same topology planner and flat pass executor.
 
 The ordinary-dense ARG selector obeys the same ownership contract. `CubArgReduction::stamp()` requires a dense-contiguous
 input, and the dense gate exhausts ranks 1-9 and every non-empty reduction mask, with singleton-heavy and disjoint-run
@@ -145,6 +146,48 @@ instantiations in the dense executor are therefore limited to genuine UINT64 *co
 contiguous ARG above UINT32 is unreachable because the CUB fixed-segment API's `int` segment-size gate rejects it first.
 The separate offset-segmented ARG API retains its own intentionally independent segmented implementation.
 
+### Recursive stage-planning invariant
+
+A staged reduction does **not** own a special second-stage or terminal reducer. Every physical pass transforms one
+reduction problem into a smaller ordinary reduction problem. If a pass emits FP32 partials shaped
+`[outer, shards, inner]`, the continuation is simply a new reduction of axis 1 for that FP32 tensor. The planner must
+analyze that intermediate geometry from scratch and choose the best available reducer for it, exactly as it would for a
+user-visible input.
+
+This rule applies after every stage, not only after the first one. A deep reduction may therefore execute as several
+independently planned passes before a direct/complete reducer finishes it. The implementation may express this as a
+stamped remainder/continuation chain rather than literal recursion, but the architectural rule is recursive:
+
+```text
+current reduction problem
+        |
+        v
+choose best reducer for current geometry
+        |
+        +-- complete/direct --> done
+        |
+        `-- staged --> FP32 partial tensor
+                           |
+                           `--> plan that reduction problem independently
+```
+
+Consequences:
+
+- Do not design or name architectures as fixed `first_stage + terminal` pairs.
+- Do not force a simple serial finalizer merely because a particular first stage produced the partials.
+- Do not reserve ROW-SPLIT, cooperative, rotated, K-parallel, or any other reducer for a particular stage number.
+- First/intermediate/final semantics control transforms, finalization, and output scaling; they do not constrain reducer
+  geometry.
+- Planner decisions use the current stage's `outer`, `R`, `K`, dtype, alignment, available parallelism, and intermediate
+  traffic. Operation-specific semantics remain orthogonal to geometry selection unless benchmark evidence proves
+  otherwise.
+- Workspace accounting includes every intermediate tensor and every recursively stamped remainder.
+
+`CubReduction::stampPhysicalStage()` already follows this invariant for cooperative sharded tiled reductions: after the
+first pass writes FP32 partials, it analyzes `[outer, shards, inner]` and calls the same physical-stage planner again.
+Benchmark staged candidates must preserve the same behavior so a census measures reducer chains rather than artificial
+first-stage/finalizer pairings.
+
 ### Low-output / deep full-row reduction sharding
 
 The direct and grouped `TiledFixedSegment` full-row kernels derive most of their launch parallelism from independent
@@ -152,21 +195,93 @@ outer/output rows. That ownership remains the fastest strategy when many outputs
 for shapes such as `[1, 104832, 512] -> [1, 1, 512]`: one warp (or one small cooperating warp group) otherwise scans the
 entire reduction domain while almost every SM is idle.
 
-Release census calibration therefore ordains a separate two-stage row-split strategy for the measured low-output,
-deep-reduction regime: FP16/BF16/FP32 inputs, reduction extent at least 1024, outer extent at most 128, and retained
-width 15..4096. The first stage keeps the full-row family's coalescing invariant—threads own adjacent trailing
-components—but splits reduction rows across enough CTAs for approximately two waves over the target GPU's SMs. Each CTA
-writes one FP32 partial vector. A second deterministic kernel combines those partial vectors in shard order, applies the
-operation's finalizer exactly once, applies the runtime output scale exactly once, and performs the final storage-dtype
-conversion. Sum, mean, L1/L2, sum-squares, product, min, and max therefore share the same row-split execution mechanism;
-input transforms occur only in the first stage and finalization only in the second.
+The original fix for this under-parallelism was `ROW-SPLIT-FULL-ROW`, a generic two-stage fallback. It proved that
+R sharding could recover device utilization, but its dedicated first-stage/finalize pairing was a transitional design.
+After the KParallel/RCooperative census closed its coverage and meaningful performance gaps, the historical row-split
+kernels, selectors, benchmark registration, and stamped compatibility state were removed from the compilation surface.
+Their role is now historical calibration only; ordinary dense VALUE RK is owned entirely by `ReducersDenseRK`.
 
-The row-split workspace is stamped explicitly as `outer * shards_per_output * inner * sizeof(float)`. The shard count is
-chosen at stamp/query time from the target GPU's multiprocessor count and recovered from the stamped workspace at run
-time, so steady-state launches perform no device-property query or allocation. Existing direct/grouped/block-sharded
-kernels remain unchanged outside the calibrated gate, including many-output and short-reduction cases where the extra
-partial/finalize pass is unnecessary. The dense composition planner models row-split stages as saturated rather than
-retaining the old one/few-warp parallelism penalty.
+Aligned staged full-row work has two useful ownership modes rather than two permanently paired reducer families.
+R-cooperative stages spend multiple warps on the same retained K tile and divide R among those warps. K-parallel stages
+instead give warps disjoint K packets and let each owner serially walk its R shard, eliminating inter-warp reduction,
+shared-memory exchange, and synchronization for that stage. K-parallel CTA width therefore follows the amount of K work:
+prefer naturally aligned 16-byte lane packets and use the smallest power-of-two warp count that covers the tile, capped
+at eight warps. Because warps/CTA varies, its shard planner targets device-wide useful **warps**, not blocks; block-count
+targets are valid proxies only for kernels whose warps/CTA is fixed. K-parallel is consequently a geometry/ownership
+choice available to the stage planner, not a special first-stage architecture and not a reason to prescribe how its FP32
+partials are reduced next.
+
+The packet-width x R-shard-depth census confirms that packet width and shard depth must remain separate geometry fields,
+but it does **not** support choosing them as two independent sequential heuristics. Changing shard depth changes the
+`[outer,shards,K]` continuation geometry and can move the recursively planned continuation onto a materially different
+reducer, so the measured end-to-end winner can change with the packet/shard pair. Production therefore exposes one
+parameterized K-parallel stage implementation for 4/8/16-byte packets and 32/64/128/256-thread compile-time CTA
+specializations. Its physical topology is explicit: STAGED uses more than one R shard and emits FP32
+`[outer,shards,K]` partials, while COMPLETE uses exactly one R shard and applies the current pass's finalizer, output
+scale, and runtime dtype conversion directly. This topology is independent of mathematical stage role: a logically
+Final pass may still be physically STAGED and defer finalization to its continuation, while a logically First pass may
+be physically COMPLETE without finalizing the overall operation. The stage planner should compare the small legal
+packet/shard plan set jointly, including the independently planned continuation and FP32 scratch cost. Near-tied plans
+should prefer less scratch rather than encoding benchmark noise into packet- or row-specific reducer families.
+
+For additive low-output/deep reductions, the newer alignment-rotated sharded topology supersedes the older ownership
+model in four benchmarked awkward-width regimes. Above 4096 retained components it handles non-4096-block-multiple
+widths; from 513 through 4095 it handles packet-misaligned row strides; from 257 through 511 it handles packet-misaligned
+rows once the reduction is at least 32768 deep; and from 33 through 255 it replaces the remaining x2/x4/x8 full-row
+islands for packet-misaligned rows at the same reduction-depth threshold. The first stage uses eight physical warps, exact
+16-byte aligned packet loads, and FP32 accumulation.
+
+DENSE-RK-STAGE-1 makes the rotated implementation obey the same one-pass contract as the aligned cooperative and
+K-parallel staged implementations. `launchAwkwardAlignmentRotatedShardedFirstStage()` emits only FP32
+`[outer,shards,K]` partials and has no terminal/output/finalizer capability. Ordinary dense VALUE RK stamping now
+executes the flat planner-driven `ReducersDenseRK` sequence directly: every staged pass emits a fresh FP32
+`[outer,shards,K]` problem and the global RK planner chooses its continuation. There is no rotated compatibility
+terminal or legacy full-row continuation in the production VALUE path.
+
+The narrow low-precision calibration adds a second physical access implementation beneath `RCooperative` rather than a
+new reducer strategy. `launchNarrowLowPrecisionFlatRCooperativeFirstStage()` flattens eight contiguous logical rows
+into aligned 16-byte packet work, reconstructs `[8,K]` ownership in FP32 shared memory, and emits only FP32
+`[outer,shards,K]` partials. A complete FP16/BF16 K=1..32 sweep established an operation-independent selector boundary:
+all odd K use `FlatRows`, even K<=14 use KParallel, and even K>=16 use `FlatRows`. The same sweep established the
+
+KParallel Complete is a distinct lean production hot path: it maps each output/component tile directly to one CTA and
+serially walks R without staged/shard work decoding. End-to-end low-output calibration established that an underfilled
+KParallel launch should switch to a staged first pass at roughly R>=96, targeting about 16 input rows per shard, then
+replan the emitted FP32 intermediate as a fresh reduction problem. Comfortable Complete launches remain eligible; no
+pass owns its continuation.
+
+FlatRows shard-depth transition used by production: K<20 uses 512 rows/shard and K>=20 uses 128 rows/shard. Rotated
+remains the coverage path when a calibrated FlatRows staged pass cannot be formed, such as shallow R.
+
+The >=513 regimes retain fixed 1024-row shards. In the 257..511 regime, production keeps rows1024 when that still exposes
+enough device-wide work, otherwise it uses the benchmarked rows256 low-precision or rows512 FP32 specialization. In the
+33..255 regime, shard depth follows logical-tile occupancy and available SM waves: small one-tile rows favor rows256
+(or rows128 when a smaller reduction needs more CTAs), fuller one/two-tile rows favor rows512, and the next tile-count
+step favors rows1024 when enough parallelism remains. The same rule also exactly reproduced the rows256/rows128
+crossover measured by the sub-64 census without adding a K-specific lookup table. Every admitted plan must still launch at least
+one CTA per SM, so narrowing the retained width does not recreate the under-parallelized failure mode that motivated
+the kernel. Exact packet-aligned sub-4096 widths remain on the existing direct/cooperative families until separately
+benchmarked.
+
+### RK post-delete coverage gate
+
+`thor_cub_reduction_benchmark --rk-census-gate` is the durable post-delete gate for ordinary dense RK. Production now
+stamps and executes the `ReducersDenseRK` family plan directly, so the gate times that production path only. It does not
+compile or execute a second legacy/reference VALUE reducer inventory: retaining those historical CUDA/CUB kernels only
+for live A/B measurement would keep their template specializations in the binary and defeat the deletion.
+
+The gate spans the existing low-output/deep-R, retained-width, output-count, wide awkward, and sub-4096/sub-512/
+sub-256/sub-64 awkward populations for FP16/BF16/FP32. SUM/MIN/MAX/PRODUCT exercise the core geometry-dependent
+operation classes, and a compact set of Complete, aligned staged, K-parallel, rotated, and FlatRows sentinels additionally
+covers Mean/L1/L2/SumSquares so input-transform/finalizer semantics are validated through multi-pass family execution.
+Coverage gaps are reported without stopping the remaining census, while numerical disagreement remains fatal.
+
+Capture stdout and run `benchmarks/analyze_rk_census_gate.py <output>`. Missing modern rows and explicit coverage gaps
+always fail analysis. The analyzer also requires the census to exercise K-parallel, R-cooperative, rotated
+R-cooperative, flat-row R-cooperative, Complete, and Staged modern plans so an accidentally dead part of the two-strategy
+inventory cannot hide behind generic coverage. New post-delete CSVs are modern-only. The analyzer continues to accept
+archived pre-delete paired CSVs when a historical production-vs-modern comparison is useful, without requiring those
+legacy kernels to remain in the current compilation surface.
 
 ### View ownership after DELETE
 

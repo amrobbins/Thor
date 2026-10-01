@@ -135,6 +135,8 @@ TEST(CubReduction, ComposedDenseSupportsEveryValueOperationAcrossStorageDtypes) 
             const size_t queried_workspace = reduction.queryWorkspaceSizeInBytes(input.getDescriptor(), stream);
             std::shared_ptr<StampedCubReduction> stamped = reduction.stamp(input, stream);
             ASSERT_EQ(stamped->getPath(), CubReductionPath::ComposedDense);
+            ASSERT_TRUE(stamped->usesDenseExecutablePlan());
+            EXPECT_GT(stamped->getDenseExecutablePassCount(), 0U);
             EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), queried_workspace);
             ASSERT_EQ(stamped->getComposedStageAxes().size(), 3U);
 
@@ -168,6 +170,8 @@ TEST(CubReduction, SingletonOnlyCompositionUsesCompleteOperationSemantics) {
                               CubReductionOp::SumSquares}) {
         std::shared_ptr<StampedCubReduction> stamped = CubReduction(op, axes, DataType::FP32).stamp(input, stream);
         ASSERT_EQ(stamped->getPath(), CubReductionPath::ComposedDense);
+        ASSERT_TRUE(stamped->usesDenseExecutablePlan());
+        EXPECT_GT(stamped->getDenseExecutablePassCount(), 0U);
         ASSERT_EQ(stamped->getComposedStageAxes().size(), 1U);
         stamped->run();
         stream.synchronize();
