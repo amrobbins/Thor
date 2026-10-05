@@ -153,7 +153,7 @@ inline __host__ __device__ void storeFp32AsRuntimeDType(void* output,
             static_cast<__nv_fp8_e4m3*>(output)[index] = ThorLowPrecision::toFp8E4M3Satfinite(value);
             return;
         case DataType::FP8_E5M2:
-            static_cast<__nv_fp8_e5m2*>(output)[index] = ThorLowPrecision::toFp8E5M2Nosat(value);
+            static_cast<__nv_fp8_e5m2*>(output)[index] = ThorLowPrecision::toFp8E5M2Satfinite(value);
             return;
 #endif
         case DataType::FP16:
@@ -594,6 +594,52 @@ template <typename InputT, int ItemsPerLane>
     return cuda::std::bit_cast<ValuesT>(raw);
 }
 
+#if THOR_CUB_ENABLE_FP8_TYPES
+template <typename InputT>
+[[nodiscard]] __device__ __forceinline__ float2 decodeFp8x2ToFp32(uint16_t packed_fp8) {
+    static_assert(std::is_same_v<InputT, __nv_fp8_e4m3> || std::is_same_v<InputT, __nv_fp8_e5m2>);
+
+    // Let CUDA own the packed FP8 -> float2 lowering.  In particular, do not force an explicit FP16x2
+    // intermediate in Thor source: the native vector type exposes operator float2() directly and gives nvcc
+    // freedom to select/schedule the target conversion sequence.
+    if constexpr (std::is_same_v<InputT, __nv_fp8_e4m3>) {
+        __nv_fp8x2_e4m3 values;
+        values.__x = static_cast<__nv_fp8x2_storage_t>(packed_fp8);
+        return static_cast<float2>(values);
+    } else {
+        __nv_fp8x2_e5m2 values;
+        values.__x = static_cast<__nv_fp8x2_storage_t>(packed_fp8);
+        return static_cast<float2>(values);
+    }
+}
+
+template <typename InputT>
+[[nodiscard]] __device__ __forceinline__ float4 decodeFp8x4ToFp32(uint32_t packed_fp8) {
+    const float2 low = decodeFp8x2ToFp32<InputT>(static_cast<uint16_t>(packed_fp8));
+    const float2 high = decodeFp8x2ToFp32<InputT>(static_cast<uint16_t>(packed_fp8 >> 16));
+    return make_float4(low.x, low.y, high.x, high.y);
+}
+
+template <typename InputT, int ItemsPerLane, typename ReductionOpT, typename InputTransformT>
+__device__ __forceinline__ void reducePackedFp8ValuesToFp32(
+    float (&local)[ItemsPerLane],
+    const PackedInputValues<InputT, ItemsPerLane>& values,
+    const ReductionOpT& reduction_op,
+    const InputTransformT& input_transform) {
+    static_assert(std::is_same_v<InputT, __nv_fp8_e4m3> || std::is_same_v<InputT, __nv_fp8_e5m2>);
+    static_assert(ItemsPerLane >= 2 && ItemsPerLane % 2 == 0);
+
+#pragma unroll
+    for (int item = 0; item < ItemsPerLane; item += 2) {
+        const uint16_t packed = static_cast<uint16_t>(values.values[item].__x)
+                                | (static_cast<uint16_t>(values.values[item + 1].__x) << 8);
+        const float2 decoded = decodeFp8x2ToFp32<InputT>(packed);
+        local[item] = reduction_op(local[item], input_transform(decoded.x));
+        local[item + 1] = reduction_op(local[item + 1], input_transform(decoded.y));
+    }
+}
+#endif
+
 // Arbitrary row strides can shift an otherwise contiguous per-thread packet away from a 16-byte boundary. Never issue
 // a misaligned 8/16-byte vector access: align the global window down to 16 bytes, load one additional uint4 when the
 // logical packet is shifted, and select the requested values from that register window. Tensor backing allocations
@@ -779,8 +825,8 @@ template <typename InputT, size_t PacketBytes>
     static_assert(PacketBytes >= sizeof(InputT));
     static_assert(PacketBytes % sizeof(InputT) == 0);
     constexpr int items = static_cast<int>(PacketBytes / sizeof(InputT));
-    static_assert(items >= 1 && items <= 8,
-                  "adaptive cooperative tiled reduction currently targets FP16/BF16/FP32 storage");
+    static_assert(items >= 1 && items <= 16,
+                  "adaptive cooperative tiled reduction supports up to one 16-byte packet per FP8/FP16/BF16/FP32 lane");
     return items;
 }
 
@@ -799,8 +845,9 @@ template <typename InputT, size_t PacketBytes>
 
     const uint64_t desired_warps = ceilDivideU64(
         ADAPTIVE_COOPERATIVE_TILED_TARGET_ACTIVE_WARPS, std::max<uint64_t>(output_tiles, 1));
+    constexpr int max_warps = sizeof(InputT) == 1 ? 16 : ADAPTIVE_COOPERATIVE_TILED_MAX_WARPS;
     int warps = 1;
-    while (warps < ADAPTIVE_COOPERATIVE_TILED_MAX_WARPS
+    while (warps < max_warps
            && static_cast<uint64_t>(warps) < desired_warps
            && static_cast<uint64_t>(warps) < geometry.reduction_size) {
         warps <<= 1;
@@ -810,7 +857,7 @@ template <typename InputT, size_t PacketBytes>
     // 16-byte packet alignment. This lets every warp see one stable row-head alignment through its reduction slice.
     // If the reduction is already no deeper than the cooperative group, every warp owns at most one row and no such
     // stride constraint exists. loadAlignmentSafeInputPacket remains the correctness fallback either way.
-    while (warps < ADAPTIVE_COOPERATIVE_TILED_MAX_WARPS
+    while (warps < max_warps
            && geometry.reduction_size > static_cast<uint64_t>(warps)
            && (geometry.inner_size * static_cast<uint64_t>(sizeof(InputT)) * static_cast<uint64_t>(warps))
                   % PacketBytes
@@ -1089,9 +1136,13 @@ void launchAdaptiveCooperativeTiledFixedSegmentReductionForPacketBytes(const Inp
                     input, output, output_dtype, geometry, reduction_op, init, input_transform, output_finalize, output_scale, stream);
                 return;
             case 32:
-                launchAdaptiveCooperativeTiledFixedSegmentReductionForWarps<InputT, ReductionOpT, InputTransformT, OutputFinalizeT, 32, PacketBytes, NaturallyAlignedRows>(
-                    input, output, output_dtype, geometry, reduction_op, init, input_transform, output_finalize, output_scale, stream);
-                return;
+                if constexpr (sizeof(InputT) == 1) {
+                    throw std::logic_error("FP8 adaptive cooperative tiled reduction is capped at 16 cooperative warps.");
+                } else {
+                    launchAdaptiveCooperativeTiledFixedSegmentReductionForWarps<InputT, ReductionOpT, InputTransformT, OutputFinalizeT, 32, PacketBytes, NaturallyAlignedRows>(
+                        input, output, output_dtype, geometry, reduction_op, init, input_transform, output_finalize, output_scale, stream);
+                    return;
+                }
             default:
                 throw std::logic_error("Adaptive cooperative tiled reduction selected an invalid warp count.");
         }

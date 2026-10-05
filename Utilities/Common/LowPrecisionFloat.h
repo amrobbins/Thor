@@ -52,47 +52,47 @@ inline __host__ __device__ __nv_fp8_e4m3 toFp8E4M3Satfinite(Integer value) {
     return toFp8E4M3Satfinite(static_cast<double>(value));
 }
 
-// E5M2 represents +/-infinity. Ordinary Thor narrowing therefore uses CUDA's
-// non-saturating conversion mode so finite overflow follows the destination
-// format's native semantics instead of being clamped to +/-57344.
-inline __host__ __device__ __nv_fp8_e5m2 toFp8E5M2Nosat(float value) {
-    return fp8E5M2FromBits(__nv_cvt_float_to_fp8(value, __NV_NOSAT, __NV_E5M2));
+// Canonical Thor FP8 narrowing saturates finite overflow for both E4M3 and E5M2.
+// Keeping the policy here makes compiled kernels, host conversion paths, and generated
+// expressions agree on overflow semantics instead of inheriting CUDA constructor defaults.
+inline __host__ __device__ __nv_fp8_e5m2 toFp8E5M2Satfinite(float value) {
+    return fp8E5M2FromBits(__nv_cvt_float_to_fp8(value, __NV_SATFINITE, __NV_E5M2));
 }
 
-inline __host__ __device__ __nv_fp8_e5m2 toFp8E5M2Nosat(double value) {
-    return fp8E5M2FromBits(__nv_cvt_double_to_fp8(value, __NV_NOSAT, __NV_E5M2));
+inline __host__ __device__ __nv_fp8_e5m2 toFp8E5M2Satfinite(double value) {
+    return fp8E5M2FromBits(__nv_cvt_double_to_fp8(value, __NV_SATFINITE, __NV_E5M2));
 }
 
-inline __host__ __device__ __nv_fp8_e5m2 toFp8E5M2Nosat(half value) {
-    return toFp8E5M2Nosat(__half2float(value));
+inline __host__ __device__ __nv_fp8_e5m2 toFp8E5M2Satfinite(half value) {
+    return toFp8E5M2Satfinite(__half2float(value));
 }
 
-inline __host__ __device__ __nv_fp8_e5m2 toFp8E5M2Nosat(__nv_bfloat16 value) {
-    return toFp8E5M2Nosat(__bfloat162float(value));
+inline __host__ __device__ __nv_fp8_e5m2 toFp8E5M2Satfinite(__nv_bfloat16 value) {
+    return toFp8E5M2Satfinite(__bfloat162float(value));
 }
 
-inline __host__ __device__ __nv_fp8_e5m2 toFp8E5M2Nosat(__nv_fp8_e4m3 value) {
-    return toFp8E5M2Nosat(static_cast<float>(value));
+inline __host__ __device__ __nv_fp8_e5m2 toFp8E5M2Satfinite(__nv_fp8_e4m3 value) {
+    return toFp8E5M2Satfinite(static_cast<float>(value));
 }
 
-inline __host__ __device__ __nv_fp8_e5m2 toFp8E5M2Nosat(__nv_fp8_e5m2 value) {
+inline __host__ __device__ __nv_fp8_e5m2 toFp8E5M2Satfinite(__nv_fp8_e5m2 value) {
     return value;
 }
 
 template <typename Integer, std::enable_if_t<std::is_integral_v<Integer>, int> = 0>
-inline __host__ __device__ __nv_fp8_e5m2 toFp8E5M2Nosat(Integer value) {
-    return toFp8E5M2Nosat(static_cast<double>(value));
+inline __host__ __device__ __nv_fp8_e5m2 toFp8E5M2Satfinite(Integer value) {
+    return toFp8E5M2Satfinite(static_cast<double>(value));
 }
 
-// Canonical Thor software narrowing into low-precision storage. Keep destination
-// format overflow semantics here so templated kernels do not accidentally inherit
+// Canonical Thor software narrowing into low-precision storage. Keep Thor's
+// explicit saturation policy here so templated kernels do not accidentally inherit
 // CUDA convenience-constructor behavior.
 template <typename Destination, typename Source>
 inline __host__ __device__ Destination castToStorage(Source value) {
     if constexpr (std::is_same_v<Destination, __nv_fp8_e4m3>) {
         return toFp8E4M3Satfinite(value);
     } else if constexpr (std::is_same_v<Destination, __nv_fp8_e5m2>) {
-        return toFp8E5M2Nosat(value);
+        return toFp8E5M2Satfinite(value);
     } else {
         return static_cast<Destination>(value);
     }
@@ -111,7 +111,7 @@ inline uint8_t floatToFp8E4M3Bits(float value) {
 }
 
 inline uint8_t floatToFp8E5M2Bits(float value) {
-    return toFp8E5M2Nosat(value).__x;
+    return toFp8E5M2Satfinite(value).__x;
 }
 
 inline uint16_t doubleToFp16Bits(double value) {
@@ -127,7 +127,7 @@ inline uint8_t doubleToFp8E4M3Bits(double value) {
 }
 
 inline uint8_t doubleToFp8E5M2Bits(double value) {
-    return toFp8E5M2Nosat(value).__x;
+    return toFp8E5M2Satfinite(value).__x;
 }
 
 }  // namespace ThorLowPrecision

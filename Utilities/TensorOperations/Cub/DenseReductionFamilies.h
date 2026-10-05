@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace ThorImplementation::CubReductionInternal {
@@ -88,10 +89,15 @@ struct DenseRKFamilyPhysicalPlan final : DenseReductionPhysicalPlan {
     uint64_t useful_stage_warps = 0;
 
     // Exact/fallback residency facts used by the calibrated family policy. physical_stage_warps counts every launched
-    // warp in the physical CTA, whereas useful_stage_warps may discount packing/grouping details for diagnostics.
+    // warp in the physical CTA. useful_stage_warps counts only warps that own useful reduction work. Idle physical
+    // warps still consume CTA/warp residency, so useful_resident_warp_capacity is derived through the exact physical
+    // block/warp occupancy rather than pretending that useful warps can occupy the device independently.
     uint32_t max_active_blocks_per_sm = 0;
     uint32_t max_active_warps_per_sm = 0;
     uint64_t physical_stage_warps = 0;
+    uint64_t resident_device_warps = 0;
+    uint64_t useful_resident_warp_capacity = 0;
+    // Useful launch supply credited toward the family comfort/progress policy.
     uint64_t launch_warp_supply = 0;
     uint64_t wave_capacity_blocks = 0;
 };
@@ -162,6 +168,16 @@ class ReducersDenseRK {
     [[nodiscard]] static DenseReductionCandidate propose(const DenseReductionProblem& problem,
                                                          DenseReductionSite site,
                                                          const DenseRKPlanningContext& context);
+
+    /**
+     * Returns exactly the production KParallel choice for this RK site, without allowing RCooperative to compete.
+     * This is a calibration/introspection hook: it reuses the production KParallel selector byte-for-byte so census
+     * benchmarks can tell which geometries are already covered without duplicating selector policy.
+     */
+    [[nodiscard]] static std::optional<DenseReductionCandidate> proposeProductionKParallelForCalibration(
+        const DenseReductionProblem& problem,
+        DenseReductionSite site,
+        const DenseRKPlanningContext& context);
 };
 
 }  // namespace ThorImplementation::CubReductionInternal

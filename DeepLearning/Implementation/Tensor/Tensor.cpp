@@ -904,7 +904,7 @@ inline __nv_fp8_e4m3 castCpuTensorValue<__nv_fp8_e4m3>(double value) {
 
 template <>
 inline __nv_fp8_e5m2 castCpuTensorValue<__nv_fp8_e5m2>(double value) {
-    return ThorLowPrecision::toFp8E5M2Nosat(value);
+    return ThorLowPrecision::toFp8E5M2Satfinite(value);
 }
 
 template <typename T>

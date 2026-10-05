@@ -747,17 +747,17 @@ __device__ __forceinline__ __nv_fp8x2_e4m3 thor_to_fp8x2_e4m3_satfinite(float2 v
 )";
 }
 
-static void emitFp8E5M2NosatHelpers(std::ostringstream& ss) {
+static void emitFp8E5M2SatfiniteHelpers(std::ostringstream& ss) {
     ss << R"(
-__device__ __forceinline__ __nv_fp8_e5m2 thor_to_fp8_e5m2_nosat(float value) {
+__device__ __forceinline__ __nv_fp8_e5m2 thor_to_fp8_e5m2_satfinite(float value) {
   __nv_fp8_e5m2 result;
-  result.__x = __nv_cvt_float_to_fp8(value, __NV_NOSAT, __NV_E5M2);
+  result.__x = __nv_cvt_float_to_fp8(value, __NV_SATFINITE, __NV_E5M2);
   return result;
 }
 
-__device__ __forceinline__ __nv_fp8x2_e5m2 thor_to_fp8x2_e5m2_nosat(float2 value) {
+__device__ __forceinline__ __nv_fp8x2_e5m2 thor_to_fp8x2_e5m2_satfinite(float2 value) {
   __nv_fp8x2_e5m2 result;
-  result.__x = __nv_cvt_float2_to_fp8x2(value, __NV_NOSAT, __NV_E5M2);
+  result.__x = __nv_cvt_float2_to_fp8x2(value, __NV_SATFINITE, __NV_E5M2);
   return result;
 }
 
@@ -818,7 +818,7 @@ static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstre
             emitFp8E4M3SatfiniteHelpers(ss);
         }
         if (need_fp8_e5m2) {
-            emitFp8E5M2NosatHelpers(ss);
+            emitFp8E5M2SatfiniteHelpers(ss);
         }
     }
     // CUDA 13.3 NVRTC bundled headers do not expose the legacy top-level
@@ -2165,13 +2165,13 @@ static std::string castScalarExpr(const std::string& expr, DataType src_dtype, D
         case DataType::FP8_E5M2:
             switch (src_dtype) {
                 case DataType::FP32:
-                    return "thor_to_fp8_e5m2_nosat(" + expr + ")";
+                    return "thor_to_fp8_e5m2_satfinite(" + expr + ")";
                 case DataType::FP16:
-                    return "thor_to_fp8_e5m2_nosat(float(" + expr + "))";
+                    return "thor_to_fp8_e5m2_satfinite(float(" + expr + "))";
                 case DataType::BF16:
-                    return "thor_to_fp8_e5m2_nosat(float(" + expr + "))";
+                    return "thor_to_fp8_e5m2_satfinite(float(" + expr + "))";
                 case DataType::FP8_E4M3:
-                    return "thor_to_fp8_e5m2_nosat(float(" + expr + "))";
+                    return "thor_to_fp8_e5m2_satfinite(float(" + expr + "))";
                 case DataType::FP8_E5M2:
                     return expr;
                 default:
@@ -4578,9 +4578,9 @@ static std::string vector_storage_conversion(const std::string& storage_dtype_ve
         return "thor_to_fp8x2_e4m3_satfinite(__half22float2(" + variable + "))";
     } else if (storage_dtype_vector == "__nv_fp8x2_e5m2") {
         if (compute_dtype == DataType::BF16) {
-            return "thor_to_fp8x2_e5m2_nosat(__bfloat1622float2(" + variable + "))";
+            return "thor_to_fp8x2_e5m2_satfinite(__bfloat1622float2(" + variable + "))";
         }
-        return "thor_to_fp8x2_e5m2_nosat(__half22float2(" + variable + "))";
+        return "thor_to_fp8x2_e5m2_satfinite(__half22float2(" + variable + "))";
     }
     throw runtime_error("Unsupported vector storage dtype in vector_storage_conversion: " + storage_dtype_vector);
 }
@@ -4619,7 +4619,7 @@ static std::string float2_storage_conversion(const std::string& storage_dtype_ve
     } else if (storage_dtype_vector == "__nv_fp8x2_e4m3") {
         return "thor_to_fp8x2_e4m3_satfinite(" + variable + ")";
     } else if (storage_dtype_vector == "__nv_fp8x2_e5m2") {
-        return "thor_to_fp8x2_e5m2_nosat(" + variable + ")";
+        return "thor_to_fp8x2_e5m2_satfinite(" + variable + ")";
     }
     throw runtime_error("Unsupported vector storage dtype in float2_storage_conversion: " + storage_dtype_vector);
 }
@@ -5998,7 +5998,7 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
             ss << "#include <cuda_bf16.h>\n";
         }
         ss << "#include <cuda_fp8.h>\n";
-        emitFp8E5M2NosatHelpers(ss);
+        emitFp8E5M2SatfiniteHelpers(ss);
     } else {
         throw runtime_error("emitVector2Flat called with non-vectorizable storage dtype.");
     }
@@ -7024,7 +7024,7 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
             ss << "#include <cuda_bf16.h>\n";
         }
         ss << "#include <cuda_fp8.h>\n";
-        emitFp8E5M2NosatHelpers(ss);
+        emitFp8E5M2SatfiniteHelpers(ss);
     } else {
         throw runtime_error("emitVector2SpecializedBroadcast called with non-vectorizable storage dtype.");
     }

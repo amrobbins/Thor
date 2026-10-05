@@ -18,7 +18,7 @@ struct Converter<FROM_TYPE, __nv_fp8_e4m3> {
 
 template <typename FROM_TYPE>
 struct Converter<FROM_TYPE, __nv_fp8_e5m2> {
-    inline __nv_fp8_e5m2 operator()(FROM_TYPE x) const { return ThorLowPrecision::toFp8E5M2Nosat(x); }
+    inline __nv_fp8_e5m2 operator()(FROM_TYPE x) const { return ThorLowPrecision::toFp8E5M2Satfinite(x); }
 };
 
 struct TypeConverter::Args : HostFunctionArgsBase {

@@ -67,7 +67,7 @@ __device__ inline __nv_fp8_e4m3 fromFloat<__nv_fp8_e4m3>(float value) {
 
 template <>
 __device__ inline __nv_fp8_e5m2 fromFloat<__nv_fp8_e5m2>(float value) {
-    return ThorLowPrecision::toFp8E5M2Nosat(value);
+    return ThorLowPrecision::toFp8E5M2Satfinite(value);
 }
 
 template <typename T>

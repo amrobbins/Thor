@@ -6,6 +6,7 @@
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 using namespace ThorImplementation;
@@ -201,6 +202,52 @@ TEST(CubReduction, AwkwardLargeVectorizedShardsHandleAlignmentAndPaddedInputTail
     run_dtype(DataType::FP64);
 #endif
 }
+
+#if THOR_CUB_ENABLE_FP8_TYPES
+TEST(CubReduction, UnderSuppliedPacketAlignedFp8OrdinaryDenseUsesNarrowModernKParallelValuePlan) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer_size = 2;
+    constexpr uint64_t reduction_size = 256;
+    // These K values successively make 16/8/4/2 bytes the widest naturally aligned packet. This is deliberately a
+    // small, under-supplied reduction, however, so the final FP8 packet policy must maximize useful K-side work
+    // rather than blindly choose that widest legal packet. Packet2 exposes the most useful launch warps in every
+    // case and is therefore the expected production choice. The family-policy unit tests cover the selector rule;
+    // this lifecycle test verifies that the stamped ordinary VALUE plan preserves it end to end.
+    for (uint64_t inner_size : std::vector<uint64_t>{528, 264, 132, 66}) {
+        SCOPED_TRACE(inner_size);
+        std::vector<float> values(outer_size * reduction_size * inner_size);
+        std::vector<float> expected(outer_size * inner_size, 0.0f);
+        for (uint64_t outer = 0; outer < outer_size; ++outer) {
+            for (uint64_t row = 0; row < reduction_size; ++row) {
+                const float value = row < 128 ? 1.0f : 2.0f;
+                for (uint64_t component = 0; component < inner_size; ++component) {
+                    values[(outer * reduction_size + row) * inner_size + component] = value;
+                    expected[outer * inner_size + component] += value;
+                }
+            }
+        }
+
+        for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+            SCOPED_TRACE(static_cast<int>(dtype));
+            Tensor input = makeGpuTensor(
+                values, {outer_size, reduction_size, inner_size}, stream, dtype);
+            std::shared_ptr<StampedCubReduction> stamped =
+                CubReduction(CubReductionOp::Sum, 1, DataType::FP32).stamp(input, stream);
+
+            ASSERT_TRUE(stamped->usesModernRKFamilyPlan());
+            EXPECT_NE(stamped->getModernRKStrategyChain().find("k_parallel:aligned"), std::string::npos);
+            EXPECT_EQ(stamped->getModernRKStrategyChain().find("rk:generic"), std::string::npos);
+            EXPECT_EQ(stamped->getModernRKFirstPacketBytes(), 2U);
+
+            stamped->run();
+            stream.synchronize();
+            expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected, 0.0f);
+        }
+    }
+}
+#endif
 
 #if THOR_CUB_ENABLE_64BIT_TYPES
 TEST(CubReduction, WideFp64RowsRespectGroupedStageCapacityAndVectorDirectBoundaries) {

@@ -190,9 +190,11 @@ struct ProductionRKOccupancyContext {
     context.rk.max_blocks_per_sm = static_cast<uint32_t>(properties.maxBlocksPerMultiProcessor);
     context.rk.occupancy_query = queryProductionRKOccupancy;
     context.rk.occupancy_query_context = &occupancy_context;
-    // Production needs total coverage while FP8 and a small shallow/awkward low-precision envelope remain outside the
-    // calibrated KParallel/RCooperative inventory. The fallback is the generic TiledFixedSegment adapter, not any of
-    // the deleted historical direct/full-row/row-split kernels. The strict RK census keeps this flag false.
+    // Production needs total coverage while packet-incompatible FP8 and a small shallow/awkward low-precision envelope
+    // remain outside the calibrated modern inventory. DENSE-FP8-VALUE-1 admits naturally packetable FP8 through
+    // 16/8/4/2-byte KParallel specializations; odd-K shapes that cannot form even the 2-byte packet remain on the
+    // generic TiledFixedSegment adapter, not any deleted historical direct/full-row/row-split kernel. The strict RK
+    // census keeps this flag false.
     context.rk.allow_generic_rk_fallback = true;
 
     DenseReductionPlan plan = planDenseReduction(problem, context);

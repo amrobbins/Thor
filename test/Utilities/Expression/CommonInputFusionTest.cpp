@@ -1418,7 +1418,7 @@ TEST(CudaSourceEmitter, Fp8E4M3CastsUseExplicitSatfiniteIntrinsics) {
     EXPECT_NE(source.find("thor_to_fp8_e4m3_satfinite("), std::string::npos);
 }
 
-TEST(CudaSourceEmitter, Fp8E5M2CastsUseExplicitNosatIntrinsicsWithoutFp16Staging) {
+TEST(CudaSourceEmitter, Fp8E5M2CastsUseExplicitSatfiniteIntrinsicsWithoutFp16Staging) {
     auto x = Expression::input("x", DataType::FP32, DataType::FP32);
     auto y = x.cast(DataType::FP8_E5M2);
 
@@ -1428,11 +1428,11 @@ TEST(CudaSourceEmitter, Fp8E5M2CastsUseExplicitNosatIntrinsicsWithoutFp16Staging
 
     ASSERT_EQ(stages.size(), 1);
     ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
-    const std::string source = CudaSourceEmitter::emitFlat(stages[0], "fp8_e5m2_nosat_cast");
+    const std::string source = CudaSourceEmitter::emitFlat(stages[0], "fp8_e5m2_satfinite_cast");
 
-    EXPECT_NE(source.find("__nv_cvt_float_to_fp8(value, __NV_NOSAT, __NV_E5M2)"), std::string::npos);
-    EXPECT_NE(source.find("thor_to_fp8_e5m2_nosat("), std::string::npos);
-    EXPECT_EQ(source.find("__NV_SATFINITE, __NV_E5M2"), std::string::npos);
+    EXPECT_NE(source.find("__nv_cvt_float_to_fp8(value, __NV_SATFINITE, __NV_E5M2)"), std::string::npos);
+    EXPECT_NE(source.find("thor_to_fp8_e5m2_satfinite("), std::string::npos);
+    EXPECT_EQ(source.find("__NV_NOSAT"), std::string::npos);
     EXPECT_EQ(source.find("__nv_fp8_e5m2("), std::string::npos);
 }
 

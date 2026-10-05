@@ -110,7 +110,7 @@ void expectFp8Bf16VectorSource(const std::string& source, DataType fp8_dtype) {
         EXPECT_NE(source.find("thor_to_fp8x2_e4m3_satfinite(__bfloat1622float2(t"), std::string::npos);
     } else {
         ASSERT_EQ(fp8_dtype, DataType::FP8_E5M2);
-        EXPECT_NE(source.find("thor_to_fp8x2_e5m2_nosat(__bfloat1622float2(t"), std::string::npos);
+        EXPECT_NE(source.find("thor_to_fp8x2_e5m2_satfinite(__bfloat1622float2(t"), std::string::npos);
     }
 }
 
@@ -164,7 +164,7 @@ void expectExplicitBf16MixedFp8TransposedVectorization(DataType input_dtype, Dat
         EXPECT_NE(source.find("thor_to_fp8x2_e4m3_satfinite(__bfloat1622float2(t"), std::string::npos);
     } else {
         ASSERT_EQ(output_dtype, DataType::FP8_E5M2);
-        EXPECT_NE(source.find("thor_to_fp8x2_e5m2_nosat(__bfloat1622float2(t"), std::string::npos);
+        EXPECT_NE(source.find("thor_to_fp8x2_e5m2_satfinite(__bfloat1622float2(t"), std::string::npos);
     }
 }
 
@@ -214,7 +214,7 @@ void expectExplicitBf16Fp8SpecializedBroadcastVectorization(DataType fp8_dtype, 
         EXPECT_NE(source.find("thor_to_fp8x2_e4m3_satfinite(__bfloat1622float2(t"), std::string::npos);
     } else {
         ASSERT_EQ(fp8_dtype, DataType::FP8_E5M2);
-        EXPECT_NE(source.find("thor_to_fp8x2_e5m2_nosat(__bfloat1622float2(t"), std::string::npos);
+        EXPECT_NE(source.find("thor_to_fp8x2_e5m2_satfinite(__bfloat1622float2(t"), std::string::npos);
     }
 }
 

@@ -270,6 +270,196 @@ TEST(CubReduction, KParallelTiledStagedTopologyDefersFinalizerAndScale) {
     expectFloatVectorNear(copyGpuTensorAsFloat(partials, stream), expected, 0.0f);
 }
 
+#if THOR_CUB_ENABLE_FP8_TYPES
+TEST(CubReduction, Fp8KParallelWidePacketCompleteTransposesToCoalescedFp32Writeback) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer_size = 2;
+    constexpr uint64_t reduction_size = 5;
+    constexpr uint64_t inner_size = 528;  // one full 512-component warp tile plus a 16-component tail
+    std::vector<float> values(outer_size * reduction_size * inner_size);
+    std::vector<float> expected(outer_size * inner_size, 0.0f);
+    for (uint64_t outer = 0; outer < outer_size; ++outer) {
+        for (uint64_t row = 0; row < reduction_size; ++row) {
+            for (uint64_t component = 0; component < inner_size; ++component) {
+                const float value = static_cast<float>(static_cast<int>((outer + row + component) % 3) - 1);
+                values[(outer * reduction_size + row) * inner_size + component] = value;
+                expected[outer * inner_size + component] += value;
+            }
+        }
+    }
+
+    for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        SCOPED_TRACE(static_cast<int>(dtype));
+        Tensor input = makeGpuTensor(values, {outer_size, reduction_size, inner_size}, stream, dtype);
+        const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
+        ASSERT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
+        Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size, inner_size}));
+        const CubReductionInternal::KParallelTiledStagePlan plan{
+            CubReductionInternal::TiledRKStageTopology::Complete, 16, 64, 1};
+        const CubReductionInternal::CubReductionStageSemantics semantics =
+            CubReductionInternal::makeValueReductionStageSemantics(
+                CubReductionOp::Sum, CubReductionInternal::CubReductionStageRole::Complete, reduction_size);
+
+        CubReductionInternal::launchKParallelTiledStage(
+            semantics, input, output, geometry, plan, 1.0f, stream);
+        expectFloatVectorNear(copyGpuTensorAsFloat(output, stream), expected, 0.0f);
+    }
+}
+
+TEST(CubReduction, Fp8KParallelWidePacketStagedWritesFp32PartialsWithoutFinalization) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer_size = 2;
+    constexpr uint64_t reduction_size = 256;
+    constexpr uint64_t inner_size = 528;
+    constexpr uint64_t shards_per_output = 2;
+    std::vector<float> values(outer_size * reduction_size * inner_size);
+    for (uint64_t outer = 0; outer < outer_size; ++outer) {
+        for (uint64_t row = 0; row < reduction_size; ++row) {
+            const float value = row < 128 ? 1.0f : 2.0f;
+            for (uint64_t component = 0; component < inner_size; ++component) {
+                values[(outer * reduction_size + row) * inner_size + component] = value;
+            }
+        }
+    }
+
+    for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        SCOPED_TRACE(static_cast<int>(dtype));
+        Tensor input = makeGpuTensor(values, {outer_size, reduction_size, inner_size}, stream, dtype);
+        const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
+        ASSERT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
+        Tensor partials(gpuPlacement,
+                        TensorDescriptor(DataType::FP32, {outer_size, shards_per_output, inner_size}));
+        const CubReductionInternal::KParallelTiledStagePlan plan{
+            CubReductionInternal::TiledRKStageTopology::Staged, 16, 32, shards_per_output};
+        const CubReductionInternal::CubReductionStageSemantics semantics =
+            CubReductionInternal::makeValueReductionStageSemantics(
+                CubReductionOp::L2Norm, CubReductionInternal::CubReductionStageRole::Complete, reduction_size);
+
+        // Complete L2 semantics deliberately arrive at a staged physical pass. The stage must apply Square on input,
+        // retain FP32 partials, and defer sqrt/output scale to the independently planned continuation.
+        CubReductionInternal::launchKParallelTiledStage(
+            semantics, input, partials, geometry, plan, 7.0f, stream);
+        std::vector<float> l2_expected;
+        l2_expected.reserve(outer_size * shards_per_output * inner_size);
+        for (uint64_t outer = 0; outer < outer_size; ++outer) {
+            l2_expected.insert(l2_expected.end(), inner_size, 128.0f);       // 128 * 1^2
+            l2_expected.insert(l2_expected.end(), inner_size, 512.0f);       // 128 * 2^2
+        }
+        expectFloatVectorNear(copyGpuTensorAsFloat(partials, stream), l2_expected, 0.0f);
+    }
+}
+
+TEST(CubReduction, Fp8KParallelStagedPacketFourAndTwoNeedNoSharedWritebackTile) {
+    REQUIRE_CUDA_DEVICE();
+
+    for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        SCOPED_TRACE(static_cast<int>(dtype));
+        for (size_t packet_bytes : {size_t{16}, size_t{8}, size_t{4}, size_t{2}}) {
+            SCOPED_TRACE(packet_bytes);
+            const CubReductionInternal::KParallelTiledStagePlan plan{
+                CubReductionInternal::TiledRKStageTopology::Staged, packet_bytes, 32, 2};
+            const CubReductionInternal::CubKernelOccupancyInfo occupancy =
+                CubReductionInternal::queryKParallelTiledStageOccupancy(dtype, plan);
+            if (packet_bytes >= 8) {
+                EXPECT_GT(occupancy.dynamic_shared_bytes, 0U);
+            } else {
+                EXPECT_EQ(occupancy.dynamic_shared_bytes, 0U);
+            }
+        }
+    }
+}
+
+TEST(CubReduction, Fp8KParallelEightFourAndTwoBytePacketsPreserveFp32Writeback) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t reduction_size = 256;
+    constexpr uint64_t shards_per_output = 2;
+    for (size_t packet_bytes : {size_t{8}, size_t{4}, size_t{2}}) {
+        const uint64_t inner_size = packet_bytes * 33U;  // one full warp tile plus one producer packet
+        SCOPED_TRACE(packet_bytes);
+        std::vector<float> values(reduction_size * inner_size);
+        for (uint64_t row = 0; row < reduction_size; ++row) {
+            const float value = row < 128 ? 1.0f : 2.0f;
+            for (uint64_t component = 0; component < inner_size; ++component) {
+                values[row * inner_size + component] = value;
+            }
+        }
+
+        for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+            SCOPED_TRACE(static_cast<int>(dtype));
+            Tensor input = makeGpuTensor(values, {1, reduction_size, inner_size}, stream, dtype);
+            const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
+            ASSERT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
+            const CubReductionInternal::CubReductionStageSemantics semantics =
+                CubReductionInternal::makeValueReductionStageSemantics(
+                    CubReductionOp::Sum, CubReductionInternal::CubReductionStageRole::Complete, reduction_size);
+
+            Tensor partials(gpuPlacement, TensorDescriptor(DataType::FP32, {1, shards_per_output, inner_size}));
+            const CubReductionInternal::KParallelTiledStagePlan staged_plan{
+                CubReductionInternal::TiledRKStageTopology::Staged, packet_bytes, 32, shards_per_output};
+            CubReductionInternal::launchKParallelTiledStage(
+                semantics, input, partials, geometry, staged_plan, 9.0f, stream);
+
+            std::vector<float> staged_expected;
+            staged_expected.reserve(shards_per_output * inner_size);
+            staged_expected.insert(staged_expected.end(), inner_size, 128.0f);
+            staged_expected.insert(staged_expected.end(), inner_size, 256.0f);
+            expectFloatVectorNear(copyGpuTensorAsFloat(partials, stream), staged_expected, 0.0f);
+
+            Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, {1, inner_size}));
+            const CubReductionInternal::KParallelTiledStagePlan complete_plan{
+                CubReductionInternal::TiledRKStageTopology::Complete, packet_bytes, 32, 1};
+            CubReductionInternal::launchKParallelTiledStage(
+                semantics, input, output, geometry, complete_plan, 1.0f, stream);
+            expectFloatVectorNear(copyGpuTensorAsFloat(output, stream),
+                                  std::vector<float>(inner_size, 384.0f),
+                                  0.0f);
+        }
+    }
+}
+
+TEST(CubReduction, Fp8KParallelCompleteKeepsEveryNativeFp8PacketWidthPacketized) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t reduction_size = 4;
+    for (size_t packet_bytes : {size_t{16}, size_t{8}, size_t{4}, size_t{2}}) {
+        const uint64_t inner_size = packet_bytes * 33U;
+        SCOPED_TRACE(packet_bytes);
+        std::vector<float> values(reduction_size * inner_size);
+        std::vector<float> expected(inner_size);
+        for (uint64_t component = 0; component < inner_size; ++component) {
+            const float value = static_cast<float>(1U << (component % 4U));  // exact in both FP8 formats
+            expected[component] = value;
+            for (uint64_t row = 0; row < reduction_size; ++row) {
+                values[row * inner_size + component] = value;
+            }
+        }
+
+        for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+            SCOPED_TRACE(static_cast<int>(dtype));
+            Tensor input = makeGpuTensor(values, {1, reduction_size, inner_size}, stream, dtype);
+            const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
+            Tensor output(gpuPlacement, TensorDescriptor(dtype, {1, inner_size}));
+            const CubReductionInternal::KParallelTiledStagePlan plan{
+                CubReductionInternal::TiledRKStageTopology::Complete, packet_bytes, 32, 1};
+            const CubReductionInternal::CubReductionStageSemantics semantics =
+                CubReductionInternal::makeValueReductionStageSemantics(
+                    CubReductionOp::Mean, CubReductionInternal::CubReductionStageRole::Complete, reduction_size);
+
+            CubReductionInternal::launchKParallelTiledStage(
+                semantics, input, output, geometry, plan, 1.0f, stream);
+            expectFloatVectorNear(copyGpuTensorAsFloat(output, stream), expected, 0.0f);
+        }
+    }
+}
+#endif
+
 TEST(CubReduction, AwkwardRotatedRCooperativeFirstStageIsAnIndependentPhysicalPass) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);

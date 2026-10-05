@@ -51,7 +51,7 @@ void storeCpuValues(Tensor& cpu, DataType dtype, const std::vector<float>& value
         case DataType::FP8_E5M2: {
             __nv_fp8_e5m2* typed = static_cast<__nv_fp8_e5m2*>(storage);
             for (size_t i = 0; i < values.size(); ++i) {
-                typed[i] = ThorLowPrecision::toFp8E5M2Nosat(values[i]);
+                typed[i] = ThorLowPrecision::toFp8E5M2Satfinite(values[i]);
             }
             return;
         }

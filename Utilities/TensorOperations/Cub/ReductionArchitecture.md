@@ -215,8 +215,10 @@ The packet-width x R-shard-depth census confirms that packet width and shard dep
 but it does **not** support choosing them as two independent sequential heuristics. Changing shard depth changes the
 `[outer,shards,K]` continuation geometry and can move the recursively planned continuation onto a materially different
 reducer, so the measured end-to-end winner can change with the packet/shard pair. Production therefore exposes one
-parameterized K-parallel stage implementation for 4/8/16-byte packets and 32/64/128/256-thread compile-time CTA
-specializations. Its physical topology is explicit: STAGED uses more than one R shard and emits FP32
+parameterized K-parallel stage implementation for 4/8/16-byte packets on FP16/BF16/FP32 and 2/4/8/16-byte packets on
+FP8, with 32/64/128/256-thread compile-time CTA specializations. FP8 always reduces in FP32. Packet16/packet8 use a
+warp-private shared-memory writeback transpose when FP32 ownership would otherwise exceed 16 bytes per lane;
+packet4/packet2 staged output is already coalesced as direct 16-byte/8-byte FP32 stores and needs no transpose. Its physical topology is explicit: STAGED uses more than one R shard and emits FP32
 `[outer,shards,K]` partials, while COMPLETE uses exactly one R shard and applies the current pass's finalizer, output
 scale, and runtime dtype conversion directly. This topology is independent of mathematical stage role: a logically
 Final pass may still be physically STAGED and defer finalization to its continuation, while a logically First pass may

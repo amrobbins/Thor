@@ -1,4 +1,5 @@
 #include "Utilities/TensorOperations/Cub/DenseReductionFamilies.h"
+#include "Utilities/TensorOperations/Cub/CubDataTypePolicy.h"
 
 #include <gtest/gtest.h>
 
@@ -68,10 +69,10 @@ DenseRKOccupancyInfo fixedTwoCtaOccupancy(const DenseRKFamilyPhysicalPlan& plan,
 
 }  // namespace
 
-TEST(CubDenseRKFamily, KParallelOccupancyUsesPhysicalWarpsRatherThanCtaCount) {
-    // Product has no packet-adaptive Complete path, and R=64 is too shallow for staged R-cooperative. K-parallel is
-    // therefore the only modern strategy and exposes the physical-warp accounting used by the calibrated policy.
-    const DenseReductionProblem problem = valueProblem({1, 64, 1536}, {1});
+TEST(CubDenseRKFamily, KParallelOccupancyCreditsUsefulWarpsButChargesIdleWarpsForResidency) {
+    // K=130 FP16 is legal only for a 4-byte packet. It needs 65 packet owners: three useful warps packed into a
+    // four-warp CTA. The fourth warp performs no reduction work, but it still consumes physical CTA residency.
+    const DenseReductionProblem problem = valueProblem({1, 64, 130}, {1});
     const DenseReductionCandidate candidate = ReducersDenseRK::propose(
         problem, {0}, context(DataType::FP16, DenseRKValueOperation::Product));
     const auto plan = rkPlan(candidate);
@@ -80,12 +81,38 @@ TEST(CubDenseRKFamily, KParallelOccupancyUsesPhysicalWarpsRatherThanCtaCount) {
     EXPECT_EQ(plan->strategy, DenseRKStrategy::KParallel);
     EXPECT_EQ(plan->implementation, DenseRKProductionImplementation::KParallelPass);
     EXPECT_EQ(plan->progress, DenseRKProgress::Complete);
-    EXPECT_EQ(plan->physical_stage_warps,
-              plan->first_stage_blocks * static_cast<uint64_t>(plan->block_threads / 32U));
-    EXPECT_GT(plan->max_active_blocks_per_sm, 0U);
-    EXPECT_GT(plan->max_active_warps_per_sm, 0U);
-    EXPECT_LE(plan->launch_warp_supply,
-              128U * static_cast<uint64_t>(plan->max_active_warps_per_sm));
+    EXPECT_EQ(plan->packet_bytes, 4U);
+    EXPECT_EQ(plan->block_threads, 128U);
+    EXPECT_EQ(plan->first_stage_blocks, 1U);
+    EXPECT_EQ(plan->physical_stage_warps, 4U);
+    EXPECT_EQ(plan->useful_stage_warps, 3U);
+    EXPECT_EQ(plan->launch_warp_supply, 3U);
+    EXPECT_LE(plan->useful_resident_warp_capacity, plan->resident_device_warps);
+    expectModernOnePass(*plan);
+}
+
+TEST(CubDenseRKFamily, KParallelUsefulResidentCapacityRemainsBoundedByPhysicalCtaOccupancy) {
+    // The same three-useful-warps/four-physical-warps CTA repeated over many outputs makes the residency distinction
+    // observable. With one SM in the deterministic fallback, 128-thread CTAs admit 12 physical resident blocks:
+    // 48 physical warps, but only 12 * 3 = 36 useful warps. Idle warps consume residency without adding supply.
+    const DenseReductionProblem problem = valueProblem({1000, 64, 130}, {1});
+    // O=1000 remains as retained run 0, so the reduced R=64 run is nominated at run 1. (The O=1 test above
+    // normalizes its leading singleton away, which is why its reduced run is at site 0.)
+    const DenseReductionCandidate candidate = ReducersDenseRK::propose(
+        problem, {1}, context(DataType::FP16, DenseRKValueOperation::Product, 1));
+    const auto plan = rkPlan(candidate);
+    ASSERT_NE(plan, nullptr);
+
+    EXPECT_EQ(plan->strategy, DenseRKStrategy::KParallel);
+    EXPECT_EQ(plan->packet_bytes, 4U);
+    EXPECT_EQ(plan->block_threads, 128U);
+    EXPECT_EQ(plan->physical_stage_warps, 4000U);
+    EXPECT_EQ(plan->useful_stage_warps, 3000U);
+    EXPECT_EQ(plan->max_active_blocks_per_sm, 12U);
+    EXPECT_EQ(plan->max_active_warps_per_sm, 48U);
+    EXPECT_EQ(plan->resident_device_warps, 48U);
+    EXPECT_EQ(plan->useful_resident_warp_capacity, 36U);
+    EXPECT_EQ(plan->launch_warp_supply, 36U);
     expectModernOnePass(*plan);
 }
 
@@ -141,6 +168,163 @@ TEST(CubDenseRKFamily, RealisticLargeReductionUsesDeepestWellSuppliedKParallelSt
     EXPECT_EQ(candidate.next_problem.runs[2].extent, 512U);
     expectModernOnePass(*plan);
 }
+
+#if THOR_CUB_ENABLE_FP8_TYPES
+TEST(CubDenseRKFamily, Fp8KParallelUsesWidestSaturatedLegalPacket) {
+    struct Case {
+        uint64_t inner_size;
+        size_t expected_packet_bytes;
+    };
+    const std::vector<Case> cases = {
+        {512, 16},
+        {24, 8},
+        {12, 4},
+    };
+
+    // O=2,R=32768 gives these packet populations enough useful resident work to reach their measured saturation
+    // targets. Once saturated, transaction width is the stable tie-break. Packet2's separate physical CTA saturation
+    // qualification is covered below.
+    for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        for (const Case& test_case : cases) {
+            SCOPED_TRACE(static_cast<int>(dtype));
+            SCOPED_TRACE(test_case.inner_size);
+            const DenseReductionProblem problem = valueProblem({2, 32768, test_case.inner_size}, {1});
+            const DenseReductionCandidate candidate =
+                ReducersDenseRK::propose(problem, {1}, context(dtype));
+            const auto plan = rkPlan(candidate);
+            ASSERT_NE(plan, nullptr);
+
+            EXPECT_EQ(plan->strategy, DenseRKStrategy::KParallel);
+            EXPECT_EQ(plan->implementation, DenseRKProductionImplementation::KParallelPass);
+            EXPECT_EQ(plan->packet_bytes, test_case.expected_packet_bytes);
+            EXPECT_EQ(plan->progress, DenseRKProgress::Staged);
+            EXPECT_GT(plan->shards_per_output, 1U);
+            expectModernOnePass(*plan);
+        }
+    }
+}
+
+TEST(CubDenseRKFamily, Fp8SaturatedWidePacketUsesPacketOwnerCtaGeometry) {
+    // Packet16 has 128 independent packet owners at K=2048. Once the launch has already crossed the calibrated
+    // 12-useful-warps/SM frontier, the measured staged sweep favors a four-warp CTA that matches that K-side owner
+    // geometry rather than CTA64 merely because the latter can report equal/greater resident useful capacity.
+    const DenseReductionProblem problem = valueProblem({4, 65536, 2048}, {1});
+    for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        SCOPED_TRACE(static_cast<int>(dtype));
+        const DenseReductionCandidate candidate =
+            ReducersDenseRK::propose(problem, {1}, context(dtype, DenseRKValueOperation::Sum, 170));
+        const auto plan = rkPlan(candidate);
+        ASSERT_NE(plan, nullptr);
+        EXPECT_EQ(plan->strategy, DenseRKStrategy::KParallel);
+        EXPECT_EQ(plan->progress, DenseRKProgress::Staged);
+        EXPECT_EQ(plan->packet_bytes, 16U);
+        EXPECT_EQ(plan->block_threads, 128U);
+        EXPECT_EQ(plan->shards_per_output, 128U);
+        EXPECT_EQ(plan->rows_per_shard, 512U);
+        EXPECT_GE(plan->launch_warp_supply, 170U * 12U);
+        expectModernOnePass(*plan);
+    }
+}
+
+TEST(CubDenseRKFamily, Fp8SaturatedWidePacketDoesNotOvervalueCta32Residency) {
+    // K=512 packet16 has exactly one warp of packet owners per output/shard. At 64 shards both CTA32 and CTA64
+    // expose the same 2048 useful launch warps on the 170-SM calibration geometry, but the sweep measures CTA64 at
+    // line rate while CTA32 is materially slower. Saturated wide-packet ranking therefore uses a two-warp minimum CTA.
+    const DenseReductionProblem problem = valueProblem({32, 32768, 512}, {1});
+    for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        SCOPED_TRACE(static_cast<int>(dtype));
+        const DenseReductionCandidate candidate =
+            ReducersDenseRK::propose(problem, {1}, context(dtype, DenseRKValueOperation::Sum, 170));
+        const auto plan = rkPlan(candidate);
+        ASSERT_NE(plan, nullptr);
+        EXPECT_EQ(plan->strategy, DenseRKStrategy::KParallel);
+        EXPECT_EQ(plan->progress, DenseRKProgress::Staged);
+        EXPECT_EQ(plan->packet_bytes, 16U);
+        EXPECT_EQ(plan->block_threads, 64U);
+        EXPECT_EQ(plan->shards_per_output, 64U);
+        EXPECT_EQ(plan->rows_per_shard, 512U);
+        EXPECT_GE(plan->launch_warp_supply, 170U * 12U);
+        expectModernOnePass(*plan);
+    }
+}
+
+TEST(CubDenseRKFamily, Fp8SaturatedLayoutKeepsImmediateCleanerShardNeighbor) {
+    // 255 shards are the first packet16 layout to reach 12 useful warps/SM for this shape, but 256 shards divide R
+    // exactly into 512-row chunks. The production selector deliberately leaves one shard of quantization freedom at
+    // the saturation boundary so the clean partition can win before continuation bytes become the tie-break.
+    const DenseReductionProblem problem = valueProblem({2, 131072, 2048}, {1});
+    for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        SCOPED_TRACE(static_cast<int>(dtype));
+        const DenseReductionCandidate candidate =
+            ReducersDenseRK::propose(problem, {1}, context(dtype, DenseRKValueOperation::Sum, 170));
+        const auto plan = rkPlan(candidate);
+        ASSERT_NE(plan, nullptr);
+        EXPECT_EQ(plan->strategy, DenseRKStrategy::KParallel);
+        EXPECT_EQ(plan->progress, DenseRKProgress::Staged);
+        EXPECT_EQ(plan->packet_bytes, 16U);
+        EXPECT_EQ(plan->block_threads, 128U);
+        EXPECT_EQ(plan->shards_per_output, 256U);
+        EXPECT_EQ(plan->rows_per_shard, 512U);
+        EXPECT_GE(plan->launch_warp_supply, 170U * 12U);
+        expectModernOnePass(*plan);
+    }
+}
+
+TEST(CubDenseRKFamily, Fp8KParallelUsesNarrowPacketForUsefulParallelismWhenUnderSupplied) {
+    // Same reduction, four packet widths: on this small Complete problem none can reach the saturation envelope.
+    // Packet2 exposes eight useful packet-owner warps versus one for packet16, so useful work supply wins.
+    const DenseReductionProblem problem = valueProblem({1, 64, 512}, {1});
+    for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        SCOPED_TRACE(static_cast<int>(dtype));
+        const DenseReductionCandidate candidate = ReducersDenseRK::propose(problem, {0}, context(dtype));
+        const auto plan = rkPlan(candidate);
+        ASSERT_NE(plan, nullptr);
+        EXPECT_EQ(plan->strategy, DenseRKStrategy::KParallel);
+        EXPECT_EQ(plan->progress, DenseRKProgress::Complete);
+        EXPECT_EQ(plan->packet_bytes, 2U);
+        EXPECT_EQ(plan->block_threads, 32U);
+        EXPECT_EQ(plan->useful_stage_warps, 8U);
+        expectModernOnePass(*plan);
+    }
+}
+
+TEST(CubDenseRKFamily, Fp8PacketTwoOnlyClaimsSaturationAtFourWarpOrWiderCta) {
+    // K=1022 makes packet2 the only legal modern KParallel width while providing enough packet owners for a
+    // four-warp CTA to expose the calibrated 48-useful-warps/SM frontier. CTA32/64 can match the useful count on
+    // paper but calibration showed that those physical specializations cannot sustain line rate, so only CTA>=128
+    // may claim saturation.
+    const DenseReductionProblem problem = valueProblem({1, 32768, 1022}, {1});
+    for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        SCOPED_TRACE(static_cast<int>(dtype));
+        const DenseReductionCandidate candidate = ReducersDenseRK::propose(problem, {0}, context(dtype));
+        const auto plan = rkPlan(candidate);
+        ASSERT_NE(plan, nullptr);
+        EXPECT_EQ(plan->strategy, DenseRKStrategy::KParallel);
+        EXPECT_EQ(plan->progress, DenseRKProgress::Staged);
+        EXPECT_EQ(plan->packet_bytes, 2U);
+        EXPECT_GE(plan->block_threads, 128U);
+        EXPECT_GE(plan->launch_warp_supply, 128U * 48U);
+        expectModernOnePass(*plan);
+    }
+}
+
+TEST(CubDenseRKFamily, Fp8KParallelLeavesOddKOnGenericFallback) {
+    // Two bytes/lane is the narrowest modern FP8 KParallel specialization. Odd K cannot form a whole-row packet and
+    // therefore remains visible as a strict modern-family coverage gap until a later FP8 RCooperative/gap milestone.
+    const DenseReductionProblem problem = valueProblem({1, 4096, 5}, {1});
+
+    for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        SCOPED_TRACE(static_cast<int>(dtype));
+        EXPECT_THROW(
+            static_cast<void>(ReducersDenseRK::propose(problem, {0}, context(dtype))), std::logic_error);
+
+        const DenseReductionCandidate fallback =
+            ReducersDenseRK::propose(problem, {0}, context(dtype, DenseRKValueOperation::Sum, 128, true));
+        ASSERT_EQ(rkPlan(fallback), nullptr);
+        ASSERT_NE(directPlan(fallback), nullptr);
+    }
+}
+#endif
 
 TEST(CubDenseRKFamily, DeepLowOutputUsesMinimumComfortableRCooperativeSharding) {
     const DenseReductionProblem problem = valueProblem({1, 8192, 512}, {1});

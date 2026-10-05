@@ -80,7 +80,7 @@ __device__ inline __nv_fp8_e4m3 transposeFromFloat<__nv_fp8_e4m3>(float v) {
 
 template <>
 __device__ inline __nv_fp8_e5m2 transposeFromFloat<__nv_fp8_e5m2>(float v) {
-    return ThorLowPrecision::toFp8E5M2Nosat(v);
+    return ThorLowPrecision::toFp8E5M2Satfinite(v);
 }
 
 template <typename OutT, typename InT>

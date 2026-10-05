@@ -2,6 +2,7 @@
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 #include "Utilities/TensorOperations/Cub/CubReductionOperation.cuh"
 #include "Utilities/TensorOperations/Cub/DenseReductionFamilies.h"
+#include "Utilities/Common/ReusableEventPool.h"
 
 #include <cuda/std/functional>
 #include <cuda_runtime.h>
@@ -15,6 +16,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -199,6 +201,14 @@ void launchPacketAdaptiveComplete(const CubReductionStageSemantics& semantics,
         case DataType::FP32:
             launchPacketAdaptiveAdditive<float>(semantics, plan, input, output, geometry, stream);
             return;
+#if THOR_CUB_ENABLE_FP8_TYPES
+        case DataType::FP8_E4M3:
+            launchPacketAdaptiveAdditive<__nv_fp8_e4m3>(semantics, plan, input, output, geometry, stream);
+            return;
+        case DataType::FP8_E5M2:
+            launchPacketAdaptiveAdditive<__nv_fp8_e5m2>(semantics, plan, input, output, geometry, stream);
+            return;
+#endif
         default:
             throw std::logic_error("Dense RK family packet-adaptive pass received an unsupported dtype.");
     }
@@ -462,6 +472,11 @@ class DenseRKFamilyCandidate final : public ReductionCandidate {
 
 constexpr int RK_SINGLE_PASS_WARMUPS = 2;
 constexpr int RK_SINGLE_PASS_SAMPLES = 3;
+// The FP8 staged-layout sweep is a policy-calibration benchmark, not a broad census. Its rows are close enough in
+// absolute time that three samples occasionally produce a bimodal median and a false 3-5% policy miss. Use a wider
+// odd sample count here so the median remains the reported statistic while being materially harder for one transient
+// scheduling/cache event to move.
+constexpr int FP8_STAGED_LAYOUT_TIMING_SAMPLES = 7;
 constexpr uint64_t RK_SINGLE_PASS_MAX_INPUT_BYTES = 512ULL * 1024ULL * 1024ULL;
 constexpr double RK_SINGLE_PASS_FILL_VALUE = 1.0 / 1024.0;
 
@@ -527,6 +542,10 @@ void checkSinglePassCuda(cudaError_t status, const char* operation) {
 
 [[nodiscard]] const char* singlePassDtypeName(DataType dtype) {
     switch (dtype) {
+        case DataType::FP8_E4M3:
+            return "fp8_e4m3";
+        case DataType::FP8_E5M2:
+            return "fp8_e5m2";
         case DataType::FP16:
             return "fp16";
         case DataType::BF16:
@@ -663,8 +682,9 @@ void checkSinglePassCuda(cudaError_t status, const char* operation) {
 
 template <typename InputT>
 [[nodiscard]] bool supportsSinglePassKParallelPacket(const CubReductionGeometry& geometry, size_t packet_bytes) {
-    if ((packet_bytes != 4 && packet_bytes != 8 && packet_bytes != 16)
-        || packet_bytes < sizeof(InputT) || packet_bytes % sizeof(InputT) != 0) {
+    const bool supported_packet = packet_bytes == 4 || packet_bytes == 8 || packet_bytes == 16
+                                  || (sizeof(InputT) == 1 && packet_bytes == 2);
+    if (!supported_packet || packet_bytes < sizeof(InputT) || packet_bytes % sizeof(InputT) != 0) {
         return false;
     }
     return geometry.inner_size % static_cast<uint64_t>(packet_bytes / sizeof(InputT)) == 0;
@@ -693,19 +713,38 @@ template <typename InputT>
 }
 
 [[nodiscard]] uint64_t singlePassAlignedRCoopTiles(const CubReductionGeometry& geometry, DataType dtype) {
-    const uint64_t items_per_lane = dtype == DataType::FP32 ? 4ULL : 8ULL;
+    const uint64_t items_per_lane = TensorDescriptor::getElementSizeInBytes(dtype) == 1 ? 16ULL
+                                    : dtype == DataType::FP32 ? 4ULL
+                                                            : 8ULL;
     return singlePassCeilDiv(geometry.inner_size, 32ULL * items_per_lane);
 }
 
 [[nodiscard]] bool singlePassAlignedRCoopSupports(const CubReductionGeometry& geometry, DataType dtype) {
+    if (TensorDescriptor::getElementSizeInBytes(dtype) == 1) {
+        return false;  // FP8 RCooperative calibration intentionally starts with FlatRows/Rotated, not aligned staging.
+    }
     const uint64_t items_per_lane = dtype == DataType::FP32 ? 4ULL : 8ULL;
     return geometry.inner_size % items_per_lane == 0;
 }
 
-[[nodiscard]] uint64_t singlePassRotatedRCoopTiles(const CubReductionGeometry& geometry, DataType dtype) {
-    const uint64_t items_per_lane = dtype == DataType::FP32 ? 4ULL : 8ULL;
-    const uint64_t logical_tile = 32ULL * items_per_lane - (items_per_lane - 1ULL);
+[[nodiscard]] uint64_t singlePassRotatedRCoopTiles(const CubReductionGeometry& geometry,
+                                                        DataType dtype,
+                                                        size_t packet_bytes,
+                                                        bool exact_fp8_tile = true) {
+    const uint64_t element_bytes = TensorDescriptor::getElementSizeInBytes(dtype);
+    if (packet_bytes < element_bytes || packet_bytes % element_bytes != 0) {
+        throw std::logic_error("Rotated R-cooperative packet width is not divisible by the input element size.");
+    }
+    const uint64_t items_per_lane = packet_bytes / element_bytes;
+    const uint64_t packet_span = 32ULL * items_per_lane;
+    const uint64_t logical_tile = element_bytes == 1 && exact_fp8_tile
+                                      ? packet_span
+                                      : packet_span - (items_per_lane - 1ULL);
     return singlePassCeilDiv(geometry.inner_size, logical_tile);
+}
+
+[[nodiscard]] uint64_t singlePassRotatedRCoopTiles(const CubReductionGeometry& geometry, DataType dtype) {
+    return singlePassRotatedRCoopTiles(geometry, dtype, 16, true);
 }
 
 [[nodiscard]] size_t singlePassPacketAdaptivePacketBytes(const CubReductionGeometry& geometry, DataType dtype) {
@@ -716,6 +755,12 @@ template <typename InputT>
             return chooseAdaptiveCooperativeTiledPacketBytes<__nv_bfloat16>(geometry);
         case DataType::FP32:
             return chooseAdaptiveCooperativeTiledPacketBytes<float>(geometry);
+#if THOR_CUB_ENABLE_FP8_TYPES
+        case DataType::FP8_E4M3:
+            return chooseAdaptiveCooperativeTiledPacketBytes<__nv_fp8_e4m3>(geometry);
+        case DataType::FP8_E5M2:
+            return chooseAdaptiveCooperativeTiledPacketBytes<__nv_fp8_e5m2>(geometry);
+#endif
         default:
             throw std::logic_error("RK single-pass packet-adaptive sweep received unsupported dtype.");
     }
@@ -743,6 +788,12 @@ template <typename InputT>
             return warps_for.template operator()<__nv_bfloat16>();
         case DataType::FP32:
             return warps_for.template operator()<float>();
+#if THOR_CUB_ENABLE_FP8_TYPES
+        case DataType::FP8_E4M3:
+            return warps_for.template operator()<__nv_fp8_e4m3>();
+        case DataType::FP8_E5M2:
+            return warps_for.template operator()<__nv_fp8_e5m2>();
+#endif
         default:
             throw std::logic_error("RK single-pass packet-adaptive sweep received unsupported dtype.");
     }
@@ -798,7 +849,11 @@ template <typename InputT, size_t PacketBytes, bool NaturallyAlignedRows>
         case 16:
             return querySinglePassPacketAdaptiveOccupancyForWarps<InputT, PacketBytes, 16, NaturallyAlignedRows>();
         case 32:
-            return querySinglePassPacketAdaptiveOccupancyForWarps<InputT, PacketBytes, 32, NaturallyAlignedRows>();
+            if constexpr (sizeof(InputT) == 1) {
+                throw std::logic_error("FP8 packet-adaptive occupancy is capped at 16 cooperative warps.");
+            } else {
+                return querySinglePassPacketAdaptiveOccupancyForWarps<InputT, PacketBytes, 32, NaturallyAlignedRows>();
+            }
         default:
             throw std::logic_error("RK packet-adaptive occupancy query received invalid warps-per-tile.");
     }
@@ -846,6 +901,12 @@ template <typename InputT>
             return querySinglePassPacketAdaptiveOccupancyForInput<__nv_bfloat16>(geometry, packet_bytes, warps);
         case DataType::FP32:
             return querySinglePassPacketAdaptiveOccupancyForInput<float>(geometry, packet_bytes, warps);
+#if THOR_CUB_ENABLE_FP8_TYPES
+        case DataType::FP8_E4M3:
+            return querySinglePassPacketAdaptiveOccupancyForInput<__nv_fp8_e4m3>(geometry, packet_bytes, warps);
+        case DataType::FP8_E5M2:
+            return querySinglePassPacketAdaptiveOccupancyForInput<__nv_fp8_e5m2>(geometry, packet_bytes, warps);
+#endif
         default:
             throw std::logic_error("RK packet-adaptive occupancy query received an unsupported dtype.");
     }
@@ -895,34 +956,187 @@ template <typename InputT>
                                 static_cast<uint32_t>(info.max_active_warps_per_sm)};
 }
 
-[[nodiscard]] RKSinglePassTiming timeRKSinglePass(Tensor& cache_flush, Stream& stream, const auto& run) {
+[[nodiscard]] RKSinglePassTiming timeRKSinglePass(Tensor& cache_flush,
+                                                       Stream& stream,
+                                                       const auto& run,
+                                                       int timing_samples = RK_SINGLE_PASS_SAMPLES) {
+    if (timing_samples <= 0 || timing_samples % 2 == 0) {
+        throw std::invalid_argument("Dense RK single-pass timing requires a positive odd sample count.");
+    }
     for (int i = 0; i < RK_SINGLE_PASS_WARMUPS; ++i) {
         run();
     }
     stream.synchronize();
 
-    cudaEvent_t start = nullptr;
-    cudaEvent_t stop = nullptr;
-    checkSinglePassCuda(cudaEventCreate(&start), "cudaEventCreate(rk_single_pass_start)");
-    checkSinglePassCuda(cudaEventCreate(&stop), "cudaEventCreate(rk_single_pass_stop)");
-    std::array<double, RK_SINGLE_PASS_SAMPLES> samples{};
-    for (int sample = 0; sample < RK_SINGLE_PASS_SAMPLES; ++sample) {
+    // Cache-cold timing does not require a host barrier between the eviction memset and the start event: both are
+    // ordered on the same CUDA stream. Queue every cold sample back-to-back and wait once on the final stop event.
+    // Reusing pooled timing events removes per-candidate cudaEventCreate/cudaEventDestroy churn without changing the
+    // measured interval or the >=8x-L2 eviction contract.
+    ReusableEventLeases event_leases(static_cast<size_t>(timing_samples) * 2);
+    std::vector<Event> starts;
+    std::vector<Event> stops;
+    starts.reserve(static_cast<size_t>(timing_samples));
+    stops.reserve(static_cast<size_t>(timing_samples));
+    for (int sample = 0; sample < timing_samples; ++sample) {
+        starts.emplace_back(event_leases.acquire(stream.getGpuNum(), true, false));
+        stops.emplace_back(event_leases.acquire(stream.getGpuNum(), true, false));
+    }
+
+    for (int sample = 0; sample < timing_samples; ++sample) {
         checkSinglePassCuda(cudaMemsetAsync(cache_flush.getMemPtr<void>(),
                                             0x41 + sample,
                                             cache_flush.getArraySizeInBytes(),
                                             stream.getStream()),
                             "cudaMemsetAsync(rk_single_pass_cache_flush)");
-        stream.synchronize();
-        checkSinglePassCuda(cudaEventRecord(start, stream.getStream()), "cudaEventRecord(rk_single_pass_start)");
+        stream.putEvent(starts[static_cast<size_t>(sample)], true, false);
         run();
-        checkSinglePassCuda(cudaEventRecord(stop, stream.getStream()), "cudaEventRecord(rk_single_pass_stop)");
-        checkSinglePassCuda(cudaEventSynchronize(stop), "cudaEventSynchronize(rk_single_pass_stop)");
+        stream.putEvent(stops[static_cast<size_t>(sample)], true, false);
+    }
+    stops.back().synchronize();
+
+    std::vector<double> samples(static_cast<size_t>(timing_samples));
+    for (int sample = 0; sample < timing_samples; ++sample) {
         float elapsed_ms = 0.0f;
-        checkSinglePassCuda(cudaEventElapsedTime(&elapsed_ms, start, stop), "cudaEventElapsedTime(rk_single_pass)");
+        checkSinglePassCuda(cudaEventElapsedTime(&elapsed_ms,
+                                                 starts[static_cast<size_t>(sample)].getEvent(),
+                                                 stops[static_cast<size_t>(sample)].getEvent()),
+                            "cudaEventElapsedTime(rk_single_pass)");
         samples[static_cast<size_t>(sample)] = elapsed_ms;
     }
-    checkSinglePassCuda(cudaEventDestroy(start), "cudaEventDestroy(rk_single_pass_start)");
-    checkSinglePassCuda(cudaEventDestroy(stop), "cudaEventDestroy(rk_single_pass_stop)");
+    std::sort(samples.begin(), samples.end());
+    return RKSinglePassTiming{samples.front(), samples[samples.size() / 2], samples.back()};
+}
+
+class RKRotatingTensorSlots {
+   public:
+    RKRotatingTensorSlots() = default;
+
+    RKRotatingTensorSlots(TensorPlacement placement, const TensorDescriptor& descriptor, uint32_t slot_count)
+        : slot_count_(slot_count) {
+        if (slot_count_ == 0) {
+            throw std::invalid_argument("Dense RK rotating working set requires at least one slot.");
+        }
+        const uint64_t elements_per_slot = descriptor.getTotalNumElements();
+        const uint64_t element_bytes = TensorDescriptor::getElementSizeInBytes(descriptor.getDataType());
+        constexpr uint64_t SLOT_ALIGNMENT_BYTES = 16;
+        if (elements_per_slot == 0 || element_bytes == 0 || SLOT_ALIGNMENT_BYTES % element_bytes != 0) {
+            throw std::invalid_argument("Dense RK rotating working set requires a non-zero element size dividing 16 bytes.");
+        }
+        const uint64_t slot_alignment_elements = SLOT_ALIGNMENT_BYTES / element_bytes;
+        if (elements_per_slot > std::numeric_limits<uint64_t>::max() - (slot_alignment_elements - 1)) {
+            throw std::overflow_error("Dense RK rotating working-set slot stride overflowed.");
+        }
+        const uint64_t slot_stride_elements =
+            ((elements_per_slot + slot_alignment_elements - 1) / slot_alignment_elements) * slot_alignment_elements;
+        if (slot_stride_elements > std::numeric_limits<uint64_t>::max() / static_cast<uint64_t>(slot_count_)) {
+            throw std::overflow_error("Dense RK rotating working-set allocation overflowed.");
+        }
+        const uint64_t storage_elements = slot_stride_elements * static_cast<uint64_t>(slot_count_);
+        storage_ = Tensor(placement, TensorDescriptor(descriptor.getDataType(), {storage_elements}));
+
+        const std::vector<uint64_t> dimensions = descriptor.getDimensions();
+        std::vector<uint64_t> dense_strides(dimensions.size(), 1);
+        for (size_t i = dimensions.size(); i-- > 1;) {
+            dense_strides[i - 1] = dense_strides[i] * dimensions[i];
+        }
+
+        slots_.reserve(slot_count_);
+        for (uint32_t slot = 0; slot < slot_count_; ++slot) {
+            slots_.push_back(storage_.aliasView(
+                dimensions, dense_strides, static_cast<uint64_t>(slot) * slot_stride_elements));
+        }
+    }
+
+    [[nodiscard]] uint32_t size() const { return slot_count_; }
+    [[nodiscard]] Tensor& slot(uint32_t index) { return slots_.at(index); }
+    [[nodiscard]] Tensor& storage() { return storage_; }
+
+   private:
+    Tensor storage_;
+    std::vector<Tensor> slots_;
+    uint32_t slot_count_ = 0;
+};
+
+[[nodiscard]] uint32_t rkRotatingColdSlotCount(uint64_t cold_reuse_bytes, uint64_t input_bytes) {
+    if (cold_reuse_bytes == 0 || input_bytes == 0) {
+        throw std::invalid_argument("Dense RK rotating working set requires non-zero byte counts.");
+    }
+    const uint64_t slots = (cold_reuse_bytes + input_bytes - 1) / input_bytes + 1;
+    if (slots > std::numeric_limits<uint32_t>::max()) {
+        throw std::overflow_error("Dense RK rotating working-set slot count overflowed uint32_t.");
+    }
+    return static_cast<uint32_t>(slots);
+}
+
+[[nodiscard]] RKSinglePassTiming timeRKSinglePassRotatingWorkingSet(
+    Tensor& input,
+    Tensor& output,
+    RKRotatingTensorSlots& input_slots,
+    RKRotatingTensorSlots& output_slots,
+    uint64_t& rotation_cursor,
+    Tensor& cache_flush,
+    bool& needs_bootstrap_flush,
+    Stream& stream,
+    const auto& run,
+    int timing_samples = RK_SINGLE_PASS_SAMPLES) {
+    if (timing_samples <= 0 || timing_samples % 2 == 0) {
+        throw std::invalid_argument("Dense RK single-pass timing requires a positive odd sample count.");
+    }
+    if (input_slots.size() != output_slots.size()) {
+        throw std::logic_error("Dense RK rotating input/output working sets must have the same slot count.");
+    }
+
+    if (needs_bootstrap_flush) {
+        // Establish one known-cold starting point. After this single bootstrap eviction, the continuously rotating
+        // input/output tensors provide the reuse distance; there is no per-sample cache-flush traffic.
+        checkSinglePassCuda(cudaMemsetAsync(cache_flush.getMemPtr<void>(),
+                                            0x41,
+                                            cache_flush.getArraySizeInBytes(),
+                                            stream.getStream()),
+                            "cudaMemsetAsync(rk_rotating_working_set_bootstrap)");
+        needs_bootstrap_flush = false;
+    }
+
+    const auto bind_next_slot = [&]() {
+        const uint32_t slot = static_cast<uint32_t>(rotation_cursor % input_slots.size());
+        ++rotation_cursor;
+        input = input_slots.slot(slot);
+        output = output_slots.slot(slot);
+    };
+
+    for (int i = 0; i < RK_SINGLE_PASS_WARMUPS; ++i) {
+        bind_next_slot();
+        run();
+    }
+    stream.synchronize();
+
+    ReusableEventLeases event_leases(static_cast<size_t>(timing_samples) * 2);
+    std::vector<Event> starts;
+    std::vector<Event> stops;
+    starts.reserve(static_cast<size_t>(timing_samples));
+    stops.reserve(static_cast<size_t>(timing_samples));
+    for (int sample = 0; sample < timing_samples; ++sample) {
+        starts.emplace_back(event_leases.acquire(stream.getGpuNum(), true, false));
+        stops.emplace_back(event_leases.acquire(stream.getGpuNum(), true, false));
+    }
+
+    for (int sample = 0; sample < timing_samples; ++sample) {
+        bind_next_slot();
+        stream.putEvent(starts[static_cast<size_t>(sample)], true, false);
+        run();
+        stream.putEvent(stops[static_cast<size_t>(sample)], true, false);
+    }
+    stops.back().synchronize();
+
+    std::vector<double> samples(static_cast<size_t>(timing_samples));
+    for (int sample = 0; sample < timing_samples; ++sample) {
+        float elapsed_ms = 0.0f;
+        checkSinglePassCuda(cudaEventElapsedTime(&elapsed_ms,
+                                                 starts[static_cast<size_t>(sample)].getEvent(),
+                                                 stops[static_cast<size_t>(sample)].getEvent()),
+                            "cudaEventElapsedTime(rk_single_pass_rotating_working_set)");
+        samples[static_cast<size_t>(sample)] = elapsed_ms;
+    }
     std::sort(samples.begin(), samples.end());
     return RKSinglePassTiming{samples.front(), samples[samples.size() / 2], samples.back()};
 }
@@ -942,6 +1156,12 @@ template <typename T>
 
 [[nodiscard]] float singlePassDeviceValue(const Tensor& tensor, uint64_t index, Stream& stream) {
     switch (tensor.getDataType()) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+        case DataType::FP8_E4M3:
+            return singlePassDeviceValue<__nv_fp8_e4m3>(tensor, index, stream);
+        case DataType::FP8_E5M2:
+            return singlePassDeviceValue<__nv_fp8_e5m2>(tensor, index, stream);
+#endif
         case DataType::FP16:
             return singlePassDeviceValue<__half>(tensor, index, stream);
         case DataType::BF16:
@@ -973,8 +1193,9 @@ void validateSinglePassSample(const Tensor& output,
 void validateSinglePassComplete(const Tensor& output,
                                 const CubReductionGeometry& geometry,
                                 Stream& stream,
-                                std::string_view implementation) {
-    const double expected = static_cast<double>(geometry.reduction_size) * RK_SINGLE_PASS_FILL_VALUE;
+                                std::string_view implementation,
+                                double fill_value = RK_SINGLE_PASS_FILL_VALUE) {
+    const double expected = static_cast<double>(geometry.reduction_size) * fill_value;
     validateSinglePassSample(output, 0, expected, stream, implementation);
     validateSinglePassSample(output, output.getTotalNumElements() - 1, expected, stream, implementation);
 }
@@ -987,7 +1208,8 @@ void validateSinglePassPartial(const Tensor& output,
                                uint64_t rows_per_shard,
                                SinglePassShardPolicy policy,
                                Stream& stream,
-                               std::string_view implementation) {
+                               std::string_view implementation,
+                               double fill_value = RK_SINGLE_PASS_FILL_VALUE) {
     if (shards_per_output <= 1) {
         throw std::logic_error("RK single-pass partial validation requires multiple shards.");
     }
@@ -1005,12 +1227,12 @@ void validateSinglePassPartial(const Tensor& output,
     }
     validateSinglePassSample(output,
                              0,
-                             static_cast<double>(first_rows) * RK_SINGLE_PASS_FILL_VALUE,
+                             static_cast<double>(first_rows) * fill_value,
                              stream,
                              implementation);
     validateSinglePassSample(output,
                              output.getTotalNumElements() - 1,
-                             static_cast<double>(last_rows) * RK_SINGLE_PASS_FILL_VALUE,
+                             static_cast<double>(last_rows) * fill_value,
                              stream,
                              implementation);
 }
@@ -2510,6 +2732,545 @@ void runRKKParallelStagedGeometryCalibrationImpl(Tensor& cache_flush, Stream& st
 }
 
 
+constexpr double FP8_PACKET_AB_FILL_VALUE = 0.125;
+constexpr uint32_t FP8_PACKET_AB_BLOCK_THREADS = 32;
+constexpr uint64_t FP8_PACKET_AB_STAGED_ROWS_PER_SHARD = 64;
+
+struct Fp8PacketABPhase {
+    const char* name;
+    TiledRKStageTopology topology;
+    uint64_t reduction;
+    uint64_t target_input_bytes;
+};
+
+template <typename InputT>
+void runFp8PacketABShape(const Fp8PacketABPhase& phase,
+                         DataType dtype,
+                         uint64_t outer,
+                         uint64_t inner,
+                         const Tensor& input,
+                         Tensor& cache_flush,
+                         Stream& stream) {
+    static_assert(sizeof(InputT) == 1, "FP8 packet A/B census requires one-byte input storage.");
+    const CubReductionGeometry geometry = CubReduction::analyzeValueGeometry(
+        CubReductionOp::Sum, input.getDimensions(), {1});
+    if (geometry.path != CubReductionPath::TiledFixedSegment) {
+        throw std::logic_error("FP8 packet A/B census case was not TiledFixedSegment.");
+    }
+    if (geometry.outer_size != outer || geometry.reduction_size != phase.reduction || geometry.inner_size != inner) {
+        throw std::logic_error("FP8 packet A/B census geometry disagrees with the requested exact shape.");
+    }
+
+    const bool staged = phase.topology == TiledRKStageTopology::Staged;
+    const uint64_t shards = staged ? singlePassCeilDiv(phase.reduction, FP8_PACKET_AB_STAGED_ROWS_PER_SHARD) : 1ULL;
+    if (staged && (shards <= 1 || phase.reduction % FP8_PACKET_AB_STAGED_ROWS_PER_SHARD != 0)) {
+        throw std::logic_error("FP8 packet A/B staged census requires an exact fixed rows-per-shard geometry.");
+    }
+
+    Tensor output(input.getPlacement(),
+                  staged
+                      ? TensorDescriptor(DataType::FP32, {outer, shards, inner})
+                      : TensorDescriptor(dtype, geometry.output_dimensions));
+    const CubReductionStageSemantics semantics = makeValueReductionStageSemantics(
+        CubReductionOp::Sum,
+        staged ? CubReductionStageRole::First : CubReductionStageRole::Complete,
+        geometry.reduction_size);
+
+    constexpr std::array<size_t, 4> PACKETS = {16, 8, 4, 2};
+    for (size_t packet_bytes : PACKETS) {
+        if (!supportsSinglePassKParallelPacket<InputT>(geometry, packet_bytes)) {
+            throw std::logic_error("FP8 packet A/B exact shape does not support every requested packet width.");
+        }
+        const KParallelTiledStagePlan plan{
+            phase.topology, packet_bytes, FP8_PACKET_AB_BLOCK_THREADS, shards};
+        const auto run = [&]() {
+            launchKParallelTiledStage(semantics, input, output, geometry, plan, 1.0f, stream);
+        };
+
+        run();
+        stream.synchronize();
+        if (staged) {
+            validateSinglePassPartial(output,
+                                      geometry,
+                                      shards,
+                                      FP8_PACKET_AB_STAGED_ROWS_PER_SHARD,
+                                      SinglePassShardPolicy::Balanced,
+                                      stream,
+                                      "fp8_packet_ab_staged",
+                                      FP8_PACKET_AB_FILL_VALUE);
+        } else {
+            validateSinglePassComplete(
+                output, geometry, stream, "fp8_packet_ab_complete", FP8_PACKET_AB_FILL_VALUE);
+        }
+
+        const RKSinglePassTiming timing = timeRKSinglePass(cache_flush, stream, run);
+        const uint64_t items_per_lane = packet_bytes / sizeof(InputT);
+        const uint64_t component_tiles = singlePassKParallelComponentTiles<InputT>(
+            geometry, packet_bytes, FP8_PACKET_AB_BLOCK_THREADS);
+        const uint64_t blocks = outer * component_tiles * shards;
+        const uint64_t input_bytes = input.getArraySizeInBytes();
+        const uint64_t output_bytes = output.getArraySizeInBytes();
+        const double logical_gbps =
+            static_cast<double>(input_bytes + output_bytes) / (timing.median_ms * 1.0e6);
+
+        std::cout << phase.name << ",o" << outer << "_r" << phase.reduction << "_k" << inner << ','
+                  << singlePassDtypeName(dtype) << ',' << (staged ? "staged" : "complete") << ',' << outer << ','
+                  << phase.reduction << ',' << inner << ',' << packet_bytes << ',' << items_per_lane << ','
+                  << FP8_PACKET_AB_BLOCK_THREADS << ',' << shards << ','
+                  << (staged ? FP8_PACKET_AB_STAGED_ROWS_PER_SHARD : phase.reduction) << ',' << blocks << ','
+                  << input_bytes << ',' << output_bytes << ',' << std::fixed << std::setprecision(4)
+                  << timing.median_ms << ',' << timing.best_ms << ',' << timing.worst_ms << ','
+                  << std::setprecision(2) << logical_gbps << '\n';
+    }
+}
+
+void runFp8KParallelPacketABCensusImpl(Tensor& cache_flush, Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    constexpr uint64_t MIB = 1024ULL * 1024ULL;
+    constexpr std::array<Fp8PacketABPhase, 3> PHASES = {{{"complete_64mib",
+                                                           TiledRKStageTopology::Complete,
+                                                           64,
+                                                           64ULL * MIB},
+                                                          {"staged_64mib",
+                                                           TiledRKStageTopology::Staged,
+                                                           4096,
+                                                           64ULL * MIB},
+                                                          {"deep_staged_512mib",
+                                                           TiledRKStageTopology::Staged,
+                                                           32768,
+                                                           512ULL * MIB}}};
+    constexpr std::array<uint64_t, 4> INNER_WIDTHS = {512, 1024, 2048, 8192};
+    constexpr std::array<DataType, 2> DTYPES = {DataType::FP8_E4M3, DataType::FP8_E5M2};
+
+    std::cout << "# mode=rk_fp8_kparallel_packet_census comparison=exact_shape_physical_kernel_ab\n";
+    std::cout << "# purpose=compare FP8 KParallel packet16/8/4/2 on literally identical reductions\n";
+    std::cout << "# invariant=same dtype,O,R,K,input buffer,output buffer,topology,block_threads,shards; only packet_bytes changes\n";
+    std::cout << "# complete topology: block_threads=32, shards=1, output dtype=input dtype\n";
+    std::cout << "# staged topology: block_threads=32, rows_per_shard=64, output dtype=fp32\n";
+    std::cout << "# production planner is not used to choose packet width in this benchmark\n";
+    std::cout << "# warmups=" << RK_SINGLE_PASS_WARMUPS << " timing_samples=" << RK_SINGLE_PASS_SAMPLES << '\n';
+    std::cout << "phase,case,dtype,topology,outer,R,K,packet_bytes,items_per_lane,block_threads,shards_per_output,"
+                 "rows_per_shard,blocks,input_bytes,output_bytes,median_ms,best_ms,worst_ms,logical_GBps\n";
+
+    uint64_t rows = 0;
+    for (const Fp8PacketABPhase& phase : PHASES) {
+        for (uint64_t inner : INNER_WIDTHS) {
+            const uint64_t elements_per_outer = checkedSinglePassElements(1, phase.reduction, inner);
+            if (phase.target_input_bytes % elements_per_outer != 0) {
+                throw std::logic_error("FP8 packet A/B target bytes must map to one exact shared outer count.");
+            }
+            const uint64_t outer = phase.target_input_bytes / elements_per_outer;
+            if (outer == 0) {
+                throw std::logic_error("FP8 packet A/B exact shape requires non-zero outer count.");
+            }
+            for (DataType dtype : DTYPES) {
+                Tensor input(cache_flush.getPlacement(), TensorDescriptor(dtype, {outer, phase.reduction, inner}));
+                input.fill(FP8_PACKET_AB_FILL_VALUE, stream);
+                stream.synchronize();
+                if (input.getArraySizeInBytes() != phase.target_input_bytes) {
+                    throw std::logic_error("FP8 packet A/B input bytes drifted from the exact target size.");
+                }
+                switch (dtype) {
+                    case DataType::FP8_E4M3:
+                        runFp8PacketABShape<__nv_fp8_e4m3>(
+                            phase, dtype, outer, inner, input, cache_flush, stream);
+                        break;
+                    case DataType::FP8_E5M2:
+                        runFp8PacketABShape<__nv_fp8_e5m2>(
+                            phase, dtype, outer, inner, input, cache_flush, stream);
+                        break;
+                    default:
+                        throw std::logic_error("FP8 packet A/B census received an unsupported dtype.");
+                }
+                rows += 4;
+            }
+        }
+    }
+    std::cout << "# rk_fp8_kparallel_packet_census_complete measured_rows=" << rows << '\n';
+#else
+    (void)cache_flush;
+    (void)stream;
+    throw std::logic_error("FP8 packet A/B census requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+
+constexpr uint64_t FP8_SMALL_PACKET_SWEEP_MAX_INPUT_BYTES = 64ULL * 1024ULL * 1024ULL;
+constexpr uint32_t FP8_SMALL_PACKET_SWEEP_BLOCK_THREADS = 32;
+constexpr double FP8_SMALL_PACKET_SWEEP_FILL_VALUE = 1.0 / 512.0;
+
+struct Fp8SmallPacketShape {
+    const char* family;
+    uint64_t outer;
+    uint64_t reduction;
+    uint64_t inner;
+};
+
+template <typename InputT>
+void runFp8SmallPacketShape(const Fp8SmallPacketShape& benchmark_case,
+                            DataType dtype,
+                            const Tensor& input,
+                            Tensor& cache_flush,
+                            Stream& stream) {
+    static_assert(sizeof(InputT) == 1, "FP8 small-packet sweep requires one-byte input storage.");
+    const CubReductionGeometry geometry = CubReduction::analyzeValueGeometry(
+        CubReductionOp::Sum, input.getDimensions(), {1});
+    if (geometry.path != CubReductionPath::TiledFixedSegment) {
+        throw std::logic_error("FP8 small-packet sweep case was not TiledFixedSegment.");
+    }
+    if (geometry.outer_size != benchmark_case.outer || geometry.reduction_size != benchmark_case.reduction
+        || geometry.inner_size != benchmark_case.inner) {
+        throw std::logic_error("FP8 small-packet sweep geometry disagrees with the requested exact shape.");
+    }
+
+    Tensor output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+    const CubReductionStageSemantics semantics = makeValueReductionStageSemantics(
+        CubReductionOp::Sum, CubReductionStageRole::Complete, geometry.reduction_size);
+
+    constexpr std::array<size_t, 4> PACKETS = {16, 8, 4, 2};
+    std::array<size_t, 4> legal_packets{};
+    size_t legal_count = 0;
+    for (size_t packet_bytes : PACKETS) {
+        if (supportsSinglePassKParallelPacket<InputT>(geometry, packet_bytes)) {
+            legal_packets[legal_count++] = packet_bytes;
+        }
+    }
+    if (legal_count < 2) {
+        throw std::logic_error("FP8 small-packet sweep requires at least two legal packet widths per exact shape.");
+    }
+    const size_t widest_legal_packet = legal_packets[0];
+
+    for (size_t packet_index = 0; packet_index < legal_count; ++packet_index) {
+        const size_t packet_bytes = legal_packets[packet_index];
+        const KParallelTiledStagePlan plan{
+            TiledRKStageTopology::Complete, packet_bytes, FP8_SMALL_PACKET_SWEEP_BLOCK_THREADS, 1};
+        const auto run = [&]() {
+            launchKParallelTiledStage(semantics, input, output, geometry, plan, 1.0f, stream);
+        };
+
+        run();
+        stream.synchronize();
+        validateSinglePassComplete(
+            output, geometry, stream, "fp8_small_packet_complete", FP8_SMALL_PACKET_SWEEP_FILL_VALUE);
+
+        const RKSinglePassTiming timing = timeRKSinglePass(cache_flush, stream, run);
+        const uint64_t items_per_lane = packet_bytes / sizeof(InputT);
+        const uint64_t packet_owners = geometry.inner_size / items_per_lane;
+        const uint64_t component_tiles = singlePassKParallelComponentTiles<InputT>(
+            geometry, packet_bytes, FP8_SMALL_PACKET_SWEEP_BLOCK_THREADS);
+        const uint64_t blocks = geometry.outer_size * component_tiles;
+        const uint64_t input_bytes = input.getArraySizeInBytes();
+        const uint64_t output_bytes = output.getArraySizeInBytes();
+        const double logical_gbps =
+            static_cast<double>(input_bytes + output_bytes) / (timing.median_ms * 1.0e6);
+
+        std::cout << benchmark_case.family << ",o" << benchmark_case.outer << "_r" << benchmark_case.reduction
+                  << "_k" << benchmark_case.inner << ',' << singlePassDtypeName(dtype) << ",complete,"
+                  << benchmark_case.outer << ',' << benchmark_case.reduction << ',' << benchmark_case.inner << ','
+                  << widest_legal_packet << ',' << legal_count << ',' << packet_bytes << ',' << items_per_lane << ','
+                  << FP8_SMALL_PACKET_SWEEP_BLOCK_THREADS << ",1," << packet_owners << ',' << component_tiles << ','
+                  << blocks << ',' << input_bytes << ',' << output_bytes << ',' << std::fixed << std::setprecision(4)
+                  << timing.median_ms << ',' << timing.best_ms << ',' << timing.worst_ms << ',' << std::setprecision(2)
+                  << logical_gbps << '\n';
+    }
+}
+
+void runFp8KParallelSmallPacketSweepImpl(Tensor& cache_flush, Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    constexpr std::array<DataType, 2> DTYPES = {DataType::FP8_E4M3, DataType::FP8_E5M2};
+    constexpr std::array<uint64_t, 6> SUPPLY_OUTERS = {1, 4, 16, 64, 256, 1024};
+    constexpr std::array<uint64_t, 3> SUPPLY_REDUCTIONS = {32, 128, 512};
+    constexpr std::array<uint64_t, 4> SUPPLY_INNERS = {16, 64, 256, 1024};
+
+    constexpr std::array<uint64_t, 4> AWKWARD_OUTERS = {1, 8, 64, 512};
+    constexpr std::array<uint64_t, 11> AWKWARD_REDUCTIONS = {17, 31, 33, 63, 65, 127, 129, 255, 257, 511, 513};
+    constexpr std::array<uint64_t, 3> AWKWARD_R_INNERS = {64, 256, 1024};
+
+    // These K values deliberately exercise three widest-legal packet classes while retaining at least one narrower
+    // packet for exact-shape A/B. Multiples of 16 are awkward-but-four-way; 8-only and 4-only groups test the natural
+    // fallback envelope without inventing benchmark-only padding. Odd K is intentionally outside this packet sweep:
+    // none of the 16/8/4/2-byte KParallel specializations can represent it exactly.
+    constexpr std::array<uint64_t, 7> AWKWARD_K_P16 = {48, 80, 112, 144, 240, 496, 1008};
+    constexpr std::array<uint64_t, 7> AWKWARD_K_P8 = {24, 40, 72, 120, 248, 504, 1016};
+    constexpr std::array<uint64_t, 7> AWKWARD_K_P4 = {20, 36, 68, 124, 252, 508, 1020};
+    constexpr std::array<uint64_t, 3> AWKWARD_K_REDUCTIONS = {32, 128, 512};
+
+    constexpr std::array<std::pair<uint64_t, uint64_t>, 6> AWKWARD_BOTH = {{{33, 48},
+                                                                            {65, 120},
+                                                                            {129, 124},
+                                                                            {257, 240},
+                                                                            {511, 504},
+                                                                            {513, 508}}};
+
+    std::cout << "# mode=rk_fp8_kparallel_small_packet_sweep comparison=exact_shape_complete_kernel_ab\n";
+    std::cout << "# purpose=find small-reduction packet-width crossovers caused by KParallel work/parallelism supply\n";
+    std::cout << "# invariant=same dtype,O,R,K,input buffer,output buffer,Complete topology,block_threads=32,shards=1; only packet_bytes changes\n";
+    std::cout << "# packet policy=measure every legal width among 16/8/4/2; baseline is widest legal packet for that exact K\n";
+    std::cout << "# families=supply|awkward_r|awkward_k|awkward_both max_input_bytes="
+              << FP8_SMALL_PACKET_SWEEP_MAX_INPUT_BYTES << '\n';
+    std::cout << "# warmups=" << RK_SINGLE_PASS_WARMUPS << " timing_samples=" << RK_SINGLE_PASS_SAMPLES << '\n';
+    std::cout << "family,case,dtype,topology,outer,R,K,widest_legal_packet,legal_packet_count,packet_bytes,items_per_lane,"
+                 "block_threads,shards_per_output,packet_owners,component_tiles,blocks,input_bytes,output_bytes,median_ms,"
+                 "best_ms,worst_ms,logical_GBps\n";
+
+    uint64_t groups = 0;
+    uint64_t rows = 0;
+    uint64_t skipped_over_size = 0;
+
+    const auto run_shape = [&](const char* family, uint64_t outer, uint64_t reduction, uint64_t inner) {
+        const uint64_t elements = checkedSinglePassElements(outer, reduction, inner);
+        if (elements > FP8_SMALL_PACKET_SWEEP_MAX_INPUT_BYTES) {
+            ++skipped_over_size;
+            return;
+        }
+        Fp8SmallPacketShape benchmark_case{family, outer, reduction, inner};
+        for (DataType dtype : DTYPES) {
+            Tensor input(cache_flush.getPlacement(), TensorDescriptor(dtype, {outer, reduction, inner}));
+            input.fill(FP8_SMALL_PACKET_SWEEP_FILL_VALUE, stream);
+            stream.synchronize();
+            switch (dtype) {
+                case DataType::FP8_E4M3:
+                    runFp8SmallPacketShape<__nv_fp8_e4m3>(benchmark_case, dtype, input, cache_flush, stream);
+                    break;
+                case DataType::FP8_E5M2:
+                    runFp8SmallPacketShape<__nv_fp8_e5m2>(benchmark_case, dtype, input, cache_flush, stream);
+                    break;
+                default:
+                    throw std::logic_error("FP8 small-packet sweep received an unsupported dtype.");
+            }
+            size_t legal_count = 0;
+            for (size_t packet_bytes : std::array<size_t, 4>{16, 8, 4, 2}) {
+                if (inner % packet_bytes == 0) {
+                    ++legal_count;
+                }
+            }
+            rows += legal_count;
+            ++groups;
+        }
+    };
+
+    for (uint64_t outer : SUPPLY_OUTERS) {
+        for (uint64_t reduction : SUPPLY_REDUCTIONS) {
+            for (uint64_t inner : SUPPLY_INNERS) {
+                run_shape("supply", outer, reduction, inner);
+            }
+        }
+    }
+    for (uint64_t outer : AWKWARD_OUTERS) {
+        for (uint64_t reduction : AWKWARD_REDUCTIONS) {
+            for (uint64_t inner : AWKWARD_R_INNERS) {
+                run_shape("awkward_r", outer, reduction, inner);
+            }
+        }
+    }
+    for (uint64_t outer : AWKWARD_OUTERS) {
+        for (uint64_t reduction : AWKWARD_K_REDUCTIONS) {
+            for (uint64_t inner : AWKWARD_K_P16) {
+                run_shape("awkward_k", outer, reduction, inner);
+            }
+            for (uint64_t inner : AWKWARD_K_P8) {
+                run_shape("awkward_k", outer, reduction, inner);
+            }
+            for (uint64_t inner : AWKWARD_K_P4) {
+                run_shape("awkward_k", outer, reduction, inner);
+            }
+        }
+    }
+    for (uint64_t outer : AWKWARD_OUTERS) {
+        for (const auto& [reduction, inner] : AWKWARD_BOTH) {
+            run_shape("awkward_both", outer, reduction, inner);
+        }
+    }
+
+    std::cout << "# rk_fp8_kparallel_small_packet_sweep_complete measured_groups=" << groups
+              << " measured_rows=" << rows << " skipped_shapes_over_input_ceiling=" << skipped_over_size << '\n';
+#else
+    (void)cache_flush;
+    (void)stream;
+    throw std::logic_error("FP8 small-packet sweep requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+constexpr uint64_t FP8_STRADDLED_SWEEP_MAX_INPUT_BYTES = 128ULL * 1024ULL * 1024ULL;
+constexpr uint64_t FP8_STRADDLED_SWEEP_TARGET_INPUT_BYTES = 64ULL * 1024ULL * 1024ULL;
+constexpr uint64_t FP8_STRADDLED_SWEEP_TARGET_ROWS_PER_SHARD = 128;
+constexpr double FP8_STRADDLED_SWEEP_FILL_VALUE = 1.0 / 512.0;
+
+struct Fp8StraddledShape {
+    const char* family;
+    uint64_t outer;
+    uint64_t reduction;
+    uint64_t inner;
+};
+
+void runFp8KParallelStraddledShape(const Fp8StraddledShape& benchmark_case,
+                                   DataType dtype,
+                                   const Tensor& input,
+                                   Tensor& cache_flush,
+                                   Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    const CubReductionGeometry geometry = CubReduction::analyzeValueGeometry(
+        CubReductionOp::Sum, input.getDimensions(), {1});
+    if (geometry.path != CubReductionPath::TiledFixedSegment || geometry.outer_size != benchmark_case.outer
+        || geometry.reduction_size != benchmark_case.reduction || geometry.inner_size != benchmark_case.inner) {
+        throw std::logic_error("FP8 KParallel Straddled sweep geometry disagrees with the requested exact shape.");
+    }
+
+    const CubReductionStageSemantics complete_semantics = makeValueReductionStageSemantics(
+        CubReductionOp::Sum, CubReductionStageRole::Complete, geometry.reduction_size);
+    const CubReductionStageSemantics first_semantics = makeValueReductionStageSemantics(
+        CubReductionOp::Sum, CubReductionStageRole::First, geometry.reduction_size);
+    constexpr std::array<uint32_t, 4> BLOCK_THREADS = {32, 64, 128, 256};
+
+    const uint64_t gcd = std::gcd(geometry.inner_size, uint64_t{16});
+    const uint64_t row_period = 16 / gcd;
+    const uint64_t packets_per_supertile = geometry.inner_size / gcd;
+
+    for (uint32_t block_threads : BLOCK_THREADS) {
+        const uint64_t warps_per_block = block_threads / TILED_REDUCTION_WARP_THREADS;
+
+        Tensor complete_output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+        const KParallelStraddledStagePlan complete_plan{
+            TiledRKStageTopology::Complete, block_threads, 1};
+        const auto run_complete = [&]() {
+            launchFp8KParallelStraddledStage(
+                complete_semantics, input, complete_output, geometry, complete_plan, 1.0f, stream);
+        };
+        run_complete();
+        stream.synchronize();
+        validateSinglePassComplete(
+            complete_output, geometry, stream, "fp8_kparallel_straddled_complete", FP8_STRADDLED_SWEEP_FILL_VALUE);
+        const RKSinglePassTiming complete_timing = timeRKSinglePass(cache_flush, stream, run_complete);
+        const CubKernelOccupancyInfo complete_occupancy =
+            queryFp8KParallelStraddledStageOccupancy(dtype, complete_plan);
+        const uint64_t complete_blocks = singlePassCeilDiv(geometry.outer_size, warps_per_block);
+        const double complete_gbps = static_cast<double>(input.getArraySizeInBytes() + complete_output.getArraySizeInBytes())
+                                     / (complete_timing.median_ms * 1.0e6);
+        std::cout << benchmark_case.family << ",o" << geometry.outer_size << "_r" << geometry.reduction_size << "_k"
+                  << geometry.inner_size << ',' << singlePassDtypeName(dtype)
+                  << ",complete," << geometry.outer_size << ',' << geometry.reduction_size << ',' << geometry.inner_size
+                  << ",16," << row_period << ',' << packets_per_supertile << ',' << block_threads << ",1,"
+                  << geometry.reduction_size << ',' << complete_blocks << ',' << complete_occupancy.registers_per_thread
+                  << ',' << complete_occupancy.dynamic_shared_bytes << ',' << complete_occupancy.max_active_blocks_per_sm
+                  << ',' << complete_occupancy.max_active_warps_per_sm << ',' << input.getArraySizeInBytes() << ','
+                  << complete_output.getArraySizeInBytes() << ',' << std::fixed << std::setprecision(4)
+                  << complete_timing.median_ms << ',' << complete_timing.best_ms << ',' << complete_timing.worst_ms << ','
+                  << std::setprecision(2) << complete_gbps << '\n';
+
+        const uint64_t shards = singlePassCeilDiv(geometry.reduction_size, FP8_STRADDLED_SWEEP_TARGET_ROWS_PER_SHARD);
+        if (shards <= 1 || shards > geometry.reduction_size) {
+            continue;
+        }
+        Tensor partials(input.getPlacement(),
+                        TensorDescriptor(DataType::FP32, {geometry.outer_size, shards, geometry.inner_size}));
+        const KParallelStraddledStagePlan staged_plan{
+            TiledRKStageTopology::Staged, block_threads, shards};
+        const auto run_staged = [&]() {
+            launchFp8KParallelStraddledStage(
+                first_semantics, input, partials, geometry, staged_plan, 1.0f, stream);
+        };
+        run_staged();
+        stream.synchronize();
+        validateSinglePassPartial(partials,
+                                  geometry,
+                                  shards,
+                                  FP8_STRADDLED_SWEEP_TARGET_ROWS_PER_SHARD,
+                                  SinglePassShardPolicy::Balanced,
+                                  stream,
+                                  "fp8_kparallel_straddled_staged",
+                                  FP8_STRADDLED_SWEEP_FILL_VALUE);
+        const RKSinglePassTiming staged_timing = timeRKSinglePass(cache_flush, stream, run_staged);
+        const CubKernelOccupancyInfo staged_occupancy =
+            queryFp8KParallelStraddledStageOccupancy(dtype, staged_plan);
+        const uint64_t staged_work = geometry.outer_size * shards;
+        const uint64_t staged_blocks = singlePassCeilDiv(staged_work, warps_per_block);
+        const double staged_gbps = static_cast<double>(input.getArraySizeInBytes() + partials.getArraySizeInBytes())
+                                   / (staged_timing.median_ms * 1.0e6);
+        std::cout << benchmark_case.family << ",o" << geometry.outer_size << "_r" << geometry.reduction_size << "_k"
+                  << geometry.inner_size << ',' << singlePassDtypeName(dtype)
+                  << ",staged," << geometry.outer_size << ',' << geometry.reduction_size << ',' << geometry.inner_size
+                  << ",16," << row_period << ',' << packets_per_supertile << ',' << block_threads << ',' << shards << ','
+                  << FP8_STRADDLED_SWEEP_TARGET_ROWS_PER_SHARD << ',' << staged_blocks << ','
+                  << staged_occupancy.registers_per_thread << ',' << staged_occupancy.dynamic_shared_bytes << ','
+                  << staged_occupancy.max_active_blocks_per_sm << ',' << staged_occupancy.max_active_warps_per_sm << ','
+                  << input.getArraySizeInBytes() << ',' << partials.getArraySizeInBytes() << ',' << std::fixed
+                  << std::setprecision(4) << staged_timing.median_ms << ',' << staged_timing.best_ms << ','
+                  << staged_timing.worst_ms << ',' << std::setprecision(2) << staged_gbps << '\n';
+    }
+#else
+    static_cast<void>(benchmark_case);
+    static_cast<void>(dtype);
+    static_cast<void>(input);
+    static_cast<void>(cache_flush);
+    static_cast<void>(stream);
+    throw std::logic_error("FP8 KParallel Straddled sweep requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+void runFp8KParallelStraddledSweepImpl(Tensor& cache_flush, Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    constexpr std::array<DataType, 2> DTYPES = {DataType::FP8_E4M3, DataType::FP8_E5M2};
+    constexpr std::array<uint64_t, 6> K17_OUTERS = {1, 4, 16, 64, 256, 1024};
+    constexpr std::array<uint64_t, 5> K17_REDUCTIONS = {16, 64, 256, 1024, 4096};
+    // K=1 canonicalizes to a suffix/R reduction in analyzeValueGeometry(), so it is not an RK
+    // exact shape and must not be included in this KParallel Straddled calibration.
+    constexpr std::array<uint64_t, 15> ODD_K = {
+        3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31};
+    constexpr std::array<uint64_t, 3> SATURATION_REDUCTIONS = {128, 1024, 8192};
+
+    std::cout << "# mode=rk_fp8_kparallel_straddled_sweep operation=sum comparison=physical_layout_calibration\n";
+    std::cout << "# candidate=KParallel_straddled invariant=aligned p16 flattened loads; packets may cross logical rows; production selector unchanged\n";
+    std::cout << "# support=FP8 K=1..31 with K%16!=0; Complete and balanced Staged; block_threads=32|64|128|256\n";
+    std::cout << "# saturation_odd_k=3..31; K=1 canonicalizes to suffix/R geometry and is intentionally excluded\n";
+    std::cout << "# staged_target_rows_per_shard=" << FP8_STRADDLED_SWEEP_TARGET_ROWS_PER_SHARD
+              << " max_input_bytes=" << FP8_STRADDLED_SWEEP_MAX_INPUT_BYTES
+              << " saturation_target_input_bytes=" << FP8_STRADDLED_SWEEP_TARGET_INPUT_BYTES << '\n';
+    std::cout << "family,case,dtype,topology,outer,R,K,packet_bytes,row_period,packets_per_supertile,block_threads,"
+                 "shards_per_output,target_rows_per_shard,blocks,regs_per_thread,dynamic_shared_bytes,max_active_blocks_per_sm,"
+                 "max_active_warps_per_sm,input_bytes,output_bytes,median_ms,best_ms,worst_ms,logical_GBps\n";
+
+    uint64_t shape_dtypes = 0;
+    uint64_t skipped_over_size = 0;
+    const auto run_shape = [&](const char* family, uint64_t outer, uint64_t reduction, uint64_t inner) {
+        const uint64_t elements = checkedSinglePassElements(outer, reduction, inner);
+        if (elements > FP8_STRADDLED_SWEEP_MAX_INPUT_BYTES) {
+            ++skipped_over_size;
+            return;
+        }
+        const Fp8StraddledShape shape{family, outer, reduction, inner};
+        for (DataType dtype : DTYPES) {
+            Tensor input(cache_flush.getPlacement(), TensorDescriptor(dtype, {outer, reduction, inner}));
+            input.fill(FP8_STRADDLED_SWEEP_FILL_VALUE, stream);
+            stream.synchronize();
+            runFp8KParallelStraddledShape(shape, dtype, input, cache_flush, stream);
+            ++shape_dtypes;
+        }
+    };
+
+    for (uint64_t outer : K17_OUTERS) {
+        for (uint64_t reduction : K17_REDUCTIONS) {
+            run_shape("k17_supply", outer, reduction, 17);
+        }
+    }
+
+    for (uint64_t reduction : SATURATION_REDUCTIONS) {
+        for (uint64_t inner : ODD_K) {
+            const uint64_t row_bytes = reduction * inner;
+            const uint64_t outer = std::max<uint64_t>(1, FP8_STRADDLED_SWEEP_TARGET_INPUT_BYTES / row_bytes);
+            run_shape("odd_k_saturation", outer, reduction, inner);
+        }
+    }
+
+    std::cout << "# rk_fp8_kparallel_straddled_sweep_complete shape_dtypes=" << shape_dtypes
+              << " skipped_shapes_over_input_ceiling=" << skipped_over_size << '\n';
+#else
+    static_cast<void>(cache_flush);
+    static_cast<void>(stream);
+    throw std::logic_error("FP8 KParallel Straddled sweep requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+
 void executeModernRKStage(const ExecutableRKStage& stage,
                           CubReductionOp op,
                           uint64_t total_reduction_size,
@@ -3184,6 +3945,2541 @@ void runRKFamilyBoundaryCalibrationImpl(Tensor& cache_flush, Stream& stream) {
     }
 }
 
+
+constexpr uint32_t FP8_COMPLETE_LAYOUT_COMFORT_WARPS_PER_SM = 8;
+constexpr double FP8_COMPLETE_LAYOUT_FILL_VALUE = 1.0 / 512.0;
+
+struct Fp8CompleteLayoutShape {
+    const char* family;
+    uint64_t outer;
+    uint64_t reduction;
+    uint64_t inner;
+};
+
+template <typename InputT>
+void runFp8CompleteLayoutShape(const Fp8CompleteLayoutShape& benchmark_case,
+                               DataType dtype,
+                               const Tensor& input,
+                               Tensor& cache_flush,
+                               Stream& stream,
+                               const RKSinglePassDeviceGeometry& device_geometry) {
+    static_assert(sizeof(InputT) == 1, "FP8 Complete layout sweep requires one-byte input storage.");
+    const CubReductionGeometry geometry = CubReduction::analyzeValueGeometry(
+        CubReductionOp::Sum, input.getDimensions(), {1});
+    if (geometry.path != CubReductionPath::TiledFixedSegment) {
+        throw std::logic_error("FP8 Complete layout sweep case was not TiledFixedSegment.");
+    }
+    if (geometry.outer_size != benchmark_case.outer || geometry.reduction_size != benchmark_case.reduction
+        || geometry.inner_size != benchmark_case.inner) {
+        throw std::logic_error("FP8 Complete layout sweep geometry disagrees with requested exact shape.");
+    }
+
+    Tensor output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+    const CubReductionStageSemantics semantics = makeValueReductionStageSemantics(
+        CubReductionOp::Sum, CubReductionStageRole::Complete, geometry.reduction_size);
+
+    constexpr std::array<size_t, 4> PACKETS = {16, 8, 4, 2};
+    constexpr std::array<uint32_t, 4> CTA_WIDTHS = {32, 64, 128, 256};
+    size_t widest_legal_packet = 0;
+    size_t legal_packet_count = 0;
+    for (size_t packet_bytes : PACKETS) {
+        if (supportsSinglePassKParallelPacket<InputT>(geometry, packet_bytes)) {
+            if (widest_legal_packet == 0) {
+                widest_legal_packet = packet_bytes;
+            }
+            ++legal_packet_count;
+        }
+    }
+    if (legal_packet_count < 2) {
+        throw std::logic_error("FP8 Complete layout sweep requires at least two legal packet widths per exact shape.");
+    }
+
+    for (size_t packet_bytes : PACKETS) {
+        if (!supportsSinglePassKParallelPacket<InputT>(geometry, packet_bytes)) {
+            continue;
+        }
+        const uint64_t items_per_lane = packet_bytes / sizeof(InputT);
+        const uint64_t packet_owners = geometry.inner_size / items_per_lane;
+
+        for (uint32_t block_threads : CTA_WIDTHS) {
+            const uint64_t component_tiles = singlePassKParallelComponentTiles<InputT>(
+                geometry, packet_bytes, block_threads);
+            const uint64_t blocks = geometry.outer_size * component_tiles;
+            const uint64_t warps_per_cta = block_threads / device_geometry.warp_size;
+            const uint64_t physical_warps = blocks * warps_per_cta;
+
+            const KParallelTiledStagePlan plan{
+                TiledRKStageTopology::Complete, packet_bytes, block_threads, 1};
+            const CubKernelOccupancyInfo occupancy = queryKParallelTiledStageOccupancy(dtype, plan);
+            if (occupancy.max_active_blocks_per_sm <= 0 || occupancy.max_active_warps_per_sm <= 0) {
+                throw std::logic_error("FP8 Complete layout sweep received invalid exact kernel occupancy.");
+            }
+            const uint64_t useful_warps_per_output =
+                (packet_owners + static_cast<uint64_t>(device_geometry.warp_size) - 1)
+                / static_cast<uint64_t>(device_geometry.warp_size);
+            const uint64_t useful_warps = geometry.outer_size * useful_warps_per_output;
+            const uint64_t resident_device_blocks =
+                static_cast<uint64_t>(device_geometry.sm_count)
+                * static_cast<uint64_t>(occupancy.max_active_blocks_per_sm);
+            const uint64_t resident_device_warps =
+                static_cast<uint64_t>(device_geometry.sm_count)
+                * static_cast<uint64_t>(occupancy.max_active_warps_per_sm);
+            const unsigned __int128 useful_capacity_numerator =
+                static_cast<unsigned __int128>(resident_device_blocks)
+                * static_cast<unsigned __int128>(useful_warps);
+            const uint64_t useful_capacity_by_blocks = static_cast<uint64_t>(
+                useful_capacity_numerator / static_cast<unsigned __int128>(blocks));
+            const uint64_t useful_resident_warps =
+                std::min(resident_device_warps, useful_capacity_by_blocks);
+            const uint64_t launch_warp_supply = std::min(useful_warps, useful_resident_warps);
+            const uint64_t comfort_target =
+                static_cast<uint64_t>(device_geometry.sm_count)
+                * static_cast<uint64_t>(std::min<int>(FP8_COMPLETE_LAYOUT_COMFORT_WARPS_PER_SM,
+                                                      occupancy.max_active_warps_per_sm));
+            const double comfort_fraction = comfort_target == 0
+                                                ? 0.0
+                                                : static_cast<double>(launch_warp_supply)
+                                                      / static_cast<double>(comfort_target);
+            const uint64_t lane_slots = component_tiles * static_cast<uint64_t>(block_threads);
+            const double lane_fill = lane_slots == 0
+                                         ? 0.0
+                                         : static_cast<double>(packet_owners) / static_cast<double>(lane_slots);
+
+            const auto run = [&]() {
+                launchKParallelTiledStage(semantics, input, output, geometry, plan, 1.0f, stream);
+            };
+            run();
+            stream.synchronize();
+            validateSinglePassComplete(
+                output, geometry, stream, "fp8_complete_layout", FP8_COMPLETE_LAYOUT_FILL_VALUE);
+            const RKSinglePassTiming timing = timeRKSinglePass(cache_flush, stream, run);
+            const uint64_t input_bytes = input.getArraySizeInBytes();
+            const uint64_t output_bytes = output.getArraySizeInBytes();
+            const double logical_gbps =
+                static_cast<double>(input_bytes + output_bytes) / (timing.median_ms * 1.0e6);
+
+            std::cout << benchmark_case.family << ",o" << benchmark_case.outer << "_r"
+                      << benchmark_case.reduction << "_k" << benchmark_case.inner << ','
+                      << singlePassDtypeName(dtype) << ",complete," << benchmark_case.outer << ','
+                      << benchmark_case.reduction << ',' << benchmark_case.inner << ',' << widest_legal_packet << ','
+                      << legal_packet_count << ',' << packet_bytes << ',' << items_per_lane << ',' << block_threads << ','
+                      << packet_owners << ',' << component_tiles << ',' << blocks << ',' << warps_per_cta << ','
+                      << physical_warps << ',' << useful_warps << ',' << occupancy.registers_per_thread << ','
+                      << occupancy.static_shared_bytes << ',' << occupancy.dynamic_shared_bytes << ','
+                      << occupancy.max_active_blocks_per_sm << ',' << occupancy.max_active_warps_per_sm << ','
+                      << resident_device_blocks << ',' << resident_device_warps << ',' << useful_resident_warps << ','
+                      << launch_warp_supply << ',' << comfort_target << ','
+                      << std::fixed << std::setprecision(6) << comfort_fraction << ',' << lane_fill << ','
+                      << input_bytes << ',' << output_bytes << ',' << std::setprecision(4) << timing.median_ms << ','
+                      << timing.best_ms << ',' << timing.worst_ms << ',' << std::setprecision(2) << logical_gbps << '\n';
+        }
+    }
+}
+
+void runFp8KParallelCompleteLayoutSweepImpl(Tensor& cache_flush, Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    constexpr uint64_t MAX_INPUT_BYTES = 64ULL * 1024ULL * 1024ULL;
+    constexpr std::array<DataType, 2> DTYPES = {DataType::FP8_E4M3, DataType::FP8_E5M2};
+    constexpr std::array<uint64_t, 6> SUPPLY_OUTERS = {1, 4, 16, 64, 256, 1024};
+    constexpr std::array<uint64_t, 3> SUPPLY_REDUCTIONS = {32, 128, 512};
+    constexpr std::array<uint64_t, 4> SUPPLY_INNERS = {16, 64, 256, 1024};
+
+    constexpr std::array<uint64_t, 4> AWKWARD_OUTERS = {1, 8, 64, 512};
+    constexpr std::array<uint64_t, 11> AWKWARD_REDUCTIONS = {17, 31, 33, 63, 65, 127, 129, 255, 257, 511, 513};
+    constexpr std::array<uint64_t, 3> AWKWARD_R_INNERS = {64, 256, 1024};
+
+    constexpr std::array<uint64_t, 7> AWKWARD_K_P16 = {48, 80, 112, 144, 240, 496, 1008};
+    constexpr std::array<uint64_t, 7> AWKWARD_K_P8 = {24, 40, 72, 120, 248, 504, 1016};
+    constexpr std::array<uint64_t, 7> AWKWARD_K_P4 = {20, 36, 68, 124, 252, 508, 1020};
+    constexpr std::array<uint64_t, 3> AWKWARD_K_REDUCTIONS = {32, 128, 512};
+    constexpr std::array<std::pair<uint64_t, uint64_t>, 6> AWKWARD_BOTH = {{{33, 48},
+                                                                            {65, 120},
+                                                                            {129, 124},
+                                                                            {257, 240},
+                                                                            {511, 504},
+                                                                            {513, 508}}};
+
+    const RKSinglePassDeviceGeometry device_geometry = querySinglePassDeviceGeometry();
+    std::cout << "# mode=rk_fp8_kparallel_complete_layout_sweep comparison=exact_shape_packet_and_cta_optimization\n";
+    std::cout << "# purpose=measure each FP8 KParallel packet reducer at its best Complete CTA layout on small/awkward reductions\n";
+    std::cout << "# invariant=within one exact shape and packet, dtype/O/R/K/input/output/topology are fixed; only block_threads=32/64/128/256 changes\n";
+    std::cout << "# packet comparison=for each exact shape, compare the measured-best CTA layout independently found for every legal packet width\n";
+    std::cout << "# occupancy_policy_reference=Complete comfort uses useful warps; idle physical warps consume exact CTA/warp residency but receive zero progress credit\n";
+    std::cout << "# families=supply|awkward_r|awkward_k|awkward_both max_input_bytes=" << MAX_INPUT_BYTES
+              << " sm_count=" << device_geometry.sm_count << " warp_size=" << device_geometry.warp_size << '\n';
+    std::cout << "# warmups=" << RK_SINGLE_PASS_WARMUPS << " timing_samples=" << RK_SINGLE_PASS_SAMPLES << '\n';
+    std::cout << "family,case,dtype,topology,outer,R,K,widest_legal_packet,legal_packet_count,packet_bytes,items_per_lane,"
+                 "block_threads,packet_owners,component_tiles,blocks,warps_per_cta,physical_warps,useful_warps,registers_per_thread,"
+                 "static_shared_bytes,dynamic_shared_bytes,max_active_blocks_per_sm,max_active_warps_per_sm,"
+                 "resident_device_blocks,resident_device_warps,useful_resident_warps,launch_warp_supply,comfort_target,comfort_fraction,lane_fill,input_bytes,"
+                 "output_bytes,median_ms,best_ms,worst_ms,logical_GBps\n";
+
+    uint64_t shape_dtypes = 0;
+    uint64_t rows = 0;
+    uint64_t skipped_over_size = 0;
+    const auto run_shape = [&](const char* family, uint64_t outer, uint64_t reduction, uint64_t inner) {
+        const uint64_t elements = checkedSinglePassElements(outer, reduction, inner);
+        if (elements > MAX_INPUT_BYTES) {
+            ++skipped_over_size;
+            return;
+        }
+        Fp8CompleteLayoutShape benchmark_case{family, outer, reduction, inner};
+        size_t legal_packet_count = 0;
+        for (size_t packet_bytes : std::array<size_t, 4>{16, 8, 4, 2}) {
+            if (inner % packet_bytes == 0) {
+                ++legal_packet_count;
+            }
+        }
+        if (legal_packet_count < 2) {
+            return;
+        }
+        for (DataType dtype : DTYPES) {
+            Tensor input(cache_flush.getPlacement(), TensorDescriptor(dtype, {outer, reduction, inner}));
+            input.fill(FP8_COMPLETE_LAYOUT_FILL_VALUE, stream);
+            stream.synchronize();
+            switch (dtype) {
+                case DataType::FP8_E4M3:
+                    runFp8CompleteLayoutShape<__nv_fp8_e4m3>(
+                        benchmark_case, dtype, input, cache_flush, stream, device_geometry);
+                    break;
+                case DataType::FP8_E5M2:
+                    runFp8CompleteLayoutShape<__nv_fp8_e5m2>(
+                        benchmark_case, dtype, input, cache_flush, stream, device_geometry);
+                    break;
+                default:
+                    throw std::logic_error("FP8 Complete layout sweep received unsupported dtype.");
+            }
+            rows += legal_packet_count * 4;
+            ++shape_dtypes;
+        }
+    };
+
+    for (uint64_t outer : SUPPLY_OUTERS) {
+        for (uint64_t reduction : SUPPLY_REDUCTIONS) {
+            for (uint64_t inner : SUPPLY_INNERS) {
+                run_shape("supply", outer, reduction, inner);
+            }
+        }
+    }
+    for (uint64_t outer : AWKWARD_OUTERS) {
+        for (uint64_t reduction : AWKWARD_REDUCTIONS) {
+            for (uint64_t inner : AWKWARD_R_INNERS) {
+                run_shape("awkward_r", outer, reduction, inner);
+            }
+        }
+    }
+    for (uint64_t outer : AWKWARD_OUTERS) {
+        for (uint64_t reduction : AWKWARD_K_REDUCTIONS) {
+            for (uint64_t inner : AWKWARD_K_P16) {
+                run_shape("awkward_k", outer, reduction, inner);
+            }
+            for (uint64_t inner : AWKWARD_K_P8) {
+                run_shape("awkward_k", outer, reduction, inner);
+            }
+            for (uint64_t inner : AWKWARD_K_P4) {
+                run_shape("awkward_k", outer, reduction, inner);
+            }
+        }
+    }
+    for (uint64_t outer : AWKWARD_OUTERS) {
+        for (const auto& [reduction, inner] : AWKWARD_BOTH) {
+            run_shape("awkward_both", outer, reduction, inner);
+        }
+    }
+
+    std::cout << "# rk_fp8_kparallel_complete_layout_sweep_complete shape_dtypes=" << shape_dtypes
+              << " timed_rows=" << rows << " skipped_shapes_over_size=" << skipped_over_size << '\n';
+#else
+    static_cast<void>(cache_flush);
+    static_cast<void>(stream);
+    throw std::logic_error("FP8 Complete layout sweep requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+
+
+constexpr uint32_t FP8_STAGED_LAYOUT_COMFORT_WARPS_PER_SM = 6;
+constexpr uint64_t FP8_STAGED_LAYOUT_MIN_ROWS_PER_SHARD = 16;
+constexpr double FP8_STAGED_LAYOUT_FILL_VALUE = 1.0 / 512.0;
+
+struct Fp8StagedLayoutShape {
+    const char* family;
+    uint64_t outer;
+    uint64_t reduction;
+    uint64_t inner;
+};
+
+void addFp8StagedShardCandidate(std::vector<uint64_t>& shards, uint64_t reduction, uint64_t candidate) {
+    if (candidate <= 1 || candidate > reduction) {
+        return;
+    }
+    if (reduction / candidate < FP8_STAGED_LAYOUT_MIN_ROWS_PER_SHARD) {
+        return;
+    }
+    if (std::find(shards.begin(), shards.end(), candidate) == shards.end()) {
+        shards.push_back(candidate);
+    }
+}
+
+void addFp8StagedShardCandidateNeighborhood(std::vector<uint64_t>& shards,
+                                            uint64_t reduction,
+                                            uint64_t candidate) {
+    if (candidate > 2) {
+        addFp8StagedShardCandidate(shards, reduction, candidate - 1);
+    }
+    addFp8StagedShardCandidate(shards, reduction, candidate);
+    if (candidate < std::numeric_limits<uint64_t>::max()) {
+        addFp8StagedShardCandidate(shards, reduction, candidate + 1);
+    }
+}
+
+[[nodiscard]] uint64_t scaledCeil(uint64_t value, uint32_t numerator, uint32_t denominator) {
+    if (denominator == 0) {
+        throw std::logic_error("FP8 staged layout sweep received a zero scale denominator.");
+    }
+    const unsigned __int128 wide = static_cast<unsigned __int128>(value) * numerator;
+    return static_cast<uint64_t>((wide + denominator - 1) / denominator);
+}
+
+template <typename InputT>
+void runFp8StagedLayoutShape(const Fp8StagedLayoutShape& benchmark_case,
+                             DataType dtype,
+                             const Tensor& input,
+                             Tensor& cache_flush,
+                             Stream& stream,
+                             const RKSinglePassDeviceGeometry& device_geometry) {
+    static_assert(sizeof(InputT) == 1, "FP8 staged layout sweep requires one-byte input storage.");
+    const CubReductionGeometry geometry = CubReduction::analyzeValueGeometry(
+        CubReductionOp::Sum, input.getDimensions(), {1});
+    if (geometry.path != CubReductionPath::TiledFixedSegment) {
+        throw std::logic_error("FP8 staged layout sweep case was not TiledFixedSegment.");
+    }
+    if (geometry.outer_size != benchmark_case.outer || geometry.reduction_size != benchmark_case.reduction
+        || geometry.inner_size != benchmark_case.inner) {
+        throw std::logic_error("FP8 staged layout sweep geometry disagrees with requested exact shape.");
+    }
+
+    const CubReductionStageSemantics semantics = makeValueReductionStageSemantics(
+        CubReductionOp::Sum, CubReductionStageRole::First, geometry.reduction_size);
+
+    constexpr std::array<size_t, 4> PACKETS = {16, 8, 4, 2};
+    constexpr std::array<uint32_t, 4> CTA_WIDTHS = {32, 64, 128, 256};
+    constexpr std::array<uint64_t, 9> ROW_DEPTHS = {4096, 2048, 1024, 512, 256, 128, 64, 32, 16};
+    constexpr std::array<std::pair<uint32_t, uint32_t>, 4> SUPPLY_SCALES = {{{1, 2}, {1, 1}, {2, 1}, {4, 1}}};
+
+    for (size_t packet_bytes : PACKETS) {
+        if (!supportsSinglePassKParallelPacket<InputT>(geometry, packet_bytes)) {
+            continue;
+        }
+        const uint64_t items_per_lane = packet_bytes / sizeof(InputT);
+        const uint64_t packet_owners = geometry.inner_size / items_per_lane;
+        const uint64_t useful_warps_per_output_shard = singlePassCeilDiv(
+            packet_owners, static_cast<uint64_t>(device_geometry.warp_size));
+
+        for (uint32_t block_threads : CTA_WIDTHS) {
+            const uint64_t component_tiles = singlePassKParallelComponentTiles<InputT>(
+                geometry, packet_bytes, block_threads);
+            const uint64_t base_blocks_per_shard = geometry.outer_size * component_tiles;
+            const uint64_t base_useful_warps_per_shard = geometry.outer_size * useful_warps_per_output_shard;
+            const KParallelTiledStagePlan occupancy_plan{
+                TiledRKStageTopology::Staged, packet_bytes, block_threads, 2};
+            const CubKernelOccupancyInfo occupancy = queryKParallelTiledStageOccupancy(dtype, occupancy_plan);
+            if (occupancy.max_active_blocks_per_sm <= 0 || occupancy.max_active_warps_per_sm <= 0) {
+                throw std::logic_error("FP8 staged layout sweep received invalid exact kernel occupancy.");
+            }
+
+            const uint64_t resident_device_blocks =
+                static_cast<uint64_t>(device_geometry.sm_count)
+                * static_cast<uint64_t>(occupancy.max_active_blocks_per_sm);
+            const uint64_t resident_device_warps =
+                static_cast<uint64_t>(device_geometry.sm_count)
+                * static_cast<uint64_t>(occupancy.max_active_warps_per_sm);
+            const uint64_t comfort_target =
+                static_cast<uint64_t>(device_geometry.sm_count)
+                * static_cast<uint64_t>(std::min<int>(FP8_STAGED_LAYOUT_COMFORT_WARPS_PER_SM,
+                                                      occupancy.max_active_warps_per_sm));
+
+            std::vector<uint64_t> shard_candidates;
+            shard_candidates.reserve(40);
+
+            // Retain the established rows/shard ladder as broad coverage over per-CTA serial R work.
+            for (uint64_t requested_rows : ROW_DEPTHS) {
+                if (geometry.reduction_size <= requested_rows) {
+                    continue;
+                }
+                addFp8StagedShardCandidate(
+                    shard_candidates, geometry.reduction_size, singlePassCeilDiv(geometry.reduction_size, requested_rows));
+            }
+
+            // Hardware-relative useful-warp targets. These are based on useful reduction work only; idle physical
+            // warps inside a CTA receive no progress credit.
+            for (const auto& [num, den] : SUPPLY_SCALES) {
+                const uint64_t target_useful_warps = scaledCeil(comfort_target, num, den);
+                if (base_useful_warps_per_shard != 0) {
+                    const uint64_t target_shards = singlePassCeilDiv(target_useful_warps, base_useful_warps_per_shard);
+                    addFp8StagedShardCandidateNeighborhood(shard_candidates, geometry.reduction_size, target_shards);
+                }
+            }
+
+            // Physical CTA waves remain a separate constraint: idle warps may not do useful work, but their CTAs and
+            // warp slots still consume real GPU residency. Probe around half/one/two/four exact resident CTA waves.
+            for (const auto& [num, den] : SUPPLY_SCALES) {
+                const uint64_t target_blocks = scaledCeil(resident_device_blocks, num, den);
+                if (base_blocks_per_shard != 0) {
+                    const uint64_t target_shards = singlePassCeilDiv(target_blocks, base_blocks_per_shard);
+                    addFp8StagedShardCandidateNeighborhood(shard_candidates, geometry.reduction_size, target_shards);
+                }
+            }
+
+            std::sort(shard_candidates.begin(), shard_candidates.end());
+            if (shard_candidates.empty()) {
+                throw std::logic_error("FP8 staged layout sweep produced no legal shard candidates.");
+            }
+
+            for (uint64_t shards : shard_candidates) {
+                const uint64_t rows_per_shard = singlePassCeilDiv(geometry.reduction_size, shards);
+                Tensor partials(input.getPlacement(),
+                                TensorDescriptor(DataType::FP32,
+                                                 {geometry.outer_size, shards, geometry.inner_size}));
+                const KParallelTiledStagePlan plan{
+                    TiledRKStageTopology::Staged, packet_bytes, block_threads, shards};
+                const auto run = [&]() {
+                    launchKParallelTiledStage(semantics, input, partials, geometry, plan, 1.0f, stream);
+                };
+
+                run();
+                stream.synchronize();
+                validateSinglePassPartial(partials,
+                                          geometry,
+                                          shards,
+                                          rows_per_shard,
+                                          SinglePassShardPolicy::Balanced,
+                                          stream,
+                                          "fp8_staged_layout",
+                                          FP8_STAGED_LAYOUT_FILL_VALUE);
+
+                const RKSinglePassTiming timing =
+                    timeRKSinglePass(cache_flush, stream, run, FP8_STAGED_LAYOUT_TIMING_SAMPLES);
+                const uint64_t blocks = base_blocks_per_shard * shards;
+                const uint64_t warps_per_cta = block_threads / device_geometry.warp_size;
+                const uint64_t physical_warps = blocks * warps_per_cta;
+                const uint64_t useful_warps = base_useful_warps_per_shard * shards;
+                const unsigned __int128 useful_capacity_numerator =
+                    static_cast<unsigned __int128>(resident_device_blocks)
+                    * static_cast<unsigned __int128>(useful_warps);
+                const uint64_t useful_capacity_by_blocks = static_cast<uint64_t>(
+                    useful_capacity_numerator / static_cast<unsigned __int128>(blocks));
+                const uint64_t useful_resident_warps =
+                    std::min(resident_device_warps, useful_capacity_by_blocks);
+                const uint64_t launch_warp_supply = std::min(useful_warps, useful_resident_warps);
+                const double comfort_fraction = comfort_target == 0
+                                                    ? 0.0
+                                                    : static_cast<double>(launch_warp_supply)
+                                                          / static_cast<double>(comfort_target);
+                const double physical_block_waves = resident_device_blocks == 0
+                                                        ? 0.0
+                                                        : static_cast<double>(blocks)
+                                                              / static_cast<double>(resident_device_blocks);
+                const uint64_t lane_slots = component_tiles * static_cast<uint64_t>(block_threads);
+                const double lane_fill = lane_slots == 0
+                                             ? 0.0
+                                             : static_cast<double>(packet_owners) / static_cast<double>(lane_slots);
+                const uint64_t input_bytes = input.getArraySizeInBytes();
+                const uint64_t output_bytes = partials.getArraySizeInBytes();
+                const double input_gbps = static_cast<double>(input_bytes) / (timing.median_ms * 1.0e6);
+                const double logical_gbps =
+                    static_cast<double>(input_bytes + output_bytes) / (timing.median_ms * 1.0e6);
+
+                std::cout << benchmark_case.family << ",o" << benchmark_case.outer << "_r"
+                          << benchmark_case.reduction << "_k" << benchmark_case.inner << ','
+                          << singlePassDtypeName(dtype) << ",staged," << benchmark_case.outer << ','
+                          << benchmark_case.reduction << ',' << benchmark_case.inner << ',' << packet_bytes << ','
+                          << items_per_lane << ',' << block_threads << ',' << shards << ',' << rows_per_shard << ','
+                          << packet_owners << ',' << component_tiles << ',' << blocks << ',' << warps_per_cta << ','
+                          << physical_warps << ',' << useful_warps << ',' << occupancy.registers_per_thread << ','
+                          << occupancy.static_shared_bytes << ',' << occupancy.dynamic_shared_bytes << ','
+                          << occupancy.max_active_blocks_per_sm << ',' << occupancy.max_active_warps_per_sm << ','
+                          << resident_device_blocks << ',' << resident_device_warps << ',' << useful_resident_warps << ','
+                          << launch_warp_supply << ',' << comfort_target << ',' << std::fixed << std::setprecision(6)
+                          << comfort_fraction << ',' << physical_block_waves << ',' << lane_fill << ',' << input_bytes << ','
+                          << output_bytes << ',' << std::setprecision(4) << timing.median_ms << ',' << timing.best_ms << ','
+                          << timing.worst_ms << ',' << std::setprecision(2) << input_gbps << ',' << logical_gbps << '\n';
+            }
+        }
+    }
+}
+
+void runFp8KParallelStagedLayoutSweepImpl(Tensor& cache_flush, Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    constexpr std::array<DataType, 2> DTYPES = {DataType::FP8_E4M3, DataType::FP8_E5M2};
+    constexpr std::array<Fp8StagedLayoutShape, 15> SHAPES = {{{"clean_512mib", 32, 32768, 512},
+                                                               {"clean_512mib", 16, 32768, 1024},
+                                                               {"clean_512mib", 8, 32768, 2048},
+                                                               {"clean_512mib", 4, 32768, 4096},
+                                                               {"clean_512mib", 2, 32768, 8192},
+                                                               {"clean_512mib", 1, 32768, 16384},
+                                                               {"depth_512mib", 16, 16384, 2048},
+                                                               {"depth_512mib", 4, 65536, 2048},
+                                                               {"depth_512mib", 2, 131072, 2048},
+                                                               {"awkward_512mib", 8, 32771, 2032},
+                                                               {"awkward_512mib", 2, 32771, 8176},
+                                                               {"awkward_512mib", 4, 65521, 2032},
+                                                               {"awkward_512mib", 1, 65521, 8176},
+                                                               {"clean_1gib", 16, 32768, 2048},
+                                                               {"clean_1gib", 4, 32768, 8192}}};
+
+    const RKSinglePassDeviceGeometry device_geometry = querySinglePassDeviceGeometry();
+    std::cout << "# mode=rk_fp8_kparallel_staged_layout_sweep comparison=exact_shape_packet_cta_shard_optimization\n";
+    std::cout << "# purpose=find the maximum large/saturating FP8 KParallel staged throughput before calibrating packet selection policy\n";
+    std::cout << "# invariant=within one exact shape all packet/CTA/shard layouts read the same dtype/O/R/K input; only physical first-stage layout changes\n";
+    std::cout << "# shard candidates=existing rows/shard ladder plus neighborhoods around useful-warp comfort and exact resident-CTA wave targets\n";
+    std::cout << "# occupancy model=useful warps receive progress credit; idle physical warps still consume exact compiled-kernel block/warp residency\n";
+    std::cout << "# throughput target=large enough cases should approach logical 1600 GB/s before FP8 packet-selection policy is considered calibrated\n";
+    std::cout << "# sm_count=" << device_geometry.sm_count << " warp_size=" << device_geometry.warp_size
+              << " max_threads_per_sm=" << device_geometry.max_threads_per_sm
+              << " warmups=" << RK_SINGLE_PASS_WARMUPS
+              << " timing_samples=" << FP8_STAGED_LAYOUT_TIMING_SAMPLES << '\n';
+    std::cout << "family,case,dtype,topology,outer,R,K,packet_bytes,items_per_lane,block_threads,shards_per_output,"
+                 "rows_per_shard,packet_owners,component_tiles,blocks,warps_per_cta,physical_warps,useful_warps,"
+                 "registers_per_thread,static_shared_bytes,dynamic_shared_bytes,max_active_blocks_per_sm,"
+                 "max_active_warps_per_sm,resident_device_blocks,resident_device_warps,useful_resident_warps,"
+                 "launch_warp_supply,comfort_target,comfort_fraction,physical_block_waves,lane_fill,input_bytes,"
+                 "output_bytes,median_ms,best_ms,worst_ms,input_GBps,logical_GBps\n";
+
+    uint64_t shape_dtypes = 0;
+    for (const Fp8StagedLayoutShape& benchmark_case : SHAPES) {
+        const uint64_t elements = checkedSinglePassElements(
+            benchmark_case.outer, benchmark_case.reduction, benchmark_case.inner);
+        if (elements < 480ULL * 1024ULL * 1024ULL) {
+            throw std::logic_error("FP8 staged layout sweep unexpectedly generated a sub-saturation input shape.");
+        }
+        for (DataType dtype : DTYPES) {
+            Tensor input(cache_flush.getPlacement(),
+                         TensorDescriptor(dtype,
+                                          {benchmark_case.outer, benchmark_case.reduction, benchmark_case.inner}));
+            input.fill(FP8_STAGED_LAYOUT_FILL_VALUE, stream);
+            stream.synchronize();
+            switch (dtype) {
+                case DataType::FP8_E4M3:
+                    runFp8StagedLayoutShape<__nv_fp8_e4m3>(
+                        benchmark_case, dtype, input, cache_flush, stream, device_geometry);
+                    break;
+                case DataType::FP8_E5M2:
+                    runFp8StagedLayoutShape<__nv_fp8_e5m2>(
+                        benchmark_case, dtype, input, cache_flush, stream, device_geometry);
+                    break;
+                default:
+                    throw std::logic_error("FP8 staged layout sweep received unsupported dtype.");
+            }
+            ++shape_dtypes;
+        }
+    }
+    std::cout << "# rk_fp8_kparallel_staged_layout_sweep_complete shape_dtypes=" << shape_dtypes << '\n';
+#else
+    static_cast<void>(cache_flush);
+    static_cast<void>(stream);
+    throw std::logic_error("FP8 staged layout sweep requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+
+constexpr double FP8_RCOOP_SINGLE_PASS_FILL_VALUE = 1.0 / 512.0;
+constexpr uint64_t FP8_RCOOP_SINGLE_PASS_TARGET_BYTES = 512ULL * 1024ULL * 1024ULL;
+constexpr int FP8_RCOOP_SINGLE_PASS_TIMING_SAMPLES = 3;
+constexpr double FP8_RCOOP_LINE_RATE_FLOOR_GBPS = 1500.0;
+constexpr double FP8_RCOOP_PEAK_REFERENCE_GBPS = 1600.0;
+constexpr uint64_t FP8_RCOOP_MAX_GRID_BLOCKS = 65535;
+
+struct Fp8RCooperativeSinglePassShape {
+    uint64_t inner;
+};
+
+[[nodiscard]] uint64_t fp8RCooperativeSinglePassOuter(uint64_t reduction, uint64_t inner) {
+    if (reduction == 0 || inner < 2) {
+        throw std::logic_error("FP8 RCooperative single-pass sweep requires R>0 and K>=2 RK geometry.");
+    }
+    const unsigned __int128 elements_per_outer =
+        static_cast<unsigned __int128>(reduction) * static_cast<unsigned __int128>(inner);
+    const unsigned __int128 target_elements = FP8_RCOOP_SINGLE_PASS_TARGET_BYTES;  // FP8 is one byte/element.
+    const uint64_t outer = static_cast<uint64_t>(
+        (target_elements + elements_per_outer - 1) / elements_per_outer);
+    return std::max<uint64_t>(1, outer);
+}
+
+void printFp8RCooperativeSinglePassHeader(const RKSinglePassDeviceGeometry& device_geometry) {
+    std::cout << "# mode=rk_fp8_rcooperative_single_pass_sweep operation=sum comparison=one_physical_pass\n";
+    std::cout << "# objective=for each physical RCooperative pattern consume as much R as possible while sustaining the "
+                 "calibrated line-rate floor; deeper rows/shard wins whenever it remains above that floor\n";
+    std::cout << "# production policy is unchanged. FP8 FlatRows calibration remains p16 but now adaptively fills toward a "
+                 "512-byte warp window (497 logical bytes after worst-case alignment reserve), preserves eight-warp shard "
+                 "participation, and supports K<=256 with multiple components/lane. Rotated compares PrefixReservedP16 "
+                 "and ExactP16. Rows above the production 128..1024 ladder are benchmark-only\n";
+    std::cout << "# every timed row is exactly one CUDA reduction pass; there is no generic fallback, no production selector, "
+                 "and no continuation timing\n";
+    std::cout << "# streaming target input bytes >=" << FP8_RCOOP_SINGLE_PASS_TARGET_BYTES
+              << " line_rate_floor_input_GBps=" << std::fixed << std::setprecision(1)
+              << FP8_RCOOP_LINE_RATE_FLOOR_GBPS << " peak_reference_physical_GBps="
+              << FP8_RCOOP_PEAK_REFERENCE_GBPS << " warmups=" << RK_SINGLE_PASS_WARMUPS
+              << " timing_samples=" << FP8_RCOOP_SINGLE_PASS_TIMING_SAMPLES << '\n';
+    std::cout << "# sm_count=" << device_geometry.sm_count << " warp_size=" << device_geometry.warp_size
+              << " max_threads_per_sm=" << device_geometry.max_threads_per_sm << '\n';
+    std::cout << "family,case,outer,R,K,dtype,operation,strategy,access,progress,implementation,packet_bytes,block_threads,"
+                 "rows_per_shard,shards_per_output,first_stage_blocks,device_sms,device_warp_size,"
+                 "device_max_threads_per_sm,device_max_threads_per_block,device_max_blocks_per_sm,"
+                 "device_shared_mem_per_sm,device_registers_per_sm,ctas_per_sm,thread_capacity_blocks_per_sm,"
+                 "thread_capacity_waves,thread_capacity_occupancy,registers_per_thread,static_shared_bytes,"
+                 "dynamic_shared_bytes,occupancy_limit_ctas_per_sm,occupancy_limit_warps_per_sm,launch_warps_per_sm,"
+                 "occupancy_waves,input_bytes,output_bytes,median_ms,best_ms,worst_ms,logical_GBps\n";
+}
+
+void runFp8RCooperativeSinglePassShape(const Fp8RCooperativeSinglePassShape& shape,
+                                       DataType dtype,
+                                       Tensor& cache_flush,
+                                       Stream& stream,
+                                       const RKSinglePassDeviceGeometry& device_geometry) {
+    constexpr uint64_t REDUCTION = 32768;
+    constexpr std::array<uint64_t, 8> ROW_DEPTHS = {128, 256, 512, 1024, 2048, 4096, 8192, 16384};
+    const uint64_t outer = fp8RCooperativeSinglePassOuter(REDUCTION, shape.inner);
+    RKSinglePassSweepCase benchmark_case{
+        "streaming_512mib",
+        "o" + std::to_string(outer) + "_r" + std::to_string(REDUCTION) + "_k" + std::to_string(shape.inner),
+        outer,
+        REDUCTION,
+        shape.inner};
+
+    Tensor input(cache_flush.getPlacement(), TensorDescriptor(dtype, {outer, REDUCTION, shape.inner}));
+    if (input.getArraySizeInBytes() < FP8_RCOOP_SINGLE_PASS_TARGET_BYTES) {
+        throw std::logic_error("FP8 RCooperative single-pass sweep generated a sub-target streaming input.");
+    }
+    input.fill(FP8_RCOOP_SINGLE_PASS_FILL_VALUE, stream);
+    stream.synchronize();
+    const CubReductionGeometry geometry = CubReduction::analyzeValueGeometry(
+        CubReductionOp::Sum, input.getDimensions(), {1});
+    if (geometry.path != CubReductionPath::TiledFixedSegment) {
+        throw std::logic_error("FP8 RCooperative single-pass sweep expected ordinary dense RK geometry.");
+    }
+
+    // Keep Complete as a deep-R reference endpoint, but do not use it to tune the staged packet/access patterns.
+    const CubReductionStageSemantics complete_semantics = makeValueReductionStageSemantics(
+        CubReductionOp::Sum, CubReductionStageRole::Complete, geometry.reduction_size);
+    const size_t complete_packet_bytes = singlePassPacketAdaptivePacketBytes(geometry, dtype);
+    const uint32_t complete_warps = singlePassPacketAdaptiveWarps(geometry, dtype, complete_packet_bytes);
+    const uint32_t complete_block_warps = std::max<uint32_t>(
+        static_cast<uint32_t>(TILED_REDUCTION_WARPS_PER_BLOCK), complete_warps);
+    DenseRKFamilyPhysicalPlan complete_plan;
+    complete_plan.packet_bytes = complete_packet_bytes;
+    complete_plan.cooperative_warps_per_tile = complete_warps;
+    complete_plan.block_threads = complete_block_warps * static_cast<uint32_t>(TILED_REDUCTION_WARP_THREADS);
+    Tensor complete_output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+    const auto run_complete = [&]() {
+        launchPacketAdaptiveComplete(complete_semantics, complete_plan, input, complete_output, geometry, stream);
+    };
+    run_complete();
+    stream.synchronize();
+    validateSinglePassComplete(complete_output,
+                               geometry,
+                               stream,
+                               "fp8_rcoop_single_pass_complete",
+                               FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+    const RKSinglePassTiming complete_timing = timeRKSinglePass(
+        cache_flush, stream, run_complete, FP8_RCOOP_SINGLE_PASS_TIMING_SAMPLES);
+    const CubKernelOccupancyInfo complete_occupancy = querySinglePassPacketAdaptiveOccupancy(
+        geometry, dtype, complete_packet_bytes, static_cast<int>(complete_warps));
+    const uint64_t complete_tiles = singlePassPacketAdaptiveTiles(geometry, dtype, complete_packet_bytes);
+    const uint64_t complete_groups_per_block = complete_block_warps / complete_warps;
+    const uint64_t complete_blocks = std::min<uint64_t>(
+        singlePassCeilDiv(geometry.outer_size * complete_tiles, complete_groups_per_block),
+        FP8_RCOOP_MAX_GRID_BLOCKS);
+    printSinglePassRow(benchmark_case,
+                       dtype,
+                       "r_cooperative",
+                       "aligned_or_alignment_safe",
+                       "complete",
+                       "packet_adaptive_complete",
+                       complete_packet_bytes,
+                       complete_plan.block_threads,
+                       geometry.reduction_size,
+                       1,
+                       complete_blocks,
+                       input,
+                       complete_output,
+                       complete_timing,
+                       &device_geometry,
+                       &complete_occupancy);
+
+    for (uint64_t rows_per_shard : ROW_DEPTHS) {
+        const uint64_t shards = singlePassCeilDiv(geometry.reduction_size, rows_per_shard);
+        if (shards <= 1) {
+            continue;
+        }
+
+        if (geometry.inner_size <= 256) {
+            Tensor flat_partials(input.getPlacement(),
+                                 TensorDescriptor(DataType::FP32,
+                                                  {geometry.outer_size, shards, geometry.inner_size}));
+            const auto run_flat = [&]() {
+                launchFp8NarrowLowPrecisionFlatRCooperativeCalibrationFirstStage(
+                    input, flat_partials, geometry, 16, rows_per_shard, shards, stream);
+            };
+            run_flat();
+            stream.synchronize();
+            validateSinglePassPartial(flat_partials,
+                                      geometry,
+                                      shards,
+                                      rows_per_shard,
+                                      SinglePassShardPolicy::FixedRows,
+                                      stream,
+                                      "fp8_rcoop_single_pass_flat_rows_packed",
+                                      FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+            const RKSinglePassTiming flat_timing = timeRKSinglePass(
+                cache_flush, stream, run_flat, FP8_RCOOP_SINGLE_PASS_TIMING_SAMPLES);
+            const CubKernelOccupancyInfo flat_occupancy =
+                queryFp8NarrowLowPrecisionFlatRCooperativeCalibrationOccupancy(
+                    dtype, 16, rows_per_shard, geometry.inner_size);
+            const uint64_t flat_blocks = std::min<uint64_t>(
+                geometry.outer_size * shards, FP8_RCOOP_MAX_GRID_BLOCKS);
+            printSinglePassRow(benchmark_case,
+                               dtype,
+                               "r_cooperative",
+                               "flat_rows",
+                               "staged",
+                               "fp8_narrow_flat_p16_adaptive_window_r_cooperative_calibration",
+                               16,
+                               256,
+                               rows_per_shard,
+                               shards,
+                               flat_blocks,
+                               input,
+                               flat_partials,
+                               flat_timing,
+                               &device_geometry,
+                               &flat_occupancy);
+        }
+
+        struct RotatedP16Layout {
+            const char* access;
+            const char* implementation;
+            bool exact_tile;
+        };
+        constexpr std::array<RotatedP16Layout, 2> ROTATED_P16_LAYOUTS = {{
+            {"rotated_prefix_reserved", "fp8_rotated_prefix_reserved_p16_r_cooperative_calibration", false},
+            {"rotated_exact", "fp8_rotated_exact_p16_r_cooperative_calibration", true},
+        }};
+        for (const RotatedP16Layout& layout : ROTATED_P16_LAYOUTS) {
+            Tensor rotated_partials(input.getPlacement(),
+                                    TensorDescriptor(DataType::FP32,
+                                                     {geometry.outer_size, shards, geometry.inner_size}));
+            const auto run_rotated = [&]() {
+                launchFp8AwkwardAlignmentRotatedShardedCalibrationFirstStage(
+                    input, rotated_partials, geometry, 16, layout.exact_tile, rows_per_shard, shards, stream);
+            };
+            run_rotated();
+            stream.synchronize();
+            validateSinglePassPartial(rotated_partials,
+                                      geometry,
+                                      shards,
+                                      rows_per_shard,
+                                      SinglePassShardPolicy::FixedRows,
+                                      stream,
+                                      std::string("fp8_rcoop_single_pass_") + layout.access,
+                                      FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+            const RKSinglePassTiming rotated_timing = timeRKSinglePass(
+                cache_flush, stream, run_rotated, FP8_RCOOP_SINGLE_PASS_TIMING_SAMPLES);
+            const CubKernelOccupancyInfo rotated_occupancy =
+                queryFp8AwkwardAlignmentRotatedShardedCalibrationOccupancy(
+                    dtype, 16, layout.exact_tile, rows_per_shard);
+            const uint64_t rotated_tiles = singlePassRotatedRCoopTiles(geometry, dtype, 16, layout.exact_tile);
+            const uint64_t rotated_blocks = std::min<uint64_t>(
+                geometry.outer_size * rotated_tiles * shards, FP8_RCOOP_MAX_GRID_BLOCKS);
+            printSinglePassRow(benchmark_case,
+                               dtype,
+                               "r_cooperative",
+                               layout.access,
+                               "staged",
+                               layout.implementation,
+                               16,
+                               512,
+                               rows_per_shard,
+                               shards,
+                               rotated_blocks,
+                               input,
+                               rotated_partials,
+                               rotated_timing,
+                               &device_geometry,
+                               &rotated_occupancy);
+        }
+    }
+}
+
+void runFp8RCooperativeSinglePassSweepImpl(Tensor& cache_flush, Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    constexpr std::array<DataType, 2> DTYPES = {DataType::FP8_E4M3, DataType::FP8_E5M2};
+    // Preserve the Rotated boundary probes, but densify the FlatRows handoff region. Small odd K establishes whether
+    // adaptive row-group depth alone fixes underfilled p16 windows; the 33..249 ladder shows how far multi-component
+    // lane ownership remains useful before the two Rotated p16 layouts naturally take over.
+    constexpr std::array<uint64_t, 80> K_VALUES = {
+        2, 3, 4, 5, 7, 8, 9, 11, 13, 15, 16, 17, 23, 24, 25, 30, 31, 32, 33, 35, 39, 47, 55,
+        63, 64, 65, 79, 95, 111, 124, 125, 126, 127, 128, 129, 143, 159, 175, 191, 207, 223, 239, 247,
+        248, 249, 250, 255, 256, 257,
+        495, 496, 497, 498, 499, 511, 512, 513,
+        746, 747, 748,
+        993, 994, 995, 996, 997, 1023, 1024, 1025,
+        1490, 1491, 1492, 1493, 1494, 1495,
+        2047, 2048, 2049,
+        4095, 4096, 4097};
+
+    const RKSinglePassDeviceGeometry device_geometry = querySinglePassDeviceGeometry();
+    printFp8RCooperativeSinglePassHeader(device_geometry);
+    uint64_t shape_dtypes = 0;
+    for (uint64_t inner : K_VALUES) {
+        const Fp8RCooperativeSinglePassShape shape{inner};
+        for (DataType dtype : DTYPES) {
+            runFp8RCooperativeSinglePassShape(shape, dtype, cache_flush, stream, device_geometry);
+            ++shape_dtypes;
+        }
+    }
+    std::cout << "# rk_fp8_rcooperative_single_pass_sweep_complete shape_dtypes=" << shape_dtypes << '\n';
+#else
+    static_cast<void>(cache_flush);
+    static_cast<void>(stream);
+    throw std::logic_error("FP8 RCooperative single-pass sweep requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+
+constexpr int FP8_RCOOP_FULL_SPACE_TIMING_SAMPLES = 3;
+constexpr std::array<uint64_t, 12> FP8_RCOOP_FULL_SPACE_ROW_DEPTHS = {
+    8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384};
+
+[[nodiscard]] uint64_t fp8RCooperativeOuterNearTarget(uint64_t reduction,
+                                                       uint64_t inner,
+                                                       uint64_t target_bytes) {
+    const unsigned __int128 elements_per_outer =
+        static_cast<unsigned __int128>(reduction) * static_cast<unsigned __int128>(inner);
+    if (elements_per_outer == 0) {
+        throw std::logic_error("FP8 RCooperative full-space sweep requires non-zero R and K.");
+    }
+    const unsigned __int128 rounded =
+        (static_cast<unsigned __int128>(target_bytes) + elements_per_outer / 2) / elements_per_outer;
+    return std::max<uint64_t>(1, static_cast<uint64_t>(rounded));
+}
+
+[[nodiscard]] const char* fp8RCooperativeTargetLabel(uint64_t bytes) {
+    switch (bytes) {
+        case 256ULL * 1024ULL: return "target_256kib";
+        case 1ULL * 1024ULL * 1024ULL: return "target_1mib";
+        case 4ULL * 1024ULL * 1024ULL: return "target_4mib";
+        case 16ULL * 1024ULL * 1024ULL: return "target_16mib";
+        case 64ULL * 1024ULL * 1024ULL: return "target_64mib";
+        case 128ULL * 1024ULL * 1024ULL: return "target_128mib";
+        case 256ULL * 1024ULL * 1024ULL: return "target_256mib";
+        case 512ULL * 1024ULL * 1024ULL: return "target_512mib";
+        default: return "target_custom";
+    }
+}
+
+void printFp8RCooperativeCoverageHeader(const RKSinglePassDeviceGeometry& device_geometry,
+                                            std::string_view mode,
+                                            std::string_view objective) {
+    std::cout << "# mode=" << mode << " operation=sum comparison=one_physical_pass\n";
+    std::cout << "# objective=" << objective << '\n';
+    std::cout << "# candidates=exact production KParallel selection; packet-adaptive Complete; adaptive multi-output-warp p4 complete; DEPRECATED one-output-per-warp outer-grouped p4 baseline; "
+                 "FlatRows p4/p8/p16 with eight-warp adaptive windows; Rotated PrefixReserved "
+                 "p4/4warp,p8/8warp,p16/16warp plus ExactP16. All RCooperative p4/p8 paths are calibration-only and "
+                 "production policy is unchanged\n";
+    std::cout << "# target problem sizes are approximate because O is integral; duplicate O values for the same R/K target "
+                 "ladder are suppressed. Staged candidates require >1 shard, so rows_per_shard<R\n";
+    std::cout << "# line_rate_floor_physical_GBps=" << std::fixed << std::setprecision(1)
+              << FP8_RCOOP_LINE_RATE_FLOOR_GBPS << " peak_reference_input_GBps="
+              << FP8_RCOOP_PEAK_REFERENCE_GBPS << " warmups=" << RK_SINGLE_PASS_WARMUPS
+              << " timing_samples=" << FP8_RCOOP_FULL_SPACE_TIMING_SAMPLES << '\n';
+    std::cout << "# sm_count=" << device_geometry.sm_count << " warp_size=" << device_geometry.warp_size
+              << " max_threads_per_sm=" << device_geometry.max_threads_per_sm << '\n';
+    std::cout << "family,case,outer,R,K,dtype,operation,strategy,access,progress,implementation,packet_bytes,block_threads,"
+                 "rows_per_shard,shards_per_output,first_stage_blocks,device_sms,device_warp_size,"
+                 "device_max_threads_per_sm,device_max_threads_per_block,device_max_blocks_per_sm,"
+                 "device_shared_mem_per_sm,device_registers_per_sm,ctas_per_sm,thread_capacity_blocks_per_sm,"
+                 "thread_capacity_waves,thread_capacity_occupancy,registers_per_thread,static_shared_bytes,"
+                 "dynamic_shared_bytes,occupancy_limit_ctas_per_sm,occupancy_limit_warps_per_sm,launch_warps_per_sm,"
+                 "occupancy_waves,input_bytes,output_bytes,median_ms,best_ms,worst_ms,logical_GBps\n";
+}
+
+void runFp8RCooperativeFullSpaceCase(const RKSinglePassSweepCase& benchmark_case,
+                                     DataType dtype,
+                                     Tensor& cache_flush,
+                                     Stream& stream,
+                                     const RKSinglePassDeviceGeometry& device_geometry,
+                                     bool use_rotating_cold_working_set = false,
+                                     bool focused_holes_only = false,
+                                     bool include_general_rparallel_small_k = false,
+                                     bool include_general_rparallel_staged = false) {
+    Tensor input(cache_flush.getPlacement(),
+                 TensorDescriptor(dtype, {benchmark_case.outer, benchmark_case.reduction, benchmark_case.inner}));
+    input.fill(FP8_RCOOP_SINGLE_PASS_FILL_VALUE, stream);
+    stream.synchronize();
+    const CubReductionGeometry geometry = CubReduction::analyzeValueGeometry(
+        CubReductionOp::Sum, input.getDimensions(), {1});
+    if (geometry.path != CubReductionPath::TiledFixedSegment) {
+        throw std::logic_error("FP8 RCooperative full-space sweep expected ordinary dense RK geometry.");
+    }
+
+    uint32_t rotating_slot_count = 0;
+    uint64_t rotating_cursor = 0;
+    bool rotating_needs_bootstrap_flush = false;
+    std::unique_ptr<RKRotatingTensorSlots> rotating_inputs;
+    std::unique_ptr<RKRotatingTensorSlots> rotating_complete_outputs;
+    if (use_rotating_cold_working_set) {
+        rotating_slot_count = rkRotatingColdSlotCount(
+            cache_flush.getArraySizeInBytes(), input.getArraySizeInBytes());
+        rotating_inputs = std::make_unique<RKRotatingTensorSlots>(
+            input.getPlacement(), input.getDescriptor(), rotating_slot_count);
+        rotating_inputs->storage().fill(FP8_RCOOP_SINGLE_PASS_FILL_VALUE, stream);
+        rotating_complete_outputs = std::make_unique<RKRotatingTensorSlots>(
+            input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions), rotating_slot_count);
+        stream.synchronize();
+        rotating_needs_bootstrap_flush = true;
+    }
+
+    const auto time_rotating_candidate = [&](Tensor& output,
+                                             RKRotatingTensorSlots& output_slots,
+                                             const auto& run) {
+        return timeRKSinglePassRotatingWorkingSet(input,
+                                                   output,
+                                                   *rotating_inputs,
+                                                   output_slots,
+                                                   rotating_cursor,
+                                                   cache_flush,
+                                                   rotating_needs_bootstrap_flush,
+                                                   stream,
+                                                   run,
+                                                   FP8_RCOOP_FULL_SPACE_TIMING_SAMPLES);
+    };
+    const auto time_complete_candidate = [&](Tensor& output, const auto& run) {
+        if (!use_rotating_cold_working_set) {
+            return timeRKSinglePass(cache_flush, stream, run, FP8_RCOOP_FULL_SPACE_TIMING_SAMPLES);
+        }
+        return time_rotating_candidate(output, *rotating_complete_outputs, run);
+    };
+
+    // The focused hole sweep deliberately stops re-running kernels/geometries whose ownership has already been
+    // established. Keep only the physical roofline, the relevant shallow Compact baseline, current RParallel, the
+    // K=3 and K=7 phase-stream experiments, and DirectComponent where K=15/31 still has measured wins. Production KParallel,
+    // packet-adaptive p16, the deprecated baseline, FlatRows, and Rotated remain covered by the broader sweeps.
+    if (focused_holes_only) {
+        Tensor roofline_output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+        const auto run_roofline = [&]() {
+            launchFp8P4ReadWriteRooflineCalibrationReference(input, roofline_output, geometry, stream);
+        };
+        run_roofline();
+        stream.synchronize();
+        const RKSinglePassTiming roofline_timing = time_complete_candidate(roofline_output, run_roofline);
+        const CubKernelOccupancyInfo roofline_occupancy = queryFp8P4ReadWriteRooflineCalibrationOccupancy();
+        const uint64_t output_elements = geometry.outer_size * geometry.inner_size;
+        const uint64_t output_packets = output_elements / 4;
+        const uint64_t roofline_warp_groups = std::max<uint64_t>(uint64_t{1}, singlePassCeilDiv(output_packets, uint64_t{32}));
+        const uint64_t roofline_blocks = std::min<uint64_t>(
+            singlePassCeilDiv(roofline_warp_groups, uint64_t{8}), FP8_RCOOP_MAX_GRID_BLOCKS);
+        printSinglePassRow(benchmark_case,
+                           dtype,
+                           "reference",
+                           "p4_read_write_roofline",
+                           "complete",
+                           "fp8_p4_read_write_same_ratio_roofline_reference",
+                           4,
+                           256,
+                           geometry.reduction_size,
+                           1,
+                           roofline_blocks,
+                           input,
+                           roofline_output,
+                           roofline_timing,
+                           &device_geometry,
+                           &roofline_occupancy);
+
+        for (const uint32_t compact_packet_bytes : {4u, 8u, 16u}) {
+            const uint32_t compact_outputs_per_warp =
+                fp8CompactMultiOutputWarpRCooperativeCalibrationOutputsPerWarp(
+                    geometry.reduction_size, geometry.inner_size, compact_packet_bytes);
+            if (compact_outputs_per_warp <= 1) {
+                continue;
+            }
+            Tensor compact_output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+            const auto run_compact = [&]() {
+                launchFp8CompactMultiOutputWarpRCooperativeCalibrationComplete(
+                    input, compact_output, geometry, compact_packet_bytes, stream);
+            };
+            run_compact();
+            stream.synchronize();
+            const std::string compact_label =
+                "fp8_rcoop_compact_multi_output_warp_p" + std::to_string(compact_packet_bytes);
+            validateSinglePassComplete(compact_output,
+                                       geometry,
+                                       stream,
+                                       compact_label,
+                                       FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+            const RKSinglePassTiming compact_timing = time_complete_candidate(compact_output, run_compact);
+            const CubKernelOccupancyInfo compact_occupancy =
+                queryFp8CompactMultiOutputWarpRCooperativeCalibrationOccupancy(
+                    dtype, geometry.inner_size, compact_outputs_per_warp, compact_packet_bytes);
+            const uint64_t compact_warp_groups = singlePassCeilDiv(
+                geometry.outer_size, static_cast<uint64_t>(compact_outputs_per_warp));
+            const uint64_t compact_blocks = std::min<uint64_t>(
+                singlePassCeilDiv(compact_warp_groups, uint64_t{8}), FP8_RCOOP_MAX_GRID_BLOCKS);
+            const std::string compact_implementation =
+                "fp8_compact_multi_output_warp_p" + std::to_string(compact_packet_bytes) + "_calibration";
+            printSinglePassRow(benchmark_case,
+                               dtype,
+                               "r_cooperative",
+                               "multi_output_compact",
+                               "complete",
+                               compact_implementation,
+                               compact_packet_bytes,
+                               256,
+                               geometry.reduction_size,
+                               1,
+                               compact_blocks,
+                               input,
+                               compact_output,
+                               compact_timing,
+                               &device_geometry,
+                               &compact_occupancy);
+        }
+
+        Tensor r_parallel_output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+        const auto run_r_parallel = [&]() {
+            launchFp8RParallelWarpP4RCooperativeCalibrationComplete(
+                input, r_parallel_output, geometry, stream);
+        };
+        run_r_parallel();
+        stream.synchronize();
+        validateSinglePassComplete(r_parallel_output,
+                                   geometry,
+                                   stream,
+                                   "fp8_rcoop_r_parallel_warp_p4",
+                                   FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+        const RKSinglePassTiming r_parallel_timing = time_complete_candidate(r_parallel_output, run_r_parallel);
+        const CubKernelOccupancyInfo r_parallel_occupancy =
+            queryFp8RParallelWarpP4RCooperativeCalibrationOccupancy(dtype, geometry.inner_size);
+        const uint64_t one_output_blocks = std::min<uint64_t>(
+            singlePassCeilDiv(geometry.outer_size, uint64_t{8}), FP8_RCOOP_MAX_GRID_BLOCKS);
+        printSinglePassRow(benchmark_case,
+                           dtype,
+                           "r_cooperative",
+                           "r_parallel_warp",
+                           "complete",
+                           "fp8_one_output_warp_r_parallel_p4_calibration",
+                           4,
+                           256,
+                           geometry.reduction_size,
+                           1,
+                           one_output_blocks,
+                           input,
+                           r_parallel_output,
+                           r_parallel_timing,
+                           &device_geometry,
+                           &r_parallel_occupancy);
+
+        // Complete the general RParallel packet-width ladder at O1. p4 above remains the established control;
+        // p8/p16 reuse the same packed-shared implementation as MultiOutput with OutputsPerWarp=1.
+        constexpr std::array<uint32_t, 2> ONE_OUTPUT_RPARALLEL_WIDE_PACKET_BYTES = {8, 16};
+        for (uint32_t packet_bytes : ONE_OUTPUT_RPARALLEL_WIDE_PACKET_BYTES) {
+            Tensor wide_r_parallel_output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+            const auto run_wide_r_parallel = [&]() {
+                launchFp8MultiOutputRParallelWarpRCooperativeCalibrationComplete(
+                    input, wide_r_parallel_output, geometry, 1, packet_bytes, stream);
+            };
+            run_wide_r_parallel();
+            stream.synchronize();
+            const std::string validation_name =
+                "fp8_rcoop_r_parallel_warp_p" + std::to_string(packet_bytes);
+            validateSinglePassComplete(wide_r_parallel_output,
+                                       geometry,
+                                       stream,
+                                       validation_name,
+                                       FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+            const RKSinglePassTiming wide_r_parallel_timing =
+                time_complete_candidate(wide_r_parallel_output, run_wide_r_parallel);
+            const CubKernelOccupancyInfo wide_r_parallel_occupancy =
+                queryFp8MultiOutputRParallelWarpRCooperativeCalibrationOccupancy(
+                    dtype, geometry.inner_size, 1, packet_bytes);
+            const std::string implementation_name =
+                "fp8_one_output_warp_r_parallel_p" + std::to_string(packet_bytes) + "_calibration";
+            printSinglePassRow(benchmark_case,
+                               dtype,
+                               "r_cooperative",
+                               "r_parallel_warp",
+                               "complete",
+                               implementation_name,
+                               packet_bytes,
+                               256,
+                               geometry.reduction_size,
+                               1,
+                               one_output_blocks,
+                               input,
+                               wide_r_parallel_output,
+                               wide_r_parallel_timing,
+                               &device_geometry,
+                               &wide_r_parallel_occupancy);
+        }
+
+        // Multi-warp Complete RParallel extends O1 in the other direction: 2/4/8 physical warps cooperate on one
+        // output inside a 256-thread CTA, each consuming disjoint R groups through the same p4/p8/p16 packed-shared
+        // component/R-worker path. The CTA folds K FP32 warp partials in shared memory and writes the final FP8 output,
+        // so this measures how far intra-CTA cooperation can push the Complete boundary before staging is necessary.
+        constexpr std::array<uint32_t, 3> MULTI_WARP_RPARALLEL_PACKET_BYTES = {4, 8, 16};
+        constexpr std::array<uint32_t, 3> MULTI_WARP_RPARALLEL_WARPS = {2, 4, 8};
+        for (uint32_t packet_bytes : MULTI_WARP_RPARALLEL_PACKET_BYTES) {
+            for (uint32_t warps_per_output : MULTI_WARP_RPARALLEL_WARPS) {
+                // More cooperating warps than R rows can only add idle partials and synchronization; omit those
+                // dominated shapes from the focused calibration without changing kernel legality.
+                if (warps_per_output > geometry.reduction_size) {
+                    continue;
+                }
+                Tensor multi_warp_r_parallel_output(
+                    input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+                const auto run_multi_warp_r_parallel = [&]() {
+                    launchFp8MultiWarpRParallelRCooperativeCalibrationComplete(
+                        input,
+                        multi_warp_r_parallel_output,
+                        geometry,
+                        warps_per_output,
+                        packet_bytes,
+                        stream);
+                };
+                run_multi_warp_r_parallel();
+                stream.synchronize();
+                const std::string validation_name =
+                    "fp8_rcoop_multi_warp_r_parallel_p" + std::to_string(packet_bytes) +
+                    "_w" + std::to_string(warps_per_output);
+                validateSinglePassComplete(multi_warp_r_parallel_output,
+                                           geometry,
+                                           stream,
+                                           validation_name,
+                                           FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+                const RKSinglePassTiming multi_warp_r_parallel_timing =
+                    time_complete_candidate(multi_warp_r_parallel_output, run_multi_warp_r_parallel);
+                const CubKernelOccupancyInfo multi_warp_r_parallel_occupancy =
+                    queryFp8MultiWarpRParallelRCooperativeCalibrationOccupancy(
+                        dtype, geometry.inner_size, warps_per_output, packet_bytes);
+                const uint32_t outputs_per_block = 8 / warps_per_output;
+                const uint64_t blocks = std::min<uint64_t>(
+                    singlePassCeilDiv(geometry.outer_size, static_cast<uint64_t>(outputs_per_block)),
+                    FP8_RCOOP_MAX_GRID_BLOCKS);
+                const std::string access_name =
+                    "r_parallel_multi_warp_" + std::to_string(warps_per_output);
+                const std::string implementation_name =
+                    "fp8_multi_warp_r_parallel_p" + std::to_string(packet_bytes) +
+                    "_w" + std::to_string(warps_per_output) + "_calibration";
+                printSinglePassRow(benchmark_case,
+                                   dtype,
+                                   "r_cooperative",
+                                   access_name,
+                                   "complete",
+                                   implementation_name,
+                                   packet_bytes,
+                                   256,
+                                   geometry.reduction_size,
+                                   1,
+                                   blocks,
+                                   input,
+                                   multi_warp_r_parallel_output,
+                                   multi_warp_r_parallel_timing,
+                                   &device_geometry,
+                                   &multi_warp_r_parallel_occupancy);
+            }
+        }
+
+        // Test MultiOutput RParallel as a general packet-width family. p4 is the established control. p8/p16 keep
+        // the same component/R-worker ownership and runtime R, but widen each producer lane's global packet and stage
+        // the raw FP8 payload through conflict-free 32-bit shared planes before packed decode in the consumers.
+        constexpr std::array<uint32_t, 3> MULTI_OUTPUT_RPARALLEL_PACKET_BYTES = {4, 8, 16};
+        constexpr std::array<uint32_t, 5> MULTI_OUTPUT_RPARALLEL_OUTPUTS = {2, 4, 8, 16, 32};
+        for (uint32_t packet_bytes : MULTI_OUTPUT_RPARALLEL_PACKET_BYTES) {
+            for (uint32_t outputs_per_warp : MULTI_OUTPUT_RPARALLEL_OUTPUTS) {
+                const uint32_t lanes_per_output = 32 / outputs_per_warp;
+                if (geometry.inner_size > lanes_per_output) {
+                    continue;
+                }
+                Tensor multi_output_r_parallel_output(
+                    input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+                const auto run_multi_output_r_parallel = [&]() {
+                    launchFp8MultiOutputRParallelWarpRCooperativeCalibrationComplete(
+                        input,
+                        multi_output_r_parallel_output,
+                        geometry,
+                        outputs_per_warp,
+                        packet_bytes,
+                        stream);
+                };
+                run_multi_output_r_parallel();
+                stream.synchronize();
+                const std::string validation_name =
+                    "fp8_rcoop_multi_output_r_parallel_warp_p" + std::to_string(packet_bytes) +
+                    "_o" + std::to_string(outputs_per_warp);
+                validateSinglePassComplete(multi_output_r_parallel_output,
+                                           geometry,
+                                           stream,
+                                           validation_name,
+                                           FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+                const RKSinglePassTiming multi_output_r_parallel_timing =
+                    time_complete_candidate(multi_output_r_parallel_output, run_multi_output_r_parallel);
+                const CubKernelOccupancyInfo multi_output_r_parallel_occupancy =
+                    queryFp8MultiOutputRParallelWarpRCooperativeCalibrationOccupancy(
+                        dtype, geometry.inner_size, outputs_per_warp, packet_bytes);
+                const uint64_t warp_groups =
+                    singlePassCeilDiv(geometry.outer_size, static_cast<uint64_t>(outputs_per_warp));
+                const uint64_t blocks = std::min<uint64_t>(
+                    singlePassCeilDiv(warp_groups, uint64_t{8}), FP8_RCOOP_MAX_GRID_BLOCKS);
+                const std::string access_name =
+                    "r_parallel_multi_output_" + std::to_string(outputs_per_warp);
+                const std::string implementation_name =
+                    "fp8_multi_output_r_parallel_p" + std::to_string(packet_bytes) +
+                    "_o" + std::to_string(outputs_per_warp) + "_calibration";
+                printSinglePassRow(benchmark_case,
+                                   dtype,
+                                   "r_cooperative",
+                                   access_name,
+                                   "complete",
+                                   implementation_name,
+                                   packet_bytes,
+                                   256,
+                                   geometry.reduction_size,
+                                   1,
+                                   blocks,
+                                   input,
+                                   multi_output_r_parallel_output,
+                                   multi_output_r_parallel_timing,
+                                   &device_geometry,
+                                   &multi_output_r_parallel_occupancy);
+            }
+        }
+
+        if (geometry.inner_size == 3 &&
+            (geometry.reduction_size == 7 || geometry.reduction_size == 8 ||
+             geometry.reduction_size == 15 || geometry.reduction_size == 16 ||
+             geometry.reduction_size == 31 || geometry.reduction_size == 32 ||
+             geometry.reduction_size == 63 || geometry.reduction_size == 64)) {
+            Tensor phase_stream_output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+            const auto run_phase_stream = [&]() {
+                launchFp8K3PhaseStreamRParallelP4RCooperativeCalibrationComplete(
+                    input, phase_stream_output, geometry, stream);
+            };
+            run_phase_stream();
+            stream.synchronize();
+            validateSinglePassComplete(phase_stream_output,
+                                       geometry,
+                                       stream,
+                                       "fp8_rcoop_k3_phase_stream_r_parallel_p4",
+                                       FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+            const RKSinglePassTiming phase_stream_timing = time_complete_candidate(phase_stream_output, run_phase_stream);
+            const CubKernelOccupancyInfo phase_stream_occupancy =
+                queryFp8K3PhaseStreamRParallelP4RCooperativeCalibrationOccupancy(dtype, geometry.reduction_size);
+            const uint64_t lanes_per_output = geometry.reduction_size <= 8 ? 8 :
+                                              (geometry.reduction_size <= 16 ? 16 : 32);
+            const uint64_t outputs_per_warp = 32 / lanes_per_output;
+            const uint64_t outputs_per_block = outputs_per_warp * 8;
+            const uint64_t phase_stream_blocks = std::min<uint64_t>(
+                singlePassCeilDiv(geometry.outer_size, outputs_per_block), FP8_RCOOP_MAX_GRID_BLOCKS);
+            printSinglePassRow(benchmark_case,
+                               dtype,
+                               "r_cooperative",
+                               "r_parallel_k3_phase_stream",
+                               "complete",
+                               "fp8_k3_phase_stream_r_parallel_p4_calibration",
+                               4,
+                               256,
+                               geometry.reduction_size,
+                               1,
+                               phase_stream_blocks,
+                               input,
+                               phase_stream_output,
+                               phase_stream_timing,
+                               &device_geometry,
+                               &phase_stream_occupancy);
+        }
+
+
+        if (geometry.inner_size == 3 &&
+            (geometry.reduction_size == 8 || geometry.reduction_size == 16 ||
+             geometry.reduction_size == 32 || geometry.reduction_size == 64)) {
+            Tensor phase_stream_p8_input_output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+            const auto run_phase_stream_p8_input = [&]() {
+                launchFp8K3PhaseStreamRParallelP8InputRCooperativeCalibrationComplete(
+                    input, phase_stream_p8_input_output, geometry, stream);
+            };
+            run_phase_stream_p8_input();
+            stream.synchronize();
+            validateSinglePassComplete(phase_stream_p8_input_output,
+                                       geometry,
+                                       stream,
+                                       "fp8_rcoop_k3_phase_stream_r_parallel_p8_input",
+                                       FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+            const RKSinglePassTiming phase_stream_p8_input_timing =
+                time_complete_candidate(phase_stream_p8_input_output, run_phase_stream_p8_input);
+            const CubKernelOccupancyInfo phase_stream_p8_input_occupancy =
+                queryFp8K3PhaseStreamRParallelP8InputRCooperativeCalibrationOccupancy(dtype, geometry.reduction_size);
+            const uint64_t lanes_per_output = geometry.reduction_size <= 8 ? 4 :
+                                              (geometry.reduction_size <= 16 ? 8 :
+                                               (geometry.reduction_size <= 32 ? 16 : 32));
+            const uint64_t outputs_per_warp = 32 / lanes_per_output;
+            const uint64_t outputs_per_block = outputs_per_warp * 8;
+            const uint64_t phase_stream_p8_input_blocks = std::min<uint64_t>(
+                singlePassCeilDiv(geometry.outer_size, outputs_per_block), FP8_RCOOP_MAX_GRID_BLOCKS);
+            printSinglePassRow(benchmark_case,
+                               dtype,
+                               "r_cooperative",
+                               "r_parallel_k3_phase_stream_p8_input",
+                               "complete",
+                               "fp8_k3_phase_stream_r_parallel_p8_input_calibration",
+                               8,
+                               256,
+                               geometry.reduction_size,
+                               1,
+                               phase_stream_p8_input_blocks,
+                               input,
+                               phase_stream_p8_input_output,
+                               phase_stream_p8_input_timing,
+                               &device_geometry,
+                               &phase_stream_p8_input_occupancy);
+        }
+
+
+        if (geometry.inner_size == 3 &&
+            (geometry.reduction_size == 7 || geometry.reduction_size == 8 ||
+             geometry.reduction_size == 15 || geometry.reduction_size == 16 ||
+             geometry.reduction_size == 31 || geometry.reduction_size == 32 ||
+             geometry.reduction_size == 63 || geometry.reduction_size == 64)) {
+            const auto runtime_r_lanes_per_output = [&](uint64_t packet_bytes) -> uint64_t {
+                const uint64_t bytes_per_output = geometry.reduction_size * 3;
+                const uint64_t max_packets = (bytes_per_output + 2 * packet_bytes - 2) / packet_bytes;
+                if (max_packets <= 4) return 4;
+                if (max_packets <= 8) return 8;
+                if (max_packets <= 16) return 16;
+                return 32;
+            };
+
+            Tensor runtime_r_p4_output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+            const auto run_runtime_r_p4 = [&]() {
+                launchFp8K3RuntimeRPhaseStreamRParallelP4RCooperativeCalibrationComplete(
+                    input, runtime_r_p4_output, geometry, stream);
+            };
+            run_runtime_r_p4();
+            stream.synchronize();
+            validateSinglePassComplete(runtime_r_p4_output,
+                                       geometry,
+                                       stream,
+                                       "fp8_rcoop_k3_runtime_r_phase_stream_p4",
+                                       FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+            const RKSinglePassTiming runtime_r_p4_timing = time_complete_candidate(runtime_r_p4_output, run_runtime_r_p4);
+            const CubKernelOccupancyInfo runtime_r_p4_occupancy =
+                queryFp8K3RuntimeRPhaseStreamRParallelP4RCooperativeCalibrationOccupancy(dtype);
+            const uint64_t runtime_r_p4_lanes = runtime_r_lanes_per_output(4);
+            const uint64_t runtime_r_p4_outputs_per_block = 8 * (32 / runtime_r_p4_lanes);
+            const uint64_t runtime_r_p4_blocks = std::min<uint64_t>(
+                singlePassCeilDiv(geometry.outer_size, runtime_r_p4_outputs_per_block), FP8_RCOOP_MAX_GRID_BLOCKS);
+            printSinglePassRow(benchmark_case,
+                               dtype,
+                               "r_cooperative",
+                               "r_parallel_k3_phase_stream_runtime_r_p4",
+                               "complete",
+                               "fp8_k3_phase_stream_runtime_r_p4_calibration",
+                               4,
+                               256,
+                               geometry.reduction_size,
+                               1,
+                               runtime_r_p4_blocks,
+                               input,
+                               runtime_r_p4_output,
+                               runtime_r_p4_timing,
+                               &device_geometry,
+                               &runtime_r_p4_occupancy);
+
+            Tensor runtime_r_p8_output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+            const auto run_runtime_r_p8 = [&]() {
+                launchFp8K3RuntimeRPhaseStreamRParallelP8InputRCooperativeCalibrationComplete(
+                    input, runtime_r_p8_output, geometry, stream);
+            };
+            run_runtime_r_p8();
+            stream.synchronize();
+            validateSinglePassComplete(runtime_r_p8_output,
+                                       geometry,
+                                       stream,
+                                       "fp8_rcoop_k3_runtime_r_phase_stream_p8",
+                                       FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+            const RKSinglePassTiming runtime_r_p8_timing = time_complete_candidate(runtime_r_p8_output, run_runtime_r_p8);
+            const CubKernelOccupancyInfo runtime_r_p8_occupancy =
+                queryFp8K3RuntimeRPhaseStreamRParallelP8InputRCooperativeCalibrationOccupancy(dtype);
+            const uint64_t runtime_r_p8_lanes = runtime_r_lanes_per_output(8);
+            const uint64_t runtime_r_p8_outputs_per_block = 8 * (32 / runtime_r_p8_lanes);
+            const uint64_t runtime_r_p8_blocks = std::min<uint64_t>(
+                singlePassCeilDiv(geometry.outer_size, runtime_r_p8_outputs_per_block), FP8_RCOOP_MAX_GRID_BLOCKS);
+            printSinglePassRow(benchmark_case,
+                               dtype,
+                               "r_cooperative",
+                               "r_parallel_k3_phase_stream_runtime_r_p8_input",
+                               "complete",
+                               "fp8_k3_phase_stream_runtime_r_p8_input_calibration",
+                               8,
+                               256,
+                               geometry.reduction_size,
+                               1,
+                               runtime_r_p8_blocks,
+                               input,
+                               runtime_r_p8_output,
+                               runtime_r_p8_timing,
+                               &device_geometry,
+                               &runtime_r_p8_occupancy);
+        }
+
+
+        if (geometry.inner_size == 7 &&
+            (geometry.reduction_size == 8 || geometry.reduction_size == 16 ||
+             geometry.reduction_size == 32 || geometry.reduction_size == 64)) {
+            Tensor k7_phase_stream_p8_input_output(
+                input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+            const auto run_k7_phase_stream_p8_input = [&]() {
+                launchFp8K7PhaseStreamRParallelP8InputRCooperativeCalibrationComplete(
+                    input, k7_phase_stream_p8_input_output, geometry, stream);
+            };
+            run_k7_phase_stream_p8_input();
+            stream.synchronize();
+            validateSinglePassComplete(k7_phase_stream_p8_input_output,
+                                       geometry,
+                                       stream,
+                                       "fp8_rcoop_k7_phase_stream_r_parallel_p8_input",
+                                       FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+            const RKSinglePassTiming k7_phase_stream_p8_input_timing =
+                time_complete_candidate(k7_phase_stream_p8_input_output, run_k7_phase_stream_p8_input);
+            const CubKernelOccupancyInfo k7_phase_stream_p8_input_occupancy =
+                queryFp8K7PhaseStreamRParallelP8InputRCooperativeCalibrationOccupancy(
+                    dtype, geometry.reduction_size);
+            const uint64_t lanes_per_output = geometry.reduction_size <= 8 ? 8 :
+                                              (geometry.reduction_size <= 16 ? 16 : 32);
+            const uint64_t outputs_per_warp = 32 / lanes_per_output;
+            const uint64_t outputs_per_block = outputs_per_warp * 8;
+            const uint64_t k7_phase_stream_p8_input_blocks = std::min<uint64_t>(
+                singlePassCeilDiv(geometry.outer_size, outputs_per_block), FP8_RCOOP_MAX_GRID_BLOCKS);
+            printSinglePassRow(benchmark_case,
+                               dtype,
+                               "r_cooperative",
+                               "r_parallel_k7_phase_stream_p8_input",
+                               "complete",
+                               "fp8_k7_phase_stream_r_parallel_p8_input_calibration",
+                               8,
+                               256,
+                               geometry.reduction_size,
+                               1,
+                               k7_phase_stream_p8_input_blocks,
+                               input,
+                               k7_phase_stream_p8_input_output,
+                               k7_phase_stream_p8_input_timing,
+                               &device_geometry,
+                               &k7_phase_stream_p8_input_occupancy);
+        }
+
+        if (geometry.inner_size == 7 &&
+            (geometry.reduction_size == 16 || geometry.reduction_size == 32 || geometry.reduction_size == 64)) {
+            Tensor k7_phase_stream_p16_input_output(
+                input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+            const auto run_k7_phase_stream_p16_input = [&]() {
+                launchFp8K7PhaseStreamRParallelP16InputRCooperativeCalibrationComplete(
+                    input, k7_phase_stream_p16_input_output, geometry, stream);
+            };
+            run_k7_phase_stream_p16_input();
+            stream.synchronize();
+            validateSinglePassComplete(k7_phase_stream_p16_input_output,
+                                       geometry,
+                                       stream,
+                                       "fp8_rcoop_k7_phase_stream_r_parallel_p16_input",
+                                       FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+            const RKSinglePassTiming k7_phase_stream_p16_input_timing =
+                time_complete_candidate(k7_phase_stream_p16_input_output, run_k7_phase_stream_p16_input);
+            const CubKernelOccupancyInfo k7_phase_stream_p16_input_occupancy =
+                queryFp8K7PhaseStreamRParallelP16InputRCooperativeCalibrationOccupancy(
+                    dtype, geometry.reduction_size);
+            const uint64_t lanes_per_output = geometry.reduction_size <= 16 ? 8 :
+                                              (geometry.reduction_size <= 32 ? 16 : 32);
+            const uint64_t outputs_per_warp = 32 / lanes_per_output;
+            const uint64_t outputs_per_block = outputs_per_warp * 8;
+            const uint64_t k7_phase_stream_p16_input_blocks = std::min<uint64_t>(
+                singlePassCeilDiv(geometry.outer_size, outputs_per_block), FP8_RCOOP_MAX_GRID_BLOCKS);
+            printSinglePassRow(benchmark_case,
+                               dtype,
+                               "r_cooperative",
+                               "r_parallel_k7_phase_stream_p16_input",
+                               "complete",
+                               "fp8_k7_phase_stream_r_parallel_p16_input_calibration",
+                               16,
+                               256,
+                               geometry.reduction_size,
+                               1,
+                               k7_phase_stream_p16_input_blocks,
+                               input,
+                               k7_phase_stream_p16_input_output,
+                               k7_phase_stream_p16_input_timing,
+                               &device_geometry,
+                               &k7_phase_stream_p16_input_occupancy);
+        }
+
+        const bool run_direct_component =
+            geometry.inner_size == 5 || geometry.inner_size == 9 || geometry.inner_size == 11 ||
+            geometry.inner_size == 13 || geometry.inner_size == 15 || geometry.inner_size == 17 ||
+            geometry.inner_size == 19 || geometry.inner_size == 31;
+        if (run_direct_component) {
+            Tensor direct_component_output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+            const auto run_direct_component = [&]() {
+                launchFp8DirectComponentWarpP4RCooperativeCalibrationComplete(
+                    input, direct_component_output, geometry, stream);
+            };
+            run_direct_component();
+            stream.synchronize();
+            validateSinglePassComplete(direct_component_output,
+                                       geometry,
+                                       stream,
+                                       "fp8_rcoop_direct_component_warp_p4",
+                                       FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+            const RKSinglePassTiming direct_component_timing =
+                time_complete_candidate(direct_component_output, run_direct_component);
+            const CubKernelOccupancyInfo direct_component_occupancy =
+                queryFp8DirectComponentWarpP4RCooperativeCalibrationOccupancy(dtype, geometry.inner_size);
+            printSinglePassRow(benchmark_case,
+                               dtype,
+                               "r_cooperative",
+                               "direct_component_warp",
+                               "complete",
+                               "fp8_one_output_warp_direct_component_p4_calibration",
+                               4,
+                               256,
+                               geometry.reduction_size,
+                               1,
+                               one_output_blocks,
+                               input,
+                               direct_component_output,
+                               direct_component_timing,
+                               &device_geometry,
+                               &direct_component_occupancy);
+        }
+        return;
+    }
+
+    // Let the exact production FP8 KParallel selector compete wherever it has a legal packet/layout. This is not a
+    // benchmark recreation of policy: proposeProductionKParallelForCalibration() calls the same selector used by production and
+    // returns null when KParallel is inapplicable (notably odd FP8 K).
+    DenseReductionOutputSpec output_spec;
+    output_spec.produce_value = true;
+    output_spec.value_dtype = dtype;
+    output_spec.produce_index = false;
+    DenseReductionProblem kparallel_problem = makeInitialDenseReductionProblem(
+        input.getDimensions(), {1}, DenseReductionAggregateKind::Value, output_spec);
+    std::vector<DenseReductionSite> kparallel_sites = enumerateDenseReductionSites(kparallel_problem);
+    if (kparallel_sites.size() != 1
+        || classifyDenseReducerFamily(kparallel_problem, kparallel_sites.front()) != DenseReducerFamily::RK) {
+        throw std::logic_error("FP8 full-space census expected one production KParallel RK site.");
+    }
+    DenseRKPlanningContext kparallel_context;
+    kparallel_context.original_input_dtype = dtype;
+    kparallel_context.value_operation = DenseRKValueOperation::Sum;
+    kparallel_context.multiprocessors = device_geometry.sm_count;
+    // Mirror the device geometry that production passes to the KParallel selector. Exact kernel occupancy answers
+    // register/shared-memory residency, but FP8 saturation policy still needs the hardware warp/thread limits to
+    // convert the calibrated useful-warps-per-SM target into a device-wide launch-supply target.
+    kparallel_context.warp_size = device_geometry.warp_size;
+    kparallel_context.max_threads_per_sm = device_geometry.max_threads_per_sm;
+    kparallel_context.max_blocks_per_sm = device_geometry.max_blocks_per_sm;
+    kparallel_context.occupancy_query = queryDenseRKFamilyExactOccupancy;
+    kparallel_context.occupancy_query_context = nullptr;
+    kparallel_context.allow_generic_rk_fallback = false;
+    std::optional<DenseReductionCandidate> kparallel_candidate = ReducersDenseRK::proposeProductionKParallelForCalibration(
+        kparallel_problem, kparallel_sites.front(), kparallel_context);
+    if (kparallel_candidate.has_value()) {
+        auto kparallel_plan = std::dynamic_pointer_cast<const DenseRKFamilyPhysicalPlan>(
+            kparallel_candidate->physical_plan);
+        if (!kparallel_plan || kparallel_plan->implementation != DenseRKProductionImplementation::KParallelPass
+            || kparallel_plan->strategy != DenseRKStrategy::KParallel) {
+            throw std::logic_error("Production KParallel calibration hook returned a non-KParallel plan.");
+        }
+        Tensor kparallel_output;
+        if (kparallel_plan->progress == DenseRKProgress::Complete) {
+            kparallel_output = Tensor(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+        } else {
+            kparallel_output = Tensor(
+                input.getPlacement(),
+                TensorDescriptor(DataType::FP32,
+                                 {geometry.outer_size, kparallel_plan->shards_per_output, geometry.inner_size}));
+        }
+        const CubReductionStageSemantics kparallel_semantics = makeValueReductionStageSemantics(
+            CubReductionOp::Sum, kparallel_plan->role, geometry.reduction_size);
+        const KParallelTiledStagePlan physical{
+            kparallel_plan->progress == DenseRKProgress::Complete ? TiledRKStageTopology::Complete
+                                                                  : TiledRKStageTopology::Staged,
+            kparallel_plan->packet_bytes,
+            kparallel_plan->block_threads,
+            kparallel_plan->shards_per_output};
+        const auto run_kparallel = [&]() {
+            launchKParallelTiledStage(
+                kparallel_semantics, input, kparallel_output, geometry, physical, 1.0f, stream);
+        };
+        run_kparallel();
+        stream.synchronize();
+        if (kparallel_plan->progress == DenseRKProgress::Complete) {
+            validateSinglePassComplete(
+                kparallel_output, geometry, stream, "production_kparallel", FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+        } else {
+            validateSinglePassPartial(kparallel_output,
+                                      geometry,
+                                      kparallel_plan->shards_per_output,
+                                      kparallel_plan->rows_per_shard,
+                                      SinglePassShardPolicy::Balanced,
+                                      stream,
+                                      "production_kparallel",
+                                      FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+        }
+        RKSinglePassTiming kparallel_timing{};
+        if (!use_rotating_cold_working_set) {
+            kparallel_timing = timeRKSinglePass(
+                cache_flush, stream, run_kparallel, FP8_RCOOP_FULL_SPACE_TIMING_SAMPLES);
+        } else if (kparallel_plan->progress == DenseRKProgress::Complete) {
+            kparallel_timing = time_complete_candidate(kparallel_output, run_kparallel);
+        } else {
+            RKRotatingTensorSlots rotating_kparallel_outputs(
+                kparallel_output.getPlacement(), kparallel_output.getDescriptor(), rotating_slot_count);
+            kparallel_timing = time_rotating_candidate(
+                kparallel_output, rotating_kparallel_outputs, run_kparallel);
+        }
+        const CubKernelOccupancyInfo kparallel_occupancy = queryKParallelTiledStageOccupancy(dtype, physical);
+        printSinglePassRow(benchmark_case,
+                           dtype,
+                           "k_parallel",
+                           "aligned",
+                           kparallel_plan->progress == DenseRKProgress::Complete ? "complete" : "staged",
+                           "production_kparallel",
+                           kparallel_plan->packet_bytes,
+                           kparallel_plan->block_threads,
+                           kparallel_plan->rows_per_shard,
+                           kparallel_plan->shards_per_output,
+                           kparallel_plan->first_stage_blocks,
+                           input,
+                           kparallel_output,
+                           kparallel_timing,
+                           &device_geometry,
+                           &kparallel_occupancy);
+    }
+
+    const CubReductionStageSemantics complete_semantics = makeValueReductionStageSemantics(
+        CubReductionOp::Sum, CubReductionStageRole::Complete, geometry.reduction_size);
+    const size_t complete_packet_bytes = singlePassPacketAdaptivePacketBytes(geometry, dtype);
+    const uint32_t complete_warps = singlePassPacketAdaptiveWarps(geometry, dtype, complete_packet_bytes);
+    const uint32_t complete_block_warps = std::max<uint32_t>(
+        static_cast<uint32_t>(TILED_REDUCTION_WARPS_PER_BLOCK), complete_warps);
+    DenseRKFamilyPhysicalPlan complete_plan;
+    complete_plan.packet_bytes = complete_packet_bytes;
+    complete_plan.cooperative_warps_per_tile = complete_warps;
+    complete_plan.block_threads = complete_block_warps * static_cast<uint32_t>(TILED_REDUCTION_WARP_THREADS);
+    Tensor complete_output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+    const auto run_complete = [&]() {
+        launchPacketAdaptiveComplete(complete_semantics, complete_plan, input, complete_output, geometry, stream);
+    };
+    run_complete();
+    stream.synchronize();
+    validateSinglePassComplete(complete_output,
+                               geometry,
+                               stream,
+                               "fp8_rcoop_full_space_complete",
+                               FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+    const RKSinglePassTiming complete_timing = time_complete_candidate(complete_output, run_complete);
+    const CubKernelOccupancyInfo complete_occupancy = querySinglePassPacketAdaptiveOccupancy(
+        geometry, dtype, complete_packet_bytes, static_cast<int>(complete_warps));
+    const uint64_t complete_tiles = singlePassPacketAdaptiveTiles(geometry, dtype, complete_packet_bytes);
+    const uint64_t complete_groups_per_block = complete_block_warps / complete_warps;
+    const uint64_t complete_blocks = std::min<uint64_t>(
+        singlePassCeilDiv(geometry.outer_size * complete_tiles, complete_groups_per_block),
+        FP8_RCOOP_MAX_GRID_BLOCKS);
+    printSinglePassRow(benchmark_case,
+                       dtype,
+                       "r_cooperative",
+                       "aligned_or_alignment_safe",
+                       "complete",
+                       "packet_adaptive_complete",
+                       complete_packet_bytes,
+                       complete_plan.block_threads,
+                       geometry.reduction_size,
+                       1,
+                       complete_blocks,
+                       input,
+                       complete_output,
+                       complete_timing,
+                       &device_geometry,
+                       &complete_occupancy);
+
+    // Generalized Complete RParallel is the intended consolidation candidate for medium K. Ownership is now one
+    // continuum in two mutually exclusive directions: O1 may grow from W1 to W2/W4/W8 as R deepens, while W1 may
+    // grow from O1 to O2/O4/O8 when one warp has enough K/R work to retain multiple outputs. Within each output,
+    // narrow K spends spare lanes across R workers/component and wider K assigns multiple components/lane. Packet
+    // legality is derived from each output subgroup's p4/p8/p16 staging slice, so awkward K stays in the same family.
+    if (geometry.reduction_size <= 1024 && geometry.inner_size <= 256 &&
+        (geometry.inner_size > 32 || include_general_rparallel_small_k)) {
+        const auto packet_supports_ownership = [&](uint32_t outputs_per_warp, uint32_t packet_bytes) {
+            const uint64_t lanes_per_output = uint64_t{32} / outputs_per_warp;
+            const uint64_t packet_window = lanes_per_output * packet_bytes;
+            const bool row_aligned = (geometry.inner_size % packet_bytes) == 0;
+            const uint64_t logical_capacity = row_aligned ? packet_window : packet_window - (packet_bytes - 1);
+            return geometry.inner_size <= logical_capacity;
+        };
+        const auto run_general_r_parallel_candidate =
+            [&](uint32_t outputs_per_warp, uint32_t warps_per_output, uint32_t packet_bytes, bool linear_packets) {
+                Tensor general_r_parallel_output(
+                    input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+                const auto run_general_r_parallel = [&]() {
+                    launchFp8GeneralRParallelRCooperativeCalibrationComplete(
+                        input,
+                        general_r_parallel_output,
+                        geometry,
+                        outputs_per_warp,
+                        warps_per_output,
+                        packet_bytes,
+                        stream,
+                        linear_packets);
+                };
+                run_general_r_parallel();
+                stream.synchronize();
+                const std::string ownership_label =
+                    "o" + std::to_string(outputs_per_warp) + "_w" + std::to_string(warps_per_output);
+                const std::string general_r_parallel_label =
+                    "fp8_rcoop_general_r_parallel_" + ownership_label +
+                    (linear_packets ? "_linear" : "") + "_p" + std::to_string(packet_bytes);
+                validateSinglePassComplete(general_r_parallel_output,
+                                           geometry,
+                                           stream,
+                                           general_r_parallel_label,
+                                           FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+                const RKSinglePassTiming general_r_parallel_timing =
+                    time_complete_candidate(general_r_parallel_output, run_general_r_parallel);
+                const CubKernelOccupancyInfo general_r_parallel_occupancy =
+                    queryFp8GeneralRParallelRCooperativeCalibrationOccupancy(
+                        dtype,
+                        geometry.inner_size,
+                        outputs_per_warp,
+                        warps_per_output,
+                        packet_bytes,
+                        linear_packets);
+                const uint64_t outputs_per_block =
+                    (uint64_t{8} / warps_per_output) * outputs_per_warp;
+                const uint64_t general_r_parallel_blocks = std::min<uint64_t>(
+                    singlePassCeilDiv(geometry.outer_size, outputs_per_block), FP8_RCOOP_MAX_GRID_BLOCKS);
+                const std::string layout_suffix = linear_packets ? "_linear" : "";
+                const std::string general_r_parallel_access =
+                    (outputs_per_warp == 1
+                         ? "r_parallel_general_w" + std::to_string(warps_per_output)
+                         : "r_parallel_general_o" + std::to_string(outputs_per_warp) + "_w1") +
+                    layout_suffix;
+                const std::string general_r_parallel_implementation =
+                    "fp8_general_r_parallel_" + ownership_label + layout_suffix + "_p" +
+                    std::to_string(packet_bytes) + "_calibration";
+                printSinglePassRow(benchmark_case,
+                                   dtype,
+                                   "r_cooperative",
+                                   general_r_parallel_access,
+                                   "complete",
+                                   general_r_parallel_implementation,
+                                   packet_bytes,
+                                   256,
+                                   geometry.reduction_size,
+                                   1,
+                                   general_r_parallel_blocks,
+                                   input,
+                                   general_r_parallel_output,
+                                   general_r_parallel_timing,
+                                   &device_geometry,
+                                   &general_r_parallel_occupancy);
+            };
+
+        for (uint32_t warps_per_output : {1u, 2u, 4u, 8u}) {
+            if (warps_per_output > geometry.reduction_size) {
+                continue;
+            }
+            for (uint32_t packet_bytes : {4u, 8u, 16u}) {
+                if (packet_supports_ownership(1, packet_bytes)) {
+                    run_general_r_parallel_candidate(1, warps_per_output, packet_bytes, false);
+                }
+            }
+        }
+        for (uint32_t outputs_per_warp : {2u, 4u, 8u}) {
+            for (uint32_t packet_bytes : {4u, 8u, 16u}) {
+                if (packet_supports_ownership(outputs_per_warp, packet_bytes)) {
+                    run_general_r_parallel_candidate(outputs_per_warp, 1, packet_bytes, false);
+                }
+            }
+        }
+
+        // LinearPackets preserves the packet-major byte stream in shared memory. Calibrate it only in the awkward
+        // small-K region where FlatRows currently wins; keep O1 so this isolates access layout from output ownership.
+        const bool calibrate_linear_packets = include_general_rparallel_staged &&
+            (geometry.inner_size == 5 || geometry.inner_size == 7 || geometry.inner_size == 11 ||
+             geometry.inner_size == 13 || geometry.inner_size == 15 || geometry.inner_size == 17 ||
+             geometry.inner_size == 19 || geometry.inner_size == 31);
+        if (calibrate_linear_packets) {
+            for (uint32_t warps_per_output : {1u, 2u, 4u, 8u}) {
+                if (warps_per_output > geometry.reduction_size) continue;
+                for (uint32_t packet_bytes : {8u, 16u}) {
+                    if (packet_supports_ownership(1, packet_bytes)) {
+                        run_general_r_parallel_candidate(1, warps_per_output, packet_bytes, true);
+                    }
+                }
+            }
+        }
+    }
+
+
+    // Staged generalized RParallel extends the same ownership family across CTAs. S2/S4/S8 balance one logical R
+    // reduction over independent CTA shards and emit FP32 [outer, shard, K] partials. S already creates independent
+    // work, so this calibration intentionally keeps O1 and varies only the useful intra-shard W1/W2/W4/W8 axis.
+    if (include_general_rparallel_staged && geometry.inner_size <= 256) {
+        const auto packet_supports_staged = [&](uint32_t packet_bytes) {
+            const uint64_t packet_window = uint64_t{32} * packet_bytes;
+            const bool row_aligned = (geometry.inner_size % packet_bytes) == 0;
+            const uint64_t logical_capacity = row_aligned ? packet_window : packet_window - (packet_bytes - 1);
+            return geometry.inner_size <= logical_capacity;
+        };
+        for (uint32_t shards_per_output : {2u, 4u, 8u}) {
+            if (shards_per_output > geometry.reduction_size) {
+                continue;
+            }
+            const uint64_t rows_per_shard = singlePassCeilDiv(geometry.reduction_size, shards_per_output);
+            Tensor staged_rparallel_partials(
+                input.getPlacement(),
+                TensorDescriptor(DataType::FP32,
+                                 {geometry.outer_size, shards_per_output, geometry.inner_size}));
+            std::unique_ptr<RKRotatingTensorSlots> rotating_staged_rparallel_outputs;
+            if (use_rotating_cold_working_set) {
+                rotating_staged_rparallel_outputs = std::make_unique<RKRotatingTensorSlots>(
+                    staged_rparallel_partials.getPlacement(),
+                    staged_rparallel_partials.getDescriptor(),
+                    rotating_slot_count);
+            }
+            for (uint32_t warps_per_output : {1u, 2u, 4u, 8u}) {
+                if (warps_per_output > rows_per_shard) {
+                    continue;
+                }
+                for (uint32_t packet_bytes : {4u, 8u, 16u}) {
+                    if (!packet_supports_staged(packet_bytes)) {
+                        continue;
+                    }
+                    const bool linear_k = geometry.inner_size == 5 || geometry.inner_size == 7 ||
+                        geometry.inner_size == 11 || geometry.inner_size == 13 || geometry.inner_size == 15 ||
+                        geometry.inner_size == 17 || geometry.inner_size == 19 || geometry.inner_size == 31;
+                    for (bool linear_packets : {false, true}) {
+                        if (linear_packets && (!linear_k || packet_bytes == 4)) continue;
+                    const auto run_staged_rparallel = [&]() {
+                        launchFp8GeneralRParallelRCooperativeCalibrationFirstStage(
+                            input,
+                            staged_rparallel_partials,
+                            geometry,
+                            warps_per_output,
+                            packet_bytes,
+                            shards_per_output,
+                            stream,
+                            linear_packets);
+                    };
+                    run_staged_rparallel();
+                    stream.synchronize();
+                    const std::string layout_suffix = linear_packets ? "_linear" : "";
+                    const std::string staged_label =
+                        "fp8_rcoop_general_r_parallel_o1_w" + std::to_string(warps_per_output) +
+                        "_s" + std::to_string(shards_per_output) + layout_suffix + "_p" +
+                        std::to_string(packet_bytes);
+                    validateSinglePassPartial(staged_rparallel_partials,
+                                              geometry,
+                                              shards_per_output,
+                                              rows_per_shard,
+                                              SinglePassShardPolicy::Balanced,
+                                              stream,
+                                              staged_label,
+                                              FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+                    const RKSinglePassTiming staged_timing = use_rotating_cold_working_set
+                        ? time_rotating_candidate(
+                              staged_rparallel_partials,
+                              *rotating_staged_rparallel_outputs,
+                              run_staged_rparallel)
+                        : timeRKSinglePass(
+                              cache_flush,
+                              stream,
+                              run_staged_rparallel,
+                              FP8_RCOOP_FULL_SPACE_TIMING_SAMPLES);
+                    const CubKernelOccupancyInfo staged_occupancy =
+                        queryFp8GeneralRParallelRCooperativeCalibrationFirstStageOccupancy(
+                            dtype, geometry.inner_size, warps_per_output, packet_bytes, linear_packets);
+                    const uint64_t outputs_per_block = uint64_t{8} / warps_per_output;
+                    const uint64_t blocks = std::min<uint64_t>(
+                        singlePassCeilDiv(geometry.outer_size * shards_per_output, outputs_per_block),
+                        FP8_RCOOP_MAX_GRID_BLOCKS);
+                    const std::string staged_access =
+                        "r_parallel_general_w" + std::to_string(warps_per_output) +
+                        "_s" + std::to_string(shards_per_output) + layout_suffix;
+                    const std::string staged_implementation =
+                        "fp8_general_r_parallel_o1_w" + std::to_string(warps_per_output) +
+                        "_s" + std::to_string(shards_per_output) + layout_suffix + "_p" +
+                        std::to_string(packet_bytes) + "_calibration";
+                    printSinglePassRow(benchmark_case,
+                                       dtype,
+                                       "r_cooperative",
+                                       staged_access,
+                                       "staged",
+                                       staged_implementation,
+                                       packet_bytes,
+                                       256,
+                                       rows_per_shard,
+                                       shards_per_output,
+                                       blocks,
+                                       input,
+                                       staged_rparallel_partials,
+                                       staged_timing,
+                                       &device_geometry,
+                                       &staged_occupancy);
+                    }
+                }
+            }
+        }
+    }
+
+    // DEPRECATED EXPERIMENT ONLY -- NOT A PRODUCTION CANDIDATE. Retain the one-output-per-warp p4 prototype only
+    // as a comparison baseline for the adaptive multi-output/R-parallel replacement below.
+    if (geometry.reduction_size <= 1024 && geometry.inner_size <= 64) {
+        Tensor outer_grouped_output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+        const auto run_outer_grouped = [&]() {
+            launchDeprecatedExperimentalFp8OuterGroupedP4RCooperativeCalibrationComplete(
+                input, outer_grouped_output, geometry, stream);
+        };
+        run_outer_grouped();
+        stream.synchronize();
+        validateSinglePassComplete(outer_grouped_output,
+                                   geometry,
+                                   stream,
+                                   "fp8_rcoop_deprecated_experiment_outer_grouped_p4",
+                                   FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+        const RKSinglePassTiming outer_grouped_timing =
+            time_complete_candidate(outer_grouped_output, run_outer_grouped);
+        const CubKernelOccupancyInfo outer_grouped_occupancy =
+            queryDeprecatedExperimentalFp8OuterGroupedP4RCooperativeCalibrationOccupancy(dtype, geometry.inner_size);
+        const uint64_t outer_grouped_blocks = std::min<uint64_t>(
+            singlePassCeilDiv(geometry.outer_size, uint64_t{8}), FP8_RCOOP_MAX_GRID_BLOCKS);
+        printSinglePassRow(benchmark_case,
+                           dtype,
+                           "r_cooperative",
+                           "experimental_deprecated_outer_grouped",
+                           "complete",
+                           "DEPRECATED_EXPERIMENT_ONLY_fp8_outer_grouped_p4_r_cooperative_calibration",
+                           4,
+                           256,
+                           geometry.reduction_size,
+                           1,
+                           outer_grouped_blocks,
+                           input,
+                           outer_grouped_output,
+                           outer_grouped_timing,
+                           &device_geometry,
+                           &outer_grouped_occupancy);
+    }
+
+    // Raw p4 read+write roofline reference with the same input/output traffic ratio as a complete reduction. It is
+    // deliberately excluded from coverage/winner decisions by the analyzer; it answers how much of the remaining gap
+    // is physical p4 streaming/writeback versus reduction-kernel overhead.
+    if (geometry.reduction_size <= 1024 && geometry.inner_size <= 32) {
+        Tensor roofline_output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+        const auto run_roofline = [&]() {
+            launchFp8P4ReadWriteRooflineCalibrationReference(input, roofline_output, geometry, stream);
+        };
+        run_roofline();
+        stream.synchronize();
+        const RKSinglePassTiming roofline_timing =
+            time_complete_candidate(roofline_output, run_roofline);
+        const CubKernelOccupancyInfo roofline_occupancy = queryFp8P4ReadWriteRooflineCalibrationOccupancy();
+        const uint64_t output_elements = geometry.outer_size * geometry.inner_size;
+        const uint64_t output_packets = output_elements / 4;
+        const uint64_t roofline_warp_groups = std::max<uint64_t>(uint64_t{1}, singlePassCeilDiv(output_packets, uint64_t{32}));
+        const uint64_t roofline_blocks = std::min<uint64_t>(
+            singlePassCeilDiv(roofline_warp_groups, uint64_t{8}), FP8_RCOOP_MAX_GRID_BLOCKS);
+        printSinglePassRow(benchmark_case,
+                           dtype,
+                           "reference",
+                           "p4_read_write_roofline",
+                           "complete",
+                           "fp8_p4_read_write_same_ratio_roofline_reference",
+                           4,
+                           256,
+                           geometry.reduction_size,
+                           1,
+                           roofline_blocks,
+                           input,
+                           roofline_output,
+                           roofline_timing,
+                           &device_geometry,
+                           &roofline_occupancy);
+    }
+
+    // Split the shallow/narrow replacement into independent physical mechanisms. This keeps the hot loops simple and
+    // lets the census establish the actual handoffs instead of embedding a speculative runtime selector.
+    if (geometry.reduction_size <= 1024 && geometry.inner_size <= 32) {
+        for (const uint32_t compact_packet_bytes : {4u, 8u, 16u}) {
+            const uint32_t compact_outputs_per_warp =
+                fp8CompactMultiOutputWarpRCooperativeCalibrationOutputsPerWarp(
+                    geometry.reduction_size, geometry.inner_size, compact_packet_bytes);
+            if (compact_outputs_per_warp <= 1) {
+                continue;
+            }
+            Tensor compact_output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+            const auto run_compact = [&]() {
+                launchFp8CompactMultiOutputWarpRCooperativeCalibrationComplete(
+                    input, compact_output, geometry, compact_packet_bytes, stream);
+            };
+            run_compact();
+            stream.synchronize();
+            const std::string compact_label =
+                "fp8_rcoop_compact_multi_output_warp_p" + std::to_string(compact_packet_bytes);
+            validateSinglePassComplete(compact_output,
+                                       geometry,
+                                       stream,
+                                       compact_label,
+                                       FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+            const RKSinglePassTiming compact_timing =
+                time_complete_candidate(compact_output, run_compact);
+            const CubKernelOccupancyInfo compact_occupancy =
+                queryFp8CompactMultiOutputWarpRCooperativeCalibrationOccupancy(
+                    dtype, geometry.inner_size, compact_outputs_per_warp, compact_packet_bytes);
+            const uint64_t compact_warp_groups = singlePassCeilDiv(
+                geometry.outer_size, static_cast<uint64_t>(compact_outputs_per_warp));
+            const uint64_t compact_blocks = std::min<uint64_t>(
+                singlePassCeilDiv(compact_warp_groups, uint64_t{8}), FP8_RCOOP_MAX_GRID_BLOCKS);
+            const std::string compact_implementation =
+                "fp8_compact_multi_output_warp_p" + std::to_string(compact_packet_bytes) + "_calibration";
+            printSinglePassRow(benchmark_case,
+                               dtype,
+                               "r_cooperative",
+                               "multi_output_compact",
+                               "complete",
+                               compact_implementation,
+                               compact_packet_bytes,
+                               256,
+                               geometry.reduction_size,
+                               1,
+                               compact_blocks,
+                               input,
+                               compact_output,
+                               compact_timing,
+                               &device_geometry,
+                               &compact_occupancy);
+        }
+
+        Tensor r_parallel_output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+        const auto run_r_parallel = [&]() {
+            launchFp8RParallelWarpP4RCooperativeCalibrationComplete(
+                input, r_parallel_output, geometry, stream);
+        };
+        run_r_parallel();
+        stream.synchronize();
+        validateSinglePassComplete(r_parallel_output,
+                                   geometry,
+                                   stream,
+                                   "fp8_rcoop_r_parallel_warp_p4",
+                                   FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+        const RKSinglePassTiming r_parallel_timing =
+            time_complete_candidate(r_parallel_output, run_r_parallel);
+        const CubKernelOccupancyInfo r_parallel_occupancy =
+            queryFp8RParallelWarpP4RCooperativeCalibrationOccupancy(dtype, geometry.inner_size);
+        const uint64_t one_output_blocks = std::min<uint64_t>(
+            singlePassCeilDiv(geometry.outer_size, uint64_t{8}), FP8_RCOOP_MAX_GRID_BLOCKS);
+        printSinglePassRow(benchmark_case,
+                           dtype,
+                           "r_cooperative",
+                           "r_parallel_warp",
+                           "complete",
+                           "fp8_one_output_warp_r_parallel_p4_calibration",
+                           4,
+                           256,
+                           geometry.reduction_size,
+                           1,
+                           one_output_blocks,
+                           input,
+                           r_parallel_output,
+                           r_parallel_timing,
+                           &device_geometry,
+                           &r_parallel_occupancy);
+
+        Tensor direct_component_output(input.getPlacement(), TensorDescriptor(dtype, geometry.output_dimensions));
+        const auto run_direct_component = [&]() {
+            launchFp8DirectComponentWarpP4RCooperativeCalibrationComplete(
+                input, direct_component_output, geometry, stream);
+        };
+        run_direct_component();
+        stream.synchronize();
+        validateSinglePassComplete(direct_component_output,
+                                   geometry,
+                                   stream,
+                                   "fp8_rcoop_direct_component_warp_p4",
+                                   FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+        const RKSinglePassTiming direct_component_timing =
+            time_complete_candidate(direct_component_output, run_direct_component);
+        const CubKernelOccupancyInfo direct_component_occupancy =
+            queryFp8DirectComponentWarpP4RCooperativeCalibrationOccupancy(dtype, geometry.inner_size);
+        printSinglePassRow(benchmark_case,
+                           dtype,
+                           "r_cooperative",
+                           "direct_component_warp",
+                           "complete",
+                           "fp8_one_output_warp_direct_component_p4_calibration",
+                           4,
+                           256,
+                           geometry.reduction_size,
+                           1,
+                           one_output_blocks,
+                           input,
+                           direct_component_output,
+                           direct_component_timing,
+                           &device_geometry,
+                           &direct_component_occupancy);
+    }
+
+    struct FlatPacketCandidate {
+        size_t packet_bytes;
+        uint64_t max_k;
+        const char* implementation;
+    };
+    constexpr std::array<FlatPacketCandidate, 3> FLAT_PACKETS = {{
+        {4, 125, "fp8_narrow_flat_p4_adaptive_window_r_cooperative_calibration"},
+        {8, 249, "fp8_narrow_flat_p8_adaptive_window_r_cooperative_calibration"},
+        {16, 256, "fp8_narrow_flat_p16_adaptive_window_r_cooperative_calibration"},
+    }};
+    struct RotatedCandidate {
+        size_t packet_bytes;
+        bool exact_tile;
+        const char* access;
+        const char* implementation;
+    };
+    constexpr std::array<RotatedCandidate, 4> ROTATED = {{
+        {4, false, "rotated_prefix_reserved", "fp8_rotated_prefix_reserved_p4_r_cooperative_calibration"},
+        {8, false, "rotated_prefix_reserved", "fp8_rotated_prefix_reserved_p8_r_cooperative_calibration"},
+        {16, false, "rotated_prefix_reserved", "fp8_rotated_prefix_reserved_p16_r_cooperative_calibration"},
+        {16, true, "rotated_exact", "fp8_rotated_exact_p16_r_cooperative_calibration"},
+    }};
+
+    for (uint64_t rows_per_shard : FP8_RCOOP_FULL_SPACE_ROW_DEPTHS) {
+        if (rows_per_shard >= geometry.reduction_size) {
+            continue;
+        }
+        const uint64_t shards = singlePassCeilDiv(geometry.reduction_size, rows_per_shard);
+        if (shards <= 1) {
+            continue;
+        }
+
+        Tensor staged_partials(input.getPlacement(),
+                               TensorDescriptor(DataType::FP32,
+                                                {geometry.outer_size, shards, geometry.inner_size}));
+        std::unique_ptr<RKRotatingTensorSlots> rotating_staged_outputs;
+        if (use_rotating_cold_working_set) {
+            rotating_staged_outputs = std::make_unique<RKRotatingTensorSlots>(
+                staged_partials.getPlacement(), staged_partials.getDescriptor(), rotating_slot_count);
+        }
+
+        for (const FlatPacketCandidate& flat : FLAT_PACKETS) {
+            if (geometry.inner_size > flat.max_k) {
+                continue;
+            }
+            const auto run_flat = [&]() {
+                launchFp8NarrowLowPrecisionFlatRCooperativeCalibrationFirstStage(
+                    input, staged_partials, geometry, flat.packet_bytes, rows_per_shard, shards, stream);
+            };
+            run_flat();
+            stream.synchronize();
+            validateSinglePassPartial(staged_partials,
+                                      geometry,
+                                      shards,
+                                      rows_per_shard,
+                                      SinglePassShardPolicy::FixedRows,
+                                      stream,
+                                      "fp8_rcoop_full_space_flat_rows_p" + std::to_string(flat.packet_bytes),
+                                      FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+            const RKSinglePassTiming timing = use_rotating_cold_working_set
+                ? time_rotating_candidate(staged_partials, *rotating_staged_outputs, run_flat)
+                : timeRKSinglePass(cache_flush, stream, run_flat, FP8_RCOOP_FULL_SPACE_TIMING_SAMPLES);
+            const CubKernelOccupancyInfo occupancy =
+                queryFp8NarrowLowPrecisionFlatRCooperativeCalibrationOccupancy(
+                    dtype, flat.packet_bytes, rows_per_shard, geometry.inner_size);
+            const uint64_t blocks = std::min<uint64_t>(
+                geometry.outer_size * shards, FP8_RCOOP_MAX_GRID_BLOCKS);
+            printSinglePassRow(benchmark_case,
+                               dtype,
+                               "r_cooperative",
+                               "flat_rows",
+                               "staged",
+                               flat.implementation,
+                               flat.packet_bytes,
+                               256,
+                               rows_per_shard,
+                               shards,
+                               blocks,
+                               input,
+                               staged_partials,
+                               timing,
+                               &device_geometry,
+                               &occupancy);
+        }
+
+        for (const RotatedCandidate& rotated : ROTATED) {
+            const auto run_rotated = [&]() {
+                launchFp8AwkwardAlignmentRotatedShardedCalibrationFirstStage(
+                    input,
+                    staged_partials,
+                    geometry,
+                    rotated.packet_bytes,
+                    rotated.exact_tile,
+                    rows_per_shard,
+                    shards,
+                    stream);
+            };
+            run_rotated();
+            stream.synchronize();
+            validateSinglePassPartial(staged_partials,
+                                      geometry,
+                                      shards,
+                                      rows_per_shard,
+                                      SinglePassShardPolicy::FixedRows,
+                                      stream,
+                                      std::string("fp8_rcoop_full_space_") + rotated.access + "_p"
+                                          + std::to_string(rotated.packet_bytes),
+                                      FP8_RCOOP_SINGLE_PASS_FILL_VALUE);
+            const RKSinglePassTiming timing = use_rotating_cold_working_set
+                ? time_rotating_candidate(staged_partials, *rotating_staged_outputs, run_rotated)
+                : timeRKSinglePass(cache_flush, stream, run_rotated, FP8_RCOOP_FULL_SPACE_TIMING_SAMPLES);
+            const CubKernelOccupancyInfo occupancy =
+                queryFp8AwkwardAlignmentRotatedShardedCalibrationOccupancy(
+                    dtype, rotated.packet_bytes, rotated.exact_tile, rows_per_shard);
+            const uint64_t tiles = singlePassRotatedRCoopTiles(
+                geometry, dtype, rotated.packet_bytes, rotated.exact_tile);
+            const uint64_t blocks = std::min<uint64_t>(
+                geometry.outer_size * tiles * shards, FP8_RCOOP_MAX_GRID_BLOCKS);
+            const uint32_t block_threads =
+                static_cast<uint32_t>(rotated.packet_bytes) * static_cast<uint32_t>(TILED_REDUCTION_WARP_THREADS);
+            printSinglePassRow(benchmark_case,
+                               dtype,
+                               "r_cooperative",
+                               rotated.access,
+                               "staged",
+                               rotated.implementation,
+                               rotated.packet_bytes,
+                               block_threads,
+                               rows_per_shard,
+                               shards,
+                               blocks,
+                               input,
+                               staged_partials,
+                               timing,
+                               &device_geometry,
+                               &occupancy);
+        }
+    }
+}
+
+void runFp8RCooperativeFullSpaceSweepImpl(Tensor& cache_flush, Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    constexpr std::array<DataType, 2> DTYPES = {DataType::FP8_E4M3, DataType::FP8_E5M2};
+    // Full requested R Cartesian: small/medium/large, with both naturally aligned and awkward depths.
+    constexpr std::array<uint64_t, 18> R_VALUES = {
+        16, 32, 64, 15, 31, 63,
+        256, 512, 1024, 255, 511, 1023,
+        4096, 8192, 32768, 4095, 8191, 32767};
+    // Actual-work Cartesian. The first four points resolve launch-dominated behavior; 64..512 MiB resolves the
+    // saturation crossover seen in the exploratory full-space sweep.
+    constexpr std::array<uint64_t, 8> TARGET_BYTES = {
+        256ULL * 1024ULL,
+        1ULL * 1024ULL * 1024ULL,
+        4ULL * 1024ULL * 1024ULL,
+        16ULL * 1024ULL * 1024ULL,
+        64ULL * 1024ULL * 1024ULL,
+        128ULL * 1024ULL * 1024ULL,
+        256ULL * 1024ULL * 1024ULL,
+        512ULL * 1024ULL * 1024ULL,
+    };
+    // Full requested K Cartesian: small/medium/large, with nice packet-aligned and awkward/boundary values.
+    constexpr std::array<uint64_t, 22> K_VALUES = {
+        8, 16, 32, 7, 15, 31,
+        64, 128, 256, 63, 127, 129, 255,
+        512, 1024, 4096, 497, 511, 993, 1023, 1493, 4095};
+
+    const RKSinglePassDeviceGeometry device_geometry = querySinglePassDeviceGeometry();
+    printFp8RCooperativeCoverageHeader(
+        device_geometry,
+        "rk_fp8_rcooperative_full_space_sweep",
+        "map modern FP8 RK coverage across the full R x K x actual-input-byte Cartesian; production KParallel "
+        "competes wherever its real selector has a legal plan, while calibration-only RCooperative candidates expose "
+        "genuine holes and transition regions");
+    uint64_t exact_shape_dtypes = 0;
+    for (uint64_t reduction : R_VALUES) {
+        for (uint64_t inner : K_VALUES) {
+            std::array<uint64_t, TARGET_BYTES.size()> seen_outer{};
+            size_t seen_count = 0;
+            for (uint64_t target_bytes : TARGET_BYTES) {
+                const uint64_t outer = fp8RCooperativeOuterNearTarget(reduction, inner, target_bytes);
+                bool duplicate = false;
+                for (size_t index = 0; index < seen_count; ++index) {
+                    duplicate = duplicate || seen_outer[index] == outer;
+                }
+                if (duplicate) {
+                    continue;
+                }
+                seen_outer[seen_count++] = outer;
+                RKSinglePassSweepCase benchmark_case{
+                    fp8RCooperativeTargetLabel(target_bytes),
+                    "o" + std::to_string(outer) + "_r" + std::to_string(reduction) + "_k" + std::to_string(inner),
+                    outer,
+                    reduction,
+                    inner};
+                for (DataType dtype : DTYPES) {
+                    runFp8RCooperativeFullSpaceCase(
+                        benchmark_case, dtype, cache_flush, stream, device_geometry);
+                    ++exact_shape_dtypes;
+                }
+            }
+        }
+    }
+    std::cout << "# rk_fp8_rcooperative_full_space_sweep_complete exact_shape_dtypes="
+              << exact_shape_dtypes << '\n';
+#else
+    static_cast<void>(cache_flush);
+    static_cast<void>(stream);
+    throw std::logic_error("FP8 RCooperative full-space sweep requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+void runFp8RCooperativeSmallRSmallKSweepImpl(Tensor& cache_flush, Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    constexpr std::array<DataType, 2> DTYPES = {DataType::FP8_E4M3, DataType::FP8_E5M2};
+    // Focus the shallow/narrow hole aggressively, including genuinely tiny reductions. Powers of two are the nice
+    // controls; their immediately-lower awkward neighbors expose alignment / utilization effects.
+    constexpr std::array<uint64_t, 11> R_VALUES = {2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64};
+    // Nice/aligned K={4,8,16,32} is already covered by Compact/RParallel and no longer belongs in this
+    // focused benchmark. Sweep every odd K through 19 to map where phase-stream-style coverage is actually needed,
+    // and retain K=31 as the larger odd-K control.
+    constexpr std::array<uint64_t, 10> K_VALUES = {3, 5, 7, 9, 11, 13, 15, 17, 19, 31};
+    // Keep only substantial work sizes here. The purpose is to distinguish a physical geometry hole from launch
+    // underfill, not to repeat the full small-work Cartesian.
+    constexpr std::array<uint64_t, 4> TARGET_BYTES = {
+        64ULL * 1024ULL * 1024ULL,
+        128ULL * 1024ULL * 1024ULL,
+        256ULL * 1024ULL * 1024ULL,
+        512ULL * 1024ULL * 1024ULL,
+    };
+
+    const RKSinglePassDeviceGeometry device_geometry = querySinglePassDeviceGeometry();
+    printFp8RCooperativeCoverageHeader(
+        device_geometry,
+        "rk_fp8_rcooperative_small_r_small_k_sweep",
+        "focused unresolved shallow-R/narrow-K FP8 holes only; skips already-established KParallel/generic-p16/FlatRows/Rotated "
+        "coverage and compares the p4 roofline, Compact where relevant, one-output RParallel p4/p8/p16, the subgrouped "
+        "multi-output RParallel p4/p8/p16 packet shapes, multi-warp Complete RParallel W2/W4/W8 p4/p8/p16, the "
+        "established K=3/K=7 phase-stream candidates, and DirectComponent across the odd-K census");
+    std::cout << "# focused_holes_only=1 odd_k_census=3,5,7,9,11,13,15,17,19,31 "
+                 "candidates=roofline,compact_when_applicable,r_parallel_p4_p8_p16,r_parallel_multi_output_2_4_8_16_32_p4_p8_p16,"
+                 "r_parallel_multi_warp_2_4_8_p4_p8_p16,k3_phase_stream,k7_phase_stream_p8_p16,direct_odd_k\n";
+    uint64_t exact_shape_dtypes = 0;
+    for (uint64_t reduction : R_VALUES) {
+        for (uint64_t inner : K_VALUES) {
+            // K=2 deep R is now covered by paired-row RParallel and no longer belongs in this sweep. Compact already
+            // owns K=3 at R<=4, so keep its established phase-stream census starting at R=7. The newly-added odd K
+            // values run across the complete shallow-R ladder so the benchmark can reveal both aligned-R and awkward-R
+            // holes without assuming phase-stream is required. K=31 remains the larger shallow-R control.
+            const bool newly_swept_odd_k =
+                inner == 5 || inner == 9 || inner == 11 || inner == 13 || inner == 17 || inner == 19;
+            const bool unresolved_cell =
+                (inner == 3 && reduction >= 7) ||
+                (inner == 7) ||
+                newly_swept_odd_k ||
+                (inner == 15) ||
+                (inner == 31 && reduction <= 16);
+            if (!unresolved_cell) {
+                continue;
+            }
+            std::array<uint64_t, TARGET_BYTES.size()> seen_outer{};
+            size_t seen_count = 0;
+            for (uint64_t target_bytes : TARGET_BYTES) {
+                const uint64_t outer = fp8RCooperativeOuterNearTarget(reduction, inner, target_bytes);
+                bool duplicate = false;
+                for (size_t index = 0; index < seen_count; ++index) {
+                    duplicate = duplicate || seen_outer[index] == outer;
+                }
+                if (duplicate) {
+                    continue;
+                }
+                seen_outer[seen_count++] = outer;
+                RKSinglePassSweepCase benchmark_case{
+                    fp8RCooperativeTargetLabel(target_bytes),
+                    "o" + std::to_string(outer) + "_r" + std::to_string(reduction) + "_k" + std::to_string(inner),
+                    outer,
+                    reduction,
+                    inner};
+                for (DataType dtype : DTYPES) {
+                    runFp8RCooperativeFullSpaceCase(
+                        benchmark_case, dtype, cache_flush, stream, device_geometry, true, true);
+                    ++exact_shape_dtypes;
+                }
+            }
+        }
+    }
+    std::cout << "# rk_fp8_rcooperative_small_r_small_k_sweep_complete exact_shape_dtypes="
+              << exact_shape_dtypes << '\n';
+#else
+    static_cast<void>(cache_flush);
+    static_cast<void>(stream);
+    throw std::logic_error("FP8 RCooperative small-R/small-K sweep requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+
+void runFp8RCooperativeSmallRMediumKSweepImpl(Tensor& cache_flush, Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    constexpr std::array<DataType, 2> DTYPES = {DataType::FP8_E4M3, DataType::FP8_E5M2};
+    // Reuse the established small-R nice/awkward ladder so this report lines up directly with the preceding
+    // shallow/narrow census. The R=2/3/4 points are intentionally retained: medium K provides ample retained-width
+    // parallelism, so they reveal whether production KParallel or a one-pass RCooperative layout already covers the
+    // formerly difficult ultra-shallow reductions without relying on the K<=32 specialized kernels.
+    constexpr std::array<uint64_t, 11> R_VALUES = {2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64};
+    // Keep this exactly aligned with the analyzer's medium-K regime: packet-friendly controls at 64/128/256 and the
+    // adjacent awkward/boundary widths that historically expose alignment and packetization holes.
+    constexpr std::array<uint64_t, 7> K_VALUES = {63, 64, 127, 128, 129, 255, 256};
+    constexpr std::array<uint64_t, 4> TARGET_BYTES = {
+        64ULL * 1024ULL * 1024ULL,
+        128ULL * 1024ULL * 1024ULL,
+        256ULL * 1024ULL * 1024ULL,
+        512ULL * 1024ULL * 1024ULL,
+    };
+
+    const RKSinglePassDeviceGeometry device_geometry = querySinglePassDeviceGeometry();
+    printFp8RCooperativeCoverageHeader(
+        device_geometry,
+        "rk_fp8_rcooperative_small_r_medium_k_sweep",
+        "focused small-R x medium-K FP8 coverage census; production KParallel competes wherever its real selector is legal "
+        "against generalized Complete RParallel O1/O2/O4/O8 x W1/W2/W4/W8 (mutually exclusive axes) p4/p8/p16, packet-adaptive Complete, and the existing "
+        "FlatRows/Rotated layouts that the generalized family is intended to replace where possible");
+    std::cout << "# focused_small_r_medium_k=1 "
+                 "r_census=2,3,4,7,8,15,16,31,32,63,64 "
+                 "k_census=63,64,127,128,129,255,256 "
+                 "targets_mib=64,128,256,512 "
+                 "candidates=production_kparallel,general_r_parallel_o1_o2_o4_o8_w1_w2_w4_w8_p4_p8_p16,packet_adaptive_complete,"
+                 "flat_rows_p4_p8_p16,rotated_prefix_p4_p8_p16,rotated_exact_p16\n";
+
+    uint64_t exact_shape_dtypes = 0;
+    for (uint64_t reduction : R_VALUES) {
+        for (uint64_t inner : K_VALUES) {
+            std::array<uint64_t, TARGET_BYTES.size()> seen_outer{};
+            size_t seen_count = 0;
+            for (uint64_t target_bytes : TARGET_BYTES) {
+                const uint64_t outer = fp8RCooperativeOuterNearTarget(reduction, inner, target_bytes);
+                bool duplicate = false;
+                for (size_t index = 0; index < seen_count; ++index) {
+                    duplicate = duplicate || seen_outer[index] == outer;
+                }
+                if (duplicate) {
+                    continue;
+                }
+                seen_outer[seen_count++] = outer;
+                RKSinglePassSweepCase benchmark_case{
+                    fp8RCooperativeTargetLabel(target_bytes),
+                    "o" + std::to_string(outer) + "_r" + std::to_string(reduction) + "_k" + std::to_string(inner),
+                    outer,
+                    reduction,
+                    inner};
+                for (DataType dtype : DTYPES) {
+                    // Use the broad family case rather than focused_holes_only so generalized medium-K RParallel
+                    // competes directly with production KParallel and the existing Complete/FlatRows/Rotated baselines.
+                    runFp8RCooperativeFullSpaceCase(
+                        benchmark_case, dtype, cache_flush, stream, device_geometry, true, false);
+                    ++exact_shape_dtypes;
+                }
+            }
+        }
+    }
+    std::cout << "# rk_fp8_rcooperative_small_r_medium_k_sweep_complete exact_shape_dtypes="
+              << exact_shape_dtypes << '\n';
+#else
+    static_cast<void>(cache_flush);
+    static_cast<void>(stream);
+    throw std::logic_error("FP8 RCooperative small-R/medium-K sweep requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+
+void runFp8RCooperativeMediumRSmallKSweepImpl(Tensor& cache_flush, Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    constexpr std::array<DataType, 2> DTYPES = {DataType::FP8_E4M3, DataType::FP8_E5M2};
+    // Use the analyzer's complete medium-R domain. Adjacent nice/awkward pairs make the R ownership transition
+    // visible without inventing a benchmark-only boundary: 255/256, 511/512, and 1023/1024.
+    constexpr std::array<uint64_t, 6> R_VALUES = {255, 256, 511, 512, 1023, 1024};
+    // Use the complete analyzer-defined small-K domain rather than a hand-picked subset. This includes the power-of-two
+    // packet-friendly controls plus every odd width already used by the shallow/narrow calibration work.
+    constexpr std::array<uint64_t, 15> K_VALUES = {
+        2, 3, 4, 5, 7, 8, 9, 11, 13, 15, 16, 17, 19, 31, 32};
+    constexpr std::array<uint64_t, 4> TARGET_BYTES = {
+        64ULL * 1024ULL * 1024ULL,
+        128ULL * 1024ULL * 1024ULL,
+        256ULL * 1024ULL * 1024ULL,
+        512ULL * 1024ULL * 1024ULL,
+    };
+
+    const RKSinglePassDeviceGeometry device_geometry = querySinglePassDeviceGeometry();
+    printFp8RCooperativeCoverageHeader(
+        device_geometry,
+        "rk_fp8_rcooperative_medium_r_small_k_sweep",
+        "focused medium-R x small-K FP8 coverage census; generalized RParallel enables the same "
+        "O1/O2/O4/O8 x W1/W2/W4/W8 Complete ownership plus balanced staged S2/S4/S8 with O1 x W1/W2/W4/W8, "
+        "with LinearPackets calibrated at K=5/7/11/13/15/17/19/31 against PackedPlanes and FlatRows");
+    std::cout << "# focused_medium_r_small_k=1 "
+                 "r_census=255,256,511,512,1023,1024 "
+                 "k_census=2,3,4,5,7,8,9,11,13,15,16,17,19,31,32 "
+                 "targets_mib=64,128,256,512 "
+                 "candidates=production_kparallel,general_r_parallel_complete_o1_o2_o4_o8_w1_w2_w4_w8_p4_p8_p16,"
+                 "general_r_parallel_staged_s2_s4_s8_o1_w1_w2_w4_w8_p4_p8_p16,"
+                 "general_r_parallel_linear_k5_k7_k11_k13_k15_k17_k19_k31_o1_w1_w2_w4_w8_s1_s2_s4_s8_p8_p16,"
+                 "packet_adaptive_complete,compact_when_applicable,legacy_r_parallel_p4,direct_component_p4,"
+                 "flat_rows_p4_p8_p16,rotated_prefix_p4_p8_p16,rotated_exact_p16\n";
+
+    uint64_t exact_shape_dtypes = 0;
+    for (uint64_t reduction : R_VALUES) {
+        for (uint64_t inner : K_VALUES) {
+            std::array<uint64_t, TARGET_BYTES.size()> seen_outer{};
+            size_t seen_count = 0;
+            for (uint64_t target_bytes : TARGET_BYTES) {
+                const uint64_t outer = fp8RCooperativeOuterNearTarget(reduction, inner, target_bytes);
+                bool duplicate = false;
+                for (size_t index = 0; index < seen_count; ++index) {
+                    duplicate = duplicate || seen_outer[index] == outer;
+                }
+                if (duplicate) {
+                    continue;
+                }
+                seen_outer[seen_count++] = outer;
+                RKSinglePassSweepCase benchmark_case{
+                    fp8RCooperativeTargetLabel(target_bytes),
+                    "o" + std::to_string(outer) + "_r" + std::to_string(reduction) + "_k" + std::to_string(inner),
+                    outer,
+                    reduction,
+                    inner};
+                for (DataType dtype : DTYPES) {
+                    // Broad-family mode retains current production/staged baselines. The final two true flags are
+                    // scoped to this census: expose generalized RParallel at K<=32 and its S2/S4/S8 staged topology.
+                    runFp8RCooperativeFullSpaceCase(
+                        benchmark_case, dtype, cache_flush, stream, device_geometry, true, false, true, true);
+                    ++exact_shape_dtypes;
+                }
+            }
+        }
+    }
+    std::cout << "# rk_fp8_rcooperative_medium_r_small_k_sweep_complete exact_shape_dtypes="
+              << exact_shape_dtypes << '\n';
+#else
+    static_cast<void>(cache_flush);
+    static_cast<void>(stream);
+    throw std::logic_error("FP8 RCooperative medium-R/small-K sweep requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
 const ReductionCandidateRegistrar<DenseRKFamilyCandidate> dense_rk_family_candidate_registrar;
 
 }  // namespace
@@ -3214,6 +6510,46 @@ void runRKKParallelStageCrossoverCalibration(Tensor& cache_flush, Stream& stream
 
 void runRKKParallelStagedGeometryCalibration(Tensor& cache_flush, Stream& stream) {
     runRKKParallelStagedGeometryCalibrationImpl(cache_flush, stream);
+}
+
+void runFp8KParallelPacketABCensus(Tensor& cache_flush, Stream& stream) {
+    runFp8KParallelPacketABCensusImpl(cache_flush, stream);
+}
+
+void runFp8KParallelSmallPacketSweep(Tensor& cache_flush, Stream& stream) {
+    runFp8KParallelSmallPacketSweepImpl(cache_flush, stream);
+}
+
+void runFp8KParallelStraddledSweep(Tensor& cache_flush, Stream& stream) {
+    runFp8KParallelStraddledSweepImpl(cache_flush, stream);
+}
+
+void runFp8KParallelCompleteLayoutSweep(Tensor& cache_flush, Stream& stream) {
+    runFp8KParallelCompleteLayoutSweepImpl(cache_flush, stream);
+}
+
+void runFp8KParallelStagedLayoutSweep(Tensor& cache_flush, Stream& stream) {
+    runFp8KParallelStagedLayoutSweepImpl(cache_flush, stream);
+}
+
+void runFp8RCooperativeSinglePassSweep(Tensor& cache_flush, Stream& stream) {
+    runFp8RCooperativeSinglePassSweepImpl(cache_flush, stream);
+}
+
+void runFp8RCooperativeFullSpaceSweep(Tensor& cache_flush, Stream& stream) {
+    runFp8RCooperativeFullSpaceSweepImpl(cache_flush, stream);
+}
+
+void runFp8RCooperativeSmallRSmallKSweep(Tensor& cache_flush, Stream& stream) {
+    runFp8RCooperativeSmallRSmallKSweepImpl(cache_flush, stream);
+}
+
+void runFp8RCooperativeSmallRMediumKSweep(Tensor& cache_flush, Stream& stream) {
+    runFp8RCooperativeSmallRMediumKSweepImpl(cache_flush, stream);
+}
+
+void runFp8RCooperativeMediumRSmallKSweep(Tensor& cache_flush, Stream& stream) {
+    runFp8RCooperativeMediumRSmallKSweepImpl(cache_flush, stream);
 }
 
 void runRKKParallelEndToEndCrossoverCalibration(Tensor& cache_flush, Stream& stream) {
