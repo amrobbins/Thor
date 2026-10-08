@@ -1,5 +1,6 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Utility/Flatten.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
 #include "DeepLearning/Api/Network/Network.h"
 
 #include <limits>
@@ -31,39 +32,6 @@ vector<uint64_t> flattenedDimensions(const vector<uint64_t>& inputDimensions, ui
     return outputDimensions;
 }
 
-RaggedTensor reconstructRaggedInput(const json& inputJson, Network* network) {
-    Tensor values = network->getApiTensorByOriginalId(inputJson.at("values").at("id").get<uint64_t>());
-    Tensor offsets = network->getApiTensorByOriginalId(inputJson.at("offsets").at("id").get<uint64_t>());
-    RaggedTensor input = inputJson.contains("max_values_per_row")
-                             ? RaggedTensor(values, offsets, inputJson.at("max_values_per_row").get<uint64_t>())
-                             : RaggedTensor(values, offsets);
-    if (input.getBatchSize() != inputJson.at("batch_size").get<uint64_t>() ||
-        input.getMaxTotalValues() != inputJson.at("max_total_values").get<uint64_t>()) {
-        throw runtime_error("Flatten serialized ragged input metadata does not match reconstructed tensors.");
-    }
-    return input;
-}
-
-void validateRaggedOutput(const json& outputJson, const RaggedTensor& input, const Tensor& outputValues) {
-    const uint64_t serializedValuesId = outputJson.at("values").at("id").get<uint64_t>();
-    const uint64_t serializedOffsetsId = outputJson.at("offsets").at("id").get<uint64_t>();
-    if (serializedValuesId != outputValues.getOriginalId() && serializedValuesId != outputValues.getId()) {
-        throw runtime_error("Flatten serialized ragged output values must match feature_output.");
-    }
-    if (serializedOffsetsId != input.getOffsets().getOriginalId() && serializedOffsetsId != input.getOffsets().getId()) {
-        throw runtime_error("Flatten serialized ragged output must preserve the input row partition.");
-    }
-    if (outputJson.at("batch_size").get<uint64_t>() != input.getBatchSize() ||
-        outputJson.at("max_total_values").get<uint64_t>() != input.getMaxTotalValues()) {
-        throw runtime_error("Flatten serialized ragged output capacity metadata does not match the input partition.");
-    }
-    const bool outputHasMaxValuesPerRow = outputJson.contains("max_values_per_row");
-    if (outputHasMaxValuesPerRow != input.hasMaxValuesPerRow() ||
-        (outputHasMaxValuesPerRow && outputJson.at("max_values_per_row").get<uint64_t>() != input.getMaxValuesPerRow())) {
-        throw runtime_error("Serialized ragged output must preserve max_values_per_row metadata.");
-    }
-}
-
 }  // namespace
 
 Flatten Flatten::Builder::build() {
@@ -78,7 +46,9 @@ Flatten Flatten::Builder::build() {
         const vector<uint64_t> outputTrailing = flattenedDimensions(inputTrailing, _numOutputDimensions.value(), "ragged input");
         vector<uint64_t> outputValueDimensions;
         outputValueDimensions.reserve(outputTrailing.size() + 1);
-        outputValueDimensions.push_back(_raggedFeatureInput->getMaxTotalValues());
+        outputValueDimensions.push_back(_raggedFeatureInput->isPlacementNeutral()
+                                            ? _raggedFeatureInput->getMaxValuesPerRow()
+                                            : _raggedFeatureInput->getMaxTotalValues());
         outputValueDimensions.insert(outputValueDimensions.end(), outputTrailing.begin(), outputTrailing.end());
         flatten.featureOutput = Tensor(_featureInput->getDataType(), outputValueDimensions);
         flatten.raggedFeatureInput = _raggedFeatureInput;
@@ -98,34 +68,61 @@ json Flatten::architectureJson() const {
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
 
+    const bool placementNeutral = raggedFeatureInput.has_value() && raggedFeatureInput->isPlacementNeutral();
+    if (raggedFeatureOutput.has_value()) THOR_THROW_IF_FALSE(placementNeutral == raggedFeatureOutput->isPlacementNeutral());
+
     json j;
     j["factory"] = Layer::Factory::Layer.value();
-    j["version"] = getLayerVersion();
+    j["version"] = placementNeutral ? "1.1.0" : getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
     j["feature_input"] = featureInput.value().architectureJson();
     j["feature_output"] = featureOutput.value().architectureJson();
     j["use_ragged"] = raggedFeatureInput.has_value();
     if (raggedFeatureInput.has_value()) {
         THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
-        j["ragged_feature_input"] = raggedFeatureInput->architectureJson();
-        j["ragged_feature_output"] = raggedFeatureOutput->architectureJson();
+        j["ragged_feature_input"] =
+            SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureInput.value());
+        j["ragged_feature_output"] =
+            SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureOutput.value());
     }
     return j;
 }
 
 void Flatten::deserialize(const json &j, Network *network) {
-    if (j.at("version").get<string>() != "1.0.0")
-        throw runtime_error("Unsupported version in Flatten::deserialize: " + j["version"].get<string>());
+    const string version = j.at("version").get<string>();
+    if (version != "1.0.0" && version != "1.1.0")
+        throw runtime_error("Unsupported version in Flatten::deserialize: " + version);
     if (j.at("layer_type").get<string>() != "flatten")
         throw runtime_error("Layer type mismatch in Flatten::deserialize: " + j.at("layer_type").get<string>());
 
     Flatten flatten;
     if (j.value("use_ragged", false)) {
-        RaggedTensor input = reconstructRaggedInput(j.at("ragged_feature_input"), network);
+        RaggedTensor input = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_feature_input"), network, "Flatten");
+        if ((version == "1.0.0" && input.isPlacementNeutral()) ||
+            (version == "1.1.0" && !input.isPlacementNeutral())) {
+            throw runtime_error("Flatten serialized layer version does not match its ragged geometry mode.");
+        }
+        const uint64_t featureInputId = j.at("feature_input").at("id").get<uint64_t>();
+        if (featureInputId != j.at("ragged_feature_input").at("values").at("id").get<uint64_t>()) {
+            throw runtime_error("Flatten serialized feature_input must match its ragged input values.");
+        }
+        Tensor featureInput = network->getApiTensorByOriginalId(featureInputId);
+        if (featureInput != input.getValues()) {
+            throw runtime_error("Flatten reconstructed feature_input must match its ragged input values.");
+        }
+
         Tensor outputValues = Tensor::deserialize(j.at("feature_output"));
+        const json& outputJson = j.at("ragged_feature_output");
+        if (outputJson.at("values").at("id").get<uint64_t>() != j.at("feature_output").at("id").get<uint64_t>()) {
+            throw runtime_error("Flatten serialized ragged output values must match feature_output.");
+        }
+        SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
+            outputJson, j.at("ragged_feature_input"), input, "Flatten");
+
         const vector<uint64_t> outputDimensions = outputValues.getDimensions();
-        if (outputDimensions.size() < 2 || outputDimensions.front() != input.getMaxTotalValues()) {
-            throw runtime_error("Ragged Flatten serialized output must preserve the packed capacity dimension.");
+        const uint64_t expectedLeading = input.isPlacementNeutral() ? input.getMaxValuesPerRow() : input.getMaxTotalValues();
+        if (outputDimensions.size() < 2 || outputDimensions.front() != expectedLeading) {
+            throw runtime_error("Ragged Flatten serialized output must preserve the logical packed-row dimension.");
         }
         const vector<uint64_t> inputTrailing = input.getTrailingDimensions();
         const vector<uint64_t> outputTrailing(outputDimensions.begin() + 1, outputDimensions.end());
@@ -134,15 +131,17 @@ void Flatten::deserialize(const json &j, Network *network) {
         }
         const vector<uint64_t> expectedTrailing =
             flattenedDimensions(inputTrailing, static_cast<uint32_t>(outputTrailing.size()), "serialized ragged input");
-        if (expectedTrailing != outputTrailing) {
+        if (expectedTrailing != outputTrailing || outputValues.getDataType() != input.getValuesDataType()) {
             throw runtime_error("Ragged Flatten serialized output dimensions are inconsistent with its input.");
         }
-        validateRaggedOutput(j.at("ragged_feature_output"), input, outputValues);
-        flatten.featureInput = input.getValues();
+
+        flatten.featureInput = featureInput;
         flatten.featureOutput = outputValues;
         flatten.raggedFeatureInput = input;
         flatten.raggedFeatureOutput = input.withValues(outputValues);
     } else {
+        if (version != "1.0.0")
+            throw runtime_error("Flatten version 1.1.0 is reserved for placement-neutral ragged geometry.");
         const uint64_t originalTensorId = j.at("feature_input").at("id").get<uint64_t>();
         Tensor featureInput = network->getApiTensorByOriginalId(originalTensorId);
         Tensor featureOutput = Tensor::deserialize(j.at("feature_output"));

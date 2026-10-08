@@ -324,6 +324,51 @@ TEST(DatasetInputBindings, RaggedLogicalInputBindsOneDatasetFieldAndCarriesMater
     EXPECT_EQ(requirement.raggedTensorDescriptor->getBatchSize(), 4u);
 }
 
+TEST(DatasetInputBindings, PlacementNeutralRaggedInputDerivesCapacityFromSessionBatchAndSemanticRowBound) {
+    auto dataset = std::make_shared<InMemoryNamedDataset>(std::vector<DatasetField>{
+        DatasetField{.id = 7,
+                     .name = "labels",
+                     .dataType = DataType::INT32,
+                     .dimensions = {2},
+                     .kind = DatasetFieldKind::RAGGED},
+    });
+    Network network("ragged-placement-neutral-dataset-binding");
+    RaggedTensor labels = RaggedNetworkInput::Builder()
+                              .network(network)
+                              .name("labels")
+                              .valuesDataType(DataType::INT32)
+                              .offsetsDataType(DataType::UINT64)
+                              .trailingDimensions({2})
+                              .maxValuesPerRow(7)
+                              .build();
+    ASSERT_TRUE(labels.isPlacementNeutral());
+
+    DatasetInputBindings exact = DatasetInputBindings::byExactName(network, *dataset);
+    CompiledDatasetInputBindings batchThree = exact.compile(network, *dataset, 3);
+    ASSERT_EQ(batchThree.fieldRequirements.size(), 1u);
+    ASSERT_TRUE(batchThree.fieldRequirements.at(7).raggedTensorDescriptor.has_value());
+    const ThorImplementation::RaggedTensorDescriptor threeDescriptor =
+        batchThree.fieldRequirements.at(7).raggedTensorDescriptor.value();
+    EXPECT_EQ(threeDescriptor.getBatchSize(), 3u);
+    EXPECT_EQ(threeDescriptor.getMaxTotalValues(), 21u);
+    EXPECT_EQ(threeDescriptor.getValuesDimensions(), (std::vector<uint64_t>{21, 2}));
+    EXPECT_EQ(threeDescriptor.getOffsetsDescriptor().getDimensions(), (std::vector<uint64_t>{4}));
+    EXPECT_EQ(threeDescriptor.getOffsetsDataType(), DataType::UINT64);
+    EXPECT_EQ(threeDescriptor.getMaxValuesPerRow(), 7u);
+
+    CompiledDatasetInputBindings batchNine = exact.compile(network, *dataset, 9);
+    ASSERT_TRUE(batchNine.fieldRequirements.at(7).raggedTensorDescriptor.has_value());
+    const ThorImplementation::RaggedTensorDescriptor nineDescriptor =
+        batchNine.fieldRequirements.at(7).raggedTensorDescriptor.value();
+    EXPECT_EQ(nineDescriptor.getBatchSize(), 9u);
+    EXPECT_EQ(nineDescriptor.getMaxTotalValues(), 63u);
+    EXPECT_EQ(nineDescriptor.getValuesDimensions(), (std::vector<uint64_t>{63, 2}));
+    EXPECT_EQ(nineDescriptor.getOffsetsDescriptor().getDimensions(), (std::vector<uint64_t>{10}));
+
+    EXPECT_EQ(labels.getValuesDimensions(), (std::vector<uint64_t>{7, 2}));
+    EXPECT_EQ(labels.getOffsetsDimensions(), (std::vector<uint64_t>{1}));
+}
+
 TEST(DatasetInputBindings, RaggedExplicitBindingUsesLogicalNameAndRejectsPhysicalHalfwayBindings) {
     auto dataset = std::make_shared<InMemoryNamedDataset>(std::vector<DatasetField>{
         DatasetField{.id = 7,

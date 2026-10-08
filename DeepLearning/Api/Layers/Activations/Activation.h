@@ -139,9 +139,16 @@ class Activation : public Layer {
     static void register_layer(std::string name, Deserializer fn);
 
    protected:
-    std::shared_ptr<ThorImplementation::Layer> stampExpressionBackedActivation(ThorImplementation::TensorPlacement placement,
-                                                                                Thor::Tensor connectingApiTensor,
-                                                                                bool inferenceOnly) const;
+    std::shared_ptr<ThorImplementation::Layer> stampExpressionBackedActivation(
+        ThorImplementation::TensorPlacement placement,
+        Thor::Tensor connectingApiTensor,
+        bool inferenceOnly,
+        std::shared_ptr<ThorImplementation::Layer> drivingLayer = nullptr) const;
+
+    // Standalone neutral-ragged artifact versions are enabled per concrete activation.
+    // This keeps shared ownership machinery reusable without silently declaring the
+    // entire activation family migrated before each specialized shape contract is reviewed.
+    virtual std::optional<std::string> placementNeutralStandaloneVersion() const { return std::nullopt; }
 
     uint64_t getExpressionBackedActivationMemRequirementInBytes(uint32_t batchSize) const;
     virtual Tensor standaloneOutputTensorForInput(const Tensor& inputTensor) const;

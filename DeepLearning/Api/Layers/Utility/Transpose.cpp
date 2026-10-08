@@ -1,5 +1,7 @@
 #include "DeepLearning/Api/Layers/Utility/Transpose.h"
 
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
 #include "Utilities/Expression/RaggedExpression.h"
@@ -27,18 +29,7 @@ uint64_t elementsPerValue(const RaggedTensor& ragged) {
     return elements;
 }
 
-RaggedTensor reconstructRaggedInput(const json& inputJson, Network* network) {
-    Tensor values = network->getApiTensorByOriginalId(inputJson.at("values").at("id").get<uint64_t>());
-    Tensor offsets = network->getApiTensorByOriginalId(inputJson.at("offsets").at("id").get<uint64_t>());
-    RaggedTensor input = inputJson.contains("max_values_per_row")
-                             ? RaggedTensor(values, offsets, inputJson.at("max_values_per_row").get<uint64_t>())
-                             : RaggedTensor(values, offsets);
-    if (input.getBatchSize() != inputJson.at("batch_size").get<uint64_t>() ||
-        input.getMaxTotalValues() != inputJson.at("max_total_values").get<uint64_t>()) {
-        throw runtime_error("Transpose serialized ragged input metadata does not match reconstructed tensors.");
-    }
-    return input;
-}
+
 
 }  // namespace
 
@@ -63,7 +54,9 @@ Transpose Transpose::Builder::build() {
         swap(trailing[trailing.size() - 2], trailing[trailing.size() - 1]);
         vector<uint64_t> outputDimensions;
         outputDimensions.reserve(trailing.size() + 1);
-        outputDimensions.push_back(_raggedFeatureInput->getMaxTotalValues());
+        outputDimensions.push_back(_raggedFeatureInput->isPlacementNeutral()
+                                       ? _raggedFeatureInput->getMaxValuesPerRow()
+                                       : _raggedFeatureInput->getMaxTotalValues());
         outputDimensions.insert(outputDimensions.end(), trailing.begin(), trailing.end());
         transpose.featureOutput = Tensor(transpose.outputDataType, outputDimensions);
         transpose.raggedFeatureInput = _raggedFeatureInput;
@@ -123,7 +116,6 @@ shared_ptr<ThorImplementation::Layer> Transpose::stamp(ThorImplementation::Tenso
                                                         shared_ptr<Thor::Layer> drivingApiLayer,
                                                         Thor::Tensor connectingApiTensor,
                                                         const bool inferenceOnly) const {
-    (void)drivingLayer;
     (void)drivingApiLayer;
     THOR_THROW_IF_FALSE(initialized);
     (void)getConnectionType(connectingApiTensor);
@@ -134,10 +126,17 @@ shared_ptr<ThorImplementation::Layer> Transpose::stamp(ThorImplementation::Tenso
 
     if (raggedFeatureInput.has_value()) {
         THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
+        const ThorImplementation::RaggedTensorDescriptor physicalInputDescriptor =
+            SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+                raggedFeatureInput.value(), drivingLayer, "Transpose");
+        const ThorImplementation::RaggedTensorDescriptor physicalOutputDescriptor =
+            raggedFeatureOutput->isPlacementNeutral()
+                ? raggedFeatureOutput->getDescriptorForPlacement(physicalInputDescriptor.getBatchSize())
+                : raggedFeatureOutput->getDescriptor();
         ThorImplementation::RaggedExpression input = ThorImplementation::RaggedExpression::input(
             "feature_input",
             "feature_offsets",
-            raggedFeatureInput->getDescriptor(),
+            physicalInputDescriptor,
             ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
         ThorImplementation::RaggedExpression output = input.transposeTrailingDimensions().cast(outputDataType);
         if (epilogue.has_value()) {
@@ -145,7 +144,7 @@ shared_ptr<ThorImplementation::Layer> Transpose::stamp(ThorImplementation::Tenso
                 return Transpose::applyEpilogue(values, epilogue.value()).withOutputDType(outputDataType);
             });
         }
-        if (output.getDescriptor() != raggedFeatureOutput->getDescriptor()) {
+        if (output.getDescriptor() != physicalOutputDescriptor) {
             throw runtime_error("Ragged Transpose expression output descriptor does not match its API output.");
         }
         ExpressionDefinition definition =
@@ -157,7 +156,7 @@ shared_ptr<ThorImplementation::Layer> Transpose::stamp(ThorImplementation::Tenso
             vector<string>{"feature_output"},
             placement,
             inferenceOnly,
-            raggedFeatureInput->getMaxTotalValues(),
+            physicalInputDescriptor.getMaxTotalValues(),
             rowWidth,
             rowWidth,
             0,
@@ -190,9 +189,12 @@ json Transpose::architectureJson() const {
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
 
+    const bool placementNeutral = raggedFeatureInput.has_value() && raggedFeatureInput->isPlacementNeutral();
+    if (raggedFeatureOutput.has_value()) THOR_THROW_IF_FALSE(placementNeutral == raggedFeatureOutput->isPlacementNeutral());
+
     json j;
     j["factory"] = Layer::Factory::Layer.value();
-    j["version"] = getLayerVersion();
+    j["version"] = placementNeutral ? "1.1.0" : getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
     j["output_data_type"] = outputDataType;
     if (epilogue.has_value()) {
@@ -206,15 +208,18 @@ json Transpose::architectureJson() const {
     j["use_ragged"] = raggedFeatureInput.has_value();
     if (raggedFeatureInput.has_value()) {
         THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
-        j["ragged_feature_input"] = raggedFeatureInput->architectureJson();
-        j["ragged_feature_output"] = raggedFeatureOutput->architectureJson();
+        j["ragged_feature_input"] =
+            SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureInput.value());
+        j["ragged_feature_output"] =
+            SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureOutput.value());
     }
     return j;
 }
 
 void Transpose::deserialize(const json &j, Network *network) {
-    if (j.at("version").get<string>() != "1.0.0")
-        throw runtime_error("Unsupported version in Transpose::deserialize: " + j["version"].get<string>());
+    const string version = j.at("version").get<string>();
+    if (version != "1.0.0" && version != "1.1.0")
+        throw runtime_error("Unsupported version in Transpose::deserialize: " + version);
     if (j.at("layer_type").get<string>() != "transpose")
         throw runtime_error("Layer type mismatch in Transpose::deserialize: " + j.at("layer_type").get<string>());
 
@@ -233,7 +238,21 @@ void Transpose::deserialize(const json &j, Network *network) {
     }
 
     if (useRagged) {
-        RaggedTensor input = reconstructRaggedInput(j.at("ragged_feature_input"), network);
+        const json& inputJson = j.at("ragged_feature_input");
+        RaggedTensor input = SegmentedPrimitiveDetail::reconstructInput(inputJson, network, "Transpose");
+        if ((version == "1.0.0" && input.isPlacementNeutral()) ||
+            (version == "1.1.0" && !input.isPlacementNeutral())) {
+            throw runtime_error("Transpose serialized layer version does not match its ragged geometry mode.");
+        }
+        const uint64_t featureInputId = j.at("feature_input").at("id").get<uint64_t>();
+        if (featureInputId != inputJson.at("values").at("id").get<uint64_t>()) {
+            throw runtime_error("Transpose serialized feature_input must match its ragged input values.");
+        }
+        Tensor featureInput = network->getApiTensorByOriginalId(featureInputId);
+        if (featureInput != input.getValues()) {
+            throw runtime_error("Transpose reconstructed feature_input must match its ragged input values.");
+        }
+
         vector<uint64_t> expectedDimensions = input.getValuesDimensions();
         if (expectedDimensions.size() < 3) {
             throw runtime_error("Ragged Transpose::deserialize requires at least two trailing value dimensions.");
@@ -243,26 +262,19 @@ void Transpose::deserialize(const json &j, Network *network) {
             throw runtime_error("Ragged Transpose::deserialize feature_output dimensions do not match the trailing-dimension transpose.");
         }
         const json& outputJson = j.at("ragged_feature_output");
-        const uint64_t outputValuesId = outputJson.at("values").at("id").get<uint64_t>();
-        const uint64_t outputOffsetsId = outputJson.at("offsets").at("id").get<uint64_t>();
-        if (outputValuesId != featureOutput.getOriginalId() && outputValuesId != featureOutput.getId()) {
+        if (outputJson.at("values").at("id").get<uint64_t>() != j.at("feature_output").at("id").get<uint64_t>()) {
             throw runtime_error("Ragged Transpose serialized ragged output values must match feature_output.");
         }
-        if ((outputOffsetsId != input.getOffsets().getOriginalId() && outputOffsetsId != input.getOffsets().getId()) ||
-            outputJson.at("batch_size").get<uint64_t>() != input.getBatchSize() ||
-            outputJson.at("max_total_values").get<uint64_t>() != input.getMaxTotalValues()) {
-            throw runtime_error("Ragged Transpose serialized output must preserve the input row partition.");
-        }
-        const bool outputHasMaxValuesPerRow = outputJson.contains("max_values_per_row");
-        if (outputHasMaxValuesPerRow != input.hasMaxValuesPerRow() ||
-            (outputHasMaxValuesPerRow && outputJson.at("max_values_per_row").get<uint64_t>() != input.getMaxValuesPerRow())) {
-            throw runtime_error("Ragged Transpose serialized output must preserve max_values_per_row metadata.");
-        }
-        transpose.featureInput = input.getValues();
+        SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
+            outputJson, inputJson, input, "Transpose");
+
+        transpose.featureInput = featureInput;
         transpose.featureOutput = featureOutput;
         transpose.raggedFeatureInput = input;
         transpose.raggedFeatureOutput = input.withValues(featureOutput);
     } else {
+        if (version != "1.0.0")
+            throw runtime_error("Transpose version 1.1.0 is reserved for placement-neutral ragged geometry.");
         const uint64_t originalTensorId = j.at("feature_input").at("id").get<uint64_t>();
         Tensor featureInput = network->getApiTensorByOriginalId(originalTensorId);
         vector<uint64_t> expectedDimensions = featureInput.getDimensions();

@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Layers/Utility/SegmentedBroadcast.h"
 
 #include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Expression/DynamicExpression.h"
@@ -20,14 +21,20 @@ SegmentedBroadcast SegmentedBroadcast::Builder::build() {
         throw std::runtime_error("SegmentedBroadcast requires network, featureInput, and partitionInput.");
     }
     SegmentedPrimitiveDetail::requireSupportedValueDataType(_featureInput->getDataType(), "SegmentedBroadcast");
-    if (_partitionInput->getBatchSize() > std::numeric_limits<uint32_t>::max()) {
+    if (!_partitionInput->isPlacementNeutral() &&
+        _partitionInput->getBatchSize() > std::numeric_limits<uint32_t>::max()) {
         throw std::invalid_argument("SegmentedBroadcast batch size exceeds Thor's uint32 placement capacity.");
+    }
+    if (_partitionInput->isPlacementNeutral() && !_partitionInput->hasMaxValuesPerRow()) {
+        throw std::invalid_argument("SegmentedBroadcast placement-neutral partition requires max_values_per_row.");
     }
 
     const std::vector<uint64_t> featureInputDimensions = _featureInput->getDimensions();
     std::vector<uint64_t> outputDimensions;
     outputDimensions.reserve(featureInputDimensions.size() + 1);
-    outputDimensions.push_back(_partitionInput->getMaxTotalValues());
+    outputDimensions.push_back(_partitionInput->isPlacementNeutral()
+                                   ? _partitionInput->getMaxValuesPerRow()
+                                   : _partitionInput->getMaxTotalValues());
     outputDimensions.insert(outputDimensions.end(), featureInputDimensions.begin(), featureInputDimensions.end());
 
     SegmentedBroadcast layer;
@@ -66,9 +73,12 @@ int SegmentedBroadcast::getConnectionType(Tensor connectingTensor) const {
 }
 
 uint64_t SegmentedBroadcast::getOutputTensorBytes(uint32_t batchSize) const {
-    (void)batchSize;
     THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
-    return featureOutputs.front().getTotalSizeInBytes();
+    const uint64_t logicalBytes = featureOutputs.front().getTotalSizeInBytes();
+    if (!raggedFeatureOutput.isPlacementNeutral()) return logicalBytes;
+    THOR_THROW_IF_FALSE(batchSize > 0);
+    THOR_THROW_IF_FALSE(logicalBytes <= std::numeric_limits<uint64_t>::max() / batchSize);
+    return logicalBytes * batchSize;
 }
 
 std::shared_ptr<ThorImplementation::Layer> SegmentedBroadcast::stamp(
@@ -77,7 +87,6 @@ std::shared_ptr<ThorImplementation::Layer> SegmentedBroadcast::stamp(
     std::shared_ptr<Thor::Layer> drivingApiLayer,
     Thor::Tensor connectingApiTensor,
     bool inferenceOnly) const {
-    (void)drivingLayer;
     (void)drivingApiLayer;
     (void)getConnectionType(connectingApiTensor);
     THOR_THROW_IF_FALSE(initialized);
@@ -88,14 +97,27 @@ std::shared_ptr<ThorImplementation::Layer> SegmentedBroadcast::stamp(
     using ThorImplementation::ExpressionDefinition;
     using ThorImplementation::RaggedExpression;
 
+    const uint32_t placementBatchSize = partitionInput.isPlacementNeutral()
+        ? SegmentedPrimitivePlacementDetail::placementBatchSizeForStamp(
+              denseFeatureInput, partitionInput, drivingLayer, connectingApiTensor, "SegmentedBroadcast")
+        : static_cast<uint32_t>(partitionInput.getBatchSize());
+    const ThorImplementation::RaggedTensorDescriptor physicalPartitionDescriptor =
+        partitionInput.isPlacementNeutral()
+        ? partitionInput.getDescriptorForPlacement(placementBatchSize)
+        : partitionInput.getDescriptor();
+    const ThorImplementation::RaggedTensorDescriptor physicalOutputDescriptor =
+        raggedFeatureOutput.isPlacementNeutral()
+        ? raggedFeatureOutput.getDescriptorForPlacement(placementBatchSize)
+        : raggedFeatureOutput.getDescriptor();
+
     Expression perSegmentValues = Expression::input("per_segment_values", std::nullopt, denseFeatureInput.getDataType());
     // The values side of this RaggedExpression is intentionally unreachable from
     // the output graph. It is only a convenient carrier for the canonical offsets
     // and partition capacity metadata used by SEGMENTED_BROADCAST.
     RaggedExpression partition =
-        RaggedExpression::input("__unused_partition_values", "feature_offsets", partitionInput.getDescriptor());
-    RaggedExpression output = partition.segment_broadcast(perSegmentValues, raggedFeatureOutput.getDescriptor());
-    if (output.getDescriptor() != raggedFeatureOutput.getDescriptor()) {
+        RaggedExpression::input("__unused_partition_values", "feature_offsets", physicalPartitionDescriptor);
+    RaggedExpression output = partition.segment_broadcast(perSegmentValues, physicalOutputDescriptor);
+    if (output.getDescriptor() != physicalOutputDescriptor) {
         throw std::runtime_error("SegmentedBroadcast expression output descriptor does not match the API output.");
     }
 
@@ -110,28 +132,33 @@ std::shared_ptr<ThorImplementation::Layer> SegmentedBroadcast::stamp(
         inferenceOnly,
         getId(),
         std::vector<CustomLayer::DeclaredOutputDescriptor>{
-            {raggedFeatureOutput.getValuesDataType(), raggedFeatureOutput.getValuesDimensions(), true}},
+            {physicalOutputDescriptor.getValuesDataType(), physicalOutputDescriptor.getValuesDimensions(), true}},
         false,
         false,
         std::vector<bool>{false, true},
-        static_cast<uint32_t>(partitionInput.getBatchSize()));
+        placementBatchSize);
     physical->setLayerName(getLayerType());
     return physical;
 }
 
 json SegmentedBroadcast::architectureJson() const {
     THOR_THROW_IF_FALSE(initialized);
+    const bool placementNeutral = partitionInput.isPlacementNeutral();
+    THOR_THROW_IF_FALSE(placementNeutral == raggedFeatureOutput.isPlacementNeutral());
     return json{{"factory", Layer::Factory::Layer.value()},
-                {"version", getLayerVersion()},
+                {"version", placementNeutral ? "1.1.0" : getLayerVersion()},
                 {"layer_type", "segmented_broadcast"},
                 {"feature_input", denseFeatureInput.architectureJson()},
-                {"partition_input", partitionInput.architectureJson()},
-                {"ragged_feature_output", raggedFeatureOutput.architectureJson()}};
+                {"partition_input",
+                 SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(partitionInput)},
+                {"ragged_feature_output",
+                 SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureOutput)}};
 }
 
 void SegmentedBroadcast::deserialize(const json& j, Network* network) {
-    if (j.at("version").get<std::string>() != "1.0.0") {
-        throw std::runtime_error("Unsupported version in SegmentedBroadcast::deserialize: " + j.at("version").get<std::string>());
+    const std::string version = j.at("version").get<std::string>();
+    if (version != "1.0.0" && version != "1.1.0") {
+        throw std::runtime_error("Unsupported version in SegmentedBroadcast::deserialize: " + version);
     }
     if (j.at("layer_type").get<std::string>() != "segmented_broadcast") {
         throw std::runtime_error("Layer type mismatch in SegmentedBroadcast::deserialize: " + j.at("layer_type").get<std::string>());
@@ -140,8 +167,15 @@ void SegmentedBroadcast::deserialize(const json& j, Network* network) {
     Tensor denseInput = network->getApiTensorByOriginalId(j.at("feature_input").at("id").get<uint64_t>());
     SegmentedPrimitiveDetail::requireSupportedValueDataType(denseInput.getDataType(), "SegmentedBroadcast");
     RaggedTensor partition = SegmentedPrimitiveDetail::reconstructInput(j.at("partition_input"), network, "SegmentedBroadcast");
-    if (partition.getBatchSize() > std::numeric_limits<uint32_t>::max()) {
+    if ((version == "1.0.0" && partition.isPlacementNeutral()) ||
+        (version == "1.1.0" && !partition.isPlacementNeutral())) {
+        throw std::runtime_error("SegmentedBroadcast serialized layer version does not match its ragged geometry mode.");
+    }
+    if (!partition.isPlacementNeutral() && partition.getBatchSize() > std::numeric_limits<uint32_t>::max()) {
         throw std::runtime_error("SegmentedBroadcast serialized batch size exceeds Thor's uint32 placement capacity.");
+    }
+    if (partition.isPlacementNeutral() && !partition.hasMaxValuesPerRow()) {
+        throw std::runtime_error("SegmentedBroadcast placement-neutral partition requires max_values_per_row.");
     }
 
     const json& outputJson = j.at("ragged_feature_output");
@@ -151,10 +185,13 @@ void SegmentedBroadcast::deserialize(const json& j, Network* network) {
     const std::vector<uint64_t> denseInputDimensions = denseInput.getDimensions();
     std::vector<uint64_t> expectedOutputDimensions;
     expectedOutputDimensions.reserve(denseInputDimensions.size() + 1);
-    expectedOutputDimensions.push_back(partition.getMaxTotalValues());
+    expectedOutputDimensions.push_back(partition.isPlacementNeutral()
+                                           ? partition.getMaxValuesPerRow()
+                                           : partition.getMaxTotalValues());
     expectedOutputDimensions.insert(expectedOutputDimensions.end(), denseInputDimensions.begin(), denseInputDimensions.end());
     if (outputValues.getDataType() != denseInput.getDataType() || outputValues.getDimensions() != expectedOutputDimensions) {
-        throw std::runtime_error("SegmentedBroadcast serialized output descriptor does not match the dense input and partition capacity.");
+        throw std::runtime_error(
+            "SegmentedBroadcast serialized output descriptor does not match the dense input and partition geometry.");
     }
     RaggedTensor output = partition.withValues(outputValues);
 

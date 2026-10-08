@@ -382,7 +382,8 @@ class Network {
     virtual void stampNetworkInput(const std::shared_ptr<Thor::NetworkInput> networkInput,
                                    uint32_t gpuNum,
                                    uint32_t batchSize,
-                                   ThorImplementation::StampedNetwork &stampedNetwork);
+                                   ThorImplementation::StampedNetwork &stampedNetwork,
+                                   std::optional<std::vector<uint64_t>> physicalDimensionsOverride = std::nullopt);
     virtual void stampNetworkOutput(Tensor inputTensor,
                                     const std::shared_ptr<Thor::NetworkOutput> networkOutput,
                                     uint32_t gpuNum,

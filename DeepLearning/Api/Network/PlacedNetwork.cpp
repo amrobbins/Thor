@@ -701,8 +701,9 @@ std::map<std::string, InferenceOutputValue> PlacedNetwork::inferLogical(const Ba
         if (logicalOutputs.contains(output.name)) {
             throw std::runtime_error("PlacedNetwork::inferLogical found duplicate logical output name '" + output.name + "'.");
         }
-        const ThorImplementation::RowPartitionDescriptor rowDescriptor =
-            output.raggedTensor.getDescriptor().getRowPartition();
+        const auto bindingIt = stampedNetworks.at(stampIndex).raggedOutputByValuesOutputName.find(output.valuesOutputName);
+        THOR_THROW_IF_FALSE(bindingIt != stampedNetworks.at(stampIndex).raggedOutputByValuesOutputName.end());
+        const ThorImplementation::RowPartitionDescriptor rowDescriptor = bindingIt->second.descriptor;
         ThorImplementation::Tensor partitionCarrier = valuesIt->second;
         if (!ThorImplementation::RowPartitionRuntime::hasPublishedHostState(partitionCarrier)) {
             auto recordIt = network.raggedNetworkOutputs.find(output.name);

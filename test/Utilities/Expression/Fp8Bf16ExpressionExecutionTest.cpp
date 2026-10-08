@@ -176,7 +176,7 @@ TEST(Fp8Bf16ExpressionExecution, MixedE4M3E5M2PromotesToFiniteBf16StorageAndComp
     expectMixedFp8ProductPromotesToFiniteBf16();
 }
 
-TEST(Fp8Bf16ExpressionExecution, Fp8OutputNarrowingUsesDestinationFormatOverflowSemantics) {
+TEST(Fp8Bf16ExpressionExecution, Fp8OutputNarrowingUsesCanonicalSatfiniteOverflowSemantics) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     constexpr size_t numValues = 33;
@@ -204,7 +204,6 @@ TEST(Fp8Bf16ExpressionExecution, Fp8OutputNarrowingUsesDestinationFormatOverflow
     for (size_t i = 0; i < numValues; ++i) {
         const bool positive = (i % 2 == 0);
         EXPECT_EQ(e4Result[i], positive ? 448.0f : -448.0f) << "index " << i;
-        EXPECT_TRUE(std::isinf(e5Result[i])) << "index " << i;
-        EXPECT_EQ(std::signbit(e5Result[i]), !positive) << "index " << i;
+        EXPECT_EQ(e5Result[i], positive ? 57344.0f : -57344.0f) << "index " << i;
     }
 }

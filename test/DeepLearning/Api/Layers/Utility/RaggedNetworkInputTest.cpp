@@ -51,11 +51,15 @@ namespace {
 Batch makeFp32RaggedBatch(const std::string& inputName,
                           const RaggedTensor& apiTensor,
                           const std::vector<uint64_t>& hostOffsets) {
+    THOR_THROW_IF_FALSE(hostOffsets.size() >= 2);
+    const uint64_t batchSize = hostOffsets.size() - 1;
+    const ThorImplementation::RaggedTensorDescriptor descriptor =
+        apiTensor.getDescriptorForPlacement(batchSize);
     const ThorImplementation::TensorPlacement cpuPlacement(
         ThorImplementation::TensorPlacement::MemDevices::CPU);
     ThorImplementation::Tensor values(
         cpuPlacement,
-        ThorImplementation::TensorDescriptor(DataType::FP32, apiTensor.getValuesDimensions()));
+        descriptor.getValuesDescriptor());
     float* valuesPtr = values.getMemPtr<float>();
     for (uint64_t i = 0; i < values.getTotalNumElements(); ++i) {
         valuesPtr[i] = static_cast<float>(i + 1) * 0.03125f;
@@ -64,7 +68,7 @@ Batch makeFp32RaggedBatch(const std::string& inputName,
     const DataType offsetsDataType = apiTensor.getOffsetsDataType();
     ThorImplementation::Tensor offsets(
         cpuPlacement,
-        ThorImplementation::TensorDescriptor(offsetsDataType, {apiTensor.getBatchSize() + 1}));
+        descriptor.getOffsetsDescriptor());
     if (offsetsDataType == DataType::UINT32) {
         uint32_t* offsetsPtr = offsets.getMemPtr<uint32_t>();
         for (size_t i = 0; i < hostOffsets.size(); ++i) {
@@ -78,8 +82,7 @@ Batch makeFp32RaggedBatch(const std::string& inputName,
         }
     }
 
-    ThorImplementation::RowPartitionRuntime partition(
-        offsets, apiTensor.getDescriptor().getRowPartition());
+    ThorImplementation::RowPartitionRuntime partition(offsets, descriptor.getRowPartition());
     partition.setHostOffsets(hostOffsets);
     Batch batch;
     batch.insert(inputName, ThorImplementation::RaggedTensor(values, partition));
@@ -117,6 +120,8 @@ TEST(RaggedNetworkInputApi, BuildsLogicalRaggedInputWithPublicValuesAndHiddenPar
     EXPECT_EQ(raggedInput.at("name").get<std::string>(), "labels");
     EXPECT_EQ(raggedInput.at("values_input_name").get<std::string>(), "labels.values");
     EXPECT_EQ(raggedInput.at("version").get<std::string>(), "1.3.0");
+    EXPECT_FALSE(raggedInput.contains("batch_size"));
+    EXPECT_FALSE(raggedInput.contains("max_total_values"));
     EXPECT_FALSE(raggedInput.contains("offsets_input_name"));
     EXPECT_EQ(raggedInput.at("values_tensor_id").get<uint64_t>(), labels.getValues().getId());
     EXPECT_EQ(raggedInput.at("row_partition_token_tensor_id").get<uint64_t>(),
@@ -157,6 +162,8 @@ TEST(RaggedNetworkInputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTensor
     const json architecture = network.architectureJson();
     const json& logicalInput = architecture.at("ragged_network_inputs").at(0);
     EXPECT_FALSE(logicalInput.contains("ragged_tensor"));
+    EXPECT_FALSE(logicalInput.contains("batch_size"));
+    EXPECT_FALSE(logicalInput.contains("max_total_values"));
     EXPECT_EQ(logicalInput.at("values_tensor_id").get<uint64_t>(), labels.getValues().getId());
     EXPECT_EQ(logicalInput.at("row_partition_token_tensor_id").get<uint64_t>(), labels.getRowPartitionToken().getId());
     EXPECT_EQ(logicalInput.at("max_values_per_row").get<uint64_t>(), 4u);
@@ -183,11 +190,199 @@ TEST(RaggedNetworkInputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTensor
     const json loadedArchitecture = loaded.architectureJson();
     const json& loadedLogicalInput = loadedArchitecture.at("ragged_network_inputs").at(0);
     EXPECT_FALSE(loadedLogicalInput.contains("ragged_tensor"));
+    EXPECT_FALSE(loadedLogicalInput.contains("batch_size"));
+    EXPECT_FALSE(loadedLogicalInput.contains("max_total_values"));
     EXPECT_EQ(loadedLogicalInput.at("values_tensor_id").get<uint64_t>(), loadedInputs[0].raggedTensor.getValues().getId());
     EXPECT_EQ(loadedLogicalInput.at("row_partition_token_tensor_id").get<uint64_t>(),
               loadedInputs[0].raggedTensor.getRowPartitionToken().getId());
     EXPECT_EQ(loadedLogicalInput.at("max_values_per_row").get<uint64_t>(), 4u);
 
+    std::filesystem::remove_all(archiveDir);
+}
+
+TEST(RaggedNetworkInputApi, PlacementNeutralBoundarySaveLoadAndReplacesPlacementGeometryPerBatch) {
+    constexpr uint64_t maxValuesPerRow = 4;
+    const std::string networkName = "ragged_network_input_placement_neutral_round_trip";
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path archiveDir =
+        std::filesystem::temp_directory_path() /
+        (std::string("thor_ragged_network_input_placement_neutral_") + std::to_string(now));
+    std::filesystem::remove_all(archiveDir);
+
+    // Save in a separate scope so the placement proof cannot depend on the
+    // original API/runtime object instance.
+    {
+        Network network(networkName);
+        RaggedTensor input = RaggedNetworkInput::Builder()
+                                 .network(network)
+                                 .name("tokens")
+                                 .valuesDataType(DataType::FP32)
+                                 .offsetsDataType(DataType::UINT32)
+                                 .trailingDimensions({3})
+                                 .maxValuesPerRow(maxValuesPerRow)
+                                 .build();
+        ASSERT_TRUE(input.isPlacementNeutral());
+        EXPECT_EQ(input.getValuesDimensions(), (std::vector<uint64_t>{maxValuesPerRow, 3}));
+        EXPECT_EQ(input.getOffsetsDimensions(), (std::vector<uint64_t>{1}));
+        EXPECT_THROW(static_cast<void>(input.getBatchSize()), std::logic_error);
+        EXPECT_THROW(static_cast<void>(input.getMaxTotalValues()), std::logic_error);
+
+        (void)RaggedNetworkOutput::Builder()
+            .network(network)
+            .name("tokens_out")
+            .inputTensor(input)
+            .build();
+
+        const json architecture = network.architectureJson();
+        ASSERT_EQ(architecture.at("ragged_network_inputs").size(), 1u);
+        const json& inputBoundary = architecture.at("ragged_network_inputs").at(0);
+        EXPECT_EQ(inputBoundary.at("version").get<std::string>(), "1.4.0");
+        EXPECT_EQ(inputBoundary.at("geometry_mode").get<std::string>(), "placement_neutral");
+        EXPECT_EQ(inputBoundary.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
+        EXPECT_FALSE(inputBoundary.contains("batch_size"));
+        EXPECT_FALSE(inputBoundary.contains("max_total_values"));
+
+        ASSERT_EQ(architecture.at("ragged_network_outputs").size(), 1u);
+        const json& outputBoundary = architecture.at("ragged_network_outputs").at(0);
+        EXPECT_EQ(outputBoundary.at("version").get<std::string>(), "1.3.0");
+        EXPECT_EQ(outputBoundary.at("geometry_mode").get<std::string>(), "placement_neutral");
+        EXPECT_EQ(outputBoundary.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
+
+        for (const json& layer : architecture.at("layers")) {
+            if (layer.at("layer_type").get<std::string>() != "network_input") continue;
+            const std::string layerName = layer.at("name").get<std::string>();
+            if (layerName == "tokens.values") {
+                EXPECT_EQ(layer.at("dimensions").get<std::vector<uint64_t>>(),
+                          (std::vector<uint64_t>{maxValuesPerRow, 3}));
+            } else if (layerName == "__thor_row_partition.tokens") {
+                EXPECT_EQ(layer.at("dimensions").get<std::vector<uint64_t>>(),
+                          (std::vector<uint64_t>{1}));
+            }
+        }
+
+        network.save(archiveDir.string(), /*overwrite=*/true);
+    }
+
+    auto loadPlaceAndInfer = [&](uint32_t placementBatchSize) {
+        Network loaded(networkName);
+        ASSERT_NO_THROW(loaded.load(archiveDir.string()));
+        const std::vector<RaggedNetworkInputReference> loadedInputs = loaded.getExternalRaggedNetworkInputs();
+        ASSERT_EQ(loadedInputs.size(), 1u);
+        const RaggedTensor loadedInput = loadedInputs.front().raggedTensor;
+        ASSERT_TRUE(loadedInput.isPlacementNeutral());
+        EXPECT_EQ(loadedInput.getValuesDimensions(), (std::vector<uint64_t>{maxValuesPerRow, 3}));
+        EXPECT_EQ(loadedInput.getOffsetsDimensions(), (std::vector<uint64_t>{1}));
+
+        const json logicalArchitectureBeforePlacement = loaded.architectureJson();
+        std::vector<Event> initDoneEvents;
+        std::shared_ptr<PlacedNetwork> placed =
+            loaded.place(placementBatchSize, initDoneEvents, /*inferenceOnly=*/true);
+        ASSERT_NE(placed, nullptr);
+        for (Event& event : initDoneEvents) event.synchronize();
+
+        const uint64_t expectedCapacity = placementBatchSize * maxValuesPerRow;
+        std::shared_ptr<ThorImplementation::NetworkInput> valuesInput =
+            placed->getStampedNetwork(0).getNamedInput("tokens.values");
+        ASSERT_NE(valuesInput, nullptr);
+        ASSERT_TRUE(valuesInput->getFeatureOutput().has_value());
+        EXPECT_EQ(valuesInput->getFeatureOutput()->getDimensions(),
+                  (std::vector<uint64_t>{expectedCapacity, 3}));
+
+        EXPECT_EQ(loaded.architectureJson(), logicalArchitectureBeforePlacement);
+
+        std::vector<uint64_t> hostOffsets(placementBatchSize + 1, 0);
+        for (uint64_t row = 0; row <= placementBatchSize; ++row) {
+            hostOffsets[row] = row * maxValuesPerRow;
+        }
+        Batch batch = makeFp32RaggedBatch("tokens", loadedInput, hostOffsets);
+        const std::map<std::string, InferenceOutputValue> outputs = placed->inferLogical(batch);
+        ASSERT_TRUE(outputs.contains("tokens_out"));
+        ASSERT_TRUE(std::holds_alternative<ThorImplementation::RaggedTensor>(outputs.at("tokens_out")));
+        const ThorImplementation::RaggedTensor output =
+            std::get<ThorImplementation::RaggedTensor>(outputs.at("tokens_out"));
+        EXPECT_EQ(output.getValues().getDimensions(), (std::vector<uint64_t>{expectedCapacity, 3}));
+        EXPECT_EQ(output.getOffsets().getDimensions(),
+                  (std::vector<uint64_t>{static_cast<uint64_t>(placementBatchSize) + 1}));
+        EXPECT_EQ(output.getHostOffsetsIfAvailable(), std::optional<std::vector<uint64_t>>(hostOffsets));
+    };
+
+    loadPlaceAndInfer(2);
+    loadPlaceAndInfer(7);
+    std::filesystem::remove_all(archiveDir);
+}
+
+TEST(RaggedNetworkInputApi, PlacementNeutralSharedPartitionKeepsCanonicalOwnerSemantics) {
+    Network network("ragged_network_input_neutral_shared_partition");
+    RaggedTensor owner = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("feature")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT64)
+                             .trailingDimensions({2})
+                             .maxValuesPerRow(6)
+                             .build();
+    RaggedTensor shared = RaggedNetworkInput::Builder()
+                              .network(network)
+                              .name("mask")
+                              .valuesDataType(DataType::BOOLEAN)
+                              .trailingDimensions({})
+                              .partition(owner)
+                              .build();
+
+    ASSERT_TRUE(owner.isPlacementNeutral());
+    ASSERT_TRUE(shared.isPlacementNeutral());
+    EXPECT_TRUE(owner.sharesPartitionWith(shared));
+    EXPECT_EQ(shared.getRowPartitionToken(), owner.getRowPartitionToken());
+    EXPECT_EQ(shared.getValuesDimensions(), (std::vector<uint64_t>{6}));
+
+    const json architecture = network.architectureJson();
+    ASSERT_EQ(architecture.at("ragged_network_inputs").size(), 2u);
+    const json* ownerBoundary = nullptr;
+    const json* sharedBoundary = nullptr;
+    for (const json& boundary : architecture.at("ragged_network_inputs")) {
+        if (boundary.at("name").get<std::string>() == "feature") ownerBoundary = &boundary;
+        if (boundary.at("name").get<std::string>() == "mask") sharedBoundary = &boundary;
+    }
+    ASSERT_NE(ownerBoundary, nullptr);
+    ASSERT_NE(sharedBoundary, nullptr);
+    EXPECT_EQ(ownerBoundary->at("version").get<std::string>(), "1.4.0");
+    EXPECT_EQ(ownerBoundary->at("geometry_mode").get<std::string>(), "placement_neutral");
+    EXPECT_EQ(ownerBoundary->at("max_values_per_row").get<uint64_t>(), 6u);
+    EXPECT_FALSE(ownerBoundary->contains("batch_size"));
+    EXPECT_FALSE(ownerBoundary->contains("max_total_values"));
+
+    EXPECT_EQ(sharedBoundary->at("version").get<std::string>(), "1.4.0");
+    EXPECT_EQ(sharedBoundary->at("geometry_mode").get<std::string>(), "placement_neutral");
+    EXPECT_EQ(sharedBoundary->at("partition_input_name").get<std::string>(), "feature");
+    EXPECT_FALSE(sharedBoundary->contains("row_partition_token_tensor_id"));
+    EXPECT_FALSE(sharedBoundary->contains("max_values_per_row"));
+    EXPECT_FALSE(sharedBoundary->contains("batch_size"));
+    EXPECT_FALSE(sharedBoundary->contains("max_total_values"));
+
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path archiveDir =
+        std::filesystem::temp_directory_path() /
+        (std::string("thor_ragged_network_input_neutral_shared_") + std::to_string(now));
+    std::filesystem::remove_all(archiveDir);
+    network.save(archiveDir.string(), /*overwrite=*/true);
+
+    Network loaded("ragged_network_input_neutral_shared_partition");
+    ASSERT_NO_THROW(loaded.load(archiveDir.string()));
+    const auto loadedInputs = loaded.getExternalRaggedNetworkInputs();
+    ASSERT_EQ(loadedInputs.size(), 2u);
+    auto loadedOwner = std::find_if(loadedInputs.begin(), loadedInputs.end(), [](const RaggedNetworkInputReference& input) {
+        return input.name == "feature";
+    });
+    auto loadedShared = std::find_if(loadedInputs.begin(), loadedInputs.end(), [](const RaggedNetworkInputReference& input) {
+        return input.name == "mask";
+    });
+    ASSERT_NE(loadedOwner, loadedInputs.end());
+    ASSERT_NE(loadedShared, loadedInputs.end());
+    ASSERT_TRUE(loadedOwner->raggedTensor.isPlacementNeutral());
+    ASSERT_TRUE(loadedShared->raggedTensor.isPlacementNeutral());
+    EXPECT_TRUE(loadedOwner->raggedTensor.sharesPartitionWith(loadedShared->raggedTensor));
+    ASSERT_TRUE(loadedShared->partitionInputName.has_value());
+    EXPECT_EQ(loadedShared->partitionInputName.value(), "feature");
     std::filesystem::remove_all(archiveDir);
 }
 
@@ -1681,6 +1876,27 @@ TEST(RaggedNetworkInputApi, SharedPartitionDeclaresOnlyValuesBoundaryAndReusesCa
     for (const json& layer : architecture.at("layers")) names.insert(layer.at("name").get<std::string>());
     EXPECT_EQ(names, (std::set<std::string>{"feature.values", "__thor_row_partition.feature", "mask.values"}));
     EXPECT_EQ(network.getExternalNetworkInputNames(), (std::vector<std::string>{"feature", "mask"}));
+
+    ASSERT_EQ(architecture.at("ragged_network_inputs").size(), 2u);
+    const json* featureBoundary = nullptr;
+    const json* maskBoundary = nullptr;
+    for (const json& boundary : architecture.at("ragged_network_inputs")) {
+        EXPECT_FALSE(boundary.contains("batch_size"));
+        EXPECT_FALSE(boundary.contains("max_total_values"));
+        if (boundary.at("name").get<std::string>() == "feature") featureBoundary = &boundary;
+        if (boundary.at("name").get<std::string>() == "mask") maskBoundary = &boundary;
+    }
+    ASSERT_NE(featureBoundary, nullptr);
+    ASSERT_NE(maskBoundary, nullptr);
+    EXPECT_EQ(featureBoundary->at("values_tensor_id").get<uint64_t>(), feature.getValues().getId());
+    EXPECT_EQ(featureBoundary->at("row_partition_token_tensor_id").get<uint64_t>(),
+              feature.getRowPartitionToken().getId());
+    EXPECT_EQ(featureBoundary->at("max_values_per_row").get<uint64_t>(), 6u);
+    EXPECT_FALSE(featureBoundary->contains("partition_input_name"));
+    EXPECT_EQ(maskBoundary->at("values_tensor_id").get<uint64_t>(), mask.getValues().getId());
+    EXPECT_EQ(maskBoundary->at("partition_input_name").get<std::string>(), "feature");
+    EXPECT_FALSE(maskBoundary->contains("row_partition_token_tensor_id"));
+    EXPECT_FALSE(maskBoundary->contains("max_values_per_row"));
 
     const auto inputs = network.getExternalRaggedNetworkInputs();
     ASSERT_EQ(inputs.size(), 2u);

@@ -6,7 +6,7 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-json GradientRivet::serialize(const string &storageDir, Stream stream) const {
+json GradientRivet::architectureJson() const {
     assert(initialized);
     assert(featureInput.has_value());
     assert(featureOutput.has_value());

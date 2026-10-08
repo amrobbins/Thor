@@ -1,11 +1,13 @@
 #include "DeepLearning/Api/Layers/Utility/SegmentedLogSoftmax.h"
 
 #include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 #include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/RaggedExpression.h"
 
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -56,9 +58,12 @@ int SegmentedLogSoftmax::getConnectionType(Tensor connectingTensor) const {
 }
 
 uint64_t SegmentedLogSoftmax::getOutputTensorBytes(uint32_t batchSize) const {
-    (void)batchSize;
     THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
-    return featureOutputs.front().getTotalSizeInBytes();
+    const uint64_t logicalBytes = featureOutputs.front().getTotalSizeInBytes();
+    if (!raggedFeatureOutput.isPlacementNeutral()) return logicalBytes;
+    THOR_THROW_IF_FALSE(batchSize > 0);
+    THOR_THROW_IF_FALSE(logicalBytes <= std::numeric_limits<uint64_t>::max() / batchSize);
+    return logicalBytes * batchSize;
 }
 
 std::shared_ptr<ThorImplementation::Layer> SegmentedLogSoftmax::stamp(
@@ -67,7 +72,6 @@ std::shared_ptr<ThorImplementation::Layer> SegmentedLogSoftmax::stamp(
     std::shared_ptr<Thor::Layer> drivingApiLayer,
     Thor::Tensor connectingApiTensor,
     bool inferenceOnly) const {
-    (void)drivingLayer;
     (void)drivingApiLayer;
     (void)getConnectionType(connectingApiTensor);
     THOR_THROW_IF_FALSE(initialized);
@@ -77,9 +81,18 @@ std::shared_ptr<ThorImplementation::Layer> SegmentedLogSoftmax::stamp(
     using ThorImplementation::ExpressionDefinition;
     using ThorImplementation::RaggedExpression;
 
-    RaggedExpression input = RaggedExpression::input("feature_input", "feature_offsets", raggedFeatureInput.getDescriptor());
+    const ThorImplementation::RaggedTensorDescriptor physicalInputDescriptor =
+        SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+            raggedFeatureInput, drivingLayer, "SegmentedLogSoftmax");
+    const ThorImplementation::RaggedTensorDescriptor physicalOutputDescriptor =
+        raggedFeatureOutput.isPlacementNeutral()
+        ? raggedFeatureOutput.getDescriptorForPlacement(physicalInputDescriptor.getBatchSize())
+        : raggedFeatureOutput.getDescriptor();
+
+    RaggedExpression input =
+        RaggedExpression::input("feature_input", "feature_offsets", physicalInputDescriptor);
     RaggedExpression output = input.segment_log_softmax();
-    if (output.getDescriptor() != raggedFeatureOutput.getDescriptor()) {
+    if (output.getDescriptor() != physicalOutputDescriptor) {
         throw std::runtime_error("SegmentedLogSoftmax expression output descriptor does not match the API output.");
     }
 
@@ -93,7 +106,7 @@ std::shared_ptr<ThorImplementation::Layer> SegmentedLogSoftmax::stamp(
         std::vector<std::string>{"feature_output"},
         placement,
         inferenceOnly,
-        raggedFeatureInput.getMaxTotalValues(),
+        physicalInputDescriptor.getMaxTotalValues(),
         elementsPerValue,
         elementsPerValue,
         0,
@@ -105,22 +118,31 @@ std::shared_ptr<ThorImplementation::Layer> SegmentedLogSoftmax::stamp(
 
 json SegmentedLogSoftmax::architectureJson() const {
     THOR_THROW_IF_FALSE(initialized);
+    const bool placementNeutral = raggedFeatureInput.isPlacementNeutral();
+    THOR_THROW_IF_FALSE(placementNeutral == raggedFeatureOutput.isPlacementNeutral());
     return json{{"factory", Layer::Factory::Layer.value()},
-                {"version", getLayerVersion()},
+                {"version", placementNeutral ? "1.1.0" : getLayerVersion()},
                 {"layer_type", "segmented_log_softmax"},
-                {"ragged_feature_input", raggedFeatureInput.architectureJson()},
-                {"ragged_feature_output", raggedFeatureOutput.architectureJson()}};
+                {"ragged_feature_input",
+                 SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureInput)},
+                {"ragged_feature_output",
+                 SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureOutput)}};
 }
 
 void SegmentedLogSoftmax::deserialize(const json& j, Network* network) {
-    if (j.at("version").get<std::string>() != "1.0.0") {
-        throw std::runtime_error("Unsupported version in SegmentedLogSoftmax::deserialize: " + j.at("version").get<std::string>());
+    const std::string version = j.at("version").get<std::string>();
+    if (version != "1.0.0" && version != "1.1.0") {
+        throw std::runtime_error("Unsupported version in SegmentedLogSoftmax::deserialize: " + version);
     }
     if (j.at("layer_type").get<std::string>() != "segmented_log_softmax") {
         throw std::runtime_error("Layer type mismatch in SegmentedLogSoftmax::deserialize: " + j.at("layer_type").get<std::string>());
     }
 
     RaggedTensor input = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_feature_input"), network, "SegmentedLogSoftmax");
+    if ((version == "1.0.0" && input.isPlacementNeutral()) ||
+        (version == "1.1.0" && !input.isPlacementNeutral())) {
+        throw std::runtime_error("SegmentedLogSoftmax serialized layer version does not match its ragged geometry mode.");
+    }
     SegmentedPrimitiveDetail::requireSupportedValueDataType(input.getValuesDataType(), "SegmentedLogSoftmax");
     const json& outputJson = j.at("ragged_feature_output");
     SegmentedPrimitiveDetail::validateSerializedPreservedPartition(

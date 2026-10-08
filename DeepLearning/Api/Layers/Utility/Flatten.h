@@ -26,7 +26,7 @@ class Flatten : public Layer {
     [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {
         THOR_THROW_IF_FALSE(featureOutput.has_value());
         THOR_THROW_IF_FALSE(outputTensor == featureOutput.value());
-        return raggedFeatureInput.has_value();
+        return raggedFeatureInput.has_value() && !raggedFeatureInput->isPlacementNeutral();
     }
 
     nlohmann::json architectureJson() const override;

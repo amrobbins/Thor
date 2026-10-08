@@ -98,6 +98,16 @@ class NetworkInput : public Layer {
     virtual bool isDeviceReferenceLoad() const { return mode == Mode::DeviceReference; }
     virtual bool requiresBatchInput() const { return mode != Mode::PassThrough; }
 
+    // Read-only stamp-time view of the concrete payload descriptor selected by
+    // the existing placement flow. API layers with placement-neutral logical
+    // shapes may use this to build their physical execution descriptor without
+    // mutating the logical model or threading placement state through Layer::stamp.
+    [[nodiscard]] std::optional<TensorDescriptor> getContentDescriptorForStamp() const {
+        if (!contentDimensions.has_value()) return std::nullopt;
+        THOR_THROW_IF_FALSE(contentDataType.has_value());
+        return TensorDescriptor(contentDataType.value(), contentDimensions.value());
+    }
+
     /**
      * Configures how runtime batch values are loaded. Same-GPU materialized
      * tensors use DeviceLoad and copy directly into featureOutput. Device

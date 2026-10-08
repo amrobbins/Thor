@@ -16,11 +16,10 @@ std::shared_ptr<ThorImplementation::Layer> GatedLinearUnitActivation::stamp(
     std::shared_ptr<Thor::Layer> drivingApiLayer,
     Thor::Tensor connectingApiTensor,
     const bool inferenceOnly) const {
-    (void)drivingLayer;
     (void)drivingApiLayer;
 
     if (raggedFeatureInput.has_value()) {
-        return stampExpressionBackedActivation(placement, connectingApiTensor, inferenceOnly);
+        return stampExpressionBackedActivation(placement, connectingApiTensor, inferenceOnly, drivingLayer);
     }
 
     THOR_THROW_IF_FALSE(initialized);

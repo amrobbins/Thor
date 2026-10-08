@@ -767,7 +767,7 @@ TEST(RandomTestConversions, GpuAllConversionsInPlace) {
     }
 }
 
-TEST(TypeConverter, CpuFp32ToE5M2UsesNativeInfinityOverflowSemantics) {
+TEST(TypeConverter, CpuFp32ToE5M2UsesCanonicalSatfiniteOverflowSemantics) {
     Stream stream(0);
     constexpr int numElements = 6;
     float source[numElements] = {57344.0f,
@@ -783,17 +783,13 @@ TEST(TypeConverter, CpuFp32ToE5M2UsesNativeInfinityOverflowSemantics) {
 
     EXPECT_FLOAT_EQ(static_cast<float>(dest[0]), 57344.0f);
     EXPECT_FLOAT_EQ(static_cast<float>(dest[1]), 57344.0f);
-    EXPECT_TRUE(std::isinf(static_cast<float>(dest[2])));
-    EXPECT_FALSE(std::signbit(static_cast<float>(dest[2])));
-    EXPECT_TRUE(std::isinf(static_cast<float>(dest[3])));
-    EXPECT_TRUE(std::signbit(static_cast<float>(dest[3])));
-    EXPECT_TRUE(std::isinf(static_cast<float>(dest[4])));
-    EXPECT_FALSE(std::signbit(static_cast<float>(dest[4])));
-    EXPECT_TRUE(std::isinf(static_cast<float>(dest[5])));
-    EXPECT_TRUE(std::signbit(static_cast<float>(dest[5])));
+    EXPECT_FLOAT_EQ(static_cast<float>(dest[2]), 57344.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(dest[3]), -57344.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(dest[4]), 57344.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(dest[5]), -57344.0f);
 }
 
-TEST(TypeConverter, GpuFp32ToE5M2UsesNativeInfinityOverflowSemantics) {
+TEST(TypeConverter, GpuFp32ToE5M2UsesCanonicalSatfiniteOverflowSemantics) {
     int deviceCount = 0;
     if (cudaGetDeviceCount(&deviceCount) != cudaSuccess || deviceCount == 0) {
         GTEST_SKIP() << "CUDA device is required for GPU TypeConverter semantics test.";
@@ -814,10 +810,8 @@ TEST(TypeConverter, GpuFp32ToE5M2UsesNativeInfinityOverflowSemantics) {
     ASSERT_EQ(cudaStreamSynchronize(stream.getStream()), cudaSuccess);
 
     EXPECT_FLOAT_EQ(static_cast<float>(dest[0]), 57344.0f);
-    EXPECT_TRUE(std::isinf(static_cast<float>(dest[1])));
-    EXPECT_FALSE(std::signbit(static_cast<float>(dest[1])));
-    EXPECT_TRUE(std::isinf(static_cast<float>(dest[2])));
-    EXPECT_TRUE(std::signbit(static_cast<float>(dest[2])));
+    EXPECT_FLOAT_EQ(static_cast<float>(dest[1]), 57344.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(dest[2]), -57344.0f);
     EXPECT_FLOAT_EQ(static_cast<float>(dest[3]), -57344.0f);
 
     EXPECT_EQ(cudaFree(sourceGpu), cudaSuccess);

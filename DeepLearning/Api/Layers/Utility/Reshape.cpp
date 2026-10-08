@@ -1,5 +1,6 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Utility/Reshape.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
 #include "DeepLearning/Api/Network/Network.h"
 
 #include <limits>
@@ -20,41 +21,6 @@ uint64_t checkedElementCount(const vector<uint64_t>& dimensions, const char* wha
         count *= dim;
     }
     return count;
-}
-
-RaggedTensor reconstructRaggedInput(const json& inputJson, Network* network) {
-    const uint64_t valuesId = inputJson.at("values").at("id").get<uint64_t>();
-    const uint64_t offsetsId = inputJson.at("offsets").at("id").get<uint64_t>();
-    Tensor values = network->getApiTensorByOriginalId(valuesId);
-    Tensor offsets = network->getApiTensorByOriginalId(offsetsId);
-    RaggedTensor input = inputJson.contains("max_values_per_row")
-                             ? RaggedTensor(values, offsets, inputJson.at("max_values_per_row").get<uint64_t>())
-                             : RaggedTensor(values, offsets);
-    if (input.getBatchSize() != inputJson.at("batch_size").get<uint64_t>() ||
-        input.getMaxTotalValues() != inputJson.at("max_total_values").get<uint64_t>()) {
-        throw runtime_error("Reshape serialized ragged input metadata does not match reconstructed tensors.");
-    }
-    return input;
-}
-
-void validateSerializedRaggedOutput(const json& outputJson, const RaggedTensor& input, const Tensor& outputValues) {
-    if (outputJson.at("values").at("id").get<uint64_t>() != outputValues.getOriginalId() &&
-        outputJson.at("values").at("id").get<uint64_t>() != outputValues.getId()) {
-        throw runtime_error("Reshape serialized ragged output values must match feature_output.");
-    }
-    if (outputJson.at("offsets").at("id").get<uint64_t>() != input.getOffsets().getOriginalId() &&
-        outputJson.at("offsets").at("id").get<uint64_t>() != input.getOffsets().getId()) {
-        throw runtime_error("Reshape serialized ragged output must preserve the input row partition.");
-    }
-    if (outputJson.at("batch_size").get<uint64_t>() != input.getBatchSize() ||
-        outputJson.at("max_total_values").get<uint64_t>() != input.getMaxTotalValues()) {
-        throw runtime_error("Reshape serialized ragged output capacity metadata does not match the input partition.");
-    }
-    const bool outputHasMaxValuesPerRow = outputJson.contains("max_values_per_row");
-    if (outputHasMaxValuesPerRow != input.hasMaxValuesPerRow() ||
-        (outputHasMaxValuesPerRow && outputJson.at("max_values_per_row").get<uint64_t>() != input.getMaxValuesPerRow())) {
-        throw runtime_error("Serialized ragged output must preserve max_values_per_row metadata.");
-    }
 }
 
 }  // namespace
@@ -78,12 +44,15 @@ Reshape Reshape::Builder::build() {
         }
         vector<uint64_t> outputValueDimensions;
         outputValueDimensions.reserve(_newDimensions->size() + 1);
-        outputValueDimensions.push_back(_raggedFeatureInput->getMaxTotalValues());
+        outputValueDimensions.push_back(_raggedFeatureInput->isPlacementNeutral()
+                                            ? _raggedFeatureInput->getMaxValuesPerRow()
+                                            : _raggedFeatureInput->getMaxTotalValues());
         outputValueDimensions.insert(outputValueDimensions.end(), _newDimensions->begin(), _newDimensions->end());
         reshape.featureOutput = Tensor(_featureInput->getDataType(), outputValueDimensions);
         reshape.raggedFeatureInput = _raggedFeatureInput;
         reshape.raggedFeatureOutput = _raggedFeatureInput->withValues(reshape.featureOutput.value());
-        // Ragged packed values already include their full-capacity leading row dimension.
+        // Fixed ragged values keep their concrete capacity; neutral values keep semantic [M, ...].
+        // stamp() materializes [B*M, ...] only for the neutral case.
         reshape.newDimensions = outputValueDimensions;
     } else {
         reshape.featureOutput = Tensor(_featureInput->getDataType(), _newDimensions.value());
@@ -106,48 +75,82 @@ json Reshape::architectureJson() const {
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
 
+    const bool placementNeutral = raggedFeatureInput.has_value() && raggedFeatureInput->isPlacementNeutral();
+    if (raggedFeatureOutput.has_value()) THOR_THROW_IF_FALSE(placementNeutral == raggedFeatureOutput->isPlacementNeutral());
+
     json j;
     j["factory"] = Layer::Factory::Layer.value();
-    j["version"] = getLayerVersion();
+    j["version"] = placementNeutral ? "1.1.0" : getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
     j["feature_input"] = featureInput.value().architectureJson();
     j["feature_output"] = featureOutput.value().architectureJson();
     j["use_ragged"] = raggedFeatureInput.has_value();
     if (raggedFeatureInput.has_value()) {
         THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
-        j["ragged_feature_input"] = raggedFeatureInput->architectureJson();
-        j["ragged_feature_output"] = raggedFeatureOutput->architectureJson();
+        j["ragged_feature_input"] =
+            SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureInput.value());
+        j["ragged_feature_output"] =
+            SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureOutput.value());
     }
     return j;
 }
 
 void Reshape::deserialize(const json &j, Network *network) {
-    if (j.at("version").get<string>() != "1.0.0")
-        throw runtime_error("Unsupported version in Reshape::deserialize: " + j["version"].get<string>());
+    const string version = j.at("version").get<string>();
+    if (version != "1.0.0" && version != "1.1.0")
+        throw runtime_error("Unsupported version in Reshape::deserialize: " + version);
     if (j.at("layer_type").get<string>() != "reshape")
         throw runtime_error("Layer type mismatch in Reshape::deserialize: " + j.at("layer_type").get<string>());
 
     Reshape reshape;
     const bool useRagged = j.value("use_ragged", false);
     if (useRagged) {
-        RaggedTensor input = reconstructRaggedInput(j.at("ragged_feature_input"), network);
+        RaggedTensor input = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_feature_input"), network, "Reshape");
+        if ((version == "1.0.0" && input.isPlacementNeutral()) ||
+            (version == "1.1.0" && !input.isPlacementNeutral())) {
+            throw runtime_error("Reshape serialized layer version does not match its ragged geometry mode.");
+        }
+        const uint64_t featureInputId = j.at("feature_input").at("id").get<uint64_t>();
+        if (featureInputId != j.at("ragged_feature_input").at("values").at("id").get<uint64_t>()) {
+            throw runtime_error("Reshape serialized feature_input must match its ragged input values.");
+        }
+        Tensor featureInput = network->getApiTensorByOriginalId(featureInputId);
+        if (featureInput != input.getValues()) {
+            throw runtime_error("Reshape reconstructed feature_input must match its ragged input values.");
+        }
+
         Tensor outputValues = Tensor::deserialize(j.at("feature_output"));
+        const json& outputJson = j.at("ragged_feature_output");
+        if (outputJson.at("values").at("id").get<uint64_t>() != j.at("feature_output").at("id").get<uint64_t>()) {
+            throw runtime_error("Reshape serialized ragged output values must match feature_output.");
+        }
+        SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
+            outputJson, j.at("ragged_feature_input"), input, "Reshape");
+
         const vector<uint64_t> outputDimensions = outputValues.getDimensions();
-        if (outputDimensions.size() < 2 || outputDimensions.front() != input.getMaxTotalValues()) {
-            throw runtime_error("Ragged Reshape serialized output must preserve the packed capacity dimension.");
+        const uint64_t expectedLeading = input.isPlacementNeutral() ? input.getMaxValuesPerRow() : input.getMaxTotalValues();
+        if (outputDimensions.size() < 2 || outputDimensions.front() != expectedLeading) {
+            throw runtime_error("Ragged Reshape serialized output must preserve the logical packed-row dimension.");
         }
         vector<uint64_t> outputTrailing(outputDimensions.begin() + 1, outputDimensions.end());
         if (checkedElementCount(input.getTrailingDimensions(), "serialized ragged input trailing shape") !=
             checkedElementCount(outputTrailing, "serialized ragged output trailing shape")) {
             throw runtime_error("Ragged Reshape serialized output must preserve elements per packed value.");
         }
-        validateSerializedRaggedOutput(j.at("ragged_feature_output"), input, outputValues);
-        reshape.featureInput = input.getValues();
+        if (outputValues.getDataType() != input.getValuesDataType()) {
+            throw runtime_error("Ragged Reshape serialized output dtype must match its input.");
+        }
+
+        reshape.featureInput = featureInput;
         reshape.featureOutput = outputValues;
         reshape.raggedFeatureInput = input;
         reshape.raggedFeatureOutput = input.withValues(outputValues);
+        // API state stays semantic for placement-neutral geometry. stamp() derives
+        // the concrete [B*M, ...] physical shape without mutating this vector.
         reshape.newDimensions = outputDimensions;
     } else {
+        if (version != "1.0.0")
+            throw runtime_error("Reshape version 1.1.0 is reserved for placement-neutral ragged geometry.");
         const uint64_t originalTensorId = j.at("feature_input").at("id").get<uint64_t>();
         Tensor featureInput = network->getApiTensorByOriginalId(originalTensorId);
         Tensor featureOutput = Tensor::deserialize(j.at("feature_output"));

@@ -34,6 +34,7 @@ TEST(RaggedNetworkOutputApi, RegistersOneLogicalOutputBackedByValuesCarrier) {
                              .trailingDimensions({2})
                              .batchSize(2)
                              .maxTotalValues(6)
+                             .maxValuesPerRow(4)
                              .build();
 
     RaggedNetworkOutput output =
@@ -58,11 +59,14 @@ TEST(RaggedNetworkOutputApi, RegistersOneLogicalOutputBackedByValuesCarrier) {
     const json& logicalOutput = architecture.at("ragged_network_outputs").at(0);
     EXPECT_EQ(logicalOutput.at("name").get<std::string>(), "tokens_out");
     EXPECT_EQ(logicalOutput.at("version").get<std::string>(), "1.2.0");
+    EXPECT_FALSE(logicalOutput.contains("batch_size"));
+    EXPECT_FALSE(logicalOutput.contains("max_total_values"));
     EXPECT_EQ(logicalOutput.at("values_tensor_id").get<uint64_t>(), output.getFeatureOutput().getValues().getId());
     EXPECT_EQ(logicalOutput.at("row_partition_token_tensor_id").get<uint64_t>(),
               output.getFeatureOutput().getRowPartitionToken().getId());
     EXPECT_FALSE(logicalOutput.contains("offsets_output_name"));
     EXPECT_FALSE(logicalOutput.contains("offsets_tensor_id"));
+    EXPECT_EQ(logicalOutput.at("max_values_per_row").get<uint64_t>(), 4u);
     EXPECT_FALSE(logicalOutput.contains("ragged_tensor"));
 
     std::set<std::string> internalNames;
@@ -103,6 +107,7 @@ TEST(RaggedNetworkOutputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTenso
                              .trailingDimensions({2})
                              .batchSize(2)
                              .maxTotalValues(6)
+                             .maxValuesPerRow(4)
                              .build();
     RaggedNetworkOutput output =
         RaggedNetworkOutput::Builder().network(network).name("tokens_out").inputTensor(input).build();
@@ -112,6 +117,9 @@ TEST(RaggedNetworkOutputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTenso
     ASSERT_EQ(architecture.at("ragged_network_outputs").size(), 1u);
     const json& logicalOutput = architecture.at("ragged_network_outputs").at(0);
     EXPECT_FALSE(logicalOutput.contains("ragged_tensor"));
+    EXPECT_FALSE(logicalOutput.contains("batch_size"));
+    EXPECT_FALSE(logicalOutput.contains("max_total_values"));
+    EXPECT_EQ(logicalOutput.at("max_values_per_row").get<uint64_t>(), 4u);
     EXPECT_EQ(logicalOutput.at("values_tensor_id").get<uint64_t>(), output.getFeatureOutput().getValues().getId());
     EXPECT_EQ(logicalOutput.at("row_partition_token_tensor_id").get<uint64_t>(),
               output.getFeatureOutput().getRowPartitionToken().getId());
@@ -132,10 +140,15 @@ TEST(RaggedNetworkOutputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTenso
     EXPECT_EQ(loadedOutputs[0].valuesOutputName, "__thor_ragged_output.tokens_out.values");
     EXPECT_EQ(loadedOutputs[0].raggedTensor.getValues().getDimensions(), (std::vector<uint64_t>{6, 2}));
     EXPECT_EQ(loadedOutputs[0].raggedTensor.getOffsets().getDimensions(), (std::vector<uint64_t>{3}));
+    ASSERT_TRUE(loadedOutputs[0].raggedTensor.hasMaxValuesPerRow());
+    EXPECT_EQ(loadedOutputs[0].raggedTensor.getMaxValuesPerRow(), 4u);
 
     const json loadedArchitecture = loaded.architectureJson();
     const json& loadedLogicalOutput = loadedArchitecture.at("ragged_network_outputs").at(0);
     EXPECT_FALSE(loadedLogicalOutput.contains("ragged_tensor"));
+    EXPECT_FALSE(loadedLogicalOutput.contains("batch_size"));
+    EXPECT_FALSE(loadedLogicalOutput.contains("max_total_values"));
+    EXPECT_EQ(loadedLogicalOutput.at("max_values_per_row").get<uint64_t>(), 4u);
     EXPECT_EQ(loadedLogicalOutput.at("values_tensor_id").get<uint64_t>(), loadedOutputs[0].raggedTensor.getValues().getId());
     EXPECT_EQ(loadedLogicalOutput.at("row_partition_token_tensor_id").get<uint64_t>(),
               loadedOutputs[0].raggedTensor.getRowPartitionToken().getId());

@@ -18,7 +18,9 @@ class Network;
 // into a GPU offsets input. Builder::partition(...) declares a values-only boundary
 // that reuses an existing logical input's exact row partition. The row partition
 // remains authoritative: values beyond hostOffsets[B] are inactive,
-// undefined capacity. RaggedNetworkInput copies packed values without inspecting
+// undefined capacity. A partition-owning builder may either use the legacy fixed
+// batchSize/maxTotalValues pair or omit both and provide maxValuesPerRow to create
+// placement-neutral logical geometry. RaggedNetworkInput copies packed values without inspecting
 // or canonicalizing that inactive storage; consumers that over-read own their
 // required sanitation.
 class RaggedNetworkInput {
@@ -36,7 +38,11 @@ class RaggedNetworkInput::Builder {
     virtual RaggedNetworkInput::Builder& offsetsDataType(DataType dataType);
     virtual RaggedNetworkInput::Builder& trailingDimensions(const std::vector<uint64_t>& dimensions);
     virtual RaggedNetworkInput::Builder& maxTotalValues(uint64_t maxTotalValues);
+    // maxValuesPerRow is optional metadata for legacy fixed geometry and required
+    // semantic model state for placement-neutral geometry.
     virtual RaggedNetworkInput::Builder& maxValuesPerRow(uint64_t maxValuesPerRow);
+    // batchSize and maxTotalValues are a legacy fixed-geometry pair. Omit both to
+    // construct a placement-neutral owner.
     virtual RaggedNetworkInput::Builder& batchSize(uint64_t batchSize);
     // Reuse the exact row partition of an existing logical RaggedNetworkInput.
     // In this mode only <name>.values is declared as a new external boundary;

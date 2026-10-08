@@ -1,9 +1,10 @@
 #include "DeepLearning/Api/Layers/Utility/FiniteCheck.h"
 
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include <iostream>
-#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -35,41 +36,6 @@ void warnIfEnabled(const FiniteCheck &finiteCheck) {
               << std::endl;
 }
 
-RaggedTensor reconstructRaggedInput(const json& inputJson, Network* network, const char* context) {
-    const uint64_t valuesId = inputJson.at("values").at("id").get<uint64_t>();
-    const uint64_t offsetsId = inputJson.at("offsets").at("id").get<uint64_t>();
-    Tensor values = network->getApiTensorByOriginalId(valuesId);
-    Tensor offsets = network->getApiTensorByOriginalId(offsetsId);
-    RaggedTensor ragged = inputJson.contains("max_values_per_row")
-        ? RaggedTensor(values, offsets, inputJson.at("max_values_per_row").get<uint64_t>())
-        : RaggedTensor(values, offsets);
-    if (ragged.getBatchSize() != inputJson.at("batch_size").get<uint64_t>() ||
-        ragged.getMaxTotalValues() != inputJson.at("max_total_values").get<uint64_t>()) {
-        throw runtime_error(string(context) + " serialized ragged input metadata does not match reconstructed tensors.");
-    }
-    return ragged;
-}
-
-void validateSerializedRaggedOutput(const json& outputJson,
-                                    const json& denseOutputJson,
-                                    const RaggedTensor& input,
-                                    const Tensor& outputValues,
-                                    const char* context) {
-    if (outputJson.at("values").at("id").get<uint64_t>() != denseOutputJson.at("id").get<uint64_t>() ||
-        outputJson.at("offsets").at("id").get<uint64_t>() != input.getOffsets().getOriginalId() ||
-        outputJson.at("batch_size").get<uint64_t>() != input.getBatchSize() ||
-        outputJson.at("max_total_values").get<uint64_t>() != input.getMaxTotalValues() ||
-        outputValues.getDimensions() != input.getValues().getDimensions() ||
-        outputValues.getDataType() != input.getValues().getDataType()) {
-        throw runtime_error(string(context) + " serialized ragged output must preserve the input values descriptor and row partition.");
-    }
-    if (outputJson.contains("max_values_per_row")) {
-        if (!input.hasMaxValuesPerRow() ||
-            outputJson.at("max_values_per_row").get<uint64_t>() != input.getMaxValuesPerRow()) {
-            throw runtime_error(string(context) + " serialized ragged output max_values_per_row does not match its input.");
-        }
-    }
-}
 
 }  // namespace
 
@@ -118,7 +84,6 @@ shared_ptr<ThorImplementation::Layer> FiniteCheck::stamp(ThorImplementation::Ten
                                                          Thor::Tensor connectingApiTensor,
                                                          const bool inferenceOnly) const {
     (void)placement;
-    (void)drivingLayer;
     (void)drivingApiLayer;
     (void)inferenceOnly;
     THOR_THROW_IF_FALSE(initialized);
@@ -131,17 +96,20 @@ shared_ptr<ThorImplementation::Layer> FiniteCheck::stamp(ThorImplementation::Ten
 
     optional<ThorImplementation::FiniteCheck::RaggedConfiguration> raggedConfiguration;
     if (raggedFeatureInput.has_value()) {
-        uint64_t elementsPerValue = 1;
-        for (uint64_t dim : raggedFeatureInput->getTrailingDimensions()) {
-            if (dim == 0 || elementsPerValue > numeric_limits<uint64_t>::max() / dim)
-                throw overflow_error("Ragged FiniteCheck elements-per-value overflow.");
-            elementsPerValue *= dim;
+        const ThorImplementation::RaggedTensorDescriptor physicalDescriptor =
+            SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+                raggedFeatureInput.value(), drivingLayer, "FiniteCheck");
+        const uint64_t elementsPerValue =
+            SegmentedPrimitiveDetail::elementsPerValue(raggedFeatureInput->getTrailingDimensions(), "FiniteCheck");
+        if (physicalDescriptor.getTrailingDimensions() != raggedFeatureInput->getTrailingDimensions() ||
+            physicalDescriptor.getOffsetsDataType() != raggedFeatureInput->getOffsetsDataType()) {
+            throw runtime_error("Ragged FiniteCheck physical placement descriptor does not match its logical tensor semantics.");
         }
         raggedConfiguration = ThorImplementation::FiniteCheck::RaggedConfiguration{
-            .batchSize = raggedFeatureInput->getBatchSize(),
-            .maxTotalValues = raggedFeatureInput->getMaxTotalValues(),
+            .batchSize = physicalDescriptor.getBatchSize(),
+            .maxTotalValues = physicalDescriptor.getMaxTotalValues(),
             .elementsPerValue = elementsPerValue,
-            .offsetsDataType = raggedFeatureInput->getOffsetsDataType(),
+            .offsetsDataType = physicalDescriptor.getOffsetsDataType(),
         };
     }
 
@@ -175,15 +143,22 @@ json FiniteCheck::architectureJson() const {
 
     json j;
     j["factory"] = Layer::Factory::Layer.value();
-    j["version"] = getLayerVersion();
+    const bool placementNeutral = raggedFeatureInput.has_value() && raggedFeatureInput->isPlacementNeutral();
+    if (raggedFeatureOutput.has_value()) {
+        THOR_THROW_IF_FALSE(placementNeutral == raggedFeatureOutput->isPlacementNeutral());
+    }
+
+    j["version"] = placementNeutral ? "1.2.0" : getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
     j["feature_input"] = featureInput.value().architectureJson();
     j["feature_output"] = featureOutput.value().architectureJson();
     j["use_ragged"] = raggedFeatureInput.has_value();
     if (raggedFeatureInput.has_value()) {
         THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
-        j["ragged_feature_input"] = raggedFeatureInput->architectureJson();
-        j["ragged_feature_output"] = raggedFeatureOutput->architectureJson();
+        j["ragged_feature_input"] =
+            SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureInput.value());
+        j["ragged_feature_output"] =
+            SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureOutput.value());
     }
     j["tensor_label"] = tensorLabel;
     j["enabled"] = enabled;
@@ -196,21 +171,35 @@ json FiniteCheck::architectureJson() const {
 
 void FiniteCheck::deserialize(const json &j, Network *network) {
     const string version = j.at("version").get<string>();
-    if (version != "1.0.0" && version != "1.1.0")
+    if (version != "1.0.0" && version != "1.1.0" && version != "1.2.0")
         throw runtime_error("Unsupported version in FiniteCheck::deserialize: " + version);
     if (j.at("layer_type").get<string>() != "finite_check")
         throw runtime_error("Layer type mismatch in FiniteCheck::deserialize: " + j.at("layer_type").get<string>());
 
-    const bool useRagged = version == "1.1.0" && j.value("use_ragged", false);
+    const bool serializedUseRagged = j.value("use_ragged", false);
+    if (version == "1.2.0" && !serializedUseRagged) {
+        throw runtime_error("FiniteCheck version 1.2.0 is reserved for placement-neutral ragged geometry.");
+    }
+    const bool useRagged = (version == "1.1.0" || version == "1.2.0") && serializedUseRagged;
+
     Tensor featureInput;
     optional<RaggedTensor> raggedInput;
     if (useRagged) {
         const json& inputJson = j.at("ragged_feature_input");
-        if (j.at("feature_input").at("id").get<uint64_t>() != inputJson.at("values").at("id").get<uint64_t>()) {
+        raggedInput = SegmentedPrimitiveDetail::reconstructInput(inputJson, network, "FiniteCheck");
+        if ((version == "1.1.0" && raggedInput->isPlacementNeutral()) ||
+            (version == "1.2.0" && !raggedInput->isPlacementNeutral())) {
+            throw runtime_error("FiniteCheck serialized layer version does not match its ragged geometry mode.");
+        }
+
+        const uint64_t serializedFeatureInputId = j.at("feature_input").at("id").get<uint64_t>();
+        if (serializedFeatureInputId != inputJson.at("values").at("id").get<uint64_t>()) {
             throw runtime_error("FiniteCheck serialized ragged feature_input must reference the ragged values tensor.");
         }
-        raggedInput = reconstructRaggedInput(inputJson, network, "FiniteCheck");
-        featureInput = raggedInput->getValues();
+        featureInput = network->getApiTensorByOriginalId(serializedFeatureInputId);
+        if (featureInput != raggedInput->getValues()) {
+            throw runtime_error("FiniteCheck reconstructed feature_input must match its ragged input values tensor.");
+        }
     } else {
         const json input = j.at("feature_input").get<json>();
         featureInput = network->getApiTensorByOriginalId(input.at("id").get<uint64_t>());
@@ -221,7 +210,21 @@ void FiniteCheck::deserialize(const json &j, Network *network) {
     finiteCheck.featureInput = featureInput;
     finiteCheck.featureOutput = featureOutput;
     if (raggedInput.has_value()) {
-        validateSerializedRaggedOutput(j.at("ragged_feature_output"), j.at("feature_output"), raggedInput.value(), featureOutput, "FiniteCheck");
+        const json& inputJson = j.at("ragged_feature_input");
+        const json& outputJson = j.at("ragged_feature_output");
+        const json& denseOutputJson = j.at("feature_output");
+        if (outputJson.at("values").at("id").get<uint64_t>() != denseOutputJson.at("id").get<uint64_t>()) {
+            throw runtime_error("FiniteCheck serialized ragged output values must match feature_output.");
+        }
+        SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
+            outputJson, inputJson, raggedInput.value(), "FiniteCheck");
+        if (featureOutput.getDimensions() != raggedInput->getValues().getDimensions() ||
+            featureOutput.getDataType() != raggedInput->getValues().getDataType() ||
+            outputJson.at("values").at("dimensions").get<vector<uint64_t>>() != featureOutput.getDimensions() ||
+            outputJson.at("values").at("data_type").get<DataType>() != featureOutput.getDataType()) {
+            throw runtime_error(
+                "FiniteCheck serialized ragged output must preserve the logical values descriptor and row partition.");
+        }
         finiteCheck.raggedFeatureInput = raggedInput;
         finiteCheck.raggedFeatureOutput = raggedInput->withValues(featureOutput);
     }

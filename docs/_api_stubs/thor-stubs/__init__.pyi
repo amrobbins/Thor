@@ -220,6 +220,9 @@ class RaggedTensor:
     def trailing_dimensions(self) -> list[int]: ...
 
     @property
+    def placement_neutral(self) -> bool: ...
+
+    @property
     def batch_size(self) -> int: ...
 
     @property

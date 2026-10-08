@@ -1,5 +1,8 @@
 #include "DeepLearning/Api/Layers/Utility/SegmentedReduction.h"
 
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
+
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "Utilities/Expression/DynamicExpression.h"
@@ -71,7 +74,8 @@ SegmentedReduction SegmentedReduction::Builder::build() {
         throw std::invalid_argument("SegmentedReduction mean requires floating-point ragged values.");
     }
 
-    if (_featureInput->getBatchSize() > std::numeric_limits<uint32_t>::max()) {
+    if (!_featureInput->isPlacementNeutral() &&
+        _featureInput->getBatchSize() > std::numeric_limits<uint32_t>::max()) {
         throw std::invalid_argument("SegmentedReduction batch size exceeds Thor's uint32 placement capacity.");
     }
     std::vector<uint64_t> outputDimensions = _featureInput->getTrailingDimensions();
@@ -128,7 +132,6 @@ std::shared_ptr<ThorImplementation::Layer> SegmentedReduction::stamp(
     std::shared_ptr<Thor::Layer> drivingApiLayer,
     Thor::Tensor connectingApiTensor,
     bool inferenceOnly) const {
-    (void)drivingLayer;
     (void)drivingApiLayer;
     THOR_THROW_IF_FALSE(initialized);
     THOR_THROW_IF_FALSE(featureInputs.size() == 2);
@@ -140,7 +143,17 @@ std::shared_ptr<ThorImplementation::Layer> SegmentedReduction::stamp(
     using ThorImplementation::ExpressionDefinition;
     using ThorImplementation::RaggedExpression;
 
-    RaggedExpression input = RaggedExpression::input("feature_input", "feature_offsets", raggedFeatureInput.getDescriptor());
+    const ThorImplementation::RaggedTensorDescriptor physicalInputDescriptor =
+        SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+            raggedFeatureInput, drivingLayer, "SegmentedReduction");
+    const uint64_t physicalBatchSize = physicalInputDescriptor.getBatchSize();
+    if (physicalBatchSize == 0 || physicalBatchSize > std::numeric_limits<uint32_t>::max()) {
+        throw std::runtime_error("SegmentedReduction placement batch size exceeds Thor's uint32 placement capacity.");
+    }
+    const uint32_t placementBatchSize = static_cast<uint32_t>(physicalBatchSize);
+
+    RaggedExpression input =
+        RaggedExpression::input("feature_input", "feature_offsets", physicalInputDescriptor);
     Expression output = [&]() -> Expression {
         switch (reductionType) {
             case Type::SUM: return input.segment_sum();
@@ -154,7 +167,7 @@ std::shared_ptr<ThorImplementation::Layer> SegmentedReduction::stamp(
     const std::vector<uint64_t> outputDimensions = featureOutputs.front().getDimensions();
     std::vector<uint64_t> physicalOutputDimensions;
     physicalOutputDimensions.reserve(outputDimensions.size() + 1);
-    physicalOutputDimensions.push_back(raggedFeatureInput.getBatchSize());
+    physicalOutputDimensions.push_back(placementBatchSize);
     physicalOutputDimensions.insert(physicalOutputDimensions.end(), outputDimensions.begin(), outputDimensions.end());
     output = output.stridedView(physicalOutputDimensions, contiguousStrides(physicalOutputDimensions), 0);
 
@@ -172,7 +185,7 @@ std::shared_ptr<ThorImplementation::Layer> SegmentedReduction::stamp(
         false,
         false,
         std::vector<bool>{true, true},
-        static_cast<uint32_t>(raggedFeatureInput.getBatchSize()));
+        placementBatchSize);
     physicalLayer->setLayerName(getLayerType());
     return physicalLayer;
 }
@@ -180,10 +193,28 @@ std::shared_ptr<ThorImplementation::Layer> SegmentedReduction::stamp(
 uint64_t SegmentedReduction::getFirstInstanceMemRequirementInBytes(
     uint32_t batchSize,
     ThorImplementation::TensorPlacement tensorPlacement) const {
-    (void)batchSize;
     (void)tensorPlacement;
     THOR_THROW_IF_FALSE(featureInputs.size() == 2);
     THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
+
+    if (raggedFeatureInput.isPlacementNeutral()) {
+        THOR_THROW_IF_FALSE(batchSize > 0);
+        const ThorImplementation::RaggedTensorDescriptor physicalInputDescriptor =
+            raggedFeatureInput.getDescriptorForPlacement(batchSize);
+        const uint64_t valuesBytes = physicalInputDescriptor.getValuesDescriptor().getArraySizeInBytes();
+        const uint64_t offsetsBytes = physicalInputDescriptor.getOffsetsDescriptor().getArraySizeInBytes();
+        const uint64_t outputBytes = getOutputTensorBytes(batchSize);
+
+        if (valuesBytes > std::numeric_limits<uint64_t>::max() - offsetsBytes) {
+            throw std::overflow_error("SegmentedReduction neutral input memory requirement overflows uint64_t.");
+        }
+        const uint64_t inputBytes = valuesBytes + offsetsBytes;
+        if (inputBytes > std::numeric_limits<uint64_t>::max() - outputBytes) {
+            throw std::overflow_error("SegmentedReduction neutral memory requirement overflows uint64_t.");
+        }
+        return inputBytes + outputBytes;
+    }
+
     const uint64_t perExampleOutputBytes = featureOutputs.front().getTotalSizeInBytes();
     if (raggedFeatureInput.getBatchSize() != 0 &&
         perExampleOutputBytes > std::numeric_limits<uint64_t>::max() / raggedFeatureInput.getBatchSize()) {
@@ -203,48 +234,49 @@ json SegmentedReduction::architectureJson() const {
     THOR_THROW_IF_FALSE(initialized);
     THOR_THROW_IF_FALSE(featureInputs.size() == 2);
     THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
+    const bool placementNeutral = raggedFeatureInput.isPlacementNeutral();
     return json{{"factory", Layer::Factory::Layer.value()},
-                {"version", getLayerVersion()},
+                {"version", placementNeutral ? "1.1.0" : getLayerVersion()},
                 {"layer_type", "segmented_reduction"},
                 {"reduction_type", typeName(reductionType)},
-                {"ragged_feature_input", raggedFeatureInput.architectureJson()},
+                {"ragged_feature_input",
+                 SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureInput)},
                 {"feature_output", featureOutputs.front().architectureJson()}};
 }
 
 void SegmentedReduction::deserialize(const json& j, Network* network) {
-    if (j.at("version").get<std::string>() != "1.0.0") {
-        throw std::runtime_error("Unsupported version in SegmentedReduction::deserialize: " + j.at("version").get<std::string>());
+    const std::string version = j.at("version").get<std::string>();
+    if (version != "1.0.0" && version != "1.1.0") {
+        throw std::runtime_error("Unsupported version in SegmentedReduction::deserialize: " + version);
     }
     if (j.at("layer_type").get<std::string>() != "segmented_reduction") {
         throw std::runtime_error("Layer type mismatch in SegmentedReduction::deserialize: " + j.at("layer_type").get<std::string>());
     }
 
     const json& inputJson = j.at("ragged_feature_input");
-    Tensor values = network->getApiTensorByOriginalId(inputJson.at("values").at("id").get<uint64_t>());
-    Tensor offsets = network->getApiTensorByOriginalId(inputJson.at("offsets").at("id").get<uint64_t>());
-    RaggedTensor raggedInput(values, offsets);
-    if (raggedInput.getBatchSize() > std::numeric_limits<uint32_t>::max()) {
-        throw std::runtime_error("SegmentedReduction serialized batch size exceeds Thor's uint32 placement capacity.");
+    RaggedTensor raggedInput = SegmentedPrimitiveDetail::reconstructInput(inputJson, network, "SegmentedReduction");
+    if ((version == "1.0.0" && raggedInput.isPlacementNeutral()) ||
+        (version == "1.1.0" && !raggedInput.isPlacementNeutral())) {
+        throw std::runtime_error("SegmentedReduction serialized layer version does not match its ragged geometry mode.");
     }
-    if (raggedInput.getBatchSize() != inputJson.at("batch_size").get<uint64_t>() ||
-        raggedInput.getMaxTotalValues() != inputJson.at("max_total_values").get<uint64_t>()) {
-        throw std::runtime_error("SegmentedReduction serialized ragged input metadata does not match reconstructed tensors.");
+    if (!raggedInput.isPlacementNeutral() && raggedInput.getBatchSize() > std::numeric_limits<uint32_t>::max()) {
+        throw std::runtime_error("SegmentedReduction serialized batch size exceeds Thor's uint32 placement capacity.");
     }
 
     Tensor output = Tensor::deserialize(j.at("feature_output"));
     std::vector<uint64_t> expectedDimensions = raggedInput.getTrailingDimensions();
     if (expectedDimensions.empty()) expectedDimensions = {1};
-    if (output.getDimensions() != expectedDimensions || output.getDataType() != values.getDataType()) {
+    if (output.getDimensions() != expectedDimensions || output.getDataType() != raggedInput.getValuesDataType()) {
         throw std::runtime_error("SegmentedReduction serialized output descriptor does not match the ragged input.");
     }
 
     SegmentedReduction reduction;
     reduction.raggedFeatureInput = raggedInput;
     reduction.reductionType = typeFromName(j.at("reduction_type").get<std::string>());
-    if (reduction.reductionType == Type::MEAN && !isFloatingPoint(values.getDataType())) {
+    if (reduction.reductionType == Type::MEAN && !isFloatingPoint(raggedInput.getValuesDataType())) {
         throw std::runtime_error("SegmentedReduction serialized mean requires floating-point ragged values.");
     }
-    reduction.featureInputs = {values, offsets};
+    reduction.featureInputs = {raggedInput.getValues(), raggedInput.getOffsets()};
     reduction.featureOutputs = {output};
     reduction.initialized = true;
     reduction.addToNetwork(network);

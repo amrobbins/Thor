@@ -36,14 +36,15 @@ class Relu : public Activation {
     }
 
    protected:
+    std::optional<std::string> placementNeutralStandaloneVersion() const override { return "1.1.0"; }
+
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
-        (void)drivingLayer;
         (void)drivingApiLayer;
-        return stampExpressionBackedActivation(placement, connectingApiTensor, inferenceOnly);
+        return stampExpressionBackedActivation(placement, connectingApiTensor, inferenceOnly, drivingLayer);
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {

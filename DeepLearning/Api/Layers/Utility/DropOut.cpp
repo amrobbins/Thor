@@ -1,5 +1,6 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
 #include "DeepLearning/Api/Network/Network.h"
 
 using namespace std;
@@ -45,78 +46,78 @@ json DropOut::architectureJson() const {
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
 
+    const bool placementNeutral = raggedFeatureInput.has_value() && raggedFeatureInput->isPlacementNeutral();
+    if (raggedFeatureOutput.has_value()) THOR_THROW_IF_FALSE(placementNeutral == raggedFeatureOutput->isPlacementNeutral());
+
     json j;
     j["factory"] = Layer::Factory::Layer.value();
-    j["version"] = getLayerVersion();
+    j["version"] = placementNeutral ? "1.1.0" : getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
 
     j["feature_input"] = featureInput.value().architectureJson();
     j["feature_output"] = featureOutput.value().architectureJson();
     if (raggedFeatureInput.has_value()) {
-        THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
         j["use_ragged"] = true;
-        j["ragged_feature_input"] = raggedFeatureInput->architectureJson();
-        j["ragged_feature_output"] = raggedFeatureOutput->architectureJson();
+        THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
+        j["ragged_feature_input"] =
+            SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureInput.value());
+        j["ragged_feature_output"] =
+            SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureOutput.value());
     }
 
     j["drop_proportion"] = dropProportion;
-
     return j;
 }
 
 void DropOut::deserialize(const json &j, Network *network) {
-    if (j.at("version").get<string>() != "1.0.0")
-        throw runtime_error("Unsupported version in DropOut::deserialize: " + j["version"].get<string>());
+    const string version = j.at("version").get<string>();
+    if (version != "1.0.0" && version != "1.1.0")
+        throw runtime_error("Unsupported version in DropOut::deserialize: " + version);
     if (j.at("layer_type").get<string>() != "drop_out")
         throw runtime_error("Layer type mismatch in DropOut::deserialize: " + j.at("layer_type").get<string>());
 
     DropOut dropOut;
     const bool useRagged = j.value("use_ragged", false);
     if (useRagged) {
-        const json& inputJson = j.at("ragged_feature_input");
-        const uint64_t valuesId = inputJson.at("values").at("id").get<uint64_t>();
-        const uint64_t offsetsId = inputJson.at("offsets").at("id").get<uint64_t>();
-        if (j.at("feature_input").at("id").get<uint64_t>() != valuesId) {
+        RaggedTensor raggedInput =
+            SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_feature_input"), network, "DropOut");
+        if ((version == "1.0.0" && raggedInput.isPlacementNeutral()) ||
+            (version == "1.1.0" && !raggedInput.isPlacementNeutral())) {
+            throw runtime_error("DropOut serialized layer version does not match its ragged geometry mode.");
+        }
+        const uint64_t valuesId = j.at("ragged_feature_input").at("values").at("id").get<uint64_t>();
+        if (j.at("feature_input").at("id").get<uint64_t>() != valuesId)
             throw runtime_error("DropOut serialized ragged feature_input must reference the ragged values tensor.");
-        }
         Tensor values = network->getApiTensorByOriginalId(valuesId);
-        Tensor offsets = network->getApiTensorByOriginalId(offsetsId);
-        RaggedTensor raggedInput = inputJson.contains("max_values_per_row")
-            ? RaggedTensor(values, offsets, inputJson.at("max_values_per_row").get<uint64_t>())
-            : RaggedTensor(values, offsets);
-        if (raggedInput.getBatchSize() != inputJson.at("batch_size").get<uint64_t>() ||
-            raggedInput.getMaxTotalValues() != inputJson.at("max_total_values").get<uint64_t>()) {
-            throw runtime_error("DropOut serialized ragged input metadata does not match reconstructed tensors.");
-        }
-        if (!ThorImplementation::DropOut::nativeKernelSupportsDataType(values.getDataType())) {
+        if (values != raggedInput.getValues())
+            throw runtime_error("DropOut reconstructed feature_input must match its ragged input values.");
+        if (!ThorImplementation::DropOut::nativeKernelSupportsDataType(values.getDataType()))
             throw runtime_error("Serialized ragged DropOut values dtype is unsupported.");
-        }
 
         Tensor outputValues = Tensor::deserialize(j.at("feature_output"));
-        if (outputValues.getDimensions() != values.getDimensions() || outputValues.getDataType() != values.getDataType()) {
+        if (outputValues.getDimensions() != values.getDimensions() || outputValues.getDataType() != values.getDataType())
             throw runtime_error("DropOut serialized ragged output descriptor must match its input values descriptor.");
-        }
-        RaggedTensor raggedOutput = raggedInput.withValues(outputValues);
         const json& outputJson = j.at("ragged_feature_output");
-        if (outputJson.at("values").at("id").get<uint64_t>() != j.at("feature_output").at("id").get<uint64_t>() ||
-            outputJson.at("offsets").at("id").get<uint64_t>() != offsetsId ||
-            outputJson.at("batch_size").get<uint64_t>() != raggedInput.getBatchSize() ||
-            outputJson.at("max_total_values").get<uint64_t>() != raggedInput.getMaxTotalValues()) {
-            throw runtime_error("DropOut serialized ragged output must preserve the input row partition.");
-        }
+        if (outputJson.at("values").at("id").get<uint64_t>() != j.at("feature_output").at("id").get<uint64_t>())
+            throw runtime_error("DropOut serialized ragged output values must match feature_output.");
+        SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
+            outputJson, j.at("ragged_feature_input"), raggedInput, "DropOut");
 
         dropOut.raggedFeatureInput = raggedInput;
-        dropOut.raggedFeatureOutput = raggedOutput;
+        dropOut.raggedFeatureOutput = raggedInput.withValues(outputValues);
         dropOut.featureInput = values;
         dropOut.featureOutput = outputValues;
     } else {
-        nlohmann::json input = j.at("feature_input").get<nlohmann::json>();
-        uint64_t originalTensorId = input.at("id").get<uint64_t>();
+        if (version != "1.0.0")
+            throw runtime_error("DropOut version 1.1.0 is reserved for placement-neutral ragged geometry.");
+        const uint64_t originalTensorId = j.at("feature_input").at("id").get<uint64_t>();
         dropOut.featureInput = network->getApiTensorByOriginalId(originalTensorId);
-        dropOut.featureOutput = Tensor::deserialize(j.at("feature_output").get<nlohmann::json>());
+        dropOut.featureOutput = Tensor::deserialize(j.at("feature_output"));
     }
 
     dropOut.dropProportion = j.at("drop_proportion").get<float>();
+    if (dropOut.dropProportion < 0.0f || dropOut.dropProportion > 1.0f)
+        throw runtime_error("Serialized DropOut drop_proportion must be in [0, 1].");
     dropOut.initialized = true;
     dropOut.addToNetwork(network);
 }

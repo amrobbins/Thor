@@ -10,6 +10,7 @@
 #include "Utilities/Expression/Expression.h"
 
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -69,7 +70,7 @@ class Transpose : public Layer {
     [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {
         THOR_THROW_IF_FALSE(featureOutput.has_value());
         THOR_THROW_IF_FALSE(outputTensor == featureOutput.value());
-        return raggedFeatureInput.has_value();
+        return raggedFeatureInput.has_value() && !raggedFeatureInput->isPlacementNeutral();
     }
 
     bool mustConnectAllInputsToDriveOutput() const override { return raggedFeatureInput.has_value(); }
@@ -96,10 +97,14 @@ class Transpose : public Layer {
                                                      const bool inferenceOnly) const override;
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        (void)batchSize;
         (void)tensorPlacement;
         THOR_THROW_IF_FALSE(getFeatureOutput().has_value());
-        return getFeatureOutput().value().getTotalSizeInBytes();
+        const uint64_t outputBytes = getFeatureOutput().value().getTotalSizeInBytes();
+        if (!raggedFeatureInput.has_value() || !raggedFeatureInput->isPlacementNeutral()) return outputBytes;
+        THOR_THROW_IF_FALSE(batchSize > 0);
+        if (outputBytes > std::numeric_limits<uint64_t>::max() / batchSize)
+            throw std::overflow_error("Placement-neutral Ragged Transpose memory requirement overflow.");
+        return outputBytes * batchSize;
     }
 
    private:

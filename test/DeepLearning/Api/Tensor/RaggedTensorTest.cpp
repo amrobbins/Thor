@@ -4,6 +4,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -37,6 +38,36 @@ TEST(RaggedTensorApi, ConstructsFromValuesAndOffsets) {
     EXPECT_EQ(ragged.getMaxTotalValues(), 17u);
     EXPECT_EQ(ragged.getTrailingDimensions(), (vector<uint64_t>{64}));
     EXPECT_EQ(ragged.getDescriptor().getValuesDimensions(), (vector<uint64_t>{17, 64}));
+}
+
+TEST(RaggedTensorApi, PlacementNeutralGeometryCarriesOnlySemanticRowBoundUntilPlacement) {
+    Tensor values(DataType::FP32, {5, 3});
+    Tensor partitionToken(DataType::UINT32, {1});
+
+    RaggedTensor ragged = RaggedTensor::placementNeutral(values, partitionToken, 5);
+
+    ASSERT_TRUE(ragged.isPlacementNeutral());
+    EXPECT_EQ(ragged.getValuesDimensions(), (vector<uint64_t>{5, 3}));
+    EXPECT_EQ(ragged.getOffsetsDimensions(), (vector<uint64_t>{1}));
+    EXPECT_EQ(ragged.getTrailingDimensions(), (vector<uint64_t>{3}));
+    EXPECT_EQ(ragged.getMaxValuesPerRow(), 5u);
+    EXPECT_THROW(static_cast<void>(ragged.getBatchSize()), logic_error);
+    EXPECT_THROW(static_cast<void>(ragged.getMaxTotalValues()), logic_error);
+    EXPECT_THROW(static_cast<void>(ragged.getDescriptor()), logic_error);
+    EXPECT_THROW(static_cast<void>(ragged.architectureJson()), logic_error);
+
+    const ThorImplementation::RaggedTensorDescriptor batchTwo = ragged.getDescriptorForPlacement(2);
+    EXPECT_EQ(batchTwo.getBatchSize(), 2u);
+    EXPECT_EQ(batchTwo.getMaxTotalValues(), 10u);
+    EXPECT_EQ(batchTwo.getValuesDimensions(), (vector<uint64_t>{10, 3}));
+    EXPECT_EQ(batchTwo.getOffsetsDescriptor().getDimensions(), (vector<uint64_t>{3}));
+    EXPECT_EQ(batchTwo.getMaxValuesPerRow(), 5u);
+
+    const ThorImplementation::RaggedTensorDescriptor batchSeven = ragged.getDescriptorForPlacement(7);
+    EXPECT_EQ(batchSeven.getBatchSize(), 7u);
+    EXPECT_EQ(batchSeven.getMaxTotalValues(), 35u);
+    EXPECT_EQ(batchSeven.getValuesDimensions(), (vector<uint64_t>{35, 3}));
+    EXPECT_EQ(batchSeven.getOffsetsDescriptor().getDimensions(), (vector<uint64_t>{8}));
 }
 
 
@@ -88,6 +119,21 @@ TEST(RaggedTensorApi, ArchitectureJsonRoundTrips) {
     EXPECT_EQ(copy.getOffsetsDataType(), original.getOffsetsDataType());
     EXPECT_EQ(copy.getValuesDimensions(), original.getValuesDimensions());
     EXPECT_EQ(copy.getOffsetsDimensions(), original.getOffsetsDimensions());
+}
+
+TEST(RaggedTensorApi, PlacementNeutralDescriptorRejectsOverflowAndOffsetDTypeOverflow) {
+    RaggedTensor uint64Offsets = RaggedTensor::placementNeutral(
+        Tensor(DataType::FP32, {4, 2}), Tensor(DataType::UINT64, {1}), 4);
+    EXPECT_THROW(
+        static_cast<void>(uint64Offsets.getDescriptorForPlacement(std::numeric_limits<uint64_t>::max())),
+        std::logic_error);
+
+    RaggedTensor uint32Offsets = RaggedTensor::placementNeutral(
+        Tensor(DataType::FP32, {3}), Tensor(DataType::UINT32, {1}), 3);
+    const uint64_t batchPastUint32Capacity = std::numeric_limits<uint32_t>::max() / 3ULL + 1ULL;
+    EXPECT_THROW(
+        static_cast<void>(uint32Offsets.getDescriptorForPlacement(batchPastUint32Capacity)),
+        std::logic_error);
 }
 
 TEST(RaggedTensorApi, ArchitectureJsonContainsStructureButNoRuntimeCacheState) {

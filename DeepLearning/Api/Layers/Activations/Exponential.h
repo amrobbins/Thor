@@ -30,28 +30,21 @@ class Exponential : public Activation {
         if (j.at("layer_type").get<std::string>() != "exponential")
             throw std::runtime_error("Layer type mismatch in Exponential::deserialize: " + j.at("layer_type").get<std::string>());
 
-        nlohmann::json input = j["feature_input"].get<nlohmann::json>();
-        uint64_t originalTensorId = input.at("id").get<uint64_t>();
-        Tensor featureInput = network->getApiTensorByOriginalId(originalTensorId);
-
-        Tensor featureOutput = Tensor::deserialize(j.at("feature_output").get<nlohmann::json>());
-
         Exponential exponential;
-        exponential.featureInput = featureInput;
-        exponential.featureOutput = featureOutput;
-        exponential.initialized = true;
+        exponential.deserializeStandaloneFields(j, network);
         exponential.addToNetwork(network);
     }
 
    protected:
+    std::optional<std::string> placementNeutralStandaloneVersion() const override { return "1.1.0"; }
+
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
-        (void)drivingLayer;
         (void)drivingApiLayer;
-        return stampExpressionBackedActivation(placement, connectingApiTensor, inferenceOnly);
+        return stampExpressionBackedActivation(placement, connectingApiTensor, inferenceOnly, drivingLayer);
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {

@@ -57,7 +57,8 @@ class Softmax : public Activation {
     std::string getLayerType() const override { return "Softmax"; }
 
     static void deserialize(const nlohmann::json &j, Network *network) {
-        if (j.at("version").get<std::string>() != "1.0.0")
+        if (j.at("version").get<std::string>() != "1.0.0" &&
+            j.at("version").get<std::string>() != "1.1.0")
             throw std::runtime_error("Unsupported version in Softmax::deserialize: " + j["version"].get<std::string>());
         if (j.at("layer_type").get<std::string>() != "softmax")
             throw std::runtime_error("Layer type mismatch in Softmax::deserialize: " + j.at("layer_type").get<std::string>());
@@ -87,12 +88,13 @@ class Softmax : public Activation {
     }
 
    protected:
+    std::optional<std::string> placementNeutralStandaloneVersion() const override { return "1.1.0"; }
+
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
-        (void)drivingLayer;
         (void)drivingApiLayer;
         THOR_THROW_IF_FALSE(initialized);
         if (featureInput.has_value() && connectingApiTensor == featureInput.value()) {
@@ -107,7 +109,7 @@ class Softmax : public Activation {
             return std::make_shared<ThorImplementation::Softmax>(true);
         }
 
-        return stampExpressionBackedActivation(placement, connectingApiTensor, inferenceOnly);
+        return stampExpressionBackedActivation(placement, connectingApiTensor, inferenceOnly, drivingLayer);
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {

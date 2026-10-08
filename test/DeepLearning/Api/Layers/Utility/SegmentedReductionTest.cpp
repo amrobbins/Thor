@@ -1,19 +1,28 @@
+#include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 #include "DeepLearning/Api/Layers/Utility/SegmentedReduction.h"
 #include "DeepLearning/Api/Layers/Utility/Slice.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Implementation/Layers/Utility/TensorFanout.h"
+#include "DeepLearning/Implementation/Tensor/RaggedTensor.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
 
 #include "gtest/gtest.h"
 
+#include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -60,6 +69,49 @@ shared_ptr<Api::NetworkInput> findInput(Api::Network& network, const std::string
         if (input != nullptr && input->getName() == name) return input;
     }
     return nullptr;
+}
+
+Batch makePlacementNeutralReductionBatch(const std::string& inputName,
+                                         const Api::RaggedTensor& logicalInput,
+                                         uint32_t batchSize) {
+    const Impl::RaggedTensorDescriptor descriptor = logicalInput.getDescriptorForPlacement(batchSize);
+    if (logicalInput.getTrailingDimensions() != (std::vector<uint64_t>{1}) ||
+        logicalInput.getMaxValuesPerRow() < 2) {
+        throw std::invalid_argument("Placement-neutral SegmentedReduction test input must be scalar with M >= 2.");
+    }
+
+    const uint64_t activeValues = static_cast<uint64_t>(batchSize) * 2;
+    Impl::Tensor values(cpuPlacement, descriptor.getValuesDescriptor());
+    float* valuesPtr = values.getMemPtr<float>();
+    for (uint32_t row = 0; row < batchSize; ++row) {
+        valuesPtr[row * 2] = static_cast<float>(row * 10 + 1);
+        valuesPtr[row * 2 + 1] = static_cast<float>(row * 10 + 3);
+    }
+    for (uint64_t value = activeValues; value < descriptor.getMaxTotalValues(); ++value) {
+        valuesPtr[value] = -1000.0F;
+    }
+
+    Impl::Tensor offsets(cpuPlacement, descriptor.getOffsetsDescriptor());
+    std::vector<uint64_t> hostOffsets(static_cast<size_t>(batchSize) + 1, 0);
+    for (uint32_t row = 0; row <= batchSize; ++row) {
+        hostOffsets[row] = static_cast<uint64_t>(row) * 2;
+    }
+    if (logicalInput.getOffsetsDataType() == DataType::UINT32) {
+        uint32_t* offsetsPtr = offsets.getMemPtr<uint32_t>();
+        for (size_t i = 0; i < hostOffsets.size(); ++i) offsetsPtr[i] = static_cast<uint32_t>(hostOffsets[i]);
+    } else {
+        if (logicalInput.getOffsetsDataType() != DataType::UINT64) {
+            throw std::invalid_argument("Placement-neutral SegmentedReduction test offsets must be uint32 or uint64.");
+        }
+        uint64_t* offsetsPtr = offsets.getMemPtr<uint64_t>();
+        for (size_t i = 0; i < hostOffsets.size(); ++i) offsetsPtr[i] = hostOffsets[i];
+    }
+
+    Impl::RowPartitionRuntime partition(offsets, descriptor.getRowPartition());
+    partition.setHostOffsets(hostOffsets);
+    Batch batch;
+    batch.insert(inputName, Impl::RaggedTensor(values, partition));
+    return batch;
 }
 
 struct ReductionFixture {
@@ -241,6 +293,405 @@ TEST(SegmentedReductionApi, BuilderProducesNormalDensePerExampleShape) {
                                              .reductionType(Api::SegmentedReduction::Type::MEAN)
                                              .build();
     EXPECT_EQ(scalarMean.getFeatureOutput()->getDimensions(), (vector<uint64_t>{1}));
+}
+
+TEST(SegmentedReductionApi, PlacementNeutralBuilderProducesDensePerExampleShapeWithoutBatch) {
+    constexpr uint64_t maxValuesPerRow = 4;
+    Api::Network network("segmented_reduction_neutral_shape");
+    Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("history")
+                                  .valuesDataType(DataType::FP32)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({2, 3})
+                                  .maxValuesPerRow(maxValuesPerRow)
+                                  .build();
+    ASSERT_TRUE(input.isPlacementNeutral());
+    EXPECT_EQ(input.getValuesDimensions(), (vector<uint64_t>{maxValuesPerRow, 2, 3}));
+
+    Api::SegmentedReduction mean = Api::SegmentedReduction::Builder()
+                                       .network(network)
+                                       .featureInput(input)
+                                       .reductionType(Api::SegmentedReduction::Type::MEAN)
+                                       .build();
+    EXPECT_EQ(mean.getFeatureOutput()->getDimensions(), (vector<uint64_t>{2, 3}));
+    EXPECT_EQ(mean.getFeatureInput().value(), input.getValues());
+
+    Api::Network scalarNetwork("segmented_reduction_neutral_scalar_shape");
+    Api::RaggedTensor scalarInput = Api::RaggedNetworkInput::Builder()
+                                        .network(scalarNetwork)
+                                        .name("scalars")
+                                        .valuesDataType(DataType::FP32)
+                                        .offsetsDataType(DataType::UINT32)
+                                        .trailingDimensions({})
+                                        .maxValuesPerRow(maxValuesPerRow)
+                                        .build();
+    ASSERT_TRUE(scalarInput.isPlacementNeutral());
+    Api::SegmentedReduction scalarMean = Api::SegmentedReduction::Builder()
+                                             .network(scalarNetwork)
+                                             .featureInput(scalarInput)
+                                             .reductionType(Api::SegmentedReduction::Type::MEAN)
+                                             .build();
+    EXPECT_EQ(scalarMean.getFeatureOutput()->getDimensions(), (vector<uint64_t>{1}));
+}
+
+TEST(SegmentedReductionApi, PlacementNeutralReductionBuildsAndExecutesAtDifferentBatches) {
+    constexpr uint64_t maxValuesPerRow = 4;
+
+    auto buildPlaceAndRun = [&](uint32_t placementBatchSize) {
+        Api::Network network("segmented_reduction_neutral_runtime_" + std::to_string(placementBatchSize));
+        Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                      .network(network)
+                                      .name("tokens")
+                                      .valuesDataType(DataType::FP32)
+                                      .offsetsDataType(DataType::UINT32)
+                                      .trailingDimensions({1})
+                                      .maxValuesPerRow(maxValuesPerRow)
+                                      .build();
+        Api::SegmentedReduction mean = Api::SegmentedReduction::Builder()
+                                           .network(network)
+                                           .featureInput(input)
+                                           .reductionType(Api::SegmentedReduction::Type::MEAN)
+                                           .build();
+        (void)Api::NetworkOutput::Builder()
+            .network(network)
+            .name("mean")
+            .inputTensor(mean.getFeatureOutput().value())
+            .dataType(DataType::FP32)
+            .build();
+
+        ASSERT_TRUE(input.isPlacementNeutral());
+        ASSERT_EQ(mean.getFeatureOutput()->getDimensions(), (vector<uint64_t>{1}));
+
+        vector<Event> initDoneEvents;
+        shared_ptr<Api::PlacedNetwork> placed = network.place(placementBatchSize, initDoneEvents, true);
+        ASSERT_NE(placed, nullptr);
+        synchronizeEvents(initDoneEvents);
+
+        Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+        const uint64_t expectedCapacity = static_cast<uint64_t>(placementBatchSize) * maxValuesPerRow;
+        shared_ptr<Impl::NetworkInput> physicalValues = stamped.getNamedInput("tokens.values");
+        ASSERT_NE(physicalValues, nullptr);
+        ASSERT_TRUE(physicalValues->getFeatureOutput().has_value());
+        EXPECT_EQ(physicalValues->getFeatureOutput()->getDimensions(), (vector<uint64_t>{expectedCapacity, 1}));
+
+        shared_ptr<Impl::NetworkInput> physicalOffsets =
+            stamped.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId());
+        ASSERT_NE(physicalOffsets, nullptr);
+        ASSERT_TRUE(physicalOffsets->getFeatureOutput().has_value());
+        EXPECT_EQ(physicalOffsets->getFeatureOutput()->getDimensions(),
+                  (vector<uint64_t>{static_cast<uint64_t>(placementBatchSize) + 1}));
+
+        auto physicalMean = std::dynamic_pointer_cast<Impl::CustomLayer>(
+            stamped.getPhysicalLayerFromApiLayer(mean.getId()));
+        ASSERT_NE(physicalMean, nullptr);
+        ASSERT_TRUE(physicalMean->getFeatureOutput().has_value());
+        EXPECT_EQ(physicalMean->getFeatureOutput()->getDimensions(),
+                  (vector<uint64_t>{placementBatchSize, 1}));
+
+        const Batch batch = makePlacementNeutralReductionBatch("tokens", input, placementBatchSize);
+        const std::map<std::string, Impl::Tensor> outputs = placed->infer(batch);
+        ASSERT_TRUE(outputs.contains("mean"));
+        const Impl::Tensor& output = outputs.at("mean");
+        ASSERT_EQ(output.getDimensions(), (vector<uint64_t>{placementBatchSize, 1}));
+        const float* outputValues = output.getMemPtr<float>();
+        for (uint32_t row = 0; row < placementBatchSize; ++row) {
+            EXPECT_NEAR(outputValues[row], static_cast<float>(row * 10 + 2), 1.0e-5F) << "row " << row;
+        }
+
+        EXPECT_EQ(mean.getFeatureOutput()->getDimensions(), (vector<uint64_t>{1}));
+        EXPECT_EQ(input.getValuesDimensions(), (vector<uint64_t>{maxValuesPerRow, 1}));
+    };
+
+    buildPlaceAndRun(2);
+    buildPlaceAndRun(7);
+}
+
+TEST(SegmentedReductionApi, PlacementNeutralManagedOffsetsCarrierDrivesPhysicalDescriptorRecovery) {
+    constexpr uint32_t placementBatchSize = 7;
+    constexpr uint64_t maxValuesPerRow = 4;
+    Api::Network network("segmented_reduction_neutral_offsets_driver");
+    Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .valuesDataType(DataType::FP32)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({1})
+                                  .maxValuesPerRow(maxValuesPerRow)
+                                  .build();
+    Api::SegmentedReduction mean = Api::SegmentedReduction::Builder()
+                                       .network(network)
+                                       .featureInput(input)
+                                       .reductionType(Api::SegmentedReduction::Type::MEAN)
+                                       .build();
+    (void)Api::NetworkOutput::Builder()
+        .network(network)
+        .name("mean")
+        .inputTensor(mean.getFeatureOutput().value())
+        .dataType(DataType::FP32)
+        .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed = network.place(placementBatchSize, initDoneEvents, true);
+    ASSERT_NE(placed, nullptr);
+    synchronizeEvents(initDoneEvents);
+
+    Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+    const auto requirements = stamped.getExternalRowPartitionRequirementsForTest(input.getRowPartitionId());
+    ASSERT_TRUE(requirements.has_value());
+    EXPECT_EQ(requirements.value(), Impl::RaggedPartitionRequirement::DEVICE_OFFSETS);
+
+    shared_ptr<Impl::NetworkInput> offsetsInput =
+        stamped.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId());
+    ASSERT_NE(offsetsInput, nullptr);
+    ASSERT_TRUE(offsetsInput->getFeatureOutput().has_value());
+    EXPECT_EQ(offsetsInput->getFeatureOutput()->getDimensions(),
+              (vector<uint64_t>{static_cast<uint64_t>(placementBatchSize) + 1}));
+
+    const Impl::RaggedTensorDescriptor expected = input.getDescriptorForPlacement(placementBatchSize);
+    shared_ptr<Impl::TensorFanout> managedOffsetsCarrier;
+    for (const shared_ptr<Impl::Layer>& layer : stamped.getOtherLayers()) {
+        auto fanout = std::dynamic_pointer_cast<Impl::TensorFanout>(layer);
+        if (fanout == nullptr || !fanout->getRowPartitionDescriptorForStamp().has_value() ||
+            !fanout->getFeatureOutput().has_value()) {
+            continue;
+        }
+        if (fanout->getRowPartitionDescriptorForStamp().value() != expected.getRowPartition() ||
+            fanout->getFeatureOutput()->getDimensions() !=
+                (vector<uint64_t>{static_cast<uint64_t>(placementBatchSize) + 1})) {
+            continue;
+        }
+        ASSERT_EQ(managedOffsetsCarrier, nullptr) << "Expected exactly one managed [B+1] offsets fanout.";
+        managedOffsetsCarrier = fanout;
+    }
+    ASSERT_NE(managedOffsetsCarrier, nullptr);
+
+    const Impl::RaggedTensorDescriptor recovered =
+        Api::SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+            input, managedOffsetsCarrier, "SegmentedReduction");
+    EXPECT_EQ(recovered, expected);
+    EXPECT_EQ(recovered.getBatchSize(), placementBatchSize);
+    EXPECT_EQ(recovered.getMaxValuesPerRow(), maxValuesPerRow);
+    EXPECT_EQ(recovered.getMaxTotalValues(),
+              static_cast<uint64_t>(placementBatchSize) * maxValuesPerRow);
+}
+
+TEST(SegmentedReductionApi, PlacementNeutralReductionSaveLoadReplacesPlacementGeometryPerBatch) {
+    constexpr uint64_t maxValuesPerRow = 4;
+    const std::string networkName = "segmented_reduction_placement_neutral_round_trip";
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path archive = std::filesystem::temp_directory_path() /
+                                          ("thor_segmented_reduction_neutral_" + std::to_string(nonce));
+    std::filesystem::remove_all(archive);
+
+    uint64_t savedInputValuesOriginalId = 0;
+    uint64_t savedPartitionTokenOriginalId = 0;
+    uint64_t savedReductionOutputOriginalId = 0;
+    {
+        Api::Network network(networkName);
+        Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                      .network(network)
+                                      .name("tokens")
+                                      .valuesDataType(DataType::FP32)
+                                      .offsetsDataType(DataType::UINT32)
+                                      .trailingDimensions({1})
+                                      .maxValuesPerRow(maxValuesPerRow)
+                                      .build();
+        Api::SegmentedReduction mean = Api::SegmentedReduction::Builder()
+                                           .network(network)
+                                           .featureInput(input)
+                                           .reductionType(Api::SegmentedReduction::Type::MEAN)
+                                           .build();
+        (void)Api::NetworkOutput::Builder()
+            .network(network)
+            .name("mean")
+            .inputTensor(mean.getFeatureOutput().value())
+            .dataType(DataType::FP32)
+            .build();
+
+        savedInputValuesOriginalId = input.getValues().getOriginalId();
+        savedPartitionTokenOriginalId = input.getRowPartitionToken().getOriginalId();
+        savedReductionOutputOriginalId = mean.getFeatureOutput()->getOriginalId();
+
+        const nlohmann::json architecture = network.architectureJson();
+        const nlohmann::json* reductionJson = nullptr;
+        for (const nlohmann::json& layerJson : architecture.at("layers")) {
+            if (layerJson.at("layer_type").get<std::string>() == "segmented_reduction") {
+                reductionJson = &layerJson;
+                break;
+            }
+        }
+        ASSERT_NE(reductionJson, nullptr);
+        EXPECT_EQ(reductionJson->at("version").get<std::string>(), "1.1.0");
+        EXPECT_EQ(reductionJson->at("reduction_type").get<std::string>(), "mean");
+
+        const nlohmann::json& inputJson = reductionJson->at("ragged_feature_input");
+        EXPECT_EQ(inputJson.at("layer_ragged_reference_version").get<std::string>(), "1.0.0");
+        EXPECT_EQ(inputJson.at("geometry_mode").get<std::string>(), "placement_neutral");
+        EXPECT_EQ(inputJson.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
+        EXPECT_FALSE(inputJson.contains("batch_size"));
+        EXPECT_FALSE(inputJson.contains("max_total_values"));
+        EXPECT_EQ(inputJson.at("values").at("dimensions").get<vector<uint64_t>>(),
+                  (vector<uint64_t>{maxValuesPerRow, 1}));
+        EXPECT_EQ(inputJson.at("offsets").at("dimensions").get<vector<uint64_t>>(),
+                  (vector<uint64_t>{1}));
+        EXPECT_EQ(inputJson.at("values").at("id").get<uint64_t>(), input.getValues().getId());
+        EXPECT_EQ(inputJson.at("offsets").at("id").get<uint64_t>(), input.getRowPartitionToken().getId());
+
+        const nlohmann::json& outputJson = reductionJson->at("feature_output");
+        EXPECT_EQ(outputJson.at("dimensions").get<vector<uint64_t>>(), (vector<uint64_t>{1}));
+        EXPECT_EQ(outputJson.at("id").get<uint64_t>(), mean.getFeatureOutput()->getId());
+
+        network.save(archive.string(), true);
+    }
+
+    auto loadPlaceAndRun = [&](uint32_t placementBatchSize) {
+        Api::Network loaded(networkName);
+        ASSERT_NO_THROW(loaded.load(archive.string()));
+
+        const auto loadedInputs = loaded.getExternalRaggedNetworkInputs();
+        ASSERT_EQ(loadedInputs.size(), 1U);
+        const Api::RaggedTensor loadedInput = loadedInputs.front().raggedTensor;
+        ASSERT_TRUE(loadedInput.isPlacementNeutral());
+        EXPECT_EQ(loadedInput.getValues().getOriginalId(), savedInputValuesOriginalId);
+        EXPECT_EQ(loadedInput.getRowPartitionToken().getOriginalId(), savedPartitionTokenOriginalId);
+        EXPECT_EQ(loadedInput.getMaxValuesPerRow(), maxValuesPerRow);
+
+        shared_ptr<Api::SegmentedReduction> loadedReduction;
+        for (uint32_t layerIndex = 0; layerIndex < loaded.getNumLayers(); ++layerIndex) {
+            loadedReduction = std::dynamic_pointer_cast<Api::SegmentedReduction>(loaded.getLayer(layerIndex));
+            if (loadedReduction != nullptr) break;
+        }
+        ASSERT_NE(loadedReduction, nullptr);
+        EXPECT_EQ(loadedReduction->getReductionType(), Api::SegmentedReduction::Type::MEAN);
+        ASSERT_TRUE(loadedReduction->getFeatureOutput().has_value());
+        EXPECT_EQ(loadedReduction->getFeatureOutput()->getDimensions(), (vector<uint64_t>{1}));
+        EXPECT_EQ(loadedReduction->getFeatureOutput()->getOriginalId(), savedReductionOutputOriginalId);
+
+        const nlohmann::json architectureBeforePlacement = loaded.architectureJson();
+        const nlohmann::json* loadedReductionJson = nullptr;
+        for (const nlohmann::json& layerJson : architectureBeforePlacement.at("layers")) {
+            if (layerJson.at("layer_type").get<std::string>() == "segmented_reduction") {
+                loadedReductionJson = &layerJson;
+                break;
+            }
+        }
+        ASSERT_NE(loadedReductionJson, nullptr);
+        EXPECT_EQ(loadedReductionJson->at("version").get<std::string>(), "1.1.0");
+        EXPECT_EQ(loadedReductionJson->at("ragged_feature_input").at("values").at("id").get<uint64_t>(),
+                  loadedInput.getValues().getId());
+        EXPECT_EQ(loadedReductionJson->at("ragged_feature_input").at("offsets").at("id").get<uint64_t>(),
+                  loadedInput.getRowPartitionToken().getId());
+        EXPECT_FALSE(loadedReductionJson->at("ragged_feature_input").contains("batch_size"));
+        EXPECT_FALSE(loadedReductionJson->at("ragged_feature_input").contains("max_total_values"));
+
+        vector<Event> initDoneEvents;
+        shared_ptr<Api::PlacedNetwork> placed = loaded.place(placementBatchSize, initDoneEvents, true);
+        ASSERT_NE(placed, nullptr);
+        synchronizeEvents(initDoneEvents);
+
+        Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+        const uint64_t expectedCapacity = static_cast<uint64_t>(placementBatchSize) * maxValuesPerRow;
+        shared_ptr<Impl::NetworkInput> physicalValues = stamped.getNamedInput("tokens.values");
+        ASSERT_NE(physicalValues, nullptr);
+        ASSERT_TRUE(physicalValues->getFeatureOutput().has_value());
+        EXPECT_EQ(physicalValues->getFeatureOutput()->getDimensions(), (vector<uint64_t>{expectedCapacity, 1}));
+
+        shared_ptr<Impl::NetworkInput> physicalOffsets =
+            stamped.getManagedPartitionOffsetsInputForTest(loadedInput.getRowPartitionId());
+        ASSERT_NE(physicalOffsets, nullptr);
+        ASSERT_TRUE(physicalOffsets->getFeatureOutput().has_value());
+        EXPECT_EQ(physicalOffsets->getFeatureOutput()->getDimensions(),
+                  (vector<uint64_t>{static_cast<uint64_t>(placementBatchSize) + 1}));
+
+        auto physicalReduction = std::dynamic_pointer_cast<Impl::CustomLayer>(
+            stamped.getPhysicalLayerFromApiLayer(loadedReduction->getId()));
+        ASSERT_NE(physicalReduction, nullptr);
+        ASSERT_TRUE(physicalReduction->getFeatureOutput().has_value());
+        EXPECT_EQ(physicalReduction->getFeatureOutput()->getDimensions(),
+                  (vector<uint64_t>{placementBatchSize, 1}));
+
+        EXPECT_EQ(loaded.architectureJson(), architectureBeforePlacement);
+
+        const Batch batch = makePlacementNeutralReductionBatch("tokens", loadedInput, placementBatchSize);
+        const std::map<std::string, Impl::Tensor> outputs = placed->infer(batch);
+        ASSERT_TRUE(outputs.contains("mean"));
+        const Impl::Tensor& output = outputs.at("mean");
+        ASSERT_EQ(output.getDimensions(), (vector<uint64_t>{placementBatchSize, 1}));
+        const float* outputValues = output.getMemPtr<float>();
+        for (uint32_t row = 0; row < placementBatchSize; ++row) {
+            EXPECT_NEAR(outputValues[row], static_cast<float>(row * 10 + 2), 1.0e-5F) << "row " << row;
+        }
+    };
+
+    try {
+        loadPlaceAndRun(2);
+        loadPlaceAndRun(7);
+    } catch (...) {
+        std::filesystem::remove_all(archive);
+        throw;
+    }
+    std::filesystem::remove_all(archive);
+}
+
+TEST(SegmentedReductionApi, FixedSerializationRemainsVersionOneAndLoads) {
+    const std::string networkName = "segmented_reduction_fixed_serialization_compatibility";
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path archive = std::filesystem::temp_directory_path() /
+                                          ("thor_segmented_reduction_fixed_" + std::to_string(nonce));
+    std::filesystem::remove_all(archive);
+
+    {
+        Api::Network network(networkName);
+        Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                      .network(network)
+                                      .name("history")
+                                      .valuesDataType(DataType::FP32)
+                                      .offsetsDataType(DataType::UINT32)
+                                      .trailingDimensions({2})
+                                      .maxTotalValues(9)
+                                      .batchSize(3)
+                                      .build();
+        Api::SegmentedReduction sum = Api::SegmentedReduction::Builder()
+                                          .network(network)
+                                          .featureInput(input)
+                                          .reductionType(Api::SegmentedReduction::Type::SUM)
+                                          .build();
+        (void)Api::NetworkOutput::Builder()
+            .network(network)
+            .name("sum")
+            .inputTensor(sum.getFeatureOutput().value())
+            .dataType(DataType::FP32)
+            .build();
+
+        const nlohmann::json serialized = sum.architectureJson();
+        EXPECT_EQ(serialized.at("version").get<std::string>(), "1.0.0");
+        EXPECT_EQ(serialized.at("reduction_type").get<std::string>(), "sum");
+        EXPECT_EQ(serialized.at("ragged_feature_input").at("batch_size").get<uint64_t>(), 3U);
+        EXPECT_EQ(serialized.at("ragged_feature_input").at("max_total_values").get<uint64_t>(), 9U);
+        EXPECT_FALSE(serialized.at("ragged_feature_input").contains("layer_ragged_reference_version"));
+        network.save(archive.string(), true);
+    }
+
+    try {
+        Api::Network loaded(networkName);
+        ASSERT_NO_THROW(loaded.load(archive.string()));
+        shared_ptr<Api::SegmentedReduction> loadedReduction;
+        for (uint32_t layerIndex = 0; layerIndex < loaded.getNumLayers(); ++layerIndex) {
+            loadedReduction = std::dynamic_pointer_cast<Api::SegmentedReduction>(loaded.getLayer(layerIndex));
+            if (loadedReduction != nullptr) break;
+        }
+        ASSERT_NE(loadedReduction, nullptr);
+        EXPECT_EQ(loadedReduction->getReductionType(), Api::SegmentedReduction::Type::SUM);
+        EXPECT_FALSE(loadedReduction->getRaggedFeatureInput().isPlacementNeutral());
+        EXPECT_EQ(loadedReduction->getRaggedFeatureInput().getBatchSize(), 3U);
+        EXPECT_EQ(loadedReduction->getRaggedFeatureInput().getMaxTotalValues(), 9U);
+        EXPECT_EQ(loadedReduction->architectureJson().at("version").get<std::string>(), "1.0.0");
+    } catch (...) {
+        std::filesystem::remove_all(archive);
+        throw;
+    }
+    std::filesystem::remove_all(archive);
 }
 
 TEST(SegmentedReductionApi, RaggedSliceFeedsBothValuesAndOffsetsIntoSegmentedReduction) {

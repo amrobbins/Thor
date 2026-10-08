@@ -3,6 +3,7 @@
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/TrainingDropoutControllable.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/DropOut.h"
@@ -45,10 +46,19 @@ class DropOut : public Layer, public TrainingDropoutControllable {
         return Layer::getRaggedPartitionRequirementForInput(inputTensor);
     }
 
+    [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
+        THOR_THROW_IF_FALSE(outputTensor == featureOutput.value());
+        return raggedFeatureInput.has_value() && !raggedFeatureInput->isPlacementNeutral();
+    }
+
     [[nodiscard]] uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
         THOR_THROW_IF_FALSE(featureOutput.has_value());
-        if (raggedFeatureInput.has_value()) return featureOutput->getTotalSizeInBytes();
-        return featureOutput->getTotalSizeInBytes() * batchSize;
+        const uint64_t bytes = featureOutput->getTotalSizeInBytes();
+        if (outputTensorDimensionsIncludeBatch(featureOutput.value())) return bytes;
+        if (batchSize != 0 && bytes > std::numeric_limits<uint64_t>::max() / batchSize)
+            throw std::overflow_error("DropOut output byte count overflow.");
+        return bytes * batchSize;
     }
 
     nlohmann::json architectureJson() const override;
@@ -60,7 +70,6 @@ class DropOut : public Layer, public TrainingDropoutControllable {
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
-        (void)drivingLayer;
         (void)drivingApiLayer;
         THOR_THROW_IF_FALSE(initialized);
         bool knownInput = connectingApiTensor == getFeatureInput().value();
@@ -76,8 +85,11 @@ class DropOut : public Layer, public TrainingDropoutControllable {
                     throw std::overflow_error("Ragged DropOut elements-per-value overflow.");
                 elementsPerValue *= dim;
             }
+            const ThorImplementation::RaggedTensorDescriptor physicalDescriptor =
+                SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+                    raggedFeatureInput.value(), drivingLayer, "DropOut");
             raggedConfiguration = ThorImplementation::DropOut::RaggedConfiguration{
-                raggedFeatureInput->getMaxTotalValues(), elementsPerValue};
+                physicalDescriptor.getMaxTotalValues(), elementsPerValue};
         }
 
         // An inference-only placement never applies dropout. A zero-rate layer is
@@ -88,8 +100,7 @@ class DropOut : public Layer, public TrainingDropoutControllable {
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        if (dropProportion == 0.0f && !raggedFeatureInput.has_value())
-            return 0;
+        if (dropProportion == 0.0f) return 0;
         THOR_THROW_IF_FALSE(tensorPlacement.getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         const ThorImplementation::DataType dataType = featureInput.value().getDataType();
         THOR_THROW_IF_FALSE(ThorImplementation::DropOut::nativeKernelSupportsDataType(dataType));
@@ -97,10 +108,20 @@ class DropOut : public Layer, public TrainingDropoutControllable {
 
         uint64_t featureOutputSize = featureOutput.value().getTotalSizeInBytes();
         uint64_t errorOutputSize = featureInput.value().getTotalSizeInBytes();
-        const uint64_t tensorMultiplier = raggedFeatureInput.has_value() ? 1 : batchSize;
+        const uint64_t tensorMultiplier =
+            raggedFeatureInput.has_value() && !raggedFeatureInput->isPlacementNeutral() ? 1 : batchSize;
+        if (featureOutputSize > std::numeric_limits<uint64_t>::max() - errorOutputSize)
+            throw std::overflow_error("DropOut tensor memory accounting overflow.");
+        const uint64_t perPlacementBytes = featureOutputSize + errorOutputSize;
+        if (tensorMultiplier != 0 && perPlacementBytes > std::numeric_limits<uint64_t>::max() / tensorMultiplier)
+            throw std::overflow_error("DropOut tensor memory accounting overflow.");
 
-        const uint64_t reserveStateSize = dropProportion == 0.0f ? 0 : getReservedStateSizeInBytes(batchSize);
-        return randomStateSize + reserveStateSize + tensorMultiplier * (featureOutputSize + errorOutputSize);
+        const uint64_t reserveStateSize = getReservedStateSizeInBytes(batchSize);
+        const uint64_t tensorBytes = tensorMultiplier * perPlacementBytes;
+        if (randomStateSize > std::numeric_limits<uint64_t>::max() - reserveStateSize ||
+            randomStateSize + reserveStateSize > std::numeric_limits<uint64_t>::max() - tensorBytes)
+            throw std::overflow_error("DropOut total memory accounting overflow.");
+        return randomStateSize + reserveStateSize + tensorBytes;
     }
 
    protected:

@@ -18,7 +18,7 @@ class GradientRivet : public Layer {
 
     virtual std::string getLayerType() const { return "GradientRivet"; }
 
-    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
+    nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:

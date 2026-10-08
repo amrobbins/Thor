@@ -222,6 +222,62 @@ void expectCombinedLayerFamilies(const Api::Network& network) {
 
 }  // namespace
 
+// Confirm this transformer integration is a connected, single-stage ragged
+// feed-forward chain, not merely four unrelated layer types in the archive.
+// The fixed-geometry transformer audit remains intentionally independent of
+// neutral GLU training (tested by SwigluNeutralG3).
+TEST(RaggedTransformerCompleteness, SwigluFeedForwardConnectionsSurviveSaveLoad) {
+    const std::filesystem::path archiveDir = std::filesystem::temp_directory_path() /
+        "thor_ragged_transformer_g3_feed_forward";
+    std::filesystem::remove_all(archiveDir);
+    Api::Network network("g3_transformer_feed_forward");
+    (void)buildAuditGraph(network, true);
+    network.save(archiveDir.string(), true);
+    Api::Network loaded("g3_transformer_feed_forward");
+    ASSERT_NO_THROW(loaded.load(archiveDir.string()));
+    std::filesystem::remove_all(archiveDir);
+
+    std::shared_ptr<Api::FullyConnected> wide;
+    std::shared_ptr<Api::Swiglu> swiglu;
+    std::shared_ptr<Api::RMSNorm> norm;
+    std::shared_ptr<Api::DropOut> dropout;
+    for (uint32_t i = 0; i < loaded.getNumLayers(); ++i) {
+        const auto layer = loaded.getLayer(i);
+        if (auto found = std::dynamic_pointer_cast<Api::FullyConnected>(layer)) wide = found;
+        if (auto found = std::dynamic_pointer_cast<Api::Swiglu>(layer)) swiglu = found;
+        if (auto found = std::dynamic_pointer_cast<Api::RMSNorm>(layer)) norm = found;
+        if (auto found = std::dynamic_pointer_cast<Api::DropOut>(layer)) dropout = found;
+    }
+    ASSERT_NE(wide, nullptr);
+    ASSERT_NE(swiglu, nullptr);
+    ASSERT_NE(norm, nullptr);
+    ASSERT_NE(dropout, nullptr);
+    ASSERT_TRUE(wide->getRaggedFeatureOutput().has_value());
+    ASSERT_TRUE(swiglu->getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(swiglu->getRaggedFeatureOutput().has_value());
+    ASSERT_TRUE(norm->getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(norm->getRaggedFeatureOutput().has_value());
+    ASSERT_TRUE(dropout->getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(dropout->getRaggedFeatureOutput().has_value());
+    const auto fcOut = wide->getRaggedFeatureOutput().value();
+    const auto gluIn = swiglu->getRaggedFeatureInput().value();
+    const auto gluOut = swiglu->getRaggedFeatureOutput().value();
+    const auto normIn = norm->getRaggedFeatureInput().value();
+    const auto normOut = norm->getRaggedFeatureOutput().value();
+    const auto dropoutIn = dropout->getRaggedFeatureInput().value();
+    const auto dropoutOut = dropout->getRaggedFeatureOutput().value();
+    EXPECT_EQ(fcOut.getValues(), gluIn.getValues());
+    EXPECT_EQ(gluOut.getValues(), normIn.getValues());
+    EXPECT_EQ(normOut.getValues(), dropoutIn.getValues());
+    EXPECT_EQ(fcOut.getValuesDimensions().back(), 2u * kFeatures);
+    EXPECT_EQ(gluOut.getValuesDimensions().back(), kFeatures);
+    EXPECT_EQ(normOut.getValuesDimensions().back(), kFeatures);
+    EXPECT_EQ(dropoutOut.getValuesDimensions().back(), kFeatures);
+    for (const auto& stage : {fcOut, gluIn, gluOut, normIn, normOut, dropoutIn, dropoutOut})
+        EXPECT_TRUE(stage.sharesPartitionWith(fcOut));
+    EXPECT_EQ(swiglu->architectureJson().at("version"), "1.0.0");
+}
+
 TEST(RaggedTransformerCompleteness, ArchitectureOnlySaveLoadPreservesCombinedRaggedAndMixedContracts) {
     const std::filesystem::path archiveDir =
         std::filesystem::temp_directory_path() / "thor_ragged_transformer_completeness_architecture";

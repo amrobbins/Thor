@@ -866,6 +866,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
 
             auto fanout = std::make_shared<ThorImplementation::TensorFanout>();
             fanout->setConstructForInferenceOnly(inferenceOnly);
+            fanout->setRowPartitionDescriptorForStamp(physicalization.descriptor);
             Layer::connectTwoLayers(managedInput, fanout, nullptr, nullptr, physicalization.logicalPartitionToken);
 
             stampedNetwork.managedPartitionInputsShared.push_back(managedInput);
@@ -940,11 +941,10 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
             (void)name;
             if (record.partitionInputName.has_value()) continue;
 
-            THOR_THROW_IF_FALSE(record.raggedTensor.getBatchSize() == batchSize);
             const ThorImplementation::RowPartitionId rowPartitionId = record.raggedTensor.getRowPartitionId();
             THOR_THROW_IF_FALSE(rowPartitionId != 0);
             const ThorImplementation::RowPartitionDescriptor descriptor =
-                record.raggedTensor.getDescriptor().getRowPartition();
+                record.raggedTensor.getDescriptorForPlacement(batchSize).getRowPartition();
             const Tensor logicalPartitionToken = record.raggedTensor.getRowPartitionToken();
 
             ThorImplementation::StampedNetwork::ExternalRowPartitionPhysicalization physicalization;
@@ -977,7 +977,17 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
                     // Thor-managed input created above.
                     continue;
                 }
-                stampNetworkInput(networkInput, gpuNum, batchSize, stampedNetwork);
+                std::optional<std::vector<uint64_t>> raggedPhysicalDimensions;
+                for (const auto& [raggedName, raggedRecord] : raggedNetworkInputs) {
+                    (void)raggedName;
+                    if (raggedRecord.valuesInputName != networkInput->getName()) continue;
+                    if (raggedRecord.raggedTensor.isPlacementNeutral()) {
+                        raggedPhysicalDimensions =
+                            raggedRecord.raggedTensor.getDescriptorForPlacement(batchSize).getValuesDimensions();
+                    }
+                    break;
+                }
+                stampNetworkInput(networkInput, gpuNum, batchSize, stampedNetwork, raggedPhysicalDimensions);
 
                 auto partitionValuesIt =
                     stampedNetwork.externalRowPartitionByValuesInputName.find(networkInput->getName());
@@ -1029,11 +1039,12 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
         stampedNetwork.auditRowPartitionPhysicalizations();
 
         for (const auto& [name, record] : raggedNetworkInputs) {
-            THOR_THROW_IF_FALSE(record.raggedTensor.getBatchSize() == batchSize);
+            const ThorImplementation::RaggedTensorDescriptor descriptor =
+                record.raggedTensor.getDescriptorForPlacement(batchSize);
             ThorImplementation::StampedNetwork::RaggedInputBinding binding{
                 record.valuesInputName,
                 record.partitionInputName,
-                record.raggedTensor.getDescriptor(),
+                descriptor,
                 record.raggedTensor.getRowPartitionId()};
             stampedNetwork.raggedInputNamedShared[name] = binding;
             stampedNetwork.raggedInputNamed[name] = binding;
@@ -1045,10 +1056,9 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
         // forcing HOST_EXTENT through the producer graph.
         for (const auto& [name, record] : raggedNetworkOutputs) {
             (void)name;
-            THOR_THROW_IF_FALSE(record.raggedTensor.getBatchSize() == batchSize);
             THOR_THROW_IF_FALSE(record.raggedTensor.getRowPartitionId() != 0);
             ThorImplementation::StampedNetwork::RaggedOutputBinding binding{
-                record.raggedTensor.getDescriptor().getRowPartition(),
+                record.raggedTensor.getDescriptorForPlacement(batchSize).getRowPartition(),
                 record.raggedTensor.getRowPartitionId()};
             THOR_THROW_IF_FALSE(
                 stampedNetwork.raggedOutputByValuesOutputName.emplace(record.valuesOutputName, std::move(binding)).second);
@@ -1427,8 +1437,11 @@ void Network::registerRaggedNetworkInput(const std::string& name,
         THOR_THROW_IF_FALSE(!sourceIt->second.partitionInputName.has_value());
         THOR_THROW_IF_FALSE(sourceIt->second.partitionTokenInputName == partitionTokenInputName);
         THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.sharesPartitionWith(raggedTensor));
-        THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getBatchSize() == raggedTensor.getBatchSize());
-        THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getMaxTotalValues() == raggedTensor.getMaxTotalValues());
+        THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getGeometryMode() == raggedTensor.getGeometryMode());
+        if (!raggedTensor.isPlacementNeutral()) {
+            THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getBatchSize() == raggedTensor.getBatchSize());
+            THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getMaxTotalValues() == raggedTensor.getMaxTotalValues());
+        }
         THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getOffsetsDataType() == raggedTensor.getOffsetsDataType());
         THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.hasMaxValuesPerRow() == raggedTensor.hasMaxValuesPerRow());
         if (raggedTensor.hasMaxValuesPerRow()) {
@@ -1546,10 +1559,12 @@ void Network::appendRaggedNetworkBoundaryJson(json& modelJson) const {
         modelJson["ragged_network_inputs"] = json::array();
         for (const auto& [name, record] : raggedNetworkInputs) {
             (void)name;
-            json entry{{"version", "1.3.0"},
+            const bool placementNeutral = record.raggedTensor.isPlacementNeutral();
+            json entry{{"version", placementNeutral ? "1.4.0" : "1.3.0"},
                        {"name", record.name},
                        {"values_input_name", record.valuesInputName},
                        {"values_tensor_id", record.raggedTensor.getValues().getId()}};
+            if (placementNeutral) entry["geometry_mode"] = "placement_neutral";
             if (record.partitionInputName.has_value()) {
                 entry["partition_input_name"] = record.partitionInputName.value();
             } else {
@@ -1565,11 +1580,13 @@ void Network::appendRaggedNetworkBoundaryJson(json& modelJson) const {
         modelJson["ragged_network_outputs"] = json::array();
         for (const auto& [name, record] : raggedNetworkOutputs) {
             (void)name;
-            json entry{{"version", "1.2.0"},
+            const bool placementNeutral = record.raggedTensor.isPlacementNeutral();
+            json entry{{"version", placementNeutral ? "1.3.0" : "1.2.0"},
                        {"name", record.name},
                        {"values_output_name", record.valuesOutputName},
                        {"values_tensor_id", record.raggedTensor.getValues().getId()},
                        {"row_partition_token_tensor_id", record.raggedTensor.getRowPartitionToken().getId()}};
+            if (placementNeutral) entry["geometry_mode"] = "placement_neutral";
             if (record.raggedTensor.hasMaxValuesPerRow())
                 entry["max_values_per_row"] = record.raggedTensor.getMaxValuesPerRow();
             modelJson["ragged_network_outputs"].push_back(std::move(entry));
@@ -1708,7 +1725,8 @@ void Network::load(const string &directory,
         auto loadRaggedInput = [this](const json& raggedInputJson, bool sharedPartition) {
             const string raggedInputVersion = raggedInputJson.at("version").get<string>();
             if (raggedInputVersion != "1.0.0" && raggedInputVersion != "1.1.0" &&
-                raggedInputVersion != "1.2.0" && raggedInputVersion != "1.3.0") {
+                raggedInputVersion != "1.2.0" && raggedInputVersion != "1.3.0" &&
+                raggedInputVersion != "1.4.0") {
                 throw runtime_error("Unsupported ragged_network_inputs version: " + raggedInputVersion);
             }
             const bool hasPartitionSource = raggedInputJson.contains("partition_input_name");
@@ -1724,17 +1742,35 @@ void Network::load(const string &directory,
                     throw runtime_error("Shared ragged input '" + name + "' references missing partition input '" +
                                         partitionInputName + "'.");
                 }
+                const bool placementNeutral = raggedInputVersion == "1.4.0";
+                if (placementNeutral != sourceIt->second.raggedTensor.isPlacementNeutral()) {
+                    throw runtime_error("Shared ragged input geometry mode does not match its canonical partition owner.");
+                }
+                if (placementNeutral && raggedInputJson.value("geometry_mode", string{}) != "placement_neutral") {
+                    throw runtime_error("Placement-neutral shared ragged input has invalid geometry mode.");
+                }
                 RaggedTensor raggedTensor = sourceIt->second.raggedTensor.withValues(values);
                 registerRaggedNetworkInput(name, raggedTensor, valuesInputName, partitionInputName);
             } else {
-                const bool rp7Boundary = raggedInputVersion == "1.3.0";
+                const bool placementNeutral = raggedInputVersion == "1.4.0";
+                const bool rp7Boundary = raggedInputVersion == "1.3.0" || placementNeutral;
                 const uint64_t partitionTokenTensorId = rp7Boundary
                     ? raggedInputJson.at("row_partition_token_tensor_id").get<uint64_t>()
                     : raggedInputJson.at("offsets_tensor_id").get<uint64_t>();
                 Tensor partitionToken = getApiTensorByOriginalId(partitionTokenTensorId);
-                RaggedTensor raggedTensor = raggedInputJson.contains("max_values_per_row")
-                    ? RaggedTensor(values, partitionToken, raggedInputJson.at("max_values_per_row").get<uint64_t>())
-                    : RaggedTensor(values, partitionToken);
+                RaggedTensor raggedTensor;
+                if (placementNeutral) {
+                    if (raggedInputJson.value("geometry_mode", string{}) != "placement_neutral" ||
+                        !raggedInputJson.contains("max_values_per_row")) {
+                        throw runtime_error("Placement-neutral ragged input requires explicit geometry mode and max_values_per_row.");
+                    }
+                    raggedTensor = RaggedTensor::placementNeutral(
+                        values, partitionToken, raggedInputJson.at("max_values_per_row").get<uint64_t>());
+                } else {
+                    raggedTensor = raggedInputJson.contains("max_values_per_row")
+                        ? RaggedTensor(values, partitionToken, raggedInputJson.at("max_values_per_row").get<uint64_t>())
+                        : RaggedTensor(values, partitionToken);
+                }
                 // For pre-RP7 archives partitionToken is the old public .offsets
                 // NetworkInput. registerRaggedNetworkInput discovers its owning input layer and
                 // treats it as a topology token; placement deliberately does not stamp it.
@@ -1753,7 +1789,8 @@ void Network::load(const string &directory,
         }
         for (const json& raggedOutputJson : raggedOutputs) {
             const string raggedOutputVersion = raggedOutputJson.at("version").get<string>();
-            if (raggedOutputVersion != "1.0.0" && raggedOutputVersion != "1.1.0" && raggedOutputVersion != "1.2.0") {
+            if (raggedOutputVersion != "1.0.0" && raggedOutputVersion != "1.1.0" &&
+                raggedOutputVersion != "1.2.0" && raggedOutputVersion != "1.3.0") {
                 throw runtime_error("Unsupported ragged_network_outputs version: " + raggedOutputVersion);
             }
             const string name = raggedOutputJson.at("name").get<string>();
@@ -1761,13 +1798,23 @@ void Network::load(const string &directory,
             const uint64_t valuesTensorId = raggedOutputJson.at("values_tensor_id").get<uint64_t>();
             Tensor values = getApiTensorByOriginalId(valuesTensorId);
 
-            if (raggedOutputVersion == "1.2.0") {
+            if (raggedOutputVersion == "1.2.0" || raggedOutputVersion == "1.3.0") {
                 const uint64_t partitionTokenTensorId =
                     raggedOutputJson.at("row_partition_token_tensor_id").get<uint64_t>();
                 Tensor partitionToken = getApiTensorByOriginalId(partitionTokenTensorId);
-                RaggedTensor raggedTensor = raggedOutputJson.contains("max_values_per_row")
-                    ? RaggedTensor(values, partitionToken, raggedOutputJson.at("max_values_per_row").get<uint64_t>())
-                    : RaggedTensor(values, partitionToken);
+                RaggedTensor raggedTensor;
+                if (raggedOutputVersion == "1.3.0") {
+                    if (raggedOutputJson.value("geometry_mode", string{}) != "placement_neutral" ||
+                        !raggedOutputJson.contains("max_values_per_row")) {
+                        throw runtime_error("Placement-neutral ragged output requires explicit geometry mode and max_values_per_row.");
+                    }
+                    raggedTensor = RaggedTensor::placementNeutral(
+                        values, partitionToken, raggedOutputJson.at("max_values_per_row").get<uint64_t>());
+                } else {
+                    raggedTensor = raggedOutputJson.contains("max_values_per_row")
+                        ? RaggedTensor(values, partitionToken, raggedOutputJson.at("max_values_per_row").get<uint64_t>())
+                        : RaggedTensor(values, partitionToken);
+                }
                 registerRaggedNetworkOutput(name, raggedTensor, valuesOutputName);
             } else {
                 const string offsetsOutputName = raggedOutputJson.at("offsets_output_name").get<string>();
@@ -3710,7 +3757,21 @@ uint64_t Network::computeFirstInstanceMemRequirements(uint32_t batchSize, Tensor
     for (const auto& orderedEntry : orderedNetwork) {
         const shared_ptr<Layer>& layer = orderedEntry.second;
         if (layer != nullptr && countedLayers.insert(layer.get()).second) {
-            bytes += layer->getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
+            uint64_t layerBytes = layer->getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
+            const std::shared_ptr<NetworkInput> networkInput = std::dynamic_pointer_cast<NetworkInput>(layer);
+            if (networkInput != nullptr) {
+                for (const auto& [name, record] : raggedNetworkInputs) {
+                    (void)name;
+                    if (record.valuesInputName == networkInput->getName() && record.raggedTensor.isPlacementNeutral()) {
+                        layerBytes = record.raggedTensor
+                                         .getDescriptorForPlacement(batchSize)
+                                         .getValuesDescriptor()
+                                         .getArraySizeInBytes();
+                        break;
+                    }
+                }
+            }
+            bytes += layerBytes;
         }
     }
     return bytes;
@@ -3723,7 +3784,21 @@ uint64_t Network::computeNonFirstInstanceMemRequirements(uint32_t batchSize, Ten
     for (const auto& orderedEntry : orderedNetwork) {
         const shared_ptr<Layer>& layer = orderedEntry.second;
         if (layer != nullptr && countedLayers.insert(layer.get()).second) {
-            bytes += layer->getNonFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
+            uint64_t layerBytes = layer->getNonFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
+            const std::shared_ptr<NetworkInput> networkInput = std::dynamic_pointer_cast<NetworkInput>(layer);
+            if (networkInput != nullptr) {
+                for (const auto& [name, record] : raggedNetworkInputs) {
+                    (void)name;
+                    if (record.valuesInputName == networkInput->getName() && record.raggedTensor.isPlacementNeutral()) {
+                        layerBytes = record.raggedTensor
+                                         .getDescriptorForPlacement(batchSize)
+                                         .getValuesDescriptor()
+                                         .getArraySizeInBytes();
+                        break;
+                    }
+                }
+            }
+            bytes += layerBytes;
         }
     }
     return bytes;
@@ -3746,13 +3821,16 @@ void Network::createBatchDimensions(vector<uint64_t> &batchDimensions, vector<ui
 void Network::stampNetworkInput(const shared_ptr<Thor::NetworkInput> networkInput,
                                 uint32_t gpuNum,
                                 uint32_t batchSize,
-                                ThorImplementation::StampedNetwork &stampedNetwork) {
+                                ThorImplementation::StampedNetwork &stampedNetwork,
+                                std::optional<std::vector<uint64_t>> physicalDimensionsOverride) {
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
     shared_ptr<ThorImplementation::Layer> outputLayer;
     Tensor outputTensor = networkInput->getFeatureOutput().value();
 
     // Stamp network input
-    shared_ptr<ThorImplementation::NetworkInput> implementationNetworkInput = networkInput->stamp(placement, batchSize);
+    shared_ptr<ThorImplementation::NetworkInput> implementationNetworkInput = physicalDimensionsOverride.has_value()
+        ? networkInput->stampWithPhysicalDimensions(placement, physicalDimensionsOverride.value())
+        : networkInput->stamp(placement, batchSize);
     if (DEBUG_STAMP) {
         printf("stamped network input\n");
         fflush(stdout);

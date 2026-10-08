@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <utility>
 #include <vector>
 #include "DeepLearning/Implementation/ThorError.h"
 
@@ -10,6 +11,7 @@
 #include "Utilities/Expression/CudaHelpers.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionDescriptor.h"
 
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
@@ -58,6 +60,17 @@ class TensorFanout : public MultiConnectionLayer {
     }
 
     std::optional<Tensor> createFeatureOutputTensor() override { return std::nullopt; }
+
+    // Thor-managed row-partition fanouts carry their already-resolved placement
+    // descriptor as stamp-time metadata. Ordinary TensorFanout instances leave
+    // this unset. The metadata is runtime-only and is never serialized.
+    void setRowPartitionDescriptorForStamp(RowPartitionDescriptor descriptor) {
+        rowPartitionDescriptorForStamp = std::move(descriptor);
+    }
+
+    [[nodiscard]] std::optional<RowPartitionDescriptor> getRowPartitionDescriptorForStamp() const {
+        return rowPartitionDescriptorForStamp;
+    }
 
     bool registerFusedCustomLossGradientWithDrivingLayer(const Tensor& predictions,
                                                          const Tensor& labels,
@@ -328,6 +341,7 @@ class TensorFanout : public MultiConnectionLayer {
     }
 
    private:
+    std::optional<RowPartitionDescriptor> rowPartitionDescriptorForStamp;
     bool fusedCustomLossGradientRegisteredWithDrivingLayer = false;
     Tensor fusedCustomLossGradientPredictions;
     Loss* fusedCustomLossGradientOwner = nullptr;

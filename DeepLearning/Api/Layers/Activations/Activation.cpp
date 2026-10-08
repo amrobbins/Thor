@@ -2,6 +2,8 @@
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 #include "Utilities/Expression/RaggedExpression.h"
 #include "Utilities/Expression/DynamicExpression.h"
 
@@ -31,6 +33,7 @@
 #include <stdexcept>
 #include <optional>
 #include <set>
+#include <limits>
 
 using namespace std;
 using json = nlohmann::json;
@@ -50,9 +53,11 @@ ThorImplementation::RaggedExpression Activation::toRaggedExpression(
 }
 
 
-std::shared_ptr<ThorImplementation::Layer> Activation::stampExpressionBackedActivation(ThorImplementation::TensorPlacement placement,
-                                                                                        Thor::Tensor connectingApiTensor,
-                                                                                        bool inferenceOnly) const {
+std::shared_ptr<ThorImplementation::Layer> Activation::stampExpressionBackedActivation(
+    ThorImplementation::TensorPlacement placement,
+    Thor::Tensor connectingApiTensor,
+    bool inferenceOnly,
+    std::shared_ptr<ThorImplementation::Layer> drivingLayer) const {
     THOR_THROW_IF_FALSE(initialized);
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
@@ -85,11 +90,14 @@ std::shared_ptr<ThorImplementation::Layer> Activation::stampExpressionBackedActi
 
     if (raggedFeatureInput.has_value()) {
         const RaggedTensor& ragged = raggedFeatureInput.value();
+        const ThorImplementation::RaggedTensorDescriptor physicalInputDescriptor =
+            SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+                ragged, drivingLayer, getLayerType().c_str());
         ThorImplementation::RaggedExpression raggedInput =
             ThorImplementation::RaggedExpression::input(
                 "feature_input",
                 "feature_offsets",
-                ragged.getDescriptor(),
+                physicalInputDescriptor,
                 ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
         ThorImplementation::RaggedExpression raggedOutput =
             epilogue.has_value()
@@ -101,24 +109,25 @@ std::shared_ptr<ThorImplementation::Layer> Activation::stampExpressionBackedActi
         if (!raggedFeatureOutput.has_value()) {
             throw std::runtime_error("Ragged activation is missing its logical ragged output.");
         }
-        if (raggedOutput.getDescriptor() != raggedFeatureOutput->getDescriptor()) {
+        const ThorImplementation::RaggedTensorDescriptor physicalOutputDescriptor =
+            raggedFeatureOutput->isPlacementNeutral()
+                ? raggedFeatureOutput->getDescriptorForPlacement(physicalInputDescriptor.getBatchSize())
+                : raggedFeatureOutput->getDescriptor();
+        if (raggedOutput.getDescriptor() != physicalOutputDescriptor) {
             throw std::runtime_error("Ragged activation expression output descriptor does not match its API output.");
         }
 
         ExpressionDefinition definition =
             ExpressionDefinition::fromOutputs(Expression::outputs({{"feature_output", raggedOutput.getValues()}}));
 
-        uint64_t inputElementsPerValue = 1;
-        for (uint64_t dim : ragged.getTrailingDimensions()) {
-            inputElementsPerValue *= dim;
-        }
-        uint64_t outputElementsPerValue = 1;
-        for (uint64_t dim : raggedFeatureOutput->getTrailingDimensions()) {
-            outputElementsPerValue *= dim;
-        }
+        const uint64_t inputElementsPerValue =
+            SegmentedPrimitiveDetail::elementsPerValue(ragged.getTrailingDimensions(), getLayerType().c_str());
+        const uint64_t outputElementsPerValue =
+            SegmentedPrimitiveDetail::elementsPerValue(raggedFeatureOutput->getTrailingDimensions(), getLayerType().c_str());
         auto physicalActivation = std::make_shared<ThorImplementation::RaggedCustomLayer>(
             DynamicExpression::fromExpressionDefinition(definition), inputNames, std::vector<std::string>{"feature_output"},
-            placement, inferenceOnly, ragged.getMaxTotalValues(), inputElementsPerValue, outputElementsPerValue, 0, 1, getId());
+            placement, inferenceOnly, physicalInputDescriptor.getMaxTotalValues(), inputElementsPerValue,
+            outputElementsPerValue, 0, 1, getId());
         physicalActivation->setLayerName(getLayerType());
         return physicalActivation;
     }
@@ -222,6 +231,34 @@ int Activation::getConnectionType(Tensor connectingTensor) const {
 uint64_t Activation::getExpressionBackedActivationMemRequirementInBytes(uint32_t batchSize) const {
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
+
+    if (raggedFeatureInput.has_value() && raggedFeatureInput->isPlacementNeutral()) {
+        if (batchSize == 0) throw std::invalid_argument("Placement-neutral activation requires a nonzero placement batch.");
+        const uint64_t inputBytes = featureInput->getTotalSizeInBytes();
+        const uint64_t outputBytes = featureOutput->getTotalSizeInBytes();
+        if (inputBytes > std::numeric_limits<uint64_t>::max() / batchSize ||
+            outputBytes > std::numeric_limits<uint64_t>::max() / batchSize) {
+            throw std::overflow_error("Placement-neutral activation memory requirement overflows uint64_t.");
+        }
+        uint64_t bytes = batchSize * inputBytes + batchSize * outputBytes;
+        // DEVICE_ACTIVE_COUNT reuses the logical partition token dtype and has physical shape [1].
+        const uint64_t carrierBytes = raggedFeatureInput->getOffsets().getTotalSizeInBytes();
+        if (bytes > std::numeric_limits<uint64_t>::max() - carrierBytes) {
+            throw std::overflow_error("Placement-neutral activation memory requirement overflows uint64_t.");
+        }
+        bytes += carrierBytes;
+        for (const auto& [name, tensor] : epilogueInputBindings) {
+            (void)name;
+            const uint64_t tensorBytes = tensor.getTotalSizeInBytes();
+            if (tensorBytes > std::numeric_limits<uint64_t>::max() / batchSize ||
+                bytes > std::numeric_limits<uint64_t>::max() - batchSize * tensorBytes) {
+                throw std::overflow_error("Placement-neutral activation epilogue memory requirement overflows uint64_t.");
+            }
+            bytes += batchSize * tensorBytes;
+        }
+        return bytes;
+    }
+
     uint64_t bytes = featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes();
     if (raggedFeatureInput.has_value()) bytes += raggedFeatureInput->getOffsets().getTotalSizeInBytes();
     for (const auto& [name, tensor] : epilogueInputBindings) {
@@ -307,21 +344,35 @@ void Activation::initializeStandaloneActivation(RaggedTensor inputTensor,
 
 void Activation::deserializeStandaloneFields(const json& j, Network* network) {
     const bool useRagged = j.value("use_ragged", false);
+    const std::string version = j.at("version").get<std::string>();
     Tensor inputTensor;
     std::optional<RaggedTensor> raggedInput;
     if (useRagged) {
         const json& raggedJson = j.at("ragged_feature_input");
-        const uint64_t valuesId = raggedJson.at("values").at("id").get<uint64_t>();
-        const uint64_t offsetsId = raggedJson.at("offsets").at("id").get<uint64_t>();
-        inputTensor = network->getApiTensorByOriginalId(valuesId);
-        Tensor offsets = network->getApiTensorByOriginalId(offsetsId);
-        raggedInput = raggedJson.contains("max_values_per_row")
-            ? RaggedTensor(inputTensor, offsets, raggedJson.at("max_values_per_row").get<uint64_t>())
-            : RaggedTensor(inputTensor, offsets);
-        if (raggedInput->getBatchSize() != raggedJson.at("batch_size").get<uint64_t>() ||
-            raggedInput->getMaxTotalValues() != raggedJson.at("max_total_values").get<uint64_t>())
-            throw std::runtime_error("Activation serialized ragged input metadata does not match reconstructed tensors.");
+        raggedInput = SegmentedPrimitiveDetail::reconstructInput(raggedJson, network, getLayerType().c_str());
+        const std::optional<std::string> neutralVersion = placementNeutralStandaloneVersion();
+        if (raggedInput->isPlacementNeutral()) {
+            if (!neutralVersion.has_value() || version != neutralVersion.value()) {
+                throw std::runtime_error(getLayerType() +
+                                         " serialized layer version does not match placement-neutral ragged geometry.");
+            }
+        } else if (version != getLayerVersion()) {
+            throw std::runtime_error(getLayerType() +
+                                     " serialized layer version does not match fixed ragged geometry.");
+        }
+
+        const uint64_t serializedFeatureInputId = j.at("feature_input").at("id").get<uint64_t>();
+        if (serializedFeatureInputId != raggedJson.at("values").at("id").get<uint64_t>()) {
+            throw std::runtime_error("Activation serialized feature_input must match ragged input values.");
+        }
+        inputTensor = network->getApiTensorByOriginalId(serializedFeatureInputId);
+        if (inputTensor != raggedInput->getValues()) {
+            throw std::runtime_error("Activation reconstructed feature_input must match ragged input values.");
+        }
     } else {
+        if (version != getLayerVersion()) {
+            throw std::runtime_error(getLayerType() + " serialized dense version is unsupported: " + version);
+        }
         inputTensor = network->getApiTensorByOriginalId(j.at("feature_input").at("id").get<uint64_t>());
     }
 
@@ -347,11 +398,33 @@ void Activation::deserializeStandaloneFields(const json& j, Network* network) {
 
     if (raggedInput.has_value()) {
         initializeStandaloneActivation(raggedInput.value(), epilogueExpression, epilogueBindings);
-        featureOutput = Tensor::deserialize(j.at("feature_output"));
+        // Initialization invokes the concrete activation's polymorphic
+        // standaloneOutputTensorForInput(). For neutral artifacts the serialized
+        // output must match that model-derived logical descriptor, which may
+        // change the trailing feature dimensions (e.g. 2H -> H for GLUs).
+        // Keep the serialized tensor identity; placement/runtime geometry is
+        // not reconstructed from the artifact.
+        const Tensor serializedOutput = Tensor::deserialize(j.at("feature_output"));
+        if (raggedInput->isPlacementNeutral() &&
+            (serializedOutput.getDataType() != featureOutput->getDataType() ||
+             serializedOutput.getDimensions() != featureOutput->getDimensions())) {
+            throw std::runtime_error(
+                "Placement-neutral activation output must match the concrete activation's logical output descriptor.");
+        }
+        featureOutput = serializedOutput;
+        const json& inputJson = j.at("ragged_feature_input");
+        const json& outputJson = j.at("ragged_feature_output");
+        if (outputJson.at("values").at("id").get<uint64_t>() !=
+            j.at("feature_output").at("id").get<uint64_t>()) {
+            throw std::runtime_error("Activation serialized ragged output values must match feature_output.");
+        }
+        SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
+            outputJson, inputJson, raggedInput.value(), getLayerType().c_str());
+        if (featureOutput->getDataType() != outputJson.at("values").at("data_type").get<DataType>() ||
+            featureOutput->getDimensions() != outputJson.at("values").at("dimensions").get<std::vector<uint64_t>>()) {
+            throw std::runtime_error("Activation serialized ragged output values descriptor does not match feature_output.");
+        }
         raggedFeatureOutput = raggedInput->withValues(featureOutput.value());
-        if (j.at("ragged_feature_output").at("offsets").at("id").get<uint64_t>() !=
-            j.at("ragged_feature_input").at("offsets").at("id").get<uint64_t>())
-            throw std::runtime_error("Activation serialized ragged output must preserve the input row partition.");
     } else {
         initializeStandaloneActivation(inputTensor, epilogueExpression, epilogueBindings);
         featureOutput = Tensor::deserialize(j.at("feature_output"));
@@ -364,7 +437,20 @@ json Activation::architectureJson() const {
 
     json j;
     j["factory"] = Layer::Factory::Activation.value();
-    j["version"] = getLayerVersion();
+    const bool placementNeutral = raggedFeatureInput.has_value() && raggedFeatureInput->isPlacementNeutral();
+    if (raggedFeatureOutput.has_value()) {
+        THOR_THROW_IF_FALSE(placementNeutral == raggedFeatureOutput->isPlacementNeutral());
+    }
+    if (placementNeutral) {
+        const std::optional<std::string> neutralVersion = placementNeutralStandaloneVersion();
+        if (!neutralVersion.has_value()) {
+            throw std::runtime_error(getLayerType() +
+                                     " placement-neutral standalone serialization has not been migrated yet.");
+        }
+        j["version"] = neutralVersion.value();
+    } else {
+        j["version"] = getLayerVersion();
+    }
     j["layer_type"] = to_snake_case(getLayerType());
 
     // Template activations embedded in expression-backed layers intentionally do not own API graph tensors.
@@ -375,9 +461,11 @@ json Activation::architectureJson() const {
     if (featureOutput.has_value()) j["feature_output"] = featureOutput.value().architectureJson();
     if (raggedFeatureInput.has_value()) {
         j["use_ragged"] = true;
-        j["ragged_feature_input"] = raggedFeatureInput->architectureJson();
         THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
-        j["ragged_feature_output"] = raggedFeatureOutput->architectureJson();
+        j["ragged_feature_input"] =
+            SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureInput.value());
+        j["ragged_feature_output"] =
+            SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureOutput.value());
     }
     if (epilogue.has_value()) {
         std::vector<std::string> auxInputNames;
@@ -432,10 +520,6 @@ std::shared_ptr<Activation> Activation::deserializeTemplate(const json& j) {
     if (j.at("factory").get<std::string>() != Layer::Factory::Activation.value()) {
         throw std::runtime_error("Activation template JSON has wrong factory: " + j.at("factory").get<std::string>());
     }
-    if (j.at("version").get<std::string>() != "1.0.0") {
-        throw std::runtime_error("Unsupported version in Activation::deserializeTemplate: " + j.at("version").get<std::string>());
-    }
-
     const std::string type = j.at("layer_type").get<std::string>();
     std::shared_ptr<Activation> activation;
 
@@ -485,6 +569,13 @@ std::shared_ptr<Activation> Activation::deserializeTemplate(const json& j) {
         activation = std::make_shared<Threshold>(j.value("threshold", 0.0), j.value("value", 0.0));
     } else {
         throw std::runtime_error("Unknown activation template type: " + type);
+    }
+
+    const std::string version = j.at("version").get<std::string>();
+    const std::optional<std::string> neutralVersion = activation->placementNeutralStandaloneVersion();
+    if (version != activation->getLayerVersion() &&
+        (!neutralVersion.has_value() || version != neutralVersion.value())) {
+        throw std::runtime_error("Unsupported version in Activation::deserializeTemplate: " + version);
     }
 
     activation->initialized = true;

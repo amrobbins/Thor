@@ -71,10 +71,23 @@ class NetworkInput : public Layer {
                 physicalDimensions.push_back(dimensions[i]);
         }
 
-        std::shared_ptr<ThorImplementation::NetworkInput> networkInput;
-        networkInput = std::make_shared<ThorImplementation::NetworkInput>(placement, dataType, physicalDimensions);
-        networkInput->setName(name);
+        return stampWithPhysicalDimensions(placement, physicalDimensions);
+    }
 
+    // Narrow placement hook for logical inputs whose serialized/API shape is not
+    // itself the physical runtime shape. SERIALIZATION-OWNERSHIP-1B uses this only
+    // for placement-neutral RaggedNetworkInput packed values; ordinary dense and
+    // legacy fixed ragged inputs continue through stamp(..., batchSize).
+    std::shared_ptr<ThorImplementation::NetworkInput> stampWithPhysicalDimensions(
+        ThorImplementation::TensorPlacement placement,
+        const std::vector<uint64_t>& physicalDimensions) const {
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(!passThroughSource_.has_value());
+        THOR_THROW_IF_FALSE(!physicalDimensions.empty());
+
+        std::shared_ptr<ThorImplementation::NetworkInput> networkInput =
+            std::make_shared<ThorImplementation::NetworkInput>(placement, dataType, physicalDimensions);
+        networkInput->setName(name);
         return networkInput;
     }
 

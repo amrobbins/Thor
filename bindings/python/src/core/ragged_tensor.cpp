@@ -58,6 +58,7 @@ Construct a logical ragged tensor descriptor with an explicit maximum logical ro
     ragged.def_prop_ro("values_data_type", &RaggedTensor::getValuesDataType);
     ragged.def_prop_ro("offsets_data_type", &RaggedTensor::getOffsetsDataType);
     ragged.def_prop_ro("trailing_dimensions", &RaggedTensor::getTrailingDimensions);
+    ragged.def_prop_ro("placement_neutral", &RaggedTensor::isPlacementNeutral);
     ragged.def_prop_ro("batch_size", &RaggedTensor::getBatchSize);
     ragged.def_prop_ro("max_total_values", &RaggedTensor::getMaxTotalValues);
     ragged.def_prop_ro("max_values_per_row", [](const RaggedTensor& value) -> nb::object {

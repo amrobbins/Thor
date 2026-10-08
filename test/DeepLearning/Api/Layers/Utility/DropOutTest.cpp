@@ -1,4 +1,7 @@
 #include <optional>
+#include <chrono>
+#include <filesystem>
+#include <limits>
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkOutput.h"
@@ -18,6 +21,10 @@ class TestableDropOut : public DropOut {
     explicit TestableDropOut(const DropOut &dropOut) : DropOut(dropOut) {}
 
     uint64_t reservedStateSizeInBytes(uint32_t batchSize) const { return getReservedStateSizeInBytes(batchSize); }
+    uint64_t firstInstanceMemRequirementInBytes(
+        uint32_t batchSize, ThorImplementation::TensorPlacement placement) const {
+        return getFirstInstanceMemRequirementInBytes(batchSize, placement);
+    }
 };
 
 }  // namespace
@@ -343,4 +350,327 @@ TEST(UtilityApiLayers, RaggedDropOutPlacesForInferenceAndPreservesLogicalOutput)
     ASSERT_TRUE(physicalDropOut->getFeatureInput().has_value());
     ASSERT_TRUE(physicalDropOut->getFeatureOutput().has_value());
     EXPECT_EQ(physicalDropOut->getFeatureInput().value(), physicalDropOut->getFeatureOutput().value());
+}
+
+
+TEST(UtilityApiLayers, PlacementNeutralDropOutSerializesSemanticGeometryAndAccountsPlacementCapacity) {
+    constexpr uint64_t maxValuesPerRow = 4;
+    Network network("placement_neutral_dropout_json");
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({2})
+                             .maxValuesPerRow(maxValuesPerRow)
+                             .build();
+    ASSERT_TRUE(input.isPlacementNeutral());
+
+    DropOut dropOut = DropOut::Builder().network(network).featureInput(input).dropProportion(0.25f).build();
+    ASSERT_TRUE(dropOut.getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(dropOut.getRaggedFeatureOutput()->getRowPartitionToken(), input.getRowPartitionToken());
+    EXPECT_EQ(dropOut.getRaggedFeatureOutput()->getValues().getDimensions(), (vector<uint64_t>{maxValuesPerRow, 2}));
+    EXPECT_FALSE(dropOut.outputTensorDimensionsIncludeBatch(dropOut.getFeatureOutput().value()));
+    EXPECT_EQ(dropOut.getOutputTensorBytes(2), 2U * maxValuesPerRow * 2U * sizeof(float));
+    EXPECT_EQ(dropOut.getOutputTensorBytes(7), 7U * maxValuesPerRow * 2U * sizeof(float));
+    EXPECT_EQ(dropOut.getRaggedPartitionRequirementForInput(input.getRowPartitionToken()),
+              ThorImplementation::RaggedPartitionRequirement::HOST_EXTENT);
+
+    TestableDropOut testable(dropOut);
+    ThorImplementation::TensorPlacement gpuPlacement(ThorImplementation::TensorPlacement::MemDevices::GPU, 0);
+    EXPECT_EQ(testable.firstInstanceMemRequirementInBytes(2, gpuPlacement),
+              2U * 2U * maxValuesPerRow * 2U * sizeof(float));
+    EXPECT_EQ(testable.firstInstanceMemRequirementInBytes(7, gpuPlacement),
+              2U * 7U * maxValuesPerRow * 2U * sizeof(float));
+
+    const json architecture = dropOut.architectureJson();
+    EXPECT_EQ(architecture.at("version").get<string>(), "1.1.0");
+    EXPECT_TRUE(architecture.at("use_ragged").get<bool>());
+    EXPECT_FALSE(architecture.contains("training_dropout_enabled"));
+    const json& inputJson = architecture.at("ragged_feature_input");
+    const json& outputJson = architecture.at("ragged_feature_output");
+    EXPECT_EQ(inputJson.at("geometry_mode").get<string>(), "placement_neutral");
+    EXPECT_EQ(inputJson.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
+    EXPECT_FALSE(inputJson.contains("batch_size"));
+    EXPECT_FALSE(inputJson.contains("max_total_values"));
+    EXPECT_FALSE(outputJson.contains("batch_size"));
+    EXPECT_FALSE(outputJson.contains("max_total_values"));
+    EXPECT_EQ(outputJson.at("offsets").at("id").get<uint64_t>(), inputJson.at("offsets").at("id").get<uint64_t>());
+    EXPECT_EQ(outputJson.at("values").at("id").get<uint64_t>(), architecture.at("feature_output").at("id").get<uint64_t>());
+
+    json neutralAsFixed = architecture;
+    neutralAsFixed["version"] = "1.0.0";
+    EXPECT_THROW(DropOut::deserialize(neutralAsFixed, &network), runtime_error);
+
+    json wrongPartition = architecture;
+    wrongPartition["ragged_feature_output"]["offsets"]["id"] = input.getValues().getId();
+    EXPECT_THROW(DropOut::deserialize(wrongPartition, &network), runtime_error);
+
+    json wrongOutputValues = architecture;
+    wrongOutputValues["ragged_feature_output"]["values"]["id"] = input.getValues().getId();
+    EXPECT_THROW(DropOut::deserialize(wrongOutputValues, &network), runtime_error);
+
+    Network fixedNetwork("fixed_dropout_compatibility");
+    RaggedTensor fixedInput = RaggedNetworkInput::Builder()
+                                  .network(fixedNetwork)
+                                  .name("history")
+                                  .valuesDataType(DataType::FP32)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({2})
+                                  .batchSize(3)
+                                  .maxTotalValues(9)
+                                  .maxValuesPerRow(4)
+                                  .build();
+    DropOut fixed = DropOut::Builder().network(fixedNetwork).featureInput(fixedInput).dropProportion(0.25f).build();
+    (void)RaggedNetworkOutput::Builder()
+        .network(fixedNetwork)
+        .name("fixed_out")
+        .inputTensor(fixed.getRaggedFeatureOutput().value())
+        .build();
+    const json fixedJson = fixed.architectureJson();
+    EXPECT_EQ(fixedJson.at("version").get<string>(), "1.0.0");
+    EXPECT_EQ(fixedJson.at("ragged_feature_input").at("batch_size").get<uint64_t>(), 3U);
+    EXPECT_EQ(fixedJson.at("ragged_feature_input").at("max_total_values").get<uint64_t>(), 9U);
+    json fixedAsNeutral = fixedJson;
+    fixedAsNeutral["version"] = "1.1.0";
+    EXPECT_THROW(DropOut::deserialize(fixedAsNeutral, &fixedNetwork), runtime_error);
+
+    const auto nonce = chrono::steady_clock::now().time_since_epoch().count();
+    const filesystem::path fixedArchive = filesystem::temp_directory_path() /
+                                          ("thor_dropout_fixed_" + to_string(nonce));
+    filesystem::remove_all(fixedArchive);
+    fixedNetwork.save(fixedArchive.string(), true);
+    Network fixedReloaded("fixed_dropout_compatibility");
+    ASSERT_NO_THROW(fixedReloaded.load(fixedArchive.string()));
+    shared_ptr<DropOut> reloadedDropOut;
+    for (uint32_t i = 0; i < fixedReloaded.getNumLayers(); ++i) {
+        auto candidate = dynamic_pointer_cast<DropOut>(fixedReloaded.getLayer(i));
+        if (candidate != nullptr) reloadedDropOut = candidate;
+    }
+    ASSERT_NE(reloadedDropOut, nullptr);
+    ASSERT_TRUE(reloadedDropOut->getRaggedFeatureInput().has_value());
+    EXPECT_FALSE(reloadedDropOut->getRaggedFeatureInput()->isPlacementNeutral());
+    EXPECT_EQ(reloadedDropOut->getRaggedFeatureInput()->getBatchSize(), 3U);
+    EXPECT_EQ(reloadedDropOut->getRaggedFeatureInput()->getMaxTotalValues(), 9U);
+    EXPECT_EQ(reloadedDropOut->architectureJson().at("version").get<string>(), "1.0.0");
+    filesystem::remove_all(fixedArchive);
+}
+
+TEST(UtilityApiLayers, PlacementNeutralDropOutSaveLoadReplacesCapacityAtDifferentBatchesAndPreservesHostExtent) {
+    constexpr uint64_t maxValuesPerRow = 4;
+    constexpr uint64_t elementsPerValue = 2;
+    const string networkName = "placement_neutral_dropout_round_trip";
+    const auto nonce = chrono::steady_clock::now().time_since_epoch().count();
+    const filesystem::path archive = filesystem::temp_directory_path() /
+                                     ("thor_dropout_neutral_" + to_string(nonce));
+    filesystem::remove_all(archive);
+
+    uint64_t savedValuesOriginalId = 0;
+    uint64_t savedPartitionOriginalId = 0;
+    uint64_t savedOutputOriginalId = 0;
+    {
+        Network network(networkName);
+        RaggedTensor input = RaggedNetworkInput::Builder()
+                                 .network(network)
+                                 .name("tokens")
+                                 .valuesDataType(DataType::FP32)
+                                 .offsetsDataType(DataType::UINT32)
+                                 .trailingDimensions({elementsPerValue})
+                                 .maxValuesPerRow(maxValuesPerRow)
+                                 .build();
+        DropOut dropOut = DropOut::Builder().network(network).featureInput(input).dropProportion(0.5f).build();
+        (void)RaggedNetworkOutput::Builder()
+            .network(network)
+            .name("dropped")
+            .inputTensor(dropOut.getRaggedFeatureOutput().value())
+            .build();
+        savedValuesOriginalId = input.getValues().getOriginalId();
+        savedPartitionOriginalId = input.getRowPartitionToken().getOriginalId();
+        savedOutputOriginalId = dropOut.getFeatureOutput()->getOriginalId();
+        EXPECT_EQ(dropOut.architectureJson().at("version").get<string>(), "1.1.0");
+        network.save(archive.string(), true);
+    }
+
+    auto makeBatch = [&](const RaggedTensor& logicalInput, uint32_t batchSize) {
+        const auto descriptor = logicalInput.getDescriptorForPlacement(batchSize);
+        const uint64_t capacity = descriptor.getMaxTotalValues();
+        ThorImplementation::Tensor values(
+            ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU),
+            descriptor.getValuesDescriptor());
+        float* valuesPtr = values.getMemPtr<float>();
+        vector<uint64_t> hostOffsets(static_cast<size_t>(batchSize) + 1, 0);
+        uint64_t activeValues = 0;
+        for (uint32_t row = 0; row < batchSize; ++row) {
+            const uint64_t rowLength = row == 0 ? 0 : 1 + ((row - 1) % 2);
+            activeValues += rowLength;
+            hostOffsets[row + 1] = activeValues;
+        }
+        for (uint64_t value = 0; value < capacity; ++value) {
+            for (uint64_t element = 0; element < elementsPerValue; ++element) {
+                valuesPtr[value * elementsPerValue + element] =
+                    value < activeValues ? static_cast<float>(value * 10 + element + 1)
+                                         : numeric_limits<float>::quiet_NaN();
+            }
+        }
+        ThorImplementation::Tensor offsets(
+            ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU),
+            descriptor.getOffsetsDescriptor());
+        uint32_t* offsetsPtr = offsets.getMemPtr<uint32_t>();
+        for (size_t i = 0; i < hostOffsets.size(); ++i) offsetsPtr[i] = static_cast<uint32_t>(hostOffsets[i]);
+        ThorImplementation::RowPartitionRuntime partition(offsets, descriptor.getRowPartition());
+        partition.setHostOffsets(hostOffsets);
+        Batch batch;
+        batch.insert("tokens", ThorImplementation::RaggedTensor(values, partition));
+        return batch;
+    };
+
+    auto findDropOut = [](Network& network) {
+        shared_ptr<DropOut> result;
+        for (uint32_t i = 0; i < network.getNumLayers(); ++i) {
+            auto candidate = dynamic_pointer_cast<DropOut>(network.getLayer(i));
+            if (candidate != nullptr) result = candidate;
+        }
+        return result;
+    };
+
+    auto loadPlaceAndRun = [&](uint32_t placementBatchSize) {
+        Network loaded(networkName);
+        ASSERT_NO_THROW(loaded.load(archive.string()));
+        const auto externalInputs = loaded.getExternalRaggedNetworkInputs();
+        ASSERT_EQ(externalInputs.size(), 1U);
+        const RaggedTensor loadedInput = externalInputs.front().raggedTensor;
+        ASSERT_TRUE(loadedInput.isPlacementNeutral());
+        EXPECT_EQ(loadedInput.getValues().getOriginalId(), savedValuesOriginalId);
+        EXPECT_EQ(loadedInput.getRowPartitionToken().getOriginalId(), savedPartitionOriginalId);
+        shared_ptr<DropOut> loadedDropOut = findDropOut(loaded);
+        ASSERT_NE(loadedDropOut, nullptr);
+        ASSERT_TRUE(loadedDropOut->getRaggedFeatureOutput().has_value());
+        EXPECT_EQ(loadedDropOut->getFeatureOutput()->getOriginalId(), savedOutputOriginalId);
+        EXPECT_EQ(loadedDropOut->getRaggedFeatureOutput()->getRowPartitionToken(), loadedInput.getRowPartitionToken());
+
+        const json architectureBeforePlacement = loaded.architectureJson();
+        vector<Event> initDoneEvents;
+        shared_ptr<PlacedNetwork> placed = loaded.place(placementBatchSize, initDoneEvents, true);
+        ASSERT_NE(placed, nullptr);
+        for (Event& event : initDoneEvents) event.synchronize();
+
+        auto& stamped = placed->getStampedNetwork(0);
+        const auto requirements = stamped.getExternalRowPartitionRequirementsForTest(loadedInput.getRowPartitionId());
+        ASSERT_TRUE(requirements.has_value());
+        EXPECT_TRUE(ThorImplementation::hasRaggedPartitionRequirement(
+            requirements.value(), ThorImplementation::RaggedPartitionRequirement::HOST_EXTENT));
+        EXPECT_EQ(stamped.getManagedPartitionActiveCountInputForTest(loadedInput.getRowPartitionId()), nullptr);
+        EXPECT_EQ(stamped.getManagedPartitionOffsetsInputForTest(loadedInput.getRowPartitionId()), nullptr);
+
+        const uint64_t expectedCapacity = static_cast<uint64_t>(placementBatchSize) * maxValuesPerRow;
+        auto physicalValues = stamped.getNamedInput("tokens.values");
+        ASSERT_NE(physicalValues, nullptr);
+        ASSERT_TRUE(physicalValues->getFeatureOutput().has_value());
+        EXPECT_EQ(physicalValues->getFeatureOutput()->getDimensions(),
+                  (vector<uint64_t>{expectedCapacity, elementsPerValue}));
+        auto physicalDropOut = dynamic_pointer_cast<ThorImplementation::DropOut>(
+            stamped.getPhysicalLayerFromApiLayer(loadedDropOut->getId()));
+        ASSERT_NE(physicalDropOut, nullptr);
+        EXPECT_TRUE(physicalDropOut->isRagged());
+        EXPECT_FALSE(physicalDropOut->isTrainingMode());
+        ASSERT_TRUE(physicalDropOut->getFeatureInput().has_value());
+        ASSERT_TRUE(physicalDropOut->getFeatureOutput().has_value());
+        EXPECT_EQ(physicalDropOut->getFeatureInput()->getDimensions(),
+                  (vector<uint64_t>{expectedCapacity, elementsPerValue}));
+        EXPECT_EQ(physicalDropOut->getFeatureInput().value(), physicalDropOut->getFeatureOutput().value());
+        EXPECT_EQ(loaded.architectureJson(), architectureBeforePlacement);
+
+        map<string, InferenceOutputValue> outputs;
+        ASSERT_NO_THROW(outputs = placed->inferLogical(makeBatch(loadedInput, placementBatchSize)));
+        ASSERT_TRUE(outputs.contains("dropped"));
+        const auto dropped = get<ThorImplementation::RaggedTensor>(outputs.at("dropped"));
+        EXPECT_EQ(dropped.getValues().getDimensions(), (vector<uint64_t>{expectedCapacity, elementsPerValue}));
+        const auto hostOffsets = dropped.getHostOffsetsIfAvailable();
+        ASSERT_TRUE(hostOffsets.has_value());
+        ASSERT_GE(hostOffsets->size(), 2U);
+        EXPECT_EQ(hostOffsets->at(0), 0U);
+        EXPECT_EQ(hostOffsets->at(1), 0U);
+    };
+
+    try {
+        loadPlaceAndRun(2);
+        loadPlaceAndRun(7);
+    } catch (...) {
+        filesystem::remove_all(archive);
+        throw;
+    }
+    filesystem::remove_all(archive);
+}
+
+TEST(UtilityApiLayers, PlacementNeutralDropOutZeroRateAndTrainingPlacementPreserveRuntimePolicy) {
+    constexpr uint32_t batchSize = 3;
+    constexpr uint64_t maxValuesPerRow = 4;
+    ThorImplementation::TensorPlacement gpuPlacement(ThorImplementation::TensorPlacement::MemDevices::GPU, 0);
+
+    Network zeroNetwork("placement_neutral_dropout_zero_rate");
+    RaggedTensor zeroInput = RaggedNetworkInput::Builder()
+                                 .network(zeroNetwork)
+                                 .name("tokens")
+                                 .valuesDataType(DataType::FP32)
+                                 .offsetsDataType(DataType::UINT32)
+                                 .trailingDimensions({2})
+                                 .maxValuesPerRow(maxValuesPerRow)
+                                 .build();
+    DropOut zero = DropOut::Builder().network(zeroNetwork).featureInput(zeroInput).dropProportion(0.0f).build();
+    (void)RaggedNetworkOutput::Builder()
+        .network(zeroNetwork)
+        .name("zero")
+        .inputTensor(zero.getRaggedFeatureOutput().value())
+        .build();
+    TestableDropOut testableZero(zero);
+    EXPECT_EQ(testableZero.firstInstanceMemRequirementInBytes(batchSize, gpuPlacement), 0U);
+    EXPECT_FALSE(zero.architectureJson().contains("training_dropout_enabled"));
+    vector<Event> zeroEvents;
+    auto zeroPlaced = zeroNetwork.place(batchSize, zeroEvents, false);
+    ASSERT_NE(zeroPlaced, nullptr);
+    for (Event& event : zeroEvents) event.synchronize();
+    auto physicalZero = dynamic_pointer_cast<ThorImplementation::DropOut>(
+        zeroPlaced->getStampedNetwork(0).getPhysicalLayerFromApiLayer(zero.getId()));
+    ASSERT_NE(physicalZero, nullptr);
+    EXPECT_TRUE(physicalZero->isTrainingMode());
+    ASSERT_TRUE(physicalZero->getFeatureInput().has_value());
+    ASSERT_TRUE(physicalZero->getFeatureOutput().has_value());
+    EXPECT_EQ(physicalZero->getFeatureInput().value(), physicalZero->getFeatureOutput().value());
+
+    Network trainingNetwork("placement_neutral_dropout_training");
+    RaggedTensor trainingInput = RaggedNetworkInput::Builder()
+                                     .network(trainingNetwork)
+                                     .name("tokens")
+                                     .valuesDataType(DataType::FP32)
+                                     .offsetsDataType(DataType::UINT32)
+                                     .trailingDimensions({2})
+                                     .maxValuesPerRow(maxValuesPerRow)
+                                     .build();
+    DropOut training = DropOut::Builder()
+                           .network(trainingNetwork)
+                           .featureInput(trainingInput)
+                           .dropProportion(0.5f)
+                           .build();
+    (void)RaggedNetworkOutput::Builder()
+        .network(trainingNetwork)
+        .name("training")
+        .inputTensor(training.getRaggedFeatureOutput().value())
+        .build();
+    trainingNetwork.setTrainingDropoutEnabled(false);
+    EXPECT_FALSE(training.architectureJson().contains("training_dropout_enabled"));
+    vector<Event> trainingEvents;
+    auto trainingPlaced = trainingNetwork.place(batchSize, trainingEvents, false);
+    ASSERT_NE(trainingPlaced, nullptr);
+    for (Event& event : trainingEvents) event.synchronize();
+    auto physicalTraining = dynamic_pointer_cast<ThorImplementation::DropOut>(
+        trainingPlaced->getStampedNetwork(0).getPhysicalLayerFromApiLayer(training.getId()));
+    ASSERT_NE(physicalTraining, nullptr);
+    EXPECT_TRUE(physicalTraining->isRagged());
+    EXPECT_TRUE(physicalTraining->isTrainingMode());
+    EXPECT_FALSE(physicalTraining->isTrainingDropoutEnabled());
+    ASSERT_TRUE(physicalTraining->getFeatureInput().has_value());
+    ASSERT_TRUE(physicalTraining->getFeatureOutput().has_value());
+    EXPECT_NE(physicalTraining->getFeatureInput().value(), physicalTraining->getFeatureOutput().value());
+    trainingPlaced->setTrainingDropoutEnabled(true);
+    EXPECT_TRUE(physicalTraining->isTrainingDropoutEnabled());
 }

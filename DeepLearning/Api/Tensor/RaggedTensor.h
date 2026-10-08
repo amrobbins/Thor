@@ -19,8 +19,12 @@ namespace Thor {
 
 using RowPartitionId = uint64_t;
 
-// Public logical ragged tensor. The logical row partition has its own identity.
-// The Tensor returned by getRowPartitionToken() is a graph-local structural token;
+// Public logical ragged tensor. GeometryMode::FIXED retains the historical
+// concrete batch/capacity representation. GeometryMode::PLACEMENT_NEUTRAL is
+// restricted to external network boundaries and carries only maxValuesPerRow plus
+// logical tensor identities/shapes; placement derives B and B*maxValuesPerRow.
+// The logical row partition has its own identity. The Tensor returned by
+// getRowPartitionToken() is a graph-local structural token;
 // it is not a promise that a device [B+1] offsets allocation exists at execution
 // time. RP5/RP6 physicalization materializes HOST_EXTENT, [1] active count, or
 // [B+1] offsets only for consumers that explicitly request them. For batch size B,
@@ -29,6 +33,8 @@ using RowPartitionId = uint64_t;
 // otherwise canonical, including for tensors entering or leaving a Network.
 class RaggedTensor {
    public:
+    enum class GeometryMode { FIXED, PLACEMENT_NEUTRAL };
+
     RaggedTensor() = default;
     RaggedTensor(Tensor values, Tensor offsets);
     RaggedTensor(Tensor values, Tensor offsets, uint64_t maxValuesPerRow);
@@ -43,6 +49,12 @@ class RaggedTensor {
                  uint64_t maxTotalValues,
                  uint64_t maxValuesPerRow,
                  DataType offsetsDataType = ThorImplementation::kDefaultRowPartitionOffsetDataType);
+
+    // Placement-neutral external-boundary representation. The logical values
+    // Tensor must be shaped [maxValuesPerRow, *trailingDimensions] and the
+    // row-partition token must use the canonical graph-only shape [1]. Neither
+    // Tensor encodes a placement batch or aggregate packed capacity.
+    static RaggedTensor placementNeutral(Tensor values, Tensor rowPartitionToken, uint64_t maxValuesPerRow);
 
     bool isInitialized() const { return initialized; }
 
@@ -110,11 +122,21 @@ class RaggedTensor {
     std::vector<uint64_t> getTrailingDimensions() const;
     uint64_t getBatchSize() const {
         THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(geometryMode == GeometryMode::FIXED);
         return batchSize;
     }
     uint64_t getMaxTotalValues() const {
         THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(geometryMode == GeometryMode::FIXED);
         return maxTotalValues;
+    }
+    GeometryMode getGeometryMode() const {
+        THOR_THROW_IF_FALSE(initialized);
+        return geometryMode;
+    }
+    bool isPlacementNeutral() const {
+        THOR_THROW_IF_FALSE(initialized);
+        return geometryMode == GeometryMode::PLACEMENT_NEUTRAL;
     }
     bool hasMaxValuesPerRow() const {
         THOR_THROW_IF_FALSE(initialized);
@@ -130,6 +152,7 @@ class RaggedTensor {
     }
 
     ThorImplementation::RaggedTensorDescriptor getDescriptor() const;
+    ThorImplementation::RaggedTensorDescriptor getDescriptorForPlacement(uint64_t placementBatchSize) const;
 
     bool operator==(const RaggedTensor &other) const { return id == other.id; }
     bool operator!=(const RaggedTensor &other) const { return id != other.id; }
@@ -147,6 +170,7 @@ class RaggedTensor {
     }
     static std::vector<uint64_t> makeValuesDimensions(uint64_t maxTotalValues, const std::vector<uint64_t> &trailingDimensions);
     void constructFromValuesAndOffsets();
+    void constructPlacementNeutral();
 
     uint64_t id = 0;
     uint64_t originalId = 0;
@@ -158,6 +182,7 @@ class RaggedTensor {
     uint64_t batchSize = 0;
     uint64_t maxTotalValues = 0;
     uint64_t maxValuesPerRow = 0;
+    GeometryMode geometryMode = GeometryMode::FIXED;
     bool initialized = false;
 };
 
