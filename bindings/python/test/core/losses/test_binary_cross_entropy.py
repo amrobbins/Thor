@@ -134,8 +134,6 @@ def _r10h_ragged_bce_pair(network, prediction_dtype=thor.DataType.fp32, label_dt
         "r10h_bce_predictions",
         prediction_dtype,
         [2],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     labels = thor.layers.RaggedNetworkInput(
@@ -176,9 +174,37 @@ def test_binary_cross_entropy_r10h_rejects_per_output_and_different_partition():
         "r10h_bce_different_labels",
         thor.DataType.uint8,
         [2],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     with pytest.raises(ValueError, match=r"exact same row partition"):
         thor.losses.BinaryCrossEntropy(n, predictions, different_labels)
+
+
+# Classification wrappers share the same placement-independent ragged shape
+# contract; keep one focused constructor assertion rather than parallel suites.
+@pytest.mark.parametrize(
+    "loss_type",
+    [
+        thor.losses.BinaryCrossEntropy,
+        thor.losses.CategoricalCrossEntropy,
+        thor.losses.SoftTargetCrossEntropy,
+        thor.losses.classification.BinaryFocalLoss,
+        thor.losses.classification.CategoricalFocalLoss,
+    ],
+)
+def test_classification_ragged_logical_values_geometry_without_model_batch(loss_type):
+    network = thor.Network("classification-logical-values-geometry")
+    predictions = thor.layers.RaggedNetworkInput(
+        network, "predictions", thor.DataType.fp32, [3], max_values_per_row=4
+    )
+    labels = thor.layers.RaggedNetworkInput(
+        network, "labels", thor.DataType.fp32, [3], partition=predictions
+    )
+    loss = loss_type(network, predictions, labels)
+    assert loss.is_ragged
+
+    wrong_shape = thor.layers.RaggedNetworkInput(
+        network, "wrong_shape", thor.DataType.fp32, [4], partition=predictions
+    )
+    with pytest.raises(ValueError, match="identical value geometry"):
+        loss_type(network, predictions, wrong_shape)

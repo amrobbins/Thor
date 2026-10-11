@@ -281,8 +281,7 @@ TEST(TrainingPhaseApi, RaggedBoundaryReferencesRoundTripByCanonicalTensorId) {
                               .valuesDataType(DataType::FP32)
                               .offsetsDataType(DataType::UINT32)
                               .trailingDimensions({2})
-                              .batchSize(2)
-                              .maxTotalValues(6)
+                              .maxValuesPerRow(4)
                               .build();
     RaggedNetworkOutput tokensOut =
         RaggedNetworkOutput::Builder().network(*network).name("tokens_out").inputTensor(tokens).build();
@@ -308,10 +307,10 @@ TEST(TrainingPhaseApi, RaggedBoundaryReferencesRoundTripByCanonicalTensorId) {
     ASSERT_EQ(restoredOutputs.size(), 1u);
     EXPECT_EQ(restoredInputs[0].name, "tokens");
     EXPECT_EQ(restoredOutputs[0].name, "tokens_out");
-    EXPECT_EQ(restoredInputs[0].raggedTensor.getValues().getDimensions(), (std::vector<uint64_t>{6, 2}));
-    EXPECT_EQ(restoredInputs[0].raggedTensor.getOffsets().getDimensions(), (std::vector<uint64_t>{3}));
-    EXPECT_EQ(restoredOutputs[0].raggedTensor.getValues().getDimensions(), (std::vector<uint64_t>{6, 2}));
-    EXPECT_EQ(restoredOutputs[0].raggedTensor.getOffsets().getDimensions(), (std::vector<uint64_t>{3}));
+    EXPECT_EQ(restoredInputs[0].raggedTensor.getValues().getDimensions(), (std::vector<uint64_t>{4, 2}));
+    EXPECT_EQ(restoredInputs[0].raggedTensor.getOffsets().getDimensions(), (std::vector<uint64_t>{1}));
+    EXPECT_EQ(restoredOutputs[0].raggedTensor.getValues().getDimensions(), (std::vector<uint64_t>{4, 2}));
+    EXPECT_EQ(restoredOutputs[0].raggedTensor.getOffsets().getDimensions(), (std::vector<uint64_t>{1}));
 
     const nlohmann::json restoredJson = restored.architectureJson();
     const nlohmann::json& restoredNetworkJson = restoredJson.at("network");
@@ -319,6 +318,50 @@ TEST(TrainingPhaseApi, RaggedBoundaryReferencesRoundTripByCanonicalTensorId) {
               restoredInputs[0].raggedTensor.getValues().getId());
     EXPECT_EQ(restoredNetworkJson.at("ragged_network_outputs").at(0).at("values_tensor_id").get<uint64_t>(),
               restoredOutputs[0].raggedTensor.getValues().getId());
+}
+
+TEST(TrainingPhaseApi, U7LogicalRaggedBoundaryReferencesRecoverAtIndependentBatchSizes) {
+    auto network = std::make_shared<Network>("phase_logical_ragged_boundaries");
+    RaggedTensor tokens = RaggedNetworkInput::Builder()
+                              .network(*network)
+                              .name("tokens")
+                              .valuesDataType(DataType::FP32)
+                              .offsetsDataType(DataType::UINT32)
+                              .trailingDimensions({2})
+                              .maxValuesPerRow(3)
+                              .build();
+    (void)RaggedNetworkOutput::Builder()
+        .network(*network).name("tokens_out").inputTensor(tokens).build();
+
+    TrainingPhase phase("logical_ragged_phase", network);
+    nlohmann::json saved = phase.architectureJson();
+    // Obsolete physical hints are not part of the semantic M contract.
+    auto& savedNetwork = saved.at("network");
+    savedNetwork.at("ragged_network_inputs").at(0)["batch_size"] = 999;
+    savedNetwork.at("ragged_network_inputs").at(0)["max_total_values"] = 9999;
+    savedNetwork.at("ragged_network_outputs").at(0)["batch_size"] = 42;
+    savedNetwork.at("ragged_network_outputs").at(0)["max_total_values"] = 12345;
+
+    TrainingPhase restored = TrainingPhase::deserialize(saved);
+    ASSERT_NE(restored.getNetwork(), nullptr);
+    const auto inputs = restored.getNetwork()->getExternalRaggedNetworkInputs();
+    const auto outputs = restored.getNetwork()->getExternalRaggedNetworkOutputs();
+    ASSERT_EQ(inputs.size(), 1u);
+    ASSERT_EQ(outputs.size(), 1u);
+    const RaggedTensor& restoredInput = inputs[0].raggedTensor;
+    const RaggedTensor& restoredOutput = outputs[0].raggedTensor;
+    EXPECT_EQ(restoredInput.getValuesDimensions(), (std::vector<uint64_t>{3, 2}));
+    EXPECT_EQ(restoredInput.getOffsetsDimensions(), (std::vector<uint64_t>{1}));
+    EXPECT_TRUE(restoredInput.sharesPartitionWith(restoredOutput));
+    for (uint64_t b : {2u, 7u}) {
+        EXPECT_EQ(restoredInput.getDescriptorForPlacement(b).getValuesDimensions(),
+                  (std::vector<uint64_t>{b * 3, 2}));
+        EXPECT_EQ(restoredOutput.getDescriptorForPlacement(b).getValuesDimensions(),
+                  (std::vector<uint64_t>{b * 3, 2}));
+    }
+    nlohmann::json badM = saved;
+    badM.at("network").at("ragged_network_inputs").at(0)["max_values_per_row"] = 4;
+    EXPECT_THROW(TrainingPhase::deserialize(badM), std::runtime_error);
 }
 
 TEST(TrainingPhaseApi, SerializesAndDeserializesEnabledAndDisabledStateAndRejectsUnsupportedVersion) {
@@ -474,8 +517,7 @@ TEST(TrainingProgramApi, TrainingStepAndPhaseCompositionPreserveLogicalRaggedInp
                               .name("labels")
                               .valuesDataType(DataType::INT32)
                               .offsetsDataType(DataType::UINT64)
-                              .batchSize(2)
-                              .maxTotalValues(5)
+                              .maxValuesPerRow(4)
                               .build();
     NetworkOutput::Builder()
         .network(*network)
@@ -507,8 +549,8 @@ TEST(TrainingProgramApi, TrainingStepAndPhaseCompositionPreserveLogicalRaggedInp
     ASSERT_TRUE(graph.network->hasRaggedNetworkInput("labels"));
     EXPECT_EQ(graph.network->getExternalNetworkInputNames(), (std::vector<std::string>{"labels"}));
     ASSERT_EQ(graph.network->getExternalRaggedNetworkInputs().size(), 1u);
-    EXPECT_EQ(graph.network->getExternalRaggedNetworkInputs().front().raggedTensor.getDescriptor(),
-              labels.getDescriptor());
+    EXPECT_EQ(graph.network->getExternalRaggedNetworkInputs().front().raggedTensor.getDescriptorForPlacement(2),
+              labels.getDescriptorForPlacement(2));
     EXPECT_EQ(graph.externalInputTensorsByName.at("labels.values"),
               graph.network->getExternalRaggedNetworkInputs().front().raggedTensor.getValues());
     EXPECT_FALSE(graph.externalInputTensorsByName.contains("labels.offsets"));

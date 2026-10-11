@@ -30,6 +30,40 @@ using namespace std;
 
 namespace {
 
+#if defined(THOR_SDPA_CUDNN_ALLOC_OWNER_AUDIT)
+// Only in the explicit G4-C3 diagnostic build. The symbols come from the
+// opt-in LD_PRELOAD probe; a normal production build contains none of this.
+extern "C" {
+void thor_sdpa_host_alloc_enter_cudnn(int phase) __attribute__((weak));
+void thor_sdpa_host_alloc_leave_cudnn(int phase) __attribute__((weak));
+void thor_sdpa_host_alloc_set_cudnn_stage(int phase, int stage) __attribute__((weak));
+}
+class ScopedCudnnSdpaAllocationAudit final {
+   public:
+    explicit ScopedCudnnSdpaAllocationAudit(int phase) noexcept : phase_(phase) {
+        if (thor_sdpa_host_alloc_enter_cudnn)
+            thor_sdpa_host_alloc_enter_cudnn(phase_);
+    }
+    ~ScopedCudnnSdpaAllocationAudit() {
+        if (thor_sdpa_host_alloc_leave_cudnn)
+            thor_sdpa_host_alloc_leave_cudnn(phase_);
+    }
+    ScopedCudnnSdpaAllocationAudit(const ScopedCudnnSdpaAllocationAudit&) = delete;
+    ScopedCudnnSdpaAllocationAudit& operator=(const ScopedCudnnSdpaAllocationAudit&) = delete;
+   private:
+    int phase_;
+};
+#endif
+
+// Stages for opt-in G4-C4 allocation attribution only; normal builds have
+// neither these calls nor any additional execution-path work.
+#if defined(THOR_SDPA_CUDNN_ALLOC_OWNER_AUDIT)
+void setCudnnAllocationAuditStage(int phase, int stage) noexcept {
+    if (thor_sdpa_host_alloc_set_cudnn_stage)
+        thor_sdpa_host_alloc_set_cudnn_stage(phase, stage);
+}
+#endif
+
 constexpr int64_t UID_Q = 10;
 constexpr int64_t UID_K = 11;
 constexpr int64_t UID_V = 12;
@@ -116,6 +150,24 @@ vector<int64_t> asInt64(const vector<uint64_t>& values) {
         converted.push_back(static_cast<int64_t>(value));
     }
     return converted;
+}
+
+// Runtime shape checks must not materialize new vectors for every cuDNN
+// execution. Tensor exposes its immutable dimensions by const reference, and
+// descriptor dimensions are already int64. Retain the historical overflow
+// validation performed by asInt64(), including on shape-mismatch paths.
+bool matchesInt64Dimensions(const vector<uint64_t>& actual, const vector<int64_t>& expected) {
+    for (uint64_t value : actual) {
+        if (value > static_cast<uint64_t>(numeric_limits<int64_t>::max()))
+            throwInvalidAttention("tensor dimension is too large for cuDNN Frontend int64 dimensions");
+    }
+    if (actual.size() != expected.size())
+        return false;
+    for (size_t i = 0; i < actual.size(); ++i) {
+        if (static_cast<int64_t>(actual[i]) != expected[i])
+            return false;
+    }
+    return true;
 }
 
 string joinInts(const vector<int64_t>& values) {
@@ -207,7 +259,7 @@ void requireTensorMatchesSpec(const Tensor& tensor, const AttentionTensorSpec& s
                                TensorDescriptor::getElementTypeName(spec.dataType) + ", got " +
                                TensorDescriptor::getElementTypeName(tensor.getDataType()));
     }
-    const vector<int64_t> dims = asInt64(tensor.getDimensions());
+    const vector<uint64_t>& dims = tensor.getDimensionsRef();
     if (spec.ragged) {
         if (spec.dimensions.size() != 4) {
             throw invalid_argument(string("cuDNN ragged attention tensor '") + string(name) + "' descriptor must be rank 4.");
@@ -215,15 +267,22 @@ void requireTensorMatchesSpec(const Tensor& tensor, const AttentionTensorSpec& s
         const int64_t packedTokenCapacity =
             spec.raggedPackedTokenCapacity > 0 ? spec.raggedPackedTokenCapacity
                                                : semanticMaxTotalTokens(spec, name);
-        const vector<int64_t> expectedPacked{packedTokenCapacity, spec.dimensions.at(1), spec.dimensions.at(3)};
-        if (dims != spec.dimensions && dims != expectedPacked) {
+        // Check both legal representations without constructing packed-shape
+        // vectors on the successful execution path.
+        const bool logicalShape = matchesInt64Dimensions(dims, spec.dimensions);
+        const bool packedShape = dims.size() == 3 &&
+                                 static_cast<int64_t>(dims[0]) == packedTokenCapacity &&
+                                 static_cast<int64_t>(dims[1]) == spec.dimensions[1] &&
+                                 static_cast<int64_t>(dims[2]) == spec.dimensions[3];
+        if (!logicalShape && !packedShape) {
+            const vector<int64_t> expectedPacked{packedTokenCapacity, spec.dimensions[1], spec.dimensions[3]};
             throw invalid_argument(string("cuDNN ragged attention tensor '") + string(name) +
                                    "' dimension mismatch. Expected BSHD " + joinInts(spec.dimensions) + " or packed THD " +
-                                   joinInts(expectedPacked) + ", got " + joinInts(dims));
+                                   joinInts(expectedPacked) + ", got " + joinInts(asInt64(dims)));
         }
-    } else if (dims != spec.dimensions) {
+    } else if (!matchesInt64Dimensions(dims, spec.dimensions)) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dimension mismatch. Expected " +
-                               joinInts(spec.dimensions) + ", got " + joinInts(dims));
+                               joinInts(spec.dimensions) + ", got " + joinInts(asInt64(dims)));
     }
 }
 
@@ -233,11 +292,10 @@ void requireFp8ScaleScalarMatchesDescriptor(const Tensor& scalar, string_view na
         throw invalid_argument(string("cuDNN FP8 attention scalar '") + string(name) + "' dtype mismatch. Expected FP32, got " +
                                TensorDescriptor::getElementTypeName(scalar.getDataType()));
     }
-    const vector<int64_t> expected{1, 1, 1, 1};
-    const vector<int64_t> dims = asInt64(scalar.getDimensions());
-    if (dims != expected) {
+    const vector<uint64_t>& dims = scalar.getDimensionsRef();
+    if (dims.size() != 4 || dims[0] != 1 || dims[1] != 1 || dims[2] != 1 || dims[3] != 1) {
         throw invalid_argument(string("cuDNN FP8 attention scalar '") + string(name) + "' dimension mismatch. Expected " +
-                               joinInts(expected) + ", got " + joinInts(dims));
+                               joinInts({1, 1, 1, 1}) + ", got " + joinInts(asInt64(dims)));
     }
 }
 
@@ -436,11 +494,10 @@ void requireSeqLenMatchesDescriptor(const Tensor& seq_len, const CudnnAttentionD
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected INT32, got " +
                                TensorDescriptor::getElementTypeName(seq_len.getDataType()));
     }
-    const vector<int64_t> expected{descriptor.batchSize()};
-    const vector<int64_t> dims = asInt64(seq_len.getDimensions());
-    if (dims != expected) {
+    const vector<uint64_t>& dims = seq_len.getDimensionsRef();
+    if (dims.size() != 1 || dims[0] != static_cast<uint64_t>(descriptor.batchSize())) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dimension mismatch. Expected " +
-                               joinInts(expected) + ", got " + joinInts(dims));
+                               joinInts({descriptor.batchSize()}) + ", got " + joinInts(asInt64(dims)));
     }
 }
 
@@ -450,11 +507,10 @@ void requireRaggedOffsetMatchesDescriptor(const Tensor& offset, const CudnnAtten
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected INT32, got " +
                                TensorDescriptor::getElementTypeName(offset.getDataType()));
     }
-    const vector<int64_t> expected{descriptor.batchSize() + 1};
-    const vector<int64_t> dims = asInt64(offset.getDimensions());
-    if (dims != expected) {
+    const vector<uint64_t>& dims = offset.getDimensionsRef();
+    if (dims.size() != 1 || dims[0] != static_cast<uint64_t>(descriptor.batchSize() + 1)) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dimension mismatch. Expected " +
-                               joinInts(expected) + ", got " + joinInts(dims));
+                               joinInts({descriptor.batchSize() + 1}) + ", got " + joinInts(asInt64(dims)));
     }
 }
 
@@ -491,7 +547,7 @@ void prepareCanonicalRaggedMetadata(const CudnnAttentionDescriptor& descriptor,
         if (!qRowPartitionOffsets.has_value()) {
             throw invalid_argument("Ragged cuDNN attention Q/O requires a canonical query row partition.");
         }
-        const auto qDims = qTensor.getDimensions();
+        const auto& qDims = qTensor.getDimensionsRef();
         const uint64_t qCapacity =
             qDims.size() == 3 ? qDims.at(0)
                               : checkedAttentionProduct(descriptor.batchSize(), descriptor.queryLength(), "Ragged Q/O token");
@@ -536,7 +592,7 @@ void prepareCanonicalRaggedMetadata(const CudnnAttentionDescriptor& descriptor,
         if (!kvRowPartitionOffsets.has_value()) {
             throw invalid_argument("Ragged cuDNN attention K/V requires a canonical key/value row partition.");
         }
-        const auto kDims = kTensor.getDimensions();
+        const auto& kDims = kTensor.getDimensionsRef();
         const uint64_t kvCapacity =
             kDims.size() == 3 ? kDims.at(0)
                               : checkedAttentionProduct(descriptor.batchSize(), descriptor.keyValueLength(), "Ragged K/V token");
@@ -571,11 +627,10 @@ void requireDropoutScalarMatchesDescriptor(const Tensor& scalar, string_view nam
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected INT64, got " +
                                TensorDescriptor::getElementTypeName(scalar.getDataType()));
     }
-    const vector<int64_t> expected{1, 1, 1, 1};
-    const vector<int64_t> dims = asInt64(scalar.getDimensions());
-    if (dims != expected) {
+    const vector<uint64_t>& dims = scalar.getDimensionsRef();
+    if (dims.size() != 4 || dims[0] != 1 || dims[1] != 1 || dims[2] != 1 || dims[3] != 1) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dimension mismatch. Expected " +
-                               joinInts(expected) + ", got " + joinInts(dims));
+                               joinInts({1, 1, 1, 1}) + ", got " + joinInts(asInt64(dims)));
     }
 }
 
@@ -602,11 +657,12 @@ void requirePagedKvTableMatchesDescriptor(const Tensor& table, const CudnnAttent
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected INT32, got " +
                                TensorDescriptor::getElementTypeName(table.getDataType()));
     }
-    const vector<int64_t> expected{descriptor.batchSize(), 1, pagedKvPageCountForTable(descriptor, name), 1};
-    const vector<int64_t> dims = asInt64(table.getDimensions());
-    if (dims != expected) {
+    const vector<uint64_t>& dims = table.getDimensionsRef();
+    const int64_t pages = pagedKvPageCountForTable(descriptor, name);
+    if (dims.size() != 4 || dims[0] != static_cast<uint64_t>(descriptor.batchSize()) || dims[1] != 1 ||
+        dims[2] != static_cast<uint64_t>(pages) || dims[3] != 1) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dimension mismatch. Expected " +
-                               joinInts(expected) + ", got " + joinInts(dims));
+                               joinInts({descriptor.batchSize(), 1, pages, 1}) + ", got " + joinInts(asInt64(dims)));
     }
 }
 
@@ -1892,6 +1948,11 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionExecutablePlan&
     requireTensorMatchesSpec(args.v, runtimeDescriptor.v, "v");
     requireTensorMatchesSpec(args.o, runtimeDescriptor.o, "o");
 
+#if defined(THOR_SDPA_CUDNN_ALLOC_OWNER_AUDIT)
+    // Scope includes per-call pointer binding, ragged metadata conversion and
+    // cuDNN submission, but excludes placement and public API scheduling.
+    ScopedCudnnSdpaAllocationAudit allocationAudit(1);
+#endif
     unordered_map<int64_t, void*> pack;
     insertTensor(pack, UID_Q, args.q);
     insertTensor(pack, UID_K, args.k);
@@ -1909,8 +1970,14 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionExecutablePlan&
     }
     const bool ragged = runtimeDescriptor.q.ragged || runtimeDescriptor.k.ragged || runtimeDescriptor.v.ragged || runtimeDescriptor.o.ragged;
     if (ragged) {
+#if defined(THOR_SDPA_CUDNN_ALLOC_OWNER_AUDIT)
+        setCudnnAllocationAuditStage(1, 2);  // metadata preparation
+#endif
         prepareCanonicalRaggedMetadata(
             runtimeDescriptor, args.q, args.k, args.qRowPartitionOffsets, args.kvRowPartitionOffsets, args.raggedScratch, stream);
+#if defined(THOR_SDPA_CUDNN_ALLOC_OWNER_AUDIT)
+        setCudnnAllocationAuditStage(1, 1);  // binding and validation
+#endif
     }
     if (runtimeDescriptor.usePaddingMask) {
         if (ragged) {
@@ -2000,7 +2067,13 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionExecutablePlan&
 #ifdef THOR_DEBUG
     attentionTestExecutionCounters().forwardCalls += 1;
 #endif
+#if defined(THOR_SDPA_CUDNN_ALLOC_OWNER_AUDIT)
+    setCudnnAllocationAuditStage(1, 3);  // workspace and executable submission
+#endif
     executeGraph(plan.executable_, pack, workspace, stream, "SDPA forward");
+#if defined(THOR_SDPA_CUDNN_ALLOC_OWNER_AUDIT)
+    setCudnnAllocationAuditStage(1, 1);  // include pack teardown in binding
+#endif
 }
 
 void CudnnScaledDotProductAttention::backward(const CudnnAttentionExecutablePlan& plan,
@@ -2026,6 +2099,10 @@ void CudnnScaledDotProductAttention::backward(const CudnnAttentionExecutablePlan
     requireGpuTensor(args.dK, "dK", gpuNum);
     requireGpuTensor(args.dV, "dV", gpuNum);
 
+#if defined(THOR_SDPA_CUDNN_ALLOC_OWNER_AUDIT)
+    // Attribute backward binding and execution to the backward scope (phase 2).
+    ScopedCudnnSdpaAllocationAudit allocationAudit(2);
+#endif
     unordered_map<int64_t, void*> pack;
     insertTensor(pack, UID_Q, args.q);
     insertTensor(pack, UID_K, args.k);
@@ -2047,8 +2124,14 @@ void CudnnScaledDotProductAttention::backward(const CudnnAttentionExecutablePlan
     }
     const bool ragged = runtimeDescriptor.q.ragged || runtimeDescriptor.k.ragged || runtimeDescriptor.v.ragged || runtimeDescriptor.o.ragged;
     if (ragged) {
+#if defined(THOR_SDPA_CUDNN_ALLOC_OWNER_AUDIT)
+        setCudnnAllocationAuditStage(2, 2);  // metadata preparation
+#endif
         prepareCanonicalRaggedMetadata(
             runtimeDescriptor, args.q, args.k, args.qRowPartitionOffsets, args.kvRowPartitionOffsets, args.raggedScratch, stream);
+#if defined(THOR_SDPA_CUDNN_ALLOC_OWNER_AUDIT)
+        setCudnnAllocationAuditStage(2, 1);  // binding and validation
+#endif
     }
     if (runtimeDescriptor.usePaddingMask) {
         if (ragged) {
@@ -2149,7 +2232,13 @@ void CudnnScaledDotProductAttention::backward(const CudnnAttentionExecutablePlan
 #ifdef THOR_DEBUG
     attentionTestExecutionCounters().backwardCalls += 1;
 #endif
+#if defined(THOR_SDPA_CUDNN_ALLOC_OWNER_AUDIT)
+    setCudnnAllocationAuditStage(2, 3);  // workspace and executable submission
+#endif
     executeGraph(plan.executable_, pack, workspace, stream, "SDPA backward");
+#if defined(THOR_SDPA_CUDNN_ALLOC_OWNER_AUDIT)
+    setCudnnAllocationAuditStage(2, 1);  // include pack teardown in binding
+#endif
 }
 
 #ifdef THOR_DEBUG

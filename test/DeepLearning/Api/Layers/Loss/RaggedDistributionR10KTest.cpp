@@ -48,8 +48,6 @@ Inputs makeInputs(Network& network, const string& prefix, DataType offsetsDType 
                                .valuesDataType(DataType::FP32)
                                .offsetsDataType(offsetsDType)
                                .trailingDimensions({2})
-                               .batchSize(4)
-                               .maxTotalValues(9)
                                .maxValuesPerRow(5)
                                .build();
     RaggedTensor labels = RaggedNetworkInput::Builder()
@@ -185,7 +183,7 @@ void runStudentRuntimeCase(DataType offsetsDType) {
 
     constexpr uint32_t batchSize = 4;
     constexpr uint32_t validExamples = 3;
-    constexpr uint64_t maxTotalValues = 8;
+    constexpr uint64_t maxTotalValues = static_cast<uint64_t>(batchSize) * 5;
     constexpr float minimumDof = 2.0f;
     // Runtime numerical qualification uses scalar trailing width so that each active
     // packed value corresponds to exactly one reference contribution.
@@ -197,8 +195,6 @@ void runStudentRuntimeCase(DataType offsetsDType) {
                                .valuesDataType(DataType::FP32)
                                .offsetsDataType(offsetsDType)
                                .trailingDimensions({1})
-                               .batchSize(batchSize)
-                               .maxTotalValues(maxTotalValues)
                                .maxValuesPerRow(5)
                                .build();
     scalarInputs.labels = RaggedNetworkInput::Builder()
@@ -322,7 +318,7 @@ void runNegativeBinomialRuntimeCase(DataType offsetsDType, bool logMean, bool lo
 
     constexpr uint32_t batchSize = 4;
     constexpr uint32_t validExamples = 3;
-    constexpr uint64_t maxTotalValues = 8;
+    constexpr uint64_t maxTotalValues = static_cast<uint64_t>(batchSize) * 5;
     Network network("r10k_nb_runtime");
     RaggedTensor mean = RaggedNetworkInput::Builder()
                             .network(network)
@@ -330,8 +326,6 @@ void runNegativeBinomialRuntimeCase(DataType offsetsDType, bool logMean, bool lo
                             .valuesDataType(DataType::FP32)
                             .offsetsDataType(offsetsDType)
                             .trailingDimensions({1})
-                            .batchSize(batchSize)
-                            .maxTotalValues(maxTotalValues)
                             .maxValuesPerRow(5)
                             .build();
     RaggedTensor labels = RaggedNetworkInput::Builder()
@@ -535,8 +529,6 @@ TEST(RaggedDistributionR10K, RejectsPerOutputAndMismatchedTokenVaryingPartitions
                                  .name("different")
                                  .valuesDataType(DataType::FP32)
                                  .trailingDimensions({2})
-                                 .batchSize(4)
-                                 .maxTotalValues(9)
                                  .maxValuesPerRow(5)
                                  .build();
 

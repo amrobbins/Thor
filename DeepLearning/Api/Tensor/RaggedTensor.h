@@ -10,6 +10,8 @@
 
 #include <atomic>
 #include <cstdint>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "Utilities/TarFile/TarReader.h"
@@ -19,42 +21,21 @@ namespace Thor {
 
 using RowPartitionId = uint64_t;
 
-// Public logical ragged tensor. GeometryMode::FIXED retains the historical
-// concrete batch/capacity representation. GeometryMode::PLACEMENT_NEUTRAL is
-// restricted to external network boundaries and carries only maxValuesPerRow plus
-// logical tensor identities/shapes; placement derives B and B*maxValuesPerRow.
-// The logical row partition has its own identity. The Tensor returned by
-// getRowPartitionToken() is a graph-local structural token;
-// it is not a promise that a device [B+1] offsets allocation exists at execution
-// time. RP5/RP6 physicalization materializes HOST_EXTENT, [1] active count, or
-// [B+1] offsets only for consumers that explicitly request them. For batch size B,
-// values[hostOffsets[B]:maxTotalValues] is inactive capacity with
-// undefined contents. Callers must not depend on that storage being zero or
-// otherwise canonical, including for tensors entering or leaving a Network.
+// A graph-level ragged tensor has one logical geometry: [M, ...features]
+// values and a [1] structural row-partition token. Runtime B, B*M and any
+// physical [B+1] offsets are owned by placement and execution, not this type.
+// The partition token identifies a logical partition; it does not promise
+// that an offsets allocation will be materialized on device.
+// Inactive physical capacity has undefined contents.
 class RaggedTensor {
    public:
-    enum class GeometryMode { FIXED, PLACEMENT_NEUTRAL };
-
     RaggedTensor() = default;
-    RaggedTensor(Tensor values, Tensor offsets);
-    RaggedTensor(Tensor values, Tensor offsets, uint64_t maxValuesPerRow);
-    RaggedTensor(DataType valuesDataType,
-                 const std::vector<uint64_t> &trailingDimensions,
-                 uint64_t batchSize,
-                 uint64_t maxTotalValues,
-                 DataType offsetsDataType = ThorImplementation::kDefaultRowPartitionOffsetDataType);
-    RaggedTensor(DataType valuesDataType,
-                 const std::vector<uint64_t> &trailingDimensions,
-                 uint64_t batchSize,
-                 uint64_t maxTotalValues,
-                 uint64_t maxValuesPerRow,
-                 DataType offsetsDataType = ThorImplementation::kDefaultRowPartitionOffsetDataType);
+    // Valid explicit-M logical constructor; the token must have shape [1].
+    RaggedTensor(Tensor values, Tensor rowPartitionToken, uint64_t maxValuesPerRow);
 
-    // Placement-neutral external-boundary representation. The logical values
-    // Tensor must be shaped [maxValuesPerRow, *trailingDimensions] and the
-    // row-partition token must use the canonical graph-only shape [1]. Neither
-    // Tensor encodes a placement batch or aggregate packed capacity.
-    static RaggedTensor placementNeutral(Tensor values, Tensor rowPartitionToken, uint64_t maxValuesPerRow);
+    // Canonical logical graph construction. The values leading dimension must
+    // equal M, and the structural partition token must have shape [1].
+    static RaggedTensor logical(Tensor values, Tensor rowPartitionToken, uint64_t maxValuesPerRow);
 
     bool isInitialized() const { return initialized; }
 
@@ -120,24 +101,6 @@ class RaggedTensor {
         return rowPartitionToken.getDimensions();
     }
     std::vector<uint64_t> getTrailingDimensions() const;
-    uint64_t getBatchSize() const {
-        THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(geometryMode == GeometryMode::FIXED);
-        return batchSize;
-    }
-    uint64_t getMaxTotalValues() const {
-        THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(geometryMode == GeometryMode::FIXED);
-        return maxTotalValues;
-    }
-    GeometryMode getGeometryMode() const {
-        THOR_THROW_IF_FALSE(initialized);
-        return geometryMode;
-    }
-    bool isPlacementNeutral() const {
-        THOR_THROW_IF_FALSE(initialized);
-        return geometryMode == GeometryMode::PLACEMENT_NEUTRAL;
-    }
     bool hasMaxValuesPerRow() const {
         THOR_THROW_IF_FALSE(initialized);
         return maxValuesPerRow != 0;
@@ -151,7 +114,6 @@ class RaggedTensor {
         return 1;
     }
 
-    ThorImplementation::RaggedTensorDescriptor getDescriptor() const;
     ThorImplementation::RaggedTensorDescriptor getDescriptorForPlacement(uint64_t placementBatchSize) const;
 
     bool operator==(const RaggedTensor &other) const { return id == other.id; }
@@ -168,9 +130,7 @@ class RaggedTensor {
     static bool offsetsDataTypeValid(DataType dataType) {
         return ThorImplementation::RowPartitionDescriptor::isValidOffsetsDataType(dataType);
     }
-    static std::vector<uint64_t> makeValuesDimensions(uint64_t maxTotalValues, const std::vector<uint64_t> &trailingDimensions);
-    void constructFromValuesAndOffsets();
-    void constructPlacementNeutral();
+    void constructLogical();
 
     uint64_t id = 0;
     uint64_t originalId = 0;
@@ -179,10 +139,7 @@ class RaggedTensor {
     Tensor values;
     Tensor rowPartitionToken;
     RowPartitionId rowPartitionId = 0;
-    uint64_t batchSize = 0;
-    uint64_t maxTotalValues = 0;
     uint64_t maxValuesPerRow = 0;
-    GeometryMode geometryMode = GeometryMode::FIXED;
     bool initialized = false;
 };
 

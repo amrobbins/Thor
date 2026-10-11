@@ -70,7 +70,8 @@ class Transpose : public Layer {
     [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {
         THOR_THROW_IF_FALSE(featureOutput.has_value());
         THOR_THROW_IF_FALSE(outputTensor == featureOutput.value());
-        return raggedFeatureInput.has_value() && !raggedFeatureInput->isPlacementNeutral();
+        // All API output dimensions are logical; placement owns the batch axis.
+        return false;
     }
 
     bool mustConnectAllInputsToDriveOutput() const override { return raggedFeatureInput.has_value(); }
@@ -100,10 +101,10 @@ class Transpose : public Layer {
         (void)tensorPlacement;
         THOR_THROW_IF_FALSE(getFeatureOutput().has_value());
         const uint64_t outputBytes = getFeatureOutput().value().getTotalSizeInBytes();
-        if (!raggedFeatureInput.has_value() || !raggedFeatureInput->isPlacementNeutral()) return outputBytes;
+        if (!raggedFeatureInput.has_value()) return outputBytes;
         THOR_THROW_IF_FALSE(batchSize > 0);
         if (outputBytes > std::numeric_limits<uint64_t>::max() / batchSize)
-            throw std::overflow_error("Placement-neutral Ragged Transpose memory requirement overflow.");
+            throw std::overflow_error("Ragged Transpose memory requirement overflow.");
         return outputBytes * batchSize;
     }
 

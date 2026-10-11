@@ -133,7 +133,6 @@ void expectNeutralSemanticJson(const string& label) {
                              .trailingDimensions({2})
                              .maxValuesPerRow(maxValuesPerRow)
                              .build();
-    ASSERT_TRUE(input.isPlacementNeutral());
 
     auto activation = buildActivation<ActivationType>(network, input);
     ASSERT_NE(activation, nullptr);
@@ -153,7 +152,7 @@ void expectNeutralSemanticJson(const string& label) {
     const json& inputJson = architecture.at("ragged_feature_input");
     const json& outputJson = architecture.at("ragged_feature_output");
     EXPECT_EQ(inputJson.at("layer_ragged_reference_version").get<string>(), "1.0.0");
-    EXPECT_EQ(inputJson.at("geometry_mode").get<string>(), "placement_neutral");
+    EXPECT_FALSE(inputJson.contains("geometry_mode"));
     EXPECT_EQ(inputJson.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
     EXPECT_FALSE(inputJson.contains("batch_size"));
     EXPECT_FALSE(inputJson.contains("max_total_values"));
@@ -215,7 +214,6 @@ void expectNeutralSaveLoadAndExecute(const string& label, const function<float(f
         const auto inputs = loaded.getExternalRaggedNetworkInputs();
         ASSERT_EQ(inputs.size(), 1U);
         const RaggedTensor loadedInput = inputs.front().raggedTensor;
-        ASSERT_TRUE(loadedInput.isPlacementNeutral());
         EXPECT_EQ(loadedInput.getValues().getOriginalId(), savedValuesOriginalId);
         EXPECT_EQ(loadedInput.getRowPartitionToken().getOriginalId(), savedPartitionOriginalId);
 
@@ -308,8 +306,6 @@ void expectFixedRaggedCompatibility(const string& label) {
                                  .valuesDataType(DataType::FP32)
                                  .offsetsDataType(DataType::UINT32)
                                  .trailingDimensions({2})
-                                 .batchSize(3)
-                                 .maxTotalValues(9)
                                  .maxValuesPerRow(4)
                                  .build();
         auto activation = buildActivation<ActivationType>(network, input);
@@ -321,10 +317,11 @@ void expectFixedRaggedCompatibility(const string& label) {
             .inputTensor(activation->getRaggedFeatureOutput().value())
             .build();
         const json architecture = activation->architectureJson();
-        EXPECT_EQ(architecture.at("version").get<string>(), "1.0.0");
-        EXPECT_EQ(architecture.at("ragged_feature_input").at("batch_size").get<uint64_t>(), 3U);
-        EXPECT_EQ(architecture.at("ragged_feature_input").at("max_total_values").get<uint64_t>(), 9U);
-        EXPECT_FALSE(architecture.at("ragged_feature_input").contains("layer_ragged_reference_version"));
+        EXPECT_EQ(architecture.at("version").get<string>(), "1.1.0");
+        EXPECT_EQ(architecture.at("ragged_feature_input").at("max_values_per_row").get<uint64_t>(), 4U);
+        EXPECT_FALSE(architecture.at("ragged_feature_input").contains("batch_size"));
+        EXPECT_FALSE(architecture.at("ragged_feature_input").contains("max_total_values"));
+        EXPECT_EQ(architecture.at("ragged_feature_input").at("offsets").at("dimensions"), json::array({1}));
         network.save(archive.string(), true);
     }
 
@@ -334,8 +331,7 @@ void expectFixedRaggedCompatibility(const string& label) {
         auto activation = findOnlyActivation<ActivationType>(loaded);
         ASSERT_NE(activation, nullptr);
         ASSERT_TRUE(activation->getRaggedFeatureInput().has_value());
-        EXPECT_FALSE(activation->getRaggedFeatureInput()->isPlacementNeutral());
-        EXPECT_EQ(activation->architectureJson().at("version").template get<string>(), "1.0.0");
+        EXPECT_EQ(activation->architectureJson().at("version").template get<string>(), "1.1.0");
     } catch (...) {
         filesystem::remove_all(archive);
         throw;
@@ -379,7 +375,7 @@ TEST(Activations, OrdinaryPlacementNeutralRaggedActivationsSerializeSemanticGeom
     const json architecture = sigmoid->architectureJson();
 
     json wrongVersion = architecture;
-    wrongVersion["version"] = "1.0.0";
+    wrongVersion["version"] = "0.0.0";
     EXPECT_THROW(Activation::deserialize(wrongVersion, &network), runtime_error);
 
     json wrongGeometry = architecture;

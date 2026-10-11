@@ -105,8 +105,6 @@ std::shared_ptr<Network> makeRaggedRowLengthMemberNetwork(const std::string& net
                                .name("history")
                                .valuesDataType(DataType::FP32)
                                .trailingDimensions({2})
-                               .maxTotalValues(8)
-                               .batchSize(4)
                                .maxValuesPerRow(3)
                                .build();
 
@@ -2546,10 +2544,11 @@ TEST(TrainingRunsResult, SaveSingleMemberEnsemblePreservesLogicalRaggedInputBoun
     const std::vector<RaggedNetworkInputReference> raggedInputs = loaded.getExternalRaggedNetworkInputs();
     ASSERT_EQ(raggedInputs.size(), 1u);
     EXPECT_EQ(raggedInputs.front().name, "history");
-    EXPECT_EQ(raggedInputs.front().raggedTensor.getBatchSize(), 4u);
-    EXPECT_EQ(raggedInputs.front().raggedTensor.getMaxTotalValues(), 8u);
-    ASSERT_TRUE(raggedInputs.front().raggedTensor.hasMaxValuesPerRow());
+    EXPECT_EQ(raggedInputs.front().raggedTensor.getValuesDimensions(), (std::vector<uint64_t>{3, 2}));
+    EXPECT_EQ(raggedInputs.front().raggedTensor.getOffsetsDimensions(), (std::vector<uint64_t>{1}));
     EXPECT_EQ(raggedInputs.front().raggedTensor.getMaxValuesPerRow(), 3u);
+    EXPECT_EQ(raggedInputs.front().raggedTensor.getDescriptorForPlacement(2).getMaxTotalValues(), 6u);
+    EXPECT_EQ(raggedInputs.front().raggedTensor.getDescriptorForPlacement(7).getMaxTotalValues(), 21u);
 
     std::filesystem::remove_all(root);
 }
@@ -2594,10 +2593,11 @@ TEST(TrainingRunsResult, SaveMultiMemberEnsemblePreservesLogicalRaggedInputBound
     const std::vector<RaggedNetworkInputReference> raggedInputs = loaded.getExternalRaggedNetworkInputs();
     ASSERT_EQ(raggedInputs.size(), 1u);
     EXPECT_EQ(raggedInputs.front().name, "history");
-    EXPECT_EQ(raggedInputs.front().raggedTensor.getBatchSize(), 4u);
-    EXPECT_EQ(raggedInputs.front().raggedTensor.getMaxTotalValues(), 8u);
-    ASSERT_TRUE(raggedInputs.front().raggedTensor.hasMaxValuesPerRow());
+    EXPECT_EQ(raggedInputs.front().raggedTensor.getValuesDimensions(), (std::vector<uint64_t>{3, 2}));
+    EXPECT_EQ(raggedInputs.front().raggedTensor.getOffsetsDimensions(), (std::vector<uint64_t>{1}));
     EXPECT_EQ(raggedInputs.front().raggedTensor.getMaxValuesPerRow(), 3u);
+    EXPECT_EQ(raggedInputs.front().raggedTensor.getDescriptorForPlacement(2).getMaxTotalValues(), 6u);
+    EXPECT_EQ(raggedInputs.front().raggedTensor.getDescriptorForPlacement(7).getMaxTotalValues(), 21u);
 
     std::filesystem::remove_all(root);
 }

@@ -19,6 +19,7 @@ def _physical_ragged(values: np.ndarray, offsets: np.ndarray, offsets_dtype: tho
     return thor.physical.PhysicalRaggedTensor(
         _cpu_tensor(values, thor.DataType.fp32),
         _cpu_tensor(offsets, offsets_dtype),
+        max_values_per_row=3,
     )
 
 
@@ -29,8 +30,7 @@ def _network(name: str, offsets_dtype: thor.DataType = thor.DataType.uint32):
         "tokens",
         thor.DataType.fp32,
         [2],
-        max_total_values=8,
-        batch_size=3,
+        max_values_per_row=3,
         offsets_data_type=offsets_dtype,
     )
     rows = thor.layers.NetworkInput(network, "rows", [3], thor.DataType.fp32)
@@ -48,7 +48,8 @@ def test_segmented_primitives_preserve_partition_and_reject_fp64():
     assert softmax.get_feature_output().offsets == tokens.offsets
     assert log_softmax.get_feature_output().offsets == tokens.offsets
     assert broadcast.get_feature_output().offsets == tokens.offsets
-    assert broadcast.get_feature_output().values.get_dimensions() == [8, 3]
+    assert broadcast.get_feature_output().values.get_dimensions() == [3, 3]
+    assert tokens.offsets.get_dimensions() == [1]
 
     architecture = json.loads(network.get_architecture_json())
     layer_types = {layer["layer_type"] for layer in architecture["layers"]}
@@ -62,8 +63,7 @@ def test_segmented_primitives_preserve_partition_and_reject_fp64():
         "tokens",
         thor.DataType.fp64,
         [2],
-        max_total_values=4,
-        batch_size=2,
+        max_values_per_row=2,
     )
     fp64_rows = thor.layers.NetworkInput(fp64, "rows", [2], thor.DataType.fp64)
     with pytest.raises(Exception, match="FP16, BF16, and FP32"):
@@ -86,7 +86,7 @@ def test_segmented_primitives_runtime_ignores_poison_and_supports_empty_rows(off
     network, *_ = _network("segmented-primitives-runtime", offsets_dtype)
     placed = network.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
-    values = np.full((8, 2), np.nan, dtype=np.float32)
+    values = np.full((3 * 3, 2), np.nan, dtype=np.float32)
     values[:5] = np.array([[0, 1], [2, 3], [1, 0], [1, 1], [1, 2]], dtype=np.float32)
     offsets = np.array([0, 2, 2, 5], dtype=np_offsets_dtype)
     rows = np.array([[10, 20, 30], [40, 50, 60], [70, 80, 90]], dtype=np.float32)
@@ -117,7 +117,7 @@ def test_segmented_primitives_runtime_ignores_poison_and_supports_empty_rows(off
 
     # Reuse the placed executable with an all-empty partition; every packed value
     # is NaN poison and remains outside the logical domain.
-    empty_values = np.full((8, 2), np.nan, dtype=np.float32)
+    empty_values = np.full((3 * 3, 2), np.nan, dtype=np.float32)
     empty_offsets = np.zeros((4,), dtype=np_offsets_dtype)
     empty = placed.infer({
         "tokens": _physical_ragged(empty_values, empty_offsets, offsets_dtype),
@@ -139,7 +139,7 @@ def test_segmented_primitives_save_load_accepts_different_runtime_partition(tmp_
     loaded.load(str(save_dir))
     placed = loaded.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
-    values = np.full((8, 2), np.nan, dtype=np.float32)
+    values = np.full((3 * 3, 2), np.nan, dtype=np.float32)
     values[:6] = np.arange(12, dtype=np.float32).reshape(6, 2)
     offsets = np.array([0, 1, 4, 6], dtype=np.uint32)
     rows = np.array([[2, 3, 4], [5, 7, 9], [11, 13, 15]], dtype=np.float32)

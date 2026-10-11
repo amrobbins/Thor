@@ -184,7 +184,7 @@ def test_huber_loss_numerical_forward_matches_reference(reported_loss_shape):
 
 def _ragged_pair_huber(network):
     predictions = thor.layers.RaggedNetworkInput(
-        network, "ragged_predictions", thor.DataType.fp32, [2], batch_size=3, max_total_values=8, max_values_per_row=4
+        network, "ragged_predictions", thor.DataType.fp32, [2], max_values_per_row=4
     )
     labels = thor.layers.RaggedNetworkInput(network, "ragged_labels", thor.DataType.uint32, [2], partition=predictions)
     return predictions, labels

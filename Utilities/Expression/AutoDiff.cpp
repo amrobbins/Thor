@@ -320,6 +320,8 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
                 reaches[i] = wrt_slots.contains(node.input_slot);
                 break;
             case ExprOp::SCALAR_FP:
+            case ExprOp::FILL:
+                // Compile-time constants never depend on requested input values.
                 reaches[i] = false;
                 break;
             case ExprOp::RUNTIME_SCALAR:
@@ -445,6 +447,9 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
                 break;
             case ExprOp::RMSNORM_BACKWARD_X:
             case ExprOp::RMSNORM_BACKWARD_SCALE:
+            case ExprOp::LAYERNORM_BACKWARD_X:
+            case ExprOp::LAYERNORM_BACKWARD_SCALE:
+            case ExprOp::LAYERNORM_BACKWARD_BIAS:
                 reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs) || reaches.at(node.aux);
                 break;
             case ExprOp::MATMUL:
@@ -1598,6 +1603,30 @@ class BackwardGraphBuilder {
             node.compute_dtype = forward_rms_norm.compute_dtype.value();
         }
         return push(std::move(node));
+    }
+
+    uint32_t layerNormBackward(ExprOp op,
+                               uint32_t x,
+                               uint32_t scale,
+                               uint32_t dY,
+                               const ExprNode& forward_layer_norm,
+                               std::optional<DataType> output_dtype,
+                               std::optional<DataType> compute_dtype) {
+        if (op != ExprOp::LAYERNORM_BACKWARD_X && op != ExprOp::LAYERNORM_BACKWARD_SCALE &&
+            op != ExprOp::LAYERNORM_BACKWARD_BIAS) {
+            throw std::runtime_error("layerNormBackward builder received an unsupported VJP route.");
+        }
+        ExprNode backward{};
+        backward.op = op;
+        backward.lhs = x;
+        backward.rhs = scale;
+        backward.aux = dY;
+        backward.layer_norm_normalized_feature_count = forward_layer_norm.layer_norm_normalized_feature_count;
+        backward.layer_norm_epsilon = forward_layer_norm.layer_norm_epsilon;
+        backward.layer_norm_packed_row_capacity = forward_layer_norm.layer_norm_packed_row_capacity;
+        backward.output_dtype = output_dtype;
+        backward.compute_dtype = compute_dtype.has_value() ? compute_dtype : forward_layer_norm.compute_dtype;
+        return push(std::move(backward));
     }
 
     uint32_t attentionBackward(ExprOp op,
@@ -3195,6 +3224,13 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::SCALAR_FP:
                 node_dims[i] = {};
                 break;
+            case ExprOp::FILL:
+                // A FILL has no tensor parents; its concrete shape is carried
+                // by the expression node itself. AdaptiveLayerNorm uses FILL
+                // for the constant unit-scale and zero-bias of its normalized
+                // intermediate, including in shape-specialized autodiff.
+                node_dims[i] = node.fill_dims;
+                break;
             case ExprOp::ADD:
             case ExprOp::SUB:
             case ExprOp::MUL:
@@ -3516,6 +3552,21 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                         "inferForwardNodeDims RMSNorm backward expects x/dY [outer, hidden] and scale [hidden].");
                 }
                 node_dims[i] = node.op == ExprOp::RMSNORM_BACKWARD_X ? input_dims : scale_dims;
+                break;
+            }
+            case ExprOp::LAYERNORM_BACKWARD_X:
+            case ExprOp::LAYERNORM_BACKWARD_SCALE:
+            case ExprOp::LAYERNORM_BACKWARD_BIAS: {
+                const auto& x_dims = node_dims[node.lhs];
+                const auto& scale_dims = node_dims[node.rhs];
+                const auto& dy_dims = node_dims[node.aux];
+                if (x_dims.size() != 2 || scale_dims.size() != 1 || dy_dims != x_dims ||
+                    x_dims[1] != node.layer_norm_normalized_feature_count ||
+                    scale_dims[0] != node.layer_norm_normalized_feature_count) {
+                    throw std::runtime_error(
+                        "inferForwardNodeDims LayerNorm backward expects x/dY [outer, hidden] and scale [hidden].");
+                }
+                node_dims[i] = node.op == ExprOp::LAYERNORM_BACKWARD_X ? x_dims : scale_dims;
                 break;
             }
             case ExprOp::ATTENTION:
@@ -4175,6 +4226,8 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
             case ExprOp::RUNTIME_SCALAR:
             case ExprOp::TENSOR_RUNTIME_SCALAR:
             case ExprOp::SCALAR_FP:
+            case ExprOp::FILL:
+                // Like a scalar literal, a filled tensor has no parents to differentiate.
                 break;
 
             case ExprOp::RAGGED_VALUEWISE_EXTENT:
@@ -5171,9 +5224,69 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 break;
             }
 
-            case ExprOp::LAYERNORM:
-                throw std::runtime_error(
-                    "LayerNorm expression autodiff is deferred to T9, where retained padded backward reductions and inactive-tail safety are implemented.");
+            case ExprOp::LAYERNORM: {
+                if (!has_forward_dims) {
+                    if (allow_shape_deferred_placeholders) {
+                        for (const uint32_t child : {node.lhs, node.rhs, node.aux}) {
+                            if (node_reaches_requested_inputs.at(child)) builder.addContribution(child, grad);
+                        }
+                        break;
+                    }
+                    throw std::runtime_error("Autodiff LayerNorm backward requires forward shape information.");
+                }
+                const auto& x_dims = forward_node_dims.at(node.lhs);
+                const auto& scale_dims = forward_node_dims.at(node.rhs);
+                const auto& bias_dims = forward_node_dims.at(node.aux);
+                if (x_dims.size() != 2 || scale_dims != std::vector<uint64_t>{node.layer_norm_normalized_feature_count} ||
+                    bias_dims != scale_dims || x_dims[1] != node.layer_norm_normalized_feature_count) {
+                    throw std::runtime_error(
+                        "Autodiff LayerNorm expects x [outer, hidden] and gamma/beta [hidden].");
+                }
+                if (node.layer_norm_packed_row_capacity != 0) {
+                    const ExprNode& marked_x = forward_expr.nodes.at(node.lhs);
+                    if (marked_x.op != ExprOp::RAGGED_VALUEWISE_EXTENT ||
+                        marked_x.ragged_runtime_max_active_values != node.layer_norm_packed_row_capacity) {
+                        throw std::runtime_error(
+                            "Autodiff packed LayerNorm requires a direct connector-owned runtime extent matching capacity.");
+                    }
+                    // 1V binds HOST_EXTENT and must not require device offsets.
+                    // 1W legitimately carries DEVICE_OFFSETS for its adjacent
+                    // segmented broadcasts. Preserve the actual source of each
+                    // graph instead of rewriting either placement contract.
+                }
+                uint32_t dY = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                if (node.output_dtype.has_value()) dY = builder.cast(dY, node.output_dtype.value());
+                const uint32_t x = builder.forwardValue(node.lhs);
+                const uint32_t gamma = builder.forwardValue(node.rhs);
+                const ExprNode& x_value = node.layer_norm_packed_row_capacity == 0
+                    ? forward_expr.nodes.at(node.lhs)
+                    : forward_expr.nodes.at(forward_expr.nodes.at(node.lhs).lhs);
+                const ExprNode& gamma_value = forward_expr.nodes.at(node.rhs);
+                const ExprNode& beta_value = forward_expr.nodes.at(node.aux);
+                if (!x_value.output_dtype || !gamma_value.output_dtype || !beta_value.output_dtype) {
+                    throw std::runtime_error("Autodiff LayerNorm requires resolved x/gamma/beta storage dtypes.");
+                }
+                auto propagate = [&](uint32_t child, ExprOp op, const ExprNode& child_value,
+                                     const std::vector<uint64_t>& target_dims) {
+                    if (!node_reaches_requested_inputs.at(child)) return;
+                    uint32_t derivative = builder.layerNormBackward(op, x, gamma, dY, node,
+                                                                     child_value.output_dtype, node.compute_dtype);
+                    const auto preferred_dtype = preferredGradValueDType(child_value);
+                    if (preferred_dtype.has_value() && preferred_dtype.value() != child_value.output_dtype.value()) {
+                        derivative = builder.cast(derivative, preferred_dtype.value());
+                    }
+                    addContributionToChild(child, derivative, target_dims);
+                };
+                propagate(node.lhs, ExprOp::LAYERNORM_BACKWARD_X, x_value, x_dims);
+                propagate(node.rhs, ExprOp::LAYERNORM_BACKWARD_SCALE, gamma_value, scale_dims);
+                propagate(node.aux, ExprOp::LAYERNORM_BACKWARD_BIAS, beta_value, bias_dims);
+                break;
+            }
+
+            case ExprOp::LAYERNORM_BACKWARD_X:
+            case ExprOp::LAYERNORM_BACKWARD_SCALE:
+            case ExprOp::LAYERNORM_BACKWARD_BIAS:
+                throw std::runtime_error("Second-order autodiff through LayerNorm backward is not supported.");
 
             case ExprOp::RMSNORM_BACKWARD_X:
             case ExprOp::RMSNORM_BACKWARD_SCALE:

@@ -88,11 +88,8 @@ class ScaledDotProductAttention : public CustomLayer {
                           return names;
                       }(),
                       queryRaggedInput.has_value() ? std::set<std::string>{"output"} : std::set<std::string>{},
-                      queryRaggedInput.has_value()
-                          ? std::optional<uint32_t>(static_cast<uint32_t>(queryRaggedInput->getBatchSize()))
-                          : (keyRaggedInput.has_value()
-                                 ? std::optional<uint32_t>(static_cast<uint32_t>(keyRaggedInput->getBatchSize()))
-                                 : std::nullopt)),
+                      // Runtime batch size is derived from placed Q/KV partitions.
+                      std::nullopt),
           tensorLayout(tensorLayout),
           maskKind(maskKind),
           diagonalLeftBound(diagonalLeftBound),
@@ -119,6 +116,24 @@ class ScaledDotProductAttention : public CustomLayer {
           fp8AmaxOInput(std::move(fp8AmaxOInput)),
           computeDataType(computeDataType),
           outputDataType(outputDataType) {}
+
+   protected:
+    // Bind placement-neutral packed Q output to the same physical partition as
+    // the real Q offsets/values ports. The parent stamping path invokes this
+    // once, before physical graph connection and expression compilation.
+    std::shared_ptr<ThorImplementation::TrainableLayer> createPhysicalLayer(
+        ThorImplementation::DynamicExpression expression,
+        std::vector<std::string> physicalInputNames,
+        std::vector<std::string> physicalOutputNames,
+        ThorImplementation::TensorPlacement placement,
+        const std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>>& physicalParameters,
+        bool inferenceOnly,
+        int64_t stampedId,
+        std::vector<ThorImplementation::CustomLayer::DeclaredOutputDescriptor> declaredOutputDescriptors,
+        bool usesBatchValidity,
+        bool requiresFullBatch,
+        std::vector<bool> inputDimensionsIncludeBatch,
+        std::optional<uint32_t> fixedBatchCapacity) const override;
 
    public:
     ~ScaledDotProductAttention() override = default;

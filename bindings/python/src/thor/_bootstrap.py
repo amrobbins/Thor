@@ -40,6 +40,8 @@ _configured = False
 _kernel_backend_handle: object | None = None
 
 _SOURCE_TREE_BOOTSTRAP_ENV = "THOR_CUDA_BOOTSTRAP_SOURCE_TREE"
+# Created only by the non-wheel CMake source-tree build/install target.
+_SOURCE_TREE_INSTALL_MARKER = ".thor_source_tree_install"
 
 
 _VERSION_PART_RE = _re.compile(r"^(\d+)")
@@ -111,17 +113,18 @@ def _version_satisfies(version: str, specifier: str) -> bool:
 
 
 def _source_tree_bootstrap_enabled() -> bool:
-    """Return true for CMake/source-tree test imports.
+    """Use CMake's local build/link environment for development installations.
 
-    Source-tree CMake test targets run against the just-built extension before
-    the final wheel has been installed with its frozen NVIDIA Python wheel
-    dependency metadata.  Those tests use the build/link environment selected
-    by CMake rather than the wheel-runtime CUDA preload path, so they opt out
-    explicitly via this environment variable.  Normal installed-wheel imports
-    do not set it and still require the exact frozen CUDA stack.
+    The non-wheel CMake build places an explicit marker alongside this module
+    in both the build-tree package and the locally installed venv package.
+    A split-wheel installation has no marker and must select and validate its
+    matching architecture-specific kernel wheel. The environment variable
+    remains an explicit override for source-tree tools not installed by CMake.
     """
 
-    return _os.environ.get(_SOURCE_TREE_BOOTSTRAP_ENV) == "1"
+    if _os.environ.get(_SOURCE_TREE_BOOTSTRAP_ENV) == "1":
+        return True
+    return (_Path(__file__).resolve().parent / _SOURCE_TREE_INSTALL_MARKER).is_file()
 
 
 def _running_under_nanobind_stubgen() -> bool:

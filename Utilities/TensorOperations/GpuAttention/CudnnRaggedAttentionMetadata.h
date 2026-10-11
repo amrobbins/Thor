@@ -30,9 +30,9 @@ void convertCanonicalRowPartitionForCudnnAttention(const Tensor& canonicalOffset
                                                     uint64_t maxTotalValues,
                                                     uint64_t firstElementsPerToken,
                                                     uint64_t secondElementsPerToken,
-                                                    Tensor sequenceLengths,
-                                                    Tensor firstElementOffsets,
-                                                    Tensor secondElementOffsets,
+                                                    const Tensor& sequenceLengths,
+                                                    const Tensor& firstElementOffsets,
+                                                    const Tensor& secondElementOffsets,
                                                     Stream stream);
 
 /**
@@ -44,9 +44,9 @@ void buildUniformCudnnAttentionMetadata(uint64_t batchSize,
                                         uint64_t sequenceLength,
                                         uint64_t firstElementsPerToken,
                                         uint64_t secondElementsPerToken,
-                                        Tensor sequenceLengths,
-                                        Tensor firstElementOffsets,
-                                        Tensor secondElementOffsets,
+                                        const Tensor& sequenceLengths,
+                                        const Tensor& firstElementOffsets,
+                                        const Tensor& secondElementOffsets,
                                         Stream stream);
 
 }  // namespace ThorImplementation

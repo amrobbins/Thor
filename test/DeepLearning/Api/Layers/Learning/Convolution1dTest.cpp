@@ -457,9 +457,7 @@ TEST(Convolution1dApi, RaggedBuilderPreservesCanonicalPartitionAndChangesOnlyCha
                                   .valuesDataType(DataType::FP32)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({8})
-                                  .maxTotalValues(66)
                                   .maxValuesPerRow(17)
-                                  .batchSize(3)
                                   .build();
 
     Api::Convolution1d conv = Api::Convolution1d::Builder()
@@ -479,11 +477,11 @@ TEST(Convolution1dApi, RaggedBuilderPreservesCanonicalPartitionAndChangesOnlyCha
     EXPECT_EQ(conv.getRaggedFeatureInput()->getValues(), input.getValues());
     EXPECT_EQ(conv.getRaggedFeatureInput()->getOffsets(), input.getOffsets());
     EXPECT_EQ(conv.getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
-    EXPECT_EQ(conv.getRaggedFeatureOutput()->getBatchSize(), input.getBatchSize());
-    EXPECT_EQ(conv.getRaggedFeatureOutput()->getMaxTotalValues(), input.getMaxTotalValues());
+    EXPECT_EQ(conv.getRaggedFeatureOutput()->getMaxValuesPerRow(), input.getMaxValuesPerRow());
+    EXPECT_TRUE(conv.getRaggedFeatureOutput()->sharesPartitionWith(input));
     ASSERT_TRUE(conv.getRaggedFeatureOutput()->hasMaxValuesPerRow());
     EXPECT_EQ(conv.getRaggedFeatureOutput()->getMaxValuesPerRow(), input.getMaxValuesPerRow());
-    EXPECT_EQ(conv.getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{66, 12}));
+    EXPECT_EQ(conv.getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{17, 12}));
     EXPECT_EQ(conv.getDilation(), 7u);
     EXPECT_EQ(conv.getStride(), 1u);
     EXPECT_EQ(conv.getPaddingMode(), Api::Convolution1dPaddingMode::CAUSAL);
@@ -515,6 +513,109 @@ TEST(Convolution1dApi, RaggedBuilderPreservesCanonicalPartitionAndChangesOnlyCha
     EXPECT_EQ(ready[0], conv.getRaggedFeatureOutput()->getValues());
 }
 
+TEST(Convolution1dApi, U7HistoricalPackedReferencesReconstructLogicalMWithoutSavedBatch) {
+    Api::Network network("ragged_conv_u7_logical_source");
+    Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .valuesDataType(DataType::FP32)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({4})
+                                  .maxValuesPerRow(6)
+                                  .build();
+    Api::Convolution1d conv = Api::Convolution1d::Builder()
+                                  .network(network)
+                                  .featureInput(input)
+                                  .numOutputChannels(8)
+                                  .filterWidth(3)
+                                  .causalPadding()
+                                  .noActivation()
+                                  .build();
+    ASSERT_TRUE(conv.getRaggedFeatureOutput().has_value());
+    const Api::RaggedTensor logicalOutput = conv.getRaggedFeatureOutput().value();
+    EXPECT_EQ(logicalOutput.getValuesDimensions(), (vector<uint64_t>{6, 8}));
+    EXPECT_TRUE(logicalOutput.sharesPartitionWith(input));
+    EXPECT_EQ(logicalOutput.getDescriptorForPlacement(2).getValuesDimensions(), (vector<uint64_t>{12, 8}));
+    EXPECT_EQ(logicalOutput.getDescriptorForPlacement(7).getValuesDimensions(), (vector<uint64_t>{42, 8}));
+
+    // Simulate historical physical dimensions without altering the source's
+    // authoritative semantic M, tensor IDs, dtypes or feature geometry.
+    json historical = conv.architectureJson();
+    EXPECT_EQ(historical.at("version").get<string>(), "1.0.0");
+    historical.at("ragged_input")["batch_size"] = 91;
+    historical.at("ragged_input")["max_total_values"] = 910;
+    historical.at("ragged_output")["batch_size"] = 91;
+    historical.at("ragged_output")["max_total_values"] = 910;
+    historical.at("ragged_input").at("values")["dimensions"] = json::array({910, 4});
+    historical.at("ragged_output").at("values")["dimensions"] = json::array({910, 8});
+    historical.at("ragged_input").at("offsets")["dimensions"] = json::array({92});
+    historical.at("ragged_output").at("offsets")["dimensions"] = json::array({92});
+    historical.at("inputs").at(0)["dimensions"] = json::array({910, 4});
+    historical.at("outputs").at(0)["dimensions"] = json::array({910, 8});
+
+    std::shared_ptr<thor_file::TarReader> reader;
+    const uint32_t layerCount = network.getNumLayers();
+    json corruptSemanticM = historical;
+    corruptSemanticM.at("ragged_output")["max_values_per_row"] = 7;
+    EXPECT_THROW(Api::Convolution1d::deserialize(reader, corruptSemanticM, &network), std::runtime_error);
+    ASSERT_EQ(network.getNumLayers(), layerCount);
+    Api::Convolution1d::deserialize(reader, historical, &network);
+    ASSERT_EQ(network.getNumLayers(), layerCount + 1);
+    const auto recovered = std::dynamic_pointer_cast<Api::Convolution1d>(network.getLayer(layerCount));
+    ASSERT_NE(recovered, nullptr);
+    ASSERT_TRUE(recovered->getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(recovered->getRaggedFeatureInput()->getValuesDimensions(), (vector<uint64_t>{6, 4}));
+    EXPECT_EQ(recovered->getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{6, 8}));
+    EXPECT_EQ(recovered->getRaggedFeatureOutput()->getOffsetsDimensions(), (vector<uint64_t>{1}));
+    EXPECT_TRUE(recovered->getRaggedFeatureInput()->sharesPartitionWith(recovered->getRaggedFeatureOutput().value()));
+    EXPECT_EQ(recovered->getRaggedFeatureOutput()->getDescriptorForPlacement(2).getValuesDimensions(),
+              (vector<uint64_t>{12, 8}));
+    EXPECT_EQ(recovered->getRaggedFeatureOutput()->getDescriptorForPlacement(7).getValuesDimensions(),
+              (vector<uint64_t>{42, 8}));
+}
+
+TEST(Convolution1dApi, U7LogicalRaggedConvolutionPlacesIndependentlyAtTwoBatchSizes) {
+    int deviceCount = 0;
+    if (cudaGetDeviceCount(&deviceCount) != cudaSuccess || deviceCount == 0)
+        GTEST_SKIP() << "CUDA required to verify physical ragged convolution stamping.";
+
+    Api::Network network("ragged_conv_u7_two_placements");
+    Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .valuesDataType(DataType::FP32)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({4})
+                                  .maxValuesPerRow(6)
+                                  .build();
+    Api::Convolution1d conv = Api::Convolution1d::Builder()
+                                  .network(network)
+                                  .featureInput(input)
+                                  .numOutputChannels(8)
+                                  .filterWidth(3)
+                                  .causalPadding()
+                                  .noActivation()
+                                  .build();
+    (void)Api::RaggedNetworkOutput::Builder()
+        .network(network)
+        .name("output")
+        .inputTensor(conv.getRaggedFeatureOutput().value())
+        .build();
+    for (uint32_t b : {2u, 7u}) {
+        vector<Event> events;
+        // This checks inference stamping at independent placements, not
+        // training; no weight optimizer is configured for this network.
+        const auto placed = network.place(b, events, true, {0}, 1);
+        synchronizeEvents(events);
+        ASSERT_NE(placed, nullptr);
+        auto physical = std::dynamic_pointer_cast<Impl::RaggedCustomLayer>(
+            placed->getStampedNetwork(0).getPhysicalLayerFromApiLayer(conv.getId()));
+        ASSERT_NE(physical, nullptr);
+        EXPECT_EQ(conv.getRaggedFeatureOutput()->getDescriptorForPlacement(b).getValuesDimensions(),
+                  (vector<uint64_t>{b * 6, 8}));
+    }
+}
+
 TEST(Convolution1dApi, RaggedBuilderRejectsUnsupportedPublicConfigurations) {
     auto makeInput = [](Api::Network& network, bool withMaxValuesPerRow = true) {
         Api::RaggedNetworkInput::Builder builder;
@@ -522,9 +623,7 @@ TEST(Convolution1dApi, RaggedBuilderRejectsUnsupportedPublicConfigurations) {
             .name("tokens")
             .valuesDataType(DataType::FP32)
             .offsetsDataType(DataType::UINT32)
-            .trailingDimensions({4})
-            .maxTotalValues(32)
-            .batchSize(2);
+            .trailingDimensions({4});
         if (withMaxValuesPerRow)
             builder.maxValuesPerRow(16);
         return builder.build();
@@ -581,15 +680,9 @@ TEST(Convolution1dApi, RaggedBuilderRejectsUnsupportedPublicConfigurations) {
     }
     {
         Api::Network network("ragged_conv1d_reject_missing_capacity");
-        Api::RaggedTensor input = makeInput(network, false);
-        EXPECT_THROW((void)Api::Convolution1d::Builder()
-                         .network(network)
-                         .featureInput(input)
-                         .numOutputChannels(4)
-                         .filterWidth(3)
-                         .causalPadding()
-                         .build(),
-                     std::invalid_argument);
+        // Independent logical ragged inputs must declare semantic M at
+        // construction time; no Convolution1d builder can repair its absence.
+        EXPECT_THROW((void)makeInput(network, false), std::logic_error);
     }
     {
         Api::Network network("ragged_conv1d_reject_groups");
@@ -638,9 +731,7 @@ TEST(Convolution1dApi, RaggedBuilderRejectsUnsupportedPublicConfigurations) {
                                       .valuesDataType(DataType::FP64)
                                       .offsetsDataType(DataType::UINT32)
                                       .trailingDimensions({4})
-                                      .maxTotalValues(32)
                                       .maxValuesPerRow(16)
-                                      .batchSize(2)
                                       .build();
         EXPECT_THROW((void)Api::Convolution1d::Builder()
                          .network(network)
@@ -661,9 +752,7 @@ TEST(Convolution1dApi, RaggedGroupedAndDepthwiseWeightGeometryUsesTrailingChanne
                                          .valuesDataType(DataType::FP16)
                                          .offsetsDataType(DataType::UINT32)
                                          .trailingDimensions({8})
-                                         .maxTotalValues(40)
                                          .maxValuesPerRow(20)
-                                         .batchSize(2)
                                          .build();
     Api::Convolution1d grouped = Api::Convolution1d::Builder()
                                      .network(groupedNetwork)
@@ -676,7 +765,11 @@ TEST(Convolution1dApi, RaggedGroupedAndDepthwiseWeightGeometryUsesTrailingChanne
                                      .build();
     EXPECT_EQ(grouped.architectureJson().at("parameters").at("weights").at("shape"), json::array({12, 2, 3}));
     ASSERT_TRUE(grouped.getRaggedFeatureOutput().has_value());
-    EXPECT_EQ(grouped.getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{40, 12}));
+    EXPECT_EQ(grouped.getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{20, 12}));
+    EXPECT_EQ(grouped.getRaggedFeatureOutput()->getDescriptorForPlacement(2).getValuesDimensions(),
+              (vector<uint64_t>{40, 12}));
+    EXPECT_EQ(grouped.getRaggedFeatureOutput()->getDescriptorForPlacement(7).getValuesDimensions(),
+              (vector<uint64_t>{140, 12}));
 
     Api::Network depthwiseNetwork("raggedConv1dDepthwise");
     Api::RaggedTensor depthwiseInput = Api::RaggedNetworkInput::Builder()
@@ -685,9 +778,7 @@ TEST(Convolution1dApi, RaggedGroupedAndDepthwiseWeightGeometryUsesTrailingChanne
                                            .valuesDataType(DataType::BF16)
                                            .offsetsDataType(DataType::UINT32)
                                            .trailingDimensions({8})
-                                           .maxTotalValues(40)
                                            .maxValuesPerRow(20)
-                                           .batchSize(2)
                                            .build();
     Api::Convolution1d depthwise = Api::Convolution1d::Builder()
                                        .network(depthwiseNetwork)
@@ -701,7 +792,11 @@ TEST(Convolution1dApi, RaggedGroupedAndDepthwiseWeightGeometryUsesTrailingChanne
                                        .build();
     EXPECT_EQ(depthwise.architectureJson().at("parameters").at("weights").at("shape"), json::array({8, 1, 5}));
     ASSERT_TRUE(depthwise.getRaggedFeatureOutput().has_value());
-    EXPECT_EQ(depthwise.getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{40, 8}));
+    EXPECT_EQ(depthwise.getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{20, 8}));
+    EXPECT_EQ(depthwise.getRaggedFeatureOutput()->getDescriptorForPlacement(2).getValuesDimensions(),
+              (vector<uint64_t>{40, 8}));
+    EXPECT_EQ(depthwise.getRaggedFeatureOutput()->getDescriptorForPlacement(7).getValuesDimensions(),
+              (vector<uint64_t>{140, 8}));
     EXPECT_EQ(depthwise.getRaggedFeatureOutput()->getOffsets(), depthwiseInput.getOffsets());
     EXPECT_EQ(depthwise.getRaggedFeatureOutput()->getMaxValuesPerRow(), 20u);
 }
@@ -731,9 +826,7 @@ TEST(Convolution1dApi, RaggedPublicLayerLowersToQualifiedCausalBackendForwardAnd
                                          .valuesDataType(DataType::FP32)
                                          .offsetsDataType(DataType::UINT32)
                                          .trailingDimensions({inputChannels})
-                                         .maxTotalValues(maxTotalValues)
                                          .maxValuesPerRow(maxValuesPerRow)
-                                         .batchSize(batchSize)
                                          .build();
     Api::GradientRivet inputRivet =
         Api::GradientRivet::Builder().network(network).tensor(networkInput.getValues()).build();
@@ -916,9 +1009,7 @@ TEST(Convolution1dApi, RaggedSerializationRoundTripPreservesExactCapacityContrac
                                       .valuesDataType(DataType::FP32)
                                       .offsetsDataType(DataType::UINT32)
                                       .trailingDimensions({8})
-                                      .maxTotalValues(96)
                                       .maxValuesPerRow(48)
-                                      .batchSize(3)
                                       .build();
         Api::Convolution1d conv = Api::Convolution1d::Builder()
                                       .network(network)
@@ -967,11 +1058,11 @@ TEST(Convolution1dApi, RaggedSerializationRoundTripPreservesExactCapacityContrac
         EXPECT_EQ(loadedConv->getPaddingMode(), Api::Convolution1dPaddingMode::CAUSAL);
         EXPECT_EQ(loadedConv->getStride(), 1u);
         EXPECT_TRUE(loadedConv->getHasBias());
-        EXPECT_EQ(loadedConv->getRaggedFeatureInput()->getValuesDimensions(), (vector<uint64_t>{96, 8}));
-        EXPECT_EQ(loadedConv->getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{96, 12}));
+        EXPECT_EQ(loadedConv->getRaggedFeatureInput()->getValuesDimensions(), (vector<uint64_t>{48, 8}));
+        EXPECT_EQ(loadedConv->getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{48, 12}));
         EXPECT_EQ(loadedConv->getRaggedFeatureInput()->getOffsets(), loadedConv->getRaggedFeatureOutput()->getOffsets());
-        EXPECT_EQ(loadedConv->getRaggedFeatureInput()->getBatchSize(), 3u);
-        EXPECT_EQ(loadedConv->getRaggedFeatureInput()->getMaxTotalValues(), 96u);
+        EXPECT_EQ(loadedConv->getRaggedFeatureInput()->getValuesDimensions().front(), 48u);
+        EXPECT_EQ(loadedConv->getRaggedFeatureInput()->getOffsetsDimensions(), (vector<uint64_t>{1}));
         ASSERT_TRUE(loadedConv->getRaggedFeatureInput()->hasMaxValuesPerRow());
         ASSERT_TRUE(loadedConv->getRaggedFeatureOutput()->hasMaxValuesPerRow());
         EXPECT_EQ(loadedConv->getRaggedFeatureInput()->getMaxValuesPerRow(), 48u);
@@ -1004,9 +1095,7 @@ TEST(Convolution1dApi, RaggedSerializationRejectsMissingCapacityMetadata) {
                                   .valuesDataType(DataType::FP32)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({4})
-                                  .maxTotalValues(32)
                                   .maxValuesPerRow(16)
-                                  .batchSize(2)
                                   .build();
     Api::Convolution1d conv = Api::Convolution1d::Builder()
                                   .network(network)
@@ -1028,7 +1117,7 @@ TEST(Convolution1dApi, RaggedSerializationRejectsMissingCapacityMetadata) {
     EXPECT_THROW(Api::Convolution1d::deserialize(archiveReader, missingOutputCapacity, &network), std::runtime_error);
 
     json oldNestedRaggedMetadata = conv.architectureJson();
-    oldNestedRaggedMetadata.at("ragged_input")["version"] = "1.0.0";
+    oldNestedRaggedMetadata.at("ragged_input")["version"] = "9.0.0";
     EXPECT_THROW(Api::Convolution1d::deserialize(archiveReader, oldNestedRaggedMetadata, &network), std::runtime_error);
 }
 
@@ -1038,8 +1127,8 @@ TEST(Convolution1dApi, RaggedPlacedSaveLoadRestoresStateAndTrainingExecution) {
         GTEST_SKIP() << "CUDA device required for ragged Convolution1d save/load execution test.";
 
     constexpr uint32_t batchSize = 3;
-    constexpr uint64_t maxTotalValues = 16;
     constexpr uint64_t maxValuesPerRow = 6;
+    constexpr uint64_t maxTotalValues = batchSize * maxValuesPerRow;
     constexpr uint64_t activeValues = 12;
     constexpr uint64_t activeMaxRowLength = 5;
     constexpr uint64_t inputChannels = 4;
@@ -1059,9 +1148,7 @@ TEST(Convolution1dApi, RaggedPlacedSaveLoadRestoresStateAndTrainingExecution) {
                                       .valuesDataType(DataType::FP32)
                                       .offsetsDataType(DataType::UINT32)
                                       .trailingDimensions({inputChannels})
-                                      .maxTotalValues(maxTotalValues)
                                       .maxValuesPerRow(maxValuesPerRow)
-                                      .batchSize(batchSize)
                                       .build();
         Api::Convolution1d conv = Api::Convolution1d::Builder()
                                       .network(network)

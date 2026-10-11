@@ -172,6 +172,11 @@ class Tensor {
         THOR_THROW_IF_FALSE(!uninitialized());
         return descriptor.getDimensions();
     }
+    // The reference is valid only while this Tensor handle is alive and unmodified.
+    const std::vector<uint64_t>& getDimensionsRef() const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        return descriptor.getDimensionsRef();
+    }
     uint32_t getNumDimensions() const {
         THOR_THROW_IF_FALSE(!uninitialized());
         return descriptor.getNumDimensions();

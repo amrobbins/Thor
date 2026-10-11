@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Expression/RaggedExpression.h"
 
@@ -204,6 +205,7 @@ ThorImplementation::DynamicExpression buildRaggedConvolution1dExpression(
     DataType computeDataType,
     const RaggedTensor &featureInput,
     const RaggedTensor &featureOutput,
+    uint64_t placementBatchSize,
     shared_ptr<Thor::Activation> activation) {
     using ThorImplementation::DataType;
     using ThorImplementation::DynamicExpression;
@@ -213,7 +215,7 @@ ThorImplementation::DynamicExpression buildRaggedConvolution1dExpression(
 
     const DataType storageDType = featureInput.getValuesDataType();
     RaggedExpression input =
-        RaggedExpression::input("feature_input", "feature_offsets", featureInput.getDescriptor());
+        RaggedExpression::input("feature_input", "feature_offsets", featureInput.getDescriptorForPlacement(placementBatchSize));
     Expression filter = Expression::input("weights", storageDType, storageDType);
     RaggedExpression output = input.causalConv1d(filter,
                                                   featureOutput.getTrailingDimensions().front(),
@@ -229,7 +231,7 @@ ThorImplementation::DynamicExpression buildRaggedConvolution1dExpression(
     if (activation != nullptr)
         output = activation->toRaggedExpression(output);
 
-    if (output.getDescriptor() != featureOutput.getDescriptor()) {
+    if (output.getDescriptor() != featureOutput.getDescriptorForPlacement(placementBatchSize)) {
         throw runtime_error("Ragged Convolution1d expression output descriptor does not match its API output.");
     }
 
@@ -274,7 +276,7 @@ Convolution1d Convolution1d::Builder::build() {
         }
         if (ragged.getValuesDimensions().size() != 2 || ragged.getTrailingDimensions().size() != 1) {
             throw invalid_argument(
-                "Convolution1d(RaggedTensor) currently requires packed values shaped [max_total_values, channels].");
+                "Convolution1d(RaggedTensor) requires logical values shaped [M, channels].");
         }
         if (_stride.value() != 1)
             throw invalid_argument("Convolution1d(RaggedTensor) currently supports only stride=1.");
@@ -369,7 +371,7 @@ Convolution1d Convolution1d::Builder::build() {
     convolution1d.initialized = true;
     if (useRagged) {
         const RaggedTensor &raggedInput = convolution1d.raggedFeatureInput.value();
-        Tensor outputValues(dataType, {raggedInput.getMaxTotalValues(), convolution1d.numOutputChannels});
+        Tensor outputValues(dataType, {raggedInput.getMaxValuesPerRow(), convolution1d.numOutputChannels});
         convolution1d.featureOutputs.push_back(outputValues);
         convolution1d.raggedFeatureOutput = raggedInput.withValues(outputValues);
         convolution1d.outputTensorFromInputTensor[raggedInput.getValues()] = outputValues;
@@ -539,6 +541,31 @@ shared_ptr<ThorImplementation::Layer> Convolution1d::stamp(ThorImplementation::T
 
     if (raggedFeatureInput.has_value()) {
         THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
+        const bool structuralPort = connectingApiTensor == raggedFeatureInput->getRowPartitionToken();
+        ThorImplementation::RaggedTensorDescriptor physicalInput;
+        if (structuralPort) {
+            // Conv1D explicitly requires DEVICE_OFFSETS. On this port, B comes
+            // from the actual [B+1] offsets descriptor, not from a packed-values
+            // carrier or from serialized model capacity.
+            const auto offsets = SegmentedPrimitivePlacementDetail::physicalDescriptorForStamp(
+                drivingLayer, "Convolution1d");
+            const auto dims = offsets.getDimensions();
+            if (offsets.getDataType() != raggedFeatureInput->getOffsetsDataType() ||
+                dims.size() != 1 || dims.front() < 2) {
+                throw runtime_error("Convolution1d requires a physical [B+1] offsets driver.");
+            }
+            physicalInput = raggedFeatureInput->getDescriptorForPlacement(dims.front() - 1);
+            if (offsets != physicalInput.getOffsetsDescriptor())
+                throw runtime_error("Convolution1d physical offsets disagree with runtime placement.");
+            if (const auto managed = SegmentedPrimitivePlacementDetail::rowPartitionDescriptorForStamp(drivingLayer);
+                managed.has_value() && managed.value() != physicalInput.getRowPartition()) {
+                throw runtime_error("Convolution1d managed partition disagrees with runtime placement.");
+            }
+        } else {
+            physicalInput = SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+                raggedFeatureInput.value(), drivingLayer, "Convolution1d");
+        }
+        const uint64_t placementBatchSize = physicalInput.getBatchSize();
         const uint64_t inputElementsPerValue = raggedFeatureInput->getTrailingDimensions().front();
         const uint64_t outputElementsPerValue = raggedFeatureOutput->getTrailingDimensions().front();
         auto physicalConvolution1d = make_shared<ThorImplementation::RaggedCustomLayer>(
@@ -549,13 +576,14 @@ shared_ptr<ThorImplementation::Layer> Convolution1d::stamp(ThorImplementation::T
                                                computeDataType,
                                                raggedFeatureInput.value(),
                                                raggedFeatureOutput.value(),
+                                               placementBatchSize,
                                                activation),
             vector<string>{"feature_input", "feature_offsets"},
             vector<string>{"feature_output"},
             placement,
             physicalParameters,
             inferenceOnly,
-            raggedFeatureInput->getMaxTotalValues(),
+            physicalInput.getMaxTotalValues(),
             vector<uint64_t>{inputElementsPerValue},
             vector<uint64_t>{outputElementsPerValue},
             vector<uint32_t>{0},
@@ -718,10 +746,10 @@ void Convolution1d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader,
     if (convolution1d.computeDataType == DataType::TF32 && convolution1d.featureInputs.front().getDataType() != DataType::FP32)
         throw runtime_error("Convolution1d serialized TF32 compute requires FP32 input/weights/output storage.");
 
-    for (const json &outputJson : j.at("outputs"))
-        convolution1d.featureOutputs.push_back(Tensor::deserialize(outputJson, archiveReader.get()));
-    if (convolution1d.featureOutputs.size() != 1)
+    if (!j.at("outputs").is_array() || j.at("outputs").size() != 1)
         throw runtime_error("Convolution1d deserialize expected exactly one feature output.");
+    if (!useRagged)
+        convolution1d.featureOutputs.push_back(Tensor::deserialize(j.at("outputs").at(0), archiveReader.get()));
 
     if (useRagged) {
         if (!j.contains("ragged_input") || !j.at("ragged_input").is_object() ||
@@ -730,9 +758,11 @@ void Convolution1d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader,
         }
         const json &raggedInputJson = j.at("ragged_input");
         const json &raggedOutputJson = j.at("ragged_output");
-        if (raggedInputJson.at("version").get<string>() != "1.1.0" ||
-            raggedOutputJson.at("version").get<string>() != "1.1.0") {
-            throw runtime_error("Ragged Convolution1d 1.0.0 requires RaggedTensor 1.1.0 metadata.");
+        const string inputRaggedVersion = raggedInputJson.at("version").get<string>();
+        const string outputRaggedVersion = raggedOutputJson.at("version").get<string>();
+        if ((inputRaggedVersion != "1.0.0" && inputRaggedVersion != "1.1.0") ||
+            (outputRaggedVersion != "1.0.0" && outputRaggedVersion != "1.1.0")) {
+            throw runtime_error("Ragged Convolution1d has an unsupported historical RaggedTensor grammar.");
         }
         if (!raggedInputJson.contains("max_values_per_row") || !raggedOutputJson.contains("max_values_per_row")) {
             throw runtime_error("Ragged Convolution1d 1.0.0 requires max_values_per_row on both input and output metadata.");
@@ -754,7 +784,6 @@ void Convolution1d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader,
         const auto validateTensorMetadata = [](const json &tensorJson, const Tensor &tensor, const string &fieldName) {
             if (tensorJson.at("version").get<string>() != "1.0.0" ||
                 tensorJson.at("id").get<uint64_t>() != tensor.getOriginalId() ||
-                tensorJson.at("dimensions").get<vector<uint64_t>>() != tensor.getDimensions() ||
                 tensorJson.at("data_type").get<DataType>() != tensor.getDataType()) {
                 throw runtime_error("Ragged Convolution1d serialized " + fieldName + " tensor metadata is inconsistent.");
             }
@@ -767,12 +796,13 @@ void Convolution1d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader,
             throw runtime_error("Ragged Convolution1d serialized ragged values must match its primary input/output tensors.");
         }
         validateTensorMetadata(raggedInputJson.at("values"), convolution1d.featureInputs.front(), "input values");
-        validateTensorMetadata(raggedOutputJson.at("values"), convolution1d.featureOutputs.front(), "output values");
 
         const uint64_t inputOffsetsId = raggedInputJson.at("offsets").at("id").get<uint64_t>();
         const uint64_t outputOffsetsId = raggedOutputJson.at("offsets").at("id").get<uint64_t>();
-        if (inputOffsetsId != outputOffsetsId)
-            throw runtime_error("Ragged Convolution1d serialized output must preserve the exact input offsets tensor.");
+        if (inputOffsetsId != outputOffsetsId ||
+            raggedInputJson.at("offsets").at("data_type").get<DataType>() !=
+                raggedOutputJson.at("offsets").at("data_type").get<DataType>())
+            throw runtime_error("Ragged Convolution1d serialized output must preserve the exact input partition identity and dtype.");
         Tensor inputOffsets = network->getApiTensorByOriginalId(inputOffsetsId);
         validateTensorMetadata(raggedInputJson.at("offsets"), inputOffsets, "input offsets");
         validateTensorMetadata(raggedOutputJson.at("offsets"), inputOffsets, "output offsets");
@@ -782,14 +812,21 @@ void Convolution1d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader,
         if (inputMaxValuesPerRow == 0 || outputMaxValuesPerRow != inputMaxValuesPerRow)
             throw runtime_error("Ragged Convolution1d serialized output must preserve max_values_per_row exactly.");
 
-        RaggedTensor raggedInput(convolution1d.featureInputs.front(), inputOffsets, inputMaxValuesPerRow);
-        if (raggedInput.getBatchSize() != raggedInputJson.at("batch_size").get<uint64_t>() ||
-            raggedInput.getMaxTotalValues() != raggedInputJson.at("max_total_values").get<uint64_t>()) {
-            throw runtime_error("Ragged Convolution1d serialized input metadata does not match reconstructed tensors.");
+        const auto inputDims = convolution1d.featureInputs.front().getDimensions();
+        const auto archivedInputDims = raggedInputJson.at("values").at("dimensions").get<vector<uint64_t>>();
+        const auto archivedInputOffsetsDims = raggedInputJson.at("offsets").at("dimensions").get<vector<uint64_t>>();
+        if (inputDims.size() != 2 || inputDims.front() != inputMaxValuesPerRow ||
+            inputOffsets.getDimensions() != vector<uint64_t>{1} ||
+            archivedInputDims.size() != 2 || archivedInputDims.front() == 0 ||
+            archivedInputDims[1] != inputDims[1] ||
+            archivedInputOffsetsDims.size() != 1 || archivedInputOffsetsDims.front() == 0) {
+            throw runtime_error("Ragged Convolution1d input semantic M, partition or trailing geometry is inconsistent.");
         }
+        RaggedTensor raggedInput = RaggedTensor::logical(convolution1d.featureInputs.front(),
+                                                                  inputOffsets, inputMaxValuesPerRow);
         if (raggedInput.getValuesDimensions().size() != 2 || raggedInput.getTrailingDimensions().size() != 1 ||
             raggedInput.getTrailingDimensions().front() == 0) {
-            throw runtime_error("Ragged Convolution1d serialized input values must be [max_total_values, channels].");
+            throw runtime_error("Ragged Convolution1d serialized input values must be [M, channels].");
         }
         if (!supportedRaggedConvolutionStorageType(raggedInput.getValuesDataType()))
             throw runtime_error("Ragged Convolution1d serialized input storage must be FP16, BF16, or FP32.");
@@ -798,17 +835,27 @@ void Convolution1d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader,
         if (inputChannels % convolution1d.groups != 0 || convolution1d.numOutputChannels % convolution1d.groups != 0)
             throw runtime_error("Ragged Convolution1d serialized grouped channel geometry is invalid.");
 
-        Tensor outputValues = convolution1d.featureOutputs.front();
-        if (outputValues.getDataType() != raggedInput.getValuesDataType() ||
-            outputValues.getDimensions() != vector<uint64_t>{raggedInput.getMaxTotalValues(), convolution1d.numOutputChannels}) {
-            throw runtime_error("Ragged Convolution1d serialized output values descriptor is inconsistent with its input/capacity geometry.");
+        const auto &outputJson = j.at("outputs").at(0);
+        const auto archivedOutputDims = outputJson.at("dimensions").get<vector<uint64_t>>();
+        const auto archivedRaggedOutputDims = raggedOutputJson.at("values").at("dimensions").get<vector<uint64_t>>();
+        const auto archivedOutputOffsetsDims = raggedOutputJson.at("offsets").at("dimensions").get<vector<uint64_t>>();
+        if (archivedOutputDims.size() != 2 || archivedRaggedOutputDims.size() != 2 ||
+            archivedOutputDims.front() == 0 || archivedRaggedOutputDims.front() == 0 ||
+            archivedOutputOffsetsDims.size() != 1 || archivedOutputOffsetsDims.front() == 0 ||
+            archivedOutputDims[1] != convolution1d.numOutputChannels ||
+            archivedRaggedOutputDims[1] != convolution1d.numOutputChannels ||
+            outputJson.at("id").get<uint64_t>() != raggedOutputJson.at("values").at("id").get<uint64_t>() ||
+            outputJson.at("data_type").get<DataType>() != raggedInput.getValuesDataType() ||
+            raggedOutputJson.at("values").at("data_type").get<DataType>() != raggedInput.getValuesDataType()) {
+            throw runtime_error("Ragged Convolution1d output identity, dtype or trailing geometry is inconsistent.");
         }
+        Tensor outputValues = Tensor::deserializeWithDimensions(
+            outputJson, {inputMaxValuesPerRow, convolution1d.numOutputChannels}, archiveReader.get());
+        convolution1d.featureOutputs.push_back(outputValues);
+        // The ragged output is reconstructed only after its semantic [M, channels]
+        // tensor exists. Never access featureOutputs.front() before this point.
+        validateTensorMetadata(raggedOutputJson.at("values"), outputValues, "output values");
         RaggedTensor raggedOutput = raggedInput.withValues(outputValues);
-        if (raggedOutputJson.at("batch_size").get<uint64_t>() != raggedOutput.getBatchSize() ||
-            raggedOutputJson.at("max_total_values").get<uint64_t>() != raggedOutput.getMaxTotalValues() ||
-            outputMaxValuesPerRow != raggedOutput.getMaxValuesPerRow()) {
-            throw runtime_error("Ragged Convolution1d serialized output metadata does not match the reconstructed output.");
-        }
 
         convolution1d.raggedFeatureInput = raggedInput;
         convolution1d.raggedFeatureOutput = raggedOutput;

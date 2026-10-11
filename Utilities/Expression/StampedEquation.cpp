@@ -10,6 +10,7 @@
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/MatmulScalarKernel.h"
+#include "Utilities/Expression/PackedLayerNormBackwardKernel.h"
 #include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
 #include "Utilities/Expression/SegmentedBroadcastKernel.h"
 #include "Utilities/TensorOperations/Ragged/PaddedRaggedSequence.h"
@@ -505,6 +506,53 @@ CudnnLayerNormDescriptor CompiledLayerNorm::descriptorFor(const Tensor& inputTen
     descriptor.training = false;
     descriptor.debugName = debug_name;
     descriptor.validateForward();
+    return descriptor;
+}
+
+DataType CompiledLayerNormBackward::outputDTypeFor(ExprOp op) const {
+    switch (op) {
+        case ExprOp::LAYERNORM_BACKWARD_X: return dx_dtype;
+        case ExprOp::LAYERNORM_BACKWARD_SCALE: return dscale_dtype;
+        case ExprOp::LAYERNORM_BACKWARD_BIAS: return dbias_dtype;
+        default: throw std::runtime_error("Expected LayerNorm backward output route.");
+    }
+}
+
+CudnnLayerNormDescriptor CompiledLayerNormBackward::descriptorFor(const Tensor& input,
+                                                                  const Tensor& scale,
+                                                                  const Tensor& dy,
+                                                                  const Tensor& dx,
+                                                                  const Tensor& dscale,
+                                                                  const Tensor& dbias) const {
+    const std::vector<uint64_t> dims = input.getDimensions();
+    if (dims.size() != 2 || dims[1] != normalized_feature_count ||
+        dy.getDimensions() != dims || dx.getDimensions() != dims) {
+        throw std::runtime_error("LayerNorm backward x/dY/dX must be rank-2 [outer,hidden] with identical shape.");
+    }
+    const std::vector<uint64_t> affine_dims{normalized_feature_count};
+    if (scale.getDimensions() != affine_dims || dscale.getDimensions() != affine_dims ||
+        dbias.getDimensions() != affine_dims) {
+        throw std::runtime_error("LayerNorm backward affine tensors must have shape [hidden].");
+    }
+    if (input.getDataType() != input_dtype || dy.getDataType() != dy_dtype ||
+        dx.getDataType() != dx_dtype || scale.getDataType() != scale_dtype ||
+        dscale.getDataType() != dscale_dtype || dbias.getDataType() != dbias_dtype) {
+        throw std::runtime_error("LayerNorm backward tensor dtype does not match compiled metadata.");
+    }
+    if (dy_dtype != input_dtype) {
+        throw std::runtime_error("LayerNorm backward cuDNN graph currently requires matching dY and x dtypes.");
+    }
+    CudnnLayerNormDescriptor descriptor;
+    descriptor.outerSize = dims[0];
+    descriptor.normalizedFeatureCount = normalized_feature_count;
+    descriptor.inputDataType = input_dtype;
+    descriptor.outputDataType = dy_dtype;
+    descriptor.parameterDataType = scale_dtype;
+    descriptor.computeDataType = compute_dtype;
+    descriptor.epsilon = static_cast<float>(epsilon);
+    descriptor.training = true;
+    descriptor.debugName = debug_name;
+    descriptor.validateBackward();
     return descriptor;
 }
 
@@ -4570,10 +4618,11 @@ const CudnnLayerNormExecutablePlan& StampedLayerNorm::forwardExecutableForOuter(
     return iter->second;
 }
 
-void StampedLayerNorm::prepareForwardExecutableFamily() {
+void StampedLayerNorm::prepareForwardExecutableFamily(bool training) {
     std::unordered_map<uint64_t, CudnnLayerNormExecutablePlan> prepared;
     uint64_t max_workspace_bytes = 0;
     auto prepare_descriptor = [&](CudnnLayerNormDescriptor descriptor) {
+        descriptor.training = training;
         CudnnLayerNormExecutablePlan plan = CudnnLayerNorm::instance().prepareForward(descriptor, stream);
         max_workspace_bytes = std::max(max_workspace_bytes, plan.workspaceBytes());
         const uint64_t outer = plan.descriptor().outerSize;
@@ -4617,11 +4666,12 @@ void StampedLayerNorm::prepareForwardExecutableFamily() {
         throw std::runtime_error("Stamped LayerNorm prepared an empty executable family.");
     }
     forward_executable_plans = std::move(prepared);
+    prepared_training_forward = training;
     ensureRmsNormExecutionWorkspace(
         workspace,
         input.getPlacement(),
         max_workspace_bytes,
-        "layernorm_forward",
+        training ? "layernorm_training_forward" : "layernorm_forward",
         "input=" + input.getDescriptor().toString() + " packed_capacity=" +
             std::to_string(compiled_layer_norm->packed_row_capacity));
 }
@@ -4632,15 +4682,20 @@ StampedLayerNorm::StampedLayerNorm(std::shared_ptr<CompiledLayerNorm> compiled,
                                    Tensor bias,
                                    Tensor output,
                                    const Stream& stream,
-                                   std::optional<Tensor> row_partition_offsets)
+                                   std::optional<Tensor> row_partition_offsets,
+                                   std::shared_ptr<LayerNormForwardState> forward_state)
     : compiled_layer_norm(std::move(compiled)),
       input(std::move(input)),
       scale(std::move(scale)),
       bias(std::move(bias)),
       row_partition_offsets(std::move(row_partition_offsets)),
       output(std::move(output)),
-      stream(stream) {
+      stream(stream),
+      forward_state(forward_state ? std::move(forward_state) : std::make_shared<LayerNormForwardState>()) {
     if (!compiled_layer_norm) throw std::invalid_argument("StampedLayerNorm requires a compiled stage.");
+    // Even if a caller supplies a retained state object, statistics from a
+    // different stamped executable may never authorize backward here.
+    this->forward_state->has_valid_state = false;
     const bool packed = compiled_layer_norm->packed_row_capacity != 0;
     if (packed != this->row_partition_offsets.has_value()) {
         throw std::runtime_error("LayerNorm row-partition binding does not match the compiled packed-row contract.");
@@ -4648,7 +4703,63 @@ StampedLayerNorm::StampedLayerNorm(std::shared_ptr<CompiledLayerNorm> compiled,
     if (packed) {
         packed_capacity_buckets = makeRaggedRmsNormCapacityBuckets(compiled_layer_norm->packed_row_capacity);
     }
-    prepareForwardExecutableFamily();
+    prepareForwardExecutableFamily(this->forward_state->retain_for_backward);
+    if (this->forward_state->retain_for_backward) {
+        retainForwardStateForBackward();
+    }
+}
+
+void StampedLayerNorm::retainForwardStateForBackward() {
+    // Retention is a placement-time transition: no plan construction or
+    // statistics allocation is permitted while executing a batch.
+    if (!forward_state->retain_for_backward) {
+        forward_state->has_valid_state = false;
+    }
+    if (!prepared_training_forward) {
+        prepareForwardExecutableFamily(true);
+    }
+    forward_state->retain_for_backward = true;
+    const uint64_t outer = input.getDimensions().at(0);
+    if (!forward_state->mean.isInitialized()) {
+        ScopedGpuAllocationContext allocation_context("layernorm_forward_mean");
+        forward_state->mean = Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {outer}));
+    }
+    if (!forward_state->inv_variance.isInitialized()) {
+        ScopedGpuAllocationContext allocation_context("layernorm_forward_inv_variance");
+        forward_state->inv_variance = Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {outer}));
+    }
+    if (forward_state->mean.getDimensions() != std::vector<uint64_t>{outer} ||
+        forward_state->inv_variance.getDimensions() != std::vector<uint64_t>{outer} ||
+        forward_state->mean.getPlacement() != input.getPlacement() ||
+        forward_state->inv_variance.getPlacement() != input.getPlacement() ||
+        forward_state->mean.getDataType() != DataType::FP32 ||
+        forward_state->inv_variance.getDataType() != DataType::FP32) {
+        throw std::runtime_error("LayerNorm retained statistics must be stamp-local FP32 [outer] tensors.");
+    }
+}
+
+bool StampedLayerNorm::canProvideForwardStateFor(
+    const CompiledLayerNormBackward& backward,
+    const Tensor& backward_input,
+    const Tensor& backward_scale,
+    const Tensor& backward_dy,
+    const std::optional<Tensor>& backward_row_partition_offsets) const {
+    const bool partition_matches = compiled_layer_norm->packed_row_capacity == 0
+        ? !row_partition_offsets.has_value() && !backward_row_partition_offsets.has_value()
+        : row_partition_offsets.has_value() && backward_row_partition_offsets.has_value() &&
+            tensorMatches(row_partition_offsets.value(), backward_row_partition_offsets.value());
+    return partition_matches && tensorMatches(input, backward_input) && tensorMatches(scale, backward_scale) &&
+           backward_dy.getDimensions() == output.getDimensions() &&
+           backward_dy.getDataType() == compiled_layer_norm->output_dtype &&
+           backward_dy.getPlacement() == output.getPlacement() &&
+           compiled_layer_norm->normalized_feature_count == backward.normalized_feature_count &&
+           compiled_layer_norm->packed_row_capacity == backward.packed_row_capacity &&
+           compiled_layer_norm->ragged_batch_size == backward.ragged_batch_size &&
+           compiled_layer_norm->epsilon == backward.epsilon &&
+           compiled_layer_norm->input_dtype == backward.input_dtype &&
+           compiled_layer_norm->scale_dtype == backward.scale_dtype &&
+           compiled_layer_norm->output_dtype == backward.dy_dtype &&
+           compiled_layer_norm->compute_dtype == backward.compute_dtype;
 }
 
 std::optional<uint64_t> StampedLayerNorm::runtimeLogicalFlopCount(uint64_t valid_example_count) const {
@@ -4715,7 +4826,22 @@ void StampedLayerNorm::runOn(Stream& run_stream) const {
         args.scale = scale;
         args.bias = bias;
         args.y = output;
-        CudnnLayerNorm::instance().forward(forward_executable_plans.begin()->second, args, workspace, run_stream);
+        const CudnnLayerNormExecutablePlan& plan = forward_executable_plans.begin()->second;
+        if (plan.descriptor().training) {
+            if (!forward_state || !forward_state->retain_for_backward || !forward_state->mean.isInitialized() ||
+                !forward_state->inv_variance.isInitialized()) {
+                throw std::runtime_error("LayerNorm training forward was not prepared at placement time.");
+            }
+            args.mean = forward_state->mean;
+            args.invVariance = forward_state->inv_variance;
+            forward_state->has_valid_state = false;
+        }
+        CudnnLayerNorm::instance().forward(plan, args, workspace, run_stream);
+        if (plan.descriptor().training) {
+            forward_state->has_valid_state = true;
+            forward_state->packed_active_rows = 0;
+            forward_state->packed_selected_rows = 0;
+        }
         return;
     }
 
@@ -4726,8 +4852,12 @@ void StampedLayerNorm::runOn(Stream& run_stream) const {
         row_partition_offsets.value(), compiled_layer_norm->ragged_batch_size, compiled_layer_norm->packed_row_capacity);
     const uint64_t active_rows = row_partition.requireHostActiveValueCount();
     if (active_rows == 0) {
-        // Every output row is inactive, so the packed output is entirely
-        // undefined and there is no useful LayerNorm work to launch.
+        // A completed zero-active *training* forward is still a valid state
+        // for zero-affine-gradient backward. Statistics are not read for it.
+        // Do not misidentify an inference forward as a training provider.
+        forward_state->has_valid_state = prepared_training_forward && forward_state->retain_for_backward;
+        forward_state->packed_active_rows = 0;
+        forward_state->packed_selected_rows = 0;
         return;
     }
 
@@ -4745,7 +4875,137 @@ void StampedLayerNorm::runOn(Stream& run_stream) const {
     args.bias = bias;
     args.y = bucket_output;
     const CudnnLayerNormExecutablePlan& plan = forwardExecutableForOuter(selected_outer);
+    if (plan.descriptor().training) {
+        if (!forward_state || !forward_state->retain_for_backward || !forward_state->mean.isInitialized() ||
+            !forward_state->inv_variance.isInitialized()) {
+            throw std::runtime_error("Packed LayerNorm training forward was not prepared at placement time.");
+        }
+        args.mean = forward_state->mean.aliasView({selected_outer}, {1}, 0);
+        args.invVariance = forward_state->inv_variance.aliasView({selected_outer}, {1}, 0);
+        forward_state->has_valid_state = false;
+    }
     CudnnLayerNorm::instance().forward(plan, args, workspace, run_stream);
+    if (plan.descriptor().training) {
+        forward_state->packed_active_rows = active_rows;
+        forward_state->packed_selected_rows = selected_rows;
+        forward_state->has_valid_state = true;
+    }
+}
+
+StampedLayerNormBackward::StampedLayerNormBackward(
+    std::shared_ptr<CompiledLayerNormBackward> backward_compiled,
+    const Tensor& backward_input,
+    const Tensor& backward_scale,
+    const Tensor& backward_dy,
+    const Tensor& backward_dx,
+    const Tensor& backward_dscale,
+    const Tensor& backward_dbias,
+    const Stream& execution_stream,
+    std::optional<Tensor> offsets)
+    : compiled(std::move(backward_compiled)),
+      input(backward_input),
+      scale(backward_scale),
+      dY(backward_dy),
+      dX(backward_dx),
+      dScale(backward_dscale),
+      dBias(backward_dbias),
+      row_partition_offsets(std::move(offsets)),
+      stream(execution_stream),
+      outputs({dX, dScale, dBias}) {
+    if (!compiled) {
+        throw std::invalid_argument("StampedLayerNormBackward requires compiled metadata.");
+    }
+    const bool packed = compiled->packed_row_capacity != 0;
+    if (packed != row_partition_offsets.has_value()) {
+        throw std::runtime_error("LayerNorm backward row-partition binding does not match packed contract.");
+    }
+    // Validate shape/dtypes for both execution routes. The packed route uses
+    // LN-E1's active-only CUDA kernels; no cuDNN backward plan or workspace is
+    // necessary (and cuDNN would reduce over inactive bucket rows).
+    const CudnnLayerNormDescriptor descriptor = compiled->descriptorFor(input, scale, dY, dX, dScale, dBias);
+    if (packed) {
+        if (compiled->ragged_batch_size == 0 || compiled->normalized_feature_count == 0 ||
+            input.getDimensions().at(0) % compiled->packed_row_capacity != 0 ||
+            input.getDimensions().at(0) < compiled->packed_row_capacity) {
+            throw std::runtime_error("Packed LayerNorm backward requires a valid physical outer extent.");
+        }
+        return;
+    }
+    CudnnLayerNormExecutablePlan plan = CudnnLayerNorm::instance().prepareBackward(descriptor, stream);
+    const uint64_t required_workspace_bytes = plan.workspaceBytes();
+    backward_executable_plans.emplace(descriptor.outerSize, std::move(plan));
+    ensureRmsNormExecutionWorkspace(workspace,
+                                    input.getPlacement(),
+                                    required_workspace_bytes,
+                                    "layernorm_backward",
+                                    "input=" + input.getDescriptor().toString());
+}
+
+std::vector<uintptr_t> StampedLayerNormBackward::backwardExecutablePlanIds() const {
+    std::vector<uintptr_t> ids;
+    ids.reserve(backward_executable_plans.size());
+    for (const auto& [_, plan] : backward_executable_plans) {
+        ids.push_back(plan.executableId());
+    }
+    return ids;
+}
+
+bool StampedLayerNormBackward::tryLinkForwardStateFrom(const std::shared_ptr<StampedLayerNorm>& forward) {
+    if (!forward || !forward->canProvideForwardStateFor(*compiled, input, scale, dY, row_partition_offsets)) {
+        return false;
+    }
+    forward->retainForwardStateForBackward();
+    std::shared_ptr<LayerNormForwardState> state = forward->trainingForwardState();
+    if (!state || !state->retain_for_backward || !state->mean.isInitialized() ||
+        !state->inv_variance.isInitialized()) {
+        throw std::runtime_error("LayerNorm forward provider did not retain complete state.");
+    }
+    saved_forward_state = std::move(state);
+    return true;
+}
+
+void StampedLayerNormBackward::runOn(Stream& run_stream) const {
+    const auto& state = saved_forward_state;
+    if (!state || !state->has_valid_state || !state->mean.isInitialized() ||
+        !state->inv_variance.isInitialized()) {
+        throw std::runtime_error("LayerNorm backward requires statistics from its matching real training forward.");
+    }
+    if (compiled->packed_row_capacity != 0) {
+        if (!row_partition_offsets.has_value()) {
+            throw std::runtime_error("Packed LayerNorm backward is missing its original HOST_EXTENT carrier.");
+        }
+        const RowPartitionRuntime partition = RowPartitionRuntime::fromHostStateCarrier(
+            row_partition_offsets.value(), compiled->ragged_batch_size, compiled->packed_row_capacity);
+        const uint64_t active_values = partition.requireHostActiveValueCount();
+        // Multiple independently-normalized outer samples may belong to each
+        // logical packed value; the physical tensor has [capacity*outer_per_value,H].
+        const uint64_t outer_per_value = input.getDimensions().at(0) / compiled->packed_row_capacity;
+        const uint64_t active_outer = active_values * outer_per_value;
+        if (state->packed_active_rows != active_values ||
+            (active_values != 0 && state->packed_selected_rows < active_values) ||
+            (active_values == 0 && state->packed_selected_rows != 0)) {
+            throw std::runtime_error("Packed LayerNorm backward active extent differs from its retained forward.");
+        }
+        // On zero active values the forward published a valid empty marker;
+        // launch zero affine reductions without reading stale statistics/dY.
+        launchPackedLayerNormBackwardActivePrefix(input, scale, dY, state->mean, state->inv_variance,
+                                                  dX, dScale, dBias, active_outer, run_stream.getStream());
+        return;
+    }
+    const auto iter = backward_executable_plans.find(input.getDimensions().at(0));
+    if (iter == backward_executable_plans.end()) {
+        throw std::runtime_error("LayerNorm backward has no prepared stamp-local executable for this outer extent.");
+    }
+    CudnnLayerNormBackwardArgs args;
+    args.dy = dY;
+    args.x = input;
+    args.scale = scale;
+    args.mean = state->mean;
+    args.invVariance = state->inv_variance;
+    args.dx = dX;
+    args.dscale = dScale;
+    args.dbias = dBias;
+    CudnnLayerNorm::instance().backward(iter->second, args, workspace, run_stream);
 }
 
 std::vector<uintptr_t> StampedRmsNorm::executablePlanIds() const {
@@ -7370,6 +7630,31 @@ void StampedExecutionPlan::linkAttentionBackwardStatesFrom(const StampedExecutio
         if (!linked) {
             throw std::runtime_error(
                 "Attention backward stage could not find the matching retained real-forward state provider.");
+        }
+    }
+}
+
+void StampedExecutionPlan::linkLayerNormBackwardStatesFrom(const StampedExecutionPlan& forward_plan) {
+    for (const StampedExecutionStage& backward_stage : steps) {
+        if (backward_stage.kind == StampedExecutionStage::Kind::Conditional && backward_stage.conditional != nullptr) {
+            const StampedConditional& forward_conditional = retainedStateConditional(forward_plan, forward_plan.steps);
+            backward_stage.conditional->thenPlan().linkLayerNormBackwardStatesFrom(forward_conditional.thenPlan());
+            backward_stage.conditional->elsePlan().linkLayerNormBackwardStatesFrom(forward_conditional.elsePlan());
+            continue;
+        }
+        if (backward_stage.kind != StampedExecutionStage::Kind::LayerNormBackward ||
+            backward_stage.layer_norm_backward == nullptr) continue;
+        bool linked = false;
+        for (const StampedExecutionStage& forward_stage : forward_plan.steps) {
+            if (forward_stage.kind != StampedExecutionStage::Kind::LayerNorm || forward_stage.layer_norm == nullptr) continue;
+            if (backward_stage.layer_norm_backward->tryLinkForwardStateFrom(forward_stage.layer_norm)) {
+                linked = true;
+                break;
+            }
+        }
+        if (!linked) {
+            throw std::runtime_error(
+                "LayerNorm backward could not find its matching real training-forward state provider.");
         }
     }
 }

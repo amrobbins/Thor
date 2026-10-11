@@ -65,8 +65,6 @@ def test_r10o_binary_accuracy_constructs_from_same_partition_ragged_tokens(offse
         "predictions",
         thor.DataType.fp16,
         [1],
-        batch_size=4,
-        max_total_values=9,
         max_values_per_row=4,
         offsets_data_type=offsets_dtype,
     )
@@ -89,10 +87,12 @@ def test_r10o_binary_accuracy_constructs_from_same_partition_ragged_tokens(offse
 def test_r10o_binary_accuracy_rejects_different_ragged_partitions():
     net = thor.Network("r10o_binary_partition_reject")
     predictions = thor.layers.RaggedNetworkInput(
-        net, "predictions", thor.DataType.fp32, [1], batch_size=3, max_total_values=7
+        net, "predictions", thor.DataType.fp32, [1],
+        max_values_per_row=4,
     )
     labels = thor.layers.RaggedNetworkInput(
-        net, "labels", thor.DataType.uint8, [1], batch_size=3, max_total_values=7
+        net, "labels", thor.DataType.uint8, [1],
+        max_values_per_row=4,
     )
 
     with pytest.raises(ValueError, match=r"exact same row partition"):
@@ -108,15 +108,13 @@ def test_r10o_binary_accuracy_uses_active_tokens_only(offsets_dtype, np_offsets_
     import numpy as np
 
     batch_size = 4
-    capacity = 9
+    capacity = batch_size * 4
     net = thor.Network(f"r10o_binary_execute_{offsets_dtype}")
     predictions = thor.layers.RaggedNetworkInput(
         net,
         "predictions",
         thor.DataType.fp32,
         [1],
-        batch_size=batch_size,
-        max_total_values=capacity,
         max_values_per_row=4,
         offsets_data_type=offsets_dtype,
     )
@@ -152,7 +150,8 @@ def test_r10o_binary_accuracy_all_empty_reports_zero():
 
     net = thor.Network("r10o_binary_all_empty")
     predictions = thor.layers.RaggedNetworkInput(
-        net, "predictions", thor.DataType.fp32, [1], batch_size=3, max_total_values=7
+        net, "predictions", thor.DataType.fp32, [1],
+        max_values_per_row=4,
     )
     labels = thor.layers.RaggedNetworkInput(net, "labels", thor.DataType.uint8, [1], partition=predictions)
     metric = thor.metrics.BinaryAccuracy(net, predictions, labels)
@@ -160,11 +159,12 @@ def test_r10o_binary_accuracy_all_empty_reports_zero():
     placed = net.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
     physical_predictions = thor.physical.PhysicalRaggedTensor(
-        _r10o_cpu_tensor(np.full((7, 1), np.nan, dtype=np.float32), thor.DataType.fp32),
+        _r10o_cpu_tensor(np.full((3 * 4, 1), np.nan, dtype=np.float32), thor.DataType.fp32),
         _r10o_cpu_tensor(np.zeros(4, dtype=np.uint32), thor.DataType.uint32),
+        max_values_per_row=4,
     )
     outputs = placed.infer({
         "predictions": physical_predictions,
-        "labels": _r10o_cpu_tensor(np.full((7, 1), 255, dtype=np.uint8), thor.DataType.uint8),
+        "labels": _r10o_cpu_tensor(np.full((3 * 4, 1), 255, dtype=np.uint8), thor.DataType.uint8),
     })
     assert float(outputs["accuracy"].numpy().reshape(-1)[0]) == pytest.approx(0.0)

@@ -220,8 +220,6 @@ def _r10j_laplace_ragged_inputs(network, prefix="r10j_laplace"):
         f"{prefix}_location",
         thor.DataType.fp32,
         [2],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     scale = thor.layers.RaggedNetworkInput(
@@ -275,8 +273,6 @@ def test_laplace_nll_loss_r10j_rejects_per_output_and_mismatched_partition():
         "different_scale",
         thor.DataType.fp32,
         [2],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     with pytest.raises(ValueError, match=r"exact same row partition"):

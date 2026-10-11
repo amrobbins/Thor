@@ -63,16 +63,14 @@ def test_r11c_ragged_categorical_losses_match_tokenwise_class_axis_and_ignore_po
     kind, offsets_dtype, np_offsets_dtype
 ):
     batch_size = 3
-    capacity = 8
     max_values_per_row = 5
+    capacity = batch_size * max_values_per_row
     network = thor.Network(f"pytest_r11c_{kind}_{np_offsets_dtype.__name__}")
     predictions = thor.layers.RaggedNetworkInput(
         network,
         "predictions",
         thor.DataType.fp32,
         [3],
-        batch_size=batch_size,
-        max_total_values=capacity,
         max_values_per_row=max_values_per_row,
         offsets_data_type=offsets_dtype,
     )

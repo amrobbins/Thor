@@ -86,9 +86,7 @@ void bind_huber_loss(nb::module_ &losses) {
                     throw nb::value_error((loss_name + ": per_output reporting is undefined for ragged predictions").c_str());
                 if (!predictions.sharesPartitionWith(labels))
                     throw nb::value_error((loss_name + ": ragged predictions and labels must use the exact same row partition").c_str());
-                if (predictions.getBatchSize() != labels.getBatchSize() ||
-                    predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
-                    predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+                if (predictions.getValuesDimensions() != labels.getValuesDimensions())
                     throw nb::value_error((loss_name + ": ragged predictions and labels must have identical value geometry").c_str());
                 DataType effective = loss_data_type.value_or(predictions.getValuesDataType());
                 if (effective != DataType::FP16 && effective != DataType::FP32)

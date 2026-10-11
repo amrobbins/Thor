@@ -30,8 +30,6 @@ def _network(name, source_offsets_dtype=thor.DataType.uint32, indices_offsets_dt
         "source",
         thor.DataType.fp32,
         [2],
-        max_total_values=10,
-        batch_size=4,
         offsets_data_type=source_offsets_dtype,
         max_values_per_row=4,
     )
@@ -40,8 +38,6 @@ def _network(name, source_offsets_dtype=thor.DataType.uint32, indices_offsets_dt
         "indices",
         thor.DataType.uint32,
         [],
-        max_total_values=9,
-        batch_size=4,
         offsets_data_type=indices_offsets_dtype,
         max_values_per_row=3,
     )
@@ -57,7 +53,7 @@ def test_ragged_gather_uses_indices_partition_and_source_value_geometry():
     assert isinstance(output, thor.RaggedTensor)
     assert gather.get_source_input() == source
     assert gather.get_indices_input() == indices
-    assert output.values.get_dimensions() == [9, 2]
+    assert output.values.get_dimensions() == [3, 2]
     assert output.offsets == indices.offsets
     assert output.offsets != source.offsets
     assert output.max_values_per_row == 3
@@ -65,7 +61,7 @@ def test_ragged_gather_uses_indices_partition_and_source_value_geometry():
     architecture = json.loads(network.get_architecture_json())
     layer = next(layer for layer in architecture["layers"] if layer["layer_type"] == "ragged_gather")
     assert layer["ragged_output"]["offsets"]["id"] == layer["ragged_indices"]["offsets"]["id"]
-    assert layer["ragged_output"]["values"]["dimensions"] == [9, 2]
+    assert layer["ragged_output"]["values"]["dimensions"] == [3, 2]
 
     with pytest.raises(ValueError, match="UINT32 or UINT64"):
         bad_indices = thor.layers.RaggedNetworkInput(
@@ -73,8 +69,6 @@ def test_ragged_gather_uses_indices_partition_and_source_value_geometry():
             "bad_indices",
             thor.DataType.fp32,
             [],
-            max_total_values=9,
-            batch_size=4,
             max_values_per_row=3,
         )
         thor.layers.RaggedGather(network, source, bad_indices)
@@ -100,9 +94,9 @@ def test_ragged_gather_runtime_row_local_duplicates_poison_and_reuse(
     placed = network.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
     def run(active_source, source_offsets, active_indices, indices_offsets):
-        source_values = np.full((10, 2), np.nan, dtype=np.float32)
+        source_values = np.full((16, 2), np.nan, dtype=np.float32)
         source_values[: len(active_source)] = active_source
-        indices_values = np.full((9,), np.uint32(0xFFFFFFFF), dtype=np.uint32)
+        indices_values = np.full((12,), np.uint32(0xFFFFFFFF), dtype=np.uint32)
         indices_values[: len(active_indices)] = np.asarray(active_indices, dtype=np.uint32)
         return placed.infer(
             {
@@ -155,12 +149,14 @@ def test_ragged_gather_save_load_preserves_q_alias_and_accepts_new_partitions(tm
 
     placed = loaded.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
     source = (3000.0 + np.arange(20, dtype=np.float32)).reshape(10, 2)
-    indices_values = np.full((9,), np.uint32(0xFFFFFFFF), dtype=np.uint32)
+    source_values = np.full((16, 2), np.nan, dtype=np.float32)
+    source_values[: len(source)] = source
+    indices_values = np.full((12,), np.uint32(0xFFFFFFFF), dtype=np.uint32)
     indices_values[:6] = np.array([1, 0, 2, 0, 1, 0], dtype=np.uint32)
     result = placed.infer(
         {
             "source": _physical_ragged(
-                source,
+                source_values,
                 thor.DataType.fp32,
                 np.array([0, 2, 5, 8, 10], dtype=np.uint32),
                 thor.DataType.uint32,
@@ -187,8 +183,6 @@ def test_ragged_gather_accepts_shared_partition_indices_without_duplicate_offset
         "source",
         thor.DataType.fp32,
         [1],
-        max_total_values=6,
-        batch_size=3,
         max_values_per_row=3,
     )
     indices = thor.layers.RaggedNetworkInput(network, "indices", thor.DataType.uint32, [], partition=source)
@@ -197,12 +191,15 @@ def test_ragged_gather_accepts_shared_partition_indices_without_duplicate_offset
     placed = network.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
     values = np.arange(6, dtype=np.float32).reshape(6, 1) + 10
+    packed_values = np.full((9, 1), np.nan, dtype=np.float32)
+    packed_values[: len(values)] = values
     offsets = np.array([0, 2, 5, 5], dtype=np.uint32)
-    packed_indices = np.array([1, 0, 2, 0, 1, 99], dtype=np.uint32)
+    packed_indices = np.full((9,), np.uint32(0xFFFFFFFF), dtype=np.uint32)
+    packed_indices[:6] = [1, 0, 2, 0, 1, 99]
     result = placed.infer(
         {
             "source": _physical_ragged(
-                values,
+                packed_values,
                 thor.DataType.fp32,
                 offsets,
                 thor.DataType.uint32,

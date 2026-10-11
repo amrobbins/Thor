@@ -122,7 +122,7 @@ def test_mape_rejects_wrong_arity():
 
 def _ragged_pair_mape(network):
     predictions = thor.layers.RaggedNetworkInput(
-        network, "ragged_predictions", thor.DataType.fp32, [2], batch_size=3, max_total_values=8, max_values_per_row=4
+        network, "ragged_predictions", thor.DataType.fp32, [2], max_values_per_row=4
     )
     labels = thor.layers.RaggedNetworkInput(network, "ragged_labels", thor.DataType.uint8, [2], partition=predictions)
     return predictions, labels

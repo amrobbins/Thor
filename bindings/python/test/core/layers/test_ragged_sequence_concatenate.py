@@ -36,8 +36,6 @@ def _network(name: str, offsets_dtype: thor.DataType = thor.DataType.uint32):
         "left",
         thor.DataType.fp32,
         [2],
-        max_total_values=6,
-        batch_size=3,
         offsets_data_type=offsets_dtype,
         max_values_per_row=3,
     )
@@ -46,8 +44,6 @@ def _network(name: str, offsets_dtype: thor.DataType = thor.DataType.uint32):
         "right",
         thor.DataType.fp32,
         [2],
-        max_total_values=7,
-        batch_size=3,
         offsets_data_type=offsets_dtype,
         max_values_per_row=4,
     )
@@ -61,8 +57,8 @@ def test_ragged_sequence_concatenate_builds_new_partition_with_summed_capacity()
     network, left, right, _, output = _network("ragged-sequence-concatenate-structure", thor.DataType.uint64)
 
     assert isinstance(output, thor.RaggedTensor)
-    assert output.values.get_dimensions() == [13, 2]
-    assert output.offsets.get_dimensions() == [4]
+    assert output.values.get_dimensions() == [7, 2]
+    assert output.offsets.get_dimensions() == [1]
     assert output.offsets.get_data_type() == thor.DataType.uint64
     assert output.offsets != left.offsets
     assert output.offsets != right.offsets
@@ -70,7 +66,7 @@ def test_ragged_sequence_concatenate_builds_new_partition_with_summed_capacity()
     architecture = json.loads(network.get_architecture_json())
     layer = next(layer for layer in architecture["layers"] if layer["layer_type"] == "ragged_sequence_concatenate")
     assert len(layer["ragged_inputs"]) == 2
-    assert layer["ragged_output"]["values"]["dimensions"] == [13, 2]
+    assert layer["ragged_output"]["values"]["dimensions"] == [7, 2]
     assert layer["ragged_output"]["max_values_per_row"] == 7
     assert layer["ragged_output"]["offsets"]["id"] not in {
         layer["ragged_inputs"][0]["offsets"]["id"],
@@ -93,8 +89,8 @@ def test_ragged_sequence_concatenate_runtime_produces_offsets_ignores_poison_and
     placed = network.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
     def run(left_active, left_offsets, right_active, right_offsets):
-        left_values = np.full((6, 2), np.nan, dtype=np.float32)
-        right_values = np.full((7, 2), np.nan, dtype=np.float32)
+        left_values = np.full((9, 2), np.nan, dtype=np.float32)
+        right_values = np.full((12, 2), np.nan, dtype=np.float32)
         left_values[: len(left_active)] = left_active
         right_values[: len(right_active)] = right_active
         return placed.infer(
@@ -144,8 +140,8 @@ def test_ragged_sequence_concatenate_save_load_accepts_new_runtime_partitions(tm
     loaded.load(str(save_dir))
     placed = loaded.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
-    left_values = np.full((6, 2), np.nan, dtype=np.float32)
-    right_values = np.full((7, 2), np.nan, dtype=np.float32)
+    left_values = np.full((9, 2), np.nan, dtype=np.float32)
+    right_values = np.full((12, 2), np.nan, dtype=np.float32)
     left_active = (5000.0 + np.arange(8, dtype=np.float32)).reshape(4, 2)
     right_active = (6000.0 + np.arange(10, dtype=np.float32)).reshape(5, 2)
     left_values[:4] = left_active
@@ -180,8 +176,6 @@ def test_ragged_sequence_concatenate_shared_partition_uses_one_structural_input_
         "source",
         thor.DataType.fp32,
         [4],
-        max_total_values=6,
-        batch_size=2,
         max_values_per_row=3,
     )
     first = thor.layers.Slice(network, source, axis=0, start=0, length=2)

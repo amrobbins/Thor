@@ -41,17 +41,13 @@ Inputs makeInputs(Network& network,
                   DataType predictionDType = DataType::FP32,
                   DataType labelDType = DataType::FP32,
                   DataType offsetsDType = DataType::UINT32,
-                  vector<uint64_t> trailingDimensions = {1},
-                  uint32_t batchSize = 4,
-                  uint64_t maxTotalValues = 8) {
+                  vector<uint64_t> trailingDimensions = {1}) {
     RaggedTensor predictions = RaggedNetworkInput::Builder()
                                    .network(network)
                                    .name("predictions")
                                    .valuesDataType(predictionDType)
                                    .offsetsDataType(offsetsDType)
                                    .trailingDimensions(trailingDimensions)
-                                   .batchSize(batchSize)
-                                   .maxTotalValues(maxTotalValues)
                                    .maxValuesPerRow(5)
                                    .build();
     RaggedTensor labels = RaggedNetworkInput::Builder()
@@ -135,9 +131,9 @@ void runRuntimeCase(Kind kind, DataType offsetsDType, float gamma = 2.0f, float 
 
     constexpr uint32_t batchSize = 4;
     constexpr uint32_t validExamples = 3;
-    constexpr uint64_t maxTotalValues = 8;
+    constexpr uint64_t maxTotalValues = static_cast<uint64_t>(batchSize) * 5;
     Network network("ragged_r10h_runtime");
-    Inputs inputs = makeInputs(network, DataType::FP32, DataType::FP32, offsetsDType, {1}, batchSize, maxTotalValues);
+    Inputs inputs = makeInputs(network, DataType::FP32, DataType::FP32, offsetsDType, {1});
     Tensor reportedLoss = buildBatchLoss(kind, network, inputs, gamma, alpha);
     (void)NetworkOutput::Builder().network(network).name("loss").inputTensor(reportedLoss).dataType(DataType::FP32).build();
 
@@ -266,8 +262,8 @@ TEST(RaggedClassificationR10H, ReportingContractsAndExactPartition) {
     }
 
     Network network("r10h_partition");
-    RaggedTensor predictions = RaggedNetworkInput::Builder().network(network).name("p").valuesDataType(DataType::FP32).trailingDimensions({1}).batchSize(3).maxTotalValues(7).maxValuesPerRow(4).build();
-    RaggedTensor labels = RaggedNetworkInput::Builder().network(network).name("l").valuesDataType(DataType::FP32).trailingDimensions({1}).batchSize(3).maxTotalValues(7).maxValuesPerRow(4).build();
+    RaggedTensor predictions = RaggedNetworkInput::Builder().network(network).name("p").valuesDataType(DataType::FP32).trailingDimensions({1}).maxValuesPerRow(4).build();
+    RaggedTensor labels = RaggedNetworkInput::Builder().network(network).name("l").valuesDataType(DataType::FP32).trailingDimensions({1}).maxValuesPerRow(4).build();
     EXPECT_THROW((void)BinaryCrossEntropy::Builder().network(network).predictions(predictions).labels(labels).build(), invalid_argument);
     EXPECT_THROW((void)BinaryFocalLoss::Builder().network(network).predictions(predictions).labels(labels).build(), invalid_argument);
 

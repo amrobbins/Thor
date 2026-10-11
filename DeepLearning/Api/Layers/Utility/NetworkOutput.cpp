@@ -52,7 +52,7 @@ void NetworkOutput::deserialize(const json &j, Network *network) {
     networkOutput.external_ = external;
     uint64_t originalTensorId = j["feature_input"].at("id").get<uint64_t>();
     networkOutput.featureInput = network->getApiTensorByOriginalId(originalTensorId);
-    networkOutput.featureOutput = Tensor::deserialize(j["feature_output"]);
+    networkOutput.featureOutput = network->deserializeBoundarySourceTensor(j.at("feature_output"));
     networkOutput.initialized = true;
     networkOutput.addToNetwork(network);
 }

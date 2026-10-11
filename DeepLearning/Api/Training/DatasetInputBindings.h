@@ -77,10 +77,9 @@ class DatasetInputBindings {
         ThorImplementation::DataType networkInputDataType = ThorImplementation::DataType::FP32;
         std::vector<uint64_t> networkInputDimensions;
         bool dimensionsIncludeBatch = false;
-        bool raggedPlacementNeutral = false;
         ThorImplementation::DataType raggedOffsetsDataType = ThorImplementation::kDefaultRowPartitionOffsetDataType;
         std::optional<uint64_t> raggedMaxValuesPerRow;
-        std::optional<ThorImplementation::RaggedTensorDescriptor> raggedDescriptor;
+        RowPartitionId raggedPartitionId = 0;
         DatasetField field;
     };
 

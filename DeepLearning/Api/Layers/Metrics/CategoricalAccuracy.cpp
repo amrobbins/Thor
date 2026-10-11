@@ -27,9 +27,7 @@ void validateRaggedCategoricalPair(const RaggedTensor& predictions,
                                    CategoricalAccuracy::LabelType labelType) {
     if (!predictions.sharesPartitionWith(labels))
         throw runtime_error("CategoricalAccuracy ragged predictions and labels must use the exact same row partition.");
-    if (predictions.getBatchSize() != labels.getBatchSize() ||
-        predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
-        predictions.getOffsetsDataType() != labels.getOffsetsDataType() ||
+    if (predictions.getOffsetsDataType() != labels.getOffsetsDataType() ||
         predictions.hasMaxValuesPerRow() != labels.hasMaxValuesPerRow() ||
         (predictions.hasMaxValuesPerRow() && predictions.getMaxValuesPerRow() != labels.getMaxValuesPerRow())) {
         throw runtime_error("CategoricalAccuracy ragged predictions and labels partition metadata must match.");

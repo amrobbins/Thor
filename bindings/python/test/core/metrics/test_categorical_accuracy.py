@@ -236,8 +236,6 @@ def _r10o_categorical_inputs(network, offsets_dtype=thor.DataType.uint32, one_ho
         "predictions",
         thor.DataType.fp32,
         [3],
-        batch_size=4,
-        max_total_values=8,
         max_values_per_row=4,
         offsets_data_type=offsets_dtype,
     )
@@ -267,10 +265,12 @@ def test_r10o_categorical_accuracy_constructs_from_same_partition_ragged_tokens(
 def test_r10o_categorical_accuracy_rejects_different_ragged_partitions():
     net = thor.Network("r10o_cat_partition_reject")
     predictions = thor.layers.RaggedNetworkInput(
-        net, "predictions", thor.DataType.fp32, [3], batch_size=3, max_total_values=7
+        net, "predictions", thor.DataType.fp32, [3],
+        max_values_per_row=4,
     )
     labels = thor.layers.RaggedNetworkInput(
-        net, "labels", thor.DataType.uint32, [1], batch_size=3, max_total_values=7
+        net, "labels", thor.DataType.uint32, [1],
+        max_values_per_row=4,
     )
     with pytest.raises(ValueError, match=r"exact same row partition"):
         thor.metrics.CategoricalAccuracy(net, predictions, labels, thor.losses.LabelType.index, 3)
@@ -298,8 +298,8 @@ def test_r10o_categorical_index_accuracy_keeps_sequence_and_class_axes_separate(
         [1.0, 3.0, 2.0],   # class 1, wrong for label 2
     ], dtype=np.float32)
     active_labels = np.asarray([[0], [1], [1], [0], [2]], dtype=np.uint32)
-    packed_predictions = np.full((8, 3), np.nan, dtype=np.float32)
-    packed_labels = np.full((8, 1), np.uint32(99), dtype=np.uint32)
+    packed_predictions = np.full((4 * 4, 3), np.nan, dtype=np.float32)
+    packed_labels = np.full((4 * 4, 1), np.uint32(99), dtype=np.uint32)
     packed_predictions[:5] = active_predictions
     packed_labels[:5] = active_labels
     offsets_np = np.asarray([0, 2, 2, 5, 5], dtype=np.dtype(np_offsets_dtype))
@@ -337,8 +337,8 @@ def test_r10o_categorical_one_hot_accuracy_argmaxes_each_active_token():
         [0.0, 0.9, 0.1],
         [0.0, 0.0, 1.0],
     ], dtype=np.float32)
-    packed_predictions = np.full((8, 3), np.nan, dtype=np.float32)
-    packed_labels = np.full((8, 3), np.nan, dtype=np.float32)
+    packed_predictions = np.full((4 * 4, 3), np.nan, dtype=np.float32)
+    packed_labels = np.full((4 * 4, 3), np.nan, dtype=np.float32)
     packed_predictions[:4] = active_predictions
     packed_labels[:4] = active_labels
     offsets_np = np.asarray([0, 1, 1, 4, 4], dtype=np.uint32)

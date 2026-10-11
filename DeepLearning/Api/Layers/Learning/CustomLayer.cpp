@@ -12,6 +12,7 @@
 
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 
 using namespace std;
 using json = nlohmann::json;
@@ -76,6 +77,25 @@ std::vector<Thor::CustomLayer::TensorMap> raggedValuesInterfaces(
 
 std::vector<Thor::CustomLayer::TensorMap> raggedInputValuesInterfaces(
     const std::vector<Thor::CustomLayer::RaggedTensorMap>& interfaces) {
+    // Validate the semantic row bound before the dense-values base constructor
+    // probes the expression. Otherwise incompatible M values surface as a fused
+    // broadcast error instead of an invalid ragged interface.
+    std::optional<uint64_t> semanticM;
+    for (const auto& interface : interfaces) {
+        for (const auto& [name, ragged] : interface) {
+            if (!ragged.isInitialized() || !ragged.hasMaxValuesPerRow() ||
+                ragged.getValuesDimensions().empty() ||
+                ragged.getValuesDimensions().front() != ragged.getMaxValuesPerRow() ||
+                ragged.getOffsetsDimensions() != std::vector<uint64_t>{1}) {
+                throw std::invalid_argument(
+                    "Ragged CustomLayer input '" + name + "' requires logical values [M,...] and a canonical [1] partition token.");
+            }
+            if (semanticM.has_value() && ragged.getMaxValuesPerRow() != semanticM.value()) {
+                throw std::invalid_argument("Ragged CustomLayer inputs must agree on semantic M.");
+            }
+            semanticM = ragged.getMaxValuesPerRow();
+        }
+    }
     return raggedValuesInterfaces(interfaces);
 }
 
@@ -136,7 +156,8 @@ bool generalizeBatchDependentJson(json& result,
                                   const json& batchOne,
                                   const json& batchTwo,
                                   const std::string& path,
-                                  std::string& rejectionReason) {
+                                  std::string& rejectionReason,
+                                  uint64_t firstProbeLeadingExtent) {
     if (batchOne.type() != batchTwo.type()) {
         rejectionReason = path + " changed JSON type between batch-1 and batch-2 builds.";
         return false;
@@ -189,9 +210,13 @@ bool generalizeBatchDependentJson(json& result,
                             result[it.key()][changedIndex] = std::numeric_limits<uint64_t>::max();
                             continue;
                         }
-                        if (changedIndex == 0 && oneDimension.get<uint64_t>() == 1 && twoDimension.get<uint64_t>() == 2) {
+                        if (changedIndex == 0 && oneDimension.get<uint64_t>() == firstProbeLeadingExtent &&
+                            firstProbeLeadingExtent <= std::numeric_limits<uint64_t>::max() / 2 &&
+                            twoDimension.get<uint64_t>() == 2 * firstProbeLeadingExtent) {
                             // Expression COPY_DIM is the internal symbolic reference to the source dimension at this axis.
-                            // This is valid for a strided view preserving CustomLayer's leading physical batch dimension.
+                            // The first probe has B=1: for packed ragged values its leading extent is
+                            // semantic M, whereas an ordinary dense probe uses 1. Both become
+                            // runtime-dependent placement extents, never serialized architecture.
                             result[it.key()][changedIndex] = 0;
                             continue;
                         }
@@ -205,7 +230,8 @@ bool generalizeBatchDependentJson(json& result,
                                   "batch-derived dimension from its source numel.";
                 return false;
             }
-            if (!generalizeBatchDependentJson(result[it.key()], it.value(), batchTwo.at(it.key()), path + "." + it.key(), rejectionReason))
+            if (!generalizeBatchDependentJson(result[it.key()], it.value(), batchTwo.at(it.key()), path + "." + it.key(),
+                                              rejectionReason, firstProbeLeadingExtent))
                 return false;
         }
         return true;
@@ -217,7 +243,8 @@ bool generalizeBatchDependentJson(json& result,
             return false;
         }
         for (size_t i = 0; i < batchOne.size(); ++i) {
-            if (!generalizeBatchDependentJson(result[i], batchOne[i], batchTwo[i], path + "[" + std::to_string(i) + "]", rejectionReason))
+            if (!generalizeBatchDependentJson(result[i], batchOne[i], batchTwo[i], path + "[" + std::to_string(i) + "]",
+                                              rejectionReason, firstProbeLeadingExtent))
                 return false;
         }
         return true;
@@ -281,7 +308,7 @@ CustomLayer::CustomLayer(DynamicExpression expr,
                   raggedInputValuesInterfaces(inputInterfaces),
                   raggedValuesInterfaces(outputInterfaces),
                   parameters,
-                  SerializationContract::REQUIRE_EXPRESSION_DEFINITION,
+                  SerializationContract::LAYER_PROVIDES_OWN_ARCHITECTURE,
                   usesBatchValidity,
                   requiresFullBatch,
                   nameSet(inputNames),
@@ -296,6 +323,17 @@ CustomLayer::CustomLayer(DynamicExpression expr,
         throw std::invalid_argument("Ragged CustomLayer does not use placement-batch semantics; requiresFullBatch() is unsupported.");
     }
     enableRaggedInterfaces(inputInterfaces, outputInterfaces);
+    // The dense-values base constructor cannot check placement polymorphism yet:
+    // the ragged partition/M is registered only by enableRaggedInterfaces().
+    // Probe independently at B=1 and B=2 using physical B*M capacity here.
+    analyzeSerializableExpression(this->inputInterfaces.front());
+    if (serializableExpressionDefinition == nullptr) {
+        throw runtime_error(
+            "Ragged CustomLayer construction rejected because Thor could not derive a verified placement-polymorphic "
+            "ExpressionDefinition: " +
+            (serializationRejectionReason.empty() ? std::string("No serializable expression definition was supplied.")
+                                                  : serializationRejectionReason));
+    }
 }
 
 CustomLayer::CustomLayer(DynamicExpression expr,
@@ -584,9 +622,24 @@ CustomLayer::SerializationProbe CustomLayer::buildExpressionForBatch(const Tenso
                                                                        uint64_t batchSize,
                                                                        const TensorMap* outputInterface) const {
     PhysicalTensorMap fakeFeatureInputs;
+    auto fakeTensor = [&](const Tensor& tensor, bool dimensionsIncludeBatch) {
+        if (!raggedInterfacesEnabled) {
+            return makeFakePlacedTensor(tensor, batchSize, dimensionsIncludeBatch);
+        }
+        // Ragged graph values are [M,...], not [B*M,...]. For these disposable
+        // expression probes only, physicalize their leading capacity at B*M.
+        // No batch/capacity is retained in the logical interface or artifact.
+        THOR_THROW_IF_FALSE(dimensionsIncludeBatch);
+        std::vector<uint64_t> dims = tensor.getDimensions();
+        if (batchSize == 0 || dims.empty() || dims.front() > std::numeric_limits<uint64_t>::max() / batchSize) {
+            throw std::overflow_error("Ragged CustomLayer probe physical B*M extent overflow.");
+        }
+        dims.front() *= batchSize;
+        const ThorImplementation::TensorPlacement placement(ThorImplementation::TensorPlacement::MemDevices::CPU, 0);
+        return PhysicalTensor(placement, ThorImplementation::TensorDescriptor(tensor.getDataType(), dims));
+    };
     for (const auto& [name, apiTensor] : inputInterface) {
-        fakeFeatureInputs.emplace(name,
-                                  makeFakePlacedTensor(apiTensor, batchSize, inputDimensionsIncludeBatch.contains(name)));
+        fakeFeatureInputs.emplace(name, fakeTensor(apiTensor, inputDimensionsIncludeBatch.contains(name)));
     }
 
     ThorImplementation::PhysicalParameter::StorageContext fakeStorageContext(fakeFeatureInputs);
@@ -618,7 +671,7 @@ CustomLayer::SerializationProbe CustomLayer::buildExpressionForBatch(const Tenso
     if (outputInterface != nullptr) {
         for (const auto& [name, apiTensor] : *outputInterface) {
             fakeOutputs.emplace(name,
-                                makeFakePlacedTensor(apiTensor, batchSize, outputDimensionsIncludeBatch.contains(name)));
+                                fakeTensor(apiTensor, outputDimensionsIncludeBatch.contains(name)));
         }
     }
 
@@ -753,6 +806,13 @@ void CustomLayer::analyzeSerializableExpression(const SerializationProbe& batchO
             const std::vector<uint64_t>& logicalDimensions = declared->second.getDimensions();
             if (outputDimensionsIncludeBatch.contains(outputName)) {
                 expectedDimensions = logicalDimensions;
+                if (raggedInterfacesEnabled) {
+                    THOR_THROW_IF_FALSE(!expectedDimensions.empty());
+                    if (expectedDimensions.front() > std::numeric_limits<uint64_t>::max() / batchSize) {
+                        throw std::overflow_error("Ragged CustomLayer declared probe extent B*M overflows.");
+                    }
+                    expectedDimensions.front() *= batchSize;
+                }
             } else {
                 expectedDimensions.push_back(batchSize);
                 expectedDimensions.insert(expectedDimensions.end(), logicalDimensions.begin(), logicalDimensions.end());
@@ -822,7 +882,11 @@ void CustomLayer::analyzeSerializableExpression(const SerializationProbe& batchO
 
     json generalized = batchOneJson;
     std::string rejectionReason;
-    if (!generalizeBatchDependentJson(generalized, batchOneJson, batchTwoJson, "expression", rejectionReason)) {
+    const uint64_t firstProbeLeadingExtent = raggedInterfacesEnabled
+        ? inputInterfaces.front().at(inputNames.front()).getDimensions().front()
+        : 1;
+    if (!generalizeBatchDependentJson(generalized, batchOneJson, batchTwoJson, "expression", rejectionReason,
+                                      firstProbeLeadingExtent)) {
         serializationRejectionReason = std::move(rejectionReason);
         return;
     }
@@ -900,8 +964,7 @@ void CustomLayer::enableRaggedInterfaces(const std::vector<RaggedTensorMap>& rag
     emittedOutputInterface.assign(raggedInputs.size(), false);
     nextInputBindingConnectionCursorByTensorOriginalId.clear();
 
-    std::optional<uint64_t> referenceBatchSize;
-    std::optional<uint64_t> referenceMaxTotalValues;
+    std::optional<uint64_t> referenceM;
     std::optional<DataType> referenceOffsetsDataType;
     for (uint32_t interfaceIndex = 0; interfaceIndex < raggedInputs.size(); ++interfaceIndex) {
         const RaggedTensorMap& inputInterface = raggedInputs[interfaceIndex];
@@ -926,15 +989,20 @@ void CustomLayer::enableRaggedInterfaces(const std::vector<RaggedTensorMap>& rag
                     "All RaggedTensor inputs in one CustomLayer interface must share the exact same row partition.");
             }
 
-            if (!referenceBatchSize.has_value()) {
-                referenceBatchSize = ragged.getBatchSize();
-                referenceMaxTotalValues = ragged.getMaxTotalValues();
+            const std::vector<uint64_t> valuesDimensions = ragged.getValuesDimensions();
+            if (!ragged.hasMaxValuesPerRow() || valuesDimensions.empty() ||
+                valuesDimensions.front() != ragged.getMaxValuesPerRow() ||
+                ragged.getOffsetsDimensions() != std::vector<uint64_t>{1}) {
+                throw std::invalid_argument(
+                    "Ragged CustomLayer requires logical values [M,...] and a canonical [1] partition token.");
+            }
+            if (!referenceM.has_value()) {
+                referenceM = ragged.getMaxValuesPerRow();
                 referenceOffsetsDataType = ragged.getOffsetsDataType();
-            } else if (ragged.getBatchSize() != referenceBatchSize.value() ||
-                       ragged.getMaxTotalValues() != referenceMaxTotalValues.value() ||
+            } else if (ragged.getMaxValuesPerRow() != referenceM.value() ||
                        ragged.getOffsetsDataType() != referenceOffsetsDataType.value()) {
                 throw std::invalid_argument(
-                    "Ragged CustomLayer interfaces must agree on batch size, packed capacity, and offsets dtype.");
+                    "Ragged CustomLayer applications must agree on semantic M and offsets dtype.");
             }
 
             Tensor values = ragged.getValues();
@@ -957,9 +1025,9 @@ void CustomLayer::enableRaggedInterfaces(const std::vector<RaggedTensorMap>& rag
         for (const std::string& outputName : outputNames) {
             const Tensor& outputValues = outputInterfaces[interfaceIndex].at(outputName);
             if (outputValues.getDimensions().empty() ||
-                outputValues.getDimensions().front() != referenceMaxTotalValues.value()) {
+                outputValues.getDimensions().front() != referenceM.value()) {
                 throw std::invalid_argument(
-                    "Ragged CustomLayer outputs must preserve the packed-row capacity as their leading dimension.");
+                    "Ragged CustomLayer outputs must preserve semantic M as their leading dimension.");
             }
             if (!raggedOutputs.empty()) {
                 auto explicitOutput = raggedOutputs[interfaceIndex].find(outputName);
@@ -1304,8 +1372,11 @@ uint64_t CustomLayer::getFirstInstanceMemRequirementInBytes(uint32_t batchSize, 
         totalBytes += tensor.getTotalSizeInBytes();
     if (batchValidityMaskEnabled)
         totalBytes += sizeof(float);
-    if (raggedInterfacesEnabled)
-        return totalBytes;
+    // The stored tensor dimensions are logical per-example dimensions for both
+    // dense and ragged interfaces. Physical capacity is allocated per placement.
+    if (totalBytes > std::numeric_limits<uint64_t>::max() / std::max<uint32_t>(1, batchSize)) {
+        throw std::overflow_error("CustomLayer placement memory requirement overflows uint64_t.");
+    }
     return totalBytes * std::max<uint32_t>(1, batchSize);
 }
 
@@ -1314,7 +1385,6 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
                                                               std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                               Thor::Tensor connectingApiTensor,
                                                               const bool inferenceOnly) const {
-    (void)drivingLayer;
     (void)drivingApiLayer;
 
     if (!inputBindingsByTensorOriginalId.contains(connectingApiTensor.getOriginalId())) {
@@ -1342,6 +1412,46 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
         THOR_THROW_IF_FALSE(!raggedInputInterfaces.empty() && !raggedOutputInterfaces.empty());
         THOR_THROW_IF_FALSE(serializableExpressionDefinition != nullptr);
         const RaggedTensor& referenceInput = raggedInputInterfaces.front().at(inputNames.front());
+        // Stamp can be driven by any values or structural partition port, even
+        // in a multi-application layer. Resolve geometry from that *physical*
+        // connection rather than a batch size archived in the API model.
+        const RaggedTensor* drivingRaggedInput = nullptr;
+        bool structuralPort = false;
+        for (const RaggedTensorMap& application : raggedInputInterfaces) {
+            const RaggedTensor& partition = application.at(inputNames.front());
+            if (connectingApiTensor == partition.getRowPartitionToken()) {
+                drivingRaggedInput = &partition;
+                structuralPort = true;
+                break;
+            }
+            for (const std::string& name : inputNames) {
+                const RaggedTensor& candidate = application.at(name);
+                if (connectingApiTensor == candidate.getValues()) {
+                    drivingRaggedInput = &candidate;
+                    break;
+                }
+            }
+            if (drivingRaggedInput != nullptr) break;
+        }
+        if (drivingRaggedInput == nullptr) {
+            throw std::runtime_error("Ragged CustomLayer stamp has no matching logical input.");
+        }
+        const ThorImplementation::RaggedTensorDescriptor physicalDescriptor =
+            SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+                *drivingRaggedInput, drivingLayer, "Ragged CustomLayer", structuralPort);
+        const uint64_t runtimeBatch = physicalDescriptor.getBatchSize();
+        const uint64_t runtimeCapacity = physicalDescriptor.getMaxTotalValues();
+        // The implementation's declared output dimensions are physical. The
+        // API graph retains [M,...] and must not be mutated by placement.
+        for (auto& declared : declaredOutputDescriptors) {
+            if (declared.featureDimensions.empty() || !declared.dimensionsIncludeBatch) {
+                throw std::runtime_error("Ragged CustomLayer output is not a packed-values tensor.");
+            }
+            declared.featureDimensions.front() = runtimeCapacity;
+        }
+        if (physicalDescriptor.getRowPartition() != referenceInput.getDescriptorForPlacement(runtimeBatch).getRowPartition()) {
+            throw std::runtime_error("Ragged CustomLayer physical partition disagrees with the logical interface.");
+        }
         std::vector<uint64_t> inputElementsPerValue;
         std::vector<uint32_t> valuesInputPorts;
         inputElementsPerValue.reserve(inputNames.size());
@@ -1375,8 +1485,8 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
         ThorImplementation::ExpressionDefinition raggedDefinition =
             addRaggedRuntimeExtents(*serializableExpressionDefinition,
                                     kRaggedOffsetsInputName,
-                                    referenceInput.getBatchSize(),
-                                    referenceInput.getMaxTotalValues(),
+                                    runtimeBatch,
+                                    runtimeCapacity,
                                     outputNames,
                                     outputElementsPerValue,
                                     runtimeExtentSource);
@@ -1391,7 +1501,7 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
             placement,
             physicalParameters,
             inferenceOnly,
-            referenceInput.getMaxTotalValues(),
+            runtimeCapacity,
             std::move(inputElementsPerValue),
             std::move(outputElementsPerValue),
             std::move(valuesInputPorts),
@@ -1550,11 +1660,27 @@ void CustomLayer::deserialize(std::shared_ptr<thor_file::TarReader>& archiveRead
         inputInterfaces.push_back(std::move(inputInterface));
     }
 
+    const bool useRagged = j.value("use_ragged", false);
     std::vector<TensorMap> outputInterfaces;
-    for (const json& interfaceJson : j.at("output_interfaces")) {
+    for (uint32_t interfaceIndex = 0; interfaceIndex < j.at("output_interfaces").size(); ++interfaceIndex) {
+        const json& interfaceJson = j.at("output_interfaces").at(interfaceIndex);
         TensorMap outputInterface;
         for (const std::string& name : outputNames) {
-            outputInterface.emplace(name, Tensor::deserialize(interfaceJson.at(name)));
+            const json& outputJson = interfaceJson.at(name);
+            if (!useRagged) {
+                outputInterface.emplace(name, Tensor::deserialize(outputJson));
+                continue;
+            }
+            if (interfaceIndex >= inputInterfaces.size() || inputNames.empty()) {
+                throw runtime_error("Serialized ragged CustomLayer output has no authoritative logical input.");
+            }
+            const auto sourceDimensions = inputInterfaces.at(interfaceIndex).at(inputNames.front()).getDimensions();
+            auto logicalDimensions = outputJson.at("dimensions").get<std::vector<uint64_t>>();
+            if (sourceDimensions.empty() || logicalDimensions.empty() || logicalDimensions.front() == 0) {
+                throw runtime_error("Serialized ragged CustomLayer output has invalid semantic geometry.");
+            }
+            logicalDimensions.front() = sourceDimensions.front();
+            outputInterface.emplace(name, Tensor::deserializeWithDimensions(outputJson, logicalDimensions));
         }
         outputInterfaces.push_back(std::move(outputInterface));
     }
@@ -1569,7 +1695,6 @@ void CustomLayer::deserialize(std::shared_ptr<thor_file::TarReader>& archiveRead
         parameters.push_back(std::make_shared<ParameterSpecification>(std::move(parameter)));
     }
 
-    const bool useRagged = j.value("use_ragged", false);
     CustomLayer customLayer = [&]() {
         if (!useRagged) {
             return CustomLayer(DynamicExpression::fromExpressionDefinition(expressionDefinition),
@@ -1609,11 +1734,35 @@ void CustomLayer::deserialize(std::shared_ptr<thor_file::TarReader>& archiveRead
                 if (commonOffsets.has_value() && commonOffsets.value() != offsets)
                     throw runtime_error("Serialized ragged CustomLayer inputs in one application do not share offsets.");
                 commonOffsets = offsets;
-                RaggedTensor ragged(values, offsets);
-                if (ragged.getBatchSize() != tensorJson.at("batch_size").get<uint64_t>() ||
-                    ragged.getMaxTotalValues() != tensorJson.at("max_total_values").get<uint64_t>())
-                    throw runtime_error("Serialized ragged CustomLayer input metadata does not match reconstructed tensors.");
-                raggedInputInterface.emplace(name, ragged);
+                const std::string referenceVersion = tensorJson.at("version").get<std::string>();
+                if (referenceVersion != "1.0.0" && referenceVersion != "1.1.0") {
+                    throw runtime_error("Unsupported ragged CustomLayer input reference version: " + referenceVersion);
+                }
+                if (tensorJson.at("ragged_rank").get<uint32_t>() != 1) {
+                    throw runtime_error("Ragged CustomLayer input must have ragged rank one.");
+                }
+                const auto dimensions = values.getDimensions();
+                if (dimensions.empty() || offsets.getDimensions() != std::vector<uint64_t>{1}) {
+                    throw runtime_error("Serialized ragged CustomLayer input lacks semantic M or a canonical partition token.");
+                }
+                const auto& valuesJson = tensorJson.at("values");
+                const auto& offsetsJson = tensorJson.at("offsets");
+                const auto oldDimensions = valuesJson.at("dimensions").get<std::vector<uint64_t>>();
+                const auto oldOffsetsDimensions = offsetsJson.at("dimensions").get<std::vector<uint64_t>>();
+                if (oldDimensions.size() != dimensions.size() || oldDimensions.empty() ||
+                    oldOffsetsDimensions.size() != 1 || oldOffsetsDimensions.front() == 0 ||
+                    !std::equal(dimensions.begin() + 1, dimensions.end(), oldDimensions.begin() + 1) ||
+                    valuesJson.at("data_type").get<DataType>() != values.getDataType() ||
+                    offsetsJson.at("data_type").get<DataType>() != offsets.getDataType() ||
+                    (tensorJson.contains("max_values_per_row") &&
+                     tensorJson.at("max_values_per_row").get<uint64_t>() != dimensions.front())) {
+                    throw runtime_error("Serialized ragged CustomLayer input semantic metadata mismatch.");
+                }
+                if (tensorJson.at("version").get<std::string>() == "1.1.0" &&
+                    (oldDimensions.front() != dimensions.front() || oldOffsetsDimensions.front() != 1)) {
+                    throw runtime_error("Serialized ragged CustomLayer canonical input geometry mismatch.");
+                }
+                raggedInputInterface.emplace(name, RaggedTensor::logical(values, offsets, dimensions.front()));
             }
             if (!commonOffsets.has_value())
                 throw runtime_error("Serialized ragged CustomLayer application has no inputs.");
@@ -1628,11 +1777,36 @@ void CustomLayer::deserialize(std::shared_ptr<thor_file::TarReader>& archiveRead
                     throw runtime_error("Serialized ragged CustomLayer values metadata disagrees with its logical output interface.");
                 if (offsetsId != commonOffsets->getOriginalId())
                     throw runtime_error("Serialized ragged CustomLayer output must preserve its application's input offsets.");
-                RaggedTensor ragged(outputInterfaces[interfaceIndex].at(name), commonOffsets.value());
-                if (ragged.getBatchSize() != tensorJson.at("batch_size").get<uint64_t>() ||
-                    ragged.getMaxTotalValues() != tensorJson.at("max_total_values").get<uint64_t>())
-                    throw runtime_error("Serialized ragged CustomLayer output metadata does not match reconstructed tensors.");
-                raggedOutputInterface.emplace(name, ragged);
+                const std::string referenceVersion = tensorJson.at("version").get<std::string>();
+                if (referenceVersion != "1.0.0" && referenceVersion != "1.1.0") {
+                    throw runtime_error("Unsupported ragged CustomLayer output reference version: " + referenceVersion);
+                }
+                if (tensorJson.at("ragged_rank").get<uint32_t>() != 1) {
+                    throw runtime_error("Ragged CustomLayer output must have ragged rank one.");
+                }
+                const Tensor& outputValues = outputInterfaces[interfaceIndex].at(name);
+                const auto logicalDimensions = outputValues.getDimensions();
+                const auto& valuesJson = tensorJson.at("values");
+                const auto& offsetsJson = tensorJson.at("offsets");
+                const auto archivedDimensions = valuesJson.at("dimensions").get<std::vector<uint64_t>>();
+                const auto archivedOffsetsDimensions = offsetsJson.at("dimensions").get<std::vector<uint64_t>>();
+                if (logicalDimensions.empty() || archivedDimensions.size() != logicalDimensions.size() ||
+                    archivedDimensions.empty() || archivedOffsetsDimensions.size() != 1 ||
+                    archivedOffsetsDimensions.front() == 0 ||
+                    !std::equal(logicalDimensions.begin() + 1, logicalDimensions.end(), archivedDimensions.begin() + 1) ||
+                    valuesJson.at("data_type").get<DataType>() != outputValues.getDataType() ||
+                    offsetsJson.at("data_type").get<DataType>() != commonOffsets->getDataType() ||
+                    (tensorJson.contains("max_values_per_row") &&
+                     tensorJson.at("max_values_per_row").get<uint64_t>() != logicalDimensions.front())) {
+                    throw runtime_error("Serialized ragged CustomLayer output semantic metadata mismatch.");
+                }
+                if (tensorJson.at("version").get<std::string>() == "1.1.0" &&
+                    (archivedDimensions.front() != logicalDimensions.front() || archivedOffsetsDimensions.front() != 1 ||
+                     j.at("output_interfaces").at(interfaceIndex).at(name).at("dimensions").at(0) != logicalDimensions.front())) {
+                    throw runtime_error("Serialized ragged CustomLayer canonical output geometry mismatch.");
+                }
+                raggedOutputInterface.emplace(
+                    name, RaggedTensor::logical(outputValues, commonOffsets.value(), logicalDimensions.front()));
             }
             raggedInputs.push_back(std::move(raggedInputInterface));
             raggedOutputs.push_back(std::move(raggedOutputInterface));

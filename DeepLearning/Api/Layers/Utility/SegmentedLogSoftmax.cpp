@@ -21,6 +21,10 @@ SegmentedLogSoftmax SegmentedLogSoftmax::Builder::build() {
         throw std::runtime_error("SegmentedLogSoftmax requires network and featureInput.");
     }
     SegmentedPrimitiveDetail::requireSupportedValueDataType(_featureInput->getValuesDataType(), "SegmentedLogSoftmax");
+    if (!_featureInput->hasMaxValuesPerRow() ||
+        _featureInput->getOffsetsDimensions() != std::vector<uint64_t>{1}) {
+        throw std::invalid_argument("SegmentedLogSoftmax requires logical M and a canonical ragged partition token.");
+    }
 
     SegmentedLogSoftmax layer;
     layer.raggedFeatureInput = _featureInput.value();
@@ -60,7 +64,6 @@ int SegmentedLogSoftmax::getConnectionType(Tensor connectingTensor) const {
 uint64_t SegmentedLogSoftmax::getOutputTensorBytes(uint32_t batchSize) const {
     THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
     const uint64_t logicalBytes = featureOutputs.front().getTotalSizeInBytes();
-    if (!raggedFeatureOutput.isPlacementNeutral()) return logicalBytes;
     THOR_THROW_IF_FALSE(batchSize > 0);
     THOR_THROW_IF_FALSE(logicalBytes <= std::numeric_limits<uint64_t>::max() / batchSize);
     return logicalBytes * batchSize;
@@ -85,9 +88,7 @@ std::shared_ptr<ThorImplementation::Layer> SegmentedLogSoftmax::stamp(
         SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
             raggedFeatureInput, drivingLayer, "SegmentedLogSoftmax");
     const ThorImplementation::RaggedTensorDescriptor physicalOutputDescriptor =
-        raggedFeatureOutput.isPlacementNeutral()
-        ? raggedFeatureOutput.getDescriptorForPlacement(physicalInputDescriptor.getBatchSize())
-        : raggedFeatureOutput.getDescriptor();
+        raggedFeatureOutput.getDescriptorForPlacement(physicalInputDescriptor.getBatchSize());
 
     RaggedExpression input =
         RaggedExpression::input("feature_input", "feature_offsets", physicalInputDescriptor);
@@ -118,10 +119,11 @@ std::shared_ptr<ThorImplementation::Layer> SegmentedLogSoftmax::stamp(
 
 json SegmentedLogSoftmax::architectureJson() const {
     THOR_THROW_IF_FALSE(initialized);
-    const bool placementNeutral = raggedFeatureInput.isPlacementNeutral();
-    THOR_THROW_IF_FALSE(placementNeutral == raggedFeatureOutput.isPlacementNeutral());
+    THOR_THROW_IF_FALSE(raggedFeatureInput.hasMaxValuesPerRow() &&
+                        raggedFeatureOutput.hasMaxValuesPerRow() &&
+                        raggedFeatureInput.sharesPartitionWith(raggedFeatureOutput));
     return json{{"factory", Layer::Factory::Layer.value()},
-                {"version", placementNeutral ? "1.1.0" : getLayerVersion()},
+                {"version", "1.1.0"},
                 {"layer_type", "segmented_log_softmax"},
                 {"ragged_feature_input",
                  SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureInput)},
@@ -139,15 +141,28 @@ void SegmentedLogSoftmax::deserialize(const json& j, Network* network) {
     }
 
     RaggedTensor input = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_feature_input"), network, "SegmentedLogSoftmax");
-    if ((version == "1.0.0" && input.isPlacementNeutral()) ||
-        (version == "1.1.0" && !input.isPlacementNeutral())) {
-        throw std::runtime_error("SegmentedLogSoftmax serialized layer version does not match its ragged geometry mode.");
-    }
     SegmentedPrimitiveDetail::requireSupportedValueDataType(input.getValuesDataType(), "SegmentedLogSoftmax");
     const json& outputJson = j.at("ragged_feature_output");
     SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
         outputJson, j.at("ragged_feature_input"), input, "SegmentedLogSoftmax");
-    Tensor outputValues = Tensor::deserialize(outputJson.at("values"));
+    // Historical 1.0.0 output tensors may contain B*M as their leading
+    // serialized dimension. Validate their semantic trailing geometry and
+    // restore the original output ID at logical M.
+    const auto savedOutputDimensions =
+        outputJson.at("values").at("dimensions").get<std::vector<uint64_t>>();
+    const auto logicalDimensions = input.getValuesDimensions();
+    if (savedOutputDimensions.size() != logicalDimensions.size() ||
+        !std::equal(savedOutputDimensions.begin() + 1, savedOutputDimensions.end(),
+                    logicalDimensions.begin() + 1) ||
+        (SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(outputJson, "SegmentedLogSoftmax") ==
+             SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL &&
+         savedOutputDimensions.front() != logicalDimensions.front())) {
+        throw std::runtime_error("Serialized segmented output geometry is inconsistent with logical input.");
+    }
+    Tensor outputValues = Tensor::deserializeWithDimensions(outputJson.at("values"), logicalDimensions);
+    if (outputValues.getOriginalId() == input.getValues().getOriginalId()) {
+        throw std::runtime_error("Serialized segmented output must have a distinct values identity.");
+    }
     if (outputValues.getDataType() != input.getValuesDataType() || outputValues.getDimensions() != input.getValuesDimensions()) {
         throw std::runtime_error("SegmentedLogSoftmax serialized output values descriptor does not match its input.");
     }

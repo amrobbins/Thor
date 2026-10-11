@@ -21,9 +21,7 @@ TEST(UtilityApiLayers, RaggedSequenceSliceBuildsNewCanonicalPartitionDescriptor)
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT64)
                              .trailingDimensions({2, 3})
-                             .maxTotalValues(12)
                              .maxValuesPerRow(5)
-                             .batchSize(4)
                              .build();
 
     RaggedSequenceSlice slice = RaggedSequenceSlice::Builder()
@@ -37,12 +35,12 @@ TEST(UtilityApiLayers, RaggedSequenceSliceBuildsNewCanonicalPartitionDescriptor)
     EXPECT_EQ(slice.getStart(), 1u);
     EXPECT_EQ(slice.getLength(), 2u);
     const RaggedTensor output = slice.getRaggedFeatureOutput();
-    EXPECT_EQ(output.getValuesDimensions(), (vector<uint64_t>{8, 2, 3}));
-    EXPECT_EQ(output.getOffsetsDimensions(), (vector<uint64_t>{5}));
+    EXPECT_EQ(output.getValuesDimensions(), (vector<uint64_t>{2, 2, 3}));
+    EXPECT_EQ(output.getOffsetsDimensions(), (vector<uint64_t>{1}));
     EXPECT_EQ(output.getValuesDataType(), DataType::FP32);
     EXPECT_EQ(output.getOffsetsDataType(), DataType::UINT64);
-    EXPECT_EQ(output.getBatchSize(), 4u);
-    EXPECT_EQ(output.getMaxTotalValues(), 8u);
+    EXPECT_EQ(output.getMaxValuesPerRow(), 2u);
+    EXPECT_EQ(output.getOffsetsDimensions(), (vector<uint64_t>{1}));
     ASSERT_TRUE(output.hasMaxValuesPerRow());
     EXPECT_EQ(output.getMaxValuesPerRow(), 2u);
     EXPECT_NE(output.getOffsets(), input.getOffsets());
@@ -78,9 +76,7 @@ TEST(UtilityApiLayers, RaggedSequenceSliceUsesConservativePositiveBoundsForStati
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({4})
-                             .maxTotalValues(9)
                              .maxValuesPerRow(3)
-                             .batchSize(3)
                              .build();
 
     RaggedSequenceSlice slice = RaggedSequenceSlice::Builder()
@@ -90,7 +86,7 @@ TEST(UtilityApiLayers, RaggedSequenceSliceUsesConservativePositiveBoundsForStati
                                     .length(7)
                                     .build();
     const RaggedTensor output = slice.getRaggedFeatureOutput();
-    EXPECT_EQ(output.getMaxTotalValues(), 1u);
+    EXPECT_EQ(output.getValuesDimensions().front(), 1u);
     ASSERT_TRUE(output.hasMaxValuesPerRow());
     EXPECT_EQ(output.getMaxValuesPerRow(), 1u);
 }
@@ -103,9 +99,7 @@ TEST(UtilityApiLayers, RaggedSequenceSliceSubgraphCloneRemapsInputAndAllocatesNe
                                    .valuesDataType(DataType::FP32)
                                    .offsetsDataType(DataType::UINT32)
                                    .trailingDimensions({2})
-                                   .maxTotalValues(9)
                                    .maxValuesPerRow(4)
-                                   .batchSize(3)
                                    .build();
     RaggedSequenceSlice sourceSlice = RaggedSequenceSlice::Builder()
                                           .network(source)
@@ -126,9 +120,7 @@ TEST(UtilityApiLayers, RaggedSequenceSliceSubgraphCloneRemapsInputAndAllocatesNe
                                         .valuesDataType(DataType::FP32)
                                         .offsetsDataType(DataType::UINT32)
                                         .trailingDimensions({2})
-                                        .maxTotalValues(9)
                                         .maxValuesPerRow(4)
-                                        .batchSize(3)
                                         .build();
 
     ApiTensorRemap remap;
@@ -146,8 +138,8 @@ TEST(UtilityApiLayers, RaggedSequenceSliceSubgraphCloneRemapsInputAndAllocatesNe
     Tensor clonedValues = clone.outputTensorsByName.at("__thor_ragged_output.sliced.values");
     Tensor clonedPartitionToken = clone.clonedTensorBySourceOriginalId.at(
         sourceSlice.getRaggedFeatureOutput().getRowPartitionToken().getOriginalId());
-    EXPECT_EQ(clonedValues.getDimensions(), (vector<uint64_t>{6, 2}));
-    EXPECT_EQ(clonedPartitionToken.getDimensions(), (vector<uint64_t>{4}));
+    EXPECT_EQ(clonedValues.getDimensions(), (vector<uint64_t>{2, 2}));
+    EXPECT_EQ(clonedPartitionToken.getDimensions(), (vector<uint64_t>{1}));
     EXPECT_NE(clonedPartitionToken, destinationInput.getRowPartitionToken());
 }
 
@@ -158,8 +150,7 @@ TEST(UtilityApiLayers, RaggedSequenceSliceRejectsMissingOrZeroLengthConfiguratio
                              .name("input")
                              .valuesDataType(DataType::FP32)
                              .trailingDimensions({2})
-                             .maxTotalValues(5)
-                             .batchSize(2)
+                             .maxValuesPerRow(4)
                              .build();
 
     EXPECT_THROW((void)RaggedSequenceSlice::Builder()

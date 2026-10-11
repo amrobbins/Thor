@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Utility/FiniteCheck.h"
 #include "DeepLearning/Api/Layers/Utility/RMSNorm.h"
@@ -100,16 +101,15 @@ TEST(RaggedNetworkInputApi, BuildsLogicalRaggedInputWithPublicValuesAndHiddenPar
                               .valuesDataType(DataType::INT32)
                               .offsetsDataType(DataType::UINT32)
                               .trailingDimensions({})
-                              .batchSize(3)
-                              .maxTotalValues(7)
                               .maxValuesPerRow(4)
                               .build();
 
     ASSERT_TRUE(labels.isInitialized());
-    EXPECT_EQ(labels.getValuesDimensions(), (std::vector<uint64_t>{7}));
-    EXPECT_EQ(labels.getOffsetsDimensions(), (std::vector<uint64_t>{4}));
-    EXPECT_EQ(labels.getBatchSize(), 3u);
-    EXPECT_EQ(labels.getMaxTotalValues(), 7u);
+    EXPECT_EQ(labels.getValuesDimensions(), (std::vector<uint64_t>{4}));
+    EXPECT_EQ(labels.getOffsetsDimensions(), (std::vector<uint64_t>{1}));
+    EXPECT_EQ(labels.getDescriptorForPlacement(2).getMaxTotalValues(), 8u);
+    EXPECT_EQ(labels.getDescriptorForPlacement(7).getMaxTotalValues(), 28u);
+    EXPECT_EQ(labels.getOffsetsDimensions(), (std::vector<uint64_t>{1}));
     ASSERT_TRUE(labels.hasMaxValuesPerRow());
     EXPECT_EQ(labels.getMaxValuesPerRow(), 4u);
 
@@ -145,6 +145,73 @@ TEST(RaggedNetworkInputApi, BuildsLogicalRaggedInputWithPublicValuesAndHiddenPar
               (std::set<std::string>{"labels.values", "__thor_row_partition.labels"}));
 }
 
+TEST(RaggedNetworkInputApi, IndependentBoundaryRequiresSemanticMAndPlacesAtIndependentBatchSizes) {
+    Network absentM("ragged_missing_semantic_m");
+    EXPECT_THROW((void)RaggedNetworkInput::Builder()
+        .network(absentM).name("tokens").valuesDataType(DataType::FP32)
+        .trailingDimensions({2}).build(), std::logic_error);
+    EXPECT_TRUE(absentM.getExternalRaggedNetworkInputs().empty());
+
+    Network network("ragged_old_builder_hints_are_not_model_state");
+    // Logical input geometry is independent of B; descriptors are physicalized at placement.
+    RaggedTensor tokens = RaggedNetworkInput::Builder()
+        .network(network).name("tokens").valuesDataType(DataType::FP32)
+        .trailingDimensions({2})
+        .maxValuesPerRow(4).build();
+    EXPECT_EQ(tokens.getValuesDimensions(), (std::vector<uint64_t>{4, 2}));
+    EXPECT_EQ(tokens.getOffsetsDimensions(), (std::vector<uint64_t>{1}));
+    EXPECT_EQ(tokens.getDescriptorForPlacement(2).getValuesDimensions(),
+              (std::vector<uint64_t>{8, 2}));
+    EXPECT_EQ(tokens.getDescriptorForPlacement(7).getValuesDimensions(),
+              (std::vector<uint64_t>{28, 2}));
+    const auto artifact = network.architectureJson().at("ragged_network_inputs").at(0);
+    EXPECT_EQ(artifact.at("max_values_per_row").get<uint64_t>(), 4u);
+    EXPECT_FALSE(artifact.contains("batch_size"));
+    EXPECT_FALSE(artifact.contains("max_total_values"));
+
+    RaggedTensor mask = RaggedNetworkInput::Builder()
+        .network(network).name("mask").valuesDataType(DataType::BOOLEAN)
+        .partition(tokens).build();
+    EXPECT_TRUE(mask.sharesPartitionWith(tokens));
+    EXPECT_EQ(mask.getValuesDimensions(), (std::vector<uint64_t>{4}));
+    EXPECT_EQ(mask.getDescriptorForPlacement(7).getMaxTotalValues(), 28u);
+
+    // A manually constructed [M, features] values tensor with a [1] structural
+    // token is a valid logical boundary. The old fixed/neutral model distinction
+    // does not exist, so the token's [1] dimension must not be interpreted as
+    // physical offsets or as evidence of any particular batch size.
+    Network manual("ragged_manual_logical_boundary");
+    const auto manualValues = NetworkInput::Builder()
+        .network(manual).name("manual.values").dataType(DataType::FP32)
+        .dimensions({4, 2}).dimensionsIncludeBatch(true).build();
+    const auto manualToken = NetworkInput::Builder()
+        .network(manual).name("manual.token").dataType(DataType::UINT32)
+        .dimensions({1}).dimensionsIncludeBatch(true).external(false).build();
+    const Tensor values = manualValues.getFeatureOutput().value();
+    const Tensor token = manualToken.getFeatureOutput().value();
+    // An incorrect semantic M is rejected at logical tensor construction.
+    EXPECT_THROW((void)RaggedTensor::logical(values, token, 3), std::logic_error);
+    EXPECT_TRUE(manual.getExternalRaggedNetworkInputs().empty());
+
+    RaggedTensor manualInput = RaggedTensor::logical(values, token, 4);
+    ASSERT_NO_THROW(manual.registerRaggedNetworkInput("manual", manualInput, "manual.values"));
+    const auto manualInputs = manual.getExternalRaggedNetworkInputs();
+    ASSERT_EQ(manualInputs.size(), 1u);
+    EXPECT_EQ(manualInputs.front().raggedTensor.getValuesDimensions(),
+              (std::vector<uint64_t>{4, 2}));
+    EXPECT_EQ(manualInputs.front().raggedTensor.getOffsetsDimensions(),
+              (std::vector<uint64_t>{1}));
+    EXPECT_EQ(manualInputs.front().raggedTensor.getDescriptorForPlacement(2).getMaxTotalValues(), 8u);
+    EXPECT_EQ(manualInputs.front().raggedTensor.getDescriptorForPlacement(7).getMaxTotalValues(), 28u);
+    const json manualArchitecture = manual.architectureJson();
+    ASSERT_EQ(manualArchitecture.at("ragged_network_inputs").size(), 1u);
+    const json& manualBoundary = manualArchitecture.at("ragged_network_inputs").at(0);
+    EXPECT_EQ(manualBoundary.at("max_values_per_row").get<uint64_t>(), 4u);
+    EXPECT_FALSE(manualBoundary.contains("batch_size"));
+    EXPECT_FALSE(manualBoundary.contains("max_total_values"));
+    EXPECT_FALSE(manualBoundary.contains("geometry_mode"));
+}
+
 TEST(RaggedNetworkInputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTensorReferences) {
     const std::string networkName = "ragged_network_input_architecture_round_trip";
     Network network(networkName);
@@ -154,8 +221,6 @@ TEST(RaggedNetworkInputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTensor
                               .valuesDataType(DataType::INT32)
                               .offsetsDataType(DataType::UINT32)
                               .trailingDimensions({2})
-                              .batchSize(2)
-                              .maxTotalValues(6)
                               .maxValuesPerRow(4)
                               .build();
 
@@ -182,8 +247,8 @@ TEST(RaggedNetworkInputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTensor
     ASSERT_EQ(loadedInputs.size(), 1u);
     EXPECT_EQ(loadedInputs[0].name, "labels");
     EXPECT_EQ(loadedInputs[0].valuesInputName, "labels.values");
-    EXPECT_EQ(loadedInputs[0].raggedTensor.getValues().getDimensions(), (std::vector<uint64_t>{6, 2}));
-    EXPECT_EQ(loadedInputs[0].raggedTensor.getOffsets().getDimensions(), (std::vector<uint64_t>{3}));
+    EXPECT_EQ(loadedInputs[0].raggedTensor.getValues().getDimensions(), (std::vector<uint64_t>{4, 2}));
+    EXPECT_EQ(loadedInputs[0].raggedTensor.getOffsets().getDimensions(), (std::vector<uint64_t>{1}));
     ASSERT_TRUE(loadedInputs[0].raggedTensor.hasMaxValuesPerRow());
     EXPECT_EQ(loadedInputs[0].raggedTensor.getMaxValuesPerRow(), 4u);
 
@@ -221,11 +286,9 @@ TEST(RaggedNetworkInputApi, PlacementNeutralBoundarySaveLoadAndReplacesPlacement
                                  .trailingDimensions({3})
                                  .maxValuesPerRow(maxValuesPerRow)
                                  .build();
-        ASSERT_TRUE(input.isPlacementNeutral());
         EXPECT_EQ(input.getValuesDimensions(), (std::vector<uint64_t>{maxValuesPerRow, 3}));
         EXPECT_EQ(input.getOffsetsDimensions(), (std::vector<uint64_t>{1}));
-        EXPECT_THROW(static_cast<void>(input.getBatchSize()), std::logic_error);
-        EXPECT_THROW(static_cast<void>(input.getMaxTotalValues()), std::logic_error);
+        EXPECT_EQ(input.getMaxValuesPerRow(), maxValuesPerRow);
 
         (void)RaggedNetworkOutput::Builder()
             .network(network)
@@ -236,16 +299,16 @@ TEST(RaggedNetworkInputApi, PlacementNeutralBoundarySaveLoadAndReplacesPlacement
         const json architecture = network.architectureJson();
         ASSERT_EQ(architecture.at("ragged_network_inputs").size(), 1u);
         const json& inputBoundary = architecture.at("ragged_network_inputs").at(0);
-        EXPECT_EQ(inputBoundary.at("version").get<std::string>(), "1.4.0");
-        EXPECT_EQ(inputBoundary.at("geometry_mode").get<std::string>(), "placement_neutral");
+        EXPECT_EQ(inputBoundary.at("version").get<std::string>(), "1.3.0");
+        EXPECT_FALSE(inputBoundary.contains("geometry_mode"));
         EXPECT_EQ(inputBoundary.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
         EXPECT_FALSE(inputBoundary.contains("batch_size"));
         EXPECT_FALSE(inputBoundary.contains("max_total_values"));
 
         ASSERT_EQ(architecture.at("ragged_network_outputs").size(), 1u);
         const json& outputBoundary = architecture.at("ragged_network_outputs").at(0);
-        EXPECT_EQ(outputBoundary.at("version").get<std::string>(), "1.3.0");
-        EXPECT_EQ(outputBoundary.at("geometry_mode").get<std::string>(), "placement_neutral");
+        EXPECT_EQ(outputBoundary.at("version").get<std::string>(), "1.2.0");
+        EXPECT_FALSE(outputBoundary.contains("geometry_mode"));
         EXPECT_EQ(outputBoundary.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
 
         for (const json& layer : architecture.at("layers")) {
@@ -269,7 +332,6 @@ TEST(RaggedNetworkInputApi, PlacementNeutralBoundarySaveLoadAndReplacesPlacement
         const std::vector<RaggedNetworkInputReference> loadedInputs = loaded.getExternalRaggedNetworkInputs();
         ASSERT_EQ(loadedInputs.size(), 1u);
         const RaggedTensor loadedInput = loadedInputs.front().raggedTensor;
-        ASSERT_TRUE(loadedInput.isPlacementNeutral());
         EXPECT_EQ(loadedInput.getValuesDimensions(), (std::vector<uint64_t>{maxValuesPerRow, 3}));
         EXPECT_EQ(loadedInput.getOffsetsDimensions(), (std::vector<uint64_t>{1}));
 
@@ -329,8 +391,6 @@ TEST(RaggedNetworkInputApi, PlacementNeutralSharedPartitionKeepsCanonicalOwnerSe
                               .partition(owner)
                               .build();
 
-    ASSERT_TRUE(owner.isPlacementNeutral());
-    ASSERT_TRUE(shared.isPlacementNeutral());
     EXPECT_TRUE(owner.sharesPartitionWith(shared));
     EXPECT_EQ(shared.getRowPartitionToken(), owner.getRowPartitionToken());
     EXPECT_EQ(shared.getValuesDimensions(), (std::vector<uint64_t>{6}));
@@ -345,14 +405,14 @@ TEST(RaggedNetworkInputApi, PlacementNeutralSharedPartitionKeepsCanonicalOwnerSe
     }
     ASSERT_NE(ownerBoundary, nullptr);
     ASSERT_NE(sharedBoundary, nullptr);
-    EXPECT_EQ(ownerBoundary->at("version").get<std::string>(), "1.4.0");
-    EXPECT_EQ(ownerBoundary->at("geometry_mode").get<std::string>(), "placement_neutral");
+    EXPECT_EQ(ownerBoundary->at("version").get<std::string>(), "1.3.0");
+    EXPECT_FALSE(ownerBoundary->contains("geometry_mode"));
     EXPECT_EQ(ownerBoundary->at("max_values_per_row").get<uint64_t>(), 6u);
     EXPECT_FALSE(ownerBoundary->contains("batch_size"));
     EXPECT_FALSE(ownerBoundary->contains("max_total_values"));
 
-    EXPECT_EQ(sharedBoundary->at("version").get<std::string>(), "1.4.0");
-    EXPECT_EQ(sharedBoundary->at("geometry_mode").get<std::string>(), "placement_neutral");
+    EXPECT_EQ(sharedBoundary->at("version").get<std::string>(), "1.3.0");
+    EXPECT_FALSE(sharedBoundary->contains("geometry_mode"));
     EXPECT_EQ(sharedBoundary->at("partition_input_name").get<std::string>(), "feature");
     EXPECT_FALSE(sharedBoundary->contains("row_partition_token_tensor_id"));
     EXPECT_FALSE(sharedBoundary->contains("max_values_per_row"));
@@ -378,8 +438,6 @@ TEST(RaggedNetworkInputApi, PlacementNeutralSharedPartitionKeepsCanonicalOwnerSe
     });
     ASSERT_NE(loadedOwner, loadedInputs.end());
     ASSERT_NE(loadedShared, loadedInputs.end());
-    ASSERT_TRUE(loadedOwner->raggedTensor.isPlacementNeutral());
-    ASSERT_TRUE(loadedShared->raggedTensor.isPlacementNeutral());
     EXPECT_TRUE(loadedOwner->raggedTensor.sharesPartitionWith(loadedShared->raggedTensor));
     ASSERT_TRUE(loadedShared->partitionInputName.has_value());
     EXPECT_EQ(loadedShared->partitionInputName.value(), "feature");
@@ -395,8 +453,7 @@ TEST(RaggedNetworkInputApi, PlacedNetworkExposesLogicalInputName) {
                               .name("labels")
                               .valuesDataType(DataType::INT32)
                               .offsetsDataType(DataType::UINT32)
-                              .batchSize(batchSize)
-                              .maxTotalValues(5)
+                              .maxValuesPerRow(3)
                               .build();
 
     NetworkOutput::Builder().network(network).name("label_values").inputTensor(labels.getValues()).dataType(DataType::INT32).build();
@@ -417,7 +474,8 @@ TEST(RaggedNetworkInputApi, PlacedNetworkExposesLogicalInputName) {
 
 TEST(RaggedNetworkInputApi, FlattenedTensorMapSubmissionIsRejectedButLogicalBatchPublishesRuntimeCache) {
     constexpr uint32_t batchSize = 2;
-    constexpr uint64_t maxTotalValues = 5;
+    constexpr uint64_t maxValuesPerRow = 3;
+    constexpr uint64_t maxTotalValues = batchSize * maxValuesPerRow;
     constexpr uint64_t inputWidth = 3;
     constexpr uint64_t outputWidth = 2;
     Network network("ragged_network_input_flattened_submission_rejected");
@@ -428,9 +486,7 @@ TEST(RaggedNetworkInputApi, FlattenedTensorMapSubmissionIsRejectedButLogicalBatc
                               .valuesDataType(DataType::FP32)
                               .offsetsDataType(DataType::UINT32)
                               .trailingDimensions({inputWidth})
-                              .batchSize(batchSize)
-                              .maxTotalValues(maxTotalValues)
-                              .maxValuesPerRow(3)
+                              .maxValuesPerRow(maxValuesPerRow)
                               .build();
     FullyConnected projection = FullyConnected::Builder()
                                     .network(network)
@@ -519,7 +575,7 @@ TEST(RaggedNetworkInputApi, FlattenedTensorMapSubmissionIsRejectedButLogicalBatc
     uploadStream.synchronize();
 
     ThorImplementation::RowPartitionRuntime gpuPartition(
-        gpuOffsets, labels.getDescriptor().getRowPartition());
+        gpuOffsets, labels.getDescriptorForPlacement(batchSize).getRowPartition());
     gpuPartition.setHostOffsets({0, 1, 3});
     Batch poisonedDeviceOffsetsBatch;
     poisonedDeviceOffsetsBatch.insert(
@@ -532,7 +588,7 @@ TEST(RaggedNetworkInputApi, FlattenedTensorMapSubmissionIsRejectedButLogicalBatc
 
 TEST(RaggedNetworkInputApi, HostExtentOnlyChainDoesNotMaterializeDevicePartitionInputs) {
     constexpr uint32_t batchSize = 2;
-    constexpr uint64_t maxTotalValues = 5;
+    constexpr uint64_t maxTotalValues = batchSize * 3;
     constexpr uint64_t inputWidth = 3;
     constexpr uint64_t hiddenWidth = 4;
     constexpr uint64_t outputWidth = 2;
@@ -544,8 +600,6 @@ TEST(RaggedNetworkInputApi, HostExtentOnlyChainDoesNotMaterializeDevicePartition
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({inputWidth})
-                             .batchSize(batchSize)
-                             .maxTotalValues(maxTotalValues)
                              .maxValuesPerRow(3)
                              .build();
 
@@ -636,8 +690,6 @@ TEST(RaggedNetworkInputApi, DeviceActiveCountConsumerMaterializesOnlyManagedScal
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({3})
-                             .batchSize(batchSize)
-                             .maxTotalValues(maxTotalValues)
                              .maxValuesPerRow(3)
                              .build();
     FiniteCheck checked = FiniteCheck::Builder()
@@ -670,7 +722,7 @@ TEST(RaggedNetworkInputApi, DeviceActiveCountConsumerMaterializesOnlyManagedScal
 
 TEST(RaggedNetworkInputApi, FusedFullyConnectedMaterializesManagedActiveCountWithoutFullOffsets) {
     constexpr uint32_t batchSize = 2;
-    constexpr uint64_t maxTotalValues = 5;
+    constexpr uint64_t maxTotalValues = batchSize * 3;
     Network network("ragged_network_input_fused_fc_active_count");
 
     RaggedTensor input = RaggedNetworkInput::Builder()
@@ -679,20 +731,19 @@ TEST(RaggedNetworkInputApi, FusedFullyConnectedMaterializesManagedActiveCountWit
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({3})
-                             .batchSize(batchSize)
-                             .maxTotalValues(maxTotalValues)
                              .maxValuesPerRow(3)
                              .build();
-    ThorImplementation::Expression projected = FullyConnected::epilogueInput(DataType::FP32, DataType::FP32);
+    // Bias fusion requires the managed active count while preserving the
+    // established ragged FullyConnected supported-feature contract.
     FullyConnected projection = FullyConnected::Builder()
                                     .network(network)
                                     .featureInput(input)
                                     .numOutputFeatures(4)
+                                    .hasBias(true)
                                     .weightsDataType(DataType::FP32)
                                     .computeDataType(DataType::FP32)
                                     .outputDataType(DataType::FP32)
                                     .noActivation()
-                                    .epilogue(projected.sin())
                                     .build();
     ASSERT_TRUE(projection.getRaggedFeatureOutput().has_value());
     NetworkOutput::Builder()
@@ -749,8 +800,6 @@ TEST(RaggedNetworkInputApi, RaggedCustomLossForwardAndBackwardUseManagedActiveCo
                                    .valuesDataType(DataType::FP32)
                                    .offsetsDataType(DataType::UINT64)
                                    .trailingDimensions({2})
-                                   .batchSize(batchSize)
-                                   .maxTotalValues(maxTotalValues)
                                    .maxValuesPerRow(4)
                                    .build();
     RaggedTensor labels = RaggedNetworkInput::Builder()
@@ -801,8 +850,6 @@ TEST(RaggedNetworkInputApi, BiasedFullyConnectedTrainingKeepsBackwardFullOffsets
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({3})
-                             .batchSize(batchSize)
-                             .maxTotalValues(6)
                              .maxValuesPerRow(4)
                              .build();
     auto optimizer = Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
@@ -849,7 +896,7 @@ TEST(RaggedNetworkInputApi, BiasedFullyConnectedTrainingKeepsBackwardFullOffsets
 
 TEST(RaggedNetworkInputApi, FullyConnectedOutputDropoutMaterializesManagedActiveCountWithoutFullOffsets) {
     constexpr uint32_t batchSize = 2;
-    constexpr uint64_t maxTotalValues = 5;
+    constexpr uint64_t maxTotalValues = batchSize * 3;
     Network network("ragged_network_input_fc_output_dropout_active_count");
 
     RaggedTensor input = RaggedNetworkInput::Builder()
@@ -858,8 +905,6 @@ TEST(RaggedNetworkInputApi, FullyConnectedOutputDropoutMaterializesManagedActive
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({3})
-                             .batchSize(batchSize)
-                             .maxTotalValues(maxTotalValues)
                              .maxValuesPerRow(3)
                              .build();
     FullyConnected projection = FullyConnected::Builder()
@@ -898,7 +943,7 @@ TEST(RaggedNetworkInputApi, FullyConnectedOutputDropoutMaterializesManagedActive
 
 TEST(RaggedNetworkInputApi, RMSNormEpilogueMaterializesManagedActiveCountWithoutFullOffsets) {
     constexpr uint32_t batchSize = 2;
-    constexpr uint64_t maxTotalValues = 5;
+    constexpr uint64_t maxTotalValues = batchSize * 3;
     Network network("ragged_network_input_rmsnorm_epilogue_active_count");
 
     RaggedTensor input = RaggedNetworkInput::Builder()
@@ -907,8 +952,6 @@ TEST(RaggedNetworkInputApi, RMSNormEpilogueMaterializesManagedActiveCountWithout
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({3})
-                             .batchSize(batchSize)
-                             .maxTotalValues(maxTotalValues)
                              .maxValuesPerRow(3)
                              .build();
     ThorImplementation::Expression normalized = RMSNorm::epilogueInput(DataType::FP32, DataType::FP32);
@@ -953,8 +996,6 @@ TEST(RaggedNetworkInputApi, PartitionPreservingValuewiseUtilitiesShareManagedAct
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({2, 4})
-                             .batchSize(batchSize)
-                             .maxTotalValues(maxTotalValues)
                              .maxValuesPerRow(4)
                              .build();
     TypeConverter converted = TypeConverter::Builder()
@@ -1021,8 +1062,6 @@ TEST(RaggedNetworkInputApi, LogicalRaggedOutputDoesNotPromotePartitionToHostExte
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({3})
-                             .batchSize(batchSize)
-                             .maxTotalValues(maxTotalValues)
                              .maxValuesPerRow(4)
                              .build();
     (void)RaggedNetworkOutput::Builder()
@@ -1064,8 +1103,6 @@ TEST(RaggedNetworkInputApi, ValuesOnlyGraphDoesNotMaterializeAnyPartitionReprese
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({3})
-                             .batchSize(batchSize)
-                             .maxTotalValues(maxTotalValues)
                              .maxValuesPerRow(4)
                              .build();
     NetworkOutput::Builder()
@@ -1094,7 +1131,7 @@ TEST(RaggedNetworkInputApi, ValuesOnlyGraphDoesNotMaterializeAnyPartitionReprese
 
 TEST(RaggedNetworkInputApi, MetadataOnlyPartitionPreservingChainCarriesHostExtentWithoutDevicePartitionInputs) {
     constexpr uint32_t batchSize = 2;
-    constexpr uint64_t maxTotalValues = 6;
+    constexpr uint64_t maxTotalValues = batchSize * 4;
     Network network("ragged_metadata_alias_host_extent_closure");
 
     RaggedTensor input = RaggedNetworkInput::Builder()
@@ -1103,8 +1140,6 @@ TEST(RaggedNetworkInputApi, MetadataOnlyPartitionPreservingChainCarriesHostExten
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({2, 2, 2})
-                             .batchSize(batchSize)
-                             .maxTotalValues(maxTotalValues)
                              .maxValuesPerRow(4)
                              .build();
     Reshape reshaped = Reshape::Builder()
@@ -1167,7 +1202,7 @@ TEST(RaggedNetworkInputApi, MetadataOnlyPartitionPreservingChainCarriesHostExten
 
 TEST(RaggedNetworkInputApi, HostExtentAndActiveCountCompositionMaterializesOnlyManagedScalar) {
     constexpr uint32_t batchSize = 2;
-    constexpr uint64_t maxTotalValues = 7;
+    constexpr uint64_t maxTotalValues = batchSize * 5;
     Network network("ragged_host_and_active_count_closure");
 
     RaggedTensor input = RaggedNetworkInput::Builder()
@@ -1176,8 +1211,6 @@ TEST(RaggedNetworkInputApi, HostExtentAndActiveCountCompositionMaterializesOnlyM
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({4})
-                             .batchSize(batchSize)
-                             .maxTotalValues(maxTotalValues)
                              .maxValuesPerRow(5)
                              .build();
     FullyConnected projected = FullyConnected::Builder()
@@ -1245,8 +1278,6 @@ TEST(RaggedNetworkInputApi, FullOffsetsOnlyConsumerDoesNotMaterializeRedundantAc
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({4})
-                             .batchSize(batchSize)
-                             .maxTotalValues(maxTotalValues)
                              .maxValuesPerRow(5)
                              .build();
     SegmentedSoftmax segmented = SegmentedSoftmax::Builder()
@@ -1290,7 +1321,7 @@ TEST(RaggedNetworkInputApi, FullOffsetsOnlyConsumerDoesNotMaterializeRedundantAc
 
 TEST(RaggedNetworkInputApi, MixedPartitionConsumersMaterializeAndRouteScalarAndOffsetsIndependently) {
     constexpr uint32_t batchSize = 2;
-    constexpr uint64_t maxTotalValues = 7;
+    constexpr uint64_t maxTotalValues = batchSize * 5;
     Network network("ragged_mixed_partition_physicalization_closure");
 
     RaggedTensor input = RaggedNetworkInput::Builder()
@@ -1299,8 +1330,6 @@ TEST(RaggedNetworkInputApi, MixedPartitionConsumersMaterializeAndRouteScalarAndO
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({4})
-                             .batchSize(batchSize)
-                             .maxTotalValues(maxTotalValues)
                              .maxValuesPerRow(5)
                              .build();
 
@@ -1394,8 +1423,6 @@ TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateValuesOnlyDoesNotMateria
                             .valuesDataType(DataType::FP32)
                             .offsetsDataType(DataType::UINT32)
                             .trailingDimensions({3})
-                            .batchSize(batchSize)
-                            .maxTotalValues(5)
                             .maxValuesPerRow(3)
                             .build();
     RaggedTensor right = RaggedNetworkInput::Builder()
@@ -1404,8 +1431,6 @@ TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateValuesOnlyDoesNotMateria
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({3})
-                             .batchSize(batchSize)
-                             .maxTotalValues(6)
                              .maxValuesPerRow(4)
                              .build();
     RaggedSequenceConcatenate concatenate = RaggedSequenceConcatenate::Builder()
@@ -1470,8 +1495,6 @@ TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateReusesSharedAuthoritativ
                               .valuesDataType(DataType::FP32)
                               .offsetsDataType(DataType::UINT32)
                               .trailingDimensions({4})
-                              .batchSize(batchSize)
-                              .maxTotalValues(6)
                               .maxValuesPerRow(3)
                               .build();
     Slice left = Slice::Builder().network(network).featureInput(source).axis(0).start(0).length(2).build();
@@ -1527,8 +1550,6 @@ TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateActiveCountMaterializesO
                             .valuesDataType(DataType::FP32)
                             .offsetsDataType(DataType::UINT64)
                             .trailingDimensions({2})
-                            .batchSize(batchSize)
-                            .maxTotalValues(5)
                             .maxValuesPerRow(3)
                             .build();
     RaggedTensor right = RaggedNetworkInput::Builder()
@@ -1537,8 +1558,6 @@ TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateActiveCountMaterializesO
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT64)
                              .trailingDimensions({2})
-                             .batchSize(batchSize)
-                             .maxTotalValues(6)
                              .maxValuesPerRow(4)
                              .build();
     RaggedSequenceConcatenate concatenate = RaggedSequenceConcatenate::Builder()
@@ -1594,8 +1613,6 @@ TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateHostExtentUsesValuesCarr
                             .valuesDataType(DataType::FP32)
                             .offsetsDataType(DataType::UINT32)
                             .trailingDimensions({4})
-                            .batchSize(batchSize)
-                            .maxTotalValues(5)
                             .maxValuesPerRow(3)
                             .build();
     RaggedTensor right = RaggedNetworkInput::Builder()
@@ -1604,8 +1621,6 @@ TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateHostExtentUsesValuesCarr
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({4})
-                             .batchSize(batchSize)
-                             .maxTotalValues(6)
                              .maxValuesPerRow(4)
                              .build();
     RaggedSequenceConcatenate concatenate = RaggedSequenceConcatenate::Builder()
@@ -1662,8 +1677,6 @@ TEST(RaggedNetworkInputApi, InternallyCreatedSliceConsumesManagedOutputOffsetsAn
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT64)
                              .trailingDimensions({4})
-                             .batchSize(batchSize)
-                             .maxTotalValues(10)
                              .maxValuesPerRow(5)
                              .build();
     RaggedSequenceSlice slice = RaggedSequenceSlice::Builder()
@@ -1731,8 +1744,6 @@ TEST(RaggedNetworkInputApi, InternallyCreatedPartitionDerivationRecursesAcrossCo
                             .valuesDataType(DataType::FP32)
                             .offsetsDataType(DataType::UINT32)
                             .trailingDimensions({2})
-                            .batchSize(batchSize)
-                            .maxTotalValues(5)
                             .maxValuesPerRow(3)
                             .build();
     RaggedTensor right = RaggedNetworkInput::Builder()
@@ -1741,8 +1752,6 @@ TEST(RaggedNetworkInputApi, InternallyCreatedPartitionDerivationRecursesAcrossCo
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({2})
-                             .batchSize(batchSize)
-                             .maxTotalValues(6)
                              .maxValuesPerRow(4)
                              .build();
     RaggedSequenceConcatenate concatenate = RaggedSequenceConcatenate::Builder()
@@ -1808,18 +1817,14 @@ TEST(RaggedNetworkInputApi, RejectsInvalidOffsetDType) {
                       .name("labels")
                       .valuesDataType(DataType::INT32)
                       .offsetsDataType(DataType::INT32)
-                      .batchSize(2)
-                      .maxTotalValues(5)
                       .build()),
                  std::logic_error);
 
+    // An independent boundary without semantic M must fail clearly.
     EXPECT_THROW((RaggedNetworkInput::Builder()
                       .network(network)
-                      .name("too_wide")
+                      .name("missing_m")
                       .valuesDataType(DataType::FP32)
-                      .batchSize(2)
-                      .maxTotalValues(5)
-                      .maxValuesPerRow(6)
                       .build()),
                  std::logic_error);
 }
@@ -1832,8 +1837,7 @@ TEST(RaggedNetworkInputApi, NetworkInputDiscoveryReportsOnlyLogicalRaggedBoundar
                               .name("labels")
                               .valuesDataType(DataType::INT32)
                               .offsetsDataType(DataType::UINT64)
-                              .batchSize(2)
-                              .maxTotalValues(5)
+                              .maxValuesPerRow(3)
                               .build();
 
     NetworkOutput::Builder().network(network).name("label_values").inputTensor(labels.getValues()).dataType(DataType::INT32).build();
@@ -1852,8 +1856,6 @@ TEST(RaggedNetworkInputApi, SharedPartitionDeclaresOnlyValuesBoundaryAndReusesCa
                                .valuesDataType(DataType::FP32)
                                .offsetsDataType(DataType::UINT64)
                                .trailingDimensions({3})
-                               .batchSize(5)
-                               .maxTotalValues(17)
                                .maxValuesPerRow(6)
                                .build();
     RaggedTensor mask = RaggedNetworkInput::Builder()
@@ -1865,8 +1867,8 @@ TEST(RaggedNetworkInputApi, SharedPartitionDeclaresOnlyValuesBoundaryAndReusesCa
                             .build();
 
     EXPECT_EQ(mask.getOffsets(), feature.getOffsets());
-    EXPECT_EQ(mask.getBatchSize(), 5u);
-    EXPECT_EQ(mask.getMaxTotalValues(), 17u);
+    EXPECT_EQ(mask.getValuesDimensions().front(), feature.getMaxValuesPerRow());
+    EXPECT_TRUE(mask.sharesPartitionWith(feature));
     ASSERT_TRUE(mask.hasMaxValuesPerRow());
     EXPECT_EQ(mask.getMaxValuesPerRow(), 6u);
 
@@ -1918,8 +1920,6 @@ TEST(RaggedNetworkInputApi, SharedPartitionSaveLoadResolvesOwnerIndependentlyOfS
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT64)
                              .trailingDimensions({2})
-                             .batchSize(3)
-                             .maxTotalValues(9)
                              .maxValuesPerRow(4)
                              .build();
     RaggedTensor shared = RaggedNetworkInput::Builder()
@@ -1976,8 +1976,6 @@ TEST(RaggedNetworkInputApi, SharedPartitionRejectsRedundantStructuralBuilderArgu
                                .network(network)
                                .name("feature")
                                .valuesDataType(DataType::FP32)
-                               .batchSize(2)
-                               .maxTotalValues(6)
                                .maxValuesPerRow(3)
                                .build();
 
@@ -1987,7 +1985,7 @@ TEST(RaggedNetworkInputApi, SharedPartitionRejectsRedundantStructuralBuilderArgu
                             .valuesDataType(DataType::BOOLEAN)
                             .trailingDimensions({})
                             .partition(feature)
-                            .maxTotalValues(6)
+                            .maxValuesPerRow(3)
                             .build()),
                  std::logic_error);
 }

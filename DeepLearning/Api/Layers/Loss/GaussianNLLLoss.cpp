@@ -55,7 +55,7 @@ void validateExampleWeights(Tensor mean, Tensor target, Tensor variance, std::op
 vector<uint64_t> raggedPackedScalarWeightBroadcastDimensions(const vector<uint64_t>& meanValueDimensions) {
     if (meanValueDimensions.empty()) throw invalid_argument("GaussianNLLLoss ragged mean values must have a packed-capacity dimension.");
     vector<uint64_t> dimensions(meanValueDimensions.size(), 1);
-    dimensions[0] = meanValueDimensions[0];
+    dimensions[0] = 0;  // Copy the physical packed extent from exampleWeights at runtime.
     return dimensions;
 }
 

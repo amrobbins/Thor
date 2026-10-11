@@ -142,8 +142,11 @@ class CtcLoss::Builder {
         THOR_THROW_IF_FALSE(labels.isInitialized());
         THOR_THROW_IF_FALSE(labels.getValuesDataType() == DataType::INT32);
         THOR_THROW_IF_FALSE(labels.getTrailingDimensions().empty());
-        THOR_THROW_IF_FALSE(labels.getBatchSize() > 0);
-        THOR_THROW_IF_FALSE(labels.getMaxTotalValues() > 0);
+        // Labels are logical [M] with a canonical [1] partition token.
+        // The cuDNN batch and packed label capacity belong to placement.
+        THOR_THROW_IF_FALSE(labels.hasMaxValuesPerRow());
+        THOR_THROW_IF_FALSE(labels.getValuesDimensions() == std::vector<uint64_t>{labels.getMaxValuesPerRow()});
+        THOR_THROW_IF_FALSE(labels.getOffsetsDimensions() == std::vector<uint64_t>{1});
         THOR_THROW_IF_FALSE(ThorImplementation::RowPartitionDescriptor::isValidOffsetsDataType(labels.getOffsetsDataType()));
         this->_labels = labels;
         return *this;

@@ -157,6 +157,10 @@ enum class ExprOp : uint16_t {
     // Internal R11A.2 exact-prefix backward boundary. Keep new internal ops at
     // the end so existing ExprOp numeric values remain archive-compatible.
     RAGGED_SOFTMAX_BACKWARD,
+    // LayerNorm VJP routes; appended to keep numeric values of serialized ops stable.
+    LAYERNORM_BACKWARD_X,
+    LAYERNORM_BACKWARD_SCALE,
+    LAYERNORM_BACKWARD_BIAS,
 };
 
 // Debug/profiling provenance for physical work produced by Expression
@@ -294,6 +298,9 @@ inline bool isExpressionCompilerStageBoundaryOp(ExprOp op) {
         case ExprOp::LAYERNORM:
         case ExprOp::RMSNORM_BACKWARD_X:
         case ExprOp::RMSNORM_BACKWARD_SCALE:
+        case ExprOp::LAYERNORM_BACKWARD_X:
+        case ExprOp::LAYERNORM_BACKWARD_SCALE:
+        case ExprOp::LAYERNORM_BACKWARD_BIAS:
         case ExprOp::MATMUL:
         case ExprOp::GEMM:
         case ExprOp::ATTENTION:

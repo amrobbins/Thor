@@ -255,7 +255,7 @@ def test_student_t_nll_loss_save_load_round_trip_serializes_support_layers(tmp_p
 
 def _r10k_student_t_ragged_inputs(network, prefix="r10k_student_t", learned_df=False):
     location = thor.layers.RaggedNetworkInput(
-        network, f"{prefix}_location", thor.DataType.fp32, [2], batch_size=3, max_total_values=8, max_values_per_row=4
+        network, f"{prefix}_location", thor.DataType.fp32, [2], max_values_per_row=4
     )
     log_scale = thor.layers.RaggedNetworkInput(network, f"{prefix}_log_scale", thor.DataType.fp32, [2], partition=location)
     labels = thor.layers.RaggedNetworkInput(network, f"{prefix}_labels", thor.DataType.fp32, [2], partition=location)
@@ -304,7 +304,7 @@ def test_student_t_nll_loss_r10k_rejects_ragged_per_output_and_mismatched_learne
             n, location, log_scale, labels, reported_loss_shape=thor.losses.LossShape.per_output
         )
     different_df = thor.layers.RaggedNetworkInput(
-        n, "different_df", thor.DataType.fp32, [2], batch_size=3, max_total_values=8, max_values_per_row=4
+        n, "different_df", thor.DataType.fp32, [2], max_values_per_row=4
     )
     with pytest.raises(ValueError, match=r"exact same row partition"):
         thor.losses.distribution.StudentTNLLLoss(

@@ -571,8 +571,6 @@ def _r10i_ragged_pair(network, prefix="r10i", dtype=thor.DataType.fp32):
         f"{prefix}_predictions",
         dtype,
         [2],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     labels = thor.layers.RaggedNetworkInput(
@@ -640,9 +638,51 @@ def test_gamma_tweedie_r10i_reject_per_output_and_mismatched_partition():
         "different_partition",
         thor.DataType.fp32,
         [2],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     with pytest.raises(ValueError, match=r"exact same row partition"):
         thor.losses.distribution.GammaNLLLoss(n, predictions, labels, dispersion=different)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "poisson_labels",
+        "gaussian_variance",
+        "laplace_scale",
+        "negative_binomial_dispersion",
+        "student_t_log_scale",
+        "student_t_learned_dof",
+        "gamma_labels",
+        "gamma_dispersion",
+        "tweedie_labels",
+    ],
+)
+def test_distribution_ragged_bindings_reject_mismatched_logical_values_geometry(case):
+    """All distribution wrappers compare semantic [M, ...features], not archived B or capacity."""
+    n = _net(f"distribution_logical_geometry_{case}")
+    source = thor.layers.RaggedNetworkInput(
+        n, "source", thor.DataType.fp32, [2], max_values_per_row=4
+    )
+    same = thor.layers.RaggedNetworkInput(
+        n, "same", thor.DataType.fp32, [2], partition=source
+    )
+    different = thor.layers.RaggedNetworkInput(
+        n, "different", thor.DataType.fp32, [3], partition=source
+    )
+    losses = thor.losses.distribution
+    constructors = {
+        "poisson_labels": lambda: losses.PoissonNLLLoss(n, source, different),
+        "gaussian_variance": lambda: losses.GaussianNLLLoss(n, source, same, different),
+        "laplace_scale": lambda: losses.LaplaceNLLLoss(n, source, different, same),
+        "negative_binomial_dispersion": lambda: losses.NegativeBinomialNLLLoss(n, source, different, same),
+        "student_t_log_scale": lambda: losses.StudentTNLLLoss(n, source, different, same),
+        "student_t_learned_dof": lambda: losses.StudentTNLLLoss(
+            n, source, same, same, learned_log_degrees_of_freedom=different
+        ),
+        "gamma_labels": lambda: losses.GammaNLLLoss(n, source, different),
+        "gamma_dispersion": lambda: losses.GammaNLLLoss(n, source, same, dispersion=different),
+        "tweedie_labels": lambda: losses.TweedieLoss(n, source, different, power=1.5),
+    }
+    with pytest.raises(ValueError, match="identical value geometry"):
+        constructors[case]()

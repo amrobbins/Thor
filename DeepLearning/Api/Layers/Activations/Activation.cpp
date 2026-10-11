@@ -110,9 +110,7 @@ std::shared_ptr<ThorImplementation::Layer> Activation::stampExpressionBackedActi
             throw std::runtime_error("Ragged activation is missing its logical ragged output.");
         }
         const ThorImplementation::RaggedTensorDescriptor physicalOutputDescriptor =
-            raggedFeatureOutput->isPlacementNeutral()
-                ? raggedFeatureOutput->getDescriptorForPlacement(physicalInputDescriptor.getBatchSize())
-                : raggedFeatureOutput->getDescriptor();
+            raggedFeatureOutput->getDescriptorForPlacement(physicalInputDescriptor.getBatchSize());
         if (raggedOutput.getDescriptor() != physicalOutputDescriptor) {
             throw std::runtime_error("Ragged activation expression output descriptor does not match its API output.");
         }
@@ -232,8 +230,8 @@ uint64_t Activation::getExpressionBackedActivationMemRequirementInBytes(uint32_t
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
 
-    if (raggedFeatureInput.has_value() && raggedFeatureInput->isPlacementNeutral()) {
-        if (batchSize == 0) throw std::invalid_argument("Placement-neutral activation requires a nonzero placement batch.");
+    if (raggedFeatureInput.has_value()) {
+        if (batchSize == 0) throw std::invalid_argument("Ragged activation requires a nonzero placement batch.");
         const uint64_t inputBytes = featureInput->getTotalSizeInBytes();
         const uint64_t outputBytes = featureOutput->getTotalSizeInBytes();
         if (inputBytes > std::numeric_limits<uint64_t>::max() / batchSize ||
@@ -260,12 +258,11 @@ uint64_t Activation::getExpressionBackedActivationMemRequirementInBytes(uint32_t
     }
 
     uint64_t bytes = featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes();
-    if (raggedFeatureInput.has_value()) bytes += raggedFeatureInput->getOffsets().getTotalSizeInBytes();
     for (const auto& [name, tensor] : epilogueInputBindings) {
         (void)name;
         bytes += tensor.getTotalSizeInBytes();
     }
-    return raggedFeatureInput.has_value() ? bytes : batchSize * bytes;
+    return batchSize * bytes;
 }
 
 Tensor Activation::standaloneOutputTensorForInput(const Tensor& inputTensor) const { return inputTensor.clone(); }
@@ -350,15 +347,12 @@ void Activation::deserializeStandaloneFields(const json& j, Network* network) {
     if (useRagged) {
         const json& raggedJson = j.at("ragged_feature_input");
         raggedInput = SegmentedPrimitiveDetail::reconstructInput(raggedJson, network, getLayerType().c_str());
-        const std::optional<std::string> neutralVersion = placementNeutralStandaloneVersion();
-        if (raggedInput->isPlacementNeutral()) {
-            if (!neutralVersion.has_value() || version != neutralVersion.value()) {
-                throw std::runtime_error(getLayerType() +
-                                         " serialized layer version does not match placement-neutral ragged geometry.");
-            }
-        } else if (version != getLayerVersion()) {
-            throw std::runtime_error(getLayerType() +
-                                     " serialized layer version does not match fixed ragged geometry.");
+        // Older standalone-ragged versions are alternate JSON grammars, not
+        // a second model geometry. Both reconstruct through the logical graph.
+        const std::optional<std::string> canonicalRaggedVersion = placementNeutralStandaloneVersion();
+        if (version != getLayerVersion() &&
+            (!canonicalRaggedVersion.has_value() || version != canonicalRaggedVersion.value())) {
+            throw std::runtime_error(getLayerType() + " serialized ragged version is unsupported: " + version);
         }
 
         const uint64_t serializedFeatureInputId = j.at("feature_input").at("id").get<uint64_t>();
@@ -398,32 +392,24 @@ void Activation::deserializeStandaloneFields(const json& j, Network* network) {
 
     if (raggedInput.has_value()) {
         initializeStandaloneActivation(raggedInput.value(), epilogueExpression, epilogueBindings);
-        // Initialization invokes the concrete activation's polymorphic
-        // standaloneOutputTensorForInput(). For neutral artifacts the serialized
-        // output must match that model-derived logical descriptor, which may
-        // change the trailing feature dimensions (e.g. 2H -> H for GLUs).
-        // Keep the serialized tensor identity; placement/runtime geometry is
-        // not reconstructed from the artifact.
-        const Tensor serializedOutput = Tensor::deserialize(j.at("feature_output"));
-        if (raggedInput->isPlacementNeutral() &&
-            (serializedOutput.getDataType() != featureOutput->getDataType() ||
-             serializedOutput.getDimensions() != featureOutput->getDimensions())) {
-            throw std::runtime_error(
-                "Placement-neutral activation output must match the concrete activation's logical output descriptor.");
-        }
-        featureOutput = serializedOutput;
+        // Reconstruct the saved output identity with graph-authoritative M.
+        // Concrete activations (including GLUs) still own their trailing shape.
         const json& inputJson = j.at("ragged_feature_input");
         const json& outputJson = j.at("ragged_feature_output");
+        const Tensor serializedOutput = SegmentedPrimitiveDetail::reconstructPreservedOutputValues(
+            j.at("feature_output"), outputJson, raggedInput.value(), getLayerType().c_str());
+        if (serializedOutput.getDataType() != featureOutput->getDataType() ||
+            serializedOutput.getDimensions() != featureOutput->getDimensions()) {
+            throw std::runtime_error(
+                "Activation output must match the concrete activation's semantic output descriptor.");
+        }
+        featureOutput = serializedOutput;
         if (outputJson.at("values").at("id").get<uint64_t>() !=
             j.at("feature_output").at("id").get<uint64_t>()) {
             throw std::runtime_error("Activation serialized ragged output values must match feature_output.");
         }
         SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
             outputJson, inputJson, raggedInput.value(), getLayerType().c_str());
-        if (featureOutput->getDataType() != outputJson.at("values").at("data_type").get<DataType>() ||
-            featureOutput->getDimensions() != outputJson.at("values").at("dimensions").get<std::vector<uint64_t>>()) {
-            throw std::runtime_error("Activation serialized ragged output values descriptor does not match feature_output.");
-        }
         raggedFeatureOutput = raggedInput->withValues(featureOutput.value());
     } else {
         initializeStandaloneActivation(inputTensor, epilogueExpression, epilogueBindings);
@@ -437,17 +423,12 @@ json Activation::architectureJson() const {
 
     json j;
     j["factory"] = Layer::Factory::Activation.value();
-    const bool placementNeutral = raggedFeatureInput.has_value() && raggedFeatureInput->isPlacementNeutral();
-    if (raggedFeatureOutput.has_value()) {
-        THOR_THROW_IF_FALSE(placementNeutral == raggedFeatureOutput->isPlacementNeutral());
-    }
-    if (placementNeutral) {
-        const std::optional<std::string> neutralVersion = placementNeutralStandaloneVersion();
-        if (!neutralVersion.has_value()) {
-            throw std::runtime_error(getLayerType() +
-                                     " placement-neutral standalone serialization has not been migrated yet.");
+    if (raggedFeatureInput.has_value()) {
+        const std::optional<std::string> canonicalRaggedVersion = placementNeutralStandaloneVersion();
+        if (!canonicalRaggedVersion.has_value()) {
+            throw std::runtime_error(getLayerType() + " has no supported standalone ragged serialization schema.");
         }
-        j["version"] = neutralVersion.value();
+        j["version"] = canonicalRaggedVersion.value();
     } else {
         j["version"] = getLayerVersion();
     }

@@ -47,8 +47,6 @@ Inputs makeSharedPartitionInputs(Network& network,
                                    .valuesDataType(valuesDType)
                                    .offsetsDataType(offsetsDType)
                                    .trailingDimensions({2})
-                                   .batchSize(4)
-                                   .maxTotalValues(11)
                                    .maxValuesPerRow(5)
                                    .build();
     RaggedTensor labels = RaggedNetworkInput::Builder()
@@ -115,8 +113,8 @@ TEST(RaggedMAEApi, RawPreservesExactPartitionAndCreatesTrainingRoot) {
         EXPECT_EQ(loss.getRaggedLabels(), inputs.labels);
         RaggedTensor raw = loss.getRaggedRawLoss();
         EXPECT_EQ(raw.getOffsets(), inputs.predictions.getOffsets());
-        EXPECT_EQ(raw.getBatchSize(), 4u);
-        EXPECT_EQ(raw.getMaxTotalValues(), 11u);
+        EXPECT_EQ(raw.getMaxValuesPerRow(), inputs.predictions.getMaxValuesPerRow());
+        EXPECT_TRUE(raw.sharesPartitionWith(inputs.predictions));
         EXPECT_EQ(raw.getTrailingDimensions(), (vector<uint64_t>{2}));
         EXPECT_EQ(raw.getValuesDataType(), DataType::FP32);
         EXPECT_EQ(loss.getRaggedLoss(), raw);
@@ -173,17 +171,13 @@ TEST(RaggedMAEApi, RejectsDifferentPartitionPerOutputAndInvalidExampleWeights) {
                                    .name("predictions")
                                    .valuesDataType(DataType::FP32)
                                    .trailingDimensions({2})
-                                   .batchSize(3)
-                                   .maxTotalValues(8)
-                                   .build();
+                                   .maxValuesPerRow(3).build();
     RaggedTensor labelsDifferentPartition = RaggedNetworkInput::Builder()
                                                 .network(network)
                                                 .name("labels")
                                                 .valuesDataType(DataType::FP32)
                                                 .trailingDimensions({2})
-                                                .batchSize(3)
-                                                .maxTotalValues(8)
-                                                .build();
+                                                .maxValuesPerRow(3).build();
     EXPECT_THROW((void)MAE::Builder()
                      .network(network)
                      .predictions(predictions)
@@ -258,9 +252,7 @@ TEST(RaggedMAEApi, MatchesDenseRegressionPredictionDTypeContractAndDefaultLossSt
                                        .name("predictions")
                                        .valuesDataType(predictionDType)
                                        .trailingDimensions({2})
-                                       .batchSize(3)
-                                       .maxTotalValues(8)
-                                       .build();
+                                       .maxValuesPerRow(3).build();
         RaggedTensor labels = RaggedNetworkInput::Builder()
                                   .network(network)
                                   .name("labels")
@@ -284,9 +276,7 @@ TEST(RaggedMAEApi, MatchesDenseRegressionLabelDTypeContract) {
                                        .name("predictions")
                                        .valuesDataType(DataType::BF16)
                                        .trailingDimensions({2})
-                                       .batchSize(3)
-                                       .maxTotalValues(8)
-                                       .build();
+                                       .maxValuesPerRow(3).build();
         RaggedTensor labels = RaggedNetworkInput::Builder()
                                   .network(network)
                                   .name("labels")
@@ -341,9 +331,7 @@ TEST(RaggedMAEApi, PerRowExampleWeightsPlaceForScalarAndMultiAxisTrailingValues)
                                        .valuesDataType(DataType::FP32)
                                        .offsetsDataType(DataType::UINT32)
                                        .trailingDimensions(trailingDimensions)
-                                       .batchSize(3)
-                                       .maxTotalValues(7)
-                                       .build();
+                                       .maxValuesPerRow(3).build();
         RaggedTensor labels = RaggedNetworkInput::Builder()
                                   .network(network)
                                   .name("labels")
@@ -387,9 +375,7 @@ TEST(RaggedMAEApi, RejectsTheSameUnsupportedRegressionDTypesAsDenseMAE) {
                                        .name("predictions")
                                        .valuesDataType(DataType::FP64)
                                        .trailingDimensions({2})
-                                       .batchSize(3)
-                                       .maxTotalValues(8)
-                                       .build();
+                                       .maxValuesPerRow(3).build();
         RaggedTensor labels = RaggedNetworkInput::Builder()
                                   .network(network)
                                   .name("labels")
@@ -406,9 +392,7 @@ TEST(RaggedMAEApi, RejectsTheSameUnsupportedRegressionDTypesAsDenseMAE) {
                                        .name("predictions")
                                        .valuesDataType(DataType::FP32)
                                        .trailingDimensions({2})
-                                       .batchSize(3)
-                                       .maxTotalValues(8)
-                                       .build();
+                                       .maxValuesPerRow(3).build();
         RaggedTensor labels = RaggedNetworkInput::Builder()
                                   .network(network)
                                   .name("labels")
@@ -436,7 +420,7 @@ TEST(RaggedMAEApi, PlacedBatchReportingAndBackwardUseLogicalRowsAndActivePrefix)
     if (!cudaAvailable()) GTEST_SKIP() << "CUDA device required for ragged MAE placement/runtime coverage.";
 
     constexpr uint32_t batchSize = 3;
-    constexpr uint64_t maxTotalValues = 8;
+    constexpr uint64_t maxTotalValues = batchSize * 3;
     constexpr uint64_t trailingWidth = 2;
     constexpr float lossWeight = 0.5f;
 
@@ -448,8 +432,6 @@ TEST(RaggedMAEApi, PlacedBatchReportingAndBackwardUseLogicalRowsAndActivePrefix)
                                        .valuesDataType(DataType::FP32)
                                        .offsetsDataType(offsetsDType)
                                        .trailingDimensions({trailingWidth})
-                                       .batchSize(batchSize)
-                                       .maxTotalValues(maxTotalValues)
                                        .maxValuesPerRow(3)
                                        .build();
         RaggedTensor labels = RaggedNetworkInput::Builder()
@@ -549,7 +531,7 @@ TEST(RaggedMAEApi, PerRowExampleWeightsScaleActiveLossAndGradientAndPreserveLogi
 
     constexpr uint32_t batchSize = 4;
     constexpr uint32_t validExamples = 3;
-    constexpr uint64_t maxTotalValues = 8;
+    constexpr uint64_t maxTotalValues = batchSize * 3;
     constexpr uint64_t trailingWidth = 2;
 
     for (DataType offsetsDType : {DataType::UINT32, DataType::UINT64}) {
@@ -560,8 +542,6 @@ TEST(RaggedMAEApi, PerRowExampleWeightsScaleActiveLossAndGradientAndPreserveLogi
                                        .valuesDataType(DataType::FP32)
                                        .offsetsDataType(offsetsDType)
                                        .trailingDimensions({trailingWidth})
-                                       .batchSize(batchSize)
-                                       .maxTotalValues(maxTotalValues)
                                        .maxValuesPerRow(3)
                                        .build();
         RaggedTensor labels = RaggedNetworkInput::Builder()

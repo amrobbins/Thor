@@ -49,8 +49,14 @@ static bool isRmsNormBackwardOp(ExprOp op) {
     return op == ExprOp::RMSNORM_BACKWARD_X || op == ExprOp::RMSNORM_BACKWARD_SCALE;
 }
 
+static bool isLayerNormBackwardOp(ExprOp op) {
+    return op == ExprOp::LAYERNORM_BACKWARD_X || op == ExprOp::LAYERNORM_BACKWARD_SCALE ||
+           op == ExprOp::LAYERNORM_BACKWARD_BIAS;
+}
+
 static bool isReductionComputeOp(ExprOp op) {
-    return isReductionOp(op) || op == ExprOp::RMSNORM || op == ExprOp::LAYERNORM || isRmsNormBackwardOp(op) ||
+    return isReductionOp(op) || op == ExprOp::RMSNORM || op == ExprOp::LAYERNORM ||
+           isRmsNormBackwardOp(op) || isLayerNormBackwardOp(op) ||
            op == ExprOp::ATTENTION ||
            isAttentionBackwardOp(op) || op == ExprOp::ROPE;
 }
@@ -882,6 +888,16 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         }
         const DataType default_dtype = node.op == ExprOp::RMSNORM_BACKWARD_X ? resolved_output_dtypes[node.lhs]
                                                                             : resolved_output_dtypes[node.rhs];
+        return node.output_dtype.value_or(default_dtype);
+    }
+
+    if (isLayerNormBackwardOp(node.op)) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size() ||
+            node.aux >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("LayerNorm-backward node has input index out of range in resolveNodeOutputDType.");
+        }
+        const DataType default_dtype = node.op == ExprOp::LAYERNORM_BACKWARD_X
+            ? resolved_output_dtypes[node.lhs] : resolved_output_dtypes[node.rhs];
         return node.output_dtype.value_or(default_dtype);
     }
 

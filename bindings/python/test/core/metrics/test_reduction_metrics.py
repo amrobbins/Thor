@@ -111,8 +111,6 @@ def _r10l_ragged_values(network, name, dtype=thor.DataType.fp32, offsets_dtype=t
         name,
         dtype,
         [2],
-        batch_size=4,
-        max_total_values=9,
         max_values_per_row=4,
         offsets_data_type=offsets_dtype,
     )
@@ -159,15 +157,13 @@ def test_r10m_min_and_max_construct_from_ragged_values(metric_type, aggregation,
 ])
 def test_r10l_ragged_sum_and_mean_ignore_inactive_capacity_and_handle_empty_rows(offsets_dtype, np_offsets_dtype):
     batch_size = 4
-    capacity = 9
+    capacity = batch_size * 4
     net = thor.Network(f"r10l_execute_{offsets_dtype}")
     values = thor.layers.RaggedNetworkInput(
         net,
         "values",
         thor.DataType.fp16,
         [2],
-        batch_size=batch_size,
-        max_total_values=capacity,
         max_values_per_row=4,
         offsets_data_type=offsets_dtype,
     )
@@ -200,10 +196,11 @@ def test_r10l_ragged_sum_and_mean_ignore_inactive_capacity_and_handle_empty_rows
 @pytest.mark.cuda
 def test_r10l_ragged_sum_and_mean_all_empty_batch_report_zero():
     batch_size = 3
-    capacity = 7
+    capacity = batch_size * 4
     net = thor.Network("r10l_all_empty")
     values = thor.layers.RaggedNetworkInput(
-        net, "values", thor.DataType.fp32, [3], batch_size=batch_size, max_total_values=capacity
+        net, "values", thor.DataType.fp32, [3],
+        max_values_per_row=4,
     )
     sum_metric = thor.metrics.Sum(net, values)
     mean_metric = thor.metrics.Mean(net, values)
@@ -214,7 +211,8 @@ def test_r10l_ragged_sum_and_mean_all_empty_batch_report_zero():
     packed = np.full((capacity, 3), np.float32(np.nan), dtype=np.float32)
     offsets = np.zeros(batch_size + 1, dtype=np.uint32)
     physical = thor.physical.PhysicalRaggedTensor(
-        _cpu_tensor(packed, thor.DataType.fp32), _cpu_tensor(offsets, thor.DataType.uint32)
+        _cpu_tensor(packed, thor.DataType.fp32), _cpu_tensor(offsets, thor.DataType.uint32),
+        max_values_per_row=4,
     )
     outputs = placed.infer({"values": physical})
     assert float(outputs["sum"].numpy().reshape(-1)[0]) == pytest.approx(0.0)
@@ -228,15 +226,13 @@ def test_r10l_ragged_sum_and_mean_all_empty_batch_report_zero():
 ])
 def test_r10m_ragged_min_max_ignore_empty_rows_inactive_capacity_and_partial_tail(offsets_dtype, np_offsets_dtype):
     batch_size = 4
-    capacity = 9
+    capacity = batch_size * 4
     net = thor.Network(f"r10m_execute_{offsets_dtype}")
     values = thor.layers.RaggedNetworkInput(
         net,
         "values",
         thor.DataType.fp32,
         [2],
-        batch_size=batch_size,
-        max_total_values=capacity,
         max_values_per_row=4,
         offsets_data_type=offsets_dtype,
     )
@@ -266,10 +262,11 @@ def test_r10m_ragged_min_max_ignore_empty_rows_inactive_capacity_and_partial_tai
 @pytest.mark.cuda
 def test_r10m_ragged_min_max_all_empty_have_concrete_graph_output():
     batch_size = 3
-    capacity = 7
+    capacity = batch_size * 4
     net = thor.Network("r10m_all_empty")
     values = thor.layers.RaggedNetworkInput(
-        net, "values", thor.DataType.fp32, [3], batch_size=batch_size, max_total_values=capacity
+        net, "values", thor.DataType.fp32, [3],
+        max_values_per_row=4,
     )
     minimum = thor.metrics.Min(net, values)
     maximum = thor.metrics.Max(net, values)
@@ -280,7 +277,8 @@ def test_r10m_ragged_min_max_all_empty_have_concrete_graph_output():
     packed = np.full((capacity, 3), np.float32(np.nan), dtype=np.float32)
     offsets = np.zeros(batch_size + 1, dtype=np.uint32)
     physical = thor.physical.PhysicalRaggedTensor(
-        _cpu_tensor(packed, thor.DataType.fp32), _cpu_tensor(offsets, thor.DataType.uint32)
+        _cpu_tensor(packed, thor.DataType.fp32), _cpu_tensor(offsets, thor.DataType.uint32),
+        max_values_per_row=4,
     )
     outputs = placed.infer({"values": physical})
     # R10M's aggregation metadata, not this concrete graph scalar, determines
@@ -295,8 +293,6 @@ def _r10n_ragged_weighted_mean_inputs(network, offsets_dtype=thor.DataType.uint3
         "values",
         thor.DataType.fp32,
         [2],
-        batch_size=4,
-        max_total_values=9,
         max_values_per_row=4,
         offsets_data_type=offsets_dtype,
     )
@@ -333,8 +329,6 @@ def test_r10n_weighted_mean_rejects_different_ragged_partitions():
         "different_weights",
         thor.DataType.fp32,
         [2],
-        batch_size=4,
-        max_total_values=9,
         max_values_per_row=4,
     )
 
@@ -360,8 +354,8 @@ def test_r10n_ragged_weighted_mean_uses_only_active_values_and_weights(offsets_d
     active_weights = np.asarray(
         [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0], [9.0, 10.0]], dtype=np.float32
     )
-    packed_values = np.full((9, 2), np.float32(np.nan), dtype=np.float32)
-    packed_weights = np.full((9, 2), np.float32(np.nan), dtype=np.float32)
+    packed_values = np.full((4 * 4, 2), np.float32(np.nan), dtype=np.float32)
+    packed_weights = np.full((4 * 4, 2), np.float32(np.nan), dtype=np.float32)
     packed_values[: len(active_values)] = active_values
     packed_weights[: len(active_weights)] = active_weights
     offsets_np = np.asarray([0, 2, 2, 5, 5], dtype=np_offsets_dtype)
@@ -389,11 +383,11 @@ def test_r10n_ragged_weighted_mean_zero_denominator_reports_zero():
     thor.layers.NetworkOutput(net, "weighted_mean", metric.get_metric(), thor.DataType.fp32)
     placed = net.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
-    packed_values = np.full((9, 2), np.float32(np.nan), dtype=np.float32)
+    packed_values = np.full((4 * 4, 2), np.float32(np.nan), dtype=np.float32)
     # Zero active weight mass is no contribution even if ignored values contain
     # NaN; the sufficient statistics are canonicalized to exact (0, 0).
     packed_values[:2] = np.asarray([[np.nan, np.nan], [5.0, 6.0]], dtype=np.float32)
-    packed_weights = np.full((9, 2), np.float32(np.nan), dtype=np.float32)
+    packed_weights = np.full((4 * 4, 2), np.float32(np.nan), dtype=np.float32)
     packed_weights[:2] = 0.0
     offsets_np = np.asarray([0, 2, 2, 2, 2], dtype=np.uint32)
     physical_values = thor.physical.PhysicalRaggedTensor(

@@ -43,17 +43,13 @@ Inputs makeInputs(Network& network,
                   DataType predictionsDType = DataType::FP32,
                   DataType labelsDType = DataType::FP32,
                   DataType offsetsDType = DataType::UINT32,
-                  vector<uint64_t> trailingDimensions = {1},
-                  uint32_t batchSize = 4,
-                  uint64_t maxTotalValues = 8) {
+                  vector<uint64_t> trailingDimensions = {1}) {
     RaggedTensor predictions = RaggedNetworkInput::Builder()
                                    .network(network)
                                    .name("predictions")
                                    .valuesDataType(predictionsDType)
                                    .offsetsDataType(offsetsDType)
                                    .trailingDimensions(trailingDimensions)
-                                   .batchSize(batchSize)
-                                   .maxTotalValues(maxTotalValues)
                                    .maxValuesPerRow(5)
                                    .build();
     RaggedTensor labels = RaggedNetworkInput::Builder()
@@ -179,12 +175,12 @@ pair<float, float> mapeLossGradient(float prediction, float label) {
 void runRuntimeCase(LossKind kind, DataType offsetsDType) {
     constexpr uint32_t batchSize = 4;
     constexpr uint32_t validExamples = 3;
-    constexpr uint64_t maxTotalValues = 8;
+    constexpr uint64_t maxTotalValues = static_cast<uint64_t>(batchSize) * 5;
     constexpr float parameter = 0.75f;
 
     const string kindName = kind == LossKind::MAPE ? "mape" : kind == LossKind::HUBER ? "huber" : "smooth";
     Network network("ragged_r10f_" + kindName + (offsetsDType == DataType::UINT32 ? "_u32" : "_u64"));
-    Inputs inputs = makeInputs(network, DataType::FP32, DataType::FP32, offsetsDType, {1}, batchSize, maxTotalValues);
+    Inputs inputs = makeInputs(network, DataType::FP32, DataType::FP32, offsetsDType, {1});
     Tensor reportedLoss = buildBatchLoss(network, inputs, kind, parameter);
     (void)NetworkOutput::Builder().network(network).name("loss").inputTensor(reportedLoss).dataType(DataType::FP32).build();
 
@@ -336,8 +332,6 @@ TEST(RaggedRegressionR10F, RequiresExactSharedPartition) {
                                        .name("predictions")
                                        .valuesDataType(DataType::FP32)
                                        .trailingDimensions({1})
-                                       .batchSize(3)
-                                       .maxTotalValues(7)
                                        .maxValuesPerRow(4)
                                        .build();
         RaggedTensor labels = RaggedNetworkInput::Builder()
@@ -345,8 +339,6 @@ TEST(RaggedRegressionR10F, RequiresExactSharedPartition) {
                                   .name("labels")
                                   .valuesDataType(DataType::FP32)
                                   .trailingDimensions({1})
-                                  .batchSize(3)
-                                  .maxTotalValues(7)
                                   .maxValuesPerRow(4)
                                   .build();
         if (kind == LossKind::MAPE)

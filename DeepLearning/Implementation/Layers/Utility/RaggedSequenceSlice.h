@@ -188,6 +188,10 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
         previousLayers[inputIndex] = previousLayer;
         featureInputs[inputIndex] = featureInput;
         streams[inputIndex] = stream;
+        // Consumers must read the physical output descriptor during stamp(),
+        // before connectToNextLayer() is called. Materialize it as soon as
+        // the first already-placed input provides the device placement.
+        ensureOutputAllocated();
         if (inputIndex == 0 && backPropagateError && !isInferenceOnly()) {
             errorOutputs[inputIndex] = featureInput->clone();
         } else {

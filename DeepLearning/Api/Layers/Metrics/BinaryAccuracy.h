@@ -3,6 +3,7 @@
 
 #include "DeepLearning/Api/Layers/Metrics/Metric.h"
 #include "DeepLearning/Api/Tensor/RaggedTensor.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 #include "DeepLearning/Implementation/Layers/Metrics/BinaryAccuracy.h"
 #include "DeepLearning/Implementation/Layers/Metrics/RaggedAccuracy.h"
 
@@ -79,13 +80,12 @@ class BinaryAccuracy : public Metric {
                                                    ThorImplementation::TensorPlacement tensorPlacement) const override {
         if (!getUseRagged())
             return Metric::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
-        (void)batchSize;
         (void)tensorPlacement;
         // metric + ratio numerator/denominator + one default slot's device buffers
         // + the reusable non-atomic CTA-partial workspace.
         const uint64_t workspaceBytes =
             ThorImplementation::raggedAccuracyStatisticsWorkspaceDescriptor(
-                raggedPredictions->getMaxTotalValues())
+                raggedPredictions->getDescriptorForPlacement(batchSize).getMaxTotalValues())
                 .getArraySizeInBytes();
         return metricTensor.getTotalSizeInBytes() + 4 * sizeof(float) + workspaceBytes;
     }
@@ -96,7 +96,6 @@ class BinaryAccuracy : public Metric {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)placement;
-        (void)drivingLayer;
         (void)drivingApiLayer;
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
@@ -110,10 +109,18 @@ class BinaryAccuracy : public Metric {
             connectingApiTensor != raggedPredictions->getOffsets()) {
             throw std::invalid_argument("BinaryAccuracy ragged stamp received an unrelated tensor.");
         }
+        const RaggedTensor& connected = connectingApiTensor == raggedLabels->getValues()
+            ? raggedLabels.value() : raggedPredictions.value();
+        const auto physical = SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+            connected, drivingLayer, "BinaryAccuracy", connectingApiTensor == raggedPredictions->getOffsets());
+        const uint64_t batchSize = physical.getBatchSize();
+        if (physical.getMaxTotalValues() !=
+                raggedPredictions->getDescriptorForPlacement(batchSize).getMaxTotalValues())
+            throw std::runtime_error("BinaryAccuracy runtime partition geometry disagrees with the logical model.");
         return std::make_shared<ThorImplementation::RaggedAccuracyMetric>(
             ThorImplementation::RaggedAccuracyDetail::Kind::BINARY,
-            raggedPredictions->getBatchSize(),
-            raggedPredictions->getMaxTotalValues());
+            batchSize,
+            physical.getMaxTotalValues());
     }
 
     std::optional<RaggedTensor> raggedPredictions;
@@ -209,9 +216,7 @@ class BinaryAccuracy::Builder {
             throw std::invalid_argument("BinaryAccuracy predictions and labels values must be distinct graph tensors.");
         if (!predictions.sharesPartitionWith(labels))
             throw std::invalid_argument("BinaryAccuracy ragged predictions and labels must use the exact same row partition.");
-        if (predictions.getBatchSize() != labels.getBatchSize() ||
-            predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
-            predictions.getOffsetsDataType() != labels.getOffsetsDataType() ||
+        if (predictions.getOffsetsDataType() != labels.getOffsetsDataType() ||
             predictions.hasMaxValuesPerRow() != labels.hasMaxValuesPerRow() ||
             (predictions.hasMaxValuesPerRow() && predictions.getMaxValuesPerRow() != labels.getMaxValuesPerRow())) {
             throw std::invalid_argument("BinaryAccuracy ragged predictions and labels partition metadata must match.");

@@ -96,8 +96,6 @@ void exerciseSavedTrainingGraph(const filesystem::path& archive, uint32_t b,
     ASSERT_NE(targetIt, external.end());
     const RaggedTensor tokens = tokenIt->raggedTensor;
     const RaggedTensor targets = targetIt->raggedTensor;
-    ASSERT_TRUE(tokens.isPlacementNeutral());
-    ASSERT_TRUE(targets.isPlacementNeutral());
     EXPECT_TRUE(tokens.sharesPartitionWith(targets));
     EXPECT_EQ(tokens.getValuesDimensions(), (vector<uint64_t>{kM, kChannels}));
     EXPECT_EQ(tokens.getValues().getOriginalId(), originalInputId);
@@ -334,7 +332,7 @@ TEST(SoftmaxNeutralS2, DenseCceExternalBackwardAndRaggedCceLogitsNativeStaySepar
     Network ragged("s2_ragged_cce_policy");
     const RaggedTensor raggedLogits = RaggedNetworkInput::Builder().network(ragged).name("logits")
         .valuesDataType(DataType::FP32).offsetsDataType(DataType::UINT32)
-        .trailingDimensions({kChannels}).batchSize(2).maxTotalValues(8).maxValuesPerRow(kM).build();
+        .trailingDimensions({kChannels}).maxValuesPerRow(kM).build();
     const RaggedTensor raggedLabels = RaggedNetworkInput::Builder().network(ragged).name("labels")
         .valuesDataType(DataType::FP32).trailingDimensions({kChannels}).partition(raggedLogits).build();
     const auto raggedLoss = CategoricalCrossEntropy::Builder().network(ragged)

@@ -421,9 +421,7 @@ TEST(ApiSubgraphClone, SourceOnlyMetricDoesNotUseRaggedOffsetsToBypassParameteri
                                 .valuesDataType(DataType::FP32)
                                 .offsetsDataType(DataType::UINT32)
                                 .trailingDimensions({3})
-                                .maxTotalValues(16)
                                 .maxValuesPerRow(8)
-                                .batchSize(2)
                                 .build();
     Convolution1d hidden = Convolution1d::Builder()
                                .network(source)

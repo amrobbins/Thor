@@ -85,9 +85,7 @@ void validateRaggedArguments(const string& loss_name,
         throw nb::value_error("SoftTargetCrossEntropy instance: ragged predictions must have exactly one trailing class dimension greater than one.");
     if (!predictions.sharesPartitionWith(labels))
         throw nb::value_error("SoftTargetCrossEntropy instance: ragged predictions and labels must use the exact same row partition.");
-    if (predictions.getBatchSize() != labels.getBatchSize() ||
-        predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
-        predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+    if (predictions.getValuesDimensions() != labels.getValuesDimensions())
         throw nb::value_error("SoftTargetCrossEntropy instance: ragged predictions and labels must have identical value geometry.");
     if (reported_loss_shape == LossShape::PER_OUTPUT)
         throw nb::value_error("SoftTargetCrossEntropy instance: per_output reporting is undefined for ragged predictions.");

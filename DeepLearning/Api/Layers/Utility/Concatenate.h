@@ -6,7 +6,9 @@
 #include "DeepLearning/Implementation/Layers/Utility/Concatenate.h"
 #include "DeepLearning/Implementation/Layers/Utility/RaggedConcatenate.h"
 #include "DeepLearning/Api/Tensor/RaggedTensor.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 #include <optional>
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <sstream>
@@ -80,6 +82,13 @@ class Concatenate : public MultiConnectionLayer {
         throw std::runtime_error("Tensor is not connected to this Concatenate layer.");
     }
 
+    // API values always use the per-example logical shape; physical capacity
+    // is derived from the execution batch when the network is placed.
+    [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {
+        (void)outputTensor;
+        return false;
+    }
+
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
@@ -93,23 +102,89 @@ class Concatenate : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(initialized);
         THOR_THROW_IF_FALSE(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
-        // Dense API tensors exclude the execution batch dimension. Ragged values
-        // instead expose their packed-capacity row as the leading physical
-        // dimension, so a trailing ragged axis still maps to axis + 1.
+        // The concatenation axis is relative to the trailing logical shape;
+        // the physical packed-value capacity occupies physical axis 0.
         if (getUseRagged()) {
+            const RaggedTensor& reference = raggedFeatureInputs.front();
+            // The stamp can be reached through any values operand or the
+            // final structural partition token. Recover B from that exact
+            // already-placed physical driver, never from logical [M, ...].
+            const int port = getConnectionType(connectingApiTensor);
+            const bool partitionPort = static_cast<size_t>(port) == raggedFeatureInputs.size();
+            const RaggedTensor& driven = partitionPort
+                ? reference : raggedFeatureInputs.at(static_cast<size_t>(port));
+            const ThorImplementation::RaggedTensorDescriptor placed =
+                SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+                    driven, drivingLayer, "Concatenate");
+            const uint64_t runtimeB = placed.getBatchSize();
+            if (runtimeB == 0 || runtimeB > std::numeric_limits<uint32_t>::max() ||
+                placed != driven.getDescriptorForPlacement(runtimeB)) {
+                throw std::runtime_error("Concatenate driving row-partition descriptor disagrees with placement.");
+            }
+            // The shared partition must be identical at runtime even for
+            // operands whose concatenation-axis widths differ.
+            const auto runtimePartition = placed.getRowPartition();
+            const uint64_t physicalCapacity = placed.getValuesDescriptor().getDimensions().front();
+            for (const RaggedTensor& input : raggedFeatureInputs) {
+                const auto expected = input.getDescriptorForPlacement(runtimeB);
+                if (expected.getRowPartition() != runtimePartition ||
+                    expected.getValuesDescriptor().getDimensions().front() != physicalCapacity) {
+                    throw std::runtime_error("Concatenate physical operand capacity or row partition disagrees.");
+                }
+            }
+            if (partitionPort) {
+                const auto carrier = SegmentedPrimitivePlacementDetail::physicalDescriptorForStamp(
+                    drivingLayer, "Concatenate");
+                if (carrier.getDataType() != reference.getOffsetsDataType() ||
+                    carrier.getDimensions() != std::vector<uint64_t>{1}) {
+                    throw std::runtime_error("Concatenate requires a physical [1] active-count carrier.");
+                }
+            } else {
+                const auto physicalValues = SegmentedPrimitivePlacementDetail::physicalDescriptorForStamp(
+                    drivingLayer, "Concatenate");
+                if (physicalValues != placed.getValuesDescriptor()) {
+                    throw std::runtime_error("Concatenate driving values dimensions disagree with placement.");
+                }
+            }
+            const auto expectedOutput = raggedFeatureOutput->getDescriptorForPlacement(runtimeB);
+            if (expectedOutput.getRowPartition() != runtimePartition ||
+                expectedOutput.getValuesDescriptor().getDimensions().front() != physicalCapacity) {
+                throw std::runtime_error("Concatenate physical output capacity or row partition disagrees.");
+            }
             return std::make_shared<ThorImplementation::RaggedConcatenate>(
                 concatenationAxis + 1,
                 static_cast<uint32_t>(raggedFeatureInputs.size()),
-                raggedFeatureInputs.front().getBatchSize());
+                runtimeB);
         }
         return std::make_shared<ThorImplementation::Concatenate>(concatenationAxis + 1, featureInputs.size());
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        // Ragged values already include packed capacity in their logical
-        // dimensions; dense tensors still require the execution batch factor.
-        const uint64_t bytes = featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes();
-        return getUseRagged() ? bytes : bytes * batchSize;
+        (void)tensorPlacement;
+        auto addChecked = [](uint64_t a, uint64_t b) {
+            if (b > std::numeric_limits<uint64_t>::max() - a)
+                throw std::overflow_error("Concatenate memory accounting overflows uint64_t.");
+            return a + b;
+        };
+        auto scaleChecked = [](uint64_t bytes, uint32_t b) {
+            if (b != 0 && bytes > std::numeric_limits<uint64_t>::max() / b)
+                throw std::overflow_error("Concatenate placed memory size overflows uint64_t.");
+            return bytes * b;
+        };
+        // Dense historically charges one input plus output. Preserve that
+        // budget while correcting the ragged multi-input accounting below.
+        if (!getUseRagged()) {
+            return scaleChecked(addChecked(featureInputs[0].getTotalSizeInBytes(),
+                                           featureOutputs[0].getTotalSizeInBytes()), batchSize);
+        }
+        uint64_t bytes = getOutputTensorBytes(batchSize);
+        for (const RaggedTensor& input : raggedFeatureInputs) {
+            const uint64_t valueBytes = input.getValues().getTotalSizeInBytes();
+            bytes = addChecked(bytes, scaleChecked(valueBytes, batchSize));
+        }
+        // DEVICE_ACTIVE_COUNT is a single scalar, not B+1 device offsets.
+        bytes = addChecked(bytes, Tensor(raggedFeatureInputs.front().getOffsetsDataType(), {1}).getTotalSizeInBytes());
+        return bytes;
     }
 
    private:
@@ -152,15 +227,14 @@ class Concatenate::Builder {
             outputTrailing[concatenationAxis] = 0;
             for (uint32_t i = 0; i < _raggedFeatureInputs.size(); ++i) {
                 const RaggedTensor &input = _raggedFeatureInputs[i];
-                if (!input.sharesPartitionWith(reference)) {
+                if (!input.sharesPartitionWith(reference) ||
+                    input.getRowPartitionToken() != reference.getRowPartitionToken()) {
                     THOR_THROW_LOGIC_ERROR("Concatenate RaggedTensor inputs must share the exact same row partition.");
                 }
-                if (input.getBatchSize() != reference.getBatchSize() ||
-                    input.getMaxTotalValues() != reference.getMaxTotalValues() ||
-                    input.getOffsetsDataType() != reference.getOffsetsDataType() ||
+                if (input.getOffsetsDataType() != reference.getOffsetsDataType() ||
                     input.getValuesDataType() != reference.getValuesDataType() ||
-                    input.hasMaxValuesPerRow() != reference.hasMaxValuesPerRow() ||
-                    (input.hasMaxValuesPerRow() && input.getMaxValuesPerRow() != reference.getMaxValuesPerRow())) {
+                    !input.hasMaxValuesPerRow() || !reference.hasMaxValuesPerRow() ||
+                    input.getMaxValuesPerRow() != reference.getMaxValuesPerRow()) {
                     THOR_THROW_LOGIC_ERROR(
                         "Concatenate RaggedTensor inputs must share row-partition capacity metadata and values dtype.");
                 }
@@ -174,6 +248,9 @@ class Concatenate::Builder {
                             "Concatenate RaggedTensor non-concatenated trailing dimensions must match.");
                     }
                 }
+                if (outputTrailing[concatenationAxis] >
+                    std::numeric_limits<uint64_t>::max() - trailing[concatenationAxis])
+                    throw std::overflow_error("Concatenate ragged trailing output dimension overflows.");
                 outputTrailing[concatenationAxis] += trailing[concatenationAxis];
             }
 

@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Attention.h"
 #include "Utilities/TensorOperations/Ragged/RowPartition.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
 
 #include "DeepLearning/Api/Initializers/Glorot.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
@@ -48,6 +49,36 @@ constexpr const char* kAttentionResidualInputName = "residual_input";
 constexpr const char* kAttentionOutputDropoutSeedInputName = "__attention_output_dropout_seed";
 constexpr const char* kAttentionOutputDropoutSequenceInputName = "__attention_output_dropout_sequence";
 constexpr ThorImplementation::DynamicExpressionVariantId kAttentionEvaluationVariant = 1;
+
+constexpr const char* kCanonicalAttentionSchemaVersion = "2.1.0";
+
+// Canonical references refer to the original graph, never the clone-local Tensor id.
+// Physical offsets, the placed B, and packed B*M dimensions are not model state.
+void validateCanonicalAttentionTensorReference(const json& reference, const Thor::Tensor& live, const char* field) {
+    if (!reference.is_object() || reference.size() != 4 || !reference.contains("version") ||
+        reference.at("version") != "1.0.0" || !reference.contains("id") ||
+        !reference.contains("data_type") || !reference.contains("dimensions") ||
+        reference.at("id").get<uint64_t>() != live.getOriginalId() ||
+        reference.at("data_type").get<DataType>() != live.getDataType() ||
+        reference.at("dimensions").get<std::vector<uint64_t>>() != live.getDimensions()) {
+        throw std::runtime_error(std::string("Attention canonical tensor reference mismatch: ") + field);
+    }
+}
+
+void validateCanonicalAttentionRaggedReference(const json& reference, const Thor::RaggedTensor& live, const char* field) {
+    if (!Thor::SegmentedPrimitiveDetail::hasCanonicalLayerRaggedReferenceFields(reference) ||
+        Thor::SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(reference, "Attention") !=
+            Thor::SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL ||
+        !live.hasMaxValuesPerRow() || live.getValuesDimensions().front() != live.getMaxValuesPerRow() ||
+        live.getOffsetsDimensions() != std::vector<uint64_t>{1} ||
+        reference.at("ragged_rank").get<uint32_t>() != 1 ||
+        reference.at("max_values_per_row").get<uint64_t>() != live.getMaxValuesPerRow()) {
+        throw std::runtime_error(std::string("Attention canonical ragged reference mismatch: ") + field);
+    }
+    validateCanonicalAttentionTensorReference(reference.at("values"), live.getValues(), field);
+    validateCanonicalAttentionTensorReference(reference.at("offsets"), live.getRowPartitionToken(), field);
+}
+
 
 std::string dtypeName(DataType dtype) {
     switch (dtype) {
@@ -172,8 +203,11 @@ void requireRaggedFeatureInput(const Thor::RaggedTensor& ragged, const char* inp
     if (!ThorImplementation::isCanonicalRowPartitionOffsetDataType(ragged.getOffsetsDataType())) {
         throw std::invalid_argument(std::string("Attention ") + inputName + " row partition must use uint32 or uint64 offsets.");
     }
-    if (ragged.getBatchSize() == 0 || ragged.getBatchSize() > std::numeric_limits<uint32_t>::max()) {
-        throw std::invalid_argument(std::string("Attention ") + inputName + " batch size must fit uint32 and be non-zero.");
+    if (!ragged.hasMaxValuesPerRow() ||
+        ragged.getValuesDimensions().front() != ragged.getMaxValuesPerRow() ||
+        ragged.getOffsetsDimensions() != std::vector<uint64_t>{1}) {
+        throw std::invalid_argument(std::string("Attention ") + inputName +
+                                    " requires logical [M,features] values and a [1] partition token.");
     }
 }
 
@@ -544,8 +578,8 @@ AttentionEpilogueInputDataTypes attentionEpilogueInputDataTypes(
     return resolved;
 }
 
-ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequenceLength,
-                                                              uint64_t keyValueSequenceLength,
+ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t modelQuerySequenceLength,
+                                                              uint64_t modelKeyValueSequenceLength,
                                                               uint64_t queryMaxSequenceLength,
                                                               uint64_t keyValueMaxSequenceLength,
                                                               uint64_t queryInputFeatures,
@@ -579,7 +613,6 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                                                               bool keyValueRagged,
                                                               bool useQueryRopePositionOffsets,
                                                               bool useKeyRopePositionOffsets,
-                                                              uint64_t raggedBatchSize,
                                                               DataType queryRowPartitionDType,
                                                               DataType keyValueRowPartitionDType,
                                                               DataType inputDType,
@@ -637,8 +670,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
     return DynamicExpression(
         expectedInputs,
         {"feature_output"},
-        [querySequenceLength,
-         keyValueSequenceLength,
+        [modelQuerySequenceLength,
+         modelKeyValueSequenceLength,
          queryMaxSequenceLength,
          keyValueMaxSequenceLength,
          queryInputFeatures,
@@ -673,7 +706,6 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
          keyValueRagged,
          useQueryRopePositionOffsets,
          useKeyRopePositionOffsets,
-         raggedBatchSize,
          queryRowPartitionDType,
          keyValueRowPartitionDType,
          inputDType,
@@ -688,7 +720,23 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             Tensor keyInput = inputs.at(kAttentionKeyInputName);
             Tensor valueInput = inputs.at(kAttentionValueInputName);
             const auto queryInputDims = queryInput.getDimensions();
-            const uint64_t batch = useAnyRagged ? raggedBatchSize : (queryInputDims.empty() ? 0 : queryInputDims.front());
+            // A ragged domain gets B exclusively from its placed [B+1] partition.
+            // Dense-only attention takes B from its physical query input.
+            uint64_t batch = queryInputDims.empty() ? 0 : queryInputDims.front();
+            if (useAnyRagged) {
+                const char* authoritativePartition = queryRagged
+                    ? kAttentionQueryRowPartitionInputName : kAttentionKeyValueRowPartitionInputName;
+                const auto partitionDimensions = inputs.at(authoritativePartition).getDimensions();
+                if (partitionDimensions.size() != 1 || partitionDimensions.front() < 2 ||
+                    partitionDimensions.front() - 1 > std::numeric_limits<uint32_t>::max()) {
+                    throw std::runtime_error("Attention runtime row partition must be physical [B+1], B>0.");
+                }
+                batch = partitionDimensions.front() - 1;
+            }
+            const uint64_t querySequenceLength = queryRagged
+                ? checkedMul(batch, queryMaxSequenceLength, "query B*M capacity") : modelQuerySequenceLength;
+            const uint64_t keyValueSequenceLength = keyValueRagged
+                ? checkedMul(batch, keyValueMaxSequenceLength, "key/value B*M capacity") : modelKeyValueSequenceLength;
             const std::vector<uint64_t> expectedQueryInputDimensions =
                 queryRagged ? std::vector<uint64_t>{querySequenceLength, queryInputFeatures}
                             : std::vector<uint64_t>{batch, querySequenceLength, queryInputFeatures};
@@ -1496,6 +1544,41 @@ std::shared_ptr<ThorImplementation::TrainableLayer> Attention::createPhysicalLay
     std::optional<uint32_t> fixedBatchCapacity) const {
     THOR_THROW_IF_FALSE(!usesBatchValidity);
     THOR_THROW_IF_FALSE(!requiresFullBatch);
+    if (raggedQueryInput.has_value()) {
+        // The logical [M,features] output is packed [B*M,features] only after
+        // this placement's Q partition establishes B. The physical CustomLayer
+        // owns that resolution and checks independent Q/KV partitions.
+        auto requiredPort = [&](const std::string& name) -> uint32_t {
+            const auto it = std::find(physicalInputNames.begin(), physicalInputNames.end(), name);
+            if (it == physicalInputNames.end()) {
+                throw std::runtime_error("Attention missing physical input port '" + name + "'.");
+            }
+            return static_cast<uint32_t>(std::distance(physicalInputNames.begin(), it));
+        };
+        if (declaredOutputDescriptors.size() != 1 ||
+            physicalOutputNames != std::vector<std::string>{"feature_output"}) {
+            throw std::runtime_error("Attention requires exactly one declared feature output.");
+        }
+        const uint64_t mQ = raggedQueryInput->getMaxValuesPerRow();
+        auto& output = declaredOutputDescriptors.front();
+        if (!output.dimensionsIncludeBatch || output.featureDimensions.size() != 2 ||
+            output.featureDimensions.front() != mQ) {
+            throw std::runtime_error("Attention requires a [M_q,features] packed output declaration.");
+        }
+        ThorImplementation::CustomLayer::PackedRaggedOutputGeometry geometry;
+        geometry.offsetsPort = requiredPort(kAttentionQueryRowPartitionInputName);
+        geometry.maxValuesPerRow = mQ;
+        geometry.raggedInputs.push_back(
+            {requiredPort(kAttentionQueryInputName), geometry.offsetsPort, mQ});
+        if (raggedKeyInput.has_value()) {
+            const uint32_t kvPartitionPort = requiredPort(kAttentionKeyValueRowPartitionInputName);
+            const uint64_t mKv = raggedKeyInput->getMaxValuesPerRow();
+            geometry.raggedInputs.push_back({requiredPort(kAttentionKeyInputName), kvPartitionPort, mKv});
+            geometry.raggedInputs.push_back({requiredPort(kAttentionValueInputName), kvPartitionPort, mKv});
+        }
+        output.dimensionsIncludeBatch = false;
+        output.packedRaggedByPartition = std::move(geometry);
+    }
     const std::optional<ThorImplementation::DynamicExpressionVariantId> deterministicTrainingVariant =
         (sdpaDropoutProbability > 0.0f || outputDropoutProbability > 0.0f)
             ? std::optional<ThorImplementation::DynamicExpressionVariantId>(kAttentionEvaluationVariant)
@@ -1649,15 +1732,10 @@ void Attention::Builder::verifyConfig() const {
         throw std::invalid_argument("Attention key and value inputs must have the same sequence length.");
     }
     if (keyValueRagged &&
-        (_raggedKeyInput->getBatchSize() != _raggedValueInput->getBatchSize() ||
-         _raggedKeyInput->getMaxTotalValues() != _raggedValueInput->getMaxTotalValues() ||
-         !_raggedKeyInput->sharesPartitionWith(_raggedValueInput.value()))) {
+        (!_raggedKeyInput->sharesPartitionWith(_raggedValueInput.value()) ||
+         _raggedKeyInput->getMaxValuesPerRow() != _raggedValueInput->getMaxValuesPerRow())) {
         throw std::invalid_argument(
-            "Attention ragged keyInput and valueInput must use the exact same row partition and capacity.");
-    }
-    if (queryRagged && keyValueRagged && _raggedKeyInput.has_value() &&
-        _raggedKeyInput->getBatchSize() != _raggedQueryInput->getBatchSize()) {
-        throw std::invalid_argument("Attention ragged query and key/value inputs must have the same logical batch size.");
+            "Attention ragged keyInput and valueInput must use the exact same row partition and semantic M.");
     }
     if (_querySequenceLengthsInput.has_value() != _keyValueSequenceLengthsInput.has_value()) {
         throw std::invalid_argument(
@@ -1807,9 +1885,8 @@ void Attention::Builder::verifyConfig() const {
         }
         if (_raggedResidualInput.has_value()) {
             requireRaggedFeatureInput(_raggedResidualInput.value(), "residualInput(RaggedTensor)");
-            if (_raggedResidualInput->getBatchSize() != _raggedQueryInput->getBatchSize() ||
-                _raggedResidualInput->getMaxTotalValues() != _raggedQueryInput->getMaxTotalValues() ||
-                !_raggedResidualInput->sharesPartitionWith(_raggedQueryInput.value())) {
+            if (!_raggedResidualInput->sharesPartitionWith(_raggedQueryInput.value()) ||
+                _raggedResidualInput->getMaxValuesPerRow() != _raggedQueryInput->getMaxValuesPerRow()) {
                 throw std::invalid_argument(
                     "Attention ragged residualInput must use the exact query row partition and capacity.");
             }
@@ -2015,8 +2092,6 @@ Attention Attention::Builder::build() {
                                             keyValueRagged,
                                             useQueryRopePositionOffsets,
                                             useKeyRopePositionOffsets,
-                                            queryRagged ? _raggedQueryInput->getBatchSize()
-                                                        : (keyValueRagged ? _raggedKeyInput->getBatchSize() : 0),
                                             queryRagged ? _raggedQueryInput->getOffsetsDataType()
                                                         : ThorImplementation::kDefaultRowPartitionOffsetDataType,
                                             keyValueRagged ? _raggedKeyInput->getOffsetsDataType()
@@ -2095,7 +2170,9 @@ Attention Attention::Builder::build() {
 json Attention::architectureJson() const {
     json j;
     j["factory"] = Layer::Factory::Learning.value();
-    j["version"] = "2.0.0";
+    // Retain the established ragged/dense writer grammars, not execution geometry modes.
+    j["version"] = (raggedQueryInput.has_value() || raggedKeyInput.has_value())
+                       ? kCanonicalAttentionSchemaVersion : "2.0.0";
     j["layer_type"] = "attention";
     j["layer_name"] = std::string("layer") + std::to_string(getId());
 
@@ -2183,17 +2260,17 @@ json Attention::architectureJson() const {
         j["key_rope_position_offsets_input"] = keyRopePositionOffsetsInput.value().architectureJson();
     }
     if (raggedQueryInput.has_value()) {
-        j["ragged_query_input"] = raggedQueryInput->architectureJson();
+        j["ragged_query_input"] = Thor::SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedQueryInput.value());
         if (!raggedFeatureOutput.has_value()) {
             throw std::runtime_error("Attention ragged-query serialization requires a logical RaggedTensor output.");
         }
-        j["ragged_feature_output"] = raggedFeatureOutput->architectureJson();
+        j["ragged_feature_output"] = Thor::SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureOutput.value());
     }
     if (raggedKeyInput.has_value()) {
-        j["ragged_key_input"] = raggedKeyInput->architectureJson();
-        j["ragged_value_input"] = raggedValueInput->architectureJson();
+        j["ragged_key_input"] = Thor::SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedKeyInput.value());
+        j["ragged_value_input"] = Thor::SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedValueInput.value());
     }
-    if (raggedResidualInput.has_value()) j["ragged_residual_input"] = raggedResidualInput->architectureJson();
+    if (raggedResidualInput.has_value()) j["ragged_residual_input"] = Thor::SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedResidualInput.value());
     j["feature_output"] = output.value().architectureJson();
     j["parameters"] = getParametersArchitectureJson()["parameters"];
     return j;
@@ -2210,7 +2287,8 @@ json Attention::serialize(thor_file::TarWriter& archiveWriter,
 
 void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader, const json& j, Network* network) {
     const std::string serializedVersion = j.at("version").get<std::string>();
-    if (serializedVersion != "2.0.0") {
+    const bool canonicalArchive = serializedVersion == kCanonicalAttentionSchemaVersion;
+    if (serializedVersion != "2.0.0" && !canonicalArchive) {
         throw std::runtime_error("Unsupported version in Attention::deserialize: " + serializedVersion);
     }
     if (j.at("layer_type").get<std::string>() != "attention") {
@@ -2310,21 +2388,27 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
             network->getApiTensorByOriginalId(j.at("key_rope_position_offsets_input").at("id").get<uint64_t>());
     }
 
+    if (canonicalArchive) {
+        for (const char* forbidden : {"batch_size", "max_total_values", "physical_batch_size", "active_extent",
+                                      "physical_offsets", "execution_plan", "workspace"}) {
+            if (j.contains(forbidden)) {
+                throw std::runtime_error(std::string("Attention canonical artifact contains runtime field: ") + forbidden);
+            }
+        }
+        if (!j.contains("query_ragged") || !j.contains("key_value_ragged") ||
+            !j.contains("use_ragged") ||
+            j.at("use_ragged").get<bool>() !=
+                (j.at("query_ragged").get<bool>() || j.at("key_value_ragged").get<bool>()) ||
+            !j.at("use_ragged").get<bool>()) {
+            throw std::runtime_error("Attention canonical artifact requires consistent explicit ragged domain flags.");
+        }
+    }
     auto raggedFromNetworkMetadata = [&](const json& raggedJson, const char* fieldName) -> RaggedTensor {
-        if (!raggedJson.is_object() || !raggedJson.contains("values") || !raggedJson.contains("offsets") ||
-            !raggedJson.contains("batch_size") || !raggedJson.contains("max_total_values")) {
-            throw std::runtime_error(std::string("Attention serialized ") + fieldName + " metadata is incomplete.");
-        }
-        Tensor values = network->getApiTensorByOriginalId(raggedJson.at("values").at("id").get<uint64_t>());
-        Tensor offsets = network->getApiTensorByOriginalId(raggedJson.at("offsets").at("id").get<uint64_t>());
-        RaggedTensor ragged = raggedJson.contains("max_values_per_row")
-                                  ? RaggedTensor(values, offsets, raggedJson.at("max_values_per_row").get<uint64_t>())
-                                  : RaggedTensor(values, offsets);
-        if (ragged.getBatchSize() != raggedJson.at("batch_size").get<uint64_t>() ||
-            ragged.getMaxTotalValues() != raggedJson.at("max_total_values").get<uint64_t>()) {
-            throw std::runtime_error(std::string("Attention serialized ") + fieldName +
-                                     " batch/capacity metadata does not match its values/offsets tensors.");
-        }
+        // The archived grammar does not determine the model's execution geometry.
+        // U1 restores authoritative logical sources before their consumers load;
+        // discarded legacy B and packed-capacity fields cannot constrain placement.
+        RaggedTensor ragged = Thor::SegmentedPrimitiveDetail::reconstructInput(raggedJson, network, "Attention");
+        if (canonicalArchive) validateCanonicalAttentionRaggedReference(raggedJson, ragged, fieldName);
         return ragged;
     };
 
@@ -2355,17 +2439,52 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
         if (raggedKeyInput->getValues() != keyInput || raggedValueInput->getValues() != valueInput) {
             throw std::runtime_error("Attention serialized ragged key/value values do not match key_input/value_input.");
         }
-        if (raggedKeyInput->getBatchSize() != raggedValueInput->getBatchSize() ||
-            raggedKeyInput->getMaxTotalValues() != raggedValueInput->getMaxTotalValues() ||
-            !raggedKeyInput->sharesPartitionWith(raggedValueInput.value())) {
+        if (!raggedKeyInput->sharesPartitionWith(raggedValueInput.value()) ||
+            raggedKeyInput->getMaxValuesPerRow() != raggedValueInput->getMaxValuesPerRow()) {
             throw std::runtime_error(
                 "Attention serialized ragged key and value inputs must use the exact same row partition and capacity.");
         }
     } else if (j.contains("ragged_key_input") || j.contains("ragged_value_input")) {
         throw std::runtime_error("Attention serialized ragged key/value metadata requires key_value_ragged=true.");
     }
-    if (queryRagged && keyValueRagged && raggedQueryInput->getBatchSize() != raggedKeyInput->getBatchSize()) {
-        throw std::runtime_error("Attention serialized ragged query and key/value inputs must have the same logical batch size.");
+    if (canonicalArchive) {
+        if (queryRagged != j.contains("ragged_query_input") ||
+            keyValueRagged != (j.contains("ragged_key_input") && j.contains("ragged_value_input")) ||
+            (queryRagged && (!raggedQueryInput->hasMaxValuesPerRow() ||
+                             raggedQueryInput->getOffsetsDimensions() != std::vector<uint64_t>{1})) ||
+            (keyValueRagged && (!raggedKeyInput->hasMaxValuesPerRow() ||
+                                raggedKeyInput->getOffsetsDimensions() != std::vector<uint64_t>{1}))) {
+            throw std::runtime_error("Attention canonical artifact ragged geometry does not match domain flags.");
+        }
+        validateCanonicalAttentionTensorReference(j.at("query_input"), queryInput, "query_input");
+        validateCanonicalAttentionTensorReference(j.at("key_input"), keyInput, "key_input");
+        validateCanonicalAttentionTensorReference(j.at("value_input"), valueInput, "value_input");
+        if (queryRagged && j.at("ragged_query_input").at("values").at("id") != j.at("query_input").at("id"))
+            throw std::runtime_error("Attention canonical query values references disagree.");
+        if (keyValueRagged &&
+            (j.at("ragged_key_input").at("values").at("id") != j.at("key_input").at("id") ||
+             j.at("ragged_value_input").at("values").at("id") != j.at("value_input").at("id")))
+            throw std::runtime_error("Attention canonical key/value references disagree.");
+        if (residualInput.has_value())
+            validateCanonicalAttentionTensorReference(j.at("residual_input"), residualInput.value(), "residual_input");
+        if (scoreBiasInput.has_value())
+            validateCanonicalAttentionTensorReference(j.at("score_bias_input"), scoreBiasInput.value(), "score_bias_input");
+        if (querySequenceLengthsInput.has_value()) {
+            validateCanonicalAttentionTensorReference(j.at("query_sequence_lengths_input"), querySequenceLengthsInput.value(), "query_sequence_lengths_input");
+            validateCanonicalAttentionTensorReference(j.at("key_value_sequence_lengths_input"), keyValueSequenceLengthsInput.value(), "key_value_sequence_lengths_input");
+        }
+        if (queryRopePositionOffsetsInput.has_value())
+            validateCanonicalAttentionTensorReference(j.at("query_rope_position_offsets_input"), queryRopePositionOffsetsInput.value(), "query_rope_position_offsets_input");
+        if (keyRopePositionOffsetsInput.has_value())
+            validateCanonicalAttentionTensorReference(j.at("key_rope_position_offsets_input"), keyRopePositionOffsetsInput.value(), "key_rope_position_offsets_input");
+        for (const auto& [name, tensor] : epilogueInputBindings) {
+            for (const auto& entry : j.at("epilogue_inputs")) {
+                if (entry.at("name").get<std::string>() == name) {
+                    validateCanonicalAttentionTensorReference(entry.at("tensor"), tensor, name.c_str());
+                    break;
+                }
+            }
+        }
     }
 
     std::optional<RaggedTensor> raggedResidualInput = std::nullopt;
@@ -2376,7 +2495,12 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
         }
     }
 
-    Tensor featureOutput = Tensor::deserialize(j.at("feature_output"), archiveReader.get());
+    Tensor featureOutput = queryRagged
+                               ? Thor::SegmentedPrimitiveDetail::reconstructPreservedOutputValues(
+                                     j.at("feature_output"), j.at("ragged_feature_output"),
+                                     raggedQueryInput.value(), "Attention")
+                               : Tensor::deserialize(j.at("feature_output"), archiveReader.get());
+    if (canonicalArchive) validateCanonicalAttentionTensorReference(j.at("feature_output"), featureOutput, "feature_output");
 
     requireRank2FeatureInput(queryInput, "query_input");
     requireRank2FeatureInput(keyInput, "key_input");
@@ -2453,9 +2577,8 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
             throw std::runtime_error("Attention serialized residual_input must be ragged exactly when the query is ragged.");
         }
         if (raggedResidualInput.has_value() &&
-            (raggedResidualInput->getBatchSize() != raggedQueryInput->getBatchSize() ||
-             raggedResidualInput->getMaxTotalValues() != raggedQueryInput->getMaxTotalValues() ||
-             !raggedResidualInput->sharesPartitionWith(raggedQueryInput.value()))) {
+            (!raggedResidualInput->sharesPartitionWith(raggedQueryInput.value()) ||
+             raggedResidualInput->getMaxValuesPerRow() != raggedQueryInput->getMaxValuesPerRow())) {
             throw std::runtime_error("Attention serialized ragged residual must use the query row partition.");
         }
     }
@@ -2513,6 +2636,20 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
             raggedOutputJson.at("offsets").at("id").get<uint64_t>() != raggedQueryInput->getOffsets().getOriginalId()) {
             throw std::runtime_error("Attention serialized ragged_feature_output must use feature_output values and the query row partition.");
         }
+        Thor::SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
+            raggedOutputJson, j.at("ragged_query_input"), raggedQueryInput.value(), "Attention");
+        if (canonicalArchive) {
+            RaggedTensor outputReference = raggedQueryInput->withValues(featureOutput);
+            validateCanonicalAttentionRaggedReference(raggedOutputJson, outputReference, "ragged_feature_output");
+        }
+    } else if (j.contains("ragged_feature_output")) {
+        throw std::runtime_error("Attention canonical dense query cannot carry ragged feature output metadata.");
+    }
+    if (canonicalArchive && j.contains("ragged_residual_input") && !raggedResidualInput.has_value()) {
+        throw std::runtime_error("Attention canonical ragged residual metadata requires residualInput.");
+    }
+    if (canonicalArchive && raggedResidualInput.has_value()) {
+        validateCanonicalAttentionRaggedReference(j.at("ragged_residual_input"), raggedResidualInput.value(), "ragged_residual_input");
     }
 
     std::vector<std::shared_ptr<ParameterSpecification>> parameters;
@@ -2578,8 +2715,6 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
                                             keyValueRagged,
                                             useQueryRopePositionOffsets,
                                             useKeyRopePositionOffsets,
-                                            queryRagged ? raggedQueryInput->getBatchSize()
-                                                        : (keyValueRagged ? raggedKeyInput->getBatchSize() : 0),
                                             queryRagged ? raggedQueryInput->getOffsetsDataType()
                                                         : ThorImplementation::kDefaultRowPartitionOffsetDataType,
                                             keyValueRagged ? raggedKeyInput->getOffsetsDataType()

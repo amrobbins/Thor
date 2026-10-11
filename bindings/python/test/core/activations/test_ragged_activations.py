@@ -31,9 +31,8 @@ def test_shape_preserving_activation_accepts_ragged_tensor_and_preserves_partiti
         "tokens",
         thor.DataType.fp32,
         [3],
-        max_total_values=8,
-        batch_size=batch_size,
         offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=4,
     )
     output = activation_factory().add_to_network(net, tokens)
     assert isinstance(output, thor.RaggedTensor)
@@ -57,6 +56,7 @@ def test_shape_preserving_activation_accepts_ragged_tensor_and_preserves_partiti
     physical = thor.physical.PhysicalRaggedTensor(
         _cpu_tensor(values_np, thor.DataType.fp32),
         _cpu_tensor(offsets_np, thor.DataType.uint32),
+        max_values_per_row=4,
     )
 
     result = placed.infer({"tokens": physical})["output"]
@@ -101,16 +101,15 @@ def test_ragged_softmax_is_ordinary_final_axis_and_distinct_from_segmented_with_
     offsets_dtype, np_offsets_dtype
 ):
     batch_size = 3
-    capacity = 8
+    capacity = batch_size * 3
     net = thor.Network("pytest_ragged_ordinary_vs_segmented_softmax")
     tokens = thor.layers.RaggedNetworkInput(
         net,
         "tokens",
         thor.DataType.fp32,
         [3],
-        max_total_values=capacity,
-        batch_size=batch_size,
         offsets_data_type=offsets_dtype,
+        max_values_per_row=3,
     )
     ordinary = thor.activations.Softmax().add_to_network(net, tokens)
     segmented = thor.layers.SegmentedSoftmax(net, tokens).get_feature_output()
@@ -145,6 +144,7 @@ def test_ragged_softmax_is_ordinary_final_axis_and_distinct_from_segmented_with_
         physical = thor.physical.PhysicalRaggedTensor(
             _cpu_tensor(values_np, thor.DataType.fp32),
             _cpu_tensor(offsets_np, offsets_dtype),
+            max_values_per_row=3,
         )
         outputs = placed.infer({"tokens": physical})
         ordinary_result = outputs["ordinary"]
@@ -175,9 +175,8 @@ def test_ragged_softmax_places_training_backward_through_partition_preserving_ou
         "tokens",
         thor.DataType.fp32,
         [3],
-        max_total_values=8,
-        batch_size=batch_size,
         offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=3,
     )
     ordinary = thor.activations.Softmax().add_to_network(net, tokens)
     pooled = thor.layers.SegmentedReduction(
@@ -199,7 +198,7 @@ def test_ragged_softmax_places_training_backward_through_partition_preserving_ou
 @pytest.mark.cuda
 def test_ragged_softmax_save_load_preserves_partition_and_accepts_changed_runtime_partition(tmp_path):
     batch_size = 3
-    capacity = 8
+    capacity = batch_size * 3
     network_name = "pytest_ragged_softmax_save_load"
     net = thor.Network(network_name)
     tokens = thor.layers.RaggedNetworkInput(
@@ -207,9 +206,8 @@ def test_ragged_softmax_save_load_preserves_partition_and_accepts_changed_runtim
         "tokens",
         thor.DataType.fp32,
         [3],
-        max_total_values=capacity,
-        batch_size=batch_size,
         offsets_data_type=thor.DataType.uint64,
+        max_values_per_row=3,
     )
     ordinary = thor.activations.Softmax().add_to_network(net, tokens)
     thor.layers.RaggedNetworkOutput(net, "output", ordinary)
@@ -240,6 +238,7 @@ def test_ragged_softmax_save_load_preserves_partition_and_accepts_changed_runtim
             "tokens": thor.physical.PhysicalRaggedTensor(
                 _cpu_tensor(values_np, thor.DataType.fp32),
                 _cpu_tensor(offsets_np, thor.DataType.uint64),
+                max_values_per_row=3,
             )
         }
     )["output"]
@@ -279,13 +278,12 @@ def test_gated_activation_accepts_ragged_tensor_halves_width_and_preserves_parti
         "tokens",
         thor.DataType.fp32,
         [6],
-        max_total_values=8,
-        batch_size=batch_size,
         offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=4,
     )
     output = activation_factory().add_to_network(net, tokens)
     assert isinstance(output, thor.RaggedTensor)
-    assert output.values.get_dimensions() == [8, 3]
+    assert output.values.get_dimensions() == [4, 3]
     thor.layers.RaggedNetworkOutput(net, "output", output)
 
     placed = net.place(batch_size, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
@@ -306,6 +304,7 @@ def test_gated_activation_accepts_ragged_tensor_halves_width_and_preserves_parti
     physical = thor.physical.PhysicalRaggedTensor(
         _cpu_tensor(values_np, thor.DataType.fp32),
         _cpu_tensor(offsets_np, thor.DataType.uint32),
+        max_values_per_row=4,
     )
 
     result = placed.infer({"tokens": physical})["output"]
@@ -328,12 +327,11 @@ def test_ragged_swiglu_save_load_preserves_shape_partition_and_execution(tmp_pat
         "tokens",
         thor.DataType.fp32,
         [4],
-        max_total_values=6,
-        batch_size=batch_size,
         offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=3,
     )
     output = thor.activations.Swiglu().add_to_network(net, tokens)
-    assert output.values.get_dimensions() == [6, 2]
+    assert output.values.get_dimensions() == [3, 2]
     thor.layers.RaggedNetworkOutput(net, "output", output)
 
     save_dir = tmp_path / "ragged_swiglu_model"
@@ -358,6 +356,7 @@ def test_ragged_swiglu_save_load_preserves_shape_partition_and_execution(tmp_pat
     physical = thor.physical.PhysicalRaggedTensor(
         _cpu_tensor(values_np, thor.DataType.fp32),
         _cpu_tensor(offsets_np, thor.DataType.uint32),
+        max_values_per_row=3,
     )
 
     result = placed.infer({"tokens": physical})["output"]
@@ -378,9 +377,8 @@ def test_ragged_swish_save_load_preserves_partition_and_execution(tmp_path):
         "tokens",
         thor.DataType.fp32,
         [2],
-        max_total_values=6,
-        batch_size=batch_size,
         offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=3,
     )
     output = thor.activations.Swish().add_to_network(net, tokens)
     thor.layers.RaggedNetworkOutput(net, "output", output)
@@ -400,6 +398,7 @@ def test_ragged_swish_save_load_preserves_partition_and_execution(tmp_path):
     physical = thor.physical.PhysicalRaggedTensor(
         _cpu_tensor(values_np, thor.DataType.fp32),
         _cpu_tensor(offsets_np, thor.DataType.uint32),
+        max_values_per_row=3,
     )
 
     result = placed.infer({"tokens": physical})["output"]

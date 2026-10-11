@@ -65,12 +65,21 @@ void requireGpuTensor(const Tensor& tensor, const char* name, int gpuNum) {
     }
 }
 
-void requireInt32Tensor(const Tensor& tensor, const std::vector<uint64_t>& dimensions, const char* name, int gpuNum) {
+// Rank-one metadata validation must not copy dimension vectors during SDPA execution.
+void requireInt32Tensor(const Tensor& tensor, uint64_t expectedElements, const char* name, int gpuNum) {
     requireGpuTensor(tensor, name, gpuNum);
-    if (tensor.getDataType() != DataType::INT32 || tensor.getDimensions() != dimensions) {
+    const auto& dimensions = tensor.getDimensionsRef();
+    if (tensor.getDataType() != DataType::INT32 || dimensions.size() != 1 || dimensions[0] != expectedElements) {
         throw std::invalid_argument(std::string("cuDNN ragged attention metadata tensor '") + name +
                                     "' must be INT32 with the expected dimensions.");
     }
+}
+
+// The output Tensor handles are logically const, but their backed GPU storage
+// is intentionally writable by the conversion kernel. Avoid per-call Tensor
+// descriptor copies while preserving exact output-buffer ownership.
+int32_t* writableMetadataPointer(const Tensor& tensor) {
+    return const_cast<int32_t*>(tensor.getMemPtr<int32_t>());
 }
 
 void requireElementCapacityFitsInt32(uint64_t maxTotalValues, uint64_t elementsPerToken, const char* label) {
@@ -89,9 +98,9 @@ void convertCanonicalRowPartitionForCudnnAttention(const Tensor& canonicalOffset
                                                     uint64_t maxTotalValues,
                                                     uint64_t firstElementsPerToken,
                                                     uint64_t secondElementsPerToken,
-                                                    Tensor sequenceLengths,
-                                                    Tensor firstElementOffsets,
-                                                    Tensor secondElementOffsets,
+                                                    const Tensor& sequenceLengths,
+                                                    const Tensor& firstElementOffsets,
+                                                    const Tensor& secondElementOffsets,
                                                     Stream stream) {
     if (batchSize == 0 || batchSize > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
         throw std::invalid_argument("cuDNN ragged attention batch size must fit INT32 and be non-zero.");
@@ -107,12 +116,13 @@ void convertCanonicalRowPartitionForCudnnAttention(const Tensor& canonicalOffset
     if (!isCanonicalRowPartitionOffsetDataType(canonicalOffsets.getDataType())) {
         throw std::invalid_argument("cuDNN ragged attention canonical offsets must use UINT32 or UINT64.");
     }
-    if (canonicalOffsets.getDimensions() != std::vector<uint64_t>{batchSize + 1}) {
+    const auto& canonicalDimensions = canonicalOffsets.getDimensionsRef();
+    if (canonicalDimensions.size() != 1 || canonicalDimensions[0] != batchSize + 1) {
         throw std::invalid_argument("cuDNN ragged attention canonical offsets must have shape [batch+1].");
     }
-    requireInt32Tensor(sequenceLengths, {batchSize}, "sequence_lengths", gpuNum);
-    requireInt32Tensor(firstElementOffsets, {batchSize + 1}, "first_element_offsets", gpuNum);
-    requireInt32Tensor(secondElementOffsets, {batchSize + 1}, "second_element_offsets", gpuNum);
+    requireInt32Tensor(sequenceLengths, batchSize, "sequence_lengths", gpuNum);
+    requireInt32Tensor(firstElementOffsets, batchSize + 1, "first_element_offsets", gpuNum);
+    requireInt32Tensor(secondElementOffsets, batchSize + 1, "second_element_offsets", gpuNum);
 
     ScopedGpu scopedGpu(gpuNum);
     constexpr uint32_t threads = 256;
@@ -120,18 +130,18 @@ void convertCanonicalRowPartitionForCudnnAttention(const Tensor& canonicalOffset
     if (canonicalOffsets.getDataType() == DataType::UINT32) {
         canonicalRowPartitionToCudnnAttentionKernel<<<blocks, threads, 0, stream.getStream()>>>(
             canonicalOffsets.getMemPtr<uint32_t>(),
-            sequenceLengths.getMemPtr<int32_t>(),
-            firstElementOffsets.getMemPtr<int32_t>(),
-            secondElementOffsets.getMemPtr<int32_t>(),
+            writableMetadataPointer(sequenceLengths),
+            writableMetadataPointer(firstElementOffsets),
+            writableMetadataPointer(secondElementOffsets),
             batchSize,
             firstElementsPerToken,
             secondElementsPerToken);
     } else {
         canonicalRowPartitionToCudnnAttentionKernel<<<blocks, threads, 0, stream.getStream()>>>(
             canonicalOffsets.getMemPtr<uint64_t>(),
-            sequenceLengths.getMemPtr<int32_t>(),
-            firstElementOffsets.getMemPtr<int32_t>(),
-            secondElementOffsets.getMemPtr<int32_t>(),
+            writableMetadataPointer(sequenceLengths),
+            writableMetadataPointer(firstElementOffsets),
+            writableMetadataPointer(secondElementOffsets),
             batchSize,
             firstElementsPerToken,
             secondElementsPerToken);
@@ -147,9 +157,9 @@ void buildUniformCudnnAttentionMetadata(uint64_t batchSize,
                                         uint64_t sequenceLength,
                                         uint64_t firstElementsPerToken,
                                         uint64_t secondElementsPerToken,
-                                        Tensor sequenceLengths,
-                                        Tensor firstElementOffsets,
-                                        Tensor secondElementOffsets,
+                                        const Tensor& sequenceLengths,
+                                        const Tensor& firstElementOffsets,
+                                        const Tensor& secondElementOffsets,
                                         Stream stream) {
     if (batchSize == 0 || batchSize > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
         throw std::invalid_argument("cuDNN uniform attention batch size must fit INT32 and be non-zero.");
@@ -165,17 +175,17 @@ void buildUniformCudnnAttentionMetadata(uint64_t batchSize,
     requireElementCapacityFitsInt32(totalTokens, secondElementsPerToken, "Second cuDNN uniform ragged offset");
 
     const int gpuNum = stream.getGpuNum();
-    requireInt32Tensor(sequenceLengths, {batchSize}, "sequence_lengths", gpuNum);
-    requireInt32Tensor(firstElementOffsets, {batchSize + 1}, "first_element_offsets", gpuNum);
-    requireInt32Tensor(secondElementOffsets, {batchSize + 1}, "second_element_offsets", gpuNum);
+    requireInt32Tensor(sequenceLengths, batchSize, "sequence_lengths", gpuNum);
+    requireInt32Tensor(firstElementOffsets, batchSize + 1, "first_element_offsets", gpuNum);
+    requireInt32Tensor(secondElementOffsets, batchSize + 1, "second_element_offsets", gpuNum);
 
     ScopedGpu scopedGpu(gpuNum);
     constexpr uint32_t threads = 256;
     const uint32_t blocks = static_cast<uint32_t>((batchSize + 1 + threads - 1) / threads);
     uniformCudnnAttentionMetadataKernel<<<blocks, threads, 0, stream.getStream()>>>(
-        sequenceLengths.getMemPtr<int32_t>(),
-        firstElementOffsets.getMemPtr<int32_t>(),
-        secondElementOffsets.getMemPtr<int32_t>(),
+        writableMetadataPointer(sequenceLengths),
+        writableMetadataPointer(firstElementOffsets),
+        writableMetadataPointer(secondElementOffsets),
         batchSize,
         sequenceLength,
         firstElementsPerToken,

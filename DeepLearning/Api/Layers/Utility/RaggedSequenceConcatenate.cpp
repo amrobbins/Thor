@@ -1,8 +1,11 @@
 #include "DeepLearning/Api/Layers/Utility/RaggedSequenceConcatenate.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <limits>
 #include <set>
@@ -14,19 +17,25 @@ using json = nlohmann::json;
 namespace Thor {
 namespace {
 
-RaggedTensor reconstructInput(const json& raggedJson, Network* network) {
-    Tensor values = network->getApiTensorByOriginalId(raggedJson.at("values").at("id").get<uint64_t>());
-    Tensor offsets = network->getApiTensorByOriginalId(raggedJson.at("offsets").at("id").get<uint64_t>());
-    RaggedTensor input = raggedJson.contains("max_values_per_row")
-        ? RaggedTensor(values, offsets, raggedJson.at("max_values_per_row").get<uint64_t>())
-        : RaggedTensor(values, offsets);
-    if (raggedJson.at("ragged_rank").get<uint32_t>() != 1 ||
-        input.getBatchSize() != raggedJson.at("batch_size").get<uint64_t>() ||
-        input.getMaxTotalValues() != raggedJson.at("max_total_values").get<uint64_t>()) {
-        throw std::runtime_error(
-            "RaggedSequenceConcatenate serialized ragged input metadata does not match reconstructed tensors.");
-    }
-    return input;
+void checkCanonicalTensor(const json& saved, const Tensor& live) {
+    if (!saved.is_object() || saved.size() != 4 ||
+        saved.at("version").get<std::string>() != "1.0.0" ||
+        saved.at("id").get<uint64_t>() != live.getOriginalId() ||
+        saved.at("data_type").get<DataType>() != live.getDataType() ||
+        saved.at("dimensions").get<std::vector<uint64_t>>() != live.getDimensions())
+        throw std::runtime_error("RaggedSequenceConcatenate canonical tensor reference mismatch.");
+}
+
+void checkCanonicalRagged(const json& saved, const RaggedTensor& live) {
+    if (!SegmentedPrimitiveDetail::hasCanonicalLayerRaggedReferenceFields(saved) ||
+        SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(saved, "RaggedSequenceConcatenate") !=
+            SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL ||
+        saved.at("ragged_rank").get<uint32_t>() != 1 ||
+        saved.at("max_values_per_row").get<uint64_t>() != live.getMaxValuesPerRow() ||
+        saved.contains("batch_size") || saved.contains("max_total_values"))
+        throw std::runtime_error("RaggedSequenceConcatenate canonical ragged reference mismatch.");
+    checkCanonicalTensor(saved.at("values"), live.getValues());
+    checkCanonicalTensor(saved.at("offsets"), live.getRowPartitionToken());
 }
 
 uint64_t checkedAdd(uint64_t a, uint64_t b, const char* what) {
@@ -44,17 +53,12 @@ RaggedSequenceConcatenate RaggedSequenceConcatenate::makeLayer(
     }
 
     const RaggedTensor& reference = inputs.front();
-    const uint64_t batchSize = reference.getBatchSize();
+    if (!reference.isInitialized() || reference.getRaggedRank() != 1)
+        throw std::invalid_argument("RaggedSequenceConcatenate requires initialized rank-1 inputs.");
     const DataType valuesDataType = reference.getValuesDataType();
     const DataType offsetsDataType = reference.getOffsetsDataType();
     const std::vector<uint64_t> trailingDimensions = reference.getTrailingDimensions();
-    if (batchSize > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
-        throw std::invalid_argument("RaggedSequenceConcatenate batch size exceeds Thor's uint32 placement capacity.");
-    }
-
-    uint64_t outputMaxTotalValues = 0;
     uint64_t outputMaxValuesPerRow = 0;
-    bool allInputsHaveMaxValuesPerRow = true;
     std::set<Tensor> uniqueValues;
     std::vector<Tensor> uniqueOffsets;
     std::set<RowPartitionId> uniquePartitions;
@@ -62,9 +66,13 @@ RaggedSequenceConcatenate RaggedSequenceConcatenate::makeLayer(
     for (uint32_t i = 0; i < inputs.size(); ++i) {
         const RaggedTensor& input = inputs[i];
         if (!input.isInitialized()) throw std::invalid_argument("RaggedSequenceConcatenate inputs must be initialized.");
-        if (input.getBatchSize() != batchSize) {
-            throw std::invalid_argument("RaggedSequenceConcatenate inputs must have the same logical batch size.");
+        if (input.getRaggedRank() != 1) {
+            throw std::invalid_argument("RaggedSequenceConcatenate inputs must have rank one.");
         }
+        if (!input.hasMaxValuesPerRow() || input.getMaxValuesPerRow() == 0 ||
+            input.getOffsetsDimensions() != std::vector<uint64_t>{1} ||
+            input.getValuesDimensions().front() != input.getMaxValuesPerRow())
+            throw std::invalid_argument("RaggedSequenceConcatenate requires logical [M,...] values and [1] partition tokens.");
         if (input.getValuesDataType() != valuesDataType) {
             throw std::invalid_argument("RaggedSequenceConcatenate inputs must have the same values dtype.");
         }
@@ -79,47 +87,38 @@ RaggedSequenceConcatenate RaggedSequenceConcatenate::makeLayer(
                 "RaggedSequenceConcatenate values inputs must be distinct graph tensors; duplicate values ports are not supported.");
         }
 
-        outputMaxTotalValues = checkedAdd(outputMaxTotalValues,
-                                          input.getMaxTotalValues(),
-                                          "RaggedSequenceConcatenate output max_total_values overflow.");
-        if (input.hasMaxValuesPerRow()) {
-            outputMaxValuesPerRow = checkedAdd(outputMaxValuesPerRow,
-                                               input.getMaxValuesPerRow(),
-                                               "RaggedSequenceConcatenate output max_values_per_row overflow.");
-        } else {
-            allInputsHaveMaxValuesPerRow = false;
-        }
+        outputMaxValuesPerRow = checkedAdd(outputMaxValuesPerRow,
+                                           input.getMaxValuesPerRow(),
+                                           "RaggedSequenceConcatenate output max_values_per_row overflow.");
 
         if (uniquePartitions.insert(input.getRowPartitionId()).second) {
             uniqueOffsets.push_back(input.getOffsets());
         }
     }
 
-    if (!ThorImplementation::canonicalRowPartitionOffsetCanRepresent(offsetsDataType, outputMaxTotalValues)) {
-        throw std::invalid_argument(
-            "RaggedSequenceConcatenate output max_total_values cannot be represented by the selected offsets dtype.");
-    }
-
-    RaggedTensor output = serializedOutput.has_value()
-        ? serializedOutput.value()
-        : (allInputsHaveMaxValuesPerRow
-               ? RaggedTensor(valuesDataType,
-                              trailingDimensions,
-                              batchSize,
-                              outputMaxTotalValues,
-                              outputMaxValuesPerRow,
-                              offsetsDataType)
-               : RaggedTensor(valuesDataType,
-                              trailingDimensions,
-                              batchSize,
-                              outputMaxTotalValues,
-                              offsetsDataType));
+    std::vector<uint64_t> outputDimensions{outputMaxValuesPerRow};
+    outputDimensions.insert(outputDimensions.end(), trailingDimensions.begin(), trailingDimensions.end());
+    RaggedTensor output = serializedOutput.has_value() ? serializedOutput.value() :
+        RaggedTensor::logical(Tensor(valuesDataType, outputDimensions),
+                                       Tensor(offsetsDataType, {1}), outputMaxValuesPerRow);
 
     if (output.getValuesDataType() != valuesDataType || output.getOffsetsDataType() != offsetsDataType ||
-        output.getBatchSize() != batchSize || output.getMaxTotalValues() != outputMaxTotalValues ||
-        output.getTrailingDimensions() != trailingDimensions || output.hasMaxValuesPerRow() != allInputsHaveMaxValuesPerRow ||
-        (allInputsHaveMaxValuesPerRow && output.getMaxValuesPerRow() != outputMaxValuesPerRow)) {
+        output.getTrailingDimensions() != trailingDimensions ||
+        !output.hasMaxValuesPerRow() || output.getMaxValuesPerRow() != outputMaxValuesPerRow ||
+        output.getValuesDimensions() != outputDimensions ||
+        output.getOffsetsDimensions() != std::vector<uint64_t>{1}) {
         throw std::runtime_error("RaggedSequenceConcatenate serialized output descriptor does not match its inputs.");
+    }
+    {
+        const Tensor& values = output.getValues();
+        const Tensor& offsets = output.getOffsets();
+        if (values.getOriginalId() == offsets.getOriginalId())
+            throw std::runtime_error("RaggedSequenceConcatenate output values/partition IDs must differ.");
+        for (const auto& input : inputs) {
+            for (const auto& id : {input.getValues().getOriginalId(), input.getOffsets().getOriginalId()})
+                if (values.getOriginalId() == id || offsets.getOriginalId() == id)
+                    throw std::runtime_error("RaggedSequenceConcatenate output must have new tensor identities.");
+        }
     }
     for (const RaggedTensor& input : inputs) {
         if (output.sharesPartitionWith(input)) {
@@ -199,14 +198,30 @@ bool RaggedSequenceConcatenate::outputTensorDimensionsIncludeBatch(const Tensor&
 }
 
 uint64_t RaggedSequenceConcatenate::getOutputTensorBytes(uint32_t batchSize) const {
-    (void)batchSize;
-    return raggedFeatureOutput.getValues().getTotalSizeInBytes();
+    const uint64_t logicalBytes = raggedFeatureOutput.getValues().getTotalSizeInBytes();
+    if (batchSize == 0 || logicalBytes > std::numeric_limits<uint64_t>::max() / batchSize)
+        throw std::overflow_error("RaggedSequenceConcatenate output allocation overflow.");
+    return logicalBytes * batchSize;
 }
 
 uint64_t RaggedSequenceConcatenate::getFirstInstanceMemRequirementInBytes(
     uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
     (void)tensorPlacement;
-    return getOutputTensorBytes(batchSize);
+    const uint64_t valuesBytes = getOutputTensorBytes(batchSize);
+    const uint64_t offsetBytes = raggedFeatureOutput.getDescriptorForPlacement(batchSize)
+        .getOffsetsDescriptor().getArraySizeInBytes();
+    // The physical copy plan reserves at most N spans per row; storage includes pinned host and device.
+    const uint64_t spanBytes = raggedFeatureOutput.getOffsetsDataType() == DataType::UINT32 ?
+        sizeof(ThorImplementation::RaggedSequenceCopySpan32) : sizeof(ThorImplementation::RaggedSequenceCopySpan64);
+    const uint64_t n = raggedFeatureInputs.size();
+    if (n > std::numeric_limits<uint64_t>::max() / batchSize ||
+        batchSize * n > std::numeric_limits<uint64_t>::max() / (2 * spanBytes))
+        throw std::overflow_error("RaggedSequenceConcatenate copy-plan allocation overflow.");
+    const uint64_t copyPlanBytes = 2 * batchSize * n * spanBytes; // pinned host and device
+    if (valuesBytes > std::numeric_limits<uint64_t>::max() - offsetBytes ||
+        valuesBytes + offsetBytes > std::numeric_limits<uint64_t>::max() - copyPlanBytes)
+        throw std::overflow_error("RaggedSequenceConcatenate total allocation overflow.");
+    return valuesBytes + offsetBytes + copyPlanBytes;
 }
 
 std::shared_ptr<ThorImplementation::Layer> RaggedSequenceConcatenate::stamp(
@@ -216,14 +231,69 @@ std::shared_ptr<ThorImplementation::Layer> RaggedSequenceConcatenate::stamp(
     Thor::Tensor connectingApiTensor,
     bool inferenceOnly) const {
     (void)placement;
-    (void)drivingLayer;
     (void)drivingApiLayer;
-    (void)getConnectionType(connectingApiTensor);
+    const int port = getConnectionType(connectingApiTensor);
     THOR_THROW_IF_FALSE(initialized);
+    ThorImplementation::RaggedTensorDescriptor outputDescriptor;
+    {
+        const auto driver = SegmentedPrimitivePlacementDetail::physicalDescriptorForStamp(
+            drivingLayer, "RaggedSequenceConcatenate");
+        uint64_t b = 0;
+        const uint32_t numValues = static_cast<uint32_t>(raggedFeatureInputs.size());
+        const RaggedTensor* input = nullptr;
+        if (port < static_cast<int>(numValues)) input = &raggedFeatureInputs[port];
+        else {
+            const Tensor& token = uniqueOffsetsInputs[port - numValues];
+            for (const auto& candidate : raggedFeatureInputs)
+                if (candidate.getOffsets() == token) { input = &candidate; break; }
+        }
+        if (input == nullptr) throw std::runtime_error("RaggedSequenceConcatenate unrecognized structural port.");
+        const bool structuralPort = port >= static_cast<int>(numValues);
+        const auto managed = SegmentedPrimitivePlacementDetail::rowPartitionDescriptorForStamp(drivingLayer);
+        if (managed.has_value()) b = managed->getBatchSize();
+        else {
+            const auto dims = driver.getDimensions();
+            const auto trailing = input->getTrailingDimensions();
+            if (!structuralPort) {
+                if (driver.getDataType() != input->getValuesDataType() ||
+                    dims.size() != trailing.size() + 1 || dims.empty() ||
+                    !std::equal(trailing.begin(), trailing.end(), dims.begin() + 1) ||
+                    dims[0] == 0 || dims[0] % input->getMaxValuesPerRow() != 0)
+                    throw std::runtime_error("RaggedSequenceConcatenate values driver geometry mismatch.");
+                b = dims[0] / input->getMaxValuesPerRow();
+            } else if (driver.getDataType() == input->getOffsetsDataType() &&
+                       dims.size() == 1 && dims[0] >= 2) {
+                b = dims[0] - 1;
+            } else if (!dims.empty() && dims[0] > 0 &&
+                       dims[0] % input->getMaxValuesPerRow() == 0) {
+                // HOST_EXTENT is an opaque values carrier for the *partition*.
+                // It need not be this operation's values tensor: multiple
+                // same-partition branches can have different trailing shapes.
+                b = dims[0] / input->getMaxValuesPerRow();
+            } else {
+                throw std::runtime_error("RaggedSequenceConcatenate invalid HOST_EXTENT carrier.");
+            }
+        }
+        if (b == 0 || b > std::numeric_limits<uint32_t>::max())
+            throw std::runtime_error("RaggedSequenceConcatenate placement B outside uint32 range.");
+        const auto placed = input->getDescriptorForPlacement(b);
+        const auto physicalDims = driver.getDimensions();
+        if (!structuralPort && driver != placed.getValuesDescriptor())
+            throw std::runtime_error("RaggedSequenceConcatenate values driver descriptor mismatch.");
+        if (structuralPort && driver != placed.getOffsetsDescriptor() &&
+            (physicalDims.empty() || physicalDims[0] != placed.getMaxTotalValues()))
+            throw std::runtime_error("RaggedSequenceConcatenate HOST_EXTENT carrier capacity mismatch.");
+        if (managed.has_value() && managed.value() != placed.getRowPartition())
+            throw std::runtime_error("RaggedSequenceConcatenate managed partition metadata mismatch.");
+        for (const auto& input : raggedFeatureInputs) (void)input.getDescriptorForPlacement(b);
+        outputDescriptor = raggedFeatureOutput.getDescriptorForPlacement(b);
+        if (!ThorImplementation::canonicalRowPartitionOffsetCanRepresent(
+                raggedFeatureOutput.getOffsetsDataType(), outputDescriptor.getMaxTotalValues()))
+            throw std::runtime_error("RaggedSequenceConcatenate output capacity exceeds offset dtype.");
+    }
     auto physical = std::make_shared<ThorImplementation::RaggedSequenceConcatenate>(
         static_cast<uint32_t>(raggedFeatureInputs.size()),
-        static_cast<uint32_t>(uniqueOffsetsInputs.size()),
-        raggedFeatureOutput.getDescriptor());
+        static_cast<uint32_t>(uniqueOffsetsInputs.size()), outputDescriptor);
     physical->setConstructForInferenceOnly(inferenceOnly);
     physical->setName(getLayerType());
     return physical;
@@ -232,40 +302,46 @@ std::shared_ptr<ThorImplementation::Layer> RaggedSequenceConcatenate::stamp(
 json RaggedSequenceConcatenate::architectureJson() const {
     THOR_THROW_IF_FALSE(initialized);
     json inputs = json::array();
-    for (const RaggedTensor& input : raggedFeatureInputs) inputs.push_back(input.architectureJson());
+    for (const RaggedTensor& input : raggedFeatureInputs)
+        inputs.push_back(SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(input));
     return json{{"factory", Layer::Factory::Layer.value()},
-                {"version", getLayerVersion()},
+                {"version", "1.1.0"},
                 {"layer_type", "ragged_sequence_concatenate"},
                 {"ragged_inputs", inputs},
-                {"ragged_output", raggedFeatureOutput.architectureJson()}};
+                {"ragged_output", SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureOutput)}};
 }
 
 void RaggedSequenceConcatenate::deserialize(const json& j, Network* network) {
-    if (j.at("version").get<std::string>() != "1.0.0") {
-        throw std::runtime_error("Unsupported version in RaggedSequenceConcatenate::deserialize: " +
-                                 j.at("version").get<std::string>());
-    }
+    const std::string version = j.at("version").get<std::string>();
+    if (version != "1.0.0" && version != "1.1.0")
+        throw std::runtime_error("Unsupported version in RaggedSequenceConcatenate::deserialize: " + version);
+    if (version == "1.1.0" && (!j.is_object() || j.size() != 5 ||
+                               j.at("factory") != Layer::Factory::Layer.value()))
+        throw std::runtime_error("RaggedSequenceConcatenate canonical layer has unexpected fields.");
     if (j.at("layer_type").get<std::string>() != "ragged_sequence_concatenate") {
         throw std::runtime_error("Layer type mismatch in RaggedSequenceConcatenate::deserialize: " +
                                  j.at("layer_type").get<std::string>());
     }
 
     std::vector<RaggedTensor> inputs;
-    for (const json& inputJson : j.at("ragged_inputs")) inputs.push_back(reconstructInput(inputJson, network));
-
-    const json& outputJson = j.at("ragged_output");
-    Tensor outputValues = Tensor::deserialize(outputJson.at("values"));
-    Tensor outputOffsets = Tensor::deserialize(outputJson.at("offsets"));
-    RaggedTensor output = outputJson.contains("max_values_per_row")
-        ? RaggedTensor(outputValues, outputOffsets, outputJson.at("max_values_per_row").get<uint64_t>())
-        : RaggedTensor(outputValues, outputOffsets);
-    if (outputJson.at("ragged_rank").get<uint32_t>() != 1 ||
-        output.getBatchSize() != outputJson.at("batch_size").get<uint64_t>() ||
-        output.getMaxTotalValues() != outputJson.at("max_total_values").get<uint64_t>()) {
-        throw std::runtime_error(
-            "RaggedSequenceConcatenate serialized ragged output metadata does not match reconstructed tensors.");
+    if (!j.at("ragged_inputs").is_array() || j.at("ragged_inputs").size() < 2)
+        throw std::runtime_error("RaggedSequenceConcatenate needs at least two serialized inputs.");
+    uint64_t outputM = 0;
+    for (const json& inputJson : j.at("ragged_inputs")) {
+        RaggedTensor input = SegmentedPrimitiveDetail::reconstructInput(
+            inputJson, network, "RaggedSequenceConcatenate");
+        if (version == "1.1.0") checkCanonicalRagged(inputJson, input);
+        outputM = checkedAdd(outputM, input.getMaxValuesPerRow(),
+                             "RaggedSequenceConcatenate semantic output M overflow.");
+        inputs.push_back(input);
     }
 
+    const json& outputJson = j.at("ragged_output");
+    RaggedTensor output = SegmentedPrimitiveDetail::reconstructNewPartitionOutput(
+        outputJson, outputM, inputs.front().getValuesDataType(),
+        inputs.front().getOffsetsDataType(), inputs.front().getTrailingDimensions(),
+        "RaggedSequenceConcatenate");
+    if (version == "1.1.0") checkCanonicalRagged(outputJson, output);
     RaggedSequenceConcatenate layer = makeLayer(inputs, output);
     layer.addToNetwork(network);
 }

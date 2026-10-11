@@ -3241,6 +3241,16 @@ RaggedNetworkInputReference requiredApiRaggedNetworkInputByName(
     return inputIt->second;
 }
 
+// The ensemble shares the member's semantic ragged boundary, not a physical
+// descriptor from any batch at which a member was trained.
+bool sameRaggedMemberInputGeometry(const RaggedTensor& a, const RaggedTensor& b) {
+    if (!a.hasMaxValuesPerRow() || !b.hasMaxValuesPerRow()) return false;
+    return a.getValuesDataType() == b.getValuesDataType() &&
+           a.getOffsetsDataType() == b.getOffsetsDataType() &&
+           a.getTrailingDimensions() == b.getTrailingDimensions() &&
+           a.getMaxValuesPerRow() == b.getMaxValuesPerRow();
+}
+
 RaggedTensor buildMatchingRaggedNetworkInput(
     Network& destination,
     const RaggedNetworkInputReference& source,
@@ -3248,7 +3258,7 @@ RaggedTensor buildMatchingRaggedNetworkInput(
     const std::map<std::string, RaggedNetworkInputReference>& sourceInputsByName) {
     for (const RaggedNetworkInputReference& existing : destination.getExternalRaggedNetworkInputs()) {
         if (existing.name == inputName) {
-            if (existing.raggedTensor.getDescriptor() != source.raggedTensor.getDescriptor() ||
+            if (!sameRaggedMemberInputGeometry(existing.raggedTensor, source.raggedTensor) ||
                 existing.partitionInputName != source.partitionInputName) {
                 throw std::runtime_error("TrainingRuns found incompatible existing ragged input '" + inputName + "'.");
             }
@@ -3256,12 +3266,16 @@ RaggedTensor buildMatchingRaggedNetworkInput(
         }
     }
 
-    const ThorImplementation::RaggedTensorDescriptor descriptor = source.raggedTensor.getDescriptor();
+    const RaggedTensor& sourceTensor = source.raggedTensor;
+    if (!sourceTensor.hasMaxValuesPerRow()) {
+        throw std::runtime_error("TrainingRuns ensemble ragged input '" + inputName +
+                                 "' is missing semantic max_values_per_row.");
+    }
     RaggedNetworkInput::Builder builder = RaggedNetworkInput::Builder()
                                               .network(destination)
                                               .name(inputName)
-                                              .valuesDataType(descriptor.getValuesDataType())
-                                              .trailingDimensions(descriptor.getTrailingDimensions());
+                                              .valuesDataType(sourceTensor.getValuesDataType())
+                                              .trailingDimensions(sourceTensor.getTrailingDimensions());
 
     if (source.partitionInputName.has_value()) {
         RaggedTensor destinationPartition;
@@ -3284,12 +3298,8 @@ RaggedTensor buildMatchingRaggedNetworkInput(
         }
         builder.partition(destinationPartition);
     } else {
-        builder.offsetsDataType(descriptor.getOffsetsDataType())
-            .maxTotalValues(descriptor.getMaxTotalValues())
-            .batchSize(descriptor.getBatchSize());
-        if (descriptor.hasMaxValuesPerRow()) {
-            builder.maxValuesPerRow(descriptor.getMaxValuesPerRow());
-        }
+        builder.offsetsDataType(sourceTensor.getOffsetsDataType());
+        builder.maxValuesPerRow(sourceTensor.getMaxValuesPerRow());
     }
 
     RaggedTensor result = builder.build();
@@ -3302,7 +3312,7 @@ void validateComposedEvaluatorMemberRaggedInputsCompatible(
     const RaggedNetworkInputReference& memberInput,
     size_t memberIndex,
     const std::string& inputName) {
-    if (referenceInput.raggedTensor.getDescriptor() != memberInput.raggedTensor.getDescriptor() ||
+    if (!sameRaggedMemberInputGeometry(referenceInput.raggedTensor, memberInput.raggedTensor) ||
         referenceInput.partitionInputName != memberInput.partitionInputName) {
         throw std::runtime_error("TrainingRuns composed ensemble evaluator member " + std::to_string(memberIndex) +
                                  " has incompatible ragged descriptor/partition topology for input '" + inputName + "'.");
@@ -3604,23 +3614,17 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
     return evaluator;
 }
 
-uint32_t trainingRunsEnsembleArtifactPlacementBatchSize(const Network& network) {
-    const std::vector<RaggedNetworkInputReference> raggedInputs = network.getExternalRaggedNetworkInputs();
-    if (raggedInputs.empty()) {
-        return 1;
-    }
-
-    const uint64_t batchSize = raggedInputs.front().raggedTensor.getBatchSize();
-    if (batchSize == 0 || batchSize > std::numeric_limits<uint32_t>::max()) {
-        throw std::runtime_error("TrainingRunsResult.save_ensemble ragged input batch size is outside uint32 placement capacity.");
-    }
-    for (const RaggedNetworkInputReference& input : raggedInputs) {
-        if (input.raggedTensor.getBatchSize() != batchSize) {
-            throw std::runtime_error(
-                "TrainingRunsResult.save_ensemble requires all ragged external inputs to use the same fixed batch size.");
+// Saving learned parameters needs a temporary placement, not a batch-size
+// property of the serialized ensemble. Logical boundaries remain independently
+// placeable at the batch size chosen for that temporary execution.
+uint32_t trainingRunsEnsembleStartupPlacementBatchSize(const Network& network) {
+    for (const RaggedNetworkInputReference& input : network.getExternalRaggedNetworkInputs()) {
+        if (!input.raggedTensor.hasMaxValuesPerRow()) {
+            throw std::runtime_error("TrainingRunsResult.save_ensemble ragged input '" + input.name +
+                                     "' is missing semantic max_values_per_row.");
         }
     }
-    return static_cast<uint32_t>(batchSize);
+    return 1;
 }
 
 std::shared_ptr<Network> buildSingleMemberEnsembleNetworkArtifact(Network& memberNetwork,
@@ -3746,7 +3750,7 @@ void saveEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleResult,
             deployableInputNames,
             safeNetworkNameForSavedEnsemble(ensembleResult.ensembleGroup));
         const uint32_t placementBatchSize =
-            trainingRunsEnsembleArtifactPlacementBatchSize(*singleMemberEnsembleNetwork);
+            trainingRunsEnsembleStartupPlacementBatchSize(*singleMemberEnsembleNetwork);
         std::shared_ptr<PlacedNetwork> placed =
             placeInferenceNetworkWithSerializedStartup(
                 *singleMemberEnsembleNetwork,
@@ -3763,7 +3767,7 @@ void saveEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleResult,
         safeNetworkNameForSavedEnsemble(ensembleResult.ensembleGroup),
         std::optional<std::vector<std::string>>{deployableInputNames});
     const uint32_t placementBatchSize =
-        trainingRunsEnsembleArtifactPlacementBatchSize(*evaluator.network);
+        trainingRunsEnsembleStartupPlacementBatchSize(*evaluator.network);
     std::shared_ptr<PlacedNetwork> placed =
         placeInferenceNetworkWithSerializedStartup(
             *evaluator.network,

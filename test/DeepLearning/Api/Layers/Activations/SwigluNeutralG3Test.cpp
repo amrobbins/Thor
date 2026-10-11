@@ -106,8 +106,6 @@ void runSavedTraining(const filesystem::path& archive, uint32_t b, uint64_t inpu
     ASSERT_NE(labelIt, inputs.end());
     const RaggedTensor tokens = inputIt->raggedTensor;
     const RaggedTensor targets = labelIt->raggedTensor;
-    ASSERT_TRUE(tokens.isPlacementNeutral());
-    ASSERT_TRUE(targets.isPlacementNeutral());
     EXPECT_TRUE(tokens.sharesPartitionWith(targets));
     EXPECT_EQ(tokens.getValuesDimensions(), (vector<uint64_t>{kM, kInputWidth}));
     EXPECT_EQ(targets.getValuesDimensions(), (vector<uint64_t>{kM, kOutputWidth}));

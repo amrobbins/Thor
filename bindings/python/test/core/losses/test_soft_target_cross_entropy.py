@@ -186,8 +186,6 @@ def _r11c_soft_target_ragged_pair(network, *, offsets_dtype=thor.DataType.uint32
         f"{prefix}_predictions",
         thor.DataType.fp32,
         [3],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
         offsets_data_type=offsets_dtype,
     )
@@ -217,7 +215,7 @@ def test_soft_target_cross_entropy_r11c_constructs_ragged_raw_and_preserves_part
     assert isinstance(loss.get_raw_loss(), thor.RaggedTensor)
     assert isinstance(loss.get_loss(), thor.RaggedTensor)
     assert loss.get_loss().offsets == predictions.offsets
-    assert loss.get_loss().values.get_dimensions() == [8, 3]
+    assert loss.get_loss().values.get_dimensions() == [4, 3]
 
 
 def test_soft_target_cross_entropy_r11c_rejects_per_output_mixed_inputs_and_different_partition():
@@ -233,8 +231,6 @@ def test_soft_target_cross_entropy_r11c_rejects_per_output_mixed_inputs_and_diff
         "r11c_soft_target_different",
         thor.DataType.fp32,
         [3],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     with pytest.raises(ValueError, match=r"exact same row partition"):

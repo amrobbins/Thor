@@ -18,9 +18,8 @@ def test_ctc_loss_uses_canonical_ragged_labels():
         "labels",
         thor.DataType.int32,
         [],
-        max_total_values=24,
-        batch_size=4,
         offsets_data_type=thor.DataType.uint64,
+        max_values_per_row=12,
     )
     input_lengths = _input_tensor(n, "input_lengths", [1], thor.DataType.int32)
 
@@ -56,8 +55,7 @@ def test_ctc_loss_rejects_noncanonical_public_inputs():
         "labels",
         thor.DataType.int32,
         [],
-        max_total_values=24,
-        batch_size=4,
+        max_values_per_row=12,
     )
     with pytest.raises(ValueError, match="out_of_bounds_gradients"):
         thor.losses.CtcLoss(n, logits, labels, input_lengths, out_of_bounds_gradients="invalid")

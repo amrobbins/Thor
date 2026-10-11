@@ -233,7 +233,8 @@ TEST(UtilityApiLayers, TypeConverterPreservesAlreadyPhysicalBatchDimensions) {
 
 TEST(UtilityApiLayers, TypeConverterRaggedBuildsAndPreservesPartition) {
     Network network("ragged_type_converter_build");
-    RaggedTensor input(DataType::FP32, {3}, 2, 8, DataType::UINT32);
+    RaggedTensor input = RaggedTensor::logical(
+        Tensor(DataType::FP32, {8, 3}), Tensor(DataType::UINT32, {1}), 8);
 
     TypeConverter typeConverter =
         TypeConverter::Builder().network(network).featureInput(input).newDataType(DataType::BF16).build();

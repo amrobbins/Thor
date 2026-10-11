@@ -99,7 +99,6 @@ TEST(RaggedRowLengthsApi, PlacementNeutralBuilderUsesOnlyPartitionAndPlacementBa
                                   .trailingDimensions({3})
                                   .maxValuesPerRow(maxValuesPerRow)
                                   .build();
-    ASSERT_TRUE(input.isPlacementNeutral());
 
     Api::RaggedRowLengths rowLengths = Api::RaggedRowLengths::Builder()
                                            .network(network)
@@ -142,7 +141,7 @@ TEST(RaggedRowLengthsApi, PlacementNeutralSerializationIsSemanticAndRejectsVersi
     EXPECT_EQ(neutralJson.at("version").get<std::string>(), "1.1.0");
     const nlohmann::json& raggedJson = neutralJson.at("ragged_feature_input");
     EXPECT_EQ(raggedJson.at("layer_ragged_reference_version").get<std::string>(), "1.0.0");
-    EXPECT_EQ(raggedJson.at("geometry_mode").get<std::string>(), "placement_neutral");
+    EXPECT_FALSE(raggedJson.contains("geometry_mode"));
     EXPECT_EQ(raggedJson.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
     EXPECT_FALSE(raggedJson.contains("batch_size"));
     EXPECT_FALSE(raggedJson.contains("max_total_values"));
@@ -156,7 +155,7 @@ TEST(RaggedRowLengthsApi, PlacementNeutralSerializationIsSemanticAndRejectsVersi
 
     nlohmann::json neutralAsFixed = neutralJson;
     neutralAsFixed["version"] = "1.0.0";
-    EXPECT_THROW(Api::RaggedRowLengths::deserialize(neutralAsFixed, &neutralNetwork), std::runtime_error);
+    EXPECT_NO_THROW(Api::RaggedRowLengths::deserialize(neutralAsFixed, &neutralNetwork));
 
     nlohmann::json wrongOffsetsIdentity = neutralJson;
     wrongOffsetsIdentity["offsets_input"]["id"] = neutralInput.getValues().getId();
@@ -177,17 +176,15 @@ TEST(RaggedRowLengthsApi, PlacementNeutralSerializationIsSemanticAndRejectsVersi
                                        .valuesDataType(DataType::FP32)
                                        .offsetsDataType(DataType::UINT32)
                                        .trailingDimensions({2})
-                                       .batchSize(3)
-                                       .maxTotalValues(9)
-                                       .build();
+                                       .maxValuesPerRow(3).build();
     Api::RaggedRowLengths fixedRowLengths = Api::RaggedRowLengths::Builder()
                                                 .network(fixedNetwork)
                                                 .featureInput(fixedInput)
                                                 .build();
     nlohmann::json fixedAsNeutral = fixedRowLengths.architectureJson();
-    ASSERT_EQ(fixedAsNeutral.at("version").get<std::string>(), "1.0.0");
-    fixedAsNeutral["version"] = "1.1.0";
-    EXPECT_THROW(Api::RaggedRowLengths::deserialize(fixedAsNeutral, &fixedNetwork), std::runtime_error);
+    ASSERT_EQ(fixedAsNeutral.at("version").get<std::string>(), "1.1.0");
+    EXPECT_FALSE(fixedAsNeutral.at("ragged_feature_input").contains("batch_size"));
+    EXPECT_NO_THROW(Api::RaggedRowLengths::deserialize(fixedAsNeutral, &fixedNetwork));
 }
 
 TEST(RaggedRowLengthsApi, PlacementNeutralSaveLoadReplacesPlacementGeometryPerBatchAndExecutesEmptyRows) {
@@ -243,7 +240,6 @@ TEST(RaggedRowLengthsApi, PlacementNeutralSaveLoadReplacesPlacementGeometryPerBa
         const auto loadedInputs = loaded.getExternalRaggedNetworkInputs();
         ASSERT_EQ(loadedInputs.size(), 1U);
         const Api::RaggedTensor loadedInput = loadedInputs.front().raggedTensor;
-        ASSERT_TRUE(loadedInput.isPlacementNeutral());
         EXPECT_EQ(loadedInput.getValues().getOriginalId(), savedValuesOriginalId);
         EXPECT_EQ(loadedInput.getRowPartitionToken().getOriginalId(), savedPartitionTokenOriginalId);
         EXPECT_EQ(loadedInput.getMaxValuesPerRow(), maxValuesPerRow);
@@ -318,7 +314,7 @@ TEST(RaggedRowLengthsApi, PlacementNeutralSaveLoadReplacesPlacementGeometryPerBa
     std::filesystem::remove_all(archive);
 }
 
-TEST(RaggedRowLengthsApi, FixedSerializationRemainsVersionOneAndLoads) {
+TEST(RaggedRowLengthsApi, CanonicalSerializationLoadsIndependentlyOfPlacementBatch) {
     const std::string networkName = "ragged_row_lengths_fixed_serialization_compatibility";
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
     const std::filesystem::path archive = std::filesystem::temp_directory_path() /
@@ -333,9 +329,7 @@ TEST(RaggedRowLengthsApi, FixedSerializationRemainsVersionOneAndLoads) {
                                       .valuesDataType(DataType::FP32)
                                       .offsetsDataType(DataType::UINT32)
                                       .trailingDimensions({2})
-                                      .batchSize(3)
-                                      .maxTotalValues(9)
-                                      .build();
+                                      .maxValuesPerRow(3).build();
         Api::RaggedRowLengths rowLengths = Api::RaggedRowLengths::Builder()
                                                .network(network)
                                                .featureInput(input)
@@ -348,12 +342,12 @@ TEST(RaggedRowLengthsApi, FixedSerializationRemainsVersionOneAndLoads) {
             .build();
 
         const nlohmann::json serialized = rowLengths.architectureJson();
-        EXPECT_EQ(serialized.at("version").get<std::string>(), "1.0.0");
-        EXPECT_EQ(serialized.at("ragged_feature_input").at("batch_size").get<uint64_t>(), 3U);
-        EXPECT_EQ(serialized.at("ragged_feature_input").at("max_total_values").get<uint64_t>(), 9U);
-        EXPECT_FALSE(serialized.at("ragged_feature_input").contains("layer_ragged_reference_version"));
+        EXPECT_EQ(serialized.at("version").get<std::string>(), "1.1.0");
+        EXPECT_FALSE(serialized.at("ragged_feature_input").contains("batch_size"));
+        EXPECT_FALSE(serialized.at("ragged_feature_input").contains("max_total_values"));
+        EXPECT_EQ(serialized.at("ragged_feature_input").at("max_values_per_row").get<uint64_t>(), 3U);
         EXPECT_EQ(serialized.at("offsets_input").at("dimensions").get<vector<uint64_t>>(),
-                  (vector<uint64_t>{4}));
+                  (vector<uint64_t>{1}));
         network.save(archive.string(), true);
     }
 
@@ -362,13 +356,48 @@ TEST(RaggedRowLengthsApi, FixedSerializationRemainsVersionOneAndLoads) {
         ASSERT_NO_THROW(loaded.load(archive.string()));
         shared_ptr<Api::RaggedRowLengths> loadedRowLengths = findRowLengths(loaded);
         ASSERT_NE(loadedRowLengths, nullptr);
-        EXPECT_FALSE(loadedRowLengths->getRaggedFeatureInput().isPlacementNeutral());
-        EXPECT_EQ(loadedRowLengths->getRaggedFeatureInput().getBatchSize(), 3U);
-        EXPECT_EQ(loadedRowLengths->getRaggedFeatureInput().getMaxTotalValues(), 9U);
-        EXPECT_EQ(loadedRowLengths->architectureJson().at("version").get<std::string>(), "1.0.0");
+        EXPECT_EQ(loadedRowLengths->getRaggedFeatureInput().getValuesDimensions().front(),
+                  loadedRowLengths->getRaggedFeatureInput().getMaxValuesPerRow());
+        EXPECT_EQ(loadedRowLengths->getRaggedFeatureInput().getOffsetsDimensions(), (vector<uint64_t>{1}));
+        EXPECT_EQ(loadedRowLengths->architectureJson().at("version").get<std::string>(), "1.1.0");
+        EXPECT_EQ(loadedRowLengths->getRaggedFeatureInput().getDescriptorForPlacement(2).getMaxTotalValues(), 6U);
+        EXPECT_EQ(loadedRowLengths->getRaggedFeatureInput().getDescriptorForPlacement(7).getMaxTotalValues(), 21U);
     } catch (...) {
         std::filesystem::remove_all(archive);
         throw;
     }
     std::filesystem::remove_all(archive);
+}
+
+TEST(RaggedRowLengthsApi, HistoricalOffsetsGrammarUsesGraphPartitionRatherThanArchivedBatch) {
+    Api::Network network("row_lengths_historical_grammar");
+    const Api::RaggedTensor source = Api::RaggedNetworkInput::Builder()
+        .network(network).name("rows")
+        .valuesDataType(DataType::FP32).offsetsDataType(DataType::UINT32)
+        .trailingDimensions({2}).maxValuesPerRow(4).build();
+    const auto rowLengths = Api::RaggedRowLengths::Builder().network(network).featureInput(source).build();
+    nlohmann::json archived = rowLengths.architectureJson();
+    archived["version"] = "1.0.0";
+    auto& ragged = archived["ragged_feature_input"];
+    ragged.erase("layer_ragged_reference_version");
+    ragged.erase("geometry_mode");
+    ragged.erase("max_values_per_row");
+    ragged["batch_size"] = 19;
+    ragged["max_total_values"] = 999;
+    ragged["values"]["dimensions"][0] = 76;
+    ragged["offsets"]["dimensions"][0] = 20;
+    archived["offsets_input"]["dimensions"] = std::vector<uint64_t>{20};
+    EXPECT_NO_THROW(Api::RaggedRowLengths::deserialize(archived, &network));
+    auto loaded = std::dynamic_pointer_cast<Api::RaggedRowLengths>(
+        network.getLayer(network.getNumLayers() - 1));
+    ASSERT_NE(loaded, nullptr);
+    EXPECT_EQ(loaded->getRaggedFeatureInput().getValuesDimensions(),
+              (std::vector<uint64_t>{4, 2}));
+    EXPECT_EQ(loaded->getRaggedFeatureInput().getOffsetsDimensions(),
+              (std::vector<uint64_t>{1}));
+    EXPECT_EQ(loaded->getOutputTensorBytes(2), 2U * sizeof(int32_t));
+    EXPECT_EQ(loaded->getOutputTensorBytes(7), 7U * sizeof(int32_t));
+    // Semantic dtype and original partition identity remain authoritative.
+    archived["offsets_input"]["id"] = source.getValues().getOriginalId();
+    EXPECT_THROW(Api::RaggedRowLengths::deserialize(archived, &network), std::runtime_error);
 }

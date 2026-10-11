@@ -48,7 +48,7 @@ void validateExampleWeights(Tensor location, Tensor scale, Tensor target, std::o
 vector<uint64_t> raggedPackedScalarWeightBroadcastDimensions(const vector<uint64_t>& locationValueDimensions) {
     if (locationValueDimensions.empty()) throw invalid_argument("LaplaceNLLLoss ragged location values must have a packed-capacity dimension.");
     vector<uint64_t> dimensions(locationValueDimensions.size(), 1);
-    dimensions[0] = locationValueDimensions[0];
+    dimensions[0] = 0;  // Copy the physical packed extent from exampleWeights at runtime.
     return dimensions;
 }
 

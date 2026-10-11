@@ -300,6 +300,41 @@ struct CompiledLayerNorm {
                                                          const Tensor& output) const;
 };
 
+// Immutable expression/descriptor contract for one LayerNorm backward pass.
+// Three output routes share the same cuDNN operation; absent logical results
+// do not imply absent physical scratch outputs required by cuDNN.
+struct CompiledLayerNormBackward {
+    uint64_t normalized_feature_count = 0;
+    uint64_t packed_row_capacity = 0;
+    uint32_t ragged_offsets_input_slot = UINT32_MAX;
+    uint64_t ragged_batch_size = 0;
+    double epsilon = 1.0e-5;
+    DataType input_dtype = DataType::FP16;
+    DataType scale_dtype = DataType::FP32;
+    DataType dy_dtype = DataType::FP16;
+    DataType dx_dtype = DataType::FP16;
+    DataType dscale_dtype = DataType::FP32;
+    DataType dbias_dtype = DataType::FP32;
+    DataType compute_dtype = DataType::FP32;
+    bool produces_dx = false;
+    bool produces_dscale = false;
+    bool produces_dbias = false;
+    std::string debug_name = "thor_expr_layer_norm_backward";
+
+    [[nodiscard]] constexpr RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        return ragged_offsets_input_slot != UINT32_MAX ? RaggedPartitionRequirement::HOST_EXTENT
+                                                       : RaggedPartitionRequirement::NONE;
+    }
+
+    [[nodiscard]] DataType outputDTypeFor(ExprOp op) const;
+    [[nodiscard]] CudnnLayerNormDescriptor descriptorFor(const Tensor& input,
+                                                        const Tensor& scale,
+                                                        const Tensor& dy,
+                                                        const Tensor& dx,
+                                                        const Tensor& dscale,
+                                                        const Tensor& dbias) const;
+};
+
 struct CompiledRmsNormBackward {
     uint64_t normalized_feature_count = 0;
     uint64_t packed_row_capacity = 0;
@@ -1070,6 +1105,18 @@ struct RmsNormForwardState {
     uint64_t packed_selected_rows = 0;
 };
 
+// Runtime-only statistics produced by the matching stamped training forward.
+// This is never encoded in the saved model/expression. A backward stamp may
+// share this state only after verifying the matching forward connection.
+struct LayerNormForwardState {
+    Tensor mean;
+    Tensor inv_variance;
+    bool retain_for_backward = false;
+    bool has_valid_state = false;
+    uint64_t packed_active_rows = 0;
+    uint64_t packed_selected_rows = 0;
+};
+
 class StampedLayerNorm {
    public:
     void run() { runOn(stream); }
@@ -1083,6 +1130,17 @@ class StampedLayerNorm {
     [[nodiscard]] size_t executablePlanCount() const noexcept { return forward_executable_plans.size(); }
     [[nodiscard]] std::vector<uintptr_t> executablePlanIds() const;
     [[nodiscard]] std::vector<CudnnFrontendPlanSelection> planSelections() const;
+    // Called during placement/linking, never from runOn(). Replaces the local
+    // inference executable family with training plans that produce statistics.
+    void retainForwardStateForBackward();
+    [[nodiscard]] std::shared_ptr<LayerNormForwardState> trainingForwardState() const noexcept {
+        return forward_state;
+    }
+    [[nodiscard]] bool canProvideForwardStateFor(const CompiledLayerNormBackward& backward,
+                                                const Tensor& backward_input,
+                                                const Tensor& backward_scale,
+                                                const Tensor& backward_dy,
+                                                const std::optional<Tensor>& backward_row_partition_offsets) const;
 
     StampedLayerNorm(std::shared_ptr<CompiledLayerNorm> compiled,
                      Tensor input,
@@ -1090,10 +1148,11 @@ class StampedLayerNorm {
                      Tensor bias,
                      Tensor output,
                      const Stream& stream,
-                     std::optional<Tensor> row_partition_offsets = std::nullopt);
+                     std::optional<Tensor> row_partition_offsets = std::nullopt,
+                     std::shared_ptr<LayerNormForwardState> forward_state = nullptr);
 
    private:
-    void prepareForwardExecutableFamily();
+    void prepareForwardExecutableFamily(bool training);
     [[nodiscard]] const CudnnLayerNormExecutablePlan& forwardExecutableForOuter(uint64_t outer) const;
 
     const std::shared_ptr<CompiledLayerNorm> compiled_layer_norm;
@@ -1106,6 +1165,47 @@ class StampedLayerNorm {
     uint64_t packed_outer_per_row = 0;
     std::vector<uint64_t> packed_capacity_buckets;
     std::unordered_map<uint64_t, CudnnLayerNormExecutablePlan> forward_executable_plans;
+    bool prepared_training_forward = false;
+    std::shared_ptr<LayerNormForwardState> forward_state;
+    mutable std::optional<Tensor> workspace;
+};
+
+// Stamp-local executable backward for the three LayerNorm gradient routes.
+// A backward must link to the *actual* forward stamp before it can execute;
+// cuDNN statistics are never recomputed from a shadow forward.
+class StampedLayerNormBackward {
+   public:
+    StampedLayerNormBackward(std::shared_ptr<CompiledLayerNormBackward> compiled,
+                             const Tensor& input,
+                             const Tensor& scale,
+                             const Tensor& dY,
+                             const Tensor& dX,
+                             const Tensor& dScale,
+                             const Tensor& dBias,
+                             const Stream& stream,
+                             std::optional<Tensor> row_partition_offsets = std::nullopt);
+
+    void run() { runOn(stream); }
+    void runOn(Stream& run_stream) const;
+    uint32_t gpuNum() const { return input.getPlacement().getDeviceNum(); }
+    const std::vector<Tensor>& getOutputTensors() const noexcept { return outputs; }
+    [[nodiscard]] size_t backwardExecutablePlanCount() const noexcept { return backward_executable_plans.size(); }
+    [[nodiscard]] std::vector<uintptr_t> backwardExecutablePlanIds() const;
+    [[nodiscard]] bool tryLinkForwardStateFrom(const std::shared_ptr<StampedLayerNorm>& forward);
+
+   private:
+    const std::shared_ptr<CompiledLayerNormBackward> compiled;
+    const Tensor input;
+    const Tensor scale;
+    const Tensor dY;
+    Tensor dX;
+    Tensor dScale;
+    Tensor dBias;
+    const std::optional<Tensor> row_partition_offsets;
+    Stream stream;
+    const std::vector<Tensor> outputs;
+    std::shared_ptr<LayerNormForwardState> saved_forward_state;
+    std::unordered_map<uint64_t, CudnnLayerNormExecutablePlan> backward_executable_plans;
     mutable std::optional<Tensor> workspace;
 };
 
@@ -1832,6 +1932,7 @@ struct StampedExecutionStage {
         SanitizePaddedRaggedTail,
         RmsNorm,
         LayerNorm,
+        LayerNormBackward,
         RmsNormBackward,
         EmbeddingLookup,
         Matmul,
@@ -1884,6 +1985,8 @@ struct StampedExecutionStage {
                 return "RmsNorm";
             case Kind::LayerNorm:
                 return "LayerNorm";
+            case Kind::LayerNormBackward:
+                return "LayerNormBackward";
             case Kind::RmsNormBackward:
                 return "RmsNormBackward";
             case Kind::EmbeddingLookup:
@@ -1962,6 +2065,7 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedSanitizePaddedRaggedTail> sanitize_padded_ragged_tail = nullptr;
     const std::shared_ptr<StampedRmsNorm> rms_norm = nullptr;
     const std::shared_ptr<StampedLayerNorm> layer_norm = nullptr;
+    const std::shared_ptr<StampedLayerNormBackward> layer_norm_backward = nullptr;
     const std::shared_ptr<StampedRmsNormBackward> rms_norm_backward = nullptr;
     const std::shared_ptr<StampedEmbeddingLookup> embedding_lookup = nullptr;
     const std::shared_ptr<StampedMatmul> matmul = nullptr;
@@ -2169,6 +2273,17 @@ struct StampedExecutionStage {
           logical_byte_count(logical_byte_count),
           layer_norm(layer_norm) {}
 
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedLayerNormBackward>& backward,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0,
+                                   uint64_t logical_byte_count = 0)
+        : kind(Kind::LayerNormBackward),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(backward->gpuNum()),
+          flop_count(flop_count),
+          logical_byte_count(logical_byte_count),
+          layer_norm_backward(backward) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedRmsNormBackward>& rms_norm_backward,
                                    std::vector<uint32_t> dependency_stage_indices = {},
@@ -2714,6 +2829,9 @@ struct StampedExecutionStage {
         } else if (kind == Kind::LayerNorm) {
             THOR_THROW_IF_FALSE(layer_norm != nullptr);
             layer_norm->runOn(run_stream);
+        } else if (kind == Kind::LayerNormBackward) {
+            THOR_THROW_IF_FALSE(layer_norm_backward != nullptr);
+            layer_norm_backward->runOn(run_stream);
         } else if (kind == Kind::RmsNormBackward) {
             THOR_THROW_IF_FALSE(rms_norm_backward != nullptr);
 #ifdef THOR_DEBUG
@@ -2834,6 +2952,7 @@ class StampedExecutionPlan {
     // Link RMSNorm backward stages to the invVariance retained by the matching real training forward.
 // Unlinked RMSNorm backward execution is invalid; backward never regenerates this state.
     void linkRmsNormBackwardStatesFrom(const StampedExecutionPlan& forward_plan);
+    void linkLayerNormBackwardStatesFrom(const StampedExecutionPlan& forward_plan);
 
     // Link Attention backward stages to the exact Q/K/V/O/stats provider from the
     // real forward plan. A linked backward discards its legacy fallback-forward

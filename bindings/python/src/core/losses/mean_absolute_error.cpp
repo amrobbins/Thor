@@ -123,9 +123,7 @@ void bind_mean_absolute_error(nb::module_ &losses) {
                 if (!predictions.sharesPartitionWith(labels)) {
                     throw nb::value_error("MAE instance: ragged predictions and labels must use the exact same row partition.");
                 }
-                if (predictions.getBatchSize() != labels.getBatchSize() ||
-                    predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
-                    predictions.getTrailingDimensions() != labels.getTrailingDimensions()) {
+                if (predictions.getValuesDimensions() != labels.getValuesDimensions()) {
                     throw nb::value_error("MAE instance: ragged predictions and labels must have identical value geometry.");
                 }
                 builder.predictions(predictions).labels(labels).lossDataType(effectiveLossDataType);

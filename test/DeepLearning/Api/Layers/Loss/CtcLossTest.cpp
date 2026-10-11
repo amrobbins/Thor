@@ -4,10 +4,16 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/TarFile/TarWriter.h"
 #include "DeepLearning/Implementation/Layers/Loss/CtcLoss.h"
 
 #include "gtest/gtest.h"
 
+#include <chrono>
+#include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <utility>
@@ -28,17 +34,14 @@ Api::RaggedTensor raggedInput(Api::Network& network,
                               const string& name,
                               Api::DataType valuesType = Api::DataType::INT32,
                               Api::DataType offsetsType = Api::DataType::UINT32,
-                              const vector<uint64_t>& trailingDimensions = {},
-                              uint64_t batchSize = 2,
-                              uint64_t maxTotalValues = 4) {
+                              const vector<uint64_t>& trailingDimensions = {}) {
     return Api::RaggedNetworkInput::Builder()
         .network(network)
         .name(name)
         .valuesDataType(valuesType)
         .offsetsDataType(offsetsType)
         .trailingDimensions(trailingDimensions)
-        .batchSize(batchSize)
-        .maxTotalValues(maxTotalValues)
+        .maxValuesPerRow(2)
         .build();
 }
 
@@ -232,14 +235,109 @@ TEST(CtcLossApiLayer, JsonDeserializerRestoresCanonicalRaggedInputsAndRejectsLeg
     EXPECT_EQ(restoredLoss->getRaggedLabels().getValuesDataType(), Api::DataType::INT32);
     EXPECT_EQ(restoredLoss->getRaggedLabels().getOffsetsDataType(), Api::DataType::UINT64);
     EXPECT_TRUE(restoredLoss->getRaggedLabels().getTrailingDimensions().empty());
-    EXPECT_EQ(restoredLoss->getRaggedLabels().getBatchSize(), 2u);
-    EXPECT_EQ(restoredLoss->getRaggedLabels().getMaxTotalValues(), 4u);
+    EXPECT_EQ(restoredLoss->getRaggedLabels().getMaxValuesPerRow(), 2u);
+    EXPECT_EQ(restoredLoss->getRaggedLabels().getValuesDimensions(), (vector<uint64_t>{2}));
+    EXPECT_EQ(restoredLoss->getRaggedLabels().getOffsetsDimensions(), (vector<uint64_t>{1}));
+    EXPECT_EQ(restoredLoss->getRaggedLabels().getDescriptorForPlacement(7).getValuesDimensions(),
+              (vector<uint64_t>{14}));
     EXPECT_EQ(restoredLoss->getOobGradientMode(), Impl::CtcLossOobGradientMode::SKIP);
 
     json legacyJson = originalCtcJson;
     legacyJson["version"] = "1.0.0";
     Api::Network legacyNetwork("ctc_legacy_deserialize_rejected");
     EXPECT_THROW(Api::Loss::deserialize(legacyJson, &legacyNetwork), runtime_error);
+}
+
+// CTC requires physical DEVICE_OFFSETS, but this is a placement requirement,
+// not permission to serialize a batch-fixed label architecture. Check a real
+// historical-grammar network at two independent placements rather than
+// duplicating the numerical CTC implementation tests.
+TEST(CtcLossApiLayer, HistoricalPackedLabelsRecoverLogicalMAndPlaceAtTwoBatchSizes) {
+    const string name = "ctc_legacy_packed_labels";
+    Api::Network source(name);
+    auto logits = input(source, "logits", {4, 3}, Api::DataType::FP32);
+    auto lengths = input(source, "input_lengths", {1}, Api::DataType::INT32);
+    auto labels = Api::RaggedNetworkInput::Builder()
+        .network(source).name("labels").valuesDataType(Api::DataType::INT32)
+        .offsetsDataType(Api::DataType::UINT64).trailingDimensions({})
+        .maxValuesPerRow(3).build();
+    const auto loss = Api::CtcLoss::Builder().network(source)
+        .logits(logits.getFeatureOutput().value()).labels(labels)
+        .inputLengths(lengths.getFeatureOutput().value())
+        .reportsRawLoss().build();
+    Api::NetworkOutput::Builder().network(source).name("loss")
+        .inputTensor(loss.getLoss()).dataType(Api::DataType::FP32).build();
+
+    json record = source.architectureJson();
+    uint32_t found = 0;
+    for (json& layer : record.at("layers")) {
+        const string type = layer.at("layer_type").get<string>();
+        if (type == "ctc_loss") {
+            auto& archivedLabels = layer.at("labels_ragged_tensor");
+            archivedLabels["version"] = "1.0.0";
+            archivedLabels.erase("max_values_per_row");
+            archivedLabels["batch_size"] = 87;        // Obsolete, deliberately wrong.
+            archivedLabels["max_total_values"] = 991; // Not 5*M.
+            archivedLabels["values"]["dimensions"][0] = 15;
+            archivedLabels["offsets"]["dimensions"][0] = 6;
+            ++found;
+        } else if (type == "network_input") {
+            const string inputName = layer.at("name").get<string>();
+            if (inputName != "labels.values" && inputName != "__thor_row_partition.labels") continue;
+            const uint64_t packed = inputName == "labels.values" ? 15 : 6;
+            layer["dimensions"][0] = packed;
+            for (const char* key : {"feature_input", "feature_output"})
+                layer[key]["dimensions"][0] = packed;
+        }
+    }
+    ASSERT_EQ(found, 1u);
+
+    const auto archive = std::filesystem::temp_directory_path() /
+        ("thor_ctc_geometry_" + to_string(chrono::steady_clock::now().time_since_epoch().count()));
+    const string encoded = record.dump(4);
+    Impl::TensorPlacement cpu(Impl::TensorPlacement::MemDevices::CPU);
+    Impl::Tensor bytes(cpu, Impl::TensorDescriptor(Api::DataType::UINT8, {encoded.size()}));
+    std::memcpy(bytes.getMemPtr<void>(), encoded.data(), encoded.size());
+    thor_file::TarWriter writer(name);
+    writer.addArchiveFile(name + ".thor.json", bytes);
+    writer.createArchive(archive, true);
+
+    for (uint32_t batchSize : {2u, 7u}) {
+        SCOPED_TRACE(::testing::Message() << "batchSize=" << batchSize);
+        Api::Network loaded(name);
+        ASSERT_NO_THROW(loaded.load(archive.string()));
+        shared_ptr<Api::CtcLoss> restored;
+        for (uint32_t i = 0; i < loaded.getNumLayers(); ++i) {
+            if (auto candidate = dynamic_pointer_cast<Api::CtcLoss>(loaded.getLayer(i))) restored = candidate;
+        }
+        ASSERT_NE(restored, nullptr);
+        const Api::RaggedTensor logical = restored->getRaggedLabels();
+        EXPECT_EQ(logical.getMaxValuesPerRow(), 3u);
+        EXPECT_EQ(logical.getValuesDimensions(), (vector<uint64_t>{3}));
+        EXPECT_EQ(logical.getOffsetsDimensions(), (vector<uint64_t>{1}));
+        EXPECT_EQ(logical.getDescriptorForPlacement(batchSize).getValuesDimensions(),
+                  (vector<uint64_t>{3 * batchSize}));
+        EXPECT_EQ(logical.getDescriptorForPlacement(batchSize).getOffsetsDescriptor().getDimensions(),
+                  (vector<uint64_t>{batchSize + 1}));
+        EXPECT_EQ(restored->getRaggedPartitionRequirementForInput(logical.getOffsets()),
+                  Impl::kCtcLossLabelPartitionRequirement);
+        EXPECT_FALSE(restored->architectureJson().at("labels_ragged_tensor").contains("batch_size"));
+        vector<Event> initialized;
+        auto placed = loaded.place(batchSize, initialized, /*inferenceOnly=*/true);
+        ASSERT_NE(placed, nullptr);
+        for (auto& event : initialized) event.synchronize();
+    }
+    std::filesystem::remove_all(archive);
+
+    // A trustworthy semantic M still must agree with the source graph.
+    json invalid = loss.architectureJson();
+    invalid["labels_ragged_tensor"]["max_values_per_row"] = 4;
+    Api::Network invalidNetwork("ctc_invalid_semantic_m");
+    for (const json& layer : source.architectureJson().at("layers")) {
+        if (layer.at("layer_type") == "network_input")
+            Api::NetworkInput::deserialize(layer, &invalidNetwork);
+    }
+    EXPECT_THROW(Api::Loss::deserialize(invalid, &invalidNetwork), runtime_error);
 }
 
 TEST(CtcLossApiLayer, RejectsUnsupportedPublicApiContracts) {

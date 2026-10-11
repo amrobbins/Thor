@@ -325,8 +325,6 @@ def _r11c_categorical_ce_ragged_pair(network, *, offsets_dtype=thor.DataType.uin
         f"{prefix}_predictions",
         thor.DataType.fp32,
         [3],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
         offsets_data_type=offsets_dtype,
     )
@@ -356,7 +354,7 @@ def test_categorical_cross_entropy_r11c_constructs_ragged_dense_targets_and_pres
     assert isinstance(loss.get_raw_loss(), thor.RaggedTensor)
     assert isinstance(loss.get_loss(), thor.RaggedTensor)
     assert loss.get_loss().offsets == predictions.offsets
-    assert loss.get_loss().values.get_dimensions() == [8, 3]
+    assert loss.get_loss().values.get_dimensions() == [4, 3]
 
 
 def test_categorical_cross_entropy_r11c_rejects_per_output_mixed_inputs_and_different_partition():
@@ -372,8 +370,6 @@ def test_categorical_cross_entropy_r11c_rejects_per_output_mixed_inputs_and_diff
         "r11c_ce_different",
         thor.DataType.fp32,
         [3],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     with pytest.raises(ValueError, match=r"exact same row partition"):
@@ -396,8 +392,6 @@ def _r11c1_sparse_ragged_inputs(
         f"{prefix}_predictions",
         thor.DataType.fp32,
         [3],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=5,
         offsets_data_type=offsets_dtype,
     )
@@ -454,7 +448,7 @@ def test_sparse_categorical_cross_entropy_r11c1_constructs_ragged_scalar_targets
     assert isinstance(loss.get_raw_loss(), thor.RaggedTensor)
     assert isinstance(loss.get_loss(), thor.RaggedTensor)
     assert loss.get_loss().offsets == predictions.offsets
-    assert loss.get_loss().values.get_dimensions() == [8]
+    assert loss.get_loss().values.get_dimensions() == [5]
 
 
 def test_sparse_categorical_cross_entropy_r11c1_accepts_trailing_singleton_labels_and_mask():
@@ -464,8 +458,6 @@ def test_sparse_categorical_cross_entropy_r11c1_accepts_trailing_singleton_label
         "predictions",
         thor.DataType.fp32,
         [3],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=5,
     )
     labels = thor.layers.RaggedNetworkInput(n, "labels", thor.DataType.uint16, [1], partition=predictions)
@@ -487,7 +479,7 @@ def test_sparse_categorical_cross_entropy_r11c1_reporting_shapes_construct(shape
     )
     if shape == "raw":
         assert isinstance(loss.get_loss(), thor.RaggedTensor)
-        assert loss.get_loss().values.get_dimensions() == [8]
+        assert loss.get_loss().values.get_dimensions() == [5]
     elif shape == "none":
         with pytest.raises(RuntimeError, match=r"LossShape::NONE"):
             loss.get_loss()
@@ -516,8 +508,6 @@ def test_sparse_categorical_cross_entropy_r11c1_rejects_per_output_mixed_inputs_
         "different_labels",
         thor.DataType.uint32,
         [],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=5,
     )
     with pytest.raises(ValueError, match=r"exact same row partition"):

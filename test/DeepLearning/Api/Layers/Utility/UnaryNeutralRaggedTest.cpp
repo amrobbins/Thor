@@ -1,5 +1,6 @@
 #include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Api/Layers/Utility/Flatten.h"
+#include "DeepLearning/Api/Layers/Utility/DropOut.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkOutput.h"
 #include "DeepLearning/Api/Layers/Utility/Reshape.h"
@@ -21,6 +22,7 @@
 #include <cuda_fp16.h>
 
 #include <chrono>
+#include <cstring>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -104,7 +106,7 @@ Batch makeNeutralUnaryBatch(const std::string& inputName,
 
 void expectNeutralReference(const nlohmann::json& raggedJson, uint64_t maxValuesPerRow) {
     EXPECT_EQ(raggedJson.at("layer_ragged_reference_version").get<std::string>(), "1.0.0");
-    EXPECT_EQ(raggedJson.at("geometry_mode").get<std::string>(), "placement_neutral");
+    EXPECT_FALSE(raggedJson.contains("geometry_mode"));
     EXPECT_EQ(raggedJson.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
     EXPECT_FALSE(raggedJson.contains("batch_size"));
     EXPECT_FALSE(raggedJson.contains("max_total_values"));
@@ -114,7 +116,6 @@ void expectNeutralReference(const nlohmann::json& raggedJson, uint64_t maxValues
 }
 
 void expectPreservedPartition(const Api::RaggedTensor& tensor, uint64_t partitionTokenOriginalId) {
-    ASSERT_TRUE(tensor.isPlacementNeutral());
     EXPECT_EQ(tensor.getRowPartitionToken().getOriginalId(), partitionTokenOriginalId);
 }
 
@@ -178,7 +179,6 @@ TEST(UtilityApiLayers, PlacementNeutralUnaryFiveLayerChainSaveLoadReplacesPlacem
         savedPartitionTokenOriginalId = input.getRowPartitionToken().getOriginalId();
         const std::vector<Api::RaggedTensor> tensors{input, converted, flattened, reshaped, stopped, scaled};
         for (const Api::RaggedTensor& tensor : tensors) {
-            ASSERT_TRUE(tensor.isPlacementNeutral());
             EXPECT_EQ(tensor.getRowPartitionToken(), input.getRowPartitionToken());
             EXPECT_EQ(tensor.getRowPartitionToken().getOriginalId(), savedPartitionTokenOriginalId);
             ASSERT_TRUE(tensor.hasMaxValuesPerRow());
@@ -387,74 +387,117 @@ TEST(UtilityApiLayers, TypeConverterActiveCountManagedCarrierSuppliesPlacementDe
     EXPECT_EQ(fromActiveCountDriver, expected);
 }
 
-TEST(UtilityApiLayers, UnaryFiveLayerFixedRaggedWritersRemainV1AndLoad) {
-    constexpr uint32_t batchSize = 2;
-    constexpr uint64_t maxTotalValues = 8;
-    constexpr uint64_t maxValuesPerRow = 4;
-    const std::string networkName = "fixed_unary_five_layer_compatibility";
+TEST(UtilityApiLayers, HistoricalUnaryReferencesAndPackedOutputsReconstructLogicalAtTwoBatches) {
+    // This replaces the old fixed-writer test: current builders must never
+    // produce fixed model geometry. Only historical *readers* accept that JSON.
+    constexpr uint64_t m = 4;
+    const std::string networkName = "historical_unary_grammar_reconstruction";
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
     const std::filesystem::path archive = std::filesystem::temp_directory_path() /
-                                          ("thor_fixed_unary_five_layer_" + std::to_string(nonce));
+        ("thor_historical_unary_" + std::to_string(nonce));
     std::filesystem::remove_all(archive);
 
-    {
-        Api::Network network(networkName);
-        Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
-                                      .network(network)
-                                      .name("tokens")
-                                      .valuesDataType(Api::DataType::FP32)
-                                      .offsetsDataType(Api::DataType::UINT32)
-                                      .trailingDimensions({2, 3})
-                                      .batchSize(batchSize)
-                                      .maxTotalValues(maxTotalValues)
-                                      .maxValuesPerRow(maxValuesPerRow)
-                                      .build();
-        Api::TypeConverter converter = Api::TypeConverter::Builder()
-                                           .network(network)
-                                           .featureInput(input)
-                                           .newDataType(Api::DataType::FP16)
-                                           .build();
-        Api::Flatten flatten = Api::Flatten::Builder()
-                                   .network(network)
-                                   .featureInput(converter.getRaggedFeatureOutput().value())
-                                   .numOutputDimensions(1)
-                                   .build();
-        Api::Reshape reshape = Api::Reshape::Builder()
-                                   .network(network)
-                                   .featureInput(flatten.getRaggedFeatureOutput().value())
-                                   .newDimensions({3, 2})
-                                   .build();
-        Api::StopGradient stop = Api::StopGradient::Builder()
-                                     .network(network)
-                                     .featureInput(reshape.getRaggedFeatureOutput().value())
-                                     .build();
-        Api::ScaleGradient scale = Api::ScaleGradient::Builder()
-                                       .network(network)
-                                       .featureInput(stop.getRaggedFeatureOutput().value())
-                                       .scale(0.5F)
-                                       .build();
-        (void)Api::RaggedNetworkOutput::Builder()
-            .network(network)
-            .name("result")
-            .inputTensor(scale.getRaggedFeatureOutput().value())
-            .build();
+    Api::Network network(networkName);
+    Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+        .network(network).name("tokens").valuesDataType(Api::DataType::FP32)
+        .offsetsDataType(Api::DataType::UINT32).trailingDimensions({2, 3})
+        .maxValuesPerRow(m).build();
+    Api::Flatten flatten = Api::Flatten::Builder().network(network)
+        .featureInput(input).numOutputDimensions(1).build();
+    Api::Reshape reshape = Api::Reshape::Builder().network(network)
+        .featureInput(flatten.getRaggedFeatureOutput().value()).newDimensions({3, 2}).build();
+    Api::StopGradient stop = Api::StopGradient::Builder().network(network)
+        .featureInput(reshape.getRaggedFeatureOutput().value()).build();
+    Api::ScaleGradient scale = Api::ScaleGradient::Builder().network(network)
+        .featureInput(stop.getRaggedFeatureOutput().value()).scale(0.5F).build();
+    Api::DropOut dropout = Api::DropOut::Builder().network(network)
+        .featureInput(scale.getRaggedFeatureOutput().value()).dropProportion(0.0F).build();
+    Api::TypeConverter converter = Api::TypeConverter::Builder().network(network)
+        .featureInput(dropout.getRaggedFeatureOutput().value())
+        .newDataType(Api::DataType::FP16).build();
+    (void)Api::RaggedNetworkOutput::Builder().network(network).name("result")
+        .inputTensor(converter.getRaggedFeatureOutput().value()).build();
 
-        const nlohmann::json architecture = network.architectureJson();
-        for (const std::string& layerType : {"type_converter", "flatten", "reshape", "stop_gradient", "scale_gradient"}) {
-            const nlohmann::json& layerJson = findLayerJson(architecture, layerType);
-            EXPECT_EQ(layerJson.at("version").get<std::string>(), "1.0.0") << layerType;
-            ASSERT_TRUE(layerJson.at("use_ragged").get<bool>()) << layerType;
-            EXPECT_EQ(layerJson.at("ragged_feature_input").at("batch_size").get<uint64_t>(), batchSize) << layerType;
-            EXPECT_EQ(layerJson.at("ragged_feature_input").at("max_total_values").get<uint64_t>(), maxTotalValues) << layerType;
-            EXPECT_EQ(layerJson.at("ragged_feature_output").at("batch_size").get<uint64_t>(), batchSize) << layerType;
-            EXPECT_EQ(layerJson.at("ragged_feature_output").at("max_total_values").get<uint64_t>(), maxTotalValues) << layerType;
+    nlohmann::json oldArtifact = network.architectureJson();
+    uint32_t migratedCount = 0;
+    for (auto& layerJson : oldArtifact.at("layers")) {
+        const std::string layerType = layerJson.at("layer_type").get<std::string>();
+        if (layerType != "flatten" && layerType != "reshape" &&
+            layerType != "stop_gradient" && layerType != "scale_gradient" &&
+            layerType != "drop_out" && layerType != "type_converter") continue;
+        // Old layers serialized physical packed output leading extents and
+        // carried a separate old-format reference. M comes from the boundary.
+        layerJson["version"] = "1.0.0";
+        for (const char* field : {"ragged_feature_input", "ragged_feature_output"}) {
+            auto& reference = layerJson.at(field);
+            reference.erase("layer_ragged_reference_version");
+            reference.erase("geometry_mode");
+            reference.erase("max_values_per_row");
+            reference["batch_size"] = 99;  // Deliberately false obsolete metadata.
+            reference["max_total_values"] = 777;
+            reference["values"]["dimensions"][0] = 12;
+            reference["offsets"]["dimensions"][0] = 4;
         }
-        EXPECT_EQ(flatten.getRaggedFeatureOutput()->getValuesDimensions(), (std::vector<uint64_t>{8, 6}));
-        EXPECT_EQ(reshape.getRaggedFeatureOutput()->getValuesDimensions(), (std::vector<uint64_t>{8, 3, 2}));
-        network.save(archive.string(), true);
+        layerJson["feature_input"]["dimensions"][0] = 12;
+        layerJson["feature_output"]["dimensions"][0] = 12;
+        ++migratedCount;
     }
+    ASSERT_EQ(migratedCount, 6u);
+    // U1's source importer also has to discard archived physical [B*M] and
+    // [B+1] without altering ordinary dense source handling.
+    for (auto& layerJson : oldArtifact.at("layers")) {
+        if (layerJson.at("layer_type") != "network_input") continue;
+        const std::string name = layerJson.at("name").get<std::string>();
+        if (name != "tokens.values" && name != "__thor_row_partition.tokens") continue;
+        const uint64_t archivedLeading = name == "tokens.values" ? 12 : 4;
+        layerJson["dimensions"][0] = archivedLeading;
+        for (const char* field : {"feature_input", "feature_output"})
+            layerJson[field]["dimensions"][0] = archivedLeading;
+    }
+    // An actual Thor archive, not a direct helper call or a rewritten live graph.
+    const std::string encoded = oldArtifact.dump(4);
+    Impl::Tensor bytes(cpuPlacement, Impl::TensorDescriptor(Api::DataType::UINT8, {encoded.size()}));
+    std::memcpy(bytes.getMemPtr<void>(), encoded.data(), encoded.size());
+    thor_file::TarWriter writer(networkName);
+    writer.addArchiveFile(networkName + ".thor.json", bytes);
+    writer.createArchive(archive, true);
 
-    Api::Network loaded(networkName);
-    EXPECT_NO_THROW(loaded.load(archive.string()));
+    for (const uint32_t batchSize : {2u, 7u}) {
+        Api::Network restored(networkName);
+        ASSERT_NO_THROW(restored.load(archive.string()));
+        auto boundary = restored.getExternalRaggedNetworkInputs();
+        ASSERT_EQ(boundary.size(), 1u);
+        EXPECT_EQ(boundary[0].raggedTensor.getValuesDimensions(), (std::vector<uint64_t>{m, 2, 3}));
+        EXPECT_EQ(boundary[0].raggedTensor.getOffsetsDimensions(), (std::vector<uint64_t>{1}));
+        const auto restoredScale = findOnlyLayerOfType<Api::ScaleGradient>(restored);
+        ASSERT_NE(restoredScale, nullptr);
+        ASSERT_TRUE(restoredScale->getRaggedFeatureOutput().has_value());
+        EXPECT_EQ(restoredScale->getRaggedFeatureOutput()->getValuesDimensions(),
+                  (std::vector<uint64_t>{m, 3, 2}));
+        const auto restoredDropout = findOnlyLayerOfType<Api::DropOut>(restored);
+        ASSERT_NE(restoredDropout, nullptr);
+        ASSERT_TRUE(restoredDropout->getRaggedFeatureOutput().has_value());
+        EXPECT_EQ(restoredDropout->getRaggedFeatureOutput()->getValuesDimensions(),
+                  (std::vector<uint64_t>{m, 3, 2}));
+        EXPECT_EQ(restoredDropout->getRaggedFeatureOutput()->getDescriptorForPlacement(batchSize).getValuesDimensions(),
+                  (std::vector<uint64_t>{batchSize * m, 3, 2}));
+        EXPECT_EQ(restoredDropout->getRaggedFeatureOutput()->getRowPartitionToken(),
+                  boundary[0].raggedTensor.getRowPartitionToken());
+        const auto restoredConverter = findOnlyLayerOfType<Api::TypeConverter>(restored);
+        ASSERT_NE(restoredConverter, nullptr);
+        ASSERT_TRUE(restoredConverter->getRaggedFeatureOutput().has_value());
+        EXPECT_EQ(restoredConverter->getRaggedFeatureOutput()->getValuesDimensions(),
+                  (std::vector<uint64_t>{m, 3, 2}));
+        EXPECT_EQ(restoredConverter->getRaggedFeatureOutput()->getValuesDataType(), Api::DataType::FP16);
+        EXPECT_EQ(restoredConverter->getRaggedFeatureOutput()->getDescriptorForPlacement(batchSize).getValuesDimensions(),
+                  (std::vector<uint64_t>{batchSize * m, 3, 2}));
+        EXPECT_EQ(restoredConverter->getRaggedFeatureOutput()->getRowPartitionToken(),
+                  boundary[0].raggedTensor.getRowPartitionToken());
+        // The same historical artifact is independently placeable at either B.
+        std::vector<Event> events;
+        auto placed = restored.place(batchSize, events, true);
+        ASSERT_NE(placed, nullptr);
+        for (Event& event : events) event.synchronize();
+    }
     std::filesystem::remove_all(archive);
 }

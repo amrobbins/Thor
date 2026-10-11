@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Api/Initializers/Glorot.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Embedding.h"
 #include "DeepLearning/Implementation/ThorError.h"
@@ -15,6 +17,51 @@
 using json = nlohmann::json;
 
 namespace Thor {
+namespace {
+
+void validateCanonicalTensorReference(const json& record, const Tensor& tensor) {
+    if (!record.is_object() || record.size() != 4 ||
+        record.at("version").get<std::string>() != "1.0.0" ||
+        record.at("id").get<uint64_t>() != tensor.getOriginalId() ||
+        record.at("data_type").get<DataType>() != tensor.getDataType() ||
+        record.at("dimensions").get<std::vector<uint64_t>>() != tensor.getDimensions()) {
+        throw std::runtime_error("Embedding canonical tensor reference does not match the live graph tensor.");
+    }
+}
+
+void validateCanonicalRaggedReference(const json& record, const RaggedTensor& tensor) {
+    if (!SegmentedPrimitiveDetail::hasCanonicalLayerRaggedReferenceFields(record) ||
+        SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(record, "Embedding") !=
+            SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL ||
+        record.at("ragged_rank").get<uint32_t>() != 1 ||
+        record.at("max_values_per_row").get<uint64_t>() != tensor.getMaxValuesPerRow() ||
+        record.contains("batch_size") || record.contains("max_total_values")) {
+        throw std::runtime_error("Embedding canonical ragged geometry is malformed.");
+    }
+    validateCanonicalTensorReference(record.at("values"), tensor.getValues());
+    validateCanonicalTensorReference(record.at("offsets"), tensor.getRowPartitionToken());
+}
+
+uint64_t checkedOutputBytes(const std::vector<Tensor>& outputs, uint32_t batchSize) {
+    if (outputs.empty()) throw std::runtime_error("Embedding has no feature outputs.");
+    if (batchSize == 0) throw std::overflow_error("Embedding placement batch must be positive.");
+    uint64_t bytes = 0;
+    for (const Tensor& output : outputs) {
+        const uint64_t n = output.getTotalSizeInBytes();
+        if (n > std::numeric_limits<uint64_t>::max() / batchSize ||
+            bytes > std::numeric_limits<uint64_t>::max() - n * batchSize) {
+            throw std::overflow_error("Embedding output memory requirement overflows uint64_t.");
+        }
+        bytes += n * batchSize;
+    }
+    return bytes;
+}
+
+}  // namespace
+
+uint64_t Embedding::outputBytesForRaggedPlacement(uint32_t batchSize) const {
+    return checkedOutputBytes(featureOutputs, batchSize);
+}
 
 bool Embedding::isSupportedIndexDataType(DataType dataType) {
     switch (dataType) {
@@ -219,7 +266,6 @@ std::shared_ptr<ThorImplementation::Layer> Embedding::stamp(ThorImplementation::
                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                             Thor::Tensor connectingApiTensor,
                                                             const bool inferenceOnly) const {
-    (void)drivingLayer;
     (void)drivingApiLayer;
 
     THOR_THROW_IF_FALSE(initialized);
@@ -239,13 +285,34 @@ std::shared_ptr<ThorImplementation::Layer> Embedding::stamp(ThorImplementation::
     if (!raggedFeatureInputs.empty()) {
         const RaggedTensor& input = raggedFeatureInputs.front();
         const Tensor values = input.getValues();
-        const uint64_t maxTotalValues = input.getMaxTotalValues();
-        THOR_THROW_IF_FALSE(maxTotalValues != 0);
-        THOR_THROW_IF_FALSE(values.getTotalNumElements() % maxTotalValues == 0);
+        ThorImplementation::RaggedTensorDescriptor physicalInput =
+            SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+                input, drivingLayer, "Embedding");
+        const uint64_t batchSize = physicalInput.getBatchSize();
+        const uint64_t maxTotalValues = physicalInput.getMaxTotalValues();
+        if (batchSize == 0 || batchSize > std::numeric_limits<uint32_t>::max() || maxTotalValues == 0 ||
+            input.getMaxValuesPerRow() > std::numeric_limits<uint64_t>::max() / batchSize ||
+            maxTotalValues != batchSize * input.getMaxValuesPerRow()) {
+            throw std::runtime_error("Embedding physical placement geometry is invalid.");
+        }
+        const auto driver = SegmentedPrimitivePlacementDetail::physicalDescriptorForStamp(drivingLayer, "Embedding");
+        const auto ports = inputPortIndicesForTensor(connectingApiTensor);
+        THOR_THROW_IF_FALSE(!ports.empty());
+        const bool valuesPort = ports.front() % 2 == 0;
+        const auto expected = valuesPort ? physicalInput.getValuesDescriptor()
+                                         : ThorImplementation::TensorDescriptor(input.getOffsetsDataType(), {1});
+        if (driver != expected) {
+            throw std::runtime_error("Embedding physical stamp driver disagrees with the values/active-count contract.");
+        }
+        const uint64_t elementsPerValue = SegmentedPrimitiveDetail::elementsPerValue(
+            input.getTrailingDimensions(), "Embedding");
+        if (values.getTotalNumElements() % elementsPerValue != 0) {
+            throw std::runtime_error("Embedding logical indices dimensions are not a whole number of values.");
+        }
         raggedConfig = ThorImplementation::RaggedEmbeddingConfig{
-            .batchSize = input.getBatchSize(),
+            .batchSize = batchSize,
             .maxTotalValues = maxTotalValues,
-            .elementsPerValue = values.getTotalNumElements() / maxTotalValues,
+            .elementsPerValue = elementsPerValue,
             .offsetsDataType = input.getOffsetsDataType(),
         };
     }
@@ -294,8 +361,10 @@ json Embedding::architectureJson() const {
     if (!raggedFeatureInputs.empty()) {
         json raggedInputs = json::array();
         json raggedOutputs = json::array();
-        for (const RaggedTensor& input : raggedFeatureInputs) raggedInputs.push_back(input.architectureJson());
-        for (const RaggedTensor& output : raggedFeatureOutputs) raggedOutputs.push_back(output.architectureJson());
+        for (const RaggedTensor& input : raggedFeatureInputs)
+            raggedInputs.push_back(SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(input));
+        for (const RaggedTensor& output : raggedFeatureOutputs)
+            raggedOutputs.push_back(SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(output));
         j["ragged_inputs"] = std::move(raggedInputs);
         j["ragged_outputs"] = std::move(raggedOutputs);
     }
@@ -316,10 +385,28 @@ json Embedding::serialize(thor_file::TarWriter& archiveWriter,
 
 void Embedding::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader, const json& j, Network* network) {
     const std::string serializedVersion = j.at("version").get<std::string>();
-    if (serializedVersion != "1.0.0" && serializedVersion != "1.1.0")
+    if (serializedVersion != "1.0.0" && serializedVersion != "1.1.0" && serializedVersion != "1.2.0")
         throw std::runtime_error("Unsupported version in Embedding::deserialize: " + serializedVersion);
     if (j.at("layer_type").get<std::string>() != "embedding")
         throw std::runtime_error("Layer type mismatch in Embedding::deserialize: " + j.at("layer_type").get<std::string>());
+
+    const bool useRagged = j.value("use_ragged", false);
+    // The layer version is an input grammar, not a switch between fixed and
+    // placement-independent model geometries. Both historical packed and
+    // canonical logical references reconstruct the same logical tensors.
+    const bool canonicalRagged = useRagged && j.contains("ragged_inputs") &&
+        j.at("ragged_inputs").is_array() && !j.at("ragged_inputs").empty() &&
+        SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(j.at("ragged_inputs").at(0), "Embedding") ==
+            SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL;
+    // Archives actually written as 1.2.0 used the canonical reference grammar.
+    // Continue to recognize those archived records; new writers use 1.1.0.
+    if (serializedVersion == "1.2.0" && !canonicalRagged) {
+        throw std::runtime_error("Embedding 1.2.0 archive requires canonical ragged references.");
+    }
+    if (canonicalRagged && (!j.is_object() || j.size() != (j.contains("padding_index") ? 15 : 14) ||
+                            j.at("factory") != Layer::Factory::Learning.value() || !useRagged)) {
+        throw std::runtime_error("Embedding canonical ragged layer JSON is malformed.");
+    }
 
     Embedding embedding;
     embedding.vocabularySize = j.at("vocabulary_size").get<uint64_t>();
@@ -332,15 +419,44 @@ void Embedding::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
 
     for (const json& inputJson : j.at("inputs")) {
         uint64_t originalTensorId = inputJson.at("id").get<uint64_t>();
-        embedding.featureInputs.push_back(network->getApiTensorByOriginalId(originalTensorId));
+        Tensor input = network->getApiTensorByOriginalId(originalTensorId);
+        if (canonicalRagged) validateCanonicalTensorReference(inputJson, input);
+        embedding.featureInputs.push_back(input);
     }
-    for (const json& outputJson : j.at("outputs")) {
-        embedding.featureOutputs.push_back(Tensor::deserialize(outputJson, archiveReader.get()));
+    std::vector<RaggedTensor> logicalInputs;
+    if (useRagged) {
+        const auto& records = j.at("ragged_inputs");
+        if (!records.is_array() || records.size() != embedding.featureInputs.size())
+            throw std::runtime_error("Embedding ragged input arity mismatch.");
+        for (uint32_t i = 0; i < embedding.featureInputs.size(); ++i) {
+            if ((SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(records.at(i), "Embedding") ==
+                 SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL) != canonicalRagged ||
+                (SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(j.at("ragged_outputs").at(i), "Embedding") ==
+                 SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL) != canonicalRagged) {
+                throw std::runtime_error("Embedding ragged references use inconsistent historical grammars.");
+            }
+            RaggedTensor logical = SegmentedPrimitiveDetail::reconstructInput(records.at(i), network, "Embedding");
+            if (logical.getValues().getOriginalId() != embedding.featureInputs[i].getOriginalId())
+                throw std::runtime_error("Embedding ragged feature input identity mismatch.");
+            logicalInputs.push_back(std::move(logical));
+        }
+    }
+    for (uint32_t i = 0; i < j.at("outputs").size(); ++i) {
+        const json& outputJson = j.at("outputs").at(i);
+        embedding.featureOutputs.push_back(useRagged
+            ? SegmentedPrimitiveDetail::reconstructPreservedOutputValues(
+                  outputJson, j.at("ragged_outputs").at(i), logicalInputs.at(i), "Embedding")
+            : Tensor::deserialize(outputJson, archiveReader.get()));
     }
     if (embedding.featureInputs.size() != embedding.featureOutputs.size()) {
         throw std::runtime_error("Embedding deserialize expected equal numbers of inputs and outputs.");
     }
-    const bool useRagged = j.value("use_ragged", false);
+    if (canonicalRagged && (embedding.featureInputs.empty() || !embedding.sparseGradients || embedding.vocabularySize == 0 || embedding.embeddingDim == 0 ||
+                    !isSupportedIndexDataType(embedding.featureInputs.front().getDataType()) ||
+                    !isSupportedWeightsDataType(embedding.weightsDataType) ||
+                    (embedding.paddingIndex.has_value() && embedding.paddingIndex.value() >= embedding.vocabularySize))) {
+        throw std::runtime_error("Embedding canonical layer configuration is invalid.");
+    }
     if (useRagged) {
         if (serializedVersion == "1.0.0") {
             throw std::runtime_error("Embedding 1.0.0 archives cannot contain ragged metadata.");
@@ -352,28 +468,37 @@ void Embedding::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
         }
         for (uint32_t i = 0; i < embedding.featureInputs.size(); ++i) {
             const json& raggedInputJson = j.at("ragged_inputs").at(i);
-            const uint64_t offsetsId = raggedInputJson.at("offsets").at("id").get<uint64_t>();
-            Tensor offsets = network->getApiTensorByOriginalId(offsetsId);
-            RaggedTensor raggedInput = raggedInputJson.contains("max_values_per_row")
-                ? RaggedTensor(embedding.featureInputs[i], offsets, raggedInputJson.at("max_values_per_row").get<uint64_t>())
-                : RaggedTensor(embedding.featureInputs[i], offsets);
-            if (raggedInput.getBatchSize() != raggedInputJson.at("batch_size").get<uint64_t>() ||
-                raggedInput.getMaxTotalValues() != raggedInputJson.at("max_total_values").get<uint64_t>()) {
-                throw std::runtime_error("Embedding serialized ragged input metadata does not match reconstructed tensors.");
-            }
+            const RaggedTensor raggedInput = logicalInputs.at(i);
+            if (canonicalRagged) validateCanonicalRaggedReference(raggedInputJson, raggedInput);
             const json& raggedOutputJson = j.at("ragged_outputs").at(i);
-            const bool outputMaxValuesPerRowMatches =
-                raggedOutputJson.contains("max_values_per_row") == raggedInput.hasMaxValuesPerRow() &&
-                (!raggedInput.hasMaxValuesPerRow() ||
-                 raggedOutputJson.at("max_values_per_row").get<uint64_t>() == raggedInput.getMaxValuesPerRow());
-            if (raggedOutputJson.at("offsets").at("id").get<uint64_t>() != offsetsId ||
-                raggedOutputJson.at("batch_size").get<uint64_t>() != raggedInput.getBatchSize() ||
-                raggedOutputJson.at("max_total_values").get<uint64_t>() != raggedInput.getMaxTotalValues() ||
-                !outputMaxValuesPerRowMatches) {
-                throw std::runtime_error("Embedding serialized ragged output must preserve the input row partition and capacity.");
+            const RaggedTensor raggedOutput = raggedInput.withValues(embedding.featureOutputs[i]);
+            SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
+                raggedOutputJson, raggedInputJson, raggedInput, "Embedding");
+            if (canonicalRagged) validateCanonicalRaggedReference(raggedOutputJson, raggedOutput);
+            {
+                const auto expectedDimensions = raggedInput.getValuesDimensions();
+                auto actualDimensions = expectedDimensions;
+                actualDimensions.push_back(embedding.embeddingDim);
+                if (raggedOutput.getValuesDimensions() != actualDimensions ||
+                    raggedOutput.getValuesDataType() != embedding.weightsDataType ||
+                    raggedOutput.getValues().getOriginalId() == raggedInput.getValues().getOriginalId() ||
+                    raggedOutput.getValues().getOriginalId() == raggedInput.getOffsets().getOriginalId()) {
+                    throw std::runtime_error("Embedding canonical output identity or shape is not an embedding of the input.");
+                }
             }
             embedding.raggedFeatureInputs.push_back(raggedInput);
-            embedding.raggedFeatureOutputs.push_back(raggedInput.withValues(embedding.featureOutputs[i]));
+            embedding.raggedFeatureOutputs.push_back(raggedOutput);
+        }
+    }
+    if (canonicalRagged) {
+        for (uint32_t i = 0; i < embedding.raggedFeatureInputs.size(); ++i) {
+            const RaggedTensor& input = embedding.raggedFeatureInputs[i];
+            if (input.getValuesDataType() != embedding.featureInputs.front().getDataType() ||
+                input.getValuesDimensions() != embedding.featureInputs.front().getDimensions() ||
+                input.getOffsetsDataType() != embedding.raggedFeatureInputs.front().getOffsetsDataType() ||
+                input.getMaxValuesPerRow() != embedding.raggedFeatureInputs.front().getMaxValuesPerRow()) {
+                throw std::runtime_error("Embedding canonical applications require identical semantic geometry and dtypes.");
+            }
         }
     }
     for (uint32_t i = 0; i < embedding.featureInputs.size(); ++i) {
@@ -393,6 +518,21 @@ void Embedding::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
     }
     if (!embedding.hasParameter("weights")) {
         throw std::runtime_error("Embedding deserialize did not find required weights parameter.");
+    }
+    if (canonicalRagged) {
+        const auto& params = embedding.getParameters();
+        if (params.size() != 1 || params.front() == nullptr || params.front()->getName() != "weights") {
+            throw std::runtime_error("Embedding canonical model must have one named weights parameter.");
+        }
+        const json spec = params.front()->architectureJson();
+        const bool staticShape = spec.contains("shape") && spec.contains("dtype");
+        const auto& shapeJson = staticShape ? spec.at("shape") : spec.at("storage").at("dimensions");
+        const auto& dtypeJson = staticShape ? spec.at("dtype") : spec.at("storage").at("data_type");
+        if (shapeJson.get<std::vector<uint64_t>>() !=
+                std::vector<uint64_t>{embedding.vocabularySize, embedding.embeddingDim} ||
+            dtypeJson.get<DataType>() != embedding.weightsDataType || !params.front()->isTrainable()) {
+            throw std::runtime_error("Embedding canonical weights specification must match vocabulary and embedding dimensions.");
+        }
     }
 
     embedding.initialized = true;

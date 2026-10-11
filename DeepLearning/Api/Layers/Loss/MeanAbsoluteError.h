@@ -121,9 +121,7 @@ class MAE::Builder {
             ThorImplementation::RegressionLossDType::validateLabelsDType("MAE", labels.getValuesDataType());
             if (!predictions.sharesPartitionWith(labels))
                 throw std::invalid_argument("MAE ragged predictions and labels must use the exact same row partition.");
-            if (predictions.getBatchSize() != labels.getBatchSize() ||
-                predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
-                predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+            if (predictions.getValuesDimensions() != labels.getValuesDimensions())
                 throw std::invalid_argument("MAE ragged predictions and labels must have identical value geometry.");
             if (_exampleWeights.has_value()) {
                 if (_exampleWeights.value() == predictions.getValues() || _exampleWeights.value() == labels.getValues())

@@ -273,6 +273,12 @@ class Network {
     Tensor resolveApiTensorByOriginalId(uint64_t originalId) const;
     Tensor getApiTensorByOriginalId(uint64_t originalId);
 
+    // Load-only: an archived ragged boundary may describe packed physical shapes.
+    // Decode only its identified source tensors with semantic dimensions;
+    // ordinary dense Tensor JSON is never reinterpreted.
+    Tensor deserializeBoundarySourceTensor(const nlohmann::json& tensorJson) const;
+    std::optional<std::vector<uint64_t>> logicalBoundaryDimensionsOnLoad(uint64_t originalTensorId) const;
+
     ApiSubgraphCloneResult cloneSubgraphInto(const Network& sourceNetwork,
                                               const std::vector<std::string>& outputNames,
                                               const ApiTensorRemap& initialRemap,
@@ -339,6 +345,11 @@ class Network {
         RaggedTensor raggedTensor;
     };
     std::map<std::string, RaggedNetworkInputRecord> raggedNetworkInputs;
+
+    // Transient during Network::load(), keyed by archived original tensor ID.
+    // Neither this index nor the archived physical extents enter model state.
+    std::map<uint64_t, std::vector<uint64_t>> loadingLogicalBoundaryDimensions_;
+    void indexRaggedBoundarySourceGeometry(const nlohmann::json& modelJson);
 
     struct RaggedNetworkOutputRecord {
         std::string name;

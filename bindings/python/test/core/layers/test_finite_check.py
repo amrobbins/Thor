@@ -164,7 +164,9 @@ def test_enabled_finite_check_warns_when_stamped(capfd):
 def _physical_ragged(values: np.ndarray, offsets: np.ndarray, offsets_dtype: thor.DataType):
     values_tensor = _cpu_tensor(values, thor.DataType.fp32)
     offsets_tensor = _cpu_tensor(offsets, offsets_dtype)
-    return thor.physical.PhysicalRaggedTensor(values_tensor, offsets_tensor)
+    return thor.physical.PhysicalRaggedTensor(
+        values_tensor, offsets_tensor, max_values_per_row=2
+    )
 
 
 @pytest.mark.cuda
@@ -182,8 +184,7 @@ def test_ragged_finite_check_ignores_poisoned_inactive_capacity_and_reuses_parti
         "input",
         thor.DataType.fp32,
         [2],
-        max_total_values=6,
-        batch_size=3,
+        max_values_per_row=2,
         offsets_data_type=offsets_dtype,
     )
     check = thor.layers.FiniteCheck(network, source, tensor_label="ragged_history")
@@ -191,6 +192,8 @@ def test_ragged_finite_check_ignores_poisoned_inactive_capacity_and_reuses_parti
     output = check.get_feature_output()
     assert isinstance(output, thor.RaggedTensor)
     assert output.get_offsets() == source.get_offsets()
+    assert output.values.get_dimensions() == [2, 2]
+    assert output.offsets.get_dimensions() == [1]
     thor.layers.RaggedNetworkOutput(network, "output", output)
 
     placed = network.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
@@ -244,8 +247,7 @@ def test_ragged_finite_check_save_load_accepts_different_runtime_partition(tmp_p
         "input",
         thor.DataType.fp32,
         [2],
-        max_total_values=6,
-        batch_size=3,
+        max_values_per_row=2,
         offsets_data_type=thor.DataType.uint64,
     )
     check = thor.layers.FiniteCheck(network, source, tensor_label="saved_ragged")

@@ -2,7 +2,6 @@
 
 from collections.abc import Sequence
 import enum
-from typing import overload
 
 from . import (
     activations as activations,
@@ -173,32 +172,13 @@ class Network:
     load: _NetworkLoadDescriptor = ...
 
 class RaggedTensor:
-    @overload
-    def __init__(self, values: Tensor, offsets: Tensor) -> None:
+    def __init__(self, values: Tensor, row_partition_token: Tensor, max_values_per_row: int) -> None:
         """
-        Construct a logical rank-1 ragged tensor from packed values and canonical row-partition offsets.
-
-        ``values`` has shape ``[max_total_values, *trailing_dimensions]`` and ``offsets``
-        has shape ``[batch_size + 1]`` with dtype ``uint32`` or ``uint64``. Offsets are
-        structural metadata; they are not differentiable model values.
-        """
-
-    @overload
-    def __init__(self, values: Tensor, offsets: Tensor, max_values_per_row: int) -> None:
-        """
-        Construct a logical rank-1 ragged tensor from packed values and offsets with an explicit maximum logical row length.
-        """
-
-    @overload
-    def __init__(self, values_data_type: DataType, trailing_dimensions: Sequence[int], batch_size: int, max_total_values: int, offsets_data_type: DataType = DataType.uint32) -> None:
-        """
-        Construct a logical ragged tensor descriptor using Thor's canonical packed representation.
-        """
-
-    @overload
-    def __init__(self, values_data_type: DataType, trailing_dimensions: Sequence[int], batch_size: int, max_total_values: int, max_values_per_row: int, offsets_data_type: DataType = DataType.uint32) -> None:
-        """
-        Construct a logical ragged tensor descriptor with an explicit maximum logical row length.
+        Construct a logical rank-1 ragged tensor with explicit semantic M and a canonical
+        row-partition token. The values have shape ``[M, *trailing_dimensions]`` and the
+        token has shape ``[1]`` with dtype uint32 or uint64. Neither is a packed runtime
+        buffer: placement determines B, physical ``[B*M, ...]`` capacity and, if required,
+        ``[B+1]`` offsets. To reuse a partition across values, pass the same token.
         """
 
     @property
@@ -206,6 +186,9 @@ class RaggedTensor:
 
     @property
     def offsets(self) -> Tensor: ...
+
+    @property
+    def row_partition_token(self) -> Tensor: ...
 
     @property
     def row_partition_id(self) -> int: ...
@@ -220,16 +203,7 @@ class RaggedTensor:
     def trailing_dimensions(self) -> list[int]: ...
 
     @property
-    def placement_neutral(self) -> bool: ...
-
-    @property
-    def batch_size(self) -> int: ...
-
-    @property
-    def max_total_values(self) -> int: ...
-
-    @property
-    def max_values_per_row(self) -> object: ...
+    def max_values_per_row(self) -> int: ...
 
     @property
     def ragged_rank(self) -> int: ...
@@ -237,6 +211,8 @@ class RaggedTensor:
     def get_values(self) -> Tensor: ...
 
     def get_offsets(self) -> Tensor: ...
+
+    def get_row_partition_token(self) -> Tensor: ...
 
     def get_row_partition_id(self) -> int: ...
 
@@ -247,10 +223,6 @@ class RaggedTensor:
     def get_offsets_data_type(self) -> DataType: ...
 
     def get_trailing_dimensions(self) -> list[int]: ...
-
-    def get_batch_size(self) -> int: ...
-
-    def get_max_total_values(self) -> int: ...
 
     def get_ragged_rank(self) -> int: ...
 

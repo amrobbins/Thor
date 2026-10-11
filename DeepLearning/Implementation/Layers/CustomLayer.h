@@ -23,10 +23,29 @@ class Loss;
 
 class CustomLayer : public TrainableLayer {
    public:
+    // Opt-in physical geometry for a packed, placement-neutral ragged output.
+    // Ports are indices into the ordinary *physical* CustomLayer input interface.
+    // The offsets are real DEVICE_OFFSETS [B+1] tensors, not HOST_EXTENT
+    // carriers; each values port has physical [B*M, ...] capacity.
+    struct PackedRaggedInputGeometry {
+        uint32_t valuesPort;
+        uint32_t offsetsPort;
+        uint64_t maxValuesPerRow;
+    };
+
+    struct PackedRaggedOutputGeometry {
+        uint32_t offsetsPort;
+        uint64_t maxValuesPerRow;
+        std::vector<PackedRaggedInputGeometry> raggedInputs;
+    };
+
     struct DeclaredOutputDescriptor {
         DataType dataType;
         std::vector<uint64_t> featureDimensions;
         bool dimensionsIncludeBatch = false;
+        // Unlike dimensionsIncludeBatch, featureDimensions[0] is the
+        // *semantic* M. Physical [B*M, ...] is resolved at connection time.
+        std::optional<PackedRaggedOutputGeometry> packedRaggedByPartition = std::nullopt;
     };
 
     ~CustomLayer() override = default;
@@ -334,6 +353,9 @@ class CustomLayer : public TrainableLayer {
         Tensor batchValidityMask;
         uint32_t currentValidExampleCount = 0;
         bool batchCardinalitySet = false;
+        // Resolved at graph connection, never recomputed from packed values
+        // or allocated during a forward/backward call.
+        std::optional<uint32_t> packedRaggedPhysicalBatchCapacity;
         std::unordered_map<std::string, Tensor> backwardAdditionalInputsByName;
         std::unordered_map<std::string, Tensor> backwardInputGradOutputsByName;
 

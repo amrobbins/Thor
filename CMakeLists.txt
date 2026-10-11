@@ -1425,6 +1425,20 @@ foreach (_thor_cuda_include_dir IN LISTS THOR_CUDA_INCLUDE_DIRS)
     )
 endforeach ()
 
+# G4-C3: explicitly opt-in *diagnostic* callbacks at the cuDNN SDPA owner.
+# OFF in all normal builds: no hooks or probes enter the production hot path.
+option(THOR_SDPA_CUDNN_ALLOC_OWNER_AUDIT
+       "Instrument cuDNN SDPA allocation owner scopes for the G4-C3 workstation benchmark" OFF)
+if (THOR_SDPA_CUDNN_ALLOC_OWNER_AUDIT)
+    if (_thor_python_release_wheel_bundle)
+        message(FATAL_ERROR "G4-C3 cuDNN allocation instrumentation is source-benchmark only, not for release wheels")
+    endif ()
+    # Recompile only the cuDNN owner translation unit, not the entire Thor DSO.
+    set_property(SOURCE
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/GpuAttention/CudnnAttention.cpp"
+        APPEND PROPERTY COMPILE_DEFINITIONS THOR_SDPA_CUDNN_ALLOC_OWNER_AUDIT=1)
+endif ()
+
 target_compile_definitions(Thor PRIVATE
         THOR_CUDA_INCLUDE_DIR="${THOR_CUDA_INCLUDE_DIR}"
         THOR_CUDA_CCCL_INCLUDE_DIR="${THOR_CUDA_CCCL_INCLUDE_DIR}"
@@ -1987,6 +2001,27 @@ target_link_libraries(thor_softmax_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRA
 target_link_libraries(thor_softmax_benchmark PRIVATE OpenMP::OpenMP_CXX)
 target_link_libraries(thor_softmax_benchmark PRIVATE PkgConfig::LIBURING)
 target_compile_options(thor_softmax_benchmark PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3>
+        $<$<CONFIG:Debug>:-O0 -ggdb>
+)
+
+# SERIALIZATION-OWNERSHIP-2C-G4-A: executable public-layer SDPA benchmark
+# preflight.  Keep this separate from expression-only Python performance tests.
+# G4-A validates actual GPU execution; G4-B adds matched event timing.
+add_executable(thor_sdpa_public_layer_benchmark EXCLUDE_FROM_ALL
+        benchmarks/SdpaPublicLayerPerformanceBenchmark.cpp
+        # G4-B1 true backward uses the existing test-only gradient rivet; it
+        # is not a production layer and needs its API vtable definitions.
+        test/DeepLearning/Api/Helpers/GradientRivet.cpp
+)
+thor_apply_linker_settings(thor_sdpa_public_layer_benchmark)
+thor_enable_release_host_lto(thor_sdpa_public_layer_benchmark)
+thor_enable_release_no_semantic_interposition(thor_sdpa_public_layer_benchmark)
+target_link_libraries(thor_sdpa_public_layer_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_link_libraries(thor_sdpa_public_layer_benchmark PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(thor_sdpa_public_layer_benchmark PRIVATE PkgConfig::LIBURING)
+target_compile_options(thor_sdpa_public_layer_benchmark PRIVATE
         $<$<CONFIG:Release>:-O3>
         $<$<CONFIG:RelWithDebInfo>:-O3>
         $<$<CONFIG:Debug>:-O0 -ggdb>

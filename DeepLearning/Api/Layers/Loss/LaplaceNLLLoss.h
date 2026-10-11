@@ -164,9 +164,8 @@ class LaplaceNLLLoss::Builder {
             THOR_THROW_IF_FALSE(scale.getValues() != target.getValues());
             if (!location.sharesPartitionWith(scale) || !location.sharesPartitionWith(target))
                 throw std::invalid_argument("LaplaceNLLLoss ragged location, scale, and target must use the exact same row partition.");
-            if (location.getBatchSize() != scale.getBatchSize() || location.getBatchSize() != target.getBatchSize() ||
-                location.getMaxTotalValues() != scale.getMaxTotalValues() || location.getMaxTotalValues() != target.getMaxTotalValues() ||
-                location.getTrailingDimensions() != scale.getTrailingDimensions() || location.getTrailingDimensions() != target.getTrailingDimensions())
+            if (location.getValuesDimensions() != scale.getValuesDimensions() ||
+                location.getValuesDimensions() != target.getValuesDimensions())
                 throw std::invalid_argument("LaplaceNLLLoss ragged location, scale, and target must have identical value geometry.");
             if (_exampleWeights.has_value() && _exampleWeights->getDimensions() != std::vector<uint64_t>{1})
                 throw std::invalid_argument("LaplaceNLLLoss ragged example_weights must have dimensions [1] for one scalar weight per logical row.");

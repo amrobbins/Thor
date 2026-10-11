@@ -194,7 +194,8 @@ TEST(UtilityApiLayers, ReshapeSerializeDeserialize) {
 
 TEST(UtilityApiLayers, RaggedReshapePreservesPartitionAndReshapesOnlyTrailingValues) {
     Network network("raggedReshape");
-    RaggedTensor input(DataType::FP32, {2, 3, 4}, 3, 8, DataType::UINT64);
+    RaggedTensor input = RaggedTensor::logical(
+        Tensor(DataType::FP32, {8, 2, 3, 4}), Tensor(DataType::UINT64, {1}), 8);
 
     Reshape reshape = Reshape::Builder().network(network).featureInput(input).newDimensions({4, 6}).build();
 
@@ -205,11 +206,11 @@ TEST(UtilityApiLayers, RaggedReshapePreservesPartitionAndReshapesOnlyTrailingVal
     EXPECT_EQ(output.getValuesDimensions(), std::vector<uint64_t>({8, 4, 6}));
     EXPECT_EQ(output.getTrailingDimensions(), std::vector<uint64_t>({4, 6}));
     EXPECT_EQ(output.getOffsets(), input.getOffsets());
-    EXPECT_EQ(output.getBatchSize(), input.getBatchSize());
-    EXPECT_EQ(output.getMaxTotalValues(), input.getMaxTotalValues());
+    EXPECT_EQ(output.getDescriptorForPlacement(3).getMaxTotalValues(), 24u);
+    EXPECT_EQ(output.getMaxValuesPerRow(), 8u);
     EXPECT_EQ(output.getOffsetsDataType(), DataType::UINT64);
     ASSERT_TRUE(reshape.getFeatureOutput().has_value());
-    EXPECT_TRUE(reshape.outputTensorDimensionsIncludeBatch(reshape.getFeatureOutput().value()));
+    EXPECT_FALSE(reshape.outputTensorDimensionsIncludeBatch(reshape.getFeatureOutput().value()));
 
     const json architecture = reshape.architectureJson();
     EXPECT_TRUE(architecture.at("use_ragged").get<bool>());
@@ -218,7 +219,8 @@ TEST(UtilityApiLayers, RaggedReshapePreservesPartitionAndReshapesOnlyTrailingVal
 
 TEST(UtilityApiLayers, RaggedReshapeRejectsChangingElementsPerPackedValue) {
     Network network("raggedReshapeRejectsChangingWidth");
-    RaggedTensor input(DataType::FP32, {2, 3, 4}, 3, 8, DataType::UINT32);
+    RaggedTensor input = RaggedTensor::logical(
+        Tensor(DataType::FP32, {8, 2, 3, 4}), Tensor(DataType::UINT32, {1}), 8);
 
     EXPECT_THROW((void)Reshape::Builder().network(network).featureInput(input).newDimensions({4, 5}).build(),
                  std::invalid_argument);

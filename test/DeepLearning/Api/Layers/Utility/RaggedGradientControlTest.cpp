@@ -15,8 +15,6 @@ TEST(UtilityApiLayers, RaggedStopGradientPreservesCanonicalPartition) {
                              .name("tokens")
                              .valuesDataType(DataType::FP32)
                              .trailingDimensions({5})
-                             .batchSize(3)
-                             .maxTotalValues(17)
                              .maxValuesPerRow(9)
                              .offsetsDataType(DataType::UINT64)
                              .build();
@@ -45,8 +43,6 @@ TEST(UtilityApiLayers, RaggedScaleGradientPreservesCanonicalPartitionAndScale) {
                              .name("tokens")
                              .valuesDataType(DataType::BF16)
                              .trailingDimensions({5})
-                             .batchSize(3)
-                             .maxTotalValues(17)
                              .maxValuesPerRow(9)
                              .offsetsDataType(DataType::UINT32)
                              .build();

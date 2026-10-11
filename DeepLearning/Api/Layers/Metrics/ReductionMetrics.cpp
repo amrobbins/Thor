@@ -115,9 +115,7 @@ void WeightedMean::deserialize(const json& j, Network* network) {
             "WeightedMean", "weights", weights.getValuesDataType());
         if (!values.sharesPartitionWith(weights))
             throw runtime_error("WeightedMean ragged values and weights must use the exact same row partition during deserialization.");
-        if (values.getBatchSize() != weights.getBatchSize() ||
-            values.getMaxTotalValues() != weights.getMaxTotalValues() ||
-            values.getOffsetsDataType() != weights.getOffsetsDataType() ||
+        if (values.getOffsetsDataType() != weights.getOffsetsDataType() ||
             values.getTrailingDimensions() != weights.getTrailingDimensions() ||
             values.hasMaxValuesPerRow() != weights.hasMaxValuesPerRow() ||
             (values.hasMaxValuesPerRow() && values.getMaxValuesPerRow() != weights.getMaxValuesPerRow())) {

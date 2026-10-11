@@ -64,7 +64,8 @@ def test_ragged_network_input_model_contract_does_not_require_placement_capacity
     )
 
     assert ragged.max_values_per_row == _MAX_VALUES_PER_ROW
-    assert ragged.placement_neutral is True
+    assert ragged.values.get_dimensions() == [_MAX_VALUES_PER_ROW, 3]
+    assert ragged.offsets.get_dimensions() == [1]
 
 
 def test_saved_ragged_artifact_omits_placement_derived_batch_and_capacity(tmp_path):

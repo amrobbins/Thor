@@ -110,6 +110,7 @@ def _physical_ragged(values: np.ndarray, offsets: np.ndarray, dtype: thor.DataTy
     return thor.physical.PhysicalRaggedTensor(
         _cpu_tensor(values, dtype),
         _cpu_tensor(offsets, thor.DataType.uint32),
+        max_values_per_row=8,
     )
 
 
@@ -120,9 +121,7 @@ def test_scale_gradient_accepts_ragged_tensor_and_preserves_partition():
         "tokens",
         thor.DataType.fp32,
         [4],
-        max_total_values=12,
         max_values_per_row=8,
-        batch_size=3,
         offsets_data_type=thor.DataType.uint32,
     )
     scale = thor.layers.ScaleGradient(n, x, -0.5)
@@ -147,14 +146,13 @@ def test_ragged_scale_gradient_forward_is_identity():
         "tokens",
         thor.DataType.fp32,
         [4],
-        max_total_values=12,
-        batch_size=3,
+        max_values_per_row=8,
         offsets_data_type=thor.DataType.uint32,
     )
     scale = thor.layers.ScaleGradient(n, x, -0.5)
     thor.layers.RaggedNetworkOutput(n, "output", scale.get_feature_output())
 
-    values = np.arange(12 * 4, dtype=np.float32).reshape(12, 4) / 7.0
+    values = np.arange((3 * 8) * 4, dtype=np.float32).reshape(3 * 8, 4) / 7.0
     offsets = np.array([0, 2, 2, 7], dtype=np.uint32)
     placed = n.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
     result = placed.infer({"tokens": _physical_ragged(values, offsets)})["output"]
@@ -171,9 +169,7 @@ def test_ragged_scale_gradient_save_load_preserves_partition_metadata(tmp_path):
         "tokens",
         thor.DataType.fp32,
         [4],
-        max_total_values=12,
         max_values_per_row=8,
-        batch_size=3,
         offsets_data_type=thor.DataType.uint32,
     )
     scale = thor.layers.ScaleGradient(n, x, 0.25)

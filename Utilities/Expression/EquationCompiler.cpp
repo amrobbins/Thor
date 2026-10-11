@@ -865,6 +865,10 @@ static bool isRaggedConv1dCausalBackwardFilterOp(ExprOp op) {
 }
 static bool isRmsNormOp(ExprOp op) { return op == ExprOp::RMSNORM; }
 static bool isLayerNormOp(ExprOp op) { return op == ExprOp::LAYERNORM; }
+static bool isLayerNormBackwardOp(ExprOp op) {
+    return op == ExprOp::LAYERNORM_BACKWARD_X || op == ExprOp::LAYERNORM_BACKWARD_SCALE ||
+           op == ExprOp::LAYERNORM_BACKWARD_BIAS;
+}
 static bool isRmsNormBackwardOp(ExprOp op) {
     return op == ExprOp::RMSNORM_BACKWARD_X || op == ExprOp::RMSNORM_BACKWARD_SCALE;
 }
@@ -1154,6 +1158,21 @@ static void validateRaggedRuntimeExtentConsumers(const PhysicalExpression& expr)
             continue;
         }
 
+        if (isLayerNormBackwardOp(node.op) && node.layer_norm_packed_row_capacity != 0) {
+            const std::optional<DirectRaggedRuntimeExtent> extent = directRaggedRuntimeExtent(expr, node.lhs);
+            if (!extent.has_value() || ambiguous_partition || !dependency_offsets_slot.has_value() ||
+                extent->offsets_input_slot != dependency_offsets_slot.value() ||
+                extent->max_active_values != node.layer_norm_packed_row_capacity) {
+                throw std::runtime_error("Packed LayerNorm backward requires its original direct HOST_EXTENT x carrier.");
+            }
+            // The future physical backward stage owns the active extent. Do not
+            // insert a second partition requirement on its result.
+            depends_on_ragged_extent[node_idx] = false;
+            ragged_offsets_input_slot[node_idx] = std::nullopt;
+            ambiguous_ragged_partition[node_idx] = false;
+            continue;
+        }
+
         if (isRmsNormBackwardOp(node.op) && node.rms_norm_packed_row_capacity != 0) {
             const std::optional<DirectRaggedRuntimeExtent> extent = directRaggedRuntimeExtent(expr, node.lhs);
             if (!extent.has_value() || ambiguous_partition || !dependency_offsets_slot.has_value() ||
@@ -1295,6 +1314,50 @@ static void validateRaggedRuntimeExtentConsumers(const PhysicalExpression& expr)
             continue;
         }
 
+        if (node.op == ExprOp::CUDA_KERNEL_OUTPUT &&
+            node.cuda_kernel_spec_index < expr.cuda_kernel_expressions.size()) {
+            // The Thor ragged FullyConnected dropout post-op explicitly receives the
+            // canonical active-count/offsets carrier and bounds *every* forward and
+            // backward read/write by that active prefix. It consumes the implicit
+            // valuewise extent, just as packed GEMM does above. Generic custom CUDA
+            // kernels are NOT permitted to consume a ragged extent: their use of a
+            // similarly named input is not evidence that they respect active rows.
+            const auto& kernel = expr.cuda_kernel_expressions[node.cuda_kernel_spec_index];
+            const bool is_forward_dropout = kernel != nullptr &&
+                kernel->name() == "FullyConnected_output_dropout_postop" &&
+                kernel->entrypoint() == "thor_dropout_postop_forward";
+            const bool is_backward_dropout = kernel != nullptr &&
+                kernel->name() == "FullyConnected_output_dropout_postop_backward" &&
+                kernel->entrypoint() == "thor_dropout_postop_backward";
+            if ((is_forward_dropout || is_backward_dropout) && !ambiguous_partition &&
+                dependency_offsets_slot.has_value() &&
+                kernel->inputs().size() == node.cuda_kernel_input_nodes.size()) {
+                bool has_values = false;
+                bool matched_partition = false;
+                bool valid = true;
+                for (size_t input_idx = 0; input_idx < kernel->inputs().size(); ++input_idx) {
+                    const auto& spec = kernel->inputs()[input_idx];
+                    const uint32_t input_node = node.cuda_kernel_input_nodes[input_idx];
+                    if (spec.name == (is_forward_dropout ? "projected" : "dy")) {
+                        has_values = input_node < depends_on_ragged_extent.size() &&
+                            depends_on_ragged_extent[input_node];
+                    }
+                    if (spec.name == "active_count" || spec.name == "offsets") {
+                        const auto carrier_slot = directInputSlot(expr, input_node);
+                        matched_partition = carrier_slot.has_value() &&
+                            carrier_slot.value() == dependency_offsets_slot.value();
+                        if (!matched_partition) valid = false;
+                    }
+                }
+                if (valid && has_values && matched_partition) {
+                    depends_on_ragged_extent[node_idx] = false;
+                    ragged_offsets_input_slot[node_idx] = std::nullopt;
+                    ambiguous_ragged_partition[node_idx] = false;
+                    continue;
+                }
+            }
+        }
+
         if (node.op == ExprOp::BROADCAST_TO) {
             throw std::runtime_error(
                 "BROADCAST_TO may not consume a value carrying ragged runtime extent; "
@@ -1304,7 +1367,9 @@ static void validateRaggedRuntimeExtentConsumers(const PhysicalExpression& expr)
         if (isStageBoundaryOp(node.op) || node.op == ExprOp::ROPE || node.op == ExprOp::TRANSPOSE ||
             node.op == ExprOp::TAKE_ALONG_AXIS) {
             throw std::runtime_error(
-                "an expression carrying ragged runtime extent reached an unsupported operation; use an explicit ragged operation or adapter.");
+                "an expression carrying ragged runtime extent reached an unsupported operation " +
+                opName(node.op) + " (node " + std::to_string(node_idx) +
+                "); use an explicit ragged operation or adapter.");
         }
     }
 }
@@ -2942,6 +3007,112 @@ static std::string compileEmbeddingEpilogueExpression(const PhysicalExpression& 
 
     visiting.erase(local_idx);
     return result;
+}
+
+// Compile the three differentiable routes as *one* cuDNN backward descriptor.
+// Its physical execution and link to a real training forward are installed in
+// the next stamped-executor patch. Do not lower these routes to a fused kernel.
+shared_ptr<CompiledLayerNormBackward> EquationCompiler::compileLayerNormBackward(const PhysicalExpression& expr) {
+    if (expr.numInputs() != 3 && expr.numInputs() != 4) {
+        throw std::runtime_error("LayerNorm backward stage expects x, scale and dY, plus optional extent carrier.");
+    }
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("LayerNorm backward stage output node is out of range.");
+    }
+    const auto is_backward = [](ExprOp op) {
+        return op == ExprOp::LAYERNORM_BACKWARD_X || op == ExprOp::LAYERNORM_BACKWARD_SCALE ||
+               op == ExprOp::LAYERNORM_BACKWARD_BIAS;
+    };
+    const ExprNode& root = expr.nodes.at(expr.output_node);
+    if (!is_backward(root.op) || root.lhs >= expr.nodes.size() || root.rhs >= expr.nodes.size() ||
+        root.aux >= expr.nodes.size()) {
+        throw std::runtime_error("LayerNorm backward output requires local x/scale/dY inputs.");
+    }
+    const ExprNode& x = expr.nodes.at(root.lhs);
+    const ExprNode& scale = expr.nodes.at(root.rhs);
+    const ExprNode& dy = expr.nodes.at(root.aux);
+    if (x.op != ExprOp::INPUT || scale.op != ExprOp::INPUT || dy.op != ExprOp::INPUT ||
+        !x.input_tensor_dtype || !scale.input_tensor_dtype || !dy.input_tensor_dtype) {
+        throw std::runtime_error("LayerNorm backward inputs must be local INPUT nodes with resolved storage dtypes.");
+    }
+    if (root.layer_norm_normalized_feature_count == 0 || !(root.layer_norm_epsilon > 0.0) ||
+        !root.compute_dtype.has_value()) {
+        throw std::runtime_error("LayerNorm backward requires valid hidden size, epsilon and compute dtype.");
+    }
+    if (root.layer_norm_packed_row_capacity != 0) {
+        if (root.ragged_runtime_offsets_input_slot == UINT32_MAX || root.ragged_runtime_batch_size == 0 ||
+            root.ragged_runtime_max_active_values != root.layer_norm_packed_row_capacity ||
+            root.ragged_runtime_offsets_input_slot >= expr.inputs.size()) {
+            throw std::runtime_error("Packed LayerNorm backward requires its original connector-owned extent.");
+        }
+        bool found_extent = false;
+        for (const ExprNode& candidate : expr.nodes) {
+            if (candidate.op == ExprOp::INPUT && candidate.input_slot == root.ragged_runtime_offsets_input_slot &&
+                candidate.input_tensor_dtype.has_value()) {
+                found_extent = true;
+            }
+        }
+        if (!found_extent) {
+            throw std::runtime_error("Packed LayerNorm backward extent slot must reference a resolved INPUT.");
+        }
+    } else if (root.ragged_runtime_offsets_input_slot != UINT32_MAX) {
+        throw std::runtime_error("Dense LayerNorm backward cannot require row extent.");
+    }
+
+    auto compiled = make_shared<CompiledLayerNormBackward>();
+    compiled->normalized_feature_count = root.layer_norm_normalized_feature_count;
+    compiled->packed_row_capacity = root.layer_norm_packed_row_capacity;
+    compiled->ragged_offsets_input_slot = root.ragged_runtime_offsets_input_slot;
+    compiled->ragged_batch_size = root.ragged_runtime_batch_size;
+    compiled->epsilon = root.layer_norm_epsilon;
+    compiled->input_dtype = x.input_tensor_dtype.value();
+    compiled->scale_dtype = scale.input_tensor_dtype.value();
+    compiled->dy_dtype = dy.input_tensor_dtype.value();
+    compiled->dx_dtype = compiled->input_dtype;
+    compiled->dscale_dtype = compiled->scale_dtype;
+    compiled->dbias_dtype = compiled->scale_dtype;
+    compiled->compute_dtype = toSupportedComputeDType(root.op, root.compute_dtype.value());
+    // The current cuDNN wrapper's backward graph types dY using the input
+    // dtype. Reject mixed output/input dtypes until that physical graph is
+    // explicitly taught to accept and validate a differently typed dY.
+    if (compiled->dy_dtype != compiled->input_dtype) {
+        throw std::runtime_error("LayerNorm backward currently requires dY and x to have the same storage dtype.");
+    }
+
+    for (const ExprNode& route : expr.nodes) {
+        if (!is_backward(route.op)) continue;
+        if (route.lhs != root.lhs || route.rhs != root.rhs || route.aux != root.aux ||
+            route.layer_norm_normalized_feature_count != root.layer_norm_normalized_feature_count ||
+            route.layer_norm_epsilon != root.layer_norm_epsilon ||
+            route.layer_norm_packed_row_capacity != root.layer_norm_packed_row_capacity ||
+            route.ragged_runtime_offsets_input_slot != root.ragged_runtime_offsets_input_slot ||
+            route.ragged_runtime_batch_size != root.ragged_runtime_batch_size ||
+            route.ragged_runtime_max_active_values != root.ragged_runtime_max_active_values ||
+            route.compute_dtype != root.compute_dtype) {
+            throw std::runtime_error("Merged LayerNorm backward routes must describe one operation.");
+        }
+        if (!route.output_dtype || route.output_dtype.value() != compiled->outputDTypeFor(route.op)) {
+            throw std::runtime_error("LayerNorm backward route must use cuDNN storage dtype; cast after the stage.");
+        }
+        compiled->produces_dx |= route.op == ExprOp::LAYERNORM_BACKWARD_X;
+        compiled->produces_dscale |= route.op == ExprOp::LAYERNORM_BACKWARD_SCALE;
+        compiled->produces_dbias |= route.op == ExprOp::LAYERNORM_BACKWARD_BIAS;
+    }
+    if (!compiled->produces_dx && !compiled->produces_dscale && !compiled->produces_dbias) {
+        throw std::runtime_error("LayerNorm backward stage contains no gradient routes.");
+    }
+    CudnnLayerNormDescriptor descriptor;
+    descriptor.outerSize = 1;
+    descriptor.normalizedFeatureCount = compiled->normalized_feature_count;
+    descriptor.inputDataType = compiled->input_dtype;
+    descriptor.outputDataType = compiled->dy_dtype;
+    descriptor.parameterDataType = compiled->scale_dtype;
+    descriptor.computeDataType = compiled->compute_dtype;
+    descriptor.epsilon = static_cast<float>(compiled->epsilon);
+    descriptor.training = true;
+    descriptor.debugName = compiled->debug_name;
+    descriptor.validateBackward();
+    return compiled;
 }
 
 shared_ptr<CompiledRmsNormBackward> EquationCompiler::compileRmsNormBackward(const PhysicalExpression& expr) {
@@ -6596,6 +6767,119 @@ static PhysicalExecutionStage buildRmsNormBackwardStage(
     };
 }
 
+// LN-C2B1: isolate an expression backward route at a physical boundary. The
+// three gradient results share x, gamma, dY and the original HOST_EXTENT
+// carrier; their distinct runtime value ids remain independent after merging.
+static PhysicalExecutionStage buildLayerNormBackwardStage(
+    const PhysicalExpression& expr,
+    uint32_t node_idx,
+    uint32_t output_value_id,
+    const std::string& output_name,
+    const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes.at(node_idx);
+    if (!isLayerNormBackwardOp(node.op)) {
+        throw std::runtime_error("buildLayerNormBackwardStage received a non-LayerNorm-backward node.");
+    }
+    PhysicalExpression stage_expr;
+    std::vector<uint32_t> input_value_ids;
+    const std::optional<DirectRaggedRuntimeExtent> extent = directRaggedRuntimeExtent(expr, node.lhs);
+    if (extent.has_value() != (node.layer_norm_packed_row_capacity != 0)) {
+        throw std::runtime_error("LayerNorm backward packed capacity and direct extent disagree.");
+    }
+    auto bind_parent = [&](uint32_t parent_idx, uint32_t slot, bool structural = false) {
+        if (parent_idx >= expr.nodes.size()) {
+            throw std::runtime_error("LayerNorm backward parent index out of range.");
+        }
+        const ExprNode& parent = expr.nodes[parent_idx];
+        uint32_t value_id = UINT32_MAX;
+        std::optional<DataType> dtype;
+        if (const auto it = node_output_value_id.find(parent_idx); it != node_output_value_id.end()) {
+            value_id = it->second;
+            dtype = parent.output_dtype;
+        } else if (parent.op == ExprOp::INPUT) {
+            value_id = parent.input_slot;
+            dtype = parent.input_tensor_dtype;
+        }
+        if (value_id == UINT32_MAX || !dtype.has_value()) {
+            throw std::runtime_error("LayerNorm backward input has no materialized value or resolved dtype.");
+        }
+        input_value_ids.push_back(value_id);
+        stage_expr.inputs.push_back(NamedInput{"__arg" + std::to_string(slot), slot, NamedInput::Kind::Tensor});
+        ExprNode input_node;
+        input_node.op = ExprOp::INPUT;
+        input_node.input_slot = slot;
+        input_node.input_tensor_dtype = dtype;
+        input_node.output_dtype = dtype;
+        input_node.compute_dtype = structural ? dtype : parent.compute_dtype.value_or(dtype.value());
+        input_node.backward_output_dtype = dtype;
+        input_node.backward_compute_dtype = input_node.compute_dtype;
+        stage_expr.nodes.push_back(std::move(input_node));
+    };
+    bind_parent(extent.has_value() ? extent->values_node : node.lhs, 0);
+    bind_parent(node.rhs, 1);
+    bind_parent(node.aux, 2);
+    if (extent.has_value()) bind_parent(extent->offsets_node, 3, true);
+    ExprNode route = node;
+    route.lhs = 0;
+    route.rhs = 1;
+    route.aux = 2;
+    route.ragged_runtime_offsets_input_slot = extent.has_value() ? 3u : UINT32_MAX;
+    route.ragged_runtime_batch_size = extent.has_value() ? extent->batch_size : 0u;
+    route.ragged_runtime_max_active_values = extent.has_value() ? extent->max_active_values : 0u;
+    route.ragged_runtime_elements_per_value = extent.has_value() ? extent->elements_per_value : 0u;
+    stage_expr.nodes.push_back(std::move(route));
+    stage_expr.output_node = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::LayerNormBackward,
+        .expr = std::move(stage_expr),
+        .input_value_ids = std::move(input_value_ids),
+        .outputs = {CompiledStageOutput{.name = output_name,
+                                        .local_node_idx = static_cast<uint32_t>(3u + (extent.has_value() ? 1u : 0u)),
+                                        .value_id = output_value_id}},
+    };
+}
+
+static std::string layerNormBackwardMergeKey(const PhysicalExecutionStage& stage) {
+    const ExprNode& node = stage.expr.nodes.at(stage.expr.output_node);
+    std::string key = "layernorm_bwd";
+    for (uint32_t value_id : stage.input_value_ids) key += ":" + std::to_string(value_id);
+    key += ";hidden=" + std::to_string(node.layer_norm_normalized_feature_count);
+    key += ";packed=" + std::to_string(node.layer_norm_packed_row_capacity);
+    key += ";batch=" + std::to_string(node.ragged_runtime_batch_size);
+    key += ";eps=" + formatFloatCanonical(node.layer_norm_epsilon);
+    key += ";compute=" + optionalDTypeSignature(node.compute_dtype);
+    return key;
+}
+
+static void mergeLayerNormBackwardStages(std::vector<PhysicalExecutionStage>& stages) {
+    std::unordered_map<std::string, size_t> first_by_key;
+    std::vector<PhysicalExecutionStage> merged;
+    merged.reserve(stages.size());
+    for (PhysicalExecutionStage& stage : stages) {
+        if (stage.kind != PhysicalExecutionStage::Kind::LayerNormBackward) {
+            merged.push_back(std::move(stage));
+            continue;
+        }
+        const std::string key = layerNormBackwardMergeKey(stage);
+        const auto it = first_by_key.find(key);
+        if (it == first_by_key.end()) {
+            first_by_key.emplace(key, merged.size());
+            merged.push_back(std::move(stage));
+            continue;
+        }
+        PhysicalExecutionStage& target = merged.at(it->second);
+        if (stage.outputs.size() != 1 || stage.input_value_ids != target.input_value_ids) {
+            throw std::runtime_error("LayerNorm backward merge has incompatible input ownership.");
+        }
+        const uint32_t local_idx = static_cast<uint32_t>(target.expr.nodes.size());
+        target.expr.nodes.push_back(stage.expr.nodes.at(stage.expr.output_node));
+        CompiledStageOutput output = stage.outputs.front();
+        output.local_node_idx = local_idx;
+        target.outputs.push_back(std::move(output));
+    }
+    stages = std::move(merged);
+}
+
 static std::string rmsNormBackwardMergeKey(const PhysicalExecutionStage& stage) {
     if (stage.kind != PhysicalExecutionStage::Kind::RmsNormBackward || stage.expr.output_node >= stage.expr.nodes.size()) {
         throw std::runtime_error("rmsNormBackwardMergeKey expected an RMSNorm-backward stage.");
@@ -8194,14 +8478,14 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
             if (isReduceMinMaxBackwardOp(root.op) || isScanMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) ||
                 root.op == ExprOp::SEGMENTED_SCAN || isSegmentedReduceOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
-                isLayerNormOp(root.op) || isRmsNormBackwardOp(root.op) || root.op == ExprOp::RAGGED_SOFTMAX_BACKWARD ||
+                isLayerNormOp(root.op) || isLayerNormBackwardOp(root.op) || isRmsNormBackwardOp(root.op) || root.op == ExprOp::RAGGED_SOFTMAX_BACKWARD ||
                 isConvolutionOp(root.op) || isRaggedConv1dCausalBackwardDataOp(root.op) ||
                 isRaggedConv1dCausalBackwardFilterOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
                     ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs");
                 }
             }
-            if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op) || isLayerNormOp(root.op) || isRmsNormBackwardOp(root.op) ||
+            if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op) || isLayerNormOp(root.op) || isLayerNormBackwardOp(root.op) || isRmsNormBackwardOp(root.op) ||
                 isRaggedConv1dCausalBackwardDataOp(root.op) ||
                 isRaggedConv1dCausalBackwardFilterOp(root.op)) {
                 ensureBoundaryParentEmitted(root.aux, "aux");
@@ -8319,6 +8603,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 planned.stages.push_back(buildRmsNormStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isLayerNormOp(root.op)) {
                 planned.stages.push_back(buildLayerNormStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+            } else if (isLayerNormBackwardOp(root.op)) {
+                planned.stages.push_back(buildLayerNormBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isRmsNormBackwardOp(root.op)) {
                 planned.stages.push_back(buildRmsNormBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isMatmulOp(root.op)) {
@@ -8572,14 +8858,14 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
             if (isReduceMinMaxBackwardOp(root.op) || isScanMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) ||
                 root.op == ExprOp::SEGMENTED_SCAN || isSegmentedReduceOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
-                isLayerNormOp(root.op) || isRmsNormBackwardOp(root.op) || isConvolutionOp(root.op) ||
+                isLayerNormOp(root.op) || isLayerNormBackwardOp(root.op) || isRmsNormBackwardOp(root.op) || isConvolutionOp(root.op) ||
                 isRaggedConv1dCausalBackwardDataOp(root.op) ||
                 isRaggedConv1dCausalBackwardFilterOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
                     ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs");
                 }
             }
-            if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op) || isLayerNormOp(root.op) || isRmsNormBackwardOp(root.op) ||
+            if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op) || isLayerNormOp(root.op) || isLayerNormBackwardOp(root.op) || isRmsNormBackwardOp(root.op) ||
                 isRaggedConv1dCausalBackwardDataOp(root.op) ||
                 isRaggedConv1dCausalBackwardFilterOp(root.op)) {
                 ensureBoundaryParentEmitted(root.aux, "aux");
@@ -8712,6 +8998,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             } else if (isLayerNormOp(root.op)) {
                 planned.stages.push_back(
                     buildLayerNormStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else if (isLayerNormBackwardOp(root.op)) {
+                planned.stages.push_back(
+                    buildLayerNormBackwardStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             } else if (isRmsNormBackwardOp(root.op)) {
                 planned.stages.push_back(
                     buildRmsNormBackwardStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
@@ -8803,6 +9092,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         materializeTerminalGroup(i);
     }
 
+    mergeLayerNormBackwardStages(planned.stages);
     mergeRmsNormBackwardStages(planned.stages);
     mergeAttentionBackwardStages(planned.stages);
 
@@ -9031,6 +9321,12 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             case PhysicalExecutionStage::Kind::LayerNorm: {
                 std::shared_ptr<CompiledLayerNorm> layer_norm = compileLayerNorm(stage.expr);
                 compiled->stages.emplace_back(layer_norm, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                break;
+            }
+            case PhysicalExecutionStage::Kind::LayerNormBackward: {
+                std::shared_ptr<CompiledLayerNormBackward> backward = compileLayerNormBackward(stage.expr);
+                compiled->stages.emplace_back(
+                    stage.expr, backward, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             case PhysicalExecutionStage::Kind::RmsNormBackward: {

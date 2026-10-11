@@ -185,6 +185,41 @@ def test_runtime_bootstrap_source_tree_bypass_requires_exact_one(monkeypatch):
 
     assert not bootstrap._source_tree_bootstrap_enabled()
 
+def test_runtime_bootstrap_automatically_detects_cmake_development_install(monkeypatch, tmp_path):
+    monkeypatch.delenv("THOR_CUDA_BOOTSTRAP_SOURCE_TREE", raising=False)
+    package_dir = tmp_path / "thor"
+    package_dir.mkdir()
+    monkeypatch.setattr(bootstrap, "__file__", str(package_dir / "_bootstrap.py"))
+
+    assert not bootstrap._source_tree_bootstrap_enabled()
+
+    (package_dir / ".thor_source_tree_install").write_text("Thor local CMake development install\n")
+    assert bootstrap._source_tree_bootstrap_enabled()
+
+
+def test_configure_uses_cmake_marker_without_preloading_kernel_wheels(monkeypatch, tmp_path):
+    package_dir = tmp_path / "thor"
+    package_dir.mkdir()
+    (package_dir / ".thor_source_tree_install").write_text("Thor local CMake development install\n")
+    monkeypatch.setattr(bootstrap, "__file__", str(package_dir / "_bootstrap.py"))
+    monkeypatch.delenv("THOR_CUDA_BOOTSTRAP_SOURCE_TREE", raising=False)
+    monkeypatch.setattr(bootstrap._sys, "argv", ["python"])
+    monkeypatch.setattr(bootstrap, "_configured", False)
+    monkeypatch.setattr(
+        bootstrap,
+        "_validate_resolved_manifest_matches_source_selection",
+        lambda: pytest.fail("dev installation must not validate wheel metadata"),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_preload_kernel_backend",
+        lambda _version: pytest.fail("dev installation must not preload kernel wheel"),
+    )
+
+    bootstrap.configure()
+    assert bootstrap._configured
+
+
 def test_runtime_bootstrap_detects_nanobind_stubgen(monkeypatch):
     monkeypatch.setattr(
         bootstrap._sys,

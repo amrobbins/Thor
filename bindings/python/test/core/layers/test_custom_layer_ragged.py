@@ -5,7 +5,8 @@ import thor
 
 
 BATCH_SIZE = 3
-CAPACITY = 8
+MAX_VALUES_PER_ROW = 3
+CAPACITY = BATCH_SIZE * MAX_VALUES_PER_ROW
 FEATURES = 4
 OFFSETS = np.asarray([0, 3, 3, 5], dtype=np.uint32)
 
@@ -23,6 +24,7 @@ def _physical_ragged(values: np.ndarray) -> thor.physical.PhysicalRaggedTensor:
     return thor.physical.PhysicalRaggedTensor(
         _cpu_tensor(values, thor.DataType.fp32),
         _cpu_tensor(OFFSETS, thor.DataType.uint32),
+        max_values_per_row=MAX_VALUES_PER_ROW,
     )
 
 
@@ -32,8 +34,7 @@ def _ragged_input(network: thor.Network, name: str = "history") -> thor.RaggedTe
         name,
         thor.DataType.fp32,
         [FEATURES],
-        max_total_values=CAPACITY,
-        batch_size=BATCH_SIZE,
+        max_values_per_row=MAX_VALUES_PER_ROW,
         offsets_data_type=thor.DataType.uint32,
     )
 
@@ -63,7 +64,8 @@ def test_python_custom_layer_ragged_single_input_preserves_partition_and_logical
     assert seen_specs == [([FEATURES], thor.DataType.fp32)]
     assert isinstance(layer["feature_output"], thor.RaggedTensor)
     assert layer["feature_output"].trailing_dimensions == [FEATURES]
-    assert layer["feature_output"].values.get_dimensions() == [CAPACITY, FEATURES]
+    assert layer["feature_output"].values.get_dimensions() == [MAX_VALUES_PER_ROW, FEATURES]
+    assert layer["feature_output"].shares_partition_with(history)
     assert layer["feature_output"].offsets == history.offsets
     assert isinstance(layer.outputs["feature_output"], thor.RaggedTensor)
     assert layer.get_input_interface()["feature_input"] == history
@@ -131,16 +133,23 @@ def test_python_custom_layer_ragged_multi_input_multi_output_and_parameter_place
     assert isinstance(narrow, thor.RaggedTensor)
     assert wide.offsets == history.offsets
     assert narrow.offsets == history.offsets
+    assert wide.shares_partition_with(history)
+    assert narrow.shares_partition_with(history)
+    assert wide.values.get_dimensions() == [MAX_VALUES_PER_ROW, FEATURES]
+    assert narrow.values.get_dimensions() == [MAX_VALUES_PER_ROW, 2]
     assert wide.trailing_dimensions == [FEATURES]
     assert narrow.trailing_dimensions == [2]
     assert [parameter.name for parameter in layer.get_parameters()] == ["scale"]
 
     thor.layers.RaggedNetworkOutput(network, "wide", wide)
     thor.layers.RaggedNetworkOutput(network, "narrow", narrow)
-    placed = network.place(BATCH_SIZE, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
-    bound = layer.get_bound_parameter(placed, "scale")
-    assert bound is not None
-    assert bound.name == "scale"
+    # One logical CustomLayer must independently physicalize its strided narrow
+    # output at different placement B, not retain the probe's semantic M.
+    for placement_batch in (2, 7):
+        placed = network.place(placement_batch, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+        bound = layer.get_bound_parameter(placed, "scale")
+        assert bound is not None
+        assert bound.name == "scale"
 
 
 @pytest.mark.cuda

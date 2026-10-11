@@ -163,8 +163,6 @@ def _ragged_pair(network, dtype=thor.DataType.fp32):
         "ragged_predictions",
         dtype,
         [2],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     labels = thor.layers.RaggedNetworkInput(
@@ -214,8 +212,6 @@ def test_mae_ragged_rejects_per_output_and_different_partition():
         "different_labels",
         thor.DataType.fp32,
         [2],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     with pytest.raises(ValueError, match=r"exact same row partition"):
@@ -294,8 +290,6 @@ def test_mae_ragged_matches_dense_label_dtype_contract(label_dtype):
         "ragged_predictions",
         thor.DataType.bf16,
         [2],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     labels = thor.layers.RaggedNetworkInput(

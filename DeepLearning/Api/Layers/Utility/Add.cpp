@@ -1,5 +1,7 @@
 #include "DeepLearning/Api/Layers/Utility/Add.h"
 
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
 #include "DeepLearning/Implementation/ThorError.h"
@@ -38,14 +40,51 @@ void requireCompatibleDense(const Tensor& left, const Tensor& right) {
 }
 
 void requireCompatibleRagged(const RaggedTensor& left, const RaggedTensor& right) {
-    if (!left.sharesPartitionWith(right)) {
-        throw std::invalid_argument("Add RaggedTensor inputs must share the exact same row partition.");
-    }
-    if (left.getDescriptor() != right.getDescriptor()) {
-        throw std::invalid_argument("Add RaggedTensor inputs must have identical row partitions, value shapes, and dtypes.");
+    if (!left.hasMaxValuesPerRow() || !right.hasMaxValuesPerRow() ||
+        left.getOffsetsDimensions() != std::vector<uint64_t>{1} ||
+        right.getOffsetsDimensions() != std::vector<uint64_t>{1} ||
+        left.getValues() == right.getValues() ||
+        !left.sharesPartitionWith(right) ||
+        left.getMaxValuesPerRow() != right.getMaxValuesPerRow() ||
+        left.getOffsetsDataType() != right.getOffsetsDataType() ||
+        left.getValuesDataType() != right.getValuesDataType() ||
+        left.getValuesDimensions() != right.getValuesDimensions()) {
+        throw std::invalid_argument("Add requires distinct values with identical logical geometry and a shared row partition.");
     }
 }
 
+uint64_t checkedAdd(uint64_t a, uint64_t b) {
+    if (b > std::numeric_limits<uint64_t>::max() - a) throw std::overflow_error("Add byte sum overflow.");
+    return a + b;
+}
+uint64_t placedBytes(const RaggedTensor& r, uint32_t batch) {
+    const uint64_t n = r.getValues().getTotalSizeInBytes();
+    THOR_THROW_IF_FALSE(r.hasMaxValuesPerRow());
+    if (batch == 0 || n > std::numeric_limits<uint64_t>::max() / batch)
+        throw std::overflow_error("Add output placement byte product overflow.");
+    return n * batch;
+}
+// Deserialization gives a tensor a new live ID while retaining the saved original
+// ID. Serialized references must be compared to that canonical original ID,
+// rather than to a new architectureJson() containing the live ID.
+void checkCanonicalTensorReference(const json& serialized, const Tensor& tensor) {
+    if (serialized.at("version").get<std::string>() != "1.0.0" ||
+        serialized.at("id").get<uint64_t>() != tensor.getOriginalId() ||
+        serialized.at("dimensions").get<std::vector<uint64_t>>() != tensor.getDimensions() ||
+        serialized.at("data_type").get<DataType>() != tensor.getDataType()) {
+        throw std::runtime_error("Add canonical reference has forged semantic tensor geometry.");
+    }
+}
+
+void checkCanonicalReference(const json& serialized, const RaggedTensor& r) {
+    if (SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(serialized, "Add") !=
+        SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL) return;
+    if (serialized.contains("batch_size") || serialized.contains("max_total_values")) {
+        throw std::runtime_error("Add canonical references must not contain archived physical batch metadata.");
+    }
+    checkCanonicalTensorReference(serialized.at("values"), r.getValues());
+    checkCanonicalTensorReference(serialized.at("offsets"), r.getRowPartitionToken());
+}
 }  // namespace
 
 Add Add::Builder::build() {
@@ -107,7 +146,7 @@ int Add::getConnectionType(Tensor connectingTensor) const {
 
 uint64_t Add::getOutputTensorBytes(uint32_t batchSize) const {
     THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
-    if (raggedOutput.has_value()) return featureOutputs.front().getTotalSizeInBytes();
+    if (raggedOutput.has_value()) return placedBytes(raggedOutput.value(), batchSize);
     const uint64_t perExample = featureOutputs.front().getTotalSizeInBytes();
     if (batchSize != 0 && perExample > std::numeric_limits<uint64_t>::max() / batchSize) {
         throw std::overflow_error("Add output size overflows uint64_t.");
@@ -121,7 +160,6 @@ std::shared_ptr<ThorImplementation::Layer> Add::stamp(
     std::shared_ptr<Thor::Layer> drivingApiLayer,
     Thor::Tensor connectingApiTensor,
     bool inferenceOnly) const {
-    (void)drivingLayer;
     (void)drivingApiLayer;
     THOR_THROW_IF_FALSE(initialized);
     THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
@@ -134,14 +172,23 @@ std::shared_ptr<ThorImplementation::Layer> Add::stamp(
 
     if (raggedLeft.has_value()) {
         THOR_THROW_IF_FALSE(raggedRight.has_value() && raggedOutput.has_value());
+        // The stamp can be driven by either values branch or the managed
+        // structural partition carrier; runtime metadata is authoritative.
+        const RaggedTensor& drivenInput = connectingApiTensor == raggedRight->getValues()
+            ? raggedRight.value() : raggedLeft.value();
+        const auto driven = SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+            drivenInput, drivingLayer, "Add", connectingApiTensor == raggedLeft->getOffsets());
+        const auto leftDescriptor = raggedLeft->getDescriptorForPlacement(driven.getBatchSize());
+        const auto rightDescriptor = raggedRight->getDescriptorForPlacement(driven.getBatchSize());
+        if (driven != (connectingApiTensor == raggedRight->getValues() ? rightDescriptor : leftDescriptor) ||
+            leftDescriptor.getValuesDescriptor() != rightDescriptor.getValuesDescriptor() ||
+            leftDescriptor.getRowPartition() != rightDescriptor.getRowPartition()) {
+            throw std::runtime_error("Add physical descriptor disagrees with both neutral operands.");
+        }
         Expression offsets = Expression::input("offsets");
-        RaggedExpression left(Expression::input("left"),
-                              offsets,
-                              raggedLeft->getDescriptor(),
+        RaggedExpression left(Expression::input("left"), offsets, leftDescriptor,
                               ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
-        RaggedExpression right(Expression::input("right"),
-                               offsets,
-                               raggedRight->getDescriptor(),
+        RaggedExpression right(Expression::input("right"), offsets, rightDescriptor,
                                ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
         RaggedExpression output = left + right;
         ExpressionDefinition definition = ExpressionDefinition::fromOutputs(
@@ -152,7 +199,7 @@ std::shared_ptr<ThorImplementation::Layer> Add::stamp(
             std::vector<std::string>{"feature_output"},
             placement,
             inferenceOnly,
-            raggedLeft->getMaxTotalValues(),
+            leftDescriptor.getMaxTotalValues(),
             std::vector<uint64_t>{elementsPerValue(raggedLeft->getTrailingDimensions()),
                                   elementsPerValue(raggedRight->getTrailingDimensions())},
             elementsPerValue(raggedOutput->getTrailingDimensions()),
@@ -184,10 +231,10 @@ uint64_t Add::getFirstInstanceMemRequirementInBytes(
     uint64_t bytes = getOutputTensorBytes(batchSize);
     if (raggedOutput.has_value()) {
         for (const Tensor& input : featureInputs) {
-            if (bytes > std::numeric_limits<uint64_t>::max() - input.getTotalSizeInBytes()) {
-                throw std::overflow_error("Ragged Add memory requirement overflows uint64_t.");
-            }
-            bytes += input.getTotalSizeInBytes();
+            const uint64_t inputBytes = input == raggedLeft->getOffsets()
+                ? input.getTotalSizeInBytes()  // managed DEVICE_ACTIVE_COUNT [1], never [B+1]
+                : placedBytes(input == raggedLeft->getValues() ? raggedLeft.value() : raggedRight.value(), batchSize);
+            bytes = checkedAdd(bytes, inputBytes);
         }
     }
     return bytes;
@@ -197,14 +244,14 @@ json Add::architectureJson() const {
     THOR_THROW_IF_FALSE(initialized);
     THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
     json j{{"factory", Layer::Factory::Layer.value()},
-           {"version", getLayerVersion()},
+           {"version", raggedLeft.has_value() ? "1.1.0" : getLayerVersion()},
            {"layer_type", "add"},
            {"feature_output", featureOutputs.front().architectureJson()}};
     if (raggedLeft.has_value()) {
         j["use_ragged"] = true;
-        j["ragged_left"] = raggedLeft->architectureJson();
-        j["ragged_right"] = raggedRight->architectureJson();
-        j["ragged_output"] = raggedOutput->architectureJson();
+        j["ragged_left"] = SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedLeft.value());
+        j["ragged_right"] = SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedRight.value());
+        j["ragged_output"] = SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedOutput.value());
     } else {
         j["left"] = featureInputs[0].architectureJson();
         j["right"] = featureInputs[1].architectureJson();
@@ -213,37 +260,44 @@ json Add::architectureJson() const {
 }
 
 void Add::deserialize(const json& j, Network* network) {
-    if (j.at("version").get<std::string>() != "1.0.0") {
-        throw std::runtime_error("Unsupported version in Add::deserialize: " + j.at("version").get<std::string>());
-    }
+    const std::string version = j.at("version").get<std::string>();
+    if (version != "1.0.0" && version != "1.1.0")
+        throw std::runtime_error("Unsupported version in Add::deserialize: " + version);
     if (j.at("layer_type").get<std::string>() != "add") {
         throw std::runtime_error("Layer type mismatch in Add::deserialize: " + j.at("layer_type").get<std::string>());
     }
 
     Add add;
     if (j.value("use_ragged", false)) {
-        auto restoreRagged = [&](const json& r) {
-            Tensor values = network->getApiTensorByOriginalId(r.at("values").at("id").get<uint64_t>());
-            Tensor offsets = network->getApiTensorByOriginalId(r.at("offsets").at("id").get<uint64_t>());
-            return r.contains("max_values_per_row")
-                ? RaggedTensor(values, offsets, r.at("max_values_per_row").get<uint64_t>())
-                : RaggedTensor(values, offsets);
-        };
-        add.raggedLeft = restoreRagged(j.at("ragged_left"));
-        add.raggedRight = restoreRagged(j.at("ragged_right"));
+        const json& leftJson = j.at("ragged_left");
+        const json& rightJson = j.at("ragged_right");
+        add.raggedLeft = SegmentedPrimitiveDetail::reconstructInput(leftJson, network, "Add");
+        add.raggedRight = SegmentedPrimitiveDetail::reconstructInput(rightJson, network, "Add");
+        // Historical 1.0.0 references use packed dimensions; the reference
+        // grammar does not select a model geometry. Resolve both from the graph.
         requireCompatibleRagged(add.raggedLeft.value(), add.raggedRight.value());
-        Tensor outputValues = Tensor::deserialize(j.at("feature_output"));
-        add.raggedOutput = add.raggedLeft->withValues(outputValues);
+        checkCanonicalReference(leftJson, add.raggedLeft.value());
+        checkCanonicalReference(rightJson, add.raggedRight.value());
         const json& outputJson = j.at("ragged_output");
-        if (outputJson.at("offsets").at("id").get<uint64_t>() !=
-                j.at("ragged_left").at("offsets").at("id").get<uint64_t>() ||
-            outputJson.at("values").at("id").get<uint64_t>() !=
-                j.at("feature_output").at("id").get<uint64_t>()) {
-            throw std::runtime_error("Add serialized ragged output does not preserve the left/right row partition.");
+        Tensor outputValues = SegmentedPrimitiveDetail::reconstructPreservedOutputValues(
+            j.at("feature_output"), outputJson, add.raggedLeft.value(), "Add");
+        SegmentedPrimitiveDetail::validateSerializedPreservedPartition(outputJson, leftJson, add.raggedLeft.value(), "Add");
+        if (outputJson.at("offsets").at("id").get<uint64_t>() != leftJson.at("offsets").at("id").get<uint64_t>() ||
+            outputJson.at("values").at("id").get<uint64_t>() != outputValues.getOriginalId())
+            throw std::runtime_error("Add output must preserve canonical partition and output values identities.");
+        if (outputJson.value("ragged_rank", 1U) != 1 ||
+            outputValues.getDimensions() != add.raggedLeft->getValuesDimensions() ||
+            outputValues.getDataType() != add.raggedLeft->getValuesDataType() ||
+            outputValues.getOriginalId() == add.raggedLeft->getValues().getOriginalId() ||
+            outputValues.getOriginalId() == add.raggedRight->getValues().getOriginalId()) {
+            throw std::runtime_error("Add output must have distinct logical values and the shared partition.");
         }
+        checkCanonicalReference(outputJson, add.raggedLeft->withValues(outputValues));
+        add.raggedOutput = add.raggedLeft->withValues(outputValues);
         add.featureInputs = {add.raggedLeft->getValues(), add.raggedRight->getValues(), add.raggedLeft->getOffsets()};
         add.featureOutputs = {outputValues};
     } else {
+        if (version != "1.0.0") throw std::runtime_error("Add neutral version requires ragged operands.");
         Tensor left = network->getApiTensorByOriginalId(j.at("left").at("id").get<uint64_t>());
         Tensor right = network->getApiTensorByOriginalId(j.at("right").at("id").get<uint64_t>());
         requireCompatibleDense(left, right);

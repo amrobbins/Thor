@@ -302,9 +302,9 @@ TEST(DatasetInputBindings, RaggedLogicalInputBindsOneDatasetFieldAndCarriesMater
                               .valuesDataType(DataType::INT32)
                               .offsetsDataType(DataType::UINT64)
                               .trailingDimensions({})
-                              .maxTotalValues(23)
+                              
                               .maxValuesPerRow(7)
-                              .batchSize(4)
+                              
                               .build();
 
     DatasetInputBindings exact = DatasetInputBindings::byExactName(network, *dataset);
@@ -316,9 +316,9 @@ TEST(DatasetInputBindings, RaggedLogicalInputBindsOneDatasetFieldAndCarriesMater
     ASSERT_EQ(compiled.fieldRequirements.size(), 1u);
     const DatasetFieldMaterializationRequirement& requirement = compiled.fieldRequirements.at(7);
     ASSERT_TRUE(requirement.raggedTensorDescriptor.has_value());
-    EXPECT_EQ(requirement.raggedTensorDescriptor.value(), labels.getDescriptor());
+    EXPECT_EQ(requirement.raggedTensorDescriptor.value(), labels.getDescriptorForPlacement(4));
     EXPECT_EQ(requirement.raggedTensorDescriptor->getOffsetsDataType(), DataType::UINT64);
-    EXPECT_EQ(requirement.raggedTensorDescriptor->getMaxTotalValues(), 23u);
+    EXPECT_EQ(requirement.raggedTensorDescriptor->getMaxTotalValues(), 28u);
     ASSERT_TRUE(requirement.raggedTensorDescriptor->hasMaxValuesPerRow());
     EXPECT_EQ(requirement.raggedTensorDescriptor->getMaxValuesPerRow(), 7u);
     EXPECT_EQ(requirement.raggedTensorDescriptor->getBatchSize(), 4u);
@@ -341,29 +341,28 @@ TEST(DatasetInputBindings, PlacementNeutralRaggedInputDerivesCapacityFromSession
                               .trailingDimensions({2})
                               .maxValuesPerRow(7)
                               .build();
-    ASSERT_TRUE(labels.isPlacementNeutral());
 
     DatasetInputBindings exact = DatasetInputBindings::byExactName(network, *dataset);
-    CompiledDatasetInputBindings batchThree = exact.compile(network, *dataset, 3);
-    ASSERT_EQ(batchThree.fieldRequirements.size(), 1u);
-    ASSERT_TRUE(batchThree.fieldRequirements.at(7).raggedTensorDescriptor.has_value());
-    const ThorImplementation::RaggedTensorDescriptor threeDescriptor =
-        batchThree.fieldRequirements.at(7).raggedTensorDescriptor.value();
-    EXPECT_EQ(threeDescriptor.getBatchSize(), 3u);
-    EXPECT_EQ(threeDescriptor.getMaxTotalValues(), 21u);
-    EXPECT_EQ(threeDescriptor.getValuesDimensions(), (std::vector<uint64_t>{21, 2}));
-    EXPECT_EQ(threeDescriptor.getOffsetsDescriptor().getDimensions(), (std::vector<uint64_t>{4}));
-    EXPECT_EQ(threeDescriptor.getOffsetsDataType(), DataType::UINT64);
-    EXPECT_EQ(threeDescriptor.getMaxValuesPerRow(), 7u);
+    CompiledDatasetInputBindings batchTwo = exact.compile(network, *dataset, 2);
+    ASSERT_EQ(batchTwo.fieldRequirements.size(), 1u);
+    ASSERT_TRUE(batchTwo.fieldRequirements.at(7).raggedTensorDescriptor.has_value());
+    const ThorImplementation::RaggedTensorDescriptor twoDescriptor =
+        batchTwo.fieldRequirements.at(7).raggedTensorDescriptor.value();
+    EXPECT_EQ(twoDescriptor.getBatchSize(), 2u);
+    EXPECT_EQ(twoDescriptor.getMaxTotalValues(), 14u);
+    EXPECT_EQ(twoDescriptor.getValuesDimensions(), (std::vector<uint64_t>{14, 2}));
+    EXPECT_EQ(twoDescriptor.getOffsetsDescriptor().getDimensions(), (std::vector<uint64_t>{3}));
+    EXPECT_EQ(twoDescriptor.getOffsetsDataType(), DataType::UINT64);
+    EXPECT_EQ(twoDescriptor.getMaxValuesPerRow(), 7u);
 
-    CompiledDatasetInputBindings batchNine = exact.compile(network, *dataset, 9);
-    ASSERT_TRUE(batchNine.fieldRequirements.at(7).raggedTensorDescriptor.has_value());
-    const ThorImplementation::RaggedTensorDescriptor nineDescriptor =
-        batchNine.fieldRequirements.at(7).raggedTensorDescriptor.value();
-    EXPECT_EQ(nineDescriptor.getBatchSize(), 9u);
-    EXPECT_EQ(nineDescriptor.getMaxTotalValues(), 63u);
-    EXPECT_EQ(nineDescriptor.getValuesDimensions(), (std::vector<uint64_t>{63, 2}));
-    EXPECT_EQ(nineDescriptor.getOffsetsDescriptor().getDimensions(), (std::vector<uint64_t>{10}));
+    CompiledDatasetInputBindings batchSeven = exact.compile(network, *dataset, 7);
+    ASSERT_TRUE(batchSeven.fieldRequirements.at(7).raggedTensorDescriptor.has_value());
+    const ThorImplementation::RaggedTensorDescriptor sevenDescriptor =
+        batchSeven.fieldRequirements.at(7).raggedTensorDescriptor.value();
+    EXPECT_EQ(sevenDescriptor.getBatchSize(), 7u);
+    EXPECT_EQ(sevenDescriptor.getMaxTotalValues(), 49u);
+    EXPECT_EQ(sevenDescriptor.getValuesDimensions(), (std::vector<uint64_t>{49, 2}));
+    EXPECT_EQ(sevenDescriptor.getOffsetsDescriptor().getDimensions(), (std::vector<uint64_t>{8}));
 
     EXPECT_EQ(labels.getValuesDimensions(), (std::vector<uint64_t>{7, 2}));
     EXPECT_EQ(labels.getOffsetsDimensions(), (std::vector<uint64_t>{1}));
@@ -384,9 +383,7 @@ TEST(DatasetInputBindings, RaggedExplicitBindingUsesLogicalNameAndRejectsPhysica
                                  .valuesDataType(DataType::FP32)
                                  .offsetsDataType(DataType::UINT32)
                                  .trailingDimensions({3})
-                                 .maxTotalValues(32)
-                                 .batchSize(4)
-                                 .build();
+                                 .maxValuesPerRow(8).build();
 
     DatasetInputBindings bindings;
     bindings.bind(network, sequences, dataset->getField("targets"));
@@ -428,9 +425,7 @@ TEST(DatasetInputBindings, RaggedBindingRejectsKindDtypeShapeAndBatchMismatches)
                                  .valuesDataType(DataType::BF16)
                                  .offsetsDataType(DataType::UINT32)
                                  .trailingDimensions({5})
-                                 .maxTotalValues(20)
-                                 .batchSize(4)
-                                 .build();
+                                 .maxValuesPerRow(5).build();
 
     auto denseKind = std::make_shared<InMemoryNamedDataset>(std::vector<DatasetField>{
         DatasetField{.id = 1, .name = "sequences", .dataType = DataType::BF16, .dimensions = {5}, .kind = DatasetFieldKind::DENSE}});
@@ -449,8 +444,10 @@ TEST(DatasetInputBindings, RaggedBindingRejectsKindDtypeShapeAndBatchMismatches)
 
     auto matching = std::make_shared<InMemoryNamedDataset>(std::vector<DatasetField>{
         DatasetField{.id = 1, .name = "sequences", .dataType = DataType::BF16, .dimensions = {5}, .kind = DatasetFieldKind::RAGGED}});
-    EXPECT_THROW(static_cast<void>(DatasetInputBindings::byExactName(network, *matching).compile(network, *matching, 2)),
-                 std::runtime_error);
+    // Dataset input bindings describe logical fields. Changing the placement
+    // batch size does not make an otherwise matching ragged field invalid.
+    EXPECT_NO_THROW(static_cast<void>(DatasetInputBindings::byExactName(network, *matching).compile(network, *matching, 2)));
+    EXPECT_NO_THROW(static_cast<void>(DatasetInputBindings::byExactName(network, *matching).compile(network, *matching, 4)));
 }
 
 
@@ -469,9 +466,7 @@ TEST(DatasetInputBindings, TrainingDataPropagatesRaggedMaterializationRequiremen
                               .valuesDataType(DataType::INT32)
                               .offsetsDataType(DataType::UINT64)
                               .trailingDimensions({})
-                              .maxTotalValues(41)
-                              .batchSize(4)
-                              .build();
+                              .maxValuesPerRow(11).build();
     (void)labels;
     CompiledDatasetInputBindings compiled = DatasetInputBindings::compileByName(network, *dataset, 4);
 
@@ -484,5 +479,5 @@ TEST(DatasetInputBindings, TrainingDataPropagatesRaggedMaterializationRequiremen
     EXPECT_EQ(session->getDatasetFieldMaterializationRequirements(), compiled.fieldRequirements);
     EXPECT_EQ(session->getRequiredDatasetFieldIds(), (std::set<DatasetFieldId>{7}));
     ASSERT_TRUE(session->getDatasetFieldMaterializationRequirements().at(7).raggedTensorDescriptor.has_value());
-    EXPECT_EQ(session->getDatasetFieldMaterializationRequirements().at(7).raggedTensorDescriptor->getMaxTotalValues(), 41u);
+    EXPECT_EQ(session->getDatasetFieldMaterializationRequirements().at(7).raggedTensorDescriptor->getMaxTotalValues(), 44u);
 }

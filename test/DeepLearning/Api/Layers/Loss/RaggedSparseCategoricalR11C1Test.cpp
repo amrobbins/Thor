@@ -44,8 +44,6 @@ SparseInputs makeSparseInputs(Network& network,
                               vector<uint64_t> maskTrailing = {},
                               DataType labelsDType = DataType::UINT32,
                               DataType maskDType = DataType::UINT8,
-                              uint32_t batchSize = 3,
-                              uint64_t capacity = 8,
                               uint64_t maxValuesPerRow = 5) {
     RaggedTensor predictions = RaggedNetworkInput::Builder()
                                    .network(network)
@@ -53,8 +51,6 @@ SparseInputs makeSparseInputs(Network& network,
                                    .valuesDataType(DataType::FP32)
                                    .offsetsDataType(offsetsDType)
                                    .trailingDimensions({3})
-                                   .batchSize(batchSize)
-                                   .maxTotalValues(capacity)
                                    .maxValuesPerRow(maxValuesPerRow)
                                    .build();
     RaggedTensor labels = RaggedNetworkInput::Builder()
@@ -168,10 +164,14 @@ Batch makeBatch(DataType offsetsDType,
                 const vector<uint8_t>& activeMask,
                 DataType labelsDType = DataType::UINT32,
                 uint32_t validExampleCount = 0,
-                uint64_t capacity = 8) {
+                uint64_t capacity = 0) {
     if (offsets.size() < 2 || activeLogits.size() != activeLabels.size() * 3 ||
-        activeMask.size() != activeLabels.size() || activeLabels.size() > capacity)
+        activeMask.size() != activeLabels.size())
         throw invalid_argument("R11C.1 sparse test batch geometry is inconsistent.");
+    const uint64_t physicalCapacity = (offsets.size() - 1) * maxValuesPerRow;
+    if (capacity == 0) capacity = physicalCapacity;
+    if (capacity != physicalCapacity || activeLabels.size() > capacity)
+        throw invalid_argument("R11C.1 sparse test batch must use placement capacity B*M.");
     Impl::TensorPlacement cpuPlacement(Impl::TensorPlacement::MemDevices::CPU);
     Impl::Tensor logits(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {capacity, 3}));
     Impl::Tensor labels(cpuPlacement, Impl::TensorDescriptor(labelsDType, {capacity}));
@@ -217,7 +217,12 @@ TEST(RaggedSparseCategoricalR11C1, PublicApiPreservesPartitionScalarGeometryMask
         RaggedTensor raw = loss.getRaggedLoss();
         EXPECT_TRUE(raw.sharesPartitionWith(inputs.predictions));
         EXPECT_TRUE(raw.getTrailingDimensions().empty());
-        EXPECT_EQ(raw.getValuesDimensions(), (vector<uint64_t>{8}));
+        EXPECT_EQ(raw.getValuesDimensions(), (vector<uint64_t>{5}));
+        EXPECT_EQ(raw.getOffsetsDimensions(), (vector<uint64_t>{1}));
+        EXPECT_EQ(raw.getDescriptorForPlacement(2).getValuesDimensions(), (vector<uint64_t>{10}));
+        EXPECT_EQ(raw.getDescriptorForPlacement(7).getValuesDimensions(), (vector<uint64_t>{35}));
+        EXPECT_EQ(loss.getOutputTensorBytes(2), 10u * sizeof(float));
+        EXPECT_EQ(loss.getOutputTensorBytes(7), 35u * sizeof(float));
         EXPECT_EQ(countLayerType(network, "SparseCategoricalCrossEntropy"), 1u);
 
         shared_ptr<Layer> clonedBase = loss.clone();
@@ -271,8 +276,6 @@ TEST(RaggedSparseCategoricalR11C1, RejectsUndefinedOrMismatchedRaggedContracts) 
                                        .name("different_labels")
                                        .valuesDataType(DataType::UINT32)
                                        .trailingDimensions({})
-                                       .batchSize(3)
-                                       .maxTotalValues(8)
                                        .maxValuesPerRow(5)
                                        .build();
     EXPECT_THROW((void)SparseCategoricalCrossEntropy::Builder()
@@ -288,8 +291,6 @@ TEST(RaggedSparseCategoricalR11C1, RejectsUndefinedOrMismatchedRaggedContracts) 
                                      .name("different_mask")
                                      .valuesDataType(DataType::UINT8)
                                      .trailingDimensions({})
-                                     .batchSize(3)
-                                     .maxTotalValues(8)
                                      .maxValuesPerRow(5)
                                      .build();
     EXPECT_THROW((void)SparseCategoricalCrossEntropy::Builder()
@@ -357,7 +358,7 @@ TEST(RaggedSparseCategoricalR11C1, QualificationForwardBackwardCoversOffsetsLabe
 
     constexpr uint32_t batchSize = 4;
     constexpr uint32_t validExamples = 3;
-    constexpr uint64_t capacity = 8;
+    constexpr uint64_t capacity = static_cast<uint64_t>(batchSize) * 5;
     const vector<float> activeLogits{
         1.0f, -0.5f, 0.25f,
         -1.0f, 0.5f, 1.5f,
@@ -380,8 +381,6 @@ TEST(RaggedSparseCategoricalR11C1, QualificationForwardBackwardCoversOffsetsLabe
                                                    {},
                                                    labelsDType,
                                                    DataType::UINT8,
-                                                   batchSize,
-                                                   capacity,
                                                    5);
             SparseCategoricalCrossEntropy loss = SparseCategoricalCrossEntropy::Builder()
                                                      .network(network)
@@ -684,7 +683,7 @@ TEST(RaggedSparseCategoricalR11C1, QualificationSubgraphCloneRemapsValuesAndShar
     options.inferenceOnly = true;
     ApiSubgraphCloneResult clone = destination.cloneSubgraphInto(source, {"raw_values"}, remap, options);
     ASSERT_TRUE(clone.outputTensorsByName.contains("raw_values"));
-    EXPECT_EQ(clone.outputTensorsByName.at("raw_values").getDimensions(), (vector<uint64_t>{8}));
+    EXPECT_EQ(clone.outputTensorsByName.at("raw_values").getDimensions(), (vector<uint64_t>{5}));
     EXPECT_EQ(countLayerType(destination, "SparseCategoricalCrossEntropy"), 1u);
 
     shared_ptr<SparseCategoricalCrossEntropy> clonedLoss;
@@ -757,7 +756,8 @@ TEST(RaggedSparseCategoricalR11C1, SaveLoadPreservesInputsAndAcceptsChangedRunti
     };
     const vector<uint32_t> labelsA{0, 1, 2, 0, 1};
     const vector<uint8_t> maskA{1, 1, 1, 0, 1};
-    Batch batchA = makeBatch(offsetsDType, 5, {0, 2, 2, 5}, logitsA, labelsA, maskA);
+    Batch batchA = makeBatch(offsetsDType, 5, {0, 2, 2, 5}, logitsA, labelsA, maskA,
+                             DataType::UINT32, 0, 15);
     map<string, Impl::Tensor> outputsA = placed->infer(batchA);
     const vector<float> hostA = copyFp32ToHost(outputsA.at("loss"));
     ASSERT_EQ(hostA.size(), 1u);
@@ -774,12 +774,33 @@ TEST(RaggedSparseCategoricalR11C1, SaveLoadPreservesInputsAndAcceptsChangedRunti
     };
     const vector<uint32_t> labelsB{1, 0, 1};
     const vector<uint8_t> maskB{1, 1, 0};
-    Batch batchB = makeBatch(offsetsDType, 5, {0, 1, 3, 3}, logitsB, labelsB, maskB);
+    Batch batchB = makeBatch(offsetsDType, 5, {0, 1, 3, 3}, logitsB, labelsB, maskB,
+                             DataType::UINT32, 0, 15);
     map<string, Impl::Tensor> outputsB = placed->infer(batchB);
     const vector<float> hostB = copyFp32ToHost(outputsB.at("loss"));
     ASSERT_EQ(hostB.size(), 1u);
     const float expectedB = (sparseCe3(&logitsB[0], 1) + sparseCe3(&logitsB[3], 0)) / 3.0f;
     EXPECT_NEAR(hostB[0], expectedB, 4.0e-5f);
+
+    // The same saved model must also place with unrelated physical batches.
+    // Saved logical M=5 does not constrain runtime placement B or partition offsets.
+    for (uint32_t b : {2u, 7u}) {
+        vector<Event> placementEvents;
+        auto independentlyPlaced = loaded.place(b, placementEvents, /*inferenceOnly=*/true);
+        ASSERT_NE(independentlyPlaced, nullptr);
+        for (Event& event : placementEvents) event.synchronize();
+        vector<uint64_t> offsets(b + 1, 2);
+        offsets.front() = 0;
+        const vector<float> smallLogits{1.0f, -0.5f, 0.25f, -1.0f, 0.5f, 1.5f};
+        const vector<uint32_t> smallLabels{0, 1};
+        const vector<uint8_t> smallMask{1, 1};
+        Batch batch = makeBatch(offsetsDType, 5, offsets, smallLogits, smallLabels, smallMask,
+                                DataType::UINT32, 0, b * 5);
+        const auto outputs = independentlyPlaced->infer(batch);
+        const auto host = copyFp32ToHost(outputs.at("loss"));
+        ASSERT_EQ(host.size(), 1u);
+        EXPECT_TRUE(std::isfinite(host.front()));
+    }
 
     filesystem::remove_all(archiveDir);
 }

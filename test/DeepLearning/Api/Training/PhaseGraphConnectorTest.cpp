@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Training/PhaseGraphConnector.h"
 #include "DeepLearning/Implementation/Layers/Utility/TensorFanout.h"
@@ -245,4 +246,39 @@ TEST(PhaseGraphConnector, RecompositionPreservesCloneSourceKeysForMatchingPhaseL
     for (const std::string& key : firstKeys) {
         EXPECT_TRUE(secondKeys.count(key)) << key;
     }
+}
+
+TEST(PhaseGraphConnector, ComposedRaggedBoundaryKeepsSemanticMAndTwoPlacementCapacities) {
+    auto makePhase = [](const std::string& name, const std::string& outputName) {
+        auto network = std::make_shared<Network>(name);
+        RaggedTensor input = RaggedNetworkInput::Builder()
+                                 .network(*network)
+                                 .name("history")
+                                 .valuesDataType(DataType::FP32)
+                                 .trailingDimensions({2})
+                                 .maxValuesPerRow(3)
+                                 .build();
+        std::shared_ptr<Activation> relu = Relu::Builder().network(*network).featureInput(input).build();
+        if (!relu->getRaggedFeatureOutput().has_value()) {
+            throw std::runtime_error("ragged phase Relu must preserve its logical ragged output");
+        }
+        NetworkOutput::Builder()
+            .network(*network)
+            .name(outputName)
+            .inputTensor(relu->getRaggedFeatureOutput()->getValues())
+            .build();
+        return network;
+    };
+
+    const auto first = makePhase("ragged_phase_one", "first_output");
+    const auto second = makePhase("ragged_phase_two", "second_output");
+    ComposedPhaseGraph composed = buildComposedPhaseGraphByName(
+        {{"first", first, true}, {"second", second, true}}, PhaseGraphComposeOptions{"ragged_composed"});
+    ASSERT_NE(composed.network, nullptr);
+    const auto inputs = composed.network->getExternalRaggedNetworkInputs();
+    ASSERT_EQ(inputs.size(), 1u);
+    EXPECT_EQ(inputs.front().raggedTensor.getValuesDimensions(), (std::vector<uint64_t>{3, 2}));
+    EXPECT_EQ(inputs.front().raggedTensor.getOffsetsDimensions(), (std::vector<uint64_t>{1}));
+    EXPECT_EQ(inputs.front().raggedTensor.getDescriptorForPlacement(2).getMaxTotalValues(), 6u);
+    EXPECT_EQ(inputs.front().raggedTensor.getDescriptorForPlacement(7).getMaxTotalValues(), 21u);
 }

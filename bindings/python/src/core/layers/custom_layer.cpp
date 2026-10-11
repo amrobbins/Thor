@@ -242,12 +242,10 @@ DeclaredOutputInterface outputInterfaceFromSpecs(nb::object specsObj,
     std::set<std::string> actual;
     TensorMap denseOutputs;
     RaggedTensorMap raggedOutputs;
-    std::optional<Tensor> raggedOffsets;
-    uint64_t maxTotalValues = 0;
+    std::optional<RaggedTensor> raggedPartition;
     if (inputs.ragged) {
         const RaggedTensor& reference = inputs.raggedTensors.at(inputs.names.front());
-        raggedOffsets = reference.getOffsets();
-        maxTotalValues = reference.getMaxTotalValues();
+        raggedPartition = reference;
     }
 
     for (auto item : mapping) {
@@ -264,9 +262,9 @@ DeclaredOutputInterface outputInterfaceFromSpecs(nb::object specsObj,
         if (inputs.ragged) {
             std::vector<uint64_t> valuesShape;
             valuesShape.reserve(spec.shape.size() + 1);
-            valuesShape.push_back(maxTotalValues);
+            valuesShape.push_back(raggedPartition->getMaxValuesPerRow());
             valuesShape.insert(valuesShape.end(), spec.shape.begin(), spec.shape.end());
-            raggedOutputs.emplace(name, RaggedTensor(Tensor(spec.dtype, valuesShape), raggedOffsets.value()));
+            raggedOutputs.emplace(name, raggedPartition->withValues(Tensor(spec.dtype, valuesShape)));
         } else {
             denseOutputs.emplace(name, Tensor(spec.dtype, spec.shape));
         }

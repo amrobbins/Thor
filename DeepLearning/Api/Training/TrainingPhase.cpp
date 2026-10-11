@@ -70,10 +70,22 @@ std::shared_ptr<Network> deserializePhaseNetwork(const json& networkJson, std::s
                     ? raggedInputJson.at("row_partition_token_tensor_id").get<uint64_t>()
                     : raggedInputJson.at("offsets_tensor_id").get<uint64_t>();
                 Tensor partitionToken = network->getApiTensorByOriginalId(partitionTokenTensorId);
-                RaggedTensor raggedTensor = raggedInputJson.contains("max_values_per_row")
-                    ? RaggedTensor(values, partitionToken, raggedInputJson.at("max_values_per_row").get<uint64_t>())
-                    : RaggedTensor(values, partitionToken);
-                network->registerRaggedNetworkInput(name, raggedTensor, valuesInputName);
+                // The layer graph must already expose authoritative logical source
+                // dimensions and partition identity; archived capacity is not M.
+                const std::vector<uint64_t> dimensions = values.getDimensions();
+                if (dimensions.empty() || dimensions.front() == 0 ||
+                    partitionToken.getDimensions() != std::vector<uint64_t>{1}) {
+                    throw std::runtime_error("TrainingPhase ragged input '" + name +
+                                             "' lacks recoverable logical M or a canonical partition token.");
+                }
+                const uint64_t m = dimensions.front();
+                if (raggedInputJson.contains("max_values_per_row") &&
+                    raggedInputJson.at("max_values_per_row").get<uint64_t>() != m) {
+                    throw std::runtime_error("TrainingPhase ragged input '" + name +
+                                             "' has inconsistent semantic M.");
+                }
+                network->registerRaggedNetworkInput(
+                    name, RaggedTensor::logical(values, partitionToken, m), valuesInputName);
             }
         };
         for (const json& raggedInputJson : raggedInputs) loadRaggedInput(raggedInputJson, /*sharedPartition=*/false);
@@ -99,10 +111,20 @@ std::shared_ptr<Network> deserializePhaseNetwork(const json& networkJson, std::s
                 ? raggedOutputJson.at("row_partition_token_tensor_id").get<uint64_t>()
                 : raggedOutputJson.at("offsets_tensor_id").get<uint64_t>();
             Tensor partitionToken = network->getApiTensorByOriginalId(partitionTokenTensorId);
-            RaggedTensor raggedTensor = raggedOutputJson.contains("max_values_per_row")
-                ? RaggedTensor(values, partitionToken, raggedOutputJson.at("max_values_per_row").get<uint64_t>())
-                : RaggedTensor(values, partitionToken);
-            network->registerRaggedNetworkOutput(name, raggedTensor, valuesOutputName);
+            const std::vector<uint64_t> dimensions = values.getDimensions();
+            if (dimensions.empty() || dimensions.front() == 0 ||
+                partitionToken.getDimensions() != std::vector<uint64_t>{1}) {
+                throw std::runtime_error("TrainingPhase ragged output '" + name +
+                                         "' lacks recoverable logical M or a canonical partition token.");
+            }
+            const uint64_t m = dimensions.front();
+            if (raggedOutputJson.contains("max_values_per_row") &&
+                raggedOutputJson.at("max_values_per_row").get<uint64_t>() != m) {
+                throw std::runtime_error("TrainingPhase ragged output '" + name +
+                                         "' has inconsistent semantic M.");
+            }
+            network->registerRaggedNetworkOutput(
+                name, RaggedTensor::logical(values, partitionToken, m), valuesOutputName);
         }
     }
 

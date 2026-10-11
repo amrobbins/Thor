@@ -182,6 +182,8 @@ class TensorDescriptor {
 
     DataType getDataType() const { return dataType; }
     std::vector<uint64_t> getDimensions() const { return dimensions; }
+    // Internal execution paths can inspect immutable shape metadata without copying its vector.
+    const std::vector<uint64_t>& getDimensionsRef() const noexcept { return dimensions; }
     uint32_t getNumDimensions() const { return dimensions.size(); }
     uint64_t getTotalNumElements() const { return totalNumElements; }
 

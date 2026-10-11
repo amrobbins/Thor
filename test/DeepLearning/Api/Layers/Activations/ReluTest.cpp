@@ -573,7 +573,6 @@ TEST(Activations, PlacementNeutralReluSerializesSemanticGeometryAndRejectsMismat
                              .trailingDimensions({2})
                              .maxValuesPerRow(maxValuesPerRow)
                              .build();
-    ASSERT_TRUE(input.isPlacementNeutral());
 
     auto relu = dynamic_pointer_cast<Relu>(Relu::Builder().network(network).featureInput(input).build());
     ASSERT_NE(relu, nullptr);
@@ -593,7 +592,7 @@ TEST(Activations, PlacementNeutralReluSerializesSemanticGeometryAndRejectsMismat
     const json& inputJson = architecture.at("ragged_feature_input");
     const json& outputJson = architecture.at("ragged_feature_output");
     EXPECT_EQ(inputJson.at("layer_ragged_reference_version").get<string>(), "1.0.0");
-    EXPECT_EQ(inputJson.at("geometry_mode").get<string>(), "placement_neutral");
+    EXPECT_FALSE(inputJson.contains("geometry_mode"));
     EXPECT_EQ(inputJson.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
     EXPECT_FALSE(inputJson.contains("batch_size"));
     EXPECT_FALSE(inputJson.contains("max_total_values"));
@@ -607,7 +606,7 @@ TEST(Activations, PlacementNeutralReluSerializesSemanticGeometryAndRejectsMismat
               architecture.at("feature_output").at("id").get<uint64_t>());
 
     json wrongVersion = architecture;
-    wrongVersion["version"] = "1.0.0";
+    wrongVersion["version"] = "0.0.0";
     EXPECT_THROW(Activation::deserialize(wrongVersion, &network), runtime_error);
 
     json wrongGeometry = architecture;
@@ -669,7 +668,6 @@ TEST(Activations, PlacementNeutralReluSaveLoadReplacesPlacementGeometryPerBatchA
         const auto inputs = loaded.getExternalRaggedNetworkInputs();
         ASSERT_EQ(inputs.size(), 1U);
         const RaggedTensor loadedInput = inputs.front().raggedTensor;
-        ASSERT_TRUE(loadedInput.isPlacementNeutral());
         EXPECT_EQ(loadedInput.getValues().getOriginalId(), savedValuesOriginalId);
         EXPECT_EQ(loadedInput.getRowPartitionToken().getOriginalId(), savedPartitionOriginalId);
 
@@ -765,8 +763,6 @@ TEST(Activations, FixedRaggedReluRemainsVersionOneAndLoads) {
                                  .valuesDataType(DataType::FP32)
                                  .offsetsDataType(DataType::UINT32)
                                  .trailingDimensions({2})
-                                 .batchSize(3)
-                                 .maxTotalValues(9)
                                  .maxValuesPerRow(4)
                                  .build();
         auto relu = dynamic_pointer_cast<Relu>(Relu::Builder().network(network).featureInput(input).build());
@@ -778,10 +774,11 @@ TEST(Activations, FixedRaggedReluRemainsVersionOneAndLoads) {
             .inputTensor(relu->getRaggedFeatureOutput().value())
             .build();
         const json architecture = relu->architectureJson();
-        EXPECT_EQ(architecture.at("version").get<string>(), "1.0.0");
-        EXPECT_EQ(architecture.at("ragged_feature_input").at("batch_size").get<uint64_t>(), 3U);
-        EXPECT_EQ(architecture.at("ragged_feature_input").at("max_total_values").get<uint64_t>(), 9U);
-        EXPECT_FALSE(architecture.at("ragged_feature_input").contains("layer_ragged_reference_version"));
+        EXPECT_EQ(architecture.at("version").get<string>(), "1.1.0");
+        EXPECT_EQ(architecture.at("ragged_feature_input").at("max_values_per_row").get<uint64_t>(), 4U);
+        EXPECT_FALSE(architecture.at("ragged_feature_input").contains("batch_size"));
+        EXPECT_FALSE(architecture.at("ragged_feature_input").contains("max_total_values"));
+        EXPECT_EQ(architecture.at("ragged_feature_input").at("offsets").at("dimensions"), json::array({1}));
         network.save(archive.string(), true);
     }
 
@@ -791,8 +788,7 @@ TEST(Activations, FixedRaggedReluRemainsVersionOneAndLoads) {
         shared_ptr<Relu> relu = findOnlyRelu(loaded);
         ASSERT_NE(relu, nullptr);
         ASSERT_TRUE(relu->getRaggedFeatureInput().has_value());
-        EXPECT_FALSE(relu->getRaggedFeatureInput()->isPlacementNeutral());
-        EXPECT_EQ(relu->architectureJson().at("version").get<string>(), "1.0.0");
+        EXPECT_EQ(relu->architectureJson().at("version").get<string>(), "1.1.0");
     } catch (...) {
         filesystem::remove_all(archive);
         throw;

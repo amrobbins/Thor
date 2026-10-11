@@ -1,5 +1,6 @@
 #include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkOutput.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
@@ -9,11 +10,13 @@
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 #include "test/DeepLearning/RaggedTestUtils.h"
 #include "Utilities/Common/Event.h"
+#include "Utilities/TarFile/TarWriter.h"
 
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
 
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <limits>
@@ -34,6 +37,58 @@ constexpr uint32_t kBatchSize = 2;
 constexpr uint64_t kMaxTotalValues = 6;
 constexpr uint64_t kWidth = 2;
 
+// Old model grammars must be tested as archived input, not by constructing a
+// fictitious fixed-batch API tensor in the current graph. Build a valid graph,
+// then write a test-only archive with the historical packed source dimensions
+// and 1.1 boundary field names. This is not a production JSON rewrite path.
+Api::RaggedTensor makeHistoricalPhysicalBoundary(Api::Network& network,
+                                                 const std::string& name,
+                                                 DataType offsetsType,
+                                                 std::optional<uint64_t> semanticM) {
+    (void)semanticM;  // Missing-M is represented in the archived grammar below.
+    return Api::RaggedNetworkInput::Builder()
+        .network(network).name(name)
+        .valuesDataType(DataType::FP32).offsetsDataType(offsetsType)
+        .trailingDimensions({kWidth}).maxValuesPerRow(3).build();
+}
+
+void saveHistoricalBoundaryFixture(Api::Network& network,
+                                   const std::filesystem::path& archiveDir,
+                                   bool omitSemanticM = false) {
+    nlohmann::json archive = network.architectureJson();
+    for (auto& layer : archive.at("layers")) {
+        if (layer.at("layer_type") != "network_input") continue;
+        const std::string name = layer.at("name").get<std::string>();
+        std::vector<uint64_t> physical;
+        if (name == "__thor_row_partition.tokens") physical = {kBatchSize + 1};
+        else if (name == "tokens.values" || name == "labels.values") physical = {kMaxTotalValues, kWidth};
+        else continue;
+        layer["dimensions"] = physical;
+        layer.at("feature_input")["dimensions"] = physical;
+        layer.at("feature_output")["dimensions"] = physical;
+    }
+    for (auto& entry : archive.at("ragged_network_inputs")) {
+        entry["version"] = "1.1.0";  // Historical offsets_tensor_id grammar.
+        entry["batch_size"] = kBatchSize;
+        entry["max_total_values"] = kMaxTotalValues;
+        if (entry.contains("row_partition_token_tensor_id")) {
+            entry["offsets_tensor_id"] = entry.at("row_partition_token_tensor_id");
+            entry.erase("row_partition_token_tensor_id");
+        }
+        if (omitSemanticM && !entry.contains("partition_input_name"))
+            entry.erase("max_values_per_row");
+    }
+    const std::string jsonDump = archive.dump(4);
+    const Impl::TensorPlacement cpu(Impl::TensorPlacement::MemDevices::CPU);
+    Impl::Tensor bytes(cpu, Impl::TensorDescriptor(DataType::UINT8, {jsonDump.size()}));
+    std::memcpy(bytes.getMemPtr<void>(), jsonDump.data(), jsonDump.size());
+    // TarReader identifies the JSON member using the archive's model name.
+    const auto fileName = network.getNetworkName() + ".thor.json";
+    thor_file::TarWriter writer(network.getNetworkName());
+    writer.addArchiveFile(fileName, bytes);
+    writer.createArchive(archiveDir, /*overwriteIfExists=*/true);
+}
+
 bool cudaAvailable() {
     int deviceCount = 0;
     return cudaGetDeviceCount(&deviceCount) == cudaSuccess && deviceCount > 0;
@@ -53,15 +108,15 @@ Api::RaggedTensor buildIdentityRaggedNetwork(Api::Network& network, DataType off
                                   .valuesDataType(DataType::FP32)
                                   .offsetsDataType(offsetsDataType)
                                   .trailingDimensions({kWidth})
-                                  .batchSize(kBatchSize)
-                                  .maxTotalValues(kMaxTotalValues)
+                                  .maxValuesPerRow(3)
                                   .build();
     (void)Api::RaggedNetworkOutput::Builder().network(network).name("tokens_out").inputTensor(input).build();
     return input;
 }
 
-void writeOffsets(Impl::Tensor& tensor, DataType dataType, const std::vector<uint64_t>& offsets) {
-    ASSERT_EQ(offsets.size(), kBatchSize + 1);
+void writeOffsets(Impl::Tensor& tensor, DataType dataType, const std::vector<uint64_t>& offsets,
+                  uint32_t batchSize = kBatchSize) {
+    ASSERT_EQ(offsets.size(), batchSize + 1);
     if (dataType == DataType::UINT32) {
         uint32_t* out = tensor.getMemPtr<uint32_t>();
         for (size_t i = 0; i < offsets.size(); ++i) {
@@ -75,8 +130,8 @@ void writeOffsets(Impl::Tensor& tensor, DataType dataType, const std::vector<uin
     for (size_t i = 0; i < offsets.size(); ++i) out[i] = offsets[i];
 }
 
-std::vector<uint64_t> readOffsets(const Impl::Tensor& tensor) {
-    std::vector<uint64_t> offsets(kBatchSize + 1);
+std::vector<uint64_t> readOffsets(const Impl::Tensor& tensor, uint32_t batchSize = kBatchSize) {
+    std::vector<uint64_t> offsets(batchSize + 1);
     if (tensor.getDataType() == DataType::UINT32) {
         const uint32_t* in = tensor.getMemPtr<uint32_t>();
         for (size_t i = 0; i < offsets.size(); ++i) offsets[i] = in[i];
@@ -91,16 +146,18 @@ std::vector<uint64_t> readOffsets(const Impl::Tensor& tensor) {
 void runIdentityCase(Api::PlacedNetwork& placed,
                      DataType offsetsDataType,
                      const std::vector<uint64_t>& offsetsVector,
-                     float activeBase) {
-    ASSERT_EQ(offsetsVector.size(), kBatchSize + 1);
+                     float activeBase,
+                     uint32_t batchSize = kBatchSize,
+                     uint64_t maxTotalValues = kMaxTotalValues) {
+    ASSERT_EQ(offsetsVector.size(), batchSize + 1);
     ASSERT_EQ(offsetsVector.front(), 0u);
     for (size_t i = 1; i < offsetsVector.size(); ++i) ASSERT_LE(offsetsVector[i - 1], offsetsVector[i]);
     const uint64_t activeValues = offsetsVector.back();
-    ASSERT_LE(activeValues, kMaxTotalValues);
+    ASSERT_LE(activeValues, maxTotalValues);
 
     const Impl::TensorPlacement cpuPlacement(Impl::TensorPlacement::MemDevices::CPU);
-    Impl::Tensor values(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {kMaxTotalValues, kWidth}));
-    Impl::Tensor offsets(cpuPlacement, Impl::TensorDescriptor(offsetsDataType, {kBatchSize + 1}));
+    Impl::Tensor values(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {maxTotalValues, kWidth}));
+    Impl::Tensor offsets(cpuPlacement, Impl::TensorDescriptor(offsetsDataType, {batchSize + 1}));
 
     float* valuesPtr = values.getMemPtr<float>();
     for (uint64_t i = 0; i < activeValues * kWidth; ++i) {
@@ -108,12 +165,12 @@ void runIdentityCase(Api::PlacedNetwork& placed,
     }
     ThorTest::poisonInactiveElements(valuesPtr,
                                      activeValues * kWidth,
-                                     kMaxTotalValues * kWidth,
+                                     maxTotalValues * kWidth,
                                      ThorTest::RaggedInactivePoison::NaN);
-    writeOffsets(offsets, offsetsDataType, offsetsVector);
+    writeOffsets(offsets, offsetsDataType, offsetsVector, batchSize);
 
     Batch batch;
-    batch.insert("tokens", Impl::RaggedTensor(values, offsets));
+    batch.insert("tokens", Impl::RaggedTensor(values, offsets, 3));
     std::map<std::string, Api::InferenceOutputValue> outputs = placed.inferLogical(batch);
     ASSERT_EQ(outputs.size(), 1u);
     ASSERT_TRUE(outputs.contains("tokens_out"));
@@ -121,7 +178,7 @@ void runIdentityCase(Api::PlacedNetwork& placed,
 
     const Impl::RaggedTensor result = std::get<Impl::RaggedTensor>(outputs.at("tokens_out"));
     EXPECT_EQ(result.getOffsets().getDataType(), offsetsDataType);
-    EXPECT_EQ(readOffsets(result.getOffsets()), offsetsVector);
+    EXPECT_EQ(readOffsets(result.getOffsets(), batchSize), offsetsVector);
     EXPECT_EQ(result.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(activeValues));
 
     const float* resultValues = result.getValues().getMemPtr<float>();
@@ -193,7 +250,7 @@ TEST(RaggedSupportContract, PartitionOwningGpuSubmissionRequiresAuthoritativeHos
     Impl::Tensor offsets(gpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {kBatchSize + 1}));
 
     Batch batch;
-    batch.insert("tokens", Impl::RaggedTensor(values, offsets));
+    batch.insert("tokens", Impl::RaggedTensor(values, offsets, 3));
     try {
         (void)placed->inferLogical(batch);
         FAIL() << "Expected a GPU-only ragged submission without authoritative host offsets to be rejected.";
@@ -227,7 +284,9 @@ TEST(RaggedSupportContract, SaveLoadDoesNotPersistRuntimeExtentAndLoadedModelAcc
         const std::vector<Api::RaggedNetworkInputReference> loadedInputs = loaded.getExternalRaggedNetworkInputs();
         ASSERT_EQ(loadedInputs.size(), 1u);
         EXPECT_EQ(loadedInputs.front().raggedTensor.getOffsetsDataType(), DataType::UINT64);
-        EXPECT_EQ(loadedInputs.front().raggedTensor.getMaxTotalValues(), kMaxTotalValues);
+        EXPECT_EQ(loadedInputs.front().raggedTensor.getMaxValuesPerRow(), 3u);
+        EXPECT_EQ(loadedInputs.front().raggedTensor.getValuesDimensions(),
+                  (std::vector<uint64_t>{3, kWidth}));
 
         std::shared_ptr<Api::PlacedNetwork> loadedPlaced = placeIdentityRaggedNetwork(loaded);
         ASSERT_NE(loadedPlaced, nullptr);
@@ -236,6 +295,108 @@ TEST(RaggedSupportContract, SaveLoadDoesNotPersistRuntimeExtentAndLoadedModelAcc
         // partition, not from the short host partition that preceded save().
         runIdentityCase(*loadedPlaced, DataType::UINT64, {0, 3, 6}, 60.0f);
         runIdentityCase(*loadedPlaced, DataType::UINT64, {0, 1, 2}, 70.0f);
+    } catch (...) {
+        std::filesystem::remove_all(archiveDir);
+        throw;
+    }
+    std::filesystem::remove_all(archiveDir);
+}
+
+
+// A test archive carrying the old fixed-boundary grammar, with an independently
+// serialized semantic M. Loading must ignore old B/total, recover [M,width] and
+// [1], and place independently at B=2 and B=7. No production JSON
+// rewriting or layer-specific compatibility mode is involved.
+TEST(RaggedSupportContract, RecoverableLegacyBoundaryImportsLogicalSourcesBeforeLayerLoad) {
+    if (!cudaAvailable()) GTEST_SKIP() << "CUDA device required for the cross-placement legacy boundary gate.";
+
+    const std::string networkName = "ragged_legacy_logical_boundary_u1";
+    const auto archiveDir = uniqueArchiveDir(networkName);
+    std::filesystem::remove_all(archiveDir);
+    try {
+        Api::Network historical(networkName);
+        const auto legacyInput = makeHistoricalPhysicalBoundary(
+            historical, "tokens", DataType::UINT64, /*semanticM=*/3);
+        (void)Api::RaggedNetworkOutput::Builder()
+            .network(historical).name("tokens_out").inputTensor(legacyInput).build();
+        saveHistoricalBoundaryFixture(historical, archiveDir);
+
+        for (const uint32_t B : {2u, 7u}) {
+            Api::Network restored(networkName);
+            ASSERT_NO_THROW(restored.load(archiveDir.string()));
+            const auto boundary = restored.getExternalRaggedNetworkInputs();
+            ASSERT_EQ(boundary.size(), 1u);
+            EXPECT_EQ(boundary.front().raggedTensor.getValuesDimensions(),
+                      (std::vector<uint64_t>{3, kWidth}));
+            EXPECT_EQ(boundary.front().raggedTensor.getOffsetsDimensions(),
+                      (std::vector<uint64_t>{1}));
+            EXPECT_EQ(boundary.front().raggedTensor.getDescriptorForPlacement(B).getValuesDimensions(),
+                      (std::vector<uint64_t>{B * 3u, kWidth}));
+            const auto outputs = restored.getExternalRaggedNetworkOutputs();
+            ASSERT_EQ(outputs.size(), 1u);
+            EXPECT_TRUE(boundary.front().raggedTensor.sharesPartitionWith(outputs.front().raggedTensor));
+
+            std::vector<Event> initDoneEvents;
+            auto placed = restored.place(B, initDoneEvents, /*inferenceOnly=*/true);
+            ASSERT_NE(placed, nullptr);
+            for (Event& event : initDoneEvents) event.synchronize();
+            if (B == 2) runIdentityCase(*placed, DataType::UINT64, {0, 3, 6}, 100.0f);
+            else runIdentityCase(*placed, DataType::UINT64,
+                                 {0, 1, 1, 3, 3, 4, 5, 7}, 120.0f, B, B * 3u);
+        }
+    } catch (...) {
+        std::filesystem::remove_all(archiveDir);
+        throw;
+    }
+    std::filesystem::remove_all(archiveDir);
+}
+
+TEST(RaggedSupportContract, HistoricalBoundaryWithoutIndependentSemanticMFailsExplicitly) {
+    const std::string networkName = "ragged_legacy_missing_m_u1";
+    const auto archiveDir = uniqueArchiveDir(networkName);
+    std::filesystem::remove_all(archiveDir);
+    try {
+        Api::Network historical(networkName);
+        (void)makeHistoricalPhysicalBoundary(
+            historical, "tokens", DataType::UINT32, std::nullopt);
+        saveHistoricalBoundaryFixture(historical, archiveDir, /*omitSemanticM=*/true);
+
+        Api::Network restored(networkName);
+        try {
+            restored.load(archiveDir.string());
+            FAIL() << "Historical physical total must not be divided by old B to guess M";
+        } catch (const std::runtime_error& error) {
+            EXPECT_NE(std::string(error.what()).find("Unrecoverable historical ragged boundary"),
+                      std::string::npos) << error.what();
+        }
+    } catch (...) {
+        std::filesystem::remove_all(archiveDir);
+        throw;
+    }
+    std::filesystem::remove_all(archiveDir);
+}
+
+TEST(RaggedSupportContract, LegacySharedBoundaryUsesOneLogicalPartitionAfterLoad) {
+    const std::string networkName = "ragged_legacy_shared_boundary_u1";
+    const auto archiveDir = uniqueArchiveDir(networkName);
+    std::filesystem::remove_all(archiveDir);
+    try {
+        Api::Network historical(networkName);
+        const auto source = makeHistoricalPhysicalBoundary(
+            historical, "tokens", DataType::UINT32, /*semanticM=*/3);
+        (void)Api::RaggedNetworkInput::Builder()
+            .network(historical).name("labels")
+            .valuesDataType(DataType::FP32)
+            .trailingDimensions({kWidth}).partition(source).build();
+        saveHistoricalBoundaryFixture(historical, archiveDir);
+
+        Api::Network restored(networkName);
+        restored.load(archiveDir.string());
+        const auto inputs = restored.getExternalRaggedNetworkInputs();
+        ASSERT_EQ(inputs.size(), 2u);
+        EXPECT_TRUE(inputs[0].raggedTensor.sharesPartitionWith(inputs[1].raggedTensor));
+        EXPECT_EQ(inputs[0].raggedTensor.getValuesDimensions(), (std::vector<uint64_t>{3, kWidth}));
+        EXPECT_EQ(inputs[1].raggedTensor.getValuesDimensions(), (std::vector<uint64_t>{3, kWidth}));
     } catch (...) {
         std::filesystem::remove_all(archiveDir);
         throw;

@@ -43,17 +43,13 @@ Inputs makeInputs(Network& network,
                   DataType predictionDType = DataType::FP32,
                   DataType labelDType = DataType::FP32,
                   DataType offsetsDType = DataType::UINT32,
-                  vector<uint64_t> trailingDimensions = {1},
-                  uint32_t batchSize = 4,
-                  uint64_t maxTotalValues = 8) {
+                  vector<uint64_t> trailingDimensions = {1}) {
     RaggedTensor predictions = RaggedNetworkInput::Builder()
                                    .network(network)
                                    .name("predictions")
                                    .valuesDataType(predictionDType)
                                    .offsetsDataType(offsetsDType)
                                    .trailingDimensions(trailingDimensions)
-                                   .batchSize(batchSize)
-                                   .maxTotalValues(maxTotalValues)
                                    .maxValuesPerRow(5)
                                    .build();
     RaggedTensor labels = RaggedNetworkInput::Builder()
@@ -158,9 +154,11 @@ void runRuntimeCase(Kind kind, DataType offsetsDType, bool weighted) {
 
     constexpr uint32_t batchSize = 4;
     constexpr uint32_t validExamples = 3;
-    constexpr uint64_t maxTotalValues = 8;
+    // Physical packed capacity comes from placement B times semantic M.
     Network network("ragged_r10g_runtime");
-    Inputs inputs = makeInputs(network, DataType::FP32, DataType::FP32, offsetsDType, {1}, batchSize, maxTotalValues);
+    Inputs inputs = makeInputs(network, DataType::FP32, DataType::FP32, offsetsDType, {1});
+    const uint64_t physicalValueCapacity =
+        inputs.predictions.getDescriptorForPlacement(batchSize).getValuesDimensions().front();
 
     optional<Tensor> weights;
     if (weighted) {
@@ -186,13 +184,13 @@ void runRuntimeCase(Kind kind, DataType offsetsDType, bool weighted) {
     ASSERT_NE(physicalLoss, nullptr);
 
     Impl::TensorPlacement cpuPlacement(Impl::TensorPlacement::MemDevices::CPU);
-    Impl::Tensor predictionValues(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {maxTotalValues, 1}));
-    Impl::Tensor labelValues(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {maxTotalValues, 1}));
+    Impl::Tensor predictionValues(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {physicalValueCapacity, 1}));
+    Impl::Tensor labelValues(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {physicalValueCapacity, 1}));
     Impl::Tensor offsets(cpuPlacement, Impl::TensorDescriptor(offsetsDType, {batchSize + 1}));
     float* predictions = predictionValues.getMemPtr<float>();
     float* labels = labelValues.getMemPtr<float>();
-    fill(predictions, predictions + maxTotalValues, numeric_limits<float>::quiet_NaN());
-    fill(labels, labels + maxTotalValues, numeric_limits<float>::quiet_NaN());
+    fill(predictions, predictions + physicalValueCapacity, numeric_limits<float>::quiet_NaN());
+    fill(labels, labels + physicalValueCapacity, numeric_limits<float>::quiet_NaN());
 
     const vector<float> activePredictions{0.0f, 2.0f, -3.0f, 4.0f, -5.0f};
     const vector<float> activeLabels{1.0f, 1.0f, -3.0f, 2.0f, -3.0f};
@@ -238,7 +236,7 @@ void runRuntimeCase(Kind kind, DataType offsetsDType, bool weighted) {
 
     ASSERT_TRUE(physicalLoss->getErrorOutput().has_value());
     const vector<float> gradient = copyFp32ToHost(physicalLoss->getErrorOutput().value());
-    ASSERT_EQ(gradient.size(), maxTotalValues);
+    ASSERT_EQ(gradient.size(), physicalValueCapacity);
     for (size_t i = 0; i < expectedGradients.size(); ++i)
         EXPECT_NEAR(gradient[i], expectedGradients[i], 2.0e-4f) << "active index " << i;
 }
@@ -309,8 +307,8 @@ TEST(RaggedRegressionR10G, ReportingAndWeightContracts) {
 TEST(RaggedRegressionR10G, RequiresExactSharedPartition) {
     for (Kind kind : {Kind::QUANTILE, Kind::EXPECTILE, Kind::ASYMMETRIC_POWER}) {
         Network network("r10g_partition");
-        RaggedTensor predictions = RaggedNetworkInput::Builder().network(network).name("predictions").valuesDataType(DataType::FP32).trailingDimensions({1}).batchSize(3).maxTotalValues(7).maxValuesPerRow(4).build();
-        RaggedTensor labels = RaggedNetworkInput::Builder().network(network).name("labels").valuesDataType(DataType::FP32).trailingDimensions({1}).batchSize(3).maxTotalValues(7).maxValuesPerRow(4).build();
+        RaggedTensor predictions = RaggedNetworkInput::Builder().network(network).name("predictions").valuesDataType(DataType::FP32).trailingDimensions({1}).maxValuesPerRow(4).build();
+        RaggedTensor labels = RaggedNetworkInput::Builder().network(network).name("labels").valuesDataType(DataType::FP32).trailingDimensions({1}).maxValuesPerRow(4).build();
         if (kind == Kind::QUANTILE)
             EXPECT_THROW((void)QuantileLoss::Builder().network(network).predictions(predictions).labels(labels).build(), invalid_argument);
         else if (kind == Kind::EXPECTILE)
@@ -341,7 +339,7 @@ TEST(RaggedRegressionR10G, DenseDTypeParityAndIntegerLabels) {
     for (Kind kind : {Kind::QUANTILE, Kind::EXPECTILE, Kind::ASYMMETRIC_POWER}) {
         for (auto [predictionDType, expectedLossDType] : cases) {
             Network network("r10g_dtype");
-            Inputs inputs = makeInputs(network, predictionDType, DataType::INT32, DataType::UINT64, {2}, 3, 7);
+            Inputs inputs = makeInputs(network, predictionDType, DataType::INT32, DataType::UINT64, {2});
             RaggedTensor raw;
             if (kind == Kind::QUANTILE)
                 raw = QuantileLoss::Builder().network(network).predictions(inputs.predictions).labels(inputs.labels).reportsRawLoss().build().getRaggedRawLoss();
@@ -397,7 +395,7 @@ TEST(RaggedRegressionR10G, PerRowWeightsPlaceForScalarAndMultiAxisTrailingValues
     for (Kind kind : {Kind::QUANTILE, Kind::EXPECTILE, Kind::ASYMMETRIC_POWER}) {
         for (const vector<uint64_t>& trailing : {vector<uint64_t>{}, vector<uint64_t>{2, 3}}) {
             Network network("r10g_weight_shape");
-            Inputs inputs = makeInputs(network, DataType::FP32, DataType::FP32, DataType::UINT32, trailing, 3, 7);
+            Inputs inputs = makeInputs(network, DataType::FP32, DataType::FP32, DataType::UINT32, trailing);
             NetworkInput weightsInput = NetworkInput::Builder().network(network).name("weights").dimensions({1}).dataType(DataType::FP32).build();
             Tensor weights = weightsInput.getFeatureOutput().value();
             Tensor reported;

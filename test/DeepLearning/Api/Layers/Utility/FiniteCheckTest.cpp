@@ -12,6 +12,7 @@
 #include "gtest/gtest.h"
 
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <map>
@@ -112,8 +113,8 @@ TEST(UtilityApiLayers, FiniteCheckArchitecturePersistsDiagnosticPolicy) {
 
 TEST(UtilityApiLayers, RaggedFiniteCheckPreservesExactPartitionAndSerializes) {
     Network network("raggedFiniteCheckBuilds");
-    Tensor values(DataType::FP32, {8, 2});
-    Tensor offsets(DataType::UINT64, {4});
+    Tensor values(DataType::FP32, {5, 2});
+    Tensor offsets(DataType::UINT64, {1});
     RaggedTensor input(values, offsets, 5);
 
     FiniteCheck finiteCheck = FiniteCheck::Builder()
@@ -128,15 +129,17 @@ TEST(UtilityApiLayers, RaggedFiniteCheckPreservesExactPartitionAndSerializes) {
     ASSERT_TRUE(finiteCheck.getRaggedFeatureOutput().has_value());
     const RaggedTensor output = finiteCheck.getRaggedFeatureOutput().value();
     EXPECT_EQ(output.getOffsets(), input.getOffsets());
-    EXPECT_EQ(output.getBatchSize(), input.getBatchSize());
-    EXPECT_EQ(output.getMaxTotalValues(), input.getMaxTotalValues());
+    EXPECT_EQ(output.getValuesDimensions(), input.getValuesDimensions());
+    EXPECT_TRUE(output.sharesPartitionWith(input));
     ASSERT_TRUE(output.hasMaxValuesPerRow());
     EXPECT_EQ(output.getMaxValuesPerRow(), 5u);
     EXPECT_EQ(output.getValues().getDimensions(), values.getDimensions());
     EXPECT_NE(output.getValues(), values);
 
     const json architecture = finiteCheck.architectureJson();
-    EXPECT_EQ(architecture.at("version").get<string>(), "1.1.0");
+    // Canonical ragged FiniteCheck records use 1.2.0; the historical
+    // 1.1.0 input grammar is exercised separately.
+    EXPECT_EQ(architecture.at("version").get<string>(), "1.2.0");
     EXPECT_TRUE(architecture.at("use_ragged").get<bool>());
     EXPECT_EQ(architecture.at("ragged_feature_input").at("offsets").at("id").get<uint64_t>(), offsets.getId());
     EXPECT_EQ(architecture.at("ragged_feature_output").at("offsets").at("id").get<uint64_t>(), offsets.getId());
@@ -160,7 +163,6 @@ TEST(UtilityApiLayers, PlacementNeutralFiniteCheckSerializesSemanticGeometryAndR
                              .trailingDimensions({2})
                              .maxValuesPerRow(maxValuesPerRow)
                              .build();
-    ASSERT_TRUE(input.isPlacementNeutral());
 
     FiniteCheck finiteCheck = FiniteCheck::Builder()
                                   .network(neutralNetwork)
@@ -195,7 +197,7 @@ TEST(UtilityApiLayers, PlacementNeutralFiniteCheckSerializesSemanticGeometryAndR
     const json& inputJson = architecture.at("ragged_feature_input");
     const json& outputJson = architecture.at("ragged_feature_output");
     EXPECT_EQ(inputJson.at("layer_ragged_reference_version").get<string>(), "1.0.0");
-    EXPECT_EQ(inputJson.at("geometry_mode").get<string>(), "placement_neutral");
+    EXPECT_FALSE(inputJson.contains("geometry_mode"));
     EXPECT_EQ(inputJson.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
     EXPECT_FALSE(inputJson.contains("batch_size"));
     EXPECT_FALSE(inputJson.contains("max_total_values"));
@@ -210,9 +212,13 @@ TEST(UtilityApiLayers, PlacementNeutralFiniteCheckSerializesSemanticGeometryAndR
     EXPECT_EQ(outputJson.at("values").at("id").get<uint64_t>(),
               architecture.at("feature_output").at("id").get<uint64_t>());
 
-    json neutralAsFixed = architecture;
-    neutralAsFixed["version"] = "1.1.0";
-    EXPECT_THROW(FiniteCheck::deserialize(neutralAsFixed, &neutralNetwork), runtime_error);
+    // The older 1.1 layer grammar and its optional archived reference markers
+    // remain loadable. Neither selects a different runtime geometry.
+    json historicalGrammar = architecture;
+    historicalGrammar["version"] = "1.1.0";
+    historicalGrammar["ragged_feature_input"]["geometry_mode"] = "placement_neutral";
+    historicalGrammar["ragged_feature_output"]["geometry_mode"] = "placement_neutral";
+    EXPECT_NO_THROW(FiniteCheck::deserialize(historicalGrammar, &neutralNetwork));
 
     json neutralAsDense = architecture;
     neutralAsDense["use_ragged"] = false;
@@ -226,26 +232,11 @@ TEST(UtilityApiLayers, PlacementNeutralFiniteCheckSerializesSemanticGeometryAndR
     wrongOutputValues["ragged_feature_output"]["values"]["id"] = input.getValues().getId();
     EXPECT_THROW(FiniteCheck::deserialize(wrongOutputValues, &neutralNetwork), runtime_error);
 
-    Network fixedNetwork("fixed_finite_check_geometry_mismatch");
-    RaggedTensor fixedInput = RaggedNetworkInput::Builder()
-                                  .network(fixedNetwork)
-                                  .name("history")
-                                  .valuesDataType(DataType::FP32)
-                                  .offsetsDataType(DataType::UINT32)
-                                  .trailingDimensions({2})
-                                  .batchSize(3)
-                                  .maxTotalValues(9)
-                                  .maxValuesPerRow(4)
-                                  .build();
-    FiniteCheck fixedCheck = FiniteCheck::Builder()
-                                 .network(fixedNetwork)
-                                 .featureInput(fixedInput)
-                                 .enabled(false)
-                                 .build();
-    json fixedAsNeutral = fixedCheck.architectureJson();
-    ASSERT_EQ(fixedAsNeutral.at("version").get<string>(), "1.1.0");
-    fixedAsNeutral["version"] = "1.2.0";
-    EXPECT_THROW(FiniteCheck::deserialize(fixedAsNeutral, &fixedNetwork), runtime_error);
+    // An unrecognized historical marker remains malformed, even though the
+    // accepted marker is ignored for model construction.
+    json invalidArchivedMarker = historicalGrammar;
+    invalidArchivedMarker["ragged_feature_input"]["geometry_mode"] = "fixed";
+    EXPECT_THROW(FiniteCheck::deserialize(invalidArchivedMarker, &neutralNetwork), runtime_error);
 }
 
 TEST(UtilityApiLayers, PlacementNeutralFiniteCheckSaveLoadReplacesRuntimeConfigurationPerBatch) {
@@ -356,7 +347,6 @@ TEST(UtilityApiLayers, PlacementNeutralFiniteCheckSaveLoadReplacesRuntimeConfigu
         const auto externalInputs = loaded.getExternalRaggedNetworkInputs();
         ASSERT_EQ(externalInputs.size(), 1U);
         const RaggedTensor loadedInput = externalInputs.front().raggedTensor;
-        ASSERT_TRUE(loadedInput.isPlacementNeutral());
         EXPECT_EQ(loadedInput.getValues().getOriginalId(), savedValuesOriginalId);
         EXPECT_EQ(loadedInput.getRowPartitionToken().getOriginalId(), savedPartitionOriginalId);
 
@@ -441,7 +431,7 @@ TEST(UtilityApiLayers, PlacementNeutralFiniteCheckSaveLoadReplacesRuntimeConfigu
     filesystem::remove_all(archive);
 }
 
-TEST(UtilityApiLayers, FiniteCheckDenseAndFixedRaggedVersionOneOneRemainLoadable) {
+TEST(UtilityApiLayers, FiniteCheckDenseAndHistoricalRaggedGrammarReconstructLogical) {
     const auto nonce = chrono::steady_clock::now().time_since_epoch().count();
 
     const string denseName = "finite_check_dense_compatibility";
@@ -478,41 +468,58 @@ TEST(UtilityApiLayers, FiniteCheckDenseAndFixedRaggedVersionOneOneRemainLoadable
     }
     filesystem::remove_all(denseArchive);
 
-    const string raggedName = "finite_check_fixed_ragged_compatibility";
+    const string raggedName = "finite_check_historical_ragged_compatibility";
     const filesystem::path raggedArchive = filesystem::temp_directory_path() /
-                                           ("thor_finite_check_fixed_ragged_" + to_string(nonce));
+                                           ("thor_finite_check_historical_ragged_" + to_string(nonce));
     filesystem::remove_all(raggedArchive);
-    {
-        Network network(raggedName);
-        RaggedTensor input = RaggedNetworkInput::Builder()
-                                 .network(network)
-                                 .name("history")
-                                 .valuesDataType(DataType::FP32)
-                                 .offsetsDataType(DataType::UINT32)
-                                 .trailingDimensions({2})
-                                 .batchSize(3)
-                                 .maxTotalValues(9)
-                                 .maxValuesPerRow(4)
-                                 .build();
-        FiniteCheck finiteCheck = FiniteCheck::Builder()
-                                      .network(network)
-                                      .featureInput(input)
-                                      .enabled(false)
-                                      .build();
-        (void)RaggedNetworkOutput::Builder()
-            .network(network)
-            .name("output")
-            .inputTensor(finiteCheck.getRaggedFeatureOutput().value())
-            .build();
-        const json serialized = finiteCheck.architectureJson();
-        EXPECT_EQ(serialized.at("version").get<string>(), "1.1.0");
-        EXPECT_TRUE(serialized.at("use_ragged").get<bool>());
-        EXPECT_EQ(serialized.at("ragged_feature_input").at("batch_size").get<uint64_t>(), 3U);
-        EXPECT_EQ(serialized.at("ragged_feature_input").at("max_total_values").get<uint64_t>(), 9U);
-        EXPECT_FALSE(serialized.at("ragged_feature_input").contains("layer_ragged_reference_version"));
-        network.save(raggedArchive.string(), true);
+    Network network(raggedName);
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network).name("history")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({2}).maxValuesPerRow(4).build();
+    FiniteCheck finiteCheck = FiniteCheck::Builder()
+                                  .network(network).featureInput(input).enabled(false).build();
+    (void)RaggedNetworkOutput::Builder().network(network).name("output")
+        .inputTensor(finiteCheck.getRaggedFeatureOutput().value()).build();
+
+    json oldArtifact = network.architectureJson();
+    uint32_t migrated = 0;
+    for (auto& layerJson : oldArtifact.at("layers")) {
+        if (layerJson.at("layer_type") == "finite_check") {
+            layerJson["version"] = "1.1.0";
+            for (const char* key : {"ragged_feature_input", "ragged_feature_output"}) {
+                auto& ref = layerJson.at(key);
+                ref.erase("layer_ragged_reference_version");
+                ref.erase("geometry_mode");
+                ref.erase("max_values_per_row");
+                ref["batch_size"] = 19;
+                ref["max_total_values"] = 912;
+                ref["values"]["dimensions"][0] = 12;
+                ref["offsets"]["dimensions"][0] = 4;
+            }
+            layerJson["feature_input"]["dimensions"][0] = 12;
+            layerJson["feature_output"]["dimensions"][0] = 12;
+            ++migrated;
+        } else if (layerJson.at("layer_type") == "network_input") {
+            const string name = layerJson.at("name").get<string>();
+            if (name != "history.values" && name != "__thor_row_partition.history") continue;
+            const uint64_t leading = name == "history.values" ? 12 : 4;
+            layerJson["dimensions"][0] = leading;
+            for (const char* key : {"feature_input", "feature_output"})
+                layerJson[key]["dimensions"][0] = leading;
+        }
     }
-    {
+    ASSERT_EQ(migrated, 1u);
+    const string encoded = oldArtifact.dump(4);
+    const ThorImplementation::TensorPlacement cpu(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor bytes(cpu, ThorImplementation::TensorDescriptor(DataType::UINT8, {encoded.size()}));
+    std::memcpy(bytes.getMemPtr<void>(), encoded.data(), encoded.size());
+    thor_file::TarWriter writer(raggedName);
+    writer.addArchiveFile(raggedName + ".thor.json", bytes);
+    writer.createArchive(raggedArchive, true);
+
+    for (uint32_t b : {2u, 7u}) {
         Network loaded(raggedName);
         ASSERT_NO_THROW(loaded.load(raggedArchive.string()));
         shared_ptr<FiniteCheck> loadedFiniteCheck;
@@ -522,10 +529,17 @@ TEST(UtilityApiLayers, FiniteCheckDenseAndFixedRaggedVersionOneOneRemainLoadable
         }
         ASSERT_NE(loadedFiniteCheck, nullptr);
         ASSERT_TRUE(loadedFiniteCheck->getRaggedFeatureInput().has_value());
-        EXPECT_FALSE(loadedFiniteCheck->getRaggedFeatureInput()->isPlacementNeutral());
-        EXPECT_EQ(loadedFiniteCheck->getRaggedFeatureInput()->getBatchSize(), 3U);
-        EXPECT_EQ(loadedFiniteCheck->getRaggedFeatureInput()->getMaxTotalValues(), 9U);
-        EXPECT_EQ(loadedFiniteCheck->architectureJson().at("version").get<string>(), "1.1.0");
+        ASSERT_TRUE(loadedFiniteCheck->getRaggedFeatureOutput().has_value());
+        const RaggedTensor values = loadedFiniteCheck->getRaggedFeatureOutput().value();
+        EXPECT_EQ(values.getValuesDimensions(), (vector<uint64_t>{4, 2}));
+        EXPECT_EQ(values.getOffsetsDimensions(), (vector<uint64_t>{1}));
+        EXPECT_EQ(values.getDescriptorForPlacement(b).getValuesDimensions(),
+                  (vector<uint64_t>{b * 4, 2}));
+        EXPECT_EQ(loadedFiniteCheck->architectureJson().at("version").get<string>(), "1.2.0");
+        vector<Event> events;
+        auto placed = loaded.place(b, events, true);
+        ASSERT_NE(placed, nullptr);
+        for (Event& event : events) event.synchronize();
     }
     filesystem::remove_all(raggedArchive);
 }

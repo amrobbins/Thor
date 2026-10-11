@@ -127,9 +127,7 @@ void bind_binary_focal_loss(nb::module_ &losses) {
                     throw nb::value_error((loss_name + ": labels must use bool, uint8, uint16, uint32, fp16, or fp32 dtype").c_str());
                 if (!predictions.sharesPartitionWith(labels))
                     throw nb::value_error((loss_name + ": ragged predictions and labels must use the exact same row partition.").c_str());
-                if (predictions.getBatchSize() != labels.getBatchSize() ||
-                    predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
-                    predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+                if (predictions.getValuesDimensions() != labels.getValuesDimensions())
                     throw nb::value_error((loss_name + ": ragged predictions and labels must have identical value geometry.").c_str());
                 DataType effectiveLossDataType = loss_data_type.value_or(predictions.getValuesDataType());
                 if (effectiveLossDataType != DataType::FP16 && effectiveLossDataType != DataType::FP32)

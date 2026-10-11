@@ -109,6 +109,12 @@ class Tensor {
     nlohmann::json architectureJson() const;
     nlohmann::json serialize(thor_file::TarWriter &archiveWriter) const;
     static Tensor deserialize(const nlohmann::json &j, thor_file::TarReader *archiveReader = nullptr);
+    // For owners that must interpret an archived physical tensor as a logical
+    // tensor: read the original ID and dtype without copying stored physical
+    // extents into the reconstructed graph. The owner validates geometry.
+    static Tensor deserializeWithDimensions(const nlohmann::json &j,
+                                            const std::vector<uint64_t> &logicalDimensions,
+                                            thor_file::TarReader *archiveReader = nullptr);
 
     std::string getVersion() const { return "1.0.0"; }
 

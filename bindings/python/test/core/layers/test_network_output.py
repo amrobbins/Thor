@@ -76,8 +76,7 @@ def test_ragged_network_output_exposes_one_logical_output():
         "tokens",
         thor.DataType.fp32,
         [2],
-        max_total_values=6,
-        batch_size=2,
+        max_values_per_row=3,
     )
 
     output = thor.layers.RaggedNetworkOutput(n, "tokens_out", tokens)
@@ -85,8 +84,8 @@ def test_ragged_network_output_exposes_one_logical_output():
     assert isinstance(output, thor.layers.RaggedNetworkOutput)
     assert isinstance(output.get_input(), thor.RaggedTensor)
     assert isinstance(output.get_feature_output(), thor.RaggedTensor)
-    assert output.get_feature_output().values.get_dimensions() == [6, 2]
-    assert output.get_feature_output().offsets.get_dimensions() == [3]
+    assert output.get_feature_output().values.get_dimensions() == [3, 2]
+    assert output.get_feature_output().offsets.get_dimensions() == [1]
 
     import json
 

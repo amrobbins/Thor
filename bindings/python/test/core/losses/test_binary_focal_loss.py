@@ -231,8 +231,6 @@ def _r10h_ragged_focal_pair(network, prediction_dtype=thor.DataType.fp32, label_
         "r10h_focal_predictions",
         prediction_dtype,
         [2],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     labels = thor.layers.RaggedNetworkInput(
@@ -272,8 +270,6 @@ def test_binary_focal_loss_r10h_rejects_different_partition():
         "r10h_focal_different_labels",
         thor.DataType.uint8,
         [2],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     with pytest.raises(ValueError, match=r"exact same row partition"):

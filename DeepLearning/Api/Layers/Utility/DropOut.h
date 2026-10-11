@@ -49,7 +49,8 @@ class DropOut : public Layer, public TrainingDropoutControllable {
     [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {
         THOR_THROW_IF_FALSE(featureOutput.has_value());
         THOR_THROW_IF_FALSE(outputTensor == featureOutput.value());
-        return raggedFeatureInput.has_value() && !raggedFeatureInput->isPlacementNeutral();
+        // API tensor dimensions are always per-example, not placement dimensions.
+        return false;
     }
 
     [[nodiscard]] uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
@@ -87,7 +88,8 @@ class DropOut : public Layer, public TrainingDropoutControllable {
             }
             const ThorImplementation::RaggedTensorDescriptor physicalDescriptor =
                 SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
-                    raggedFeatureInput.value(), drivingLayer, "DropOut");
+                    raggedFeatureInput.value(), drivingLayer, "DropOut",
+                    connectingApiTensor == raggedFeatureInput->getRowPartitionToken());
             raggedConfiguration = ThorImplementation::DropOut::RaggedConfiguration{
                 physicalDescriptor.getMaxTotalValues(), elementsPerValue};
         }
@@ -108,8 +110,7 @@ class DropOut : public Layer, public TrainingDropoutControllable {
 
         uint64_t featureOutputSize = featureOutput.value().getTotalSizeInBytes();
         uint64_t errorOutputSize = featureInput.value().getTotalSizeInBytes();
-        const uint64_t tensorMultiplier =
-            raggedFeatureInput.has_value() && !raggedFeatureInput->isPlacementNeutral() ? 1 : batchSize;
+        const uint64_t tensorMultiplier = batchSize;
         if (featureOutputSize > std::numeric_limits<uint64_t>::max() - errorOutputSize)
             throw std::overflow_error("DropOut tensor memory accounting overflow.");
         const uint64_t perPlacementBytes = featureOutputSize + errorOutputSize;

@@ -42,7 +42,8 @@ inline uint32_t placementBatchSizeForStamp(
     const std::shared_ptr<ThorImplementation::Layer>& drivingLayer,
     const Tensor& connectingApiTensor,
     const char* layerName) {
-    THOR_THROW_IF_FALSE(logicalPartitionInput.isPlacementNeutral());
+    THOR_THROW_IF_FALSE(logicalPartitionInput.hasMaxValuesPerRow() &&
+                        logicalPartitionInput.getOffsetsDimensions() == std::vector<uint64_t>{1});
     const ThorImplementation::TensorDescriptor physicalInput =
         physicalDescriptorForStamp(drivingLayer, layerName);
     const std::vector<uint64_t> physicalDimensions = physicalInput.getDimensions();
@@ -87,10 +88,10 @@ inline std::optional<ThorImplementation::RowPartitionDescriptor> rowPartitionDes
 inline ThorImplementation::RaggedTensorDescriptor physicalRaggedDescriptorForStamp(
     const RaggedTensor& logicalInput,
     const std::shared_ptr<ThorImplementation::Layer>& drivingLayer,
-    const char* layerName) {
-    if (!logicalInput.isPlacementNeutral()) return logicalInput.getDescriptor();
-
-    THOR_THROW_IF_FALSE(logicalInput.hasMaxValuesPerRow());
+    const char* layerName,
+    bool drivingStructuralPartitionPort = false) {
+    THOR_THROW_IF_FALSE(logicalInput.hasMaxValuesPerRow() &&
+                        logicalInput.getOffsetsDimensions() == std::vector<uint64_t>{1});
     if (const std::optional<ThorImplementation::RowPartitionDescriptor> placedPartition =
             rowPartitionDescriptorForStamp(drivingLayer);
         placedPartition.has_value()) {
@@ -119,15 +120,33 @@ inline ThorImplementation::RaggedTensorDescriptor physicalRaggedDescriptorForSta
 
         const ThorImplementation::TensorDescriptor carrier = physicalDescriptorForStamp(drivingLayer, layerName);
         const std::vector<uint64_t> carrierDimensions = carrier.getDimensions();
-        if (carrier.getDataType() != runtimePartition.getOffsetsDataType() || carrierDimensions.size() != 1 ||
-            (carrierDimensions.front() != 1 &&
-             carrierDimensions != runtimePartition.getOffsetsDescriptor().getDimensions())) {
+        const bool offsetsCarrier =
+            carrier.getDataType() == runtimePartition.getOffsetsDataType() && carrierDimensions.size() == 1 &&
+            (carrierDimensions.front() == 1 ||
+             carrierDimensions == runtimePartition.getOffsetsDescriptor().getDimensions());
+        // HOST_EXTENT is represented by the *canonical source values* carrier,
+        // whose trailing dimensions and dtype may differ from this consumer's
+        // values after intervening transforms (Flatten, Reshape, TypeConverter).
+        // Only a structural-port stamp may use that carrier as the source of B.
+        // An actual values-input stamp still requires its complete descriptor.
+        const bool hostExtentCarrier =
+            !carrierDimensions.empty() && carrierDimensions.front() == descriptor.getMaxTotalValues() &&
+            (drivingStructuralPartitionPort || carrier == descriptor.getValuesDescriptor());
+        if (!offsetsCarrier && !hostExtentCarrier) {
             throw std::runtime_error(std::string(layerName) +
-                                     " managed row-partition carrier is neither [1] active-count nor [B+1] offsets.");
+                " managed row-partition carrier does not represent the placed partition or its packed values.");
         }
         return descriptor;
     }
 
+    // Structural carriers must supply explicit stamp-time partition metadata.
+    // Their leading dimension and dtype are not necessarily the consumer's
+    // values geometry; guessing from that shape would couple the model to the
+    // wrong physical tensor.
+    if (drivingStructuralPartitionPort) {
+        throw std::runtime_error(std::string(layerName) +
+            " structural partition carrier is missing its runtime row-partition descriptor.");
+    }
     const ThorImplementation::TensorDescriptor physicalValues =
         physicalDescriptorForStamp(drivingLayer, layerName);
     const std::vector<uint64_t> physicalDimensions = physicalValues.getDimensions();

@@ -120,9 +120,7 @@ class SmoothL1Loss::Builder {
             THOR_THROW_IF_FALSE(predictions.getValues() != labels.getValues());
             if (!predictions.sharesPartitionWith(labels))
                 throw std::invalid_argument("SmoothL1Loss ragged predictions and labels must use the exact same row partition.");
-            if (predictions.getBatchSize() != labels.getBatchSize() ||
-                predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
-                predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+            if (predictions.getValuesDimensions() != labels.getValuesDimensions())
                 throw std::invalid_argument("SmoothL1Loss ragged predictions and labels must have identical value geometry.");
             if (_lossShape.value() == LossShape::PER_OUTPUT)
                 throw std::invalid_argument("SmoothL1Loss LossShape::PER_OUTPUT is undefined for ragged sequences.");

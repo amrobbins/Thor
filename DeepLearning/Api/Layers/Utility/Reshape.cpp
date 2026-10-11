@@ -44,15 +44,11 @@ Reshape Reshape::Builder::build() {
         }
         vector<uint64_t> outputValueDimensions;
         outputValueDimensions.reserve(_newDimensions->size() + 1);
-        outputValueDimensions.push_back(_raggedFeatureInput->isPlacementNeutral()
-                                            ? _raggedFeatureInput->getMaxValuesPerRow()
-                                            : _raggedFeatureInput->getMaxTotalValues());
+        outputValueDimensions.push_back(_raggedFeatureInput->getMaxValuesPerRow());
         outputValueDimensions.insert(outputValueDimensions.end(), _newDimensions->begin(), _newDimensions->end());
         reshape.featureOutput = Tensor(_featureInput->getDataType(), outputValueDimensions);
         reshape.raggedFeatureInput = _raggedFeatureInput;
         reshape.raggedFeatureOutput = _raggedFeatureInput->withValues(reshape.featureOutput.value());
-        // Fixed ragged values keep their concrete capacity; neutral values keep semantic [M, ...].
-        // stamp() materializes [B*M, ...] only for the neutral case.
         reshape.newDimensions = outputValueDimensions;
     } else {
         reshape.featureOutput = Tensor(_featureInput->getDataType(), _newDimensions.value());
@@ -75,12 +71,10 @@ json Reshape::architectureJson() const {
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
 
-    const bool placementNeutral = raggedFeatureInput.has_value() && raggedFeatureInput->isPlacementNeutral();
-    if (raggedFeatureOutput.has_value()) THOR_THROW_IF_FALSE(placementNeutral == raggedFeatureOutput->isPlacementNeutral());
 
     json j;
     j["factory"] = Layer::Factory::Layer.value();
-    j["version"] = placementNeutral ? "1.1.0" : getLayerVersion();
+    j["version"] = raggedFeatureInput.has_value() ? "1.1.0" : getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
     j["feature_input"] = featureInput.value().architectureJson();
     j["feature_output"] = featureOutput.value().architectureJson();
@@ -106,10 +100,6 @@ void Reshape::deserialize(const json &j, Network *network) {
     const bool useRagged = j.value("use_ragged", false);
     if (useRagged) {
         RaggedTensor input = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_feature_input"), network, "Reshape");
-        if ((version == "1.0.0" && input.isPlacementNeutral()) ||
-            (version == "1.1.0" && !input.isPlacementNeutral())) {
-            throw runtime_error("Reshape serialized layer version does not match its ragged geometry mode.");
-        }
         const uint64_t featureInputId = j.at("feature_input").at("id").get<uint64_t>();
         if (featureInputId != j.at("ragged_feature_input").at("values").at("id").get<uint64_t>()) {
             throw runtime_error("Reshape serialized feature_input must match its ragged input values.");
@@ -119,7 +109,8 @@ void Reshape::deserialize(const json &j, Network *network) {
             throw runtime_error("Reshape reconstructed feature_input must match its ragged input values.");
         }
 
-        Tensor outputValues = Tensor::deserialize(j.at("feature_output"));
+        Tensor outputValues = SegmentedPrimitiveDetail::reconstructPreservedOutputValues(
+            j.at("feature_output"), j.at("ragged_feature_output"), input, "Reshape");
         const json& outputJson = j.at("ragged_feature_output");
         if (outputJson.at("values").at("id").get<uint64_t>() != j.at("feature_output").at("id").get<uint64_t>()) {
             throw runtime_error("Reshape serialized ragged output values must match feature_output.");
@@ -128,7 +119,7 @@ void Reshape::deserialize(const json &j, Network *network) {
             outputJson, j.at("ragged_feature_input"), input, "Reshape");
 
         const vector<uint64_t> outputDimensions = outputValues.getDimensions();
-        const uint64_t expectedLeading = input.isPlacementNeutral() ? input.getMaxValuesPerRow() : input.getMaxTotalValues();
+        const uint64_t expectedLeading = input.getMaxValuesPerRow();
         if (outputDimensions.size() < 2 || outputDimensions.front() != expectedLeading) {
             throw runtime_error("Ragged Reshape serialized output must preserve the logical packed-row dimension.");
         }
@@ -145,8 +136,7 @@ void Reshape::deserialize(const json &j, Network *network) {
         reshape.featureOutput = outputValues;
         reshape.raggedFeatureInput = input;
         reshape.raggedFeatureOutput = input.withValues(outputValues);
-        // API state stays semantic for placement-neutral geometry. stamp() derives
-        // the concrete [B*M, ...] physical shape without mutating this vector.
+        // stamp() derives the concrete [B*M, ...] shape from logical M.
         reshape.newDimensions = outputDimensions;
     } else {
         if (version != "1.0.0")

@@ -60,9 +60,7 @@ AuditGraph buildAuditGraph(Api::Network& network, bool addExternalOutputs) {
                        .valuesDataType(DataType::FP16)
                        .offsetsDataType(DataType::UINT32)
                        .trailingDimensions({kFeatures})
-                       .maxTotalValues(kHistoryCapacity)
-                       .batchSize(kBatchSize)
-                       .build(),
+                       .maxValuesPerRow(4).build(),
         .future = Api::NetworkInput::Builder()
                       .network(network)
                       .name("future")
@@ -275,7 +273,7 @@ TEST(RaggedTransformerCompleteness, SwigluFeedForwardConnectionsSurviveSaveLoad)
     EXPECT_EQ(dropoutOut.getValuesDimensions().back(), kFeatures);
     for (const auto& stage : {fcOut, gluIn, gluOut, normIn, normOut, dropoutIn, dropoutOut})
         EXPECT_TRUE(stage.sharesPartitionWith(fcOut));
-    EXPECT_EQ(swiglu->architectureJson().at("version"), "1.0.0");
+    EXPECT_EQ(swiglu->architectureJson().at("version"), "1.1.0");
 }
 
 TEST(RaggedTransformerCompleteness, ArchitectureOnlySaveLoadPreservesCombinedRaggedAndMixedContracts) {
@@ -338,9 +336,7 @@ TEST(RaggedTransformerCompleteness, CloneSubgraphRemapsBothRaggedValuesAndOffset
                                                .valuesDataType(DataType::FP16)
                                                .offsetsDataType(DataType::UINT32)
                                                .trailingDimensions({kFeatures})
-                                               .maxTotalValues(kHistoryCapacity)
-                                               .batchSize(kBatchSize)
-                                               .build();
+                                               .maxValuesPerRow(4).build();
     Api::NetworkInput destinationFuture = Api::NetworkInput::Builder()
                                               .network(destination)
                                               .name("future")

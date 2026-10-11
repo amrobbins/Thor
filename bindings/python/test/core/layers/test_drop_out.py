@@ -105,8 +105,7 @@ def test_dropout_accepts_ragged_tensor_and_preserves_partition():
         "tokens",
         thor.DataType.fp32,
         [3],
-        max_total_values=8,
-        batch_size=2,
+        max_values_per_row=4,
         offsets_data_type=thor.DataType.uint32,
     )
     layer = thor.layers.DropOut(n, x, 0.25)
@@ -114,7 +113,9 @@ def test_dropout_accepts_ragged_tensor_and_preserves_partition():
 
     assert layer.get_use_ragged() is True
     assert isinstance(y, thor.RaggedTensor)
-    assert y.values.get_dimensions() == [8, 3]
+    assert y.values.get_dimensions() == [4, 3]
+    assert y.offsets.get_dimensions() == [1]
+    assert y.max_values_per_row == 4
     assert y.offsets == x.offsets
 
 
@@ -129,8 +130,7 @@ def test_ragged_dropout_inference_is_identity_on_active_prefix_and_survives_save
         "tokens",
         thor.DataType.fp32,
         [2],
-        max_total_values=6,
-        batch_size=2,
+        max_values_per_row=3,
         offsets_data_type=thor.DataType.uint32,
     )
     layer = thor.layers.DropOut(n, x, 0.5)
@@ -144,6 +144,7 @@ def test_ragged_dropout_inference_is_identity_on_active_prefix_and_survives_save
     physical = thor.physical.PhysicalRaggedTensor(
         _cpu_tensor(values_np, thor.DataType.fp32),
         _cpu_tensor(offsets_np, thor.DataType.uint32),
+        max_values_per_row=3,
     )
 
     placed = n.place(2, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)

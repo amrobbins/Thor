@@ -312,8 +312,7 @@ def test_fully_connected_accepts_ragged_input_and_preserves_partition():
         "tokens",
         thor.DataType.fp32,
         [4],
-        max_total_values=66,
-        batch_size=3,
+        max_values_per_row=5,
         offsets_data_type=thor.DataType.uint64,
     )
 
@@ -328,14 +327,20 @@ def test_fully_connected_accepts_ragged_input_and_preserves_partition():
     y = fc.get_feature_output()
     assert fc.get_use_ragged()
     assert isinstance(y, thor.RaggedTensor)
-    assert y.values.get_dimensions() == [66, 3]
+    assert y.values.get_dimensions() == [5, 3]
+    assert y.offsets.get_dimensions() == [1]
+    assert y.max_values_per_row == 5
     assert y.offsets == x.offsets
 
     arch = _only_layer_architecture(n, "fully_connected")
     assert arch["use_ragged"] is True
     assert arch["preserve_input_prefix_dimensions"] is True
-    assert arch["ragged_inputs"][0]["max_total_values"] == 66
-    assert arch["ragged_outputs"][0]["max_total_values"] == 66
+    for reference in (arch["ragged_inputs"][0], arch["ragged_outputs"][0]):
+        assert reference["max_values_per_row"] == 5
+        assert reference["values"]["dimensions"][0] == 5
+        assert reference["offsets"]["dimensions"] == [1]
+        assert "batch_size" not in reference
+        assert "max_total_values" not in reference
 
 
 def test_fully_connected_ragged_uses_regular_default_activation():
@@ -345,8 +350,7 @@ def test_fully_connected_ragged_uses_regular_default_activation():
         "tokens",
         thor.DataType.fp32,
         [4],
-        max_total_values=66,
-        batch_size=3,
+        max_values_per_row=5,
     )
 
     fc = thor.layers.FullyConnected(n, x, 3, True)
@@ -365,8 +369,7 @@ def test_fully_connected_ragged_rejects_disabling_prefix_preservation():
         "tokens",
         thor.DataType.fp32,
         [4],
-        max_total_values=66,
-        batch_size=3,
+        max_values_per_row=5,
     )
 
     with pytest.raises(ValueError, match="prefix|Ragged|ragged"):
@@ -383,10 +386,10 @@ def test_fully_connected_ragged_rejects_disabling_prefix_preservation():
 def test_fully_connected_ragged_epilogue_auxiliary_requires_exact_partition():
     n = thor.Network("test_net_fully_connected_ragged_epilogue_partition_guard")
     x = thor.layers.RaggedNetworkInput(
-        n, "tokens", thor.DataType.fp32, [4], max_total_values=8, batch_size=3, max_values_per_row=5
+        n, "tokens", thor.DataType.fp32, [4], max_values_per_row=5
     )
     other = thor.layers.RaggedNetworkInput(
-        n, "other", thor.DataType.fp32, [4], max_total_values=8, batch_size=3, max_values_per_row=5
+        n, "other", thor.DataType.fp32, [4], max_values_per_row=5
     )
     projected = thor.layers.FullyConnected.epilogue_input(
         output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32
@@ -430,8 +433,8 @@ def test_fully_connected_ragged_epilogue_auxiliary_is_active_prefix_aware_and_ro
     tmp_path, offsets_dtype, np_offsets_dtype
 ):
     batch_size = 3
-    capacity = 8
     max_values_per_row = 5
+    capacity = batch_size * max_values_per_row
     features = 4
     n = thor.Network(f"test_net_fully_connected_ragged_epilogue_auxiliary_{np_offsets_dtype.__name__}")
     x = thor.layers.RaggedNetworkInput(
@@ -439,8 +442,6 @@ def test_fully_connected_ragged_epilogue_auxiliary_is_active_prefix_aware_and_ro
         "tokens",
         thor.DataType.fp32,
         [features],
-        max_total_values=capacity,
-        batch_size=batch_size,
         max_values_per_row=max_values_per_row,
         offsets_data_type=offsets_dtype,
     )
@@ -466,7 +467,7 @@ def test_fully_connected_ragged_epilogue_auxiliary_is_active_prefix_aware_and_ro
     thor.layers.RaggedNetworkOutput(n, "output", y)
 
     arch = _only_layer_architecture(n, "fully_connected")
-    assert arch["version"] == "1.2.0"
+    assert arch["version"] == "1.7.0"  # One ragged epilogue auxiliary is a real feature schema.
     assert arch["epilogue_inputs"][0]["name"] == "aux"
     assert arch["epilogue_inputs"][0]["ragged_tensor"]["offsets"]["id"] == arch["ragged_inputs"][0]["offsets"]["id"]
 
@@ -497,10 +498,11 @@ def test_fully_connected_ragged_epilogue_auxiliary_is_active_prefix_aware_and_ro
     np.testing.assert_allclose(short_output[:5], np.maximum(short_values, 0.0), rtol=0.0, atol=0.0)
 
     long_offsets = [0, 1, 5, 8]
-    long_values = (np.arange(capacity * features, dtype=np.float32).reshape(capacity, features) - 9.0) / 3.0
+    long_active_count = long_offsets[-1]
+    long_values = (np.arange(long_active_count * features, dtype=np.float32).reshape(long_active_count, features) - 9.0) / 3.0
     long_result, long_output = run(placed, long_offsets, long_values)
     np.testing.assert_array_equal(long_result.offsets.numpy(), np.asarray(long_offsets, dtype=np_offsets_dtype))
-    np.testing.assert_allclose(long_output[:capacity], np.maximum(long_values, 0.0), rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(long_output[:long_active_count], np.maximum(long_values, 0.0), rtol=0.0, atol=0.0)
 
     empty_offsets = [0, 0, 0, 0]
     empty_result, _ = run(placed, empty_offsets, np.empty((0, features), dtype=np.float32))

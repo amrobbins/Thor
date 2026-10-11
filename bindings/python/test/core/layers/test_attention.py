@@ -88,15 +88,14 @@ def test_attention_accepts_and_returns_canonical_ragged_tensor():
         "tokens",
         thor.DataType.fp16,
         [32],
-        max_total_values=11,
-        batch_size=3,
         offsets_data_type=thor.DataType.uint64,
+        max_values_per_row=5,
     )
 
     attention = thor.layers.Attention(n, tokens, tokens, tokens, 4, head_dim=8, output_features=24)
 
     assert isinstance(attention.get_feature_output(), thor.RaggedTensor)
-    assert attention.get_feature_output().values.get_dimensions() == [11, 24]
+    assert attention.get_feature_output().values.get_dimensions() == [5, 24]
     assert attention.get_feature_output().offsets == tokens.offsets
     assert attention.get_key_input() == attention.get_query_input()
     assert attention.get_value_input() == attention.get_query_input()
@@ -116,18 +115,16 @@ def test_attention_ragged_cross_attention_rope_allows_independent_partitions():
         "query",
         thor.DataType.fp16,
         [32],
-        max_total_values=9,
-        batch_size=2,
         offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=5,
     )
     context = thor.layers.RaggedNetworkInput(
         n,
         "context",
         thor.DataType.fp16,
         [32],
-        max_total_values=12,
-        batch_size=2,
         offsets_data_type=thor.DataType.uint64,
+        max_values_per_row=6,
     )
 
     attention = thor.layers.Attention(
@@ -149,10 +146,12 @@ def test_attention_ragged_cross_attention_rope_allows_independent_partitions():
 def test_attention_ragged_cross_attention_accepts_per_row_rope_origins():
     n = _net("test_attention_ragged_cross_attention_per_row_rope_origins")
     query = thor.layers.RaggedNetworkInput(
-        n, "query", thor.DataType.fp16, [32], max_total_values=9, batch_size=2
+        n, "query", thor.DataType.fp16, [32],
+        max_values_per_row=5,
     )
     context = thor.layers.RaggedNetworkInput(
-        n, "context", thor.DataType.fp16, [32], max_total_values=12, batch_size=2
+        n, "context", thor.DataType.fp16, [32],
+        max_values_per_row=6,
     )
     query_origins = _input_tensor(n, "query_origins", [1], thor.DataType.int32)
     key_origins = _input_tensor(n, "key_origins", [1], thor.DataType.int32)
@@ -873,9 +872,8 @@ def test_attention_dense_query_ragged_kv_infers_mixed_mode_and_key_rope_origins(
         "context",
         thor.DataType.fp16,
         [32],
-        max_total_values=11,
-        batch_size=3,
         offsets_data_type=thor.DataType.uint64,
+        max_values_per_row=5,
     )
     key_origins = _input_tensor(n, "key_origins", [1], thor.DataType.int32)
 
@@ -918,9 +916,8 @@ def test_attention_ragged_query_dense_kv_infers_mixed_mode():
         "query",
         thor.DataType.fp16,
         [32],
-        max_total_values=9,
-        batch_size=3,
         offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=5,
     )
     context = _input_tensor(n, "context", [7, 32], thor.DataType.fp16)
     query_origins = _input_tensor(n, "query_origins", [1], thor.DataType.int32)
@@ -941,7 +938,7 @@ def test_attention_ragged_query_dense_kv_infers_mixed_mode():
     output = attention.get_feature_output()
     assert isinstance(output, thor.RaggedTensor)
     assert output.offsets == query.offsets
-    assert output.values.get_dimensions() == [9, 32]
+    assert output.values.get_dimensions() == [5, 32]
 
     arch = _only_layer_architecture(n, "attention")
     assert arch["use_ragged"] is True

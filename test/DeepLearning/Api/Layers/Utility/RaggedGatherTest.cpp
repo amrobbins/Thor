@@ -20,9 +20,7 @@ TEST(UtilityApiLayers, RaggedGatherUsesIndicesPartitionQAndSourceValueGeometry) 
                               .valuesDataType(DataType::FP32)
                               .offsetsDataType(DataType::UINT32)
                               .trailingDimensions({2, 3})
-                              .maxTotalValues(12)
                               .maxValuesPerRow(5)
-                              .batchSize(4)
                               .build();
     RaggedTensor indices = RaggedNetworkInput::Builder()
                                .network(network)
@@ -30,20 +28,18 @@ TEST(UtilityApiLayers, RaggedGatherUsesIndicesPartitionQAndSourceValueGeometry) 
                                .valuesDataType(DataType::UINT64)
                                .offsetsDataType(DataType::UINT64)
                                .trailingDimensions({})
-                               .maxTotalValues(9)
                                .maxValuesPerRow(4)
-                               .batchSize(4)
                                .build();
 
     RaggedGather gather = RaggedGather::Builder().network(network).sourceInput(source).indicesInput(indices).build();
     const RaggedTensor output = gather.getRaggedFeatureOutput();
 
     EXPECT_EQ(output.getValuesDataType(), DataType::FP32);
-    EXPECT_EQ(output.getValuesDimensions(), (vector<uint64_t>{9, 2, 3}));
+    EXPECT_EQ(output.getValuesDimensions(), (vector<uint64_t>{4, 2, 3}));
     EXPECT_EQ(output.getOffsets(), indices.getOffsets());
     EXPECT_EQ(output.getOffsetsDataType(), DataType::UINT64);
-    EXPECT_EQ(output.getBatchSize(), 4u);
-    EXPECT_EQ(output.getMaxTotalValues(), 9u);
+    EXPECT_EQ(output.getMaxValuesPerRow(), indices.getMaxValuesPerRow());
+    EXPECT_TRUE(output.sharesPartitionWith(indices));
     ASSERT_TRUE(output.hasMaxValuesPerRow());
     EXPECT_EQ(output.getMaxValuesPerRow(), 4u);
 
@@ -61,7 +57,7 @@ TEST(UtilityApiLayers, RaggedGatherUsesIndicesPartitionQAndSourceValueGeometry) 
     EXPECT_EQ(architecture.at("ragged_output").at("offsets").at("id").get<uint64_t>(),
               architecture.at("ragged_indices").at("offsets").at("id").get<uint64_t>());
     EXPECT_EQ(architecture.at("ragged_output").at("values").at("dimensions").get<vector<uint64_t>>(),
-              (vector<uint64_t>{9, 2, 3}));
+              (vector<uint64_t>{4, 2, 3}));
 }
 
 TEST(UtilityApiLayers, RaggedGatherDeduplicatesOffsetsWhenSourceAndIndicesSharePartition) {
@@ -71,9 +67,7 @@ TEST(UtilityApiLayers, RaggedGatherDeduplicatesOffsetsWhenSourceAndIndicesShareP
                               .name("source")
                               .valuesDataType(DataType::FP32)
                               .trailingDimensions({2})
-                              .maxTotalValues(8)
                               .maxValuesPerRow(4)
-                              .batchSize(3)
                               .build();
     RaggedTensor indices = RaggedNetworkInput::Builder()
                                .network(network)
@@ -89,25 +83,21 @@ TEST(UtilityApiLayers, RaggedGatherDeduplicatesOffsetsWhenSourceAndIndicesShareP
     EXPECT_EQ(gather.getRaggedFeatureOutput().getOffsets(), source.getOffsets());
 }
 
-TEST(UtilityApiLayers, RaggedGatherRejectsInvalidIndicesGeometryOrBatch) {
+TEST(UtilityApiLayers, RaggedGatherRejectsInvalidIndicesGeometry) {
     Network network("ragged_gather_validation");
     RaggedTensor source = RaggedNetworkInput::Builder()
                               .network(network)
                               .name("source")
                               .valuesDataType(DataType::FP32)
                               .trailingDimensions({2})
-                              .maxTotalValues(8)
                               .maxValuesPerRow(4)
-                              .batchSize(3)
                               .build();
     RaggedTensor fpIndices = RaggedNetworkInput::Builder()
                                  .network(network)
                                  .name("fp_indices")
                                  .valuesDataType(DataType::FP32)
                                  .trailingDimensions({})
-                                 .maxTotalValues(6)
                                  .maxValuesPerRow(3)
-                                 .batchSize(3)
                                  .build();
     EXPECT_THROW((void)RaggedGather::Builder().network(network).sourceInput(source).indicesInput(fpIndices).build(),
                  std::invalid_argument);
@@ -117,24 +107,12 @@ TEST(UtilityApiLayers, RaggedGatherRejectsInvalidIndicesGeometryOrBatch) {
                                      .name("vector_indices")
                                      .valuesDataType(DataType::UINT32)
                                      .trailingDimensions({1})
-                                     .maxTotalValues(6)
                                      .maxValuesPerRow(3)
-                                     .batchSize(3)
                                      .build();
     EXPECT_THROW((void)RaggedGather::Builder().network(network).sourceInput(source).indicesInput(vectorIndices).build(),
                  std::invalid_argument);
 
-    RaggedTensor wrongBatch = RaggedNetworkInput::Builder()
-                                  .network(network)
-                                  .name("wrong_batch")
-                                  .valuesDataType(DataType::UINT32)
-                                  .trailingDimensions({})
-                                  .maxTotalValues(6)
-                                  .maxValuesPerRow(3)
-                                  .batchSize(2)
-                                  .build();
-    EXPECT_THROW((void)RaggedGather::Builder().network(network).sourceInput(source).indicesInput(wrongBatch).build(),
-                 std::invalid_argument);
+
 }
 
 TEST(UtilityApiLayers, RaggedGatherSubgraphCloneRemapsBothPartitionsAndPreservesDestinationQ) {
@@ -145,9 +123,7 @@ TEST(UtilityApiLayers, RaggedGatherSubgraphCloneRemapsBothPartitionsAndPreserves
                               .valuesDataType(DataType::FP32)
                               .offsetsDataType(DataType::UINT32)
                               .trailingDimensions({2})
-                              .maxTotalValues(9)
                               .maxValuesPerRow(4)
-                              .batchSize(3)
                               .build();
     RaggedTensor indices = RaggedNetworkInput::Builder()
                                .network(sourceNetwork)
@@ -155,9 +131,7 @@ TEST(UtilityApiLayers, RaggedGatherSubgraphCloneRemapsBothPartitionsAndPreserves
                                .valuesDataType(DataType::UINT32)
                                .offsetsDataType(DataType::UINT64)
                                .trailingDimensions({})
-                               .maxTotalValues(7)
                                .maxValuesPerRow(3)
-                               .batchSize(3)
                                .build();
     RaggedGather gather =
         RaggedGather::Builder().network(sourceNetwork).sourceInput(source).indicesInput(indices).build();
@@ -174,9 +148,7 @@ TEST(UtilityApiLayers, RaggedGatherSubgraphCloneRemapsBothPartitionsAndPreserves
                                          .valuesDataType(DataType::FP32)
                                          .offsetsDataType(DataType::UINT32)
                                          .trailingDimensions({2})
-                                         .maxTotalValues(9)
                                          .maxValuesPerRow(4)
-                                         .batchSize(3)
                                          .build();
     RaggedTensor destinationIndices = RaggedNetworkInput::Builder()
                                           .network(destination)
@@ -184,9 +156,7 @@ TEST(UtilityApiLayers, RaggedGatherSubgraphCloneRemapsBothPartitionsAndPreserves
                                           .valuesDataType(DataType::UINT32)
                                           .offsetsDataType(DataType::UINT64)
                                           .trailingDimensions({})
-                                          .maxTotalValues(7)
                                           .maxValuesPerRow(3)
-                                          .batchSize(3)
                                           .build();
 
     ApiTensorRemap remap;
@@ -204,7 +174,7 @@ TEST(UtilityApiLayers, RaggedGatherSubgraphCloneRemapsBothPartitionsAndPreserves
 
     ASSERT_EQ(clone.outputTensorsByName.size(), 1u);
     EXPECT_EQ(clone.outputTensorsByName.at("__thor_ragged_output.gathered.values").getDimensions(),
-              (vector<uint64_t>{7, 2}));
+              (vector<uint64_t>{3, 2}));
     const Tensor clonedPartitionToken = clone.clonedTensorBySourceOriginalId.at(
         gather.getRaggedFeatureOutput().getRowPartitionToken().getOriginalId());
     EXPECT_EQ(clonedPartitionToken, destinationIndices.getRowPartitionToken());

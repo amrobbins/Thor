@@ -137,7 +137,6 @@ TEST(GatedLinearUnitsNeutralG2, FiveVariantsSerializeSemanticShapeAndRejectCorru
         RaggedTensor input = RaggedNetworkInput::Builder().network(network).name("tokens")
             .valuesDataType(DataType::FP32).offsetsDataType(DataType::UINT32)
             .trailingDimensions({4}).maxValuesPerRow(M).build();
-        ASSERT_TRUE(input.isPlacementNeutral());
         auto activation = buildG2(variant.name, network, input);
         ASSERT_NE(activation, nullptr);
         ASSERT_TRUE(activation->getRaggedFeatureOutput().has_value());
@@ -150,7 +149,7 @@ TEST(GatedLinearUnitsNeutralG2, FiveVariantsSerializeSemanticShapeAndRejectCorru
         EXPECT_EQ(j.at("feature_output").at("dimensions").get<vector<uint64_t>>(), (vector<uint64_t>{M, 2}));
         const json& in = j.at("ragged_feature_input");
         const json& out = j.at("ragged_feature_output");
-        EXPECT_EQ(in.at("geometry_mode").get<string>(), "placement_neutral");
+        EXPECT_FALSE(in.contains("geometry_mode"));
         EXPECT_EQ(in.at("max_values_per_row").get<uint64_t>(), M);
         EXPECT_EQ(in.at("values").at("dimensions").get<vector<uint64_t>>(), (vector<uint64_t>{M, 4}));
         EXPECT_EQ(in.at("offsets").at("dimensions").get<vector<uint64_t>>(), (vector<uint64_t>{1}));
@@ -163,7 +162,9 @@ TEST(GatedLinearUnitsNeutralG2, FiveVariantsSerializeSemanticShapeAndRejectCorru
         EXPECT_FALSE(out.contains("max_total_values"));
 
         json invalid = j;
-        invalid["version"] = "1.0.0";
+        // 1.0.0 is a supported historical input grammar, not an invalid
+        // alternate model geometry. Reject a genuinely unsupported version.
+        invalid["version"] = "9.9.9";
         EXPECT_THROW(Activation::deserialize(invalid, &network), runtime_error);
         invalid = j;
         invalid["ragged_feature_input"]["geometry_mode"] = "fixed";
@@ -227,7 +228,6 @@ TEST(GatedLinearUnitsNeutralG2, FiveVariantsLoadAtTwoAndSevenAndExecuteSplitGate
             const auto inputs = loaded.getExternalRaggedNetworkInputs();
             ASSERT_EQ(inputs.size(), 1U);
             const RaggedTensor logicalInput = inputs.front().raggedTensor;
-            ASSERT_TRUE(logicalInput.isPlacementNeutral());
             EXPECT_EQ(logicalInput.getValues().getOriginalId(), savedInputId);
             EXPECT_EQ(logicalInput.getRowPartitionToken().getOriginalId(), savedPartitionId);
             auto activation = onlyG2(loaded, variant.layerType);
@@ -294,12 +294,13 @@ TEST(GatedLinearUnitsNeutralG2, AllFivePreserveHistoricalDenseAndFixedVersionOne
             Network network(name);
             RaggedTensor input = RaggedNetworkInput::Builder().network(network).name("tokens")
                 .valuesDataType(DataType::FP32).offsetsDataType(DataType::UINT32)
-                .trailingDimensions({4}).batchSize(3).maxTotalValues(9).maxValuesPerRow(4).build();
+                .trailingDimensions({4}).maxValuesPerRow(4).build();
             auto activation = buildG2(variant.name, network, input);
             ASSERT_NE(activation, nullptr);
             (void)RaggedNetworkOutput::Builder().network(network).name("activated")
                 .inputTensor(activation->getRaggedFeatureOutput().value()).build();
-            EXPECT_EQ(activation->architectureJson().at("version").get<string>(), "1.0.0");
+            EXPECT_EQ(activation->architectureJson().at("version").get<string>(), "1.1.0");
+            EXPECT_FALSE(activation->architectureJson().at("ragged_feature_input").contains("batch_size"));
             network.save(archive.string(), true);
         }
         {
@@ -308,10 +309,9 @@ TEST(GatedLinearUnitsNeutralG2, AllFivePreserveHistoricalDenseAndFixedVersionOne
             auto activation = onlyG2(loaded, variant.layerType);
             ASSERT_NE(activation, nullptr);
             ASSERT_TRUE(activation->getRaggedFeatureInput().has_value());
-            EXPECT_FALSE(activation->getRaggedFeatureInput()->isPlacementNeutral());
-            EXPECT_EQ(activation->architectureJson().at("version").get<string>(), "1.0.0");
+            EXPECT_EQ(activation->architectureJson().at("version").get<string>(), "1.1.0");
             json invalid = activation->architectureJson();
-            invalid["version"] = "1.1.0";
+            invalid["version"] = "0.0.0";
             EXPECT_THROW(Activation::deserialize(invalid, &loaded), runtime_error);
         }
         filesystem::remove_all(archive);

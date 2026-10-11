@@ -55,6 +55,9 @@ static bool physicalExpressionRequiresLinkedForwardExecution(const PhysicalExpre
         switch (node.op) {
             case ExprOp::RMSNORM_BACKWARD_X:
             case ExprOp::RMSNORM_BACKWARD_SCALE:
+            case ExprOp::LAYERNORM_BACKWARD_X:
+            case ExprOp::LAYERNORM_BACKWARD_SCALE:
+            case ExprOp::LAYERNORM_BACKWARD_BIAS:
             case ExprOp::ATTENTION_BACKWARD_Q:
             case ExprOp::ATTENTION_BACKWARD_K:
             case ExprOp::ATTENTION_BACKWARD_V:
@@ -1336,6 +1339,10 @@ static std::vector<uint64_t> inferLayerNormOutputDims(const ExprNode& node,
                                                       const std::vector<uint64_t>& input_dims,
                                                       const std::vector<uint64_t>& scale_dims,
                                                       const std::vector<uint64_t>& bias_dims);
+static std::vector<uint64_t> inferLayerNormBackwardOutputDims(const ExprNode& node,
+                                                              const std::vector<uint64_t>& x_dims,
+                                                              const std::vector<uint64_t>& scale_dims,
+                                                              const std::vector<uint64_t>& dy_dims);
 
 static std::vector<uint64_t> inferEmbeddingLookupOutputDims(const std::vector<uint64_t>& index_dims,
                                                              const std::vector<uint64_t>& weights_dims) {
@@ -1803,6 +1810,12 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 break;
             case ExprOp::LAYERNORM:
                 node_dims[i] = inferLayerNormOutputDims(node, node_dims[node.lhs], node_dims[node.rhs], node_dims[node.aux]);
+                break;
+            case ExprOp::LAYERNORM_BACKWARD_X:
+            case ExprOp::LAYERNORM_BACKWARD_SCALE:
+            case ExprOp::LAYERNORM_BACKWARD_BIAS:
+                node_dims[i] = inferLayerNormBackwardOutputDims(
+                    node, node_dims[node.lhs], node_dims[node.rhs], node_dims[node.aux]);
                 break;
             case ExprOp::RMSNORM_BACKWARD_X:
             case ExprOp::RMSNORM_BACKWARD_SCALE: {
@@ -4046,6 +4059,32 @@ static std::vector<uint64_t> inferLayerNormOutputDims(const ExprNode& node,
     return inferLayerNormOutputDims(node.layer_norm_normalized_feature_count, input_dims, scale_dims, bias_dims);
 }
 
+static std::vector<uint64_t> inferLayerNormBackwardOutputDims(const ExprNode& node,
+                                                              const std::vector<uint64_t>& x_dims,
+                                                              const std::vector<uint64_t>& scale_dims,
+                                                              const std::vector<uint64_t>& dy_dims) {
+    const std::vector<uint64_t> forward_dims = inferRmsNormOutputDims(
+        node.layer_norm_normalized_feature_count, x_dims, scale_dims);
+    if (dy_dims != forward_dims) {
+        throw std::runtime_error("LayerNorm backward dY dimensions must match LayerNorm output dimensions.");
+    }
+    return node.op == ExprOp::LAYERNORM_BACKWARD_X ? x_dims : scale_dims;
+}
+
+static std::vector<uint64_t> inferLayerNormBackwardOutputDims(
+    const CompiledLayerNormBackward& compiled,
+    const std::vector<std::vector<uint64_t>>& input_dims,
+    ExprOp route) {
+    const size_t expected_inputs = compiled.packed_row_capacity != 0 ? 4u : 3u;
+    if (input_dims.size() != expected_inputs) {
+        throw std::runtime_error("LayerNorm backward stage input count disagrees with its packed-extent contract.");
+    }
+    ExprNode node;
+    node.op = route;
+    node.layer_norm_normalized_feature_count = compiled.normalized_feature_count;
+    return inferLayerNormBackwardOutputDims(node, input_dims[0], input_dims[1], input_dims[2]);
+}
+
 static std::vector<uint64_t> inferLayerNormOutputDims(const CompiledLayerNorm& compiled,
                                                       const std::vector<uint64_t>& input_dims,
                                                       const std::vector<uint64_t>& scale_dims,
@@ -4881,6 +4920,12 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
             case ExprOp::LAYERNORM:
                 node_dims[i] = inferLayerNormOutputDims(node, node_dims[node.lhs], node_dims[node.rhs], node_dims[node.aux]);
                 break;
+            case ExprOp::LAYERNORM_BACKWARD_X:
+            case ExprOp::LAYERNORM_BACKWARD_SCALE:
+            case ExprOp::LAYERNORM_BACKWARD_BIAS:
+                node_dims[i] = inferLayerNormBackwardOutputDims(
+                    node, node_dims[node.lhs], node_dims[node.rhs], node_dims[node.aux]);
+                break;
             case ExprOp::RMSNORM_BACKWARD_X:
             case ExprOp::RMSNORM_BACKWARD_SCALE: {
                 const std::vector<uint64_t> forward_dims = inferRmsNormOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
@@ -5088,6 +5133,9 @@ static uint64_t computeFusedStageNodeFlops(const PhysicalExpression& expr,
         case ExprOp::LAYERNORM:
         case ExprOp::RMSNORM_BACKWARD_X:
         case ExprOp::RMSNORM_BACKWARD_SCALE:
+        case ExprOp::LAYERNORM_BACKWARD_X:
+        case ExprOp::LAYERNORM_BACKWARD_SCALE:
+        case ExprOp::LAYERNORM_BACKWARD_BIAS:
         case ExprOp::REDUCE_MIN_BACKWARD:
         case ExprOp::REDUCE_MAX_BACKWARD:
         case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
@@ -6162,6 +6210,13 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
             return checkedMulU64(numelFromDims(stage_input_dims[0]), 8, "computeLayerNormStageFlops");
         }
 
+        case CompiledExecutionStage::Kind::LayerNormBackward: {
+            if (!stage.layer_norm_backward || stage_input_dims.empty()) {
+                throw std::runtime_error("LayerNormBackward stage missing payload/input dims while computing FLOPs.");
+            }
+            return checkedMulU64(numelFromDims(stage_input_dims[0]), 16, "computeLayerNormBackwardStageFlops");
+        }
+
         case CompiledExecutionStage::Kind::RmsNormBackward: {
             if (!stage.rms_norm_backward || stage_input_dims.empty()) {
                 throw std::runtime_error("RMSNormBackward stage missing payload/input dims while computing FLOPs.");
@@ -6367,6 +6422,14 @@ static uint64_t computeDedicatedStageLogicalBytes(
             // x + scale + bias -> y. Saved backend statistics/workspace are
             // excluded because equivalent implementations need not materialize
             // them.
+            add_input(0);
+            add_input(1);
+            add_input(2);
+            add_all_outputs();
+            return total;
+
+        case CompiledExecutionStage::Kind::LayerNormBackward:
+            // x + scale + dY -> requested gradients; saved statistics are runtime scratch.
             add_input(0);
             add_input(1);
             add_input(2);
@@ -6782,6 +6845,15 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
             }
             return inferLayerNormOutputDims(
                 *stage.layer_norm, stage_input_dims[0], stage_input_dims[1], stage_input_dims[2]);
+        }
+
+        case CompiledExecutionStage::Kind::LayerNormBackward: {
+            if (!stage.layer_norm_backward || output_idx >= stage.outputs.size() ||
+                stage.outputs[output_idx].local_node_idx >= stage.expr.nodes.size()) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput LayerNorm backward route missing.");
+            }
+            return inferLayerNormBackwardOutputDims(*stage.layer_norm_backward, stage_input_dims,
+                stage.expr.nodes[stage.outputs[output_idx].local_node_idx].op);
         }
 
         case CompiledExecutionStage::Kind::RmsNormBackward: {
@@ -8384,6 +8456,16 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
             }
             value_dims[stage.outputs[0].value_id] =
                 inferLayerNormOutputDims(*stage.layer_norm, stage_input_dims[0], stage_input_dims[1], stage_input_dims[2]);
+        } else if (stage.kind == CompiledExecutionStage::Kind::LayerNormBackward) {
+            const size_t expected_inputs = stage.layer_norm_backward && stage.layer_norm_backward->packed_row_capacity != 0 ? 4u : 3u;
+            if (!stage.layer_norm_backward || stage.input_value_ids.size() != expected_inputs ||
+                stage.outputs.empty() || stage.outputs.size() > 3) {
+                throw std::runtime_error("LayerNorm-backward stage has incompatible input/output arity.");
+            }
+            for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                value_dims[stage.outputs[output_idx].value_id] =
+                    resolveOutputDimsForStageOutput(stage, output_idx, stage_input_dims);
+            }
         } else if (stage.kind == CompiledExecutionStage::Kind::RmsNormBackward) {
             const size_t expected_rms_norm_backward_inputs =
                 stage.rms_norm_backward && stage.rms_norm_backward->packed_row_capacity != 0 ? 4u : 3u;
@@ -9794,6 +9876,43 @@ std::shared_ptr<StampedLayerNorm> FusedEquation::stampLayerNorm(
         output = Tensor(input.getPlacement(), TensorDescriptor(compiledStage->output_dtype, output_dims));
     }
     return std::make_shared<StampedLayerNorm>(compiledStage, input, scale, bias, output, stream, rowPartitionOffsets);
+}
+
+std::shared_ptr<StampedLayerNormBackward> FusedEquation::stampLayerNormBackward(
+    const std::shared_ptr<CompiledLayerNormBackward>& compiledStage,
+    const Tensor& input, const Tensor& scale, const Tensor& dY,
+    const std::vector<std::optional<Tensor>>& preallocatedOutputs,
+    const Stream& stream, const std::optional<Tensor>& rowPartitionOffsets) const {
+    if (!compiledStage || preallocatedOutputs.size() != 3) {
+        throw std::runtime_error("LayerNorm backward requires compiled metadata and three semantic output slots.");
+    }
+    if ((compiledStage->packed_row_capacity != 0) != rowPartitionOffsets.has_value()) {
+        throw std::runtime_error("LayerNorm backward packed host-extent binding is incompatible.");
+    }
+    std::vector<std::vector<uint64_t>> input_dims{input.getDimensions(), scale.getDimensions(), dY.getDimensions()};
+    if (rowPartitionOffsets.has_value()) input_dims.push_back(rowPartitionOffsets->getDimensions());
+    const std::vector<ExprOp> routes{
+        ExprOp::LAYERNORM_BACKWARD_X, ExprOp::LAYERNORM_BACKWARD_SCALE, ExprOp::LAYERNORM_BACKWARD_BIAS};
+    std::vector<Tensor> gradients;
+    gradients.reserve(3);
+    for (size_t i = 0; i < 3; ++i) {
+        const std::vector<uint64_t> dims = inferLayerNormBackwardOutputDims(*compiledStage, input_dims, routes[i]);
+        const DataType dtype = compiledStage->outputDTypeFor(routes[i]);
+        if (preallocatedOutputs[i].has_value()) {
+            const Tensor& tensor = preallocatedOutputs[i].value();
+            if (tensor.getPlacement() != input.getPlacement() || tensor.getDataType() != dtype ||
+                tensor.getDimensions() != dims) {
+                throw std::runtime_error("Preallocated LayerNorm backward gradient tensor is incompatible.");
+            }
+            gradients.push_back(tensor);
+        } else {
+            // The cuDNN backward ABI always writes all three gradients. Internal
+            // scratch outputs are not exposed as requested logical gradients.
+            gradients.emplace_back(input.getPlacement(), TensorDescriptor(dtype, dims));
+        }
+    }
+    return std::make_shared<StampedLayerNormBackward>(compiledStage, input, scale, dY,
+        gradients[0], gradients[1], gradients[2], stream, rowPartitionOffsets);
 }
 
 std::shared_ptr<StampedRmsNormBackward> FusedEquation::stampRmsNormBackward(
@@ -11469,6 +11588,7 @@ std::pair<StampedExecutionPlan, StampedExecutionPlan> FusedEquation::stampForwar
         preallocated_backward_outputs,
         requested_backward_output_shapes);
     backward_plan.linkRmsNormBackwardStatesFrom(forward_plan);
+    backward_plan.linkLayerNormBackwardStatesFrom(forward_plan);
     backward_plan.linkAttentionBackwardStatesFrom(forward_plan);
     // Cross-plan state linking can change the tensor/state bindings captured by
     // conditional child operations. Re-capture both sides now, while still in
@@ -13851,6 +13971,49 @@ StampedExecutionPlan FusedEquation::stampImpl(
                 stampedStages.emplace_back(stampedLayerNorm, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
                 break;
             }
+            case CompiledExecutionStage::Kind::LayerNormBackward: {
+                const bool packed = stage.layer_norm_backward && stage.layer_norm_backward->packed_row_capacity != 0;
+                if (!stage.layer_norm_backward || stageInputs.size() != (packed ? 4u : 3u) ||
+                    stage.outputs.empty() || stage.outputs.size() > 3) {
+                    throw std::runtime_error("LayerNorm-backward stage has incompatible input/output count.");
+                }
+                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
+                Tensor scaleTensor = runtimeInputTensor(stageInputs[1]);
+                Tensor dYTensor = runtimeInputTensor(stageInputs[2]);
+                std::optional<Tensor> rowPartitionOffsets;
+                if (packed) rowPartitionOffsets = runtimeInputTensor(stageInputs[3]);
+                std::vector<std::optional<Tensor>> preallocated(3, std::nullopt);
+                std::array<bool, 3> seen_routes{false, false, false};
+                for (size_t i = 0; i < stage.outputs.size(); ++i) {
+                    const CompiledStageOutput& output = stage.outputs[i];
+                    if (output.local_node_idx >= stage.expr.nodes.size()) {
+                        throw std::runtime_error("LayerNorm-backward output local route index out of range.");
+                    }
+                    const ExprOp route = stage.expr.nodes[output.local_node_idx].op;
+                    size_t semantic = route == ExprOp::LAYERNORM_BACKWARD_X ? 0u :
+                                      route == ExprOp::LAYERNORM_BACKWARD_SCALE ? 1u :
+                                      route == ExprOp::LAYERNORM_BACKWARD_BIAS ? 2u : 3u;
+                    if (semantic == 3u || seen_routes.at(semantic)) {
+                        throw std::runtime_error("LayerNorm-backward stage contains duplicate/invalid output route.");
+                    }
+                    seen_routes[semantic] = true;
+                    const auto dims = resolveOutputDimsForStageOutput(stage, i, stageInputs);
+                    preallocated[semantic] = preallocatedForStageOutput(output, dims);
+                }
+                const auto stampedBackward = stampLayerNormBackward(
+                    stage.layer_norm_backward, inputTensor, scaleTensor, dYTensor, preallocated, stream, rowPartitionOffsets);
+                const auto& semanticOutputs = stampedBackward->getOutputTensors();
+                const uint32_t producer = static_cast<uint32_t>(stampedStages.size());
+                for (const auto& output : stage.outputs) {
+                    const ExprOp route = stage.expr.nodes[output.local_node_idx].op;
+                    const size_t semantic = route == ExprOp::LAYERNORM_BACKWARD_X ? 0u :
+                                            route == ExprOp::LAYERNORM_BACKWARD_SCALE ? 1u : 2u;
+                    values[output.value_id] = semanticOutputs.at(semantic);
+                    producer_stage_by_value_id[output.value_id] = producer;
+                }
+                stampedStages.emplace_back(stampedBackward, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
+                break;
+            }
             case CompiledExecutionStage::Kind::RmsNormBackward: {
                 const bool packedRmsNormBackward = stage.rms_norm_backward && stage.rms_norm_backward->packed_row_capacity != 0;
                 const size_t expectedRmsNormBackwardInputs = packedRmsNormBackward ? 4u : 3u;
@@ -15529,6 +15692,16 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             }
             value_dims[stage.outputs[0].value_id] =
                 inferLayerNormOutputDims(*stage.layer_norm, stage_input_dims[0], stage_input_dims[1], stage_input_dims[2]);
+        } else if (stage.kind == CompiledExecutionStage::Kind::LayerNormBackward) {
+            const size_t expected_inputs = stage.layer_norm_backward && stage.layer_norm_backward->packed_row_capacity != 0 ? 4u : 3u;
+            if (!stage.layer_norm_backward || stage.input_value_ids.size() != expected_inputs ||
+                stage.outputs.empty() || stage.outputs.size() > 3) {
+                throw std::runtime_error("LayerNorm-backward stage has incompatible input/output arity.");
+            }
+            for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                value_dims[stage.outputs[output_idx].value_id] =
+                    resolveOutputDimsForStageOutput(stage, output_idx, stage_input_dims);
+            }
         } else if (stage.kind == CompiledExecutionStage::Kind::RmsNormBackward) {
             const size_t expected_rms_norm_backward_inputs =
                 stage.rms_norm_backward && stage.rms_norm_backward->packed_row_capacity != 0 ? 4u : 3u;

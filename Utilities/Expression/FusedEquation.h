@@ -48,6 +48,7 @@ struct CompiledExecutionStage {
         Softmax,
         RmsNorm,
         LayerNorm,
+        LayerNormBackward,
         RmsNormBackward,
         EmbeddingLookup,
         Matmul,
@@ -88,6 +89,8 @@ struct CompiledExecutionStage {
                 return "RmsNorm";
             case Kind::LayerNorm:
                 return "LayerNorm";
+            case Kind::LayerNormBackward:
+                return "LayerNormBackward";
             case Kind::RmsNormBackward:
                 return "RmsNormBackward";
             case Kind::EmbeddingLookup:
@@ -137,6 +140,7 @@ struct CompiledExecutionStage {
     const std::shared_ptr<CompiledSoftmax> softmax = nullptr;
     const std::shared_ptr<CompiledRmsNorm> rms_norm = nullptr;
     const std::shared_ptr<CompiledLayerNorm> layer_norm = nullptr;
+    const std::shared_ptr<CompiledLayerNormBackward> layer_norm_backward = nullptr;
     const std::shared_ptr<CompiledRmsNormBackward> rms_norm_backward = nullptr;
     const std::shared_ptr<CompiledEmbeddingLookup> embedding_lookup = nullptr;
     const std::shared_ptr<CompiledMatmul> matmul = nullptr;
@@ -248,6 +252,12 @@ struct CompiledExecutionStage {
                     throw std::runtime_error("CompiledExecutionStage::outputDType missing LayerNorm stage.");
                 }
                 return layer_norm->output_dtype;
+
+            case Kind::LayerNormBackward:
+                if (!layer_norm_backward || outputs[output_idx].local_node_idx >= expr.nodes.size()) {
+                    throw std::runtime_error("LayerNorm-backward stage missing compiled route.");
+                }
+                return layer_norm_backward->outputDTypeFor(expr.nodes[outputs[output_idx].local_node_idx].op);
 
             case Kind::RmsNormBackward:
                 if (!rms_norm_backward) {
@@ -361,6 +371,8 @@ struct CompiledExecutionStage {
                 return rms_norm ? rms_norm->raggedPartitionRequirement() : missingPayload();
             case Kind::LayerNorm:
                 return layer_norm ? layer_norm->raggedPartitionRequirement() : missingPayload();
+            case Kind::LayerNormBackward:
+                return layer_norm_backward ? layer_norm_backward->raggedPartitionRequirement() : missingPayload();
             case Kind::RmsNormBackward:
                 return rms_norm_backward ? rms_norm_backward->raggedPartitionRequirement() : missingPayload();
             case Kind::Matmul:
@@ -517,6 +529,18 @@ struct CompiledExecutionStage {
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::LayerNorm),
           layer_norm(layer_norm),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const PhysicalExpression& expr,
+                           const std::shared_ptr<CompiledLayerNormBackward>& backward,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::LayerNormBackward),
+          expr(expr),
+          layer_norm_backward(backward),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
@@ -1028,6 +1052,12 @@ class FusedEquation {
         const std::optional<Tensor>& preallocatedOutput,
         const Stream& stream,
         const std::optional<Tensor>& rowPartitionOffsets = std::nullopt) const;
+
+    [[nodiscard]] std::shared_ptr<StampedLayerNormBackward> stampLayerNormBackward(
+        const std::shared_ptr<CompiledLayerNormBackward>& compiledStage,
+        const Tensor& input, const Tensor& scale, const Tensor& dY,
+        const std::vector<std::optional<Tensor>>& preallocatedOutputs,
+        const Stream& stream, const std::optional<Tensor>& rowPartitionOffsets) const;
 
     [[nodiscard]] std::shared_ptr<StampedRmsNormBackward> stampRmsNormBackward(
         const std::shared_ptr<CompiledRmsNormBackward>& compiledStage,

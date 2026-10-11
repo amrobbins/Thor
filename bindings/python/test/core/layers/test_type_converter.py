@@ -66,8 +66,7 @@ def test_type_converter_constructs_with_ragged_input_and_preserves_partition():
         "ragged_input",
         thor.DataType.fp32,
         [3],
-        max_total_values=8,
-        batch_size=2,
+        max_values_per_row=4,
         offsets_data_type=thor.DataType.uint32,
     )
 
@@ -76,7 +75,9 @@ def test_type_converter_constructs_with_ragged_input_and_preserves_partition():
     y = tc.get_feature_output()
     assert isinstance(y, thor.RaggedTensor)
     assert y.values.get_data_type() == thor.DataType.bf16
-    assert y.values.get_dimensions() == [8, 3]
+    assert y.values.get_dimensions() == [4, 3]
+    assert y.offsets.get_dimensions() == [1]
+    assert y.max_values_per_row == 4
     assert y.offsets == x.offsets
 
 
@@ -91,8 +92,7 @@ def test_ragged_type_converter_executes_only_active_prefix_and_preserves_offsets
         "tokens",
         thor.DataType.fp32,
         [2],
-        max_total_values=6,
-        batch_size=batch_size,
+        max_values_per_row=3,
         offsets_data_type=thor.DataType.uint32,
     )
     tc = thor.layers.TypeConverter(n, x, thor.DataType.fp16)
@@ -115,6 +115,7 @@ def test_ragged_type_converter_executes_only_active_prefix_and_preserves_offsets
     physical = thor.physical.PhysicalRaggedTensor(
         _cpu_tensor(values_np, thor.DataType.fp32),
         _cpu_tensor(offsets_np, thor.DataType.uint32),
+        max_values_per_row=3,
     )
 
     result = placed.infer({"tokens": physical})["output"]
@@ -136,8 +137,7 @@ def test_ragged_type_converter_save_load_preserves_expression_execution(tmp_path
         "tokens",
         thor.DataType.fp16,
         [2],
-        max_total_values=5,
-        batch_size=batch_size,
+        max_values_per_row=3,
         offsets_data_type=thor.DataType.uint32,
     )
     y = thor.layers.TypeConverter(n, x, thor.DataType.fp32).get_feature_output()
@@ -150,13 +150,15 @@ def test_ragged_type_converter_save_load_preserves_expression_execution(tmp_path
     loaded.load(str(save_dir))
     placed = loaded.place(batch_size, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
-    values_np = np.array([[1.5, -2.0], [3.0, 0.25], [99.0, 99.0], [99.0, 99.0], [99.0, 99.0]], dtype=np.float16)
+    # B=2 and semantic M=3 require six physical value slots.
+    values_np = np.array([[1.5, -2.0], [3.0, 0.25], [99.0, 99.0], [99.0, 99.0], [99.0, 99.0], [99.0, 99.0]], dtype=np.float16)
     offsets_np = np.array([0, 1, 2], dtype=np.uint32)
     result = placed.infer(
         {
             "tokens": thor.physical.PhysicalRaggedTensor(
                 _cpu_tensor(values_np, thor.DataType.fp16),
                 _cpu_tensor(offsets_np, thor.DataType.uint32),
+                max_values_per_row=3,
             )
         }
     )["output"]

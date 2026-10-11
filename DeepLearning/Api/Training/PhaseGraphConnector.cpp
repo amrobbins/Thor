@@ -101,6 +101,18 @@ void validateProducerConsumerDescriptors(const string& tensorName,
     }
 }
 
+// Phase composition compares logical input geometry. Runtime B and packed
+// Source and destination boundaries must both carry semantic per-row geometry.
+// A pre-unification fixed API graph must first be reconstructed logically;
+// comparing (or copying) its physical B/capacity would perpetuate that bug.
+bool sameRaggedInputGeometry(const RaggedTensor& a, const RaggedTensor& b) {
+    if (!a.hasMaxValuesPerRow() || !b.hasMaxValuesPerRow()) return false;
+    return a.getValuesDataType() == b.getValuesDataType() &&
+           a.getOffsetsDataType() == b.getOffsetsDataType() &&
+           a.getTrailingDimensions() == b.getTrailingDimensions() &&
+           a.getMaxValuesPerRow() == b.getMaxValuesPerRow();
+}
+
 optional<RaggedNetworkInputReference> raggedInputForPhysicalName(const Network& network, const string& physicalInputName) {
     for (const RaggedNetworkInputReference& ragged : network.getExternalRaggedNetworkInputs()) {
         if (physicalInputName == ragged.valuesInputName) {
@@ -116,13 +128,17 @@ Tensor ensureExternalInput(ComposedPhaseGraph& graph, const Network& sourceNetwo
     const optional<RaggedNetworkInputReference> sourceRagged =
         raggedInputForPhysicalName(sourceNetwork, inputName);
     if (sourceRagged.has_value()) {
+        if (!sourceRagged->raggedTensor.hasMaxValuesPerRow()) {
+            throw runtime_error("Phase graph ragged input '" + sourceRagged->name +
+                                "' is missing semantic max_values_per_row.");
+        }
         RaggedTensor destinationRagged;
         bool foundExisting = false;
         for (const RaggedNetworkInputReference& existing : graph.network->getExternalRaggedNetworkInputs()) {
             if (existing.name != sourceRagged->name) {
                 continue;
             }
-            if (existing.raggedTensor.getDescriptor() != sourceRagged->raggedTensor.getDescriptor() ||
+            if (!sameRaggedInputGeometry(existing.raggedTensor, sourceRagged->raggedTensor) ||
                 existing.partitionInputName != sourceRagged->partitionInputName) {
                 throw runtime_error("Phase graph logical ragged external input '" + sourceRagged->name +
                                     "' has incompatible descriptor/partition topology across active phases.");
@@ -133,13 +149,12 @@ Tensor ensureExternalInput(ComposedPhaseGraph& graph, const Network& sourceNetwo
         }
 
         if (!foundExisting) {
-            const ThorImplementation::RaggedTensorDescriptor descriptor =
-                sourceRagged->raggedTensor.getDescriptor();
+            const RaggedTensor& source = sourceRagged->raggedTensor;
             RaggedNetworkInput::Builder builder = RaggedNetworkInput::Builder()
                                                      .network(*graph.network)
                                                      .name(sourceRagged->name)
-                                                     .valuesDataType(descriptor.getValuesDataType())
-                                                     .trailingDimensions(descriptor.getTrailingDimensions());
+                                                     .valuesDataType(source.getValuesDataType())
+                                                     .trailingDimensions(source.getTrailingDimensions());
             if (sourceRagged->partitionInputName.has_value()) {
                 bool foundPartition = false;
                 for (const RaggedNetworkInputReference& existing : graph.network->getExternalRaggedNetworkInputs()) {
@@ -184,10 +199,8 @@ Tensor ensureExternalInput(ComposedPhaseGraph& graph, const Network& sourceNetwo
                     THOR_THROW_IF_FALSE(foundPartition);
                 }
             } else {
-                builder.offsetsDataType(descriptor.getOffsetsDataType())
-                    .maxTotalValues(descriptor.getMaxTotalValues())
-                    .batchSize(descriptor.getBatchSize());
-                if (descriptor.hasMaxValuesPerRow()) builder.maxValuesPerRow(descriptor.getMaxValuesPerRow());
+                builder.offsetsDataType(source.getOffsetsDataType());
+                builder.maxValuesPerRow(source.getMaxValuesPerRow());
             }
             destinationRagged = builder.build();
         }

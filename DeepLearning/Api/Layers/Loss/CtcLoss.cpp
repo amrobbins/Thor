@@ -1,4 +1,5 @@
 #include "DeepLearning/Api/Layers/Loss/CtcLoss.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
 
 using namespace std;
 using json = nlohmann::json;
@@ -60,24 +61,22 @@ void CtcLoss::deserialize(const json& j, Network* network) {
         throw runtime_error("Unsupported RaggedTensor version in CtcLoss::deserialize: " + labelsVersion);
     if (labelsJson.at("ragged_rank").get<uint32_t>() != 1)
         throw runtime_error("CtcLoss requires ragged_rank 1 labels.");
-    const uint64_t labelValuesId = labelsJson.at("values").at("id").get<uint64_t>();
-    const uint64_t labelOffsetsId = labelsJson.at("offsets").at("id").get<uint64_t>();
     const uint64_t inputLengthsId = j.at("input_lengths_tensor").at("id").get<uint64_t>();
 
     CtcLoss ctcLoss;
     ctcLoss.rawLossAddedToNetwork = true;
     ctcLoss.predictionsTensor = network->getApiTensorByOriginalId(predictionsId);
-    Tensor labelValues = network->getApiTensorByOriginalId(labelValuesId);
-    Tensor labelOffsets = network->getApiTensorByOriginalId(labelOffsetsId);
-    ctcLoss.labelsRaggedTensor = labelsJson.contains("max_values_per_row")
-        ? RaggedTensor(labelValues, labelOffsets, labelsJson.at("max_values_per_row").get<uint64_t>())
-        : RaggedTensor(labelValues, labelOffsets);
-    THOR_THROW_IF_FALSE(ctcLoss.labelsRaggedTensor.getBatchSize() == labelsJson.at("batch_size").get<uint64_t>());
-    THOR_THROW_IF_FALSE(ctcLoss.labelsRaggedTensor.getMaxTotalValues() == labelsJson.at("max_total_values").get<uint64_t>());
+    // Resolve historical packed label references against the graph's logical
+    // source owner. Archived B, B*M and [B+1] are only physical hints; even
+    // CTC's mandatory DEVICE_OFFSETS carrier is provisioned at placement.
+    ctcLoss.labelsRaggedTensor =
+        SegmentedPrimitiveDetail::reconstructInput(labelsJson, network, "CtcLoss.labels");
     THOR_THROW_IF_FALSE(ctcLoss.predictionsTensor.getDataType() == DataType::FP32);
     THOR_THROW_IF_FALSE(ctcLoss.predictionsTensor.getDimensions().size() == 2);
     THOR_THROW_IF_FALSE(ctcLoss.labelsRaggedTensor.getValuesDataType() == DataType::INT32);
     THOR_THROW_IF_FALSE(ctcLoss.labelsRaggedTensor.getTrailingDimensions().empty());
+    THOR_THROW_IF_FALSE(ThorImplementation::RowPartitionDescriptor::isValidOffsetsDataType(
+        ctcLoss.labelsRaggedTensor.getOffsetsDataType()));
     ctcLoss.labelsTensor = ctcLoss.labelsRaggedTensor.getValues();
     ctcLoss.inputLengthsTensor = network->getApiTensorByOriginalId(inputLengthsId);
     THOR_THROW_IF_FALSE(ThorImplementation::isCudnnCtcLengthDataType(ctcLoss.inputLengthsTensor.getDataType()));

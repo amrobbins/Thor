@@ -81,53 +81,32 @@ def test_ragged_network_input_returns_one_logical_ragged_tensor():
         "labels",
         thor.DataType.int32,
         [],
-        max_total_values=64,
-        batch_size=8,
         offsets_data_type=thor.DataType.uint64,
         max_values_per_row=12,
     )
 
     assert isinstance(labels, thor.RaggedTensor)
-    assert labels.values.get_dimensions() == [64]
-    assert labels.offsets.get_dimensions() == [9]
+    assert labels.values.get_dimensions() == [12]
+    assert labels.offsets.get_dimensions() == [1]
     assert labels.values_data_type == thor.DataType.int32
     assert labels.offsets_data_type == thor.DataType.uint64
-    assert labels.batch_size == 8
-    assert labels.max_total_values == 64
     assert labels.max_values_per_row == 12
 
 
 def test_ragged_network_input_rejects_invalid_shape_contract():
     n = _net()
-    with pytest.raises(ValueError, match="max_total_values"):
-        thor.layers.RaggedNetworkInput(
-            n,
-            "labels",
-            thor.DataType.int32,
-            [],
-            max_total_values=0,
-            batch_size=8,
-        )
+    # Without semantic M, a model cannot establish its logical ragged shape.
+    with pytest.raises(ValueError, match="max_values_per_row"):
+        thor.layers.RaggedNetworkInput(n, "labels", thor.DataType.int32, [])
 
     with pytest.raises(ValueError, match="trailing_dimensions"):
         thor.layers.RaggedNetworkInput(
-            n,
-            "labels2",
-            thor.DataType.fp16,
-            [4, 0],
-            max_total_values=64,
-            batch_size=8,
+            n, "labels2", thor.DataType.fp16, [4, 0], max_values_per_row=8
         )
 
     with pytest.raises((ValueError, RuntimeError)):
         thor.layers.RaggedNetworkInput(
-            n,
-            "labels3",
-            thor.DataType.fp16,
-            [4],
-            max_total_values=64,
-            batch_size=8,
-            max_values_per_row=65,
+            n, "labels3", thor.DataType.fp16, [4], max_values_per_row=0
         )
 
 
@@ -138,8 +117,6 @@ def test_ragged_network_input_can_share_existing_partition_without_repeating_str
         "feature",
         thor.DataType.fp32,
         [3],
-        max_total_values=17,
-        batch_size=5,
         offsets_data_type=thor.DataType.uint64,
         max_values_per_row=6,
     )
@@ -151,10 +128,9 @@ def test_ragged_network_input_can_share_existing_partition_without_repeating_str
         partition=feature,
     )
 
-    assert mask.values.get_dimensions() == [17]
+    assert mask.values.get_dimensions() == [6]
     assert mask.offsets == feature.offsets
-    assert mask.batch_size == feature.batch_size
-    assert mask.max_total_values == feature.max_total_values
+    assert mask.values.get_dimensions() == feature.values.get_dimensions()[:1]
     assert mask.max_values_per_row == feature.max_values_per_row
     assert mask.offsets_data_type == feature.offsets_data_type
 
@@ -171,9 +147,26 @@ def test_ragged_network_input_can_share_existing_partition_without_repeating_str
 def test_ragged_network_input_shared_partition_rejects_redundant_structure():
     n = _net()
     feature = thor.layers.RaggedNetworkInput(
-        n, "feature", thor.DataType.fp32, [2], max_total_values=8, batch_size=3, max_values_per_row=4
+        n, "feature", thor.DataType.fp32, [2], max_values_per_row=4
     )
     with pytest.raises(ValueError, match="sole structural source of truth"):
         thor.layers.RaggedNetworkInput(
-            n, "mask", thor.DataType.bool, [], partition=feature, max_total_values=8
+            n, "mask", thor.DataType.bool, [], partition=feature, max_values_per_row=4
+        )
+
+
+@pytest.mark.parametrize(
+    "obsolete_kwarg,value",
+    [("batch_size", 2), ("max_total_values", 8)],
+)
+def test_ragged_network_input_rejects_removed_physical_geometry_keywords(obsolete_kwarg, value):
+    network = thor.Network(f"ragged_input_removed_{obsolete_kwarg}")
+    with pytest.raises(TypeError):
+        thor.layers.RaggedNetworkInput(
+            network,
+            "tokens",
+            thor.DataType.fp32,
+            [3],
+            max_values_per_row=4,
+            **{obsolete_kwarg: value},
         )

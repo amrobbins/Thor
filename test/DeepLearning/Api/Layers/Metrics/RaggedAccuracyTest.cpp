@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Api/Layers/Metrics/BinaryAccuracy.h"
 #include "DeepLearning/Api/Layers/Metrics/CategoricalAccuracy.h"
+#include "DeepLearning/Api/Layers/Metrics/ReductionMetrics.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -11,6 +12,8 @@
 #include "gtest/gtest.h"
 
 #include <algorithm>
+#include <chrono>
+#include <filesystem>
 #include <array>
 #include <cstdint>
 #include <limits>
@@ -54,8 +57,6 @@ RaggedTensor buildPredictions(Network& network,
         .valuesDataType(DataType::FP32)
         .offsetsDataType(offsetsDType)
         .trailingDimensions(std::move(trailing))
-        .batchSize(4)
-        .maxTotalValues(9)
         .maxValuesPerRow(4)
         .build();
 }
@@ -140,8 +141,6 @@ TEST(RaggedAccuracyApi, R10ORejectsDifferentPartitionsAndConfusedClassAxis) {
                                             .name("separate_binary_labels")
                                             .valuesDataType(DataType::UINT8)
                                             .trailingDimensions({1})
-                                            .batchSize(4)
-                                            .maxTotalValues(9)
                                             .maxValuesPerRow(4)
                                             .build();
     EXPECT_THROW(BinaryAccuracy::Builder()
@@ -210,7 +209,8 @@ TEST(RaggedAccuracyApi, R10OBinaryPartialTailUsesAuthoritativeHostBoundaryAtVali
         GTEST_SKIP() << "R10O ragged BinaryAccuracy execution requires a GPU";
 
     constexpr uint32_t batchSize = 4;
-    constexpr uint64_t maxTotalValues = 9;
+    constexpr uint64_t maxValuesPerRow = 4;
+    constexpr uint64_t maxTotalValues = batchSize * maxValuesPerRow;
     for (DataType offsetsDType : {DataType::UINT32, DataType::UINT64}) {
         Network network("r10o_binary_partial_" + ThorImplementation::TensorDescriptor::getElementTypeName(offsetsDType));
         RaggedTensor predictions = buildPredictions(network, "predictions", offsetsDType, {1});
@@ -257,7 +257,7 @@ TEST(RaggedAccuracyApi, R10OBinaryPartialTailUsesAuthoritativeHostBoundaryAtVali
         writeOffsets(offsets, offsetsDType, {0, 2, 2, 5, 7});
 
         Batch batch;
-        batch.insert("predictions", ThorImplementation::RaggedTensor(packedPredictions, offsets, 4));
+        batch.insert("predictions", ThorImplementation::RaggedTensor(packedPredictions, offsets, maxValuesPerRow));
         batch.insert("labels", packedLabels);
         batch.setValidExampleCount(2);
 
@@ -280,4 +280,75 @@ TEST(RaggedAccuracyApi, R10OBinaryPartialTailUsesAuthoritativeHostBoundaryAtVali
         EXPECT_FLOAT_EQ(*stat.denominator->getMemPtr<float>(), 2.0f);
         placed->synchronize();
     }
+}
+
+// One real archive exercises the shared metric stamping contract without
+// duplicating the existing tokenwise numerical and partial-batch tests.
+TEST(RaggedAccuracyApi, U7GMetricsRecoverLogicalPartitionsAndPlaceAtTwoBatchSizes) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Metric placement regression requires a GPU";
+
+    const string name = "u7g_metric_geometry";
+    const auto archive = std::filesystem::temp_directory_path() /
+        (name + "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::remove_all(archive);
+    {
+        Network network(name);
+        auto makeInput = [&](const string& inputName, DataType dtype, vector<uint64_t> trailing) {
+            return RaggedNetworkInput::Builder()
+                .network(network).name(inputName).valuesDataType(dtype)
+                .offsetsDataType(DataType::UINT32).trailingDimensions(trailing)
+                .maxValuesPerRow(3).build();
+        };
+        auto makeSibling = [&](const string& inputName, DataType dtype, vector<uint64_t> trailing,
+                               const RaggedTensor& partition) {
+            return RaggedNetworkInput::Builder().network(network).name(inputName)
+                .valuesDataType(dtype).trailingDimensions(trailing).partition(partition).build();
+        };
+        auto exportMetric = [&](const string& metricName, Tensor metric) {
+            NetworkOutput::Builder().network(network).name(metricName)
+                .inputTensor(metric).dataType(DataType::FP32).build();
+        };
+
+        const RaggedTensor binary = makeInput("binary", DataType::FP32, {1});
+        const RaggedTensor binaryLabels = makeSibling("binary_labels", DataType::UINT8, {1}, binary);
+        exportMetric("binary_accuracy", BinaryAccuracy::Builder().network(network)
+            .predictions(binary).labels(binaryLabels).build().getMetric());
+
+        const RaggedTensor category = makeInput("category", DataType::FP32, {3});
+        const RaggedTensor categoryLabels = makeSibling("category_labels", DataType::UINT32, {1}, category);
+        exportMetric("categorical_accuracy", CategoricalAccuracy::Builder().network(network)
+            .predictions(category).labels(categoryLabels).receivesClassIndexLabels(3).build().getMetric());
+
+        const RaggedTensor values = makeInput("values", DataType::FP32, {2});
+        const RaggedTensor weights = makeSibling("weights", DataType::FP32, {2}, values);
+        exportMetric("mean", Mean::Builder().network(network).values(values).build().getMetric());
+        exportMetric("sum", Sum::Builder().network(network).values(values).build().getMetric());
+        exportMetric("min", Min::Builder().network(network).values(values).build().getMetric());
+        exportMetric("max", Max::Builder().network(network).values(values).build().getMetric());
+        exportMetric("weighted_mean", WeightedMean::Builder().network(network)
+            .values(values).weights(weights).build().getMetric());
+        network.save(archive.string(), true);
+    }
+
+    for (uint32_t batchSize : {2U, 7U}) {
+        Network loaded(name);
+        ASSERT_NO_THROW(loaded.load(archive.string()));
+        const auto inputs = loaded.getExternalRaggedNetworkInputs();
+        ASSERT_EQ(inputs.size(), 6U);
+        for (const auto& input : inputs) {
+            EXPECT_EQ(input.raggedTensor.getOffsetsDimensions(), (vector<uint64_t>{1}));
+            EXPECT_EQ(input.raggedTensor.getValuesDimensions().front(), 3U);
+            EXPECT_EQ(input.raggedTensor.getDescriptorForPlacement(batchSize).getMaxTotalValues(), batchSize * 3U);
+        }
+        vector<Event> initializationDone;
+        shared_ptr<PlacedNetwork> placed;
+        ASSERT_NO_THROW(placed = loaded.place(
+            batchSize, initializationDone, /*inferenceOnly=*/true, vector<int32_t>{0},
+            /*forcedNumStampsPerGpu=*/1));
+        ASSERT_NE(placed, nullptr);
+        for (Event& event : initializationDone) event.synchronize();
+        placed->synchronize();
+    }
+    std::filesystem::remove_all(archive);
 }

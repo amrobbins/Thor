@@ -186,10 +186,17 @@ def test_layer_norm_forward_matches_numpy_explicit_trailing_shape():
     np.testing.assert_allclose(actual.astype(np.float32), expected.astype(np.float32), atol=1.5e-3, rtol=1.5e-3)
 
 
-def _physical_ragged(values: np.ndarray, offsets: np.ndarray, dtype: thor.DataType = thor.DataType.fp32):
+def _physical_ragged(
+    values: np.ndarray,
+    offsets: np.ndarray,
+    dtype: thor.DataType = thor.DataType.fp32,
+    *,
+    max_values_per_row: int,
+):
     return thor.physical.PhysicalRaggedTensor(
         _cpu_tensor(values, dtype),
         _cpu_tensor(offsets, thor.DataType.uint32),
+        max_values_per_row=max_values_per_row,
     )
 
 
@@ -200,9 +207,7 @@ def test_layer_norm_accepts_ragged_tensor_and_preserves_partition():
         "tokens",
         thor.DataType.fp32,
         [4],
-        max_total_values=16,
         max_values_per_row=9,
-        batch_size=3,
         offsets_data_type=thor.DataType.uint32,
     )
 
@@ -211,7 +216,8 @@ def test_layer_norm_accepts_ragged_tensor_and_preserves_partition():
 
     assert ln.get_use_ragged() is True
     assert isinstance(y, thor.RaggedTensor)
-    assert y.values.get_dimensions() == [16, 4]
+    assert y.values.get_dimensions() == [9, 4]
+    assert y.offsets.get_dimensions() == [1]
     assert y.offsets == x.offsets
     assert y.max_values_per_row == 9
     assert ln.get_normalized_shape() == [4]
@@ -228,20 +234,18 @@ def test_layer_norm_rejects_ragged_geometry_outside_single_channel_contract():
         "tokens",
         thor.DataType.fp32,
         [4],
-        max_total_values=16,
-        batch_size=3,
+        max_values_per_row=9,
         offsets_data_type=thor.DataType.uint32,
     )
     with pytest.raises((RuntimeError, ValueError), match="packed ragged row dimension"):
-        thor.layers.LayerNorm(n, x, normalized_shape=[16, 4])
+        thor.layers.LayerNorm(n, x, normalized_shape=[9, 4])
 
     matrix = thor.layers.RaggedNetworkInput(
         n,
         "matrix_tokens",
         thor.DataType.fp32,
         [2, 2],
-        max_total_values=16,
-        batch_size=3,
+        max_values_per_row=9,
         offsets_data_type=thor.DataType.uint32,
     )
     with pytest.raises((RuntimeError, ValueError), match="exactly one non-zero trailing channel dimension"):
@@ -257,20 +261,19 @@ def test_ragged_layer_norm_matches_active_prefix_and_ignores_poisoned_capacity()
         "tokens",
         thor.DataType.fp32,
         [4],
-        max_total_values=16,
-        batch_size=3,
+        max_values_per_row=9,
         offsets_data_type=thor.DataType.uint32,
     )
     ln = thor.layers.LayerNorm(n, x, epsilon=epsilon)
     thor.layers.RaggedNetworkOutput(n, "output", ln.get_feature_output())
 
     active_rows = 11
-    values = np.full((16, 4), np.float32(np.nan), dtype=np.float32)
+    values = np.full((3 * 9, 4), np.float32(np.nan), dtype=np.float32)
     values[:active_rows] = (np.arange(active_rows * 4, dtype=np.float32).reshape(active_rows, 4) - 10.0) / 5.0
     offsets = np.array([0, 3, 3, active_rows], dtype=np.uint32)
 
     placed = n.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
-    result = placed.infer({"tokens": _physical_ragged(values, offsets)})["output"]
+    result = placed.infer({"tokens": _physical_ragged(values, offsets, max_values_per_row=9)})["output"]
     actual = np.array(result.values.numpy(), copy=True)
     expected = _layer_norm_reference(values[:active_rows], [4], epsilon)
 
@@ -286,9 +289,7 @@ def test_ragged_layer_norm_save_load_preserves_partition_metadata(tmp_path):
         "tokens",
         thor.DataType.fp32,
         [4],
-        max_total_values=16,
         max_values_per_row=9,
-        batch_size=3,
         offsets_data_type=thor.DataType.uint32,
     )
     ln = thor.layers.LayerNorm(n, x, epsilon=1e-4)

@@ -201,16 +201,14 @@ class StudentTNLLLoss::Builder {
             THOR_THROW_IF_FALSE(logScale.getValues() != target.getValues());
             if (!location.sharesPartitionWith(logScale) || !location.sharesPartitionWith(target))
                 throw std::invalid_argument("StudentTNLLLoss ragged location, log_scale, and target must use the exact same row partition.");
-            if (location.getBatchSize() != logScale.getBatchSize() || location.getBatchSize() != target.getBatchSize() ||
-                location.getMaxTotalValues() != logScale.getMaxTotalValues() || location.getMaxTotalValues() != target.getMaxTotalValues() ||
-                location.getTrailingDimensions() != logScale.getTrailingDimensions() || location.getTrailingDimensions() != target.getTrailingDimensions())
+            if (location.getValuesDimensions() != logScale.getValuesDimensions() ||
+                location.getValuesDimensions() != target.getValuesDimensions())
                 throw std::invalid_argument("StudentTNLLLoss ragged location, log_scale, and target must have identical value geometry.");
             if (_raggedLogDegreesOfFreedom.has_value()) {
                 const RaggedTensor& logDof = _raggedLogDegreesOfFreedom.value();
                 if (!location.sharesPartitionWith(logDof))
                     throw std::invalid_argument("StudentTNLLLoss ragged learned log degrees of freedom must use the exact same row partition.");
-                if (location.getBatchSize() != logDof.getBatchSize() || location.getMaxTotalValues() != logDof.getMaxTotalValues() ||
-                    location.getTrailingDimensions() != logDof.getTrailingDimensions())
+                if (location.getValuesDimensions() != logDof.getValuesDimensions())
                     throw std::invalid_argument("StudentTNLLLoss ragged learned log degrees of freedom must have identical value geometry.");
                 THOR_THROW_IF_FALSE(logDof.getValues() != location.getValues());
                 THOR_THROW_IF_FALSE(logDof.getValues() != logScale.getValues());

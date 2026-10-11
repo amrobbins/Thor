@@ -263,12 +263,10 @@ def _physical_ragged(
     dtype: thor.DataType = thor.DataType.fp32,
     *,
     offsets_dtype: thor.DataType = thor.DataType.uint32,
-    max_values_per_row=None,
+    max_values_per_row: int,
 ):
     values_tensor = _cpu_tensor(values, dtype)
     offsets_tensor = _cpu_tensor(offsets, offsets_dtype)
-    if max_values_per_row is None:
-        return thor.physical.PhysicalRaggedTensor(values_tensor, offsets_tensor)
     return thor.physical.PhysicalRaggedTensor(
         values_tensor,
         offsets_tensor,
@@ -279,10 +277,10 @@ def _physical_ragged(
 def test_rms_norm_ragged_epilogue_auxiliary_requires_exact_partition():
     n = thor.Network("test_net_rms_norm_ragged_epilogue_partition_guard")
     x = thor.layers.RaggedNetworkInput(
-        n, "tokens", thor.DataType.fp32, [4], max_total_values=8, batch_size=3, max_values_per_row=5
+        n, "tokens", thor.DataType.fp32, [4], max_values_per_row=5
     )
     other = thor.layers.RaggedNetworkInput(
-        n, "other", thor.DataType.fp32, [4], max_total_values=8, batch_size=3, max_values_per_row=5
+        n, "other", thor.DataType.fp32, [4], max_values_per_row=5
     )
     normalized = thor.layers.RMSNorm.epilogue_input(
         output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32
@@ -320,8 +318,8 @@ def test_rms_norm_ragged_epilogue_auxiliary_is_active_prefix_aware_and_round_tri
     tmp_path, offsets_dtype, np_offsets_dtype
 ):
     batch_size = 3
-    capacity = 8
     max_values_per_row = 5
+    capacity = batch_size * max_values_per_row
     features = 4
     name = f"test_net_rms_norm_ragged_epilogue_auxiliary_{np_offsets_dtype.__name__}"
     n = thor.Network(name)
@@ -330,8 +328,6 @@ def test_rms_norm_ragged_epilogue_auxiliary_is_active_prefix_aware_and_round_tri
         "tokens",
         thor.DataType.fp32,
         [features],
-        max_total_values=capacity,
-        batch_size=batch_size,
         max_values_per_row=max_values_per_row,
         offsets_data_type=offsets_dtype,
     )
@@ -390,10 +386,10 @@ def test_rms_norm_ragged_epilogue_auxiliary_is_active_prefix_aware_and_round_tri
     np.testing.assert_allclose(short_output[:5], np.maximum(short_values, 0.0), rtol=0.0, atol=0.0)
 
     long_offsets = [0, 1, 5, 8]
-    long_values = (np.arange(capacity * features, dtype=np.float32).reshape(capacity, features) - 9.0) / 3.0
+    long_values = (np.arange(8 * features, dtype=np.float32).reshape(8, features) - 9.0) / 3.0
     long_result, long_output = run(placed, long_offsets, long_values)
     np.testing.assert_array_equal(long_result.offsets.numpy(), np.asarray(long_offsets, dtype=np_offsets_dtype))
-    np.testing.assert_allclose(long_output[:capacity], np.maximum(long_values, 0.0), rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(long_output[: len(long_values)], np.maximum(long_values, 0.0), rtol=0.0, atol=0.0)
 
     empty_offsets = [0, 0, 0, 0]
     empty_result, _ = run(placed, empty_offsets, np.empty((0, features), dtype=np.float32))
@@ -424,8 +420,7 @@ def test_rms_norm_accepts_ragged_tensor_and_preserves_partition():
         "tokens",
         thor.DataType.fp32,
         [4],
-        max_total_values=66,
-        batch_size=2,
+        max_values_per_row=33,
         offsets_data_type=thor.DataType.uint32,
     )
 
@@ -434,7 +429,8 @@ def test_rms_norm_accepts_ragged_tensor_and_preserves_partition():
 
     assert rn.get_use_ragged() is True
     assert isinstance(y, thor.RaggedTensor)
-    assert y.values.get_dimensions() == [66, 4]
+    assert y.values.get_dimensions() == [33, 4]
+    assert y.offsets.get_dimensions() == [1]
     assert y.offsets == x.offsets
     assert rn.get_normalized_shape() == [4]
 
@@ -450,13 +446,12 @@ def test_rms_norm_rejects_ragged_normalized_shape_that_includes_packed_row_dimen
         "tokens",
         thor.DataType.fp32,
         [4],
-        max_total_values=66,
-        batch_size=2,
+        max_values_per_row=33,
         offsets_data_type=thor.DataType.uint32,
     )
 
     with pytest.raises((RuntimeError, ValueError), match="packed ragged row dimension"):
-        thor.layers.RMSNorm(n, x, normalized_shape=[66, 4])
+        thor.layers.RMSNorm(n, x, normalized_shape=[33, 4])
 
 
 @pytest.mark.cuda
@@ -469,8 +464,7 @@ def test_ragged_rms_norm_matches_dense_prefix_across_capacity_buckets(active_row
         "tokens",
         thor.DataType.fp32,
         [4],
-        max_total_values=66,
-        batch_size=2,
+        max_values_per_row=33,
         offsets_data_type=thor.DataType.uint32,
     )
     rn = thor.layers.RMSNorm(n, x, epsilon=epsilon)
@@ -483,7 +477,7 @@ def test_ragged_rms_norm_matches_dense_prefix_across_capacity_buckets(active_row
     offsets = np.array([0, active_rows // 2, active_rows], dtype=np.uint32)
 
     placed = n.place(2, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
-    result = placed.infer({"tokens": _physical_ragged(values, offsets)})["output"]
+    result = placed.infer({"tokens": _physical_ragged(values, offsets, max_values_per_row=33)})["output"]
     actual = np.array(result.values.numpy(), copy=True)
     expected = _rms_norm_reference(values[:active_rows], [4], epsilon)
 
@@ -523,8 +517,7 @@ def test_ragged_rms_norm_save_load_preserves_execution(tmp_path):
         "tokens",
         thor.DataType.fp32,
         [4],
-        max_total_values=16,
-        batch_size=3,
+        max_values_per_row=9,
         offsets_data_type=thor.DataType.uint32,
     )
     rn = thor.layers.RMSNorm(n, x, epsilon=epsilon)
@@ -535,11 +528,11 @@ def test_ragged_rms_norm_save_load_preserves_execution(tmp_path):
     loaded = thor.Network(name)
     loaded.load(str(save_dir))
 
-    values = np.full((16, 4), np.float32(-7777.0), dtype=np.float32)
+    values = np.full((3 * 9, 4), np.float32(-7777.0), dtype=np.float32)
     active_rows = 11
     values[:active_rows] = (np.arange(active_rows * 4, dtype=np.float32).reshape(active_rows, 4) - 10.0) / 5.0
     offsets = np.array([0, 3, 3, active_rows], dtype=np.uint32)
-    physical = _physical_ragged(values, offsets)
+    physical = _physical_ragged(values, offsets, max_values_per_row=9)
 
     placed = loaded.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
     result = placed.infer({"tokens": physical})["output"]

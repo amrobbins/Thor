@@ -336,8 +336,6 @@ def _r10j_gaussian_ragged_inputs(network, prefix="r10j_gaussian"):
         f"{prefix}_predictions",
         thor.DataType.fp32,
         [2],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     labels = thor.layers.RaggedNetworkInput(
@@ -391,8 +389,6 @@ def test_gaussian_nll_loss_r10j_rejects_per_output_and_mismatched_partition():
         "different_variance",
         thor.DataType.fp32,
         [2],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     with pytest.raises(ValueError, match=r"exact same row partition"):

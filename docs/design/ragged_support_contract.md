@@ -12,15 +12,21 @@ this matrix and the `check-ragged-support-contract` gate synchronized.
 
 ## Scope
 
-Thor's public `RaggedTensor` is a **canonical rank-1 sequence-ragged tensor**:
+Thor's public `RaggedTensor` is a **canonical rank-1 sequence-ragged logical tensor**.
+The graph does not own batch size or packed capacity:
 
 ```text
-RaggedTensor
-  values:        [max_total_values, trailing...]
-  row partition: logical RowPartitionId + authoritative host offsets
+Logical API RaggedTensor
+  values:              [M, trailing...]
+  row partition token: [1] (uint32 or uint64), with exact graph partition identity
+  max_values_per_row:   M, the semantic per-row capacity
+
+Placed physical ragged tensor (batch capacity B)
+  packed values:       [B*M, trailing...]
+  host row offsets:    [B+1], authoritative at execution time
 ```
 
-The required structural invariants are:
+The required **physical execution** invariants are:
 
 - `offsets[0] == 0`;
 - offsets are monotonically non-decreasing;
@@ -29,8 +35,9 @@ The required structural invariants are:
 - the logical packed extent is exactly `[0, offsets[batch_size])`;
 - `[offsets[batch_size], max_total_values)` is inactive capacity with undefined
   contents;
-- `max_values_per_row`, when present, is placement-time capacity metadata and
-  every logical row length must fit it;
+- `max_values_per_row` is required semantic geometry for an independent logical
+  ragged tensor; placement uses it to size capacity `B*M`, and every runtime
+  row length must fit it;
 - the complete host offsets vector is the authoritative runtime row partition;
   `active_value_count` and `max_active_row_length` are derived from it and cannot
   be published independently;

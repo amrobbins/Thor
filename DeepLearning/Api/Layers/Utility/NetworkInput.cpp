@@ -71,6 +71,12 @@ void NetworkInput::deserialize(const json &j, Network *network) {
 
     NetworkInput networkInput;
     networkInput.name = name;
+    // A legacy ragged source's archived dimensions describe B*M, not the
+    // logical [M,...] model tensor. The boundary owner resolved M before
+    // any Layer::deserialize call; dense sources have no override.
+    const uint64_t outputOriginalId = j.at("feature_output").at("id").get<uint64_t>();
+    const auto logical = network->logicalBoundaryDimensionsOnLoad(outputOriginalId);
+    if (logical.has_value()) dimensions = *logical;
     networkInput.dimensions = dimensions;
     networkInput.dataType = dataType;
     networkInput.dimensionsIncludeBatch_ = dimensionsIncludeBatch;
@@ -90,8 +96,14 @@ void NetworkInput::deserialize(const json &j, Network *network) {
         networkInput.featureOutput = sourceTensor;
     } else {
         networkInput.external_ = external;
-        networkInput.featureInput = Tensor::deserialize(j["feature_input"]);
-        networkInput.featureOutput = Tensor::deserialize(j["feature_output"]);
+        networkInput.featureInput = network->deserializeBoundarySourceTensor(j.at("feature_input"));
+        networkInput.featureOutput = network->deserializeBoundarySourceTensor(j.at("feature_output"));
+        if (logical.has_value()) {
+            THOR_THROW_IF_FALSE(networkInput.featureInput->getDimensions() == dimensions);
+            THOR_THROW_IF_FALSE(networkInput.featureOutput->getDimensions() == dimensions);
+            THOR_THROW_IF_FALSE(networkInput.featureInput->getDataType() == dataType);
+            THOR_THROW_IF_FALSE(networkInput.featureOutput->getDataType() == dataType);
+        }
     }
     networkInput.initialized = true;
     networkInput.addToNetwork(network);

@@ -6,6 +6,7 @@
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/AdaptiveLayerNorm.h"
 #include "DeepLearning/Implementation/ThorError.h"
 
+#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -67,7 +68,10 @@ class AdaptiveLayerNorm : public MultiConnectionLayer {
     uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
         if (!raggedFeatureInput.has_value()) return MultiConnectionLayer::getOutputTensorBytes(batchSize);
         THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
-        return featureOutputs.front().getTotalSizeInBytes();
+        const uint64_t bytes = featureOutputs.front().getTotalSizeInBytes();
+        if (batchSize == 0 || bytes > std::numeric_limits<uint64_t>::max() / batchSize)
+            throw std::overflow_error("AdaptiveLayerNorm neutral output capacity overflows uint64_t.");
+        return bytes * batchSize;
     }
     void informThatInputConnectionMade(Tensor inputTensor) override;
     void resetGraphTraversalState() override;

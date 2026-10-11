@@ -152,12 +152,12 @@ class GammaNLLLoss::Builder {
             THOR_THROW_IF_FALSE(mean.isInitialized() && labels.isInitialized());
             THOR_THROW_IF_FALSE(mean.getValues() != labels.getValues());
             if (!mean.sharesPartitionWith(labels)) throw std::invalid_argument("GammaNLLLoss ragged mean and labels must use the exact same row partition.");
-            if (mean.getBatchSize() != labels.getBatchSize() || mean.getMaxTotalValues() != labels.getMaxTotalValues() || mean.getTrailingDimensions() != labels.getTrailingDimensions())
+            if (mean.getValuesDimensions() != labels.getValuesDimensions())
                 throw std::invalid_argument("GammaNLLLoss ragged mean and labels must have identical value geometry.");
             if (_raggedDispersion.has_value()) {
                 const RaggedTensor& dispersion = _raggedDispersion.value();
                 if (!dispersion.sharesPartitionWith(mean)) throw std::invalid_argument("GammaNLLLoss ragged dispersion must use the exact same row partition as mean.");
-                if (dispersion.getBatchSize() != mean.getBatchSize() || dispersion.getMaxTotalValues() != mean.getMaxTotalValues() || dispersion.getTrailingDimensions() != mean.getTrailingDimensions())
+                if (dispersion.getValuesDimensions() != mean.getValuesDimensions())
                     throw std::invalid_argument("GammaNLLLoss ragged dispersion must have identical value geometry to mean.");
                 if (dispersion.getValues() == mean.getValues() || dispersion.getValues() == labels.getValues()) throw std::invalid_argument("GammaNLLLoss ragged dispersion values must be distinct from mean and labels values.");
             }

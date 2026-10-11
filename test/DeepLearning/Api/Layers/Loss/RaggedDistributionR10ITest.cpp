@@ -49,8 +49,6 @@ Inputs makeInputs(Network& network,
                   DataType labelDType = DataType::FP32,
                   DataType offsetsDType = DataType::UINT32,
                   vector<uint64_t> trailingDimensions = {1},
-                  uint32_t batchSize = 4,
-                  uint64_t maxTotalValues = 8,
                   bool withDispersion = false) {
     RaggedTensor predictions = RaggedNetworkInput::Builder()
                                    .network(network)
@@ -58,8 +56,6 @@ Inputs makeInputs(Network& network,
                                    .valuesDataType(predictionDType)
                                    .offsetsDataType(offsetsDType)
                                    .trailingDimensions(trailingDimensions)
-                                   .batchSize(batchSize)
-                                   .maxTotalValues(maxTotalValues)
                                    .maxValuesPerRow(5)
                                    .build();
     RaggedTensor labels = RaggedNetworkInput::Builder()
@@ -199,7 +195,7 @@ void runRuntimeCase(Kind kind, DataType offsetsDType, bool weighted) {
 
     constexpr uint32_t batchSize = 4;
     constexpr uint32_t validExamples = 3;
-    constexpr uint64_t maxTotalValues = 8;
+    constexpr uint64_t maxTotalValues = static_cast<uint64_t>(batchSize) * 5;
     Network network("ragged_r10i_runtime");
     Inputs inputs = makeInputs(network,
                                kind,
@@ -207,8 +203,6 @@ void runRuntimeCase(Kind kind, DataType offsetsDType, bool weighted) {
                                DataType::FP32,
                                offsetsDType,
                                {1},
-                               batchSize,
-                               maxTotalValues,
                                kind == Kind::GAMMA);
 
     optional<Tensor> weights;
@@ -349,7 +343,7 @@ TEST(RaggedDistributionR10I, ReportingContractsAndExactPartition) {
         for (Kind kind : {Kind::POISSON, Kind::TWEEDIE, Kind::GAMMA}) {
             Network rawNetwork("r10i_raw");
             const DataType labelsDType = kind == Kind::POISSON ? DataType::UINT16 : DataType::FP16;
-            Inputs inputs = makeInputs(rawNetwork, kind, DataType::FP16, labelsDType, offsetsDType, {2}, 4, 8, kind == Kind::GAMMA);
+            Inputs inputs = makeInputs(rawNetwork, kind, DataType::FP16, labelsDType, offsetsDType, {2}, kind == Kind::GAMMA);
             RaggedTensor raw;
             if (kind == Kind::POISSON) {
                 PoissonNLLLoss loss = PoissonNLLLoss::Builder()
@@ -387,7 +381,7 @@ TEST(RaggedDistributionR10I, ReportingContractsAndExactPartition) {
             EXPECT_EQ(countLayerType(rawNetwork, "RaggedCustomLoss"), 1u);
 
             Network perExampleNetwork("r10i_per_example");
-            Inputs perInputs = makeInputs(perExampleNetwork, kind, DataType::FP32, DataType::FP32, offsetsDType, {1}, 4, 8, kind == Kind::GAMMA);
+            Inputs perInputs = makeInputs(perExampleNetwork, kind, DataType::FP32, DataType::FP32, offsetsDType, {1}, kind == Kind::GAMMA);
             Tensor perExample;
             if (kind == Kind::POISSON)
                 perExample = PoissonNLLLoss::Builder().network(perExampleNetwork).predictions(perInputs.predictions).labels(perInputs.labels).reportsPerExampleLoss().build().getLoss();
@@ -401,8 +395,8 @@ TEST(RaggedDistributionR10I, ReportingContractsAndExactPartition) {
     }
 
     Network partitionNetwork("r10i_partition");
-    RaggedTensor predictions = RaggedNetworkInput::Builder().network(partitionNetwork).name("p").valuesDataType(DataType::FP32).trailingDimensions({1}).batchSize(3).maxTotalValues(7).maxValuesPerRow(4).build();
-    RaggedTensor labels = RaggedNetworkInput::Builder().network(partitionNetwork).name("l").valuesDataType(DataType::FP32).trailingDimensions({1}).batchSize(3).maxTotalValues(7).maxValuesPerRow(4).build();
+    RaggedTensor predictions = RaggedNetworkInput::Builder().network(partitionNetwork).name("p").valuesDataType(DataType::FP32).trailingDimensions({1}).maxValuesPerRow(4).build();
+    RaggedTensor labels = RaggedNetworkInput::Builder().network(partitionNetwork).name("l").valuesDataType(DataType::FP32).trailingDimensions({1}).maxValuesPerRow(4).build();
     EXPECT_THROW((void)PoissonNLLLoss::Builder().network(partitionNetwork).predictions(predictions).labels(labels).build(), invalid_argument);
     EXPECT_THROW((void)TweedieLoss::Builder().network(partitionNetwork).predictions(predictions).labels(labels).build(), invalid_argument);
     EXPECT_THROW((void)GammaNLLLoss::Builder().network(partitionNetwork).mean(predictions).labels(labels).build(), invalid_argument);
@@ -414,14 +408,12 @@ TEST(RaggedDistributionR10I, ReportingContractsAndExactPartition) {
 
 TEST(RaggedDistributionR10I, GammaDispersionMustSharePartitionAndGeometry) {
     Network network("r10i_gamma_dispersion_validation");
-    Inputs inputs = makeInputs(network, Kind::GAMMA, DataType::FP32, DataType::FP32, DataType::UINT32, {2}, 3, 7, false);
+    Inputs inputs = makeInputs(network, Kind::GAMMA, DataType::FP32, DataType::FP32, DataType::UINT32, {2}, false);
     RaggedTensor differentPartition = RaggedNetworkInput::Builder()
                                           .network(network)
                                           .name("different_dispersion")
                                           .valuesDataType(DataType::FP32)
                                           .trailingDimensions({2})
-                                          .batchSize(3)
-                                          .maxTotalValues(7)
                                           .maxValuesPerRow(4)
                                           .build();
     EXPECT_THROW((void)GammaNLLLoss::Builder()
@@ -444,7 +436,7 @@ TEST(RaggedDistributionR10I, ForwardBackwardUseOnlyActivePrefix) {
 
 TEST(RaggedDistributionR10I, SupportLayersSaveLoadIncludingGammaSecondaryInput) {
     Network network("r10i_round_trip");
-    Inputs inputs = makeInputs(network, Kind::GAMMA, DataType::FP32, DataType::FP32, DataType::UINT64, {1}, 4, 8, true);
+    Inputs inputs = makeInputs(network, Kind::GAMMA, DataType::FP32, DataType::FP32, DataType::UINT64, {1}, true);
     NetworkInput weightInput = NetworkInput::Builder().network(network).name("weights").dimensions({1}).dataType(DataType::FP32).build();
     (void)GammaNLLLoss::Builder()
         .network(network)

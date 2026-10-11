@@ -163,8 +163,6 @@ TEST(UtilityApiLayers, RaggedAdaptiveLayerNormUsesDensePerRowConditioningAndPres
                              .name("tokens")
                              .valuesDataType(DataType::FP16)
                              .trailingDimensions({32})
-                             .batchSize(3)
-                             .maxTotalValues(11)
                              .maxValuesPerRow(7)
                              .offsetsDataType(DataType::UINT64)
                              .build();
@@ -183,11 +181,11 @@ TEST(UtilityApiLayers, RaggedAdaptiveLayerNormUsesDensePerRowConditioningAndPres
     ASSERT_TRUE(layer.getRaggedDataInput().has_value());
     ASSERT_TRUE(layer.getRaggedFeatureOutput().has_value());
     const RaggedTensor output = layer.getRaggedFeatureOutput().value();
-    EXPECT_EQ(output.getValues().getDimensions(), (vector<uint64_t>{11, 32}));
+    EXPECT_EQ(output.getValues().getDimensions(), (vector<uint64_t>{7, 32}));
     EXPECT_EQ(output.getValuesDataType(), DataType::FP16);
     EXPECT_EQ(output.getOffsets(), input.getOffsets());
-    EXPECT_EQ(output.getBatchSize(), input.getBatchSize());
-    EXPECT_EQ(output.getMaxTotalValues(), input.getMaxTotalValues());
+    EXPECT_EQ(output.getMaxValuesPerRow(), input.getMaxValuesPerRow());
+    EXPECT_TRUE(output.sharesPartitionWith(input));
     ASSERT_TRUE(output.hasMaxValuesPerRow());
     EXPECT_EQ(output.getMaxValuesPerRow(), input.getMaxValuesPerRow());
     EXPECT_EQ(layer.getNormalizedShape(), (vector<uint64_t>{32}));
@@ -212,8 +210,7 @@ TEST(UtilityApiLayers, RaggedAdaptiveLayerNormRejectsNonTokenwiseNormalizedGeome
                              .name("tokens")
                              .valuesDataType(DataType::FP16)
                              .trailingDimensions({2, 16})
-                             .batchSize(2)
-                             .maxTotalValues(7)
+                             .maxValuesPerRow(3)
                              .build();
     Tensor scale(DataType::FP32, {16});
     Tensor bias(DataType::FP32, {16});
@@ -236,8 +233,6 @@ TEST(UtilityApiLayers, RaggedAdaptiveLayerNormInferencePlacementUsesSegmentedRow
                              .name("tokens")
                              .valuesDataType(DataType::FP16)
                              .trailingDimensions({32})
-                             .batchSize(batchSize)
-                             .maxTotalValues(12)
                              .maxValuesPerRow(6)
                              .offsetsDataType(DataType::UINT32)
                              .build();

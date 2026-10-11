@@ -132,9 +132,7 @@ void bind_quantile_loss(nb::module_ &losses) {
                     throw nb::value_error("QuantileLoss instance: per_output reporting is undefined for ragged predictions.");
                 if (!predictions.sharesPartitionWith(labels))
                     throw nb::value_error("QuantileLoss instance: ragged predictions and labels must use the exact same row partition.");
-                if (predictions.getBatchSize() != labels.getBatchSize() ||
-                    predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
-                    predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+                if (predictions.getValuesDimensions() != labels.getValuesDimensions())
                     throw nb::value_error("QuantileLoss instance: ragged predictions and labels must have identical value geometry.");
                 const DataType effectiveLossDataType = ThorPython::RegressionLossDType::effectiveLossDType(
                     loss_name, predictions.getValuesDataType(), loss_data_type);

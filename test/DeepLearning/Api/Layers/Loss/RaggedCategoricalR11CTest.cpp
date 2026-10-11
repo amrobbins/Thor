@@ -44,8 +44,6 @@ struct Inputs {
 Inputs makeInputs(Network& network,
                   DataType offsetsDType = DataType::UINT32,
                   DataType valuesDType = DataType::FP32,
-                  uint32_t batchSize = 4,
-                  uint64_t maxTotalValues = 8,
                   vector<uint64_t> trailingDimensions = {3}) {
     RaggedTensor predictions = RaggedNetworkInput::Builder()
                                    .network(network)
@@ -53,8 +51,6 @@ Inputs makeInputs(Network& network,
                                    .valuesDataType(valuesDType)
                                    .offsetsDataType(offsetsDType)
                                    .trailingDimensions(trailingDimensions)
-                                   .batchSize(batchSize)
-                                   .maxTotalValues(maxTotalValues)
                                    .maxValuesPerRow(5)
                                    .build();
     RaggedTensor labels = RaggedNetworkInput::Builder()
@@ -208,9 +204,9 @@ void runRuntimeCase(Kind kind, DataType offsetsDType) {
 
     constexpr uint32_t batchSize = 4;
     constexpr uint32_t validExamples = 3;
-    constexpr uint64_t maxTotalValues = 8;
+    constexpr uint64_t maxTotalValues = static_cast<uint64_t>(batchSize) * 5;
     Network network("ragged_r11c_runtime");
-    Inputs inputs = makeInputs(network, offsetsDType, DataType::FP32, batchSize, maxTotalValues);
+    Inputs inputs = makeInputs(network, offsetsDType, DataType::FP32);
     Tensor reportedLoss = buildBatchLoss(kind, network, inputs);
     (void)NetworkOutput::Builder().network(network).name("loss").inputTensor(reportedLoss).dataType(DataType::FP32).build();
 
@@ -320,8 +316,6 @@ TEST(RaggedCategoricalR11C, PublicContractsPreservePartitionAndRejectUndefinedGe
                                  .name("different")
                                  .valuesDataType(DataType::FP32)
                                  .trailingDimensions({3})
-                                 .batchSize(4)
-                                 .maxTotalValues(8)
                                  .maxValuesPerRow(5)
                                  .build();
     EXPECT_THROW((void)SoftTargetCrossEntropy::Builder().network(mismatchNetwork).predictions(same.predictions).labels(different).build(), invalid_argument);
@@ -335,7 +329,7 @@ TEST(RaggedCategoricalR11C, PublicContractsPreservePartitionAndRejectUndefinedGe
     EXPECT_THROW((void)CategoricalCrossEntropy::Builder().network(perOutputNetwork).predictions(perOutputInputs.predictions).labels(perOutputInputs.labels).reportsPerOutputLoss().build(), invalid_argument);
 
     Network rankNetwork("r11c_rank");
-    Inputs rankInputs = makeInputs(rankNetwork, DataType::UINT32, DataType::FP32, 4, 8, {2, 3});
+    Inputs rankInputs = makeInputs(rankNetwork, DataType::UINT32, DataType::FP32, {2, 3});
     EXPECT_THROW((void)SoftTargetCrossEntropy::Builder().network(rankNetwork).predictions(rankInputs.predictions).labels(rankInputs.labels).build(), logic_error);
     EXPECT_THROW((void)CategoricalFocalLoss::Builder().network(rankNetwork).predictions(rankInputs.predictions).labels(rankInputs.labels).build(), logic_error);
     EXPECT_THROW((void)CategoricalCrossEntropy::Builder().network(rankNetwork).predictions(rankInputs.predictions).labels(rankInputs.labels).build(), invalid_argument);

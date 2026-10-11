@@ -901,7 +901,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
                 const RaggedTensor output = slice->getRaggedFeatureOutput();
                 ThorImplementation::StampedNetwork::InternalRowPartitionPhysicalization physicalization;
                 physicalization.rowPartitionId = output.getRowPartitionId();
-                physicalization.descriptor = output.getDescriptor().getRowPartition();
+                physicalization.descriptor = output.getDescriptorForPlacement(batchSize).getRowPartition();
                 physicalization.logicalPartitionToken = output.getRowPartitionToken();
                 physicalization.logicalValuesTensor = output.getValues();
                 physicalization.requirements = aggregateRequirements(output.getRowPartitionToken()) |
@@ -920,7 +920,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
                 const RaggedTensor output = concatenate->getRaggedFeatureOutput();
                 ThorImplementation::StampedNetwork::InternalRowPartitionPhysicalization physicalization;
                 physicalization.rowPartitionId = output.getRowPartitionId();
-                physicalization.descriptor = output.getDescriptor().getRowPartition();
+                physicalization.descriptor = output.getDescriptorForPlacement(batchSize).getRowPartition();
                 physicalization.logicalPartitionToken = output.getRowPartitionToken();
                 physicalization.logicalValuesTensor = output.getValues();
                 physicalization.requirements = aggregateRequirements(output.getRowPartitionToken());
@@ -981,10 +981,8 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
                 for (const auto& [raggedName, raggedRecord] : raggedNetworkInputs) {
                     (void)raggedName;
                     if (raggedRecord.valuesInputName != networkInput->getName()) continue;
-                    if (raggedRecord.raggedTensor.isPlacementNeutral()) {
-                        raggedPhysicalDimensions =
-                            raggedRecord.raggedTensor.getDescriptorForPlacement(batchSize).getValuesDimensions();
-                    }
+                    raggedPhysicalDimensions =
+                        raggedRecord.raggedTensor.getDescriptorForPlacement(batchSize).getValuesDimensions();
                     break;
                 }
                 stampNetworkInput(networkInput, gpuNum, batchSize, stampedNetwork, raggedPhysicalDimensions);
@@ -1016,6 +1014,12 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
                             stampedNetwork.apiTensorToPhysicalDrivingLayerShared[valuesTensor] = valuesFanout;
                             stampedNetwork.apiTensorToPhysicalDrivingLayer[valuesTensor] = valuesFanout.get();
                         }
+                        // HOST_EXTENT is a structural dependency routed over
+                        // the canonical packed-values carrier, not necessarily
+                        // a tensor with this consumer's trailing dimensions.
+                        // Propagate the known runtime partition metadata so
+                        // consumers do not infer B from another layer's shape.
+                        valuesFanout->setRowPartitionDescriptorForStamp(physicalization.descriptor);
                         physicalization.hostCarrierDrivingLayer = valuesFanout;
                     }
                 }
@@ -1403,6 +1407,15 @@ void Network::registerRaggedNetworkInput(const std::string& name,
                                          std::optional<std::string> partitionInputName) {
     THOR_THROW_IF_FALSE(!name.empty());
     THOR_THROW_IF_FALSE(raggedTensor.isInitialized());
+    // A network boundary is a logical per-example tensor. Archived physical
+    // dimensions must have been normalized by its original source owner before
+    // registration; there is no fixed-batch boundary variant.
+    THOR_THROW_IF_FALSE(raggedTensor.hasMaxValuesPerRow());
+    THOR_THROW_IF_FALSE(raggedTensor.getValuesDimensions().front() == raggedTensor.getMaxValuesPerRow());
+    THOR_THROW_IF_FALSE(raggedTensor.getOffsetsDimensions() == std::vector<uint64_t>{1});
+    // Verify that the logical dtype and M support a physical descriptor at
+    // placement time. The [1] token is structural, never archived [B+1] offsets.
+    (void)raggedTensor.getDescriptorForPlacement(1);
     THOR_THROW_IF_FALSE(!valuesInputName.empty());
     THOR_THROW_IF_FALSE(raggedNetworkInputs.count(name) == 0);
 
@@ -1437,16 +1450,8 @@ void Network::registerRaggedNetworkInput(const std::string& name,
         THOR_THROW_IF_FALSE(!sourceIt->second.partitionInputName.has_value());
         THOR_THROW_IF_FALSE(sourceIt->second.partitionTokenInputName == partitionTokenInputName);
         THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.sharesPartitionWith(raggedTensor));
-        THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getGeometryMode() == raggedTensor.getGeometryMode());
-        if (!raggedTensor.isPlacementNeutral()) {
-            THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getBatchSize() == raggedTensor.getBatchSize());
-            THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getMaxTotalValues() == raggedTensor.getMaxTotalValues());
-        }
         THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getOffsetsDataType() == raggedTensor.getOffsetsDataType());
-        THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.hasMaxValuesPerRow() == raggedTensor.hasMaxValuesPerRow());
-        if (raggedTensor.hasMaxValuesPerRow()) {
-            THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getMaxValuesPerRow() == raggedTensor.getMaxValuesPerRow());
-        }
+        THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getMaxValuesPerRow() == raggedTensor.getMaxValuesPerRow());
     } else {
         for (const auto& [existingName, existing] : raggedNetworkInputs) {
             (void)existingName;
@@ -1520,7 +1525,12 @@ void Network::registerRaggedNetworkOutput(const std::string& name,
     for (const std::shared_ptr<Layer>& layer : allLayersInNetworkList) {
         const std::shared_ptr<NetworkOutput> candidate = std::dynamic_pointer_cast<NetworkOutput>(layer);
         if (candidate == nullptr || !candidate->getFeatureInput().has_value()) continue;
-        if (candidate->getFeatureInput().value() != raggedTensor.getRowPartitionToken()) continue;
+        // An old offsets NetworkOutput may carry the archived partition as its
+        // output tensor; earlier writers also used the input tensor directly.
+        const bool ownsToken = candidate->getFeatureInput().value() == raggedTensor.getRowPartitionToken() ||
+            (candidate->getFeatureOutput().has_value() &&
+             candidate->getFeatureOutput().value() == raggedTensor.getRowPartitionToken());
+        if (!ownsToken) continue;
         if (candidate->getName() == valuesOutputName) continue;
         THOR_THROW_IF_FALSE(!record.legacyOffsetsOutputName.has_value());
         record.legacyOffsetsOutputName = candidate->getName();
@@ -1559,12 +1569,13 @@ void Network::appendRaggedNetworkBoundaryJson(json& modelJson) const {
         modelJson["ragged_network_inputs"] = json::array();
         for (const auto& [name, record] : raggedNetworkInputs) {
             (void)name;
-            const bool placementNeutral = record.raggedTensor.isPlacementNeutral();
-            json entry{{"version", placementNeutral ? "1.4.0" : "1.3.0"},
+            // These version strings describe the RP7 boundary grammar, not a
+            // fixed versus neutral execution mode. Historical JSON is parsed
+            // into the same logical tensor irrespective of its old version.
+            json entry{{"version", "1.3.0"},
                        {"name", record.name},
                        {"values_input_name", record.valuesInputName},
                        {"values_tensor_id", record.raggedTensor.getValues().getId()}};
-            if (placementNeutral) entry["geometry_mode"] = "placement_neutral";
             if (record.partitionInputName.has_value()) {
                 entry["partition_input_name"] = record.partitionInputName.value();
             } else {
@@ -1580,13 +1591,12 @@ void Network::appendRaggedNetworkBoundaryJson(json& modelJson) const {
         modelJson["ragged_network_outputs"] = json::array();
         for (const auto& [name, record] : raggedNetworkOutputs) {
             (void)name;
-            const bool placementNeutral = record.raggedTensor.isPlacementNeutral();
-            json entry{{"version", placementNeutral ? "1.3.0" : "1.2.0"},
+            // Schema version identifies the partition-token grammar only.
+            json entry{{"version", "1.2.0"},
                        {"name", record.name},
                        {"values_output_name", record.valuesOutputName},
                        {"values_tensor_id", record.raggedTensor.getValues().getId()},
                        {"row_partition_token_tensor_id", record.raggedTensor.getRowPartitionToken().getId()}};
-            if (placementNeutral) entry["geometry_mode"] = "placement_neutral";
             if (record.raggedTensor.hasMaxValuesPerRow())
                 entry["max_values_per_row"] = record.raggedTensor.getMaxValuesPerRow();
             modelJson["ragged_network_outputs"].push_back(std::move(entry));
@@ -1655,6 +1665,198 @@ std::string Network::cudaKernelSourceInfoJsonString() const {
     return ThorImplementation::cudaKernelSourceInspectionListToJson(cudaKernelSourceInfo()).dump(4);
 }
 
+// This index is for load-time source ownership only. Historical boundary
+// declarations can supply a trustworthy semantic per-row M even though the
+// nested NetworkInput tensors were saved with a physical [B*M,...] shape.
+// Identify those source tensor IDs before deserializing any API layers.
+std::optional<std::vector<uint64_t>> Network::logicalBoundaryDimensionsOnLoad(uint64_t originalTensorId) const {
+    const auto found = loadingLogicalBoundaryDimensions_.find(originalTensorId);
+    if (found == loadingLogicalBoundaryDimensions_.end()) return std::nullopt;
+    return found->second;
+}
+
+Tensor Network::deserializeBoundarySourceTensor(const json& tensorJson) const {
+    Tensor restored = Tensor::deserialize(tensorJson);
+    if (auto logical = logicalBoundaryDimensionsOnLoad(restored.getOriginalId())) {
+        restored.dimensions = *logical;  // Network owns the archived source reconstruction.
+    }
+    return restored;
+}
+
+void Network::indexRaggedBoundarySourceGeometry(const json& modelJson) {
+    loadingLogicalBoundaryDimensions_.clear();
+    if (!modelJson.contains("ragged_network_inputs") && !modelJson.contains("ragged_network_outputs")) return;
+
+    const json& layers = modelJson.at("layers");
+    std::map<std::string, const json*> inputsByName;
+    std::map<std::string, const json*> outputsByName;
+    std::map<uint64_t, const json*> inputsByOutputId;
+    for (const json& layer : layers) {
+        const std::string type = layer.value("layer_type", std::string{});
+        if (type != "network_input" && type != "network_output") continue;
+        const std::string name = layer.at("name").get<std::string>();
+        if (type == "network_input") {
+            if (!inputsByName.emplace(name, &layer).second)
+                throw std::runtime_error("Duplicate archived NetworkInput name: " + name);
+            const uint64_t id = layer.at("feature_output").at("id").get<uint64_t>();
+            // A pass-through NetworkInput names an already-owned API tensor.
+            // Multiple member-scoped aliases may legitimately share its ID;
+            // only real sources are candidates for boundary token ownership.
+            if (layer.contains("pass_through_source")) {
+                const uint64_t sourceId = layer.at("pass_through_source").at("id").get<uint64_t>();
+                if (id != sourceId ||
+                    layer.at("feature_input").at("id").get<uint64_t>() != sourceId)
+                    throw std::runtime_error("Invalid archived pass-through NetworkInput tensor alias: " + name);
+                continue;
+            }
+            if (!inputsByOutputId.emplace(id, &layer).second)
+                throw std::runtime_error("Duplicate archived NetworkInput tensor ID");
+        } else {
+            if (!outputsByName.emplace(name, &layer).second)
+                throw std::runtime_error("Duplicate archived NetworkOutput name: " + name);
+        }
+    }
+    auto recordDimensions = [this](uint64_t tensorId, const std::vector<uint64_t>& dimensions) {
+        if (dimensions.empty() || std::any_of(dimensions.begin(), dimensions.end(), [](uint64_t v) { return v == 0; }))
+            throw std::runtime_error("Ragged boundary has invalid semantic dimensions");
+        const auto [it, inserted] = loadingLogicalBoundaryDimensions_.emplace(tensorId, dimensions);
+        if (!inserted && it->second != dimensions)
+            throw std::runtime_error("Conflicting logical dimensions for archived ragged tensor ID " + std::to_string(tensorId));
+    };
+    auto sourceLayer = [](const std::map<std::string, const json*>& byName, const std::string& name,
+                          const char* kind) -> const json& {
+        auto it = byName.find(name);
+        if (it == byName.end()) throw std::runtime_error(std::string("Ragged boundary missing archived ") + kind + " '" + name + "'");
+        return *it->second;
+    };
+    auto logicalDimensions = [](const json& layer, uint64_t M) {
+        const auto archived = layer.at("feature_output").at("dimensions").get<std::vector<uint64_t>>();
+        if (archived.empty()) throw std::runtime_error("Ragged values source has no trailing dimensions");
+        std::vector<uint64_t> logical = archived;
+        logical.front() = M;
+        return logical;
+    };
+    auto markSource = [&](const json& layer, uint64_t archivedOutputId, const std::vector<uint64_t>& logical) {
+        if (layer.at("feature_output").at("id").get<uint64_t>() != archivedOutputId)
+            throw std::runtime_error("Ragged boundary references the wrong original source tensor ID");
+        if (layer.contains("pass_through_source"))
+            throw std::runtime_error("Ragged boundary source unexpectedly aliases another NetworkInput");
+        if (layer.at("feature_input").at("dimensions").get<std::vector<uint64_t>>() !=
+                layer.at("feature_output").at("dimensions").get<std::vector<uint64_t>>() ||
+            layer.at("dimensions").get<std::vector<uint64_t>>() !=
+                layer.at("feature_output").at("dimensions").get<std::vector<uint64_t>>() ||
+            layer.at("feature_input").at("data_type") != layer.at("feature_output").at("data_type") ||
+            layer.at("data_type") != layer.at("feature_output").at("data_type"))
+            throw std::runtime_error("Inconsistent archived ragged NetworkInput source");
+        recordDimensions(layer.at("feature_input").at("id").get<uint64_t>(), logical);
+        recordDimensions(archivedOutputId, logical);
+    };
+
+    std::map<std::string, const json*> boundaries;
+    std::map<uint64_t, uint64_t> MByCanonicalTokenId;
+    if (modelJson.contains("ragged_network_inputs")) {
+        const json& entries = modelJson.at("ragged_network_inputs");
+        if (!entries.is_array()) throw std::runtime_error("ragged_network_inputs must be an array");
+        for (const json& entry : entries) {
+            const std::string name = entry.at("name").get<std::string>();
+            if (!boundaries.emplace(name, &entry).second)
+                throw std::runtime_error("Duplicate archived ragged boundary: " + name);
+        }
+    }
+    std::map<std::string, uint64_t> MByBoundary;
+    std::set<std::string> resolving;
+    std::function<uint64_t(const std::string&)> resolveM = [&](const std::string& name) -> uint64_t {
+        if (auto known = MByBoundary.find(name); known != MByBoundary.end()) return known->second;
+        auto it = boundaries.find(name);
+        if (it == boundaries.end()) throw std::runtime_error("Missing shared ragged partition owner: " + name);
+        if (!resolving.insert(name).second) throw std::runtime_error("Cycle in shared ragged partition ownership: " + name);
+        const json& entry = *it->second;
+        uint64_t M = 0;
+        if (entry.contains("partition_input_name")) {
+            M = resolveM(entry.at("partition_input_name").get<std::string>());
+            if (entry.contains("max_values_per_row") && entry.at("max_values_per_row").get<uint64_t>() != M)
+                throw std::runtime_error("Shared ragged boundary disagrees with canonical semantic M: " + name);
+        } else {
+            if (!entry.contains("max_values_per_row"))
+                throw std::runtime_error("Unrecoverable historical ragged boundary '" + name +
+                    "': no independently serialized semantic max_values_per_row (M)");
+            M = entry.at("max_values_per_row").get<uint64_t>();
+        }
+        if (M == 0) throw std::runtime_error("Invalid semantic M for ragged boundary: " + name);
+        resolving.erase(name);
+        MByBoundary[name] = M;
+        return M;
+    };
+    for (const auto& [name, entry] : boundaries) {
+        const uint64_t M = resolveM(name);
+        const std::string valuesName = entry->at("values_input_name").get<std::string>();
+        const uint64_t valuesId = entry->at("values_tensor_id").get<uint64_t>();
+        const json& valuesLayer = sourceLayer(inputsByName, valuesName, "values NetworkInput");
+        markSource(valuesLayer, valuesId, logicalDimensions(valuesLayer, M));
+        if (!entry->contains("partition_input_name")) {
+            const bool token = entry->contains("row_partition_token_tensor_id");
+            const uint64_t tokenId = entry->at(token ? "row_partition_token_tensor_id" : "offsets_tensor_id").get<uint64_t>();
+            auto tokenSource = inputsByOutputId.find(tokenId);
+            if (tokenSource == inputsByOutputId.end())
+                throw std::runtime_error("Missing archived row-partition token source for " + name);
+            const json& tokenLayer = *tokenSource->second;
+            const auto archived = tokenLayer.at("feature_output").at("dimensions").get<std::vector<uint64_t>>();
+            if (archived.size() != 1)
+                throw std::runtime_error("Invalid archived row-partition token rank for " + name);
+            markSource(tokenLayer, tokenId, {1});
+            MByCanonicalTokenId[tokenId] = M;
+        }
+    }
+
+    // The external logical output may have been saved as a packed NetworkOutput
+    // too. Output semantic M is either explicit or inherited from its already
+    // identified source tensor. Never derive it from archived B or total capacity.
+    if (modelJson.contains("ragged_network_outputs")) {
+        const json& entries = modelJson.at("ragged_network_outputs");
+        if (!entries.is_array()) throw std::runtime_error("ragged_network_outputs must be an array");
+        for (const json& entry : entries) {
+            const std::string name = entry.at("name").get<std::string>();
+            const std::string outputName = entry.at("values_output_name").get<std::string>();
+            const json& layer = sourceLayer(outputsByName, outputName, "values NetworkOutput");
+            const uint64_t id = entry.at("values_tensor_id").get<uint64_t>();
+            if (layer.at("feature_output").at("id").get<uint64_t>() != id)
+                throw std::runtime_error("Ragged output has inconsistent original tensor ID: " + name);
+            const uint64_t inputId = layer.at("feature_input").at("id").get<uint64_t>();
+            const auto inherited = logicalBoundaryDimensionsOnLoad(inputId);
+            uint64_t M = 0;
+            if (entry.contains("max_values_per_row")) M = entry.at("max_values_per_row").get<uint64_t>();
+            else if (inherited.has_value()) M = inherited->at(0);
+            else {
+                uint64_t canonicalTokenId = 0;
+                if (entry.contains("row_partition_token_tensor_id")) {
+                    canonicalTokenId = entry.at("row_partition_token_tensor_id").get<uint64_t>();
+                } else if (entry.contains("offsets_output_name")) {
+                    const json& offsetsLayer = sourceLayer(outputsByName,
+                        entry.at("offsets_output_name").get<std::string>(), "offsets NetworkOutput");
+                    canonicalTokenId = offsetsLayer.at("feature_input").at("id").get<uint64_t>();
+                }
+                if (auto tokenIt = MByCanonicalTokenId.find(canonicalTokenId); tokenIt != MByCanonicalTokenId.end())
+                    M = tokenIt->second;
+            }
+            if (M == 0) throw std::runtime_error("Unrecoverable historical ragged output '" + name +
+                "': no independently recoverable semantic M");
+            if (M == 0 || (inherited.has_value() && inherited->at(0) != M))
+                throw std::runtime_error("Ragged output disagrees with the logical source M: " + name);
+            recordDimensions(id, logicalDimensions(layer, M));
+            // Pre-RP7 archives materialized an obsolete offsets NetworkOutput.
+            // Its original tensor ID remains an alias of the canonical token.
+            if (entry.contains("offsets_output_name")) {
+                const json& offsetsLayer = sourceLayer(outputsByName,
+                    entry.at("offsets_output_name").get<std::string>(), "offsets NetworkOutput");
+                const uint64_t offsetsId = entry.at("offsets_tensor_id").get<uint64_t>();
+                if (offsetsLayer.at("feature_output").at("id").get<uint64_t>() != offsetsId)
+                    throw std::runtime_error("Ragged output has inconsistent offsets tensor ID: " + name);
+                recordDimensions(offsetsId, {1});
+            }
+        }
+    }
+}
+
 void Network::load(const string &directory) { load(directory, false, "", ""); }
 
 void Network::load(const string &directory, bool allowUnsafeLoadedCudaKernelSource) { load(directory, allowUnsafeLoadedCudaKernelSource, "", ""); }
@@ -1690,6 +1892,9 @@ void Network::load(const string &directory,
     if (!layers.is_array()) {
         throw runtime_error("\"layers\" is not a JSON array");
     }
+    // Resolve semantic boundary ownership before importing any NetworkInput or
+    // NetworkOutput JSON; later layers must see [M,...] and a [1] token.
+    indexRaggedBoundarySourceGeometry(modelJson);
     if (modelJson.contains("default_optimizer"))
         defaultOptimizer = Optimizer::deserialize(archiveReader, modelJson["default_optimizer"], this);
 
@@ -1742,35 +1947,25 @@ void Network::load(const string &directory,
                     throw runtime_error("Shared ragged input '" + name + "' references missing partition input '" +
                                         partitionInputName + "'.");
                 }
-                const bool placementNeutral = raggedInputVersion == "1.4.0";
-                if (placementNeutral != sourceIt->second.raggedTensor.isPlacementNeutral()) {
-                    throw runtime_error("Shared ragged input geometry mode does not match its canonical partition owner.");
-                }
-                if (placementNeutral && raggedInputJson.value("geometry_mode", string{}) != "placement_neutral") {
-                    throw runtime_error("Placement-neutral shared ragged input has invalid geometry mode.");
-                }
+                // Old geometry_mode was a writer-side marker, not model state.
+                // Shared partition identity is resolved from the canonical owner.
                 RaggedTensor raggedTensor = sourceIt->second.raggedTensor.withValues(values);
                 registerRaggedNetworkInput(name, raggedTensor, valuesInputName, partitionInputName);
             } else {
-                const bool placementNeutral = raggedInputVersion == "1.4.0";
-                const bool rp7Boundary = raggedInputVersion == "1.3.0" || placementNeutral;
+                // Both version strings use the same RP7 partition-token grammar.
+                // Neither selects an execution-time batch geometry.
+                const bool rp7Boundary = raggedInputVersion == "1.3.0" || raggedInputVersion == "1.4.0";
                 const uint64_t partitionTokenTensorId = rp7Boundary
                     ? raggedInputJson.at("row_partition_token_tensor_id").get<uint64_t>()
                     : raggedInputJson.at("offsets_tensor_id").get<uint64_t>();
                 Tensor partitionToken = getApiTensorByOriginalId(partitionTokenTensorId);
-                RaggedTensor raggedTensor;
-                if (placementNeutral) {
-                    if (raggedInputJson.value("geometry_mode", string{}) != "placement_neutral" ||
-                        !raggedInputJson.contains("max_values_per_row")) {
-                        throw runtime_error("Placement-neutral ragged input requires explicit geometry mode and max_values_per_row.");
-                    }
-                    raggedTensor = RaggedTensor::placementNeutral(
-                        values, partitionToken, raggedInputJson.at("max_values_per_row").get<uint64_t>());
-                } else {
-                    raggedTensor = raggedInputJson.contains("max_values_per_row")
-                        ? RaggedTensor(values, partitionToken, raggedInputJson.at("max_values_per_row").get<uint64_t>())
-                        : RaggedTensor(values, partitionToken);
+                // Old versions are alternate syntaxes, never fixed model modes.
+                // Source tensor dimensions were normalized before any layer load.
+                if (!raggedInputJson.contains("max_values_per_row")) {
+                    throw runtime_error("Unrecoverable historical ragged input: missing semantic M");
                 }
+                RaggedTensor raggedTensor = RaggedTensor::logical(
+                    values, partitionToken, raggedInputJson.at("max_values_per_row").get<uint64_t>());
                 // For pre-RP7 archives partitionToken is the old public .offsets
                 // NetworkInput. registerRaggedNetworkInput discovers its owning input layer and
                 // treats it as a topology token; placement deliberately does not stamp it.
@@ -1802,33 +1997,29 @@ void Network::load(const string &directory,
                 const uint64_t partitionTokenTensorId =
                     raggedOutputJson.at("row_partition_token_tensor_id").get<uint64_t>();
                 Tensor partitionToken = getApiTensorByOriginalId(partitionTokenTensorId);
-                RaggedTensor raggedTensor;
-                if (raggedOutputVersion == "1.3.0") {
-                    if (raggedOutputJson.value("geometry_mode", string{}) != "placement_neutral" ||
-                        !raggedOutputJson.contains("max_values_per_row")) {
-                        throw runtime_error("Placement-neutral ragged output requires explicit geometry mode and max_values_per_row.");
-                    }
-                    raggedTensor = RaggedTensor::placementNeutral(
-                        values, partitionToken, raggedOutputJson.at("max_values_per_row").get<uint64_t>());
-                } else {
-                    raggedTensor = raggedOutputJson.contains("max_values_per_row")
-                        ? RaggedTensor(values, partitionToken, raggedOutputJson.at("max_values_per_row").get<uint64_t>())
-                        : RaggedTensor(values, partitionToken);
+                RaggedTensor raggedTensor = RaggedTensor::logical(
+                    values, partitionToken, values.getDimensions().at(0));
+                if (raggedOutputJson.contains("max_values_per_row") &&
+                    raggedOutputJson.at("max_values_per_row").get<uint64_t>() != raggedTensor.getMaxValuesPerRow()) {
+                    throw runtime_error("Ragged output semantic M does not match its logical values tensor");
                 }
                 registerRaggedNetworkOutput(name, raggedTensor, valuesOutputName);
             } else {
                 const string offsetsOutputName = raggedOutputJson.at("offsets_output_name").get<string>();
                 const uint64_t offsetsTensorId = raggedOutputJson.at("offsets_tensor_id").get<uint64_t>();
                 Tensor offsets = getApiTensorByOriginalId(offsetsTensorId);
-                RaggedTensor raggedTensor = raggedOutputJson.contains("max_values_per_row")
-                    ? RaggedTensor(values, offsets, raggedOutputJson.at("max_values_per_row").get<uint64_t>())
-                    : RaggedTensor(values, offsets);
+                RaggedTensor raggedTensor = RaggedTensor::logical(
+                    values, offsets, values.getDimensions().at(0));
+                if (raggedOutputJson.contains("max_values_per_row") &&
+                    raggedOutputJson.at("max_values_per_row").get<uint64_t>() != raggedTensor.getMaxValuesPerRow()) {
+                    throw runtime_error("Ragged output semantic M does not match its logical values tensor");
+                }
                 registerRaggedNetworkOutput(name, raggedTensor, valuesOutputName);
                 THOR_THROW_IF_FALSE(raggedNetworkOutputs.at(name).legacyOffsetsOutputName == offsetsOutputName);
             }
         }
     }
-
+    loadingLogicalBoundaryDimensions_.clear();
 }
 
 
@@ -3762,7 +3953,7 @@ uint64_t Network::computeFirstInstanceMemRequirements(uint32_t batchSize, Tensor
             if (networkInput != nullptr) {
                 for (const auto& [name, record] : raggedNetworkInputs) {
                     (void)name;
-                    if (record.valuesInputName == networkInput->getName() && record.raggedTensor.isPlacementNeutral()) {
+                    if (record.valuesInputName == networkInput->getName()) {
                         layerBytes = record.raggedTensor
                                          .getDescriptorForPlacement(batchSize)
                                          .getValuesDescriptor()
@@ -3789,7 +3980,7 @@ uint64_t Network::computeNonFirstInstanceMemRequirements(uint32_t batchSize, Ten
             if (networkInput != nullptr) {
                 for (const auto& [name, record] : raggedNetworkInputs) {
                     (void)name;
-                    if (record.valuesInputName == networkInput->getName() && record.raggedTensor.isPlacementNeutral()) {
+                    if (record.valuesInputName == networkInput->getName()) {
                         layerBytes = record.raggedTensor
                                          .getDescriptorForPlacement(batchSize)
                                          .getValuesDescriptor()
@@ -4383,6 +4574,11 @@ void Network::stampLayer(Tensor inputTensor,
         for (uint32_t i = 0; i < apiOutputTensors.size(); ++i) {
             stampedNetwork.apiTensorToPhysicalDrivingLayerShared[apiOutputTensors[i]] = implementationLayer;
             stampedNetwork.apiTensorToPhysicalDrivingLayer[apiOutputTensors[i]] = implementationLayer.get();
+            // Preserve the semantic API producer independently of physical routing.
+            // TensorFanout may replace the physical driver when an output has
+            // multiple consumers, but it does not become the owning API layer.
+            stampedNetwork.apiTensorToApiDrivingLayerShared[apiOutputTensors[i]] = layer;
+            stampedNetwork.apiTensorToApiDrivingLayer[apiOutputTensors[i]] = layer.get();
         }
 
         std::optional<ThorImplementation::RowPartitionId> producedPartitionId;
@@ -4405,6 +4601,7 @@ void Network::stampLayer(Tensor inputTensor,
                 auto valuesFanout = std::make_shared<ThorImplementation::TensorFanout>();
                 valuesFanout->setConstructForInferenceOnly(inferenceOnly);
                 Layer::connectTwoLayers(implementationLayer, valuesFanout, layer, nullptr, physicalization.logicalValuesTensor);
+                valuesFanout->setRowPartitionDescriptorForStamp(physicalization.descriptor);
                 stampedNetwork.otherLayersShared.push_back(valuesFanout);
                 stampedNetwork.otherLayers.push_back(valuesFanout.get());
                 stampedNetwork.apiTensorToPhysicalDrivingLayerShared[physicalization.logicalValuesTensor] = valuesFanout;

@@ -5,7 +5,8 @@ import thor
 
 
 BATCH_SIZE = 3
-CAPACITY = 8
+MAX_VALUES_PER_ROW = 3
+CAPACITY = BATCH_SIZE * MAX_VALUES_PER_ROW
 FEATURES = 4
 OFFSETS = np.asarray([0, 3, 3, 5], dtype=np.uint32)
 
@@ -23,6 +24,7 @@ def _physical_ragged(values: np.ndarray) -> thor.physical.PhysicalRaggedTensor:
     return thor.physical.PhysicalRaggedTensor(
         _cpu_tensor(values, thor.DataType.fp32),
         _cpu_tensor(OFFSETS, thor.DataType.uint32),
+        max_values_per_row=MAX_VALUES_PER_ROW,
     )
 
 
@@ -33,8 +35,7 @@ def _build_network(name: str) -> thor.Network:
         "history",
         thor.DataType.fp32,
         [FEATURES],
-        max_total_values=CAPACITY,
-        batch_size=BATCH_SIZE,
+        max_values_per_row=MAX_VALUES_PER_ROW,
     )
     relu = thor.activations.Relu().add_to_network(network, history)
     swish = thor.activations.Swish().add_to_network(network, history)
@@ -58,9 +59,9 @@ def _build_network(name: str) -> thor.Network:
 def test_ragged_add_rejects_distinct_row_partition_objects():
     network = thor.Network("ragged_add_partition_guard")
     left = thor.layers.RaggedNetworkInput(
-        network, "left", thor.DataType.fp32, [FEATURES], CAPACITY, BATCH_SIZE)
+        network, "left", thor.DataType.fp32, [FEATURES], max_values_per_row=MAX_VALUES_PER_ROW)
     right = thor.layers.RaggedNetworkInput(
-        network, "right", thor.DataType.fp32, [FEATURES], CAPACITY, BATCH_SIZE)
+        network, "right", thor.DataType.fp32, [FEATURES], max_values_per_row=MAX_VALUES_PER_ROW)
     with pytest.raises(Exception):
         thor.layers.Add(network, left, right)
 

@@ -27,7 +27,8 @@ class StopGradient : public Layer {
     [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {
         THOR_THROW_IF_FALSE(featureOutput.has_value());
         THOR_THROW_IF_FALSE(outputTensor == featureOutput.value());
-        return raggedFeatureInput.has_value() && !raggedFeatureInput->isPlacementNeutral();
+        // API tensor dimensions are always per-example, not placement dimensions.
+        return false;
     }
 
     nlohmann::json architectureJson() const override;

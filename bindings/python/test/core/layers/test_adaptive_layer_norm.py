@@ -161,8 +161,6 @@ def test_ragged_adaptive_layer_norm_builds_row_conditioned_partition_preserving_
         "tokens",
         thor.DataType.fp16,
         [32],
-        max_total_values=9,
-        batch_size=3,
         max_values_per_row=5,
         offsets_data_type=thor.DataType.uint64,
     )
@@ -174,7 +172,8 @@ def test_ragged_adaptive_layer_norm_builds_row_conditioned_partition_preserving_
     assert isinstance(output, thor.RaggedTensor)
     assert aln.get_use_ragged()
     assert output.offsets == tokens.offsets
-    assert output.values.get_dimensions() == [9, 32]
+    assert output.values.get_dimensions() == [5, 32]
+    assert output.offsets.get_dimensions() == [1]
 
     arch = _only_layer_architecture(n, "adaptive_layer_norm")
     assert arch["use_ragged"] is True
@@ -189,8 +188,6 @@ def test_ragged_adaptive_layer_norm_save_load_preserves_row_conditioning_contrac
         "tokens",
         thor.DataType.fp16,
         [32],
-        max_total_values=8,
-        batch_size=3,
         max_values_per_row=5,
         offsets_data_type=thor.DataType.uint32,
     )
@@ -211,7 +208,7 @@ def test_ragged_adaptive_layer_norm_save_load_preserves_row_conditioning_contrac
 
     placed = loaded.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
     offsets = np.asarray([0, 1, 4, 6], dtype=np.uint32)
-    values = np.full((8, 32), np.nan, dtype=np.float16)
+    values = np.full((3 * 5, 32), np.nan, dtype=np.float16)
     active_values = (np.arange(6 * 32, dtype=np.float32).reshape(6, 32) % 17 - 8.0) / 4.0
     values[:6] = active_values.astype(np.float16)
     row_scale = np.stack(
@@ -317,8 +314,7 @@ def test_adaptive_layer_norm_rejects_unsupported_dtypes_and_shapes():
         "tokens",
         thor.DataType.fp16,
         [2, 16],
-        max_total_values=8,
-        batch_size=2,
+        max_values_per_row=4,
     )
     ragged_scale = thor.layers.NetworkInput(ragged_net, "scale", [16], thor.DataType.fp32)
     ragged_bias = thor.layers.NetworkInput(ragged_net, "bias", [16], thor.DataType.fp32)
@@ -411,7 +407,8 @@ def test_adaptive_layer_norm_forward_matches_numpy_explicit_trailing_shape():
 )
 def test_ragged_adaptive_layer_norm_runtime_broadcasts_per_row_and_ignores_poison_tail(offsets_dtype, np_offsets_dtype):
     batch_size = 3
-    max_total_values = 8
+    max_values_per_row = 5
+    capacity = batch_size * max_values_per_row
     channels = 32
     n = thor.Network(f"test_net_ragged_adaptive_layer_norm_runtime_{np_offsets_dtype.__name__}")
     tokens = thor.layers.RaggedNetworkInput(
@@ -419,9 +416,7 @@ def test_ragged_adaptive_layer_norm_runtime_broadcasts_per_row_and_ignores_poiso
         "tokens",
         thor.DataType.fp16,
         [channels],
-        max_total_values=max_total_values,
-        batch_size=batch_size,
-        max_values_per_row=5,
+        max_values_per_row=max_values_per_row,
         offsets_data_type=offsets_dtype,
     )
     scale_input = thor.layers.NetworkInput(n, "scale", [channels], thor.DataType.fp32)
@@ -447,7 +442,7 @@ def test_ragged_adaptive_layer_norm_runtime_broadcasts_per_row_and_ignores_poiso
     )
 
     def run(offset_values, active_values):
-        values = np.full((max_total_values, channels), np.nan, dtype=np.float16)
+        values = np.full((capacity, channels), np.nan, dtype=np.float16)
         values[: len(active_values)] = np.asarray(active_values, dtype=np.float16)
         result = placed.infer(
             {
@@ -455,7 +450,7 @@ def test_ragged_adaptive_layer_norm_runtime_broadcasts_per_row_and_ignores_poiso
                     values,
                     np.asarray(offset_values, dtype=np_offsets_dtype),
                     offsets_dtype,
-                    max_values_per_row=5,
+                    max_values_per_row=max_values_per_row,
                 ),
                 "scale": _cpu_tensor(scale, thor.DataType.fp32),
                 "bias": _cpu_tensor(bias, thor.DataType.fp32),

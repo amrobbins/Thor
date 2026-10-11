@@ -130,11 +130,10 @@ ReductionFixture makeReductionFixture(Api::SegmentedReduction::Type type) {
                                   .valuesDataType(DataType::FP32)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({2})
-                                  .maxTotalValues(9)
-                                  .batchSize(3)
+                                  .maxValuesPerRow(4)
                                   .build();
     Api::GradientRivet inputRivet = Api::GradientRivet::Builder().network(*network).tensor(input.getValues()).build();
-    Api::RaggedTensor rivetedInput(inputRivet.getFeatureOutput().value(), input.getOffsets());
+    Api::RaggedTensor rivetedInput = input.withValues(inputRivet.getFeatureOutput().value());
     Api::SegmentedReduction reduction = Api::SegmentedReduction::Builder()
                                             .network(*network)
                                             .featureInput(rivetedInput)
@@ -210,19 +209,21 @@ void runForwardBackwardCase(Api::SegmentedReduction::Type type) {
     ASSERT_NE(physicalReduction, nullptr);
     ASSERT_NE(physicalOutput, nullptr);
 
-    // offsets = [0,3,3,7]: unequal lengths and an empty middle row. The final two
-    // packed rows are deliberately extreme poison and must never participate.
+    // offsets = [0,3,3,7]: unequal lengths and an empty middle row.
+    // M=4 at B=3 provides 12 physical value slots; the final five inactive
+    // slots are poison and must not participate in the reduction/gradient.
     const vector<float> values{
         1.0F, 10.0F, 3.0F, 8.0F, 2.0F, 12.0F,
         5.0F, 9.0F, 4.0F, 7.0F, 8.0F, 6.0F, 6.0F, 11.0F,
-        -1000.0F, 1000.0F, 1000.0F, -1000.0F};
+        -1000.0F, 1000.0F, 1000.0F, -1000.0F, -1000.0F, 1000.0F,
+        1000.0F, -1000.0F, -1000.0F, 1000.0F};
     const vector<uint32_t> offsets{0U, 3U, 3U, 7U};
-    Impl::Tensor valuesHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {9, 2}));
+    Impl::Tensor valuesHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {12, 2}));
     writeCpuFloat(valuesHost, values);
     physicalValues->forward(valuesHost, false, batchSize);
     physicalOffsets->forwardManagedRowPartitionOffsets(
         false,
-        Impl::RowPartitionDescriptor(batchSize, 9, DataType::UINT32),
+        Impl::RowPartitionDescriptor(batchSize, 12, DataType::UINT32, 4),
         batchSize,
         std::vector<uint64_t>(offsets.begin(), offsets.end()),
         fixture.rowPartitionId);
@@ -267,8 +268,7 @@ TEST(SegmentedReductionApi, BuilderProducesNormalDensePerExampleShape) {
                                   .name("history")
                                   .valuesDataType(DataType::FP32)
                                   .trailingDimensions({2, 3})
-                                  .maxTotalValues(9)
-                                  .batchSize(3)
+                                  .maxValuesPerRow(3)
                                   .build();
     Api::SegmentedReduction mean = Api::SegmentedReduction::Builder()
                                        .network(network)
@@ -284,8 +284,7 @@ TEST(SegmentedReductionApi, BuilderProducesNormalDensePerExampleShape) {
                                         .name("scalars")
                                         .valuesDataType(DataType::FP32)
                                         .trailingDimensions({})
-                                        .maxTotalValues(9)
-                                        .batchSize(3)
+                                        .maxValuesPerRow(3)
                                         .build();
     Api::SegmentedReduction scalarMean = Api::SegmentedReduction::Builder()
                                              .network(scalarNetwork)
@@ -306,7 +305,6 @@ TEST(SegmentedReductionApi, PlacementNeutralBuilderProducesDensePerExampleShapeW
                                   .trailingDimensions({2, 3})
                                   .maxValuesPerRow(maxValuesPerRow)
                                   .build();
-    ASSERT_TRUE(input.isPlacementNeutral());
     EXPECT_EQ(input.getValuesDimensions(), (vector<uint64_t>{maxValuesPerRow, 2, 3}));
 
     Api::SegmentedReduction mean = Api::SegmentedReduction::Builder()
@@ -326,7 +324,6 @@ TEST(SegmentedReductionApi, PlacementNeutralBuilderProducesDensePerExampleShapeW
                                         .trailingDimensions({})
                                         .maxValuesPerRow(maxValuesPerRow)
                                         .build();
-    ASSERT_TRUE(scalarInput.isPlacementNeutral());
     Api::SegmentedReduction scalarMean = Api::SegmentedReduction::Builder()
                                              .network(scalarNetwork)
                                              .featureInput(scalarInput)
@@ -360,7 +357,6 @@ TEST(SegmentedReductionApi, PlacementNeutralReductionBuildsAndExecutesAtDifferen
             .dataType(DataType::FP32)
             .build();
 
-        ASSERT_TRUE(input.isPlacementNeutral());
         ASSERT_EQ(mean.getFeatureOutput()->getDimensions(), (vector<uint64_t>{1}));
 
         vector<Event> initDoneEvents;
@@ -527,7 +523,7 @@ TEST(SegmentedReductionApi, PlacementNeutralReductionSaveLoadReplacesPlacementGe
 
         const nlohmann::json& inputJson = reductionJson->at("ragged_feature_input");
         EXPECT_EQ(inputJson.at("layer_ragged_reference_version").get<std::string>(), "1.0.0");
-        EXPECT_EQ(inputJson.at("geometry_mode").get<std::string>(), "placement_neutral");
+        EXPECT_FALSE(inputJson.contains("geometry_mode"));
         EXPECT_EQ(inputJson.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
         EXPECT_FALSE(inputJson.contains("batch_size"));
         EXPECT_FALSE(inputJson.contains("max_total_values"));
@@ -552,7 +548,6 @@ TEST(SegmentedReductionApi, PlacementNeutralReductionSaveLoadReplacesPlacementGe
         const auto loadedInputs = loaded.getExternalRaggedNetworkInputs();
         ASSERT_EQ(loadedInputs.size(), 1U);
         const Api::RaggedTensor loadedInput = loadedInputs.front().raggedTensor;
-        ASSERT_TRUE(loadedInput.isPlacementNeutral());
         EXPECT_EQ(loadedInput.getValues().getOriginalId(), savedInputValuesOriginalId);
         EXPECT_EQ(loadedInput.getRowPartitionToken().getOriginalId(), savedPartitionTokenOriginalId);
         EXPECT_EQ(loadedInput.getMaxValuesPerRow(), maxValuesPerRow);
@@ -634,64 +629,73 @@ TEST(SegmentedReductionApi, PlacementNeutralReductionSaveLoadReplacesPlacementGe
     std::filesystem::remove_all(archive);
 }
 
-TEST(SegmentedReductionApi, FixedSerializationRemainsVersionOneAndLoads) {
-    const std::string networkName = "segmented_reduction_fixed_serialization_compatibility";
-    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
-    const std::filesystem::path archive = std::filesystem::temp_directory_path() /
-                                          ("thor_segmented_reduction_fixed_" + std::to_string(nonce));
-    std::filesystem::remove_all(archive);
+TEST(SegmentedReductionApi, HistoricalVersionIgnoresObsoletePhysicalBatchMetadata) {
+    Api::Network network("segmented_reduction_legacy_logical_reconstruction");
+    constexpr uint64_t m = 4;
+    Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("history")
+                                  .valuesDataType(DataType::FP32)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({2})
+                                  .maxValuesPerRow(m)
+                                  .build();
 
-    {
-        Api::Network network(networkName);
-        Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
-                                      .network(network)
-                                      .name("history")
-                                      .valuesDataType(DataType::FP32)
-                                      .offsetsDataType(DataType::UINT32)
-                                      .trailingDimensions({2})
-                                      .maxTotalValues(9)
-                                      .batchSize(3)
-                                      .build();
-        Api::SegmentedReduction sum = Api::SegmentedReduction::Builder()
-                                          .network(network)
-                                          .featureInput(input)
-                                          .reductionType(Api::SegmentedReduction::Type::SUM)
-                                          .build();
-        (void)Api::NetworkOutput::Builder()
-            .network(network)
-            .name("sum")
-            .inputTensor(sum.getFeatureOutput().value())
-            .dataType(DataType::FP32)
-            .build();
+    // A genuine historical reference grammar can carry physical leading
+    // extents. Its source identities, trailing dimensions and dtypes remain
+    // meaningful, but the archived B and total capacity do not.
+    nlohmann::json legacyValues = input.getValues().architectureJson();
+    nlohmann::json legacyOffsets = input.getRowPartitionToken().architectureJson();
+    legacyValues["dimensions"] = std::vector<uint64_t>{15, 2};
+    legacyOffsets["dimensions"] = std::vector<uint64_t>{4};
+    nlohmann::json legacyReference = {
+        {"ragged_rank", 1},
+        {"values", legacyValues},
+        {"offsets", legacyOffsets},
+        {"max_values_per_row", m},
+        {"batch_size", 3},
+        {"max_total_values", 15}
+    };
+    Api::Tensor output(DataType::FP32, {2});
+    nlohmann::json record = {
+        {"factory", "layer"},
+        {"version", "1.0.0"},
+        {"layer_type", "segmented_reduction"},
+        {"reduction_type", "sum"},
+        {"ragged_feature_input", legacyReference},
+        {"feature_output", output.architectureJson()}
+    };
 
-        const nlohmann::json serialized = sum.architectureJson();
-        EXPECT_EQ(serialized.at("version").get<std::string>(), "1.0.0");
-        EXPECT_EQ(serialized.at("reduction_type").get<std::string>(), "sum");
-        EXPECT_EQ(serialized.at("ragged_feature_input").at("batch_size").get<uint64_t>(), 3U);
-        EXPECT_EQ(serialized.at("ragged_feature_input").at("max_total_values").get<uint64_t>(), 9U);
-        EXPECT_FALSE(serialized.at("ragged_feature_input").contains("layer_ragged_reference_version"));
-        network.save(archive.string(), true);
+    ASSERT_NO_THROW(Api::SegmentedReduction::deserialize(record, &network));
+    std::shared_ptr<Api::SegmentedReduction> restored;
+    for (uint32_t i = 0; i < network.getNumLayers(); ++i) {
+        restored = std::dynamic_pointer_cast<Api::SegmentedReduction>(network.getLayer(i));
+        if (restored) break;
     }
+    ASSERT_NE(restored, nullptr);
+    const Api::RaggedTensor logical = restored->getRaggedFeatureInput();
+    EXPECT_EQ(logical.getMaxValuesPerRow(), m);
+    EXPECT_EQ(logical.getValues().getOriginalId(), input.getValues().getOriginalId());
+    EXPECT_EQ(logical.getRowPartitionToken().getOriginalId(), input.getRowPartitionToken().getOriginalId());
+    EXPECT_EQ(logical.getDescriptorForPlacement(2).getMaxTotalValues(), 2 * m);
+    EXPECT_EQ(logical.getDescriptorForPlacement(7).getMaxTotalValues(), 7 * m);
+    EXPECT_FALSE(restored->architectureJson().at("ragged_feature_input").contains("batch_size"));
+    EXPECT_FALSE(restored->architectureJson().at("ragged_feature_input").contains("max_total_values"));
 
-    try {
-        Api::Network loaded(networkName);
-        ASSERT_NO_THROW(loaded.load(archive.string()));
-        shared_ptr<Api::SegmentedReduction> loadedReduction;
-        for (uint32_t layerIndex = 0; layerIndex < loaded.getNumLayers(); ++layerIndex) {
-            loadedReduction = std::dynamic_pointer_cast<Api::SegmentedReduction>(loaded.getLayer(layerIndex));
-            if (loadedReduction != nullptr) break;
-        }
-        ASSERT_NE(loadedReduction, nullptr);
-        EXPECT_EQ(loadedReduction->getReductionType(), Api::SegmentedReduction::Type::SUM);
-        EXPECT_FALSE(loadedReduction->getRaggedFeatureInput().isPlacementNeutral());
-        EXPECT_EQ(loadedReduction->getRaggedFeatureInput().getBatchSize(), 3U);
-        EXPECT_EQ(loadedReduction->getRaggedFeatureInput().getMaxTotalValues(), 9U);
-        EXPECT_EQ(loadedReduction->architectureJson().at("version").get<std::string>(), "1.0.0");
-    } catch (...) {
-        std::filesystem::remove_all(archive);
-        throw;
-    }
-    std::filesystem::remove_all(archive);
+    // Obsolete metadata must not override semantic identities or M. The
+    // reader still rejects genuine semantic corruption.
+    auto assertRejected = [&](const nlohmann::json& invalid) {
+        EXPECT_ANY_THROW(Api::SegmentedReduction::deserialize(invalid, &network));
+    };
+    nlohmann::json invalidM = record;
+    invalidM["ragged_feature_input"]["max_values_per_row"] = m + 1;
+    assertRejected(invalidM);
+    nlohmann::json invalidDtype = record;
+    invalidDtype["ragged_feature_input"]["values"]["data_type"] = "fp16";
+    assertRejected(invalidDtype);
+    nlohmann::json invalidPartition = record;
+    invalidPartition["ragged_feature_input"]["offsets"]["id"] = 99999999ULL;
+    assertRejected(invalidPartition);
 }
 
 TEST(SegmentedReductionApi, RaggedSliceFeedsBothValuesAndOffsetsIntoSegmentedReduction) {
@@ -703,8 +707,7 @@ TEST(SegmentedReductionApi, RaggedSliceFeedsBothValuesAndOffsetsIntoSegmentedRed
                                     .valuesDataType(DataType::FP32)
                                     .offsetsDataType(DataType::UINT32)
                                     .trailingDimensions({3})
-                                    .maxTotalValues(9)
-                                    .batchSize(batchSize)
+                                    .maxValuesPerRow(3)
                                     .build();
     Api::Slice channel0 = Api::Slice::Builder()
                               .network(network)
@@ -753,8 +756,7 @@ TEST(SegmentedReductionApi, SingleReductionPlacesForInferenceWithoutFanout) {
                                     .valuesDataType(DataType::FP32)
                                     .offsetsDataType(DataType::UINT32)
                                     .trailingDimensions({2})
-                                    .maxTotalValues(9)
-                                    .batchSize(batchSize)
+                                    .maxValuesPerRow(3)
                                     .build();
     Api::SegmentedReduction mean = Api::SegmentedReduction::Builder()
                                        .network(network)
@@ -784,18 +786,17 @@ TEST(SegmentedReductionApi, SharedOffsetsFanoutFeedsPortOneOfIndependentReductio
                                     .valuesDataType(DataType::FP32)
                                     .offsetsDataType(DataType::UINT32)
                                     .trailingDimensions({2})
-                                    .maxTotalValues(9)
-                                    .batchSize(batchSize)
+                                    .maxValuesPerRow(3)
                                     .build();
 
-    Api::NetworkInput alternateValues = Api::NetworkInput::Builder()
-                                            .network(network)
-                                            .name("alternate_values")
-                                            .dimensions({9, 2})
-                                            .dataType(DataType::FP32)
-                                            .dimensionsIncludeBatch(true)
-                                            .build();
-    Api::RaggedTensor alternate(alternateValues.getFeatureOutput().value(), history.getOffsets());
+    Api::RaggedTensor alternate = Api::RaggedNetworkInput::Builder()
+                                      .network(network)
+                                      .name("alternate_values")
+                                      .valuesDataType(DataType::FP32)
+                                      .trailingDimensions({2})
+                                      .partition(history)
+                                      .build();
+    EXPECT_TRUE(alternate.sharesPartitionWith(history));
 
     Api::SegmentedReduction historyMean = Api::SegmentedReduction::Builder()
                                               .network(network)

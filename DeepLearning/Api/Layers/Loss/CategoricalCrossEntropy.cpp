@@ -250,10 +250,11 @@ void CategoricalCrossEntropy::deserializeInto(const json &j,
             if (!CategoricalCrossEntropy::Builder::sparseRaggedValueIsScalar(labels.getTrailingDimensions()))
                 throw runtime_error(
                     "Serialized ragged SparseCategoricalCrossEntropy labels must have scalar trailing shape [] or [1].");
-            if (!predictions.sharesPartitionWith(labels) || predictions.getBatchSize() != labels.getBatchSize() ||
-                predictions.getMaxTotalValues() != labels.getMaxTotalValues())
+            if (!predictions.sharesPartitionWith(labels) ||
+                predictions.getMaxValuesPerRow() != labels.getMaxValuesPerRow() ||
+                predictions.getOffsetsDataType() != labels.getOffsetsDataType())
                 throw runtime_error(
-                    "Serialized ragged SparseCategoricalCrossEntropy predictions and labels must share one row partition and capacity.");
+                    "Serialized ragged SparseCategoricalCrossEntropy predictions and labels must share one logical partition and semantic M.");
             const DataType labelsDType = labels.getValuesDataType();
             if (labelsDType != DataType::UINT8 && labelsDType != DataType::UINT16 && labelsDType != DataType::UINT32)
                 throw runtime_error(
@@ -273,11 +274,12 @@ void CategoricalCrossEntropy::deserializeInto(const json &j,
                 const json& rawJson = j.at("ragged_raw_loss");
                 SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
                     rawJson, j.at("ragged_predictions"), predictions, "SparseCategoricalCrossEntropy");
-                Tensor rawValues = Tensor::deserialize(rawJson.at("values"));
-                if (rawValues.getDimensions() != vector<uint64_t>{predictions.getMaxTotalValues()} ||
+                Tensor rawValues = SegmentedPrimitiveDetail::reconstructRaggedOutputValues(
+                    rawJson, predictions, "SparseCategoricalCrossEntropy");
+                if (rawValues.getDimensions() != vector<uint64_t>{predictions.getMaxValuesPerRow()} ||
                     rawValues.getDataType() != serializedLossDType) {
                     throw runtime_error(
-                        "Serialized ragged SparseCategoricalCrossEntropy raw loss must have packed scalar shape [max_total_values].");
+                        "Serialized ragged SparseCategoricalCrossEntropy raw loss must have logical scalar shape [M].");
                 }
 
                 categoricalCrossEntropy.labelType = LabelType::SPARSE;
@@ -298,8 +300,8 @@ void CategoricalCrossEntropy::deserializeInto(const json &j,
                         j.at("ragged_mask"), network, "SparseCategoricalCrossEntropy");
                     if (!CategoricalCrossEntropy::Builder::sparseRaggedValueIsScalar(mask.getTrailingDimensions()) ||
                         !predictions.sharesPartitionWith(mask) ||
-                        predictions.getBatchSize() != mask.getBatchSize() ||
-                        predictions.getMaxTotalValues() != mask.getMaxTotalValues())
+                        predictions.getMaxValuesPerRow() != mask.getMaxValuesPerRow() ||
+                        predictions.getOffsetsDataType() != mask.getOffsetsDataType())
                         throw runtime_error(
                             "Serialized ragged SparseCategoricalCrossEntropy mask must be scalar per token on the prediction partition.");
                     const DataType maskDType = mask.getValuesDataType();

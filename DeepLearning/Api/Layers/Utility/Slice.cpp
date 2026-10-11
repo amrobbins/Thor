@@ -62,9 +62,7 @@ Slice Slice::Builder::build() {
         slice.raggedFeatureInput = _raggedFeatureInput.value();
         std::vector<uint64_t> outputValueDimensions;
         outputValueDimensions.reserve(outputDimensions.size() + 1);
-        outputValueDimensions.push_back(_raggedFeatureInput->isPlacementNeutral()
-                                            ? _raggedFeatureInput->getMaxValuesPerRow()
-                                            : _raggedFeatureInput->getMaxTotalValues());
+        outputValueDimensions.push_back(_raggedFeatureInput->getMaxValuesPerRow());
         outputValueDimensions.insert(outputValueDimensions.end(), outputDimensions.begin(), outputDimensions.end());
         Tensor outputValues(_featureInput->getDataType(), outputValueDimensions);
         slice.raggedFeatureOutput = _raggedFeatureInput->withValues(outputValues);
@@ -115,7 +113,6 @@ uint64_t Slice::getOutputTensorBytes(uint32_t batchSize) const {
     THOR_THROW_IF_FALSE(featureOutput.has_value());
     const uint64_t outputBytes = featureOutput->getTotalSizeInBytes();
     if (raggedFeatureInput.has_value()) {
-        if (!raggedFeatureInput->isPlacementNeutral()) return outputBytes;
         THOR_THROW_IF_FALSE(batchSize > 0);
     }
     if (batchSize != 0 && outputBytes > std::numeric_limits<uint64_t>::max() / batchSize) {
@@ -148,9 +145,7 @@ std::shared_ptr<ThorImplementation::Layer> Slice::stamp(ThorImplementation::Tens
             SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
                 raggedInput, drivingLayer, "Slice");
         const ThorImplementation::RaggedTensorDescriptor physicalOutputDescriptor =
-            raggedFeatureOutput->isPlacementNeutral()
-                ? raggedFeatureOutput->getDescriptorForPlacement(physicalInputDescriptor.getBatchSize())
-                : raggedFeatureOutput->getDescriptor();
+            raggedFeatureOutput->getDescriptorForPlacement(physicalInputDescriptor.getBatchSize());
         ThorImplementation::RaggedExpression input = ThorImplementation::RaggedExpression::input(
             "feature_input",
             "feature_offsets",
@@ -265,18 +260,13 @@ uint64_t Slice::getFirstInstanceMemRequirementInBytes(uint32_t batchSize,
     const uint64_t perBatchBytes = inputBytes + outputBytes;
     if (raggedFeatureInput.has_value()) {
         const uint64_t offsetsBytes = raggedFeatureInput->getOffsets().getTotalSizeInBytes();
-        if (raggedFeatureInput->isPlacementNeutral()) {
-            THOR_THROW_IF_FALSE(batchSize > 0);
-            if (perBatchBytes > std::numeric_limits<uint64_t>::max() / batchSize)
-                throw std::overflow_error("Placement-neutral Ragged Slice memory requirement overflow.");
-            const uint64_t physicalValuesBytes = perBatchBytes * batchSize;
-            if (physicalValuesBytes > std::numeric_limits<uint64_t>::max() - offsetsBytes)
-                throw std::overflow_error("Placement-neutral Ragged Slice memory requirement overflow.");
-            return physicalValuesBytes + offsetsBytes;
-        }
-        if (perBatchBytes > std::numeric_limits<uint64_t>::max() - offsetsBytes)
+        THOR_THROW_IF_FALSE(batchSize > 0);
+        if (perBatchBytes > std::numeric_limits<uint64_t>::max() / batchSize)
             throw std::overflow_error("Ragged Slice memory requirement overflow.");
-        return perBatchBytes + offsetsBytes;
+        const uint64_t physicalValuesBytes = perBatchBytes * batchSize;
+        if (physicalValuesBytes > std::numeric_limits<uint64_t>::max() - offsetsBytes)
+            throw std::overflow_error("Ragged Slice memory requirement overflow.");
+        return physicalValuesBytes + offsetsBytes;
     }
     const uint64_t effectiveBatchSize = std::max<uint64_t>(1, batchSize);
     if (perBatchBytes > std::numeric_limits<uint64_t>::max() / effectiveBatchSize)
@@ -289,12 +279,11 @@ json Slice::architectureJson() const {
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
 
-    const bool placementNeutral = raggedFeatureInput.has_value() && raggedFeatureInput->isPlacementNeutral();
-    if (raggedFeatureOutput.has_value()) THOR_THROW_IF_FALSE(placementNeutral == raggedFeatureOutput->isPlacementNeutral());
+    THOR_THROW_IF_FALSE(raggedFeatureInput.has_value() == raggedFeatureOutput.has_value());
 
     json j{
         {"factory", Layer::Factory::Layer.value()},
-        {"version", placementNeutral ? "1.1.0" : getLayerVersion()},
+        {"version", raggedFeatureInput.has_value() ? "1.1.0" : getLayerVersion()},
         {"layer_type", "slice"},
         {"axis", axis},
         {"start", start},
@@ -329,10 +318,6 @@ void Slice::deserialize(const json& j, Network* network) {
     if (useRagged) {
         const json& inputJson = j.at("ragged_feature_input");
         RaggedTensor raggedInput = SegmentedPrimitiveDetail::reconstructInput(inputJson, network, "Slice");
-        if ((version == "1.0.0" && raggedInput.isPlacementNeutral()) ||
-            (version == "1.1.0" && !raggedInput.isPlacementNeutral())) {
-            throw std::runtime_error("Slice serialized layer version does not match its ragged geometry mode.");
-        }
         const uint64_t featureInputId = j.at("feature_input").at("id").get<uint64_t>();
         if (featureInputId != inputJson.at("values").at("id").get<uint64_t>()) {
             throw std::runtime_error("Slice serialized feature_input must match its ragged input values.");
@@ -351,8 +336,9 @@ void Slice::deserialize(const json& j, Network* network) {
             throw std::runtime_error("Slice serialized start + length exceeds the selected ragged trailing axis.");
         }
 
-        Tensor outputValues = Tensor::deserialize(j.at("feature_output"));
         const json& outputJson = j.at("ragged_feature_output");
+        Tensor outputValues = SegmentedPrimitiveDetail::reconstructPreservedOutputValues(
+            j.at("feature_output"), outputJson, raggedInput, "Slice");
         if (outputJson.at("values").at("id").get<uint64_t>() != j.at("feature_output").at("id").get<uint64_t>()) {
             throw std::runtime_error("Slice serialized ragged output values must match feature_output.");
         }
@@ -361,9 +347,7 @@ void Slice::deserialize(const json& j, Network* network) {
 
         std::vector<uint64_t> expectedOutputDimensions;
         expectedOutputDimensions.reserve(trailingDimensions.size() + 1);
-        expectedOutputDimensions.push_back(raggedInput.isPlacementNeutral()
-                                               ? raggedInput.getMaxValuesPerRow()
-                                               : raggedInput.getMaxTotalValues());
+        expectedOutputDimensions.push_back(raggedInput.getMaxValuesPerRow());
         std::vector<uint64_t> expectedTrailing = trailingDimensions;
         expectedTrailing[axis] = length;
         expectedOutputDimensions.insert(expectedOutputDimensions.end(), expectedTrailing.begin(), expectedTrailing.end());

@@ -47,7 +47,8 @@ shared_ptr<ActivationT> buildRaggedActivation(Network& network, RaggedTensor inp
 template <typename ActivationT>
 void expectRaggedGatedActivationBuilds(const string& expectedLayerType) {
     Network network("raggedGatedActivationBuilds");
-    RaggedTensor featureInput(DataType::FP32, {3, 10}, 2, 11, DataType::UINT32);
+    RaggedTensor featureInput = RaggedTensor::logical(
+        Tensor(DataType::FP32, {11, 3, 10}), Tensor(DataType::UINT32, {1}), 11);
 
     shared_ptr<ActivationT> activation = buildRaggedActivation<ActivationT>(network, featureInput);
     ASSERT_NE(activation, nullptr);
@@ -61,8 +62,10 @@ void expectRaggedGatedActivationBuilds(const string& expectedLayerType) {
     EXPECT_EQ(output.getValuesDataType(), DataType::FP32);
     EXPECT_EQ(output.getValuesDimensions(), (vector<uint64_t>{11, 3, 5}));
     EXPECT_EQ(output.getOffsets(), featureInput.getOffsets());
-    EXPECT_EQ(output.getMaxTotalValues(), featureInput.getMaxTotalValues());
-    EXPECT_EQ(output.getBatchSize(), featureInput.getBatchSize());
+    EXPECT_EQ(output.getMaxValuesPerRow(), featureInput.getMaxValuesPerRow());
+    EXPECT_TRUE(output.sharesPartitionWith(featureInput));
+    EXPECT_EQ(output.getDescriptorForPlacement(2).getMaxTotalValues(), 22u);
+    EXPECT_EQ(output.getDescriptorForPlacement(7).getMaxTotalValues(), 77u);
 
     const auto json = activation->architectureJson();
     EXPECT_TRUE(json.at("use_ragged").template get<bool>());
@@ -134,7 +137,8 @@ TEST(GatedLinearUnits, RaggedSwigluSplitGateAndProductRemainOneExpressionStage) 
 
 TEST(GatedLinearUnits, RaggedRejectsOddFinalFeatureDimension) {
     Network network("raggedRejectOddFinalFeatureDimension");
-    RaggedTensor featureInput(DataType::FP32, {9}, 2, 8, DataType::UINT32);
+    RaggedTensor featureInput = RaggedTensor::logical(
+        Tensor(DataType::FP32, {8, 9}), Tensor(DataType::UINT32, {1}), 8);
 
     Glu::Builder builder;
     EXPECT_ANY_THROW((void)builder.network(network).featureInput(featureInput).build());

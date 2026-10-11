@@ -36,8 +36,6 @@ def _network(name: str, offsets_dtype: thor.DataType = thor.DataType.uint32):
         "source",
         thor.DataType.fp32,
         [2],
-        max_total_values=10,
-        batch_size=4,
         offsets_data_type=offsets_dtype,
         max_values_per_row=4,
     )
@@ -53,8 +51,8 @@ def test_ragged_sequence_slice_builds_new_partition_and_compact_capacity():
     assert isinstance(output, thor.RaggedTensor)
     assert slice_layer.start == 1
     assert slice_layer.length == 2
-    assert output.values.get_dimensions() == [8, 2]
-    assert output.offsets.get_dimensions() == [5]
+    assert output.values.get_dimensions() == [2, 2]
+    assert output.offsets.get_dimensions() == [1]
     assert output.offsets.get_data_type() == thor.DataType.uint64
     assert output.offsets != source.offsets
 
@@ -62,7 +60,7 @@ def test_ragged_sequence_slice_builds_new_partition_and_compact_capacity():
     layer = next(layer for layer in architecture["layers"] if layer["layer_type"] == "ragged_sequence_slice")
     assert layer["start"] == 1
     assert layer["length"] == 2
-    assert layer["ragged_output"]["values"]["dimensions"] == [8, 2]
+    assert layer["ragged_output"]["values"]["dimensions"] == [2, 2]
     assert layer["ragged_output"]["max_values_per_row"] == 2
     assert layer["ragged_output"]["offsets"]["id"] != layer["ragged_input"]["offsets"]["id"]
 
@@ -74,8 +72,6 @@ def test_ragged_sequence_slice_rejects_zero_length():
         "source",
         thor.DataType.fp32,
         [2],
-        max_total_values=5,
-        batch_size=2,
         max_values_per_row=3,
     )
     with pytest.raises(ValueError, match="length must be greater than zero"):
@@ -97,7 +93,7 @@ def test_ragged_sequence_slice_runtime_clips_rows_ignores_poison_and_reuses_exte
     placed = network.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
     def run(active, offsets):
-        values = np.full((10, 2), np.nan, dtype=np.float32)
+        values = np.full((16, 2), np.nan, dtype=np.float32)
         values[: len(active)] = active
         return placed.infer(
             {
@@ -143,7 +139,7 @@ def test_ragged_sequence_slice_save_load_accepts_new_runtime_partition(tmp_path)
     placed = loaded.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
     active = (4000.0 + np.arange(18, dtype=np.float32)).reshape(9, 2)
-    values = np.full((10, 2), np.nan, dtype=np.float32)
+    values = np.full((16, 2), np.nan, dtype=np.float32)
     values[:9] = active
     output = placed.infer(
         {
@@ -168,8 +164,6 @@ def test_partition_changing_chain_publishes_host_metadata_for_active_prefix_cons
         "left",
         thor.DataType.fp32,
         [2],
-        max_total_values=5,
-        batch_size=3,
         max_values_per_row=3,
     )
     right = thor.layers.RaggedNetworkInput(
@@ -177,8 +171,6 @@ def test_partition_changing_chain_publishes_host_metadata_for_active_prefix_cons
         "right",
         thor.DataType.fp32,
         [2],
-        max_total_values=6,
-        batch_size=3,
         max_values_per_row=3,
     )
     joined = thor.layers.RaggedSequenceConcatenate(network, [left, right]).get_feature_output()
@@ -194,8 +186,8 @@ def test_partition_changing_chain_publishes_host_metadata_for_active_prefix_cons
 
     left_active = (5000.0 + np.arange(8, dtype=np.float32)).reshape(4, 2)
     right_active = (6000.0 + np.arange(8, dtype=np.float32)).reshape(4, 2)
-    left_values = np.full((5, 2), np.nan, dtype=np.float32)
-    right_values = np.full((6, 2), np.nan, dtype=np.float32)
+    left_values = np.full((9, 2), np.nan, dtype=np.float32)
+    right_values = np.full((9, 2), np.nan, dtype=np.float32)
     left_values[:4] = left_active
     right_values[:4] = right_active
     output = placed.infer(

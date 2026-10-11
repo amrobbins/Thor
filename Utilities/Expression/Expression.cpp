@@ -363,6 +363,12 @@ std::string exprOpExternalName(ExprOp op) {
             return "rmsnorm_backward_x";
         case ExprOp::RMSNORM_BACKWARD_SCALE:
             return "rmsnorm_backward_scale";
+        case ExprOp::LAYERNORM_BACKWARD_X:
+            return "layernorm_backward_x";
+        case ExprOp::LAYERNORM_BACKWARD_SCALE:
+            return "layernorm_backward_scale";
+        case ExprOp::LAYERNORM_BACKWARD_BIAS:
+            return "layernorm_backward_bias";
         case ExprOp::ATTENTION:
             return "attention";
         case ExprOp::ATTENTION_BACKWARD_Q:
@@ -529,6 +535,9 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"layernorm", ExprOp::LAYERNORM},
         {"rmsnorm_backward_x", ExprOp::RMSNORM_BACKWARD_X},
         {"rmsnorm_backward_scale", ExprOp::RMSNORM_BACKWARD_SCALE},
+        {"layernorm_backward_x", ExprOp::LAYERNORM_BACKWARD_X},
+        {"layernorm_backward_scale", ExprOp::LAYERNORM_BACKWARD_SCALE},
+        {"layernorm_backward_bias", ExprOp::LAYERNORM_BACKWARD_BIAS},
         {"attention", ExprOp::ATTENTION},
         {"attention_backward_q", ExprOp::ATTENTION_BACKWARD_Q},
         {"attention_backward_k", ExprOp::ATTENTION_BACKWARD_K},
@@ -1403,6 +1412,12 @@ std::string opName(ExprOp op) {
             return "RMSNORM_BW_X";
         case ExprOp::RMSNORM_BACKWARD_SCALE:
             return "RMSNORM_BW_SCALE";
+        case ExprOp::LAYERNORM_BACKWARD_X:
+            return "LAYERNORM_BW_X";
+        case ExprOp::LAYERNORM_BACKWARD_SCALE:
+            return "LAYERNORM_BW_SCALE";
+        case ExprOp::LAYERNORM_BACKWARD_BIAS:
+            return "LAYERNORM_BW_BIAS";
         case ExprOp::ATTENTION:
             return "ATTENTION";
         case ExprOp::ATTENTION_BACKWARD_Q:
@@ -1841,6 +1856,20 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             std::string scale = canonicalizeNode(expr, n.rhs, memo, memoReady);
             std::string bias = canonicalizeNode(expr, n.aux, memo, memoReady);
             out = opName(n.op) + "(" + x + "," + scale + "," + bias;
+            out += ";hidden=" + std::to_string(n.layer_norm_normalized_feature_count);
+            out += ";epsilon=" + formatFloatCanonical(n.layer_norm_epsilon);
+            out += ";packedRowsCapacity=" + std::to_string(n.layer_norm_packed_row_capacity);
+            out += ")";
+            break;
+        }
+
+        case ExprOp::LAYERNORM_BACKWARD_X:
+        case ExprOp::LAYERNORM_BACKWARD_SCALE:
+        case ExprOp::LAYERNORM_BACKWARD_BIAS: {
+            std::string x = canonicalizeNode(expr, n.lhs, memo, memoReady);
+            std::string scale = canonicalizeNode(expr, n.rhs, memo, memoReady);
+            std::string dY = canonicalizeNode(expr, n.aux, memo, memoReady);
+            out = opName(n.op) + "(" + x + "," + scale + "," + dY;
             out += ";hidden=" + std::to_string(n.layer_norm_normalized_feature_count);
             out += ";epsilon=" + formatFloatCanonical(n.layer_norm_epsilon);
             out += ";packedRowsCapacity=" + std::to_string(n.layer_norm_packed_row_capacity);
@@ -3061,6 +3090,9 @@ bool Expression::isTernaryOp(const ExprOp op) {
         case ExprOp::LAYERNORM:
         case ExprOp::RMSNORM_BACKWARD_X:
         case ExprOp::RMSNORM_BACKWARD_SCALE:
+        case ExprOp::LAYERNORM_BACKWARD_X:
+        case ExprOp::LAYERNORM_BACKWARD_SCALE:
+        case ExprOp::LAYERNORM_BACKWARD_BIAS:
         case ExprOp::RAGGED_SOFTMAX_BACKWARD:
         case ExprOp::ATTENTION:
         case ExprOp::ATTENTION_BACKWARD_Q:

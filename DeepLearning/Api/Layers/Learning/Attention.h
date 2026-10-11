@@ -112,11 +112,8 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
                           return names;
                       }(),
                       raggedQueryInput.has_value() ? std::set<std::string>{"feature_output"} : std::set<std::string>{},
-                      raggedQueryInput.has_value()
-                          ? std::optional<uint32_t>(static_cast<uint32_t>(raggedQueryInput->getBatchSize()))
-                          : (raggedKeyInput.has_value()
-                                 ? std::optional<uint32_t>(static_cast<uint32_t>(raggedKeyInput->getBatchSize()))
-                                 : std::nullopt)),
+                      // The model never supplies runtime B. Placement owns the row extents.
+                      std::nullopt),
           numHeads(numHeads),
           numKeyValueHeads(numKeyValueHeads),
           headDim(headDim),

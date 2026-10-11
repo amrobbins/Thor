@@ -47,6 +47,21 @@ set(THOR_NSYS_LAUNCHER_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/${THOR_NSYS_LAUN
 set(THOR_NSYS_LAUNCHER_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/${THOR_NSYS_LAUNCHER_PKG_NAME}")
 set(THOR_NSYS_LAUNCHER_VENV_DIR "${THOR_PY_PURELIB}/${THOR_NSYS_LAUNCHER_PKG_NAME}")
 
+# Distinguish local CMake installs from split-wheel runtime installs without
+# requiring callers to set THOR_CUDA_BOOTSTRAP_SOURCE_TREE=1. The marker lives
+# only in build/venv package trees, never in the checked-in package sources or
+# the wheel install rules below.
+set(_thor_py_dev_marker "${THOR_PY_PKG_BUILD_DIR}/.thor_source_tree_install")
+set(_thor_py_dev_marker_install_command "")
+if (NOT DEFINED SKBUILD_PROJECT_NAME)
+    file(MAKE_DIRECTORY "${THOR_PY_PKG_BUILD_DIR}")
+    file(WRITE "${_thor_py_dev_marker}" "Thor local CMake development install\n")
+    set(_thor_py_dev_marker_install_command
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${_thor_py_dev_marker}" "${THOR_PY_VENV_DIR}/.thor_source_tree_install"
+    )
+endif ()
+
 file(GLOB_RECURSE THOR_PY_PKG_FILES CONFIGURE_DEPENDS
         "${THOR_PY_PKG_SRC_DIR}/*.py"
         "${THOR_PY_PKG_SRC_DIR}/py.typed"
@@ -134,13 +149,19 @@ target_include_directories(_thor PRIVATE
 
 
 # ---- venv install target: copy package + extension into .venv site-packages ----
+# The extension links against libThor.so and uses $ORIGIN to find it. Keep the
+# native library in the local venv in sync with _thor: an older adjacent copy
+# may satisfy DT_NEEDED yet lack newer C++ symbols (e.g. Layer's vtable).
+# Wheel builds use their separate install/package graph, not this dev target.
 if (THOR_PYTHON_AUTO_INSTALL AND NOT DEFINED SKBUILD_PROJECT_NAME)
     add_custom_target(thor_py_install ALL
             COMMAND ${CMAKE_COMMAND} -E make_directory "${THOR_PY_VENV_DIR}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${THOR_NSYS_LAUNCHER_VENV_DIR}"
             COMMAND ${CMAKE_COMMAND} -E copy_directory "${THOR_PY_PKG_SRC_DIR}" "${THOR_PY_VENV_DIR}"
             COMMAND ${CMAKE_COMMAND} -E copy_directory "${THOR_NSYS_LAUNCHER_SRC_DIR}" "${THOR_NSYS_LAUNCHER_VENV_DIR}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:Thor>" "${THOR_PY_VENV_DIR}/"
             COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:_thor>" "${THOR_PY_VENV_DIR}/"
+            ${_thor_py_dev_marker_install_command}
             DEPENDS _thor
             COMMENT "Thor: installing Python package + native extension into venv"
     )
@@ -150,7 +171,9 @@ else ()
             COMMAND ${CMAKE_COMMAND} -E make_directory "${THOR_NSYS_LAUNCHER_VENV_DIR}"
             COMMAND ${CMAKE_COMMAND} -E copy_directory "${THOR_PY_PKG_SRC_DIR}" "${THOR_PY_VENV_DIR}"
             COMMAND ${CMAKE_COMMAND} -E copy_directory "${THOR_NSYS_LAUNCHER_SRC_DIR}" "${THOR_NSYS_LAUNCHER_VENV_DIR}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:Thor>" "${THOR_PY_VENV_DIR}/"
             COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:_thor>" "${THOR_PY_VENV_DIR}/"
+            ${_thor_py_dev_marker_install_command}
             DEPENDS _thor
             COMMENT "Thor: installing Python package + native extension into venv"
     )
@@ -391,7 +414,6 @@ endif ()
 if (THOR_PYTHON_TESTS)
     set(THOR_PY_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test")
     set(THOR_PY_TEST_ENV
-            "THOR_CUDA_BOOTSTRAP_SOURCE_TREE=1"
             "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}"
     )
 

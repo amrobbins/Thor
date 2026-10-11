@@ -121,8 +121,6 @@ TEST(ReductionMetricApi, R10LRaggedSumAndMeanBuildWithDistinctAggregationContrac
                                   .valuesDataType(DataType::FP16)
                                   .offsetsDataType(offsetsDType)
                                   .trailingDimensions({2})
-                                  .batchSize(4)
-                                  .maxTotalValues(9)
                                   .maxValuesPerRow(4)
                                   .build();
 
@@ -168,8 +166,6 @@ TEST(ReductionMetricApi, R10MRaggedMinAndMaxBuildWithExtremaAggregationContracts
                                   .valuesDataType(DataType::FP16)
                                   .offsetsDataType(offsetsDType)
                                   .trailingDimensions({2})
-                                  .batchSize(4)
-                                  .maxTotalValues(9)
                                   .maxValuesPerRow(4)
                                   .build();
         Min minimum = Min::Builder().network(network).values(values).build();
@@ -200,7 +196,7 @@ TEST(ReductionMetricApi, R10LPlacedRaggedSumAndMeanExposeActiveScalarStatisticsF
         GTEST_SKIP() << "R10L ragged metric execution requires a GPU";
 
     constexpr uint32_t batchSize = 4;
-    constexpr uint64_t maxTotalValues = 9;
+    constexpr uint64_t maxTotalValues = batchSize * 4;
     constexpr uint64_t trailingWidth = 2;
     for (DataType offsetsDType : {DataType::UINT32, DataType::UINT64}) {
         Network network("r10l_metric_runtime_" + ThorImplementation::TensorDescriptor::getElementTypeName(offsetsDType));
@@ -210,8 +206,6 @@ TEST(ReductionMetricApi, R10LPlacedRaggedSumAndMeanExposeActiveScalarStatisticsF
                                   .valuesDataType(DataType::FP32)
                                   .offsetsDataType(offsetsDType)
                                   .trailingDimensions({trailingWidth})
-                                  .batchSize(batchSize)
-                                  .maxTotalValues(maxTotalValues)
                                   .maxValuesPerRow(4)
                                   .build();
         Sum sum = Sum::Builder().network(network).values(values).build();
@@ -334,7 +328,7 @@ TEST(ReductionMetricApi, R10MRaggedExtremaIgnoreEmptyRowsAndPublishNoContributio
         GTEST_SKIP() << "R10M ragged extrema execution requires a GPU";
 
     constexpr uint32_t batchSize = 4;
-    constexpr uint64_t maxTotalValues = 9;
+    constexpr uint64_t maxTotalValues = batchSize * 4;
     constexpr uint64_t trailingWidth = 2;
     for (DataType offsetsDType : {DataType::UINT32, DataType::UINT64}) {
         Network network("r10m_extrema_runtime_" + ThorImplementation::TensorDescriptor::getElementTypeName(offsetsDType));
@@ -344,8 +338,6 @@ TEST(ReductionMetricApi, R10MRaggedExtremaIgnoreEmptyRowsAndPublishNoContributio
                                   .valuesDataType(DataType::FP32)
                                   .offsetsDataType(offsetsDType)
                                   .trailingDimensions({trailingWidth})
-                                  .batchSize(batchSize)
-                                  .maxTotalValues(maxTotalValues)
                                   .maxValuesPerRow(4)
                                   .build();
         Min minimum = Min::Builder().network(network).values(values).build();
@@ -664,8 +656,6 @@ TEST(ReductionMetricApi, R10NWeightedMeanBuildsFromSamePartitionRaggedValuesAndW
                                   .valuesDataType(DataType::FP16)
                                   .offsetsDataType(offsetsDType)
                                   .trailingDimensions({2})
-                                  .batchSize(4)
-                                  .maxTotalValues(9)
                                   .maxValuesPerRow(4)
                                   .build();
         RaggedTensor weights = RaggedNetworkInput::Builder()
@@ -712,7 +702,7 @@ TEST(ReductionMetricApi, R10NRaggedWeightedMeanUsesActivePrefixAndClampsPartialT
         GTEST_SKIP() << "R10N ragged WeightedMean execution requires a GPU";
 
     constexpr uint32_t batchSize = 4;
-    constexpr uint64_t maxTotalValues = 9;
+    constexpr uint64_t maxTotalValues = batchSize * 4;
     constexpr uint64_t trailingWidth = 2;
     for (DataType offsetsDType : {DataType::UINT32, DataType::UINT64}) {
         Network network("r10n_weighted_runtime_" +
@@ -723,8 +713,6 @@ TEST(ReductionMetricApi, R10NRaggedWeightedMeanUsesActivePrefixAndClampsPartialT
                                   .valuesDataType(DataType::FP32)
                                   .offsetsDataType(offsetsDType)
                                   .trailingDimensions({trailingWidth})
-                                  .batchSize(batchSize)
-                                  .maxTotalValues(maxTotalValues)
                                   .maxValuesPerRow(4)
                                   .build();
         RaggedTensor weights = RaggedNetworkInput::Builder()
@@ -848,8 +836,6 @@ TEST(ReductionMetricApi, R10NWeightedMeanRejectsDifferentRaggedPartitions) {
                               .name("values")
                               .valuesDataType(DataType::FP32)
                               .trailingDimensions({2})
-                              .batchSize(4)
-                              .maxTotalValues(9)
                               .maxValuesPerRow(4)
                               .build();
     RaggedTensor weights = RaggedNetworkInput::Builder()
@@ -857,8 +843,6 @@ TEST(ReductionMetricApi, R10NWeightedMeanRejectsDifferentRaggedPartitions) {
                                .name("weights")
                                .valuesDataType(DataType::FP32)
                                .trailingDimensions({2})
-                               .batchSize(4)
-                               .maxTotalValues(9)
                                .maxValuesPerRow(4)
                                .build();
     EXPECT_THROW(WeightedMean::Builder().network(network).values(values).weights(weights).build(), std::invalid_argument);

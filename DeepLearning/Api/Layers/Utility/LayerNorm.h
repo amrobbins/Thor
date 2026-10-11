@@ -73,17 +73,14 @@ class LayerNorm : public TrainableLayer {
 
     uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
         if (raggedFeatureOutputs.empty()) return MultiConnectionLayer::getOutputTensorBytes(batchSize);
-        THOR_THROW_IF_FALSE(!featureOutputs.empty());
-        return featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();
+        return raggedOutputBytesForPlacement(batchSize);
     }
     uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize,
                                                       ThorImplementation::TensorPlacement tensorPlacement) const override {
         if (raggedFeatureOutputs.empty())
             return TrainableLayer::getNonFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
-        (void)batchSize;
         (void)tensorPlacement;
-        THOR_THROW_IF_FALSE(!featureOutputs.empty());
-        return featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();
+        return raggedOutputBytesForPlacement(batchSize);
     }
 
     nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
@@ -101,6 +98,7 @@ class LayerNorm : public TrainableLayer {
                                                      const bool inferenceOnly) const override;
 
    private:
+    uint64_t raggedOutputBytesForPlacement(uint32_t batchSize) const;
     static bool isLayerNormInputDataType(DataType dataType);
     static uint64_t checkedFeatureCount(const std::vector<uint64_t>& shape, const std::string& what);
     static void validateNormalizedShapeForInput(const std::vector<uint64_t>& inputDims, const std::vector<uint64_t>& normalizedShape);
@@ -152,8 +150,9 @@ class LayerNorm::Builder {
         if (_featureInputs.size() > 1) {
             THOR_THROW_IF_FALSE(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
             THOR_THROW_IF_FALSE(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
-            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getBatchSize() == _raggedFeatureInputs.front().getBatchSize());
-            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getMaxTotalValues() == _raggedFeatureInputs.front().getMaxTotalValues());
+            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().sharesPartitionWith(_raggedFeatureInputs.front()));
+            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getMaxValuesPerRow() ==
+                                _raggedFeatureInputs.front().getMaxValuesPerRow());
             THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getOffsetsDataType() == _raggedFeatureInputs.front().getOffsetsDataType());
         }
         return *this;

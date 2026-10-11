@@ -8,7 +8,8 @@ import thor
 
 BATCH_SIZE = 2
 FEATURES = 16
-HISTORY_CAPACITY = 7
+HISTORY_MAX_VALUES_PER_ROW = 4
+HISTORY_CAPACITY = BATCH_SIZE * HISTORY_MAX_VALUES_PER_ROW
 FUTURE_LENGTH = 2
 HISTORY_BOUNDARY = 371
 
@@ -26,6 +27,7 @@ def _physical_ragged(values: np.ndarray, offsets: np.ndarray) -> thor.physical.P
     return thor.physical.PhysicalRaggedTensor(
         _cpu_tensor(values, thor.DataType.fp16),
         _cpu_tensor(offsets, thor.DataType.uint32),
+        max_values_per_row=HISTORY_MAX_VALUES_PER_ROW,
     )
 
 
@@ -36,9 +38,8 @@ def _build_network(name: str) -> thor.Network:
         "history",
         thor.DataType.fp16,
         [FEATURES],
-        max_total_values=HISTORY_CAPACITY,
-        batch_size=BATCH_SIZE,
         offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=HISTORY_MAX_VALUES_PER_ROW,
     )
     future = thor.layers.NetworkInput(
         network,

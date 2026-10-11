@@ -305,9 +305,10 @@ cuDNN-backed scaled dot-product attention layer for already-projected Q/K/V tens
 Dense API tensor shapes omit batch.  ``tensor_layout='bhsd'`` means
 ``[heads, sequence, head_dim]`` and ``tensor_layout='bshd'`` means
 ``[sequence, heads, head_dim]``.  Canonical ragged inputs instead use
-``thor.RaggedTensor`` packed values shaped ``[max_total_values, heads, head_dim]``
-with a separate logical row partition.  cuDNN-specific lengths and element
-offsets remain private backend metadata.
+``thor.RaggedTensor`` logical values shaped ``[M, heads, head_dim]``
+with a canonical ``[1]`` row-partition token. Physical packed capacity
+``[B*M, heads, head_dim]`` is established only when the network is placed.
+cuDNN-specific lengths and element offsets remain private backend metadata.
 
 FP16/BF16 production support:
 

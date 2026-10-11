@@ -111,7 +111,6 @@ TEST(Activations, PlacementNeutralSoftmaxSerializesSemanticGeometryAndRejectsMis
                              .trailingDimensions({2})
                              .maxValuesPerRow(maxValuesPerRow)
                              .build();
-    ASSERT_TRUE(input.isPlacementNeutral());
 
     auto softmax = dynamic_pointer_cast<Softmax>(Softmax::Builder().network(network).featureInput(input).build());
     ASSERT_NE(softmax, nullptr);
@@ -131,7 +130,7 @@ TEST(Activations, PlacementNeutralSoftmaxSerializesSemanticGeometryAndRejectsMis
     const json& inputJson = architecture.at("ragged_feature_input");
     const json& outputJson = architecture.at("ragged_feature_output");
     EXPECT_EQ(inputJson.at("layer_ragged_reference_version").get<string>(), "1.0.0");
-    EXPECT_EQ(inputJson.at("geometry_mode").get<string>(), "placement_neutral");
+    EXPECT_FALSE(inputJson.contains("geometry_mode"));
     EXPECT_EQ(inputJson.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
     EXPECT_FALSE(inputJson.contains("batch_size"));
     EXPECT_FALSE(inputJson.contains("max_total_values"));
@@ -145,7 +144,7 @@ TEST(Activations, PlacementNeutralSoftmaxSerializesSemanticGeometryAndRejectsMis
               architecture.at("feature_output").at("id").get<uint64_t>());
 
     json wrongVersion = architecture;
-    wrongVersion["version"] = "1.0.0";
+    wrongVersion["version"] = "0.0.0";
     EXPECT_THROW(Activation::deserialize(wrongVersion, &network), runtime_error);
     EXPECT_THROW(Softmax::deserialize(wrongVersion, &network), runtime_error);
 
@@ -216,7 +215,6 @@ TEST(Activations, PlacementNeutralSoftmaxSaveLoadReplacesPlacementGeometryPerBat
         const auto inputs = loaded.getExternalRaggedNetworkInputs();
         ASSERT_EQ(inputs.size(), 1U);
         const RaggedTensor loadedInput = inputs.front().raggedTensor;
-        ASSERT_TRUE(loadedInput.isPlacementNeutral());
         EXPECT_EQ(loadedInput.getValues().getOriginalId(), savedValuesOriginalId);
         EXPECT_EQ(loadedInput.getRowPartitionToken().getOriginalId(), savedPartitionOriginalId);
 
@@ -318,8 +316,6 @@ TEST(Activations, FixedRaggedSoftmaxRemainsVersionOneAndLoads) {
                                  .valuesDataType(DataType::FP32)
                                  .offsetsDataType(DataType::UINT32)
                                  .trailingDimensions({2})
-                                 .batchSize(3)
-                                 .maxTotalValues(9)
                                  .maxValuesPerRow(4)
                                  .build();
         auto softmax = dynamic_pointer_cast<Softmax>(Softmax::Builder().network(network).featureInput(input).build());
@@ -331,10 +327,11 @@ TEST(Activations, FixedRaggedSoftmaxRemainsVersionOneAndLoads) {
             .inputTensor(softmax->getRaggedFeatureOutput().value())
             .build();
         const json architecture = softmax->architectureJson();
-        EXPECT_EQ(architecture.at("version").get<string>(), "1.0.0");
-        EXPECT_EQ(architecture.at("ragged_feature_input").at("batch_size").get<uint64_t>(), 3U);
-        EXPECT_EQ(architecture.at("ragged_feature_input").at("max_total_values").get<uint64_t>(), 9U);
-        EXPECT_FALSE(architecture.at("ragged_feature_input").contains("layer_ragged_reference_version"));
+        EXPECT_EQ(architecture.at("version").get<string>(), "1.1.0");
+        EXPECT_EQ(architecture.at("ragged_feature_input").at("max_values_per_row").get<uint64_t>(), 4U);
+        EXPECT_FALSE(architecture.at("ragged_feature_input").contains("batch_size"));
+        EXPECT_FALSE(architecture.at("ragged_feature_input").contains("max_total_values"));
+        EXPECT_EQ(architecture.at("ragged_feature_input").at("offsets").at("dimensions"), json::array({1}));
         network.save(archive.string(), true);
     }
 
@@ -344,8 +341,7 @@ TEST(Activations, FixedRaggedSoftmaxRemainsVersionOneAndLoads) {
         shared_ptr<Softmax> softmax = findOnlySoftmax(loaded);
         ASSERT_NE(softmax, nullptr);
         ASSERT_TRUE(softmax->getRaggedFeatureInput().has_value());
-        EXPECT_FALSE(softmax->getRaggedFeatureInput()->isPlacementNeutral());
-        EXPECT_EQ(softmax->architectureJson().at("version").get<string>(), "1.0.0");
+        EXPECT_EQ(softmax->architectureJson().at("version").get<string>(), "1.1.0");
     } catch (...) {
         filesystem::remove_all(archive);
         throw;
@@ -424,7 +420,8 @@ TEST(Activations, SoftmaxRejectsFp8StandaloneDenseAndRaggedInputs) {
         }
         {
             Network network("raggedFp8SoftmaxReject");
-            RaggedTensor input(dtype, {7}, 3, 12, DataType::UINT64);
+            RaggedTensor input = RaggedTensor::logical(
+                Tensor(dtype, {4, 7}), Tensor(DataType::UINT64, {1}), 4);
             Softmax::Builder builder;
             builder.network(network);
             EXPECT_THROW(builder.featureInput(input), std::invalid_argument);
@@ -434,7 +431,8 @@ TEST(Activations, SoftmaxRejectsFp8StandaloneDenseAndRaggedInputs) {
 
 TEST(Activations, RaggedSoftmaxBuildCloneAndExpressionPreservePartitionWithOrdinaryFinalAxisSemantics) {
     Network network("raggedSoftmaxBuildCloneAndExpression");
-    RaggedTensor featureInput(DataType::FP32, {2, 3}, 2, 8, DataType::UINT64);
+    RaggedTensor featureInput = RaggedTensor::logical(
+        Tensor(DataType::FP32, {8, 2, 3}), Tensor(DataType::UINT64, {1}), 8);
 
     shared_ptr<Softmax> softmax = dynamic_pointer_cast<Softmax>(
         Softmax::Builder().network(network).featureInput(featureInput).build());
@@ -495,8 +493,7 @@ TEST(Activations, RaggedSoftmaxStandaloneMaterializesManagedActiveCountWithoutFu
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT64)
                              .trailingDimensions({5})
-                             .maxTotalValues(11)
-                             .batchSize(batchSize)
+                             .maxValuesPerRow(5)
                              .build();
 
     auto softmax = dynamic_pointer_cast<Softmax>(

@@ -167,9 +167,8 @@ class NegativeBinomialNLLLoss::Builder {
             THOR_THROW_IF_FALSE(dispersion.getValues() != labels.getValues());
             if (!mean.sharesPartitionWith(dispersion) || !mean.sharesPartitionWith(labels))
                 throw std::invalid_argument("NegativeBinomialNLLLoss ragged mean, dispersion, and labels must use the exact same row partition.");
-            if (mean.getBatchSize() != dispersion.getBatchSize() || mean.getBatchSize() != labels.getBatchSize() ||
-                mean.getMaxTotalValues() != dispersion.getMaxTotalValues() || mean.getMaxTotalValues() != labels.getMaxTotalValues() ||
-                mean.getTrailingDimensions() != dispersion.getTrailingDimensions() || mean.getTrailingDimensions() != labels.getTrailingDimensions())
+            if (mean.getValuesDimensions() != dispersion.getValuesDimensions() ||
+                mean.getValuesDimensions() != labels.getValuesDimensions())
                 throw std::invalid_argument("NegativeBinomialNLLLoss ragged mean, dispersion, and labels must have identical value geometry.");
             if (_exampleWeights.has_value() && _exampleWeights->getDimensions() != std::vector<uint64_t>{1})
                 throw std::invalid_argument("NegativeBinomialNLLLoss ragged example_weights must have dimensions [1] for one scalar weight per logical row.");

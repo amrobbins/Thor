@@ -42,17 +42,13 @@ Inputs makeSharedPartitionInputs(Network& network,
                                  DataType predictionsDType = DataType::FP32,
                                  DataType labelsDType = DataType::FP32,
                                  DataType offsetsDType = DataType::UINT32,
-                                 vector<uint64_t> trailingDimensions = {2},
-                                 uint32_t batchSize = 4,
-                                 uint64_t maxTotalValues = 11) {
+                                 vector<uint64_t> trailingDimensions = {2}) {
     RaggedTensor predictions = RaggedNetworkInput::Builder()
                                    .network(network)
                                    .name("predictions")
                                    .valuesDataType(predictionsDType)
                                    .offsetsDataType(offsetsDType)
                                    .trailingDimensions(trailingDimensions)
-                                   .batchSize(batchSize)
-                                   .maxTotalValues(maxTotalValues)
                                    .maxValuesPerRow(5)
                                    .build();
     RaggedTensor labels = RaggedNetworkInput::Builder()
@@ -105,7 +101,7 @@ enum class LossKind { MSE, MEAN_POWER };
 void runRuntimeCase(LossKind kind, DataType offsetsDType, bool weighted) {
     constexpr uint32_t batchSize = 4;
     constexpr uint32_t validExamples = 3;
-    constexpr uint64_t maxTotalValues = 8;
+    // Physical packed capacity comes from placement B times semantic M.
     constexpr uint64_t trailingWidth = 2;
     constexpr float exponent = 1.5f;
 
@@ -113,7 +109,9 @@ void runRuntimeCase(LossKind kind, DataType offsetsDType, bool weighted) {
     Network network("ragged_r10e_" + kindName + (weighted ? "_weighted" : "_unweighted") +
                     (offsetsDType == DataType::UINT32 ? "_u32" : "_u64"));
     Inputs inputs = makeSharedPartitionInputs(
-        network, DataType::FP32, DataType::FP32, offsetsDType, {trailingWidth}, batchSize, maxTotalValues);
+        network, DataType::FP32, DataType::FP32, offsetsDType, {trailingWidth});
+    const uint64_t physicalValueCapacity =
+        inputs.predictions.getDescriptorForPlacement(batchSize).getValuesDimensions().front();
 
     optional<Tensor> weightsTensor;
     if (weighted) {
@@ -167,14 +165,14 @@ void runRuntimeCase(LossKind kind, DataType offsetsDType, bool weighted) {
     ASSERT_NE(physicalLoss, nullptr);
 
     const Impl::TensorPlacement cpuPlacement(Impl::TensorPlacement::MemDevices::CPU);
-    Impl::Tensor predictionValues(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {maxTotalValues, trailingWidth}));
-    Impl::Tensor labelValues(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {maxTotalValues, trailingWidth}));
+    Impl::Tensor predictionValues(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {physicalValueCapacity, trailingWidth}));
+    Impl::Tensor labelValues(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {physicalValueCapacity, trailingWidth}));
     Impl::Tensor offsets(cpuPlacement, Impl::TensorDescriptor(offsetsDType, {batchSize + 1}));
 
     float* p = predictionValues.getMemPtr<float>();
     float* y = labelValues.getMemPtr<float>();
-    fill(p, p + maxTotalValues * trailingWidth, numeric_limits<float>::quiet_NaN());
-    fill(y, y + maxTotalValues * trailingWidth, numeric_limits<float>::quiet_NaN());
+    fill(p, p + physicalValueCapacity * trailingWidth, numeric_limits<float>::quiet_NaN());
+    fill(y, y + physicalValueCapacity * trailingWidth, numeric_limits<float>::quiet_NaN());
     const vector<float> activePredictions{1.0f, -4.0f, 9.0f, -16.0f, 25.0f, -36.0f, 49.0f, -64.0f, 81.0f, -100.0f};
     copy(activePredictions.begin(), activePredictions.end(), p);
     fill(y, y + activePredictions.size(), 0.0f);
@@ -221,7 +219,7 @@ void runRuntimeCase(LossKind kind, DataType offsetsDType, bool weighted) {
 
     ASSERT_TRUE(physicalLoss->getErrorOutput().has_value());
     const vector<float> gradient = copyFp32ToHost(physicalLoss->getErrorOutput().value());
-    ASSERT_EQ(gradient.size(), maxTotalValues * trailingWidth);
+    ASSERT_EQ(gradient.size(), physicalValueCapacity * trailingWidth);
     const float scale = Impl::Loss::getLossScalingFactor();
     for (size_t i = 0; i < activePredictions.size(); ++i) {
         const float prediction = activePredictions[i];
@@ -335,8 +333,6 @@ TEST(RaggedRegressionR10E, BothLossesRejectDifferentPartitionsAndAcceptDensePerR
                                        .name("predictions")
                                        .valuesDataType(DataType::FP32)
                                        .trailingDimensions({2})
-                                       .batchSize(3)
-                                       .maxTotalValues(8)
                                        .maxValuesPerRow(4)
                                        .build();
         RaggedTensor differentLabels = RaggedNetworkInput::Builder()
@@ -344,8 +340,6 @@ TEST(RaggedRegressionR10E, BothLossesRejectDifferentPartitionsAndAcceptDensePerR
                                            .name("different_labels")
                                            .valuesDataType(DataType::FP32)
                                            .trailingDimensions({2})
-                                           .batchSize(3)
-                                           .maxTotalValues(8)
                                            .maxValuesPerRow(4)
                                            .build();
         if (kind == LossKind::MSE) {
@@ -366,6 +360,28 @@ TEST(RaggedRegressionR10E, BothLossesRejectDifferentPartitionsAndAcceptDensePerR
                                   .trailingDimensions({2})
                                   .partition(predictions)
                                   .build();
+        // Sharing a partition is necessary, but logical M and trailing values
+        // shape must also agree. Neither comparison may use saved batch size.
+        RaggedTensor wrongM = RaggedTensor::logical(
+            Tensor(DataType::FP32, {5, 2}), predictions.getRowPartitionToken(), 5);
+        RaggedTensor wrongTrailing = RaggedTensor::logical(
+            Tensor(DataType::FP32, {4, 3}), predictions.getRowPartitionToken(), 4);
+        ASSERT_TRUE(predictions.sharesPartitionWith(wrongM));
+        ASSERT_TRUE(predictions.sharesPartitionWith(wrongTrailing));
+        for (const RaggedTensor& wrong : {wrongM, wrongTrailing}) {
+            if (kind == LossKind::MSE) {
+                EXPECT_THROW((void)MSE::Builder().network(network).predictions(predictions).labels(wrong).build(),
+                             invalid_argument);
+            } else {
+                EXPECT_THROW((void)MeanPowerError::Builder()
+                                 .network(network)
+                                 .predictions(predictions)
+                                 .labels(wrong)
+                                 .build(),
+                             invalid_argument);
+            }
+        }
+
         NetworkInput weightsInput = NetworkInput::Builder()
                                         .network(network)
                                         .name("weights")
@@ -495,7 +511,7 @@ TEST(RaggedRegressionR10E, PerRowWeightsPlaceForScalarAndMultiAxisTrailingValues
         for (const vector<uint64_t>& trailingDimensions : {vector<uint64_t>{}, vector<uint64_t>{2, 3}}) {
             Network network(kind == LossKind::MSE ? "r10e_mse_weight_shape" : "r10e_mean_power_weight_shape");
             Inputs inputs = makeSharedPartitionInputs(
-                network, DataType::FP32, DataType::FP32, DataType::UINT32, trailingDimensions, 3, 7);
+                network, DataType::FP32, DataType::FP32, DataType::UINT32, trailingDimensions);
             NetworkInput weightsInput = NetworkInput::Builder()
                                             .network(network)
                                             .name("weights")

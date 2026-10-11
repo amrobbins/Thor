@@ -235,9 +235,7 @@ def test_numpy_dataset_ragged_batches_train_through_canonical_ctc_with_exact_par
         "labels",
         thor.DataType.int32,
         [],
-        max_total_values=5,
         max_values_per_row=2,
-        batch_size=batch_size,
         offsets_data_type=thor.DataType.uint32,
     )
     input_lengths = thor.layers.NetworkInput(
@@ -329,8 +327,6 @@ def _numpy_ragged_conv_training_fixture(*, max_values_per_row: int):
         "history",
         thor.DataType.fp32,
         [channels],
-        max_total_values=12,
-        batch_size=batch_size,
         offsets_data_type=thor.DataType.uint32,
         max_values_per_row=max_values_per_row,
     )
@@ -432,9 +428,8 @@ def test_numpy_dataset_device_residency_supports_all_empty_ragged_storage():
         "labels",
         thor.DataType.int32,
         [],
-        max_total_values=1,
-        batch_size=batch_size,
         offsets_data_type=thor.DataType.uint64,
+        max_values_per_row=1,
     )
     input_lengths = thor.layers.NetworkInput(
         network, "input_lengths", [1], thor.DataType.int32

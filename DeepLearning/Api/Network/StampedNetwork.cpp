@@ -1,5 +1,6 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Network/StampedNetwork.h"
+#include "DeepLearning/Api/Layers/Loss/Loss.h"
 
 #include <tuple>
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
@@ -421,16 +422,28 @@ void StampedNetwork::setActiveTrainingLossRoots(const std::vector<Thor::Tensor>&
 
     std::set<ThorImplementation::Loss*> activePhysicalLosses;
     for (const Thor::Tensor& rawLossRoot : activeRawLossRoots) {
-        auto drivingLayerIt = apiTensorToPhysicalDrivingLayerShared.find(rawLossRoot);
-        if (drivingLayerIt == apiTensorToPhysicalDrivingLayerShared.end()) {
+        // Training roots are owned by the logical Loss, not by the last
+        // physical layer routing its output. In particular, a multi-consumer
+        // RAW loss is routed through TensorFanout, which is not a Loss.
+        auto apiOwnerIt = apiTensorToApiDrivingLayerShared.find(rawLossRoot);
+        if (apiOwnerIt == apiTensorToApiDrivingLayerShared.end()) {
             throw std::runtime_error("Active raw loss tensor with original id " + std::to_string(rawLossRoot.getOriginalId()) +
-                                     " is not present in the stamped network.");
+                                     " has no semantic producer in the stamped network.");
         }
-        std::shared_ptr<ThorImplementation::Loss> physicalLoss =
-            std::dynamic_pointer_cast<ThorImplementation::Loss>(drivingLayerIt->second);
+        auto apiLoss = std::dynamic_pointer_cast<Thor::Loss>(apiOwnerIt->second);
+        if (apiLoss == nullptr || apiLoss->getRawLoss().getOriginalId() != rawLossRoot.getOriginalId()) {
+            throw std::runtime_error("Active raw loss tensor with original id " + std::to_string(rawLossRoot.getOriginalId()) +
+                                     " is not produced by an API loss layer.");
+        }
+        auto physicalOwnerIt = apiLayerToPhysicalLayerShared.find(apiLoss->getId());
+        if (physicalOwnerIt == apiLayerToPhysicalLayerShared.end()) {
+            throw std::runtime_error("Active raw loss tensor with original id " + std::to_string(rawLossRoot.getOriginalId()) +
+                                     " has no physical loss implementation.");
+        }
+        auto physicalLoss = std::dynamic_pointer_cast<ThorImplementation::Loss>(physicalOwnerIt->second);
         if (physicalLoss == nullptr) {
             throw std::runtime_error("Active raw loss tensor with original id " + std::to_string(rawLossRoot.getOriginalId()) +
-                                     " is not driven by a physical loss layer.");
+                                     " maps to a non-loss physical implementation.");
         }
         activePhysicalLosses.insert(physicalLoss.get());
     }

@@ -411,9 +411,8 @@ def test_ragged_network_output_infer_returns_one_logical_physical_ragged_tensor(
         "tokens",
         thor.DataType.fp32,
         [2],
-        max_total_values=6,
-        batch_size=batch_size,
         offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=3,
     )
     thor.layers.RaggedNetworkOutput(net, "tokens_out", tokens)
 
@@ -431,7 +430,7 @@ def test_ragged_network_output_infer_returns_one_logical_physical_ragged_tensor(
     offsets_np = np.array([0, 1, 4], dtype=np.uint32)
     values = _cpu_tensor(values_np, thor.DataType.fp32)
     offsets = _cpu_tensor(offsets_np, thor.DataType.uint32)
-    ragged = thor.physical.PhysicalRaggedTensor(values, offsets)
+    ragged = thor.physical.PhysicalRaggedTensor(values, offsets, max_values_per_row=3)
 
     outputs = placed.infer({"tokens": ragged})
 
@@ -500,8 +499,6 @@ def test_physical_ragged_tensor_with_capacity_directly_infers_through_ragged_con
         "tokens",
         thor.DataType.fp32,
         [channels],
-        max_total_values=max_total_values,
-        batch_size=batch_size,
         offsets_data_type=thor.DataType.uint32,
         max_values_per_row=max_values_per_row,
     )

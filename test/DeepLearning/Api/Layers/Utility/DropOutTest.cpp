@@ -292,8 +292,7 @@ TEST(UtilityApiLayers, RaggedDropOutPreservesPartitionWithoutReserveSpace) {
                              .name("history")
                              .valuesDataType(DataType::FP32)
                              .trailingDimensions({4})
-                             .maxTotalValues(maxTotalValues)
-                             .batchSize(batchSize)
+                             .maxValuesPerRow(3)
                              .offsetsDataType(DataType::UINT32)
                              .build();
 
@@ -307,7 +306,7 @@ TEST(UtilityApiLayers, RaggedDropOutPreservesPartitionWithoutReserveSpace) {
     EXPECT_EQ(dropOut.getRaggedFeatureInput().value(), input);
     EXPECT_EQ(dropOut.getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
     EXPECT_EQ(dropOut.getRaggedFeatureOutput()->getValuesDimensions(), input.getValuesDimensions());
-    EXPECT_EQ(dropOut.getOutputTensorBytes(batchSize), input.getValues().getTotalSizeInBytes());
+    EXPECT_EQ(dropOut.getOutputTensorBytes(batchSize), batchSize * input.getValues().getTotalSizeInBytes());
 
     TestableDropOut testableDropOut(dropOut);
     EXPECT_EQ(testableDropOut.reservedStateSizeInBytes(batchSize), 0u);
@@ -325,8 +324,7 @@ TEST(UtilityApiLayers, RaggedDropOutPlacesForInferenceAndPreservesLogicalOutput)
                              .name("history")
                              .valuesDataType(DataType::BF16)
                              .trailingDimensions({3})
-                             .maxTotalValues(9)
-                             .batchSize(3)
+                             .maxValuesPerRow(3)
                              .offsetsDataType(DataType::UINT32)
                              .build();
     DropOut dropOut = DropOut::Builder().network(network).featureInput(input).dropProportion(0.5f).build();
@@ -364,7 +362,6 @@ TEST(UtilityApiLayers, PlacementNeutralDropOutSerializesSemanticGeometryAndAccou
                              .trailingDimensions({2})
                              .maxValuesPerRow(maxValuesPerRow)
                              .build();
-    ASSERT_TRUE(input.isPlacementNeutral());
 
     DropOut dropOut = DropOut::Builder().network(network).featureInput(input).dropProportion(0.25f).build();
     ASSERT_TRUE(dropOut.getRaggedFeatureOutput().has_value());
@@ -389,7 +386,7 @@ TEST(UtilityApiLayers, PlacementNeutralDropOutSerializesSemanticGeometryAndAccou
     EXPECT_FALSE(architecture.contains("training_dropout_enabled"));
     const json& inputJson = architecture.at("ragged_feature_input");
     const json& outputJson = architecture.at("ragged_feature_output");
-    EXPECT_EQ(inputJson.at("geometry_mode").get<string>(), "placement_neutral");
+    EXPECT_FALSE(inputJson.contains("geometry_mode"));
     EXPECT_EQ(inputJson.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
     EXPECT_FALSE(inputJson.contains("batch_size"));
     EXPECT_FALSE(inputJson.contains("max_total_values"));
@@ -398,9 +395,9 @@ TEST(UtilityApiLayers, PlacementNeutralDropOutSerializesSemanticGeometryAndAccou
     EXPECT_EQ(outputJson.at("offsets").at("id").get<uint64_t>(), inputJson.at("offsets").at("id").get<uint64_t>());
     EXPECT_EQ(outputJson.at("values").at("id").get<uint64_t>(), architecture.at("feature_output").at("id").get<uint64_t>());
 
-    json neutralAsFixed = architecture;
-    neutralAsFixed["version"] = "1.0.0";
-    EXPECT_THROW(DropOut::deserialize(neutralAsFixed, &network), runtime_error);
+    json wrongVersion = architecture;
+    wrongVersion["version"] = "9.0.0";
+    EXPECT_THROW(DropOut::deserialize(wrongVersion, &network), runtime_error);
 
     json wrongPartition = architecture;
     wrongPartition["ragged_feature_output"]["offsets"]["id"] = input.getValues().getId();
@@ -417,8 +414,6 @@ TEST(UtilityApiLayers, PlacementNeutralDropOutSerializesSemanticGeometryAndAccou
                                   .valuesDataType(DataType::FP32)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({2})
-                                  .batchSize(3)
-                                  .maxTotalValues(9)
                                   .maxValuesPerRow(4)
                                   .build();
     DropOut fixed = DropOut::Builder().network(fixedNetwork).featureInput(fixedInput).dropProportion(0.25f).build();
@@ -428,12 +423,13 @@ TEST(UtilityApiLayers, PlacementNeutralDropOutSerializesSemanticGeometryAndAccou
         .inputTensor(fixed.getRaggedFeatureOutput().value())
         .build();
     const json fixedJson = fixed.architectureJson();
-    EXPECT_EQ(fixedJson.at("version").get<string>(), "1.0.0");
-    EXPECT_EQ(fixedJson.at("ragged_feature_input").at("batch_size").get<uint64_t>(), 3U);
-    EXPECT_EQ(fixedJson.at("ragged_feature_input").at("max_total_values").get<uint64_t>(), 9U);
-    json fixedAsNeutral = fixedJson;
-    fixedAsNeutral["version"] = "1.1.0";
-    EXPECT_THROW(DropOut::deserialize(fixedAsNeutral, &fixedNetwork), runtime_error);
+    EXPECT_EQ(fixedJson.at("version").get<string>(), "1.1.0");
+    EXPECT_EQ(fixedJson.at("ragged_feature_input").at("max_values_per_row").get<uint64_t>(), 4U);
+    EXPECT_FALSE(fixedJson.at("ragged_feature_input").contains("batch_size"));
+    EXPECT_FALSE(fixedJson.at("ragged_feature_input").contains("max_total_values"));
+    EXPECT_EQ(fixed.getRaggedFeatureOutput()->getDescriptorForPlacement(3).getMaxTotalValues(), 12U);
+    EXPECT_EQ(fixedJson.at("ragged_feature_input").at("offsets").at("dimensions"),
+              (vector<uint64_t>{1}));
 
     const auto nonce = chrono::steady_clock::now().time_since_epoch().count();
     const filesystem::path fixedArchive = filesystem::temp_directory_path() /
@@ -449,10 +445,9 @@ TEST(UtilityApiLayers, PlacementNeutralDropOutSerializesSemanticGeometryAndAccou
     }
     ASSERT_NE(reloadedDropOut, nullptr);
     ASSERT_TRUE(reloadedDropOut->getRaggedFeatureInput().has_value());
-    EXPECT_FALSE(reloadedDropOut->getRaggedFeatureInput()->isPlacementNeutral());
-    EXPECT_EQ(reloadedDropOut->getRaggedFeatureInput()->getBatchSize(), 3U);
-    EXPECT_EQ(reloadedDropOut->getRaggedFeatureInput()->getMaxTotalValues(), 9U);
-    EXPECT_EQ(reloadedDropOut->architectureJson().at("version").get<string>(), "1.0.0");
+        EXPECT_EQ(reloadedDropOut->getRaggedFeatureInput()->getMaxValuesPerRow(), 4U);
+        EXPECT_EQ(reloadedDropOut->getRaggedFeatureInput()->getOffsetsDimensions(), (vector<uint64_t>{1}));
+    EXPECT_EQ(reloadedDropOut->architectureJson().at("version").get<string>(), "1.1.0");
     filesystem::remove_all(fixedArchive);
 }
 
@@ -539,7 +534,6 @@ TEST(UtilityApiLayers, PlacementNeutralDropOutSaveLoadReplacesCapacityAtDifferen
         const auto externalInputs = loaded.getExternalRaggedNetworkInputs();
         ASSERT_EQ(externalInputs.size(), 1U);
         const RaggedTensor loadedInput = externalInputs.front().raggedTensor;
-        ASSERT_TRUE(loadedInput.isPlacementNeutral());
         EXPECT_EQ(loadedInput.getValues().getOriginalId(), savedValuesOriginalId);
         EXPECT_EQ(loadedInput.getRowPartitionToken().getOriginalId(), savedPartitionOriginalId);
         shared_ptr<DropOut> loadedDropOut = findDropOut(loaded);

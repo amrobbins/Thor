@@ -3087,7 +3087,13 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
     }
 
     if (n.op == ExprOp::STRIDED_VIEW) {
-        if (n.view_dims.empty() || n.view_dims.size() != n.view_strides.size()) {
+        // view_dims may contain the Expression copy-dimension marker (0).
+        // Shape inference has already resolved it against the *physical* input
+        // at this placement; never use the unexpanded model dimensions for
+        // index arithmetic.
+        const std::vector<uint64_t>& view_dims = group.node_dims[node_idx];
+        if (n.view_dims.empty() || n.view_dims.size() != n.view_strides.size() ||
+            view_dims.size() != n.view_dims.size()) {
             throw runtime_error("Index-mapped strided_view emission requires dimensions and strides with the same non-zero rank.");
         }
 
@@ -3097,8 +3103,8 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
            << emittedIndexType(use_uint32_index_math) << ">(" << idx_expr << ");\n";
         ss << indent << emittedIndexType(use_uint32_index_math) << " " << source_idx << " = "
            << emitUnsignedLiteral(n.view_element_offset, use_uint32_index_math) << ";\n";
-        for (int64_t axis = static_cast<int64_t>(n.view_dims.size()) - 1; axis >= 0; --axis) {
-            const uint64_t dim = n.view_dims.at(static_cast<size_t>(axis));
+        for (int64_t axis = static_cast<int64_t>(view_dims.size()) - 1; axis >= 0; --axis) {
+            const uint64_t dim = view_dims.at(static_cast<size_t>(axis));
             const uint64_t stride = n.view_strides.at(static_cast<size_t>(axis));
             if (dim == 0 || stride == 0) {
                 throw runtime_error("Index-mapped strided_view dimensions and strides must be non-zero.");
@@ -3832,7 +3838,13 @@ static std::string emitScalarValueAtIndex(std::ostringstream& ss,
     };
 
     if (n.op == ExprOp::STRIDED_VIEW) {
-        if (n.view_dims.empty() || n.view_dims.size() != n.view_strides.size()) {
+        // Specialized groups carry physical dimensions after copy-dimension
+        // markers have been resolved.  The original expression keeps the 0
+        // marker for serialization and must not drive address arithmetic.
+        const std::vector<uint64_t>& view_dims =
+            group != nullptr && node_idx < group->node_dims.size() ? group->node_dims[node_idx] : n.view_dims;
+        if (n.view_dims.empty() || n.view_dims.size() != n.view_strides.size() ||
+            view_dims.size() != n.view_dims.size()) {
             throw runtime_error("Index-aware strided_view emission requires dimensions and strides with the same non-zero rank.");
         }
 
@@ -3840,8 +3852,8 @@ static std::string emitScalarValueAtIndex(std::ostringstream& ss,
         const std::string residual_var = "sv_residual_" + std::to_string(node_idx) + suffix;
         ss << indent << "unsigned long long " << residual_var << " = static_cast<unsigned long long>(" << idx_expr << ");\n";
         ss << indent << "unsigned long long " << source_idx << " = " << n.view_element_offset << "ULL;\n";
-        for (int64_t axis = static_cast<int64_t>(n.view_dims.size()) - 1; axis >= 0; --axis) {
-            const uint64_t dim = n.view_dims.at(static_cast<size_t>(axis));
+        for (int64_t axis = static_cast<int64_t>(view_dims.size()) - 1; axis >= 0; --axis) {
+            const uint64_t dim = view_dims.at(static_cast<size_t>(axis));
             const uint64_t stride = n.view_strides.at(static_cast<size_t>(axis));
             if (dim == 0 || stride == 0) {
                 throw runtime_error("Index-aware strided_view dimensions and strides must be non-zero.");

@@ -45,9 +45,7 @@ Inputs makeInputs(Network& network,
                   Kind kind,
                   DataType offsetsDType = DataType::UINT32,
                   DataType valueDType = DataType::FP32,
-                  vector<uint64_t> trailingDimensions = {1},
-                  uint32_t batchSize = 4,
-                  uint64_t maxTotalValues = 8) {
+                  vector<uint64_t> trailingDimensions = {1}) {
     (void)kind;
     RaggedTensor primary = RaggedNetworkInput::Builder()
                                .network(network)
@@ -55,8 +53,6 @@ Inputs makeInputs(Network& network,
                                .valuesDataType(valueDType)
                                .offsetsDataType(offsetsDType)
                                .trailingDimensions(trailingDimensions)
-                               .batchSize(batchSize)
-                               .maxTotalValues(maxTotalValues)
                                .maxValuesPerRow(5)
                                .build();
     RaggedTensor labels = RaggedNetworkInput::Builder()
@@ -177,7 +173,7 @@ void runRuntimeCase(Kind kind, DataType offsetsDType, bool logParameter, bool we
 
     constexpr uint32_t batchSize = 4;
     constexpr uint32_t validExamples = 3;
-    constexpr uint64_t maxTotalValues = 8;
+    constexpr uint64_t maxTotalValues = static_cast<uint64_t>(batchSize) * 5;
     Network network("ragged_r10j_runtime");
     Inputs inputs = makeInputs(network, kind, offsetsDType);
 
@@ -357,8 +353,6 @@ TEST(RaggedDistributionR10J, ReportingContractsAndExactPartition) {
                                  .name("different")
                                  .valuesDataType(DataType::FP32)
                                  .trailingDimensions({1})
-                                 .batchSize(4)
-                                 .maxTotalValues(8)
                                  .maxValuesPerRow(5)
                                  .build();
     EXPECT_THROW((void)GaussianNLLLoss::Builder()

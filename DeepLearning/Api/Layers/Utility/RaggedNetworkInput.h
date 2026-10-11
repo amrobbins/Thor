@@ -18,9 +18,9 @@ class Network;
 // into a GPU offsets input. Builder::partition(...) declares a values-only boundary
 // that reuses an existing logical input's exact row partition. The row partition
 // remains authoritative: values beyond hostOffsets[B] are inactive,
-// undefined capacity. A partition-owning builder may either use the legacy fixed
-// batchSize/maxTotalValues pair or omit both and provide maxValuesPerRow to create
-// placement-neutral logical geometry. RaggedNetworkInput copies packed values without inspecting
+// undefined capacity. Independent boundaries require a semantic maxValuesPerRow;
+// shared boundaries inherit it from their canonical partition.
+// RaggedNetworkInput copies packed values without inspecting
 // or canonicalizing that inactive storage; consumers that over-read own their
 // required sanitation.
 class RaggedNetworkInput {
@@ -37,16 +37,12 @@ class RaggedNetworkInput::Builder {
     virtual RaggedNetworkInput::Builder& valuesDataType(DataType dataType);
     virtual RaggedNetworkInput::Builder& offsetsDataType(DataType dataType);
     virtual RaggedNetworkInput::Builder& trailingDimensions(const std::vector<uint64_t>& dimensions);
-    virtual RaggedNetworkInput::Builder& maxTotalValues(uint64_t maxTotalValues);
-    // maxValuesPerRow is optional metadata for legacy fixed geometry and required
-    // semantic model state for placement-neutral geometry.
+    // Required semantic M for independently owned boundaries; a shared
+    // partition inherits M instead.
     virtual RaggedNetworkInput::Builder& maxValuesPerRow(uint64_t maxValuesPerRow);
-    // batchSize and maxTotalValues are a legacy fixed-geometry pair. Omit both to
-    // construct a placement-neutral owner.
-    virtual RaggedNetworkInput::Builder& batchSize(uint64_t batchSize);
     // Reuse the exact row partition of an existing logical RaggedNetworkInput.
     // In this mode only <name>.values is declared as a new external boundary;
-    // batch/partition/capacity metadata is inherited from partition and must not be
+    // partition metadata is inherited from partition and must not be
     // redundantly specified on this builder.
     virtual RaggedNetworkInput::Builder& partition(const RaggedTensor& partition);
 
@@ -56,9 +52,7 @@ class RaggedNetworkInput::Builder {
     std::optional<DataType> valuesDataType_;
     std::optional<DataType> offsetsDataType_;
     std::vector<uint64_t> trailingDimensions_;
-    std::optional<uint64_t> maxTotalValues_;
     std::optional<uint64_t> maxValuesPerRow_;
-    std::optional<uint64_t> batchSize_;
     std::optional<RaggedTensor> partition_;
 };
 

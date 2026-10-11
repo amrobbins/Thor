@@ -529,8 +529,6 @@ TEST(FullyConnectedApi, RaggedMemoryAccountingCountsPackedBatchCapacityExactlyOn
                                  .valuesDataType(DataType::FP32)
                                  .offsetsDataType(DataType::UINT32)
                                  .trailingDimensions({inputFeatures})
-                                 .batchSize(batchSize)
-                                 .maxTotalValues(static_cast<uint64_t>(batchSize) * sequenceCapacity)
                                  .maxValuesPerRow(sequenceCapacity)
                                  .build();
         return Api::FullyConnected::Builder()
@@ -556,26 +554,24 @@ TEST(FullyConnectedApi, RaggedMemoryAccountingCountsPackedBatchCapacityExactlyOn
     const uint64_t outputBytes32 = output32.getTotalSizeInBytes();
     const uint64_t outputBytes64 = output64.getTotalSizeInBytes();
 
-    EXPECT_TRUE(fc32.outputTensorDimensionsIncludeBatch(output32));
-    EXPECT_TRUE(fc64.outputTensorDimensionsIncludeBatch(output64));
-    EXPECT_EQ(outputBytes64, 2 * outputBytes32);
-
-    // Packed ragged values already contain the complete batch capacity T_max.
-    // Memory admission must not multiply that physical tensor by batchSize again.
-    EXPECT_EQ(fc32.getOutputTensorBytes(batch32), outputBytes32);
-    EXPECT_EQ(fc64.getOutputTensorBytes(batch64), outputBytes64);
+    EXPECT_EQ(outputBytes32, sequenceCapacity * outputFeatures * sizeof(float));
+    EXPECT_EQ(outputBytes64, outputBytes32);
+    // Logical output shapes never contain placement B. Physical allocation
+    // accounts for the packed B*M capacity exactly once.
+    EXPECT_EQ(fc32.getOutputTensorBytes(batch32), batch32 * outputBytes32);
+    EXPECT_EQ(fc64.getOutputTensorBytes(batch64), batch64 * outputBytes64);
     EXPECT_EQ(fc64.getOutputTensorBytes(batch64), 2 * fc32.getOutputTensorBytes(batch32));
 
-    EXPECT_EQ(fc32.getNonFirstInstanceMemRequirementInBytes(batch32, gpuPlacement), outputBytes32);
-    EXPECT_EQ(fc64.getNonFirstInstanceMemRequirementInBytes(batch64, gpuPlacement), outputBytes64);
+    EXPECT_EQ(fc32.getNonFirstInstanceMemRequirementInBytes(batch32, gpuPlacement), batch32 * outputBytes32);
+    EXPECT_EQ(fc64.getNonFirstInstanceMemRequirementInBytes(batch64, gpuPlacement), batch64 * outputBytes64);
     EXPECT_EQ(fc64.getNonFirstInstanceMemRequirementInBytes(batch64, gpuPlacement),
               2 * fc32.getNonFirstInstanceMemRequirementInBytes(batch32, gpuPlacement));
 
     ASSERT_EQ(fc32.getParameterBytes(), fc64.getParameterBytes());
     EXPECT_EQ(fc32.getFirstInstanceMemRequirementInBytes(batch32, gpuPlacement),
-              outputBytes32 + fc32.getParameterBytes());
+              batch32 * outputBytes32 + fc32.getParameterBytes());
     EXPECT_EQ(fc64.getFirstInstanceMemRequirementInBytes(batch64, gpuPlacement),
-              outputBytes64 + fc64.getParameterBytes());
+              batch64 * outputBytes64 + fc64.getParameterBytes());
 }
 
 TEST(FullyConnectedApi, DenseMemoryAccountingStillAppliesLogicalBatchExactlyOnce) {
@@ -616,9 +612,9 @@ TEST(FullyConnectedApi, RaggedBuilderPreservesRowPartitionAndUsesTokenWiseOutput
                                   .valuesDataType(DataType::FP32)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({4})
-                                  .maxTotalValues(66)
+                                  
                                   .maxValuesPerRow(17)
-                                  .batchSize(2)
+                                  
                                   .build();
 
     Api::FullyConnected fc = Api::FullyConnected::Builder()
@@ -639,7 +635,7 @@ TEST(FullyConnectedApi, RaggedBuilderPreservesRowPartitionAndUsesTokenWiseOutput
     EXPECT_EQ(fc.getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
     ASSERT_TRUE(fc.getRaggedFeatureOutput()->hasMaxValuesPerRow());
     EXPECT_EQ(fc.getRaggedFeatureOutput()->getMaxValuesPerRow(), 17u);
-    EXPECT_EQ(fc.getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{66, 3}));
+    EXPECT_EQ(fc.getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{17, 3}));
     ASSERT_EQ(fc.getFeatureInputs().size(), 2u);
     EXPECT_EQ(fc.getFeatureInputs()[0], input.getValues());
     EXPECT_EQ(fc.getFeatureInputs()[1], input.getOffsets());
@@ -666,8 +662,7 @@ TEST(FullyConnectedApi, RaggedMultipleApplicationsExposeIndependentStructuralOff
                                    .valuesDataType(DataType::FP32)
                                    .offsetsDataType(DataType::UINT32)
                                    .trailingDimensions({4})
-                                   .maxTotalValues(66)
-                                   .batchSize(2)
+                                   .maxValuesPerRow(33)
                                    .build();
     Api::RaggedTensor input1 = Api::RaggedNetworkInput::Builder()
                                    .network(network)
@@ -675,8 +670,7 @@ TEST(FullyConnectedApi, RaggedMultipleApplicationsExposeIndependentStructuralOff
                                    .valuesDataType(DataType::FP32)
                                    .offsetsDataType(DataType::UINT32)
                                    .trailingDimensions({4})
-                                   .maxTotalValues(66)
-                                   .batchSize(2)
+                                   .maxValuesPerRow(33)
                                    .build();
 
     Api::FullyConnected fc = Api::FullyConnected::Builder()
@@ -690,6 +684,19 @@ TEST(FullyConnectedApi, RaggedMultipleApplicationsExposeIndependentStructuralOff
                                  .outputDataType(DataType::FP32)
                                  .noActivation()
                                  .build();
+
+    // Both logical applications are owned by one FC and one shared weight parameter.
+    ASSERT_EQ(fc.getParameters().size(), 1u);
+    EXPECT_FALSE(input0.sharesPartitionWith(input1));
+    ASSERT_TRUE(fc.getRaggedFeatureOutput(0).has_value());
+    ASSERT_TRUE(fc.getRaggedFeatureOutput(1).has_value());
+    EXPECT_TRUE(fc.getRaggedFeatureOutput(0)->sharesPartitionWith(input0));
+    EXPECT_TRUE(fc.getRaggedFeatureOutput(1)->sharesPartitionWith(input1));
+    EXPECT_FALSE(fc.getRaggedFeatureOutput(0)->sharesPartitionWith(input1));
+    EXPECT_EQ(fc.getRaggedFeatureOutput(0)->getValues().getDimensions(),
+              (vector<uint64_t>{33, 3}));
+    EXPECT_EQ(fc.getRaggedFeatureOutput(1)->getValues().getDimensions(),
+              (vector<uint64_t>{33, 3}));
 
     ASSERT_EQ(fc.getFeatureInputs().size(), 4u);
     EXPECT_EQ(fc.getFeatureInputs()[0], input0.getValues());
@@ -718,6 +725,32 @@ TEST(FullyConnectedApi, RaggedMultipleApplicationsExposeIndependentStructuralOff
     EXPECT_EQ(secondReady[0], fc.getRaggedFeatureOutput(1)->getValues());
 }
 
+TEST(FullyConnectedApi, NeutralMultipleApplicationsRequireMatchingSemanticGeometry) {
+    Api::Network network("neutral_fc_multi_geometry_validation");
+    auto input = [&](const string& name, uint64_t m, DataType offsetsDtype) {
+        return Api::RaggedNetworkInput::Builder()
+            .network(network)
+            .name(name)
+            .valuesDataType(DataType::FP32)
+            .offsetsDataType(offsetsDtype)
+            .trailingDimensions({4})
+            .maxValuesPerRow(m)
+            .build();
+    };
+    const Api::RaggedTensor first = input("first", 5, DataType::UINT32);
+    const Api::RaggedTensor differentM = input("different_m", 6, DataType::UINT32);
+    const Api::RaggedTensor differentOffsetsDtype = input("different_offsets", 5, DataType::UINT64);
+
+    EXPECT_ANY_THROW((Api::FullyConnected::Builder()
+                          .network(network)
+                          .featureInput(first)
+                          .featureInput(differentM)));
+    EXPECT_ANY_THROW((Api::FullyConnected::Builder()
+                          .network(network)
+                          .featureInput(first)
+                          .featureInput(differentOffsetsDtype)));
+}
+
 TEST(FullyConnectedApi, RaggedBuilderUsesRegularDefaultActivationPattern) {
     Api::Network network("ragged_fc_default_activation");
     Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
@@ -725,9 +758,7 @@ TEST(FullyConnectedApi, RaggedBuilderUsesRegularDefaultActivationPattern) {
                                   .name("tokens")
                                   .valuesDataType(DataType::FP32)
                                   .trailingDimensions({4})
-                                  .maxTotalValues(66)
-                                  .batchSize(2)
-                                  .build();
+                                  .maxValuesPerRow(17).build();
     Api::FullyConnected fc = Api::FullyConnected::Builder()
                                  .network(network)
                                  .featureInput(input)
@@ -753,9 +784,9 @@ TEST(FullyConnectedApi, RaggedArchitectureSaveLoadRoundTripPreservesRowPartition
                                       .valuesDataType(DataType::FP32)
                                       .offsetsDataType(DataType::UINT64)
                                       .trailingDimensions({4})
-                                      .maxTotalValues(66)
+                                      
                                       .maxValuesPerRow(17)
-                                      .batchSize(2)
+                                      
                                       .build();
         Api::FullyConnected fc = Api::FullyConnected::Builder()
                                      .network(network)
@@ -784,12 +815,12 @@ TEST(FullyConnectedApi, RaggedArchitectureSaveLoadRoundTripPreservesRowPartition
         ASSERT_TRUE(loadedFc->getUseRagged());
         ASSERT_TRUE(loadedFc->getRaggedFeatureInput().has_value());
         ASSERT_TRUE(loadedFc->getRaggedFeatureOutput().has_value());
-        EXPECT_EQ(loadedFc->getRaggedFeatureInput()->getBatchSize(), 2u);
-        EXPECT_EQ(loadedFc->getRaggedFeatureInput()->getMaxTotalValues(), 66u);
+        EXPECT_EQ(loadedFc->getRaggedFeatureInput()->getValuesDimensions().front(), 17u);
+        EXPECT_EQ(loadedFc->getRaggedFeatureInput()->getOffsetsDimensions(), (vector<uint64_t>{1}));
         ASSERT_TRUE(loadedFc->getRaggedFeatureInput()->hasMaxValuesPerRow());
         EXPECT_EQ(loadedFc->getRaggedFeatureInput()->getMaxValuesPerRow(), 17u);
         EXPECT_EQ(loadedFc->getRaggedFeatureInput()->getOffsetsDataType(), DataType::UINT64);
-        EXPECT_EQ(loadedFc->getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{66, 3}));
+        EXPECT_EQ(loadedFc->getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{17, 3}));
         ASSERT_TRUE(loadedFc->getRaggedFeatureOutput()->hasMaxValuesPerRow());
         EXPECT_EQ(loadedFc->getRaggedFeatureOutput()->getMaxValuesPerRow(), 17u);
         EXPECT_EQ(loadedFc->getRaggedFeatureOutput()->getOffsets(), loadedFc->getRaggedFeatureInput()->getOffsets());
@@ -818,9 +849,7 @@ TEST(FullyConnectedApi, RaggedDropOutToFcLeavesInactiveCapacityToTheFcConsumer) 
                                   .valuesDataType(DataType::FP32)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({inputFeatures})
-                                  .maxTotalValues(fullRows)
-                                  .batchSize(logicalBatchSize)
-                                  .build();
+                                  .maxValuesPerRow(50).build();
     Api::DropOut dropOut =
         Api::DropOut::Builder().network(network).featureInput(input).dropProportion(0.5f).build();
     ASSERT_TRUE(dropOut.getRaggedFeatureOutput().has_value());
@@ -926,12 +955,10 @@ TEST(FullyConnectedApi, RaggedForwardBackwardSanitizesOnlySelectedConsumerBucket
                                          .valuesDataType(dataType)
                                          .offsetsDataType(DataType::UINT32)
                                          .trailingDimensions({inputFeatures})
-                                         .maxTotalValues(fullRows)
-                                         .batchSize(logicalBatchSize)
-                                         .build();
+                                         .maxValuesPerRow(33).build();
     Api::GradientRivet inputRivet =
         Api::GradientRivet::Builder().network(network).tensor(networkInput.getValues()).build();
-    Api::RaggedTensor raggedInput(inputRivet.getFeatureOutput().value(), networkInput.getOffsets());
+    Api::RaggedTensor raggedInput = networkInput.withValues(inputRivet.getFeatureOutput().value());
     Api::FullyConnected fc = Api::FullyConnected::Builder()
                                  .network(network)
                                  .featureInput(raggedInput)
@@ -3036,9 +3063,7 @@ TEST(FullyConnectedApi, RaggedFirstClassResidualWidthChangingProjectionPlacesFor
                                     .valuesDataType(DataType::BF16)
                                     .offsetsDataType(DataType::UINT32)
                                     .trailingDimensions({4})
-                                    .maxTotalValues(8)
-                                    .batchSize(batchSize)
-                                    .build();
+                                    .maxValuesPerRow(4).build();
 
     shared_ptr<Api::Sgd> expandSgd =
         Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
@@ -3095,9 +3120,7 @@ TEST(FullyConnectedApi, RaggedFirstClassResidualWidthChangingProjectionWithOutpu
                                     .valuesDataType(DataType::BF16)
                                     .offsetsDataType(DataType::UINT32)
                                     .trailingDimensions({4})
-                                    .maxTotalValues(8)
-                                    .batchSize(batchSize)
-                                    .build();
+                                    .maxValuesPerRow(4).build();
 
     shared_ptr<Api::Sgd> expandSgd =
         Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
@@ -3154,9 +3177,7 @@ TEST(FullyConnectedApi, RaggedFirstClassResidualOutputDropoutPlacesForTraining) 
                                     .valuesDataType(DataType::BF16)
                                     .offsetsDataType(DataType::UINT32)
                                     .trailingDimensions({4})
-                                    .maxTotalValues(8)
-                                    .batchSize(batchSize)
-                                    .build();
+                                    .maxValuesPerRow(4).build();
     Api::DropOut residualIdentity =
         Api::DropOut::Builder().network(network).featureInput(feature).dropProportion(0.0f).build();
     ASSERT_TRUE(residualIdentity.getRaggedFeatureOutput().has_value());
@@ -3178,6 +3199,10 @@ TEST(FullyConnectedApi, RaggedFirstClassResidualOutputDropoutPlacesForTraining) 
                                  .outputDropoutSeed(2222)
                                  .build();
     ASSERT_TRUE(fc.getRaggedFeatureOutput().has_value());
+    // Residual + dropout adds no fields: it uses the existing 1.5.0
+    // residual grammar's output_dropout_probability/seed attributes.
+    EXPECT_EQ(fc.architectureJson().at("version"), "1.5.0");
+    EXPECT_FLOAT_EQ(fc.architectureJson().at("output_dropout_probability").get<float>(), 0.1f);
     EXPECT_EQ(fc.getRaggedFeatureOutput()->getOffsets(), feature.getOffsets());
     (void)Api::RaggedNetworkOutput::Builder()
         .network(network)
@@ -3205,9 +3230,7 @@ TEST(FullyConnectedApi, RaggedFirstClassResidualOutputDropoutWithDownstreamLossP
                                     .valuesDataType(DataType::BF16)
                                     .offsetsDataType(DataType::UINT32)
                                     .trailingDimensions({4})
-                                    .maxTotalValues(8)
-                                    .batchSize(batchSize)
-                                    .build();
+                                    .maxValuesPerRow(4).build();
 
     shared_ptr<Api::Sgd> weightsSgd =
         Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
@@ -3267,18 +3290,14 @@ TEST(FullyConnectedApi, RaggedFirstClassResidualRequiresExactRowPartition) {
                                     .valuesDataType(DataType::BF16)
                                     .offsetsDataType(DataType::UINT32)
                                     .trailingDimensions({4})
-                                    .maxTotalValues(8)
-                                    .batchSize(2)
-                                    .build();
+                                    .maxValuesPerRow(4).build();
     Api::RaggedTensor differentPartition = Api::RaggedNetworkInput::Builder()
                                                .network(network)
                                                .name("residual")
                                                .valuesDataType(DataType::BF16)
                                                .offsetsDataType(DataType::UINT32)
                                                .trailingDimensions({4})
-                                               .maxTotalValues(8)
-                                               .batchSize(2)
-                                               .build();
+                                               .maxValuesPerRow(4).build();
 
     EXPECT_THROW(
         (void)Api::FullyConnected::Builder()
@@ -3305,9 +3324,9 @@ TEST(FullyConnectedApi, RaggedEpilogueAuxiliaryPreservesPartitionAndPlaces) {
                                     .valuesDataType(DataType::FP32)
                                     .offsetsDataType(DataType::UINT32)
                                     .trailingDimensions({4})
-                                    .maxTotalValues(8)
+                                    
                                     .maxValuesPerRow(5)
-                                    .batchSize(batchSize)
+                                    
                                     .build();
     shared_ptr<Api::Activation> relu = Api::Relu::Builder().network(network).featureInput(feature).build();
     ASSERT_TRUE(relu->getRaggedFeatureOutput().has_value());
@@ -3339,7 +3358,7 @@ TEST(FullyConnectedApi, RaggedEpilogueAuxiliaryPreservesPartitionAndPlaces) {
         .build();
 
     const nlohmann::json architecture = fc.architectureJson();
-    ASSERT_EQ(architecture.at("version").get<string>(), "1.2.0");
+    ASSERT_EQ(architecture.at("version").get<string>(), "1.7.0");
     ASSERT_EQ(architecture.at("epilogue_inputs").size(), 1u);
     EXPECT_EQ(architecture.at("epilogue_inputs").at(0).at("ragged_tensor").at("offsets").at("id").get<uint64_t>(),
               feature.getOffsets().getOriginalId());
@@ -3364,9 +3383,9 @@ TEST(FullyConnectedApi, RaggedEpilogueAuxiliaryRequiresExactRowPartition) {
                                     .valuesDataType(DataType::FP32)
                                     .offsetsDataType(DataType::UINT32)
                                     .trailingDimensions({4})
-                                    .maxTotalValues(8)
+                                    
                                     .maxValuesPerRow(5)
-                                    .batchSize(batchSize)
+                                    
                                     .build();
     Api::RaggedTensor differentPartition = Api::RaggedNetworkInput::Builder()
                                                .network(network)
@@ -3374,9 +3393,9 @@ TEST(FullyConnectedApi, RaggedEpilogueAuxiliaryRequiresExactRowPartition) {
                                                .valuesDataType(DataType::FP32)
                                                .offsetsDataType(DataType::UINT32)
                                                .trailingDimensions({4})
-                                               .maxTotalValues(8)
+                                               
                                                .maxValuesPerRow(5)
-                                               .batchSize(batchSize)
+                                               
                                                .build();
     Impl::Expression projected = Api::FullyConnected::epilogueInput(DataType::FP32, DataType::FP32);
     Impl::Expression auxiliaryInput = Api::FullyConnected::epilogueAuxInput("aux", DataType::FP32, DataType::FP32);
@@ -3396,21 +3415,9 @@ TEST(FullyConnectedApi, RaggedEpilogueAuxiliaryRequiresExactRowPartition) {
             .build(),
         std::invalid_argument);
 
-    Api::RaggedTensor conflictingBound(feature.getValues(), feature.getOffsets(), 4);
-    EXPECT_THROW(
-        (void)Api::FullyConnected::Builder()
-            .network(network)
-            .featureInput(feature)
-            .numOutputFeatures(4)
-            .hasBias(false)
-            .weightsDataType(DataType::FP32)
-            .computeDataType(DataType::FP32)
-            .outputDataType(DataType::FP32)
-            .noActivation()
-            .epilogueInput("aux", conflictingBound)
-            .epilogue(projected + auxiliaryInput)
-            .build(),
-        std::invalid_argument);
+    // A logically inconsistent M cannot even construct a RaggedTensor;
+    // builder rejection for a different *valid* partition is covered above.
+    EXPECT_ANY_THROW((void)Api::RaggedTensor(feature.getValues(), feature.getOffsets(), 4));
 }
 
 TEST(FullyConnectedApi, FirstClassResidualOutputDropoutRejectsCustomEpilogue) {

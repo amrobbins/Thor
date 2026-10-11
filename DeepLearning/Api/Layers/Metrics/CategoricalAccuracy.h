@@ -3,6 +3,7 @@
 
 #include "DeepLearning/Api/Layers/Metrics/Metric.h"
 #include "DeepLearning/Api/Tensor/RaggedTensor.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 #include "DeepLearning/Implementation/Layers/Metrics/CategoricalAccuracy.h"
 #include "DeepLearning/Implementation/Layers/Metrics/RaggedAccuracy.h"
 
@@ -81,12 +82,11 @@ class CategoricalAccuracy : public Metric {
                                                    ThorImplementation::TensorPlacement tensorPlacement) const override {
         if (!getUseRagged())
             return Metric::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
-        (void)batchSize;
         (void)tensorPlacement;
         const uint64_t classes = raggedPredictions->getTrailingDimensions().at(0);
         const uint64_t workspaceBytes =
             ThorImplementation::raggedAccuracyStatisticsWorkspaceDescriptor(
-                raggedPredictions->getMaxTotalValues(), classes)
+                raggedPredictions->getDescriptorForPlacement(batchSize).getMaxTotalValues(), classes)
                 .getArraySizeInBytes();
         return metricTensor.getTotalSizeInBytes() + 4 * sizeof(float) + workspaceBytes;
     }
@@ -97,7 +97,6 @@ class CategoricalAccuracy : public Metric {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)placement;
-        (void)drivingLayer;
         (void)drivingApiLayer;
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
@@ -114,10 +113,18 @@ class CategoricalAccuracy : public Metric {
         const ThorImplementation::RaggedCategoricalLabelFormat format =
             labelType == LabelType::INDEX ? ThorImplementation::RaggedCategoricalLabelFormat::CLASS_INDEX
                                           : ThorImplementation::RaggedCategoricalLabelFormat::PER_CLASS;
+        const RaggedTensor& connected = connectingApiTensor == raggedLabels->getValues()
+            ? raggedLabels.value() : raggedPredictions.value();
+        const auto physical = SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+            connected, drivingLayer, "CategoricalAccuracy", connectingApiTensor == raggedPredictions->getOffsets());
+        const uint64_t batchSize = physical.getBatchSize();
+        if (physical.getMaxTotalValues() !=
+                raggedPredictions->getDescriptorForPlacement(batchSize).getMaxTotalValues())
+            throw std::runtime_error("CategoricalAccuracy runtime partition geometry disagrees with the logical model.");
         return std::make_shared<ThorImplementation::RaggedAccuracyMetric>(
             ThorImplementation::RaggedAccuracyDetail::Kind::CATEGORICAL,
-            raggedPredictions->getBatchSize(),
-            raggedPredictions->getMaxTotalValues(),
+            batchSize,
+            physical.getMaxTotalValues(),
             numClasses,
             format);
     }
@@ -253,9 +260,7 @@ class CategoricalAccuracy::Builder {
         if (!predictions.sharesPartitionWith(labels))
             throw std::invalid_argument(
                 "CategoricalAccuracy ragged predictions and labels must use the exact same row partition.");
-        if (predictions.getBatchSize() != labels.getBatchSize() ||
-            predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
-            predictions.getOffsetsDataType() != labels.getOffsetsDataType() ||
+        if (predictions.getOffsetsDataType() != labels.getOffsetsDataType() ||
             predictions.hasMaxValuesPerRow() != labels.hasMaxValuesPerRow() ||
             (predictions.hasMaxValuesPerRow() && predictions.getMaxValuesPerRow() != labels.getMaxValuesPerRow())) {
             throw std::invalid_argument("CategoricalAccuracy ragged predictions and labels partition metadata must match.");

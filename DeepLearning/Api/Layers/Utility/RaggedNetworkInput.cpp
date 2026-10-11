@@ -11,19 +11,7 @@ namespace Thor {
 
 namespace {
 
-std::vector<uint64_t> makeValuesDimensions(uint64_t maxTotalValues, const std::vector<uint64_t>& trailingDimensions) {
-    THOR_THROW_IF_FALSE(maxTotalValues > 0);
-    std::vector<uint64_t> dimensions;
-    dimensions.reserve(trailingDimensions.size() + 1);
-    dimensions.push_back(maxTotalValues);
-    for (uint64_t dim : trailingDimensions) {
-        THOR_THROW_IF_FALSE(dim > 0);
-        dimensions.push_back(dim);
-    }
-    return dimensions;
-}
-
-std::vector<uint64_t> makeNeutralValuesDimensions(uint64_t maxValuesPerRow,
+std::vector<uint64_t> makeLogicalValuesDimensions(uint64_t maxValuesPerRow,
                                                   const std::vector<uint64_t>& trailingDimensions) {
     THOR_THROW_IF_FALSE(maxValuesPerRow > 0);
     std::vector<uint64_t> dimensions;
@@ -52,11 +40,13 @@ RaggedTensor RaggedNetworkInput::Builder::build() {
         // Reject duplicate metadata instead of accepting values that merely
         // happen to match the referenced partition today.
         THOR_THROW_IF_FALSE(!offsetsDataType_.has_value());
-        THOR_THROW_IF_FALSE(!maxTotalValues_.has_value());
         THOR_THROW_IF_FALSE(!maxValuesPerRow_.has_value());
-        THOR_THROW_IF_FALSE(!batchSize_.has_value());
 
         const RaggedTensor& partition = partition_.value();
+        THOR_THROW_IF_FALSE(partition.hasMaxValuesPerRow());
+        THOR_THROW_IF_FALSE(partition.getValuesDimensions().front() == partition.getMaxValuesPerRow());
+        THOR_THROW_IF_FALSE(partition.getOffsetsDimensions() == std::vector<uint64_t>{1});
+        (void)partition.getDescriptorForPlacement(1);
         std::optional<RaggedNetworkInputReference> partitionSource;
         for (const RaggedNetworkInputReference& candidate : network_.value()->getExternalRaggedNetworkInputs()) {
             if (candidate.raggedTensor.sharesPartitionWith(partition)) {
@@ -71,9 +61,7 @@ RaggedTensor RaggedNetworkInput::Builder::build() {
         NetworkInput valuesInput = NetworkInput::Builder()
                                        .network(*network_.value())
                                        .name(valuesInputName)
-                                       .dimensions(partition.isPlacementNeutral()
-                                                       ? makeNeutralValuesDimensions(partition.getMaxValuesPerRow(), trailingDimensions_)
-                                                       : makeValuesDimensions(partition.getMaxTotalValues(), trailingDimensions_))
+                                       .dimensions(makeLogicalValuesDimensions(partition.getMaxValuesPerRow(), trailingDimensions_))
                                        .dataType(valuesDataType_.value())
                                        .dimensionsIncludeBatch(true)
                                        .build();
@@ -89,29 +77,15 @@ RaggedTensor RaggedNetworkInput::Builder::build() {
 
     const std::string partitionTokenInputName = "__thor_row_partition." + name_.value();
 
-    const bool hasFixedBatch = batchSize_.has_value();
-    const bool hasFixedCapacity = maxTotalValues_.has_value();
-    THOR_THROW_IF_FALSE(hasFixedBatch == hasFixedCapacity);
-    const bool placementNeutral = !hasFixedBatch;
-
-    if (placementNeutral) {
-        THOR_THROW_IF_FALSE(maxValuesPerRow_.has_value());
-        THOR_THROW_IF_FALSE(maxValuesPerRow_.value() > 0);
-    } else {
-        THOR_THROW_IF_FALSE(maxTotalValues_.value() > 0);
-        THOR_THROW_IF_FALSE(batchSize_.value() <= UINT64_MAX - 1);
-        if (maxValuesPerRow_.has_value()) {
-            THOR_THROW_IF_FALSE(maxValuesPerRow_.value() > 0);
-            THOR_THROW_IF_FALSE(maxValuesPerRow_.value() <= maxTotalValues_.value());
-        }
-    }
+    // Public API geometry is logical. Independent boundaries require a
+    // semantic maximum per row; physical capacity is chosen at placement.
+    THOR_THROW_IF_FALSE(maxValuesPerRow_.has_value());
+    THOR_THROW_IF_FALSE(maxValuesPerRow_.value() > 0);
 
     NetworkInput valuesInput = NetworkInput::Builder()
                                    .network(*network_.value())
                                    .name(valuesInputName)
-                                   .dimensions(placementNeutral
-                                                   ? makeNeutralValuesDimensions(maxValuesPerRow_.value(), trailingDimensions_)
-                                                   : makeValuesDimensions(maxTotalValues_.value(), trailingDimensions_))
+                                   .dimensions(makeLogicalValuesDimensions(maxValuesPerRow_.value(), trailingDimensions_))
                                    .dataType(valuesDataType_.value())
                                    .dimensionsIncludeBatch(true)
                                    .build();
@@ -122,24 +96,14 @@ RaggedTensor RaggedNetworkInput::Builder::build() {
     NetworkInput partitionTokenInput = NetworkInput::Builder()
                                            .network(*network_.value())
                                            .name(partitionTokenInputName)
-                                           .dimensions(placementNeutral ? std::vector<uint64_t>{1}
-                                                                        : std::vector<uint64_t>{batchSize_.value() + 1})
+                                           .dimensions({1})
                                            .dataType(offsetsDataType)
                                            .dimensionsIncludeBatch(true)
                                            .external(false)
                                            .build();
 
-    RaggedTensor raggedTensor;
-    if (placementNeutral) {
-        raggedTensor = RaggedTensor::placementNeutral(
-            valuesInput.getFeatureOutput().value(), partitionTokenInput.getFeatureOutput().value(), maxValuesPerRow_.value());
-    } else {
-        raggedTensor = maxValuesPerRow_.has_value()
-            ? RaggedTensor(valuesInput.getFeatureOutput().value(),
-                           partitionTokenInput.getFeatureOutput().value(),
-                           maxValuesPerRow_.value())
-            : RaggedTensor(valuesInput.getFeatureOutput().value(), partitionTokenInput.getFeatureOutput().value());
-    }
+    RaggedTensor raggedTensor = RaggedTensor::logical(
+        valuesInput.getFeatureOutput().value(), partitionTokenInput.getFeatureOutput().value(), maxValuesPerRow_.value());
     network_.value()->registerRaggedNetworkInput(name_.value(), raggedTensor, valuesInputName);
     return raggedTensor;
 }
@@ -178,13 +142,6 @@ RaggedNetworkInput::Builder& RaggedNetworkInput::Builder::trailingDimensions(con
     return *this;
 }
 
-RaggedNetworkInput::Builder& RaggedNetworkInput::Builder::maxTotalValues(uint64_t maxTotalValues) {
-    THOR_THROW_IF_FALSE(maxTotalValues > 0);
-    THOR_THROW_IF_FALSE(!partition_.has_value());
-    maxTotalValues_ = maxTotalValues;
-    return *this;
-}
-
 RaggedNetworkInput::Builder& RaggedNetworkInput::Builder::maxValuesPerRow(uint64_t maxValuesPerRow) {
     THOR_THROW_IF_FALSE(maxValuesPerRow > 0);
     THOR_THROW_IF_FALSE(!partition_.has_value());
@@ -192,20 +149,11 @@ RaggedNetworkInput::Builder& RaggedNetworkInput::Builder::maxValuesPerRow(uint64
     return *this;
 }
 
-RaggedNetworkInput::Builder& RaggedNetworkInput::Builder::batchSize(uint64_t batchSize) {
-    THOR_THROW_IF_FALSE(batchSize <= UINT64_MAX - 1);
-    THOR_THROW_IF_FALSE(!partition_.has_value());
-    batchSize_ = batchSize;
-    return *this;
-}
-
 RaggedNetworkInput::Builder& RaggedNetworkInput::Builder::partition(const RaggedTensor& partition) {
     THOR_THROW_IF_FALSE(partition.isInitialized());
     THOR_THROW_IF_FALSE(!partition_.has_value());
     THOR_THROW_IF_FALSE(!offsetsDataType_.has_value());
-    THOR_THROW_IF_FALSE(!maxTotalValues_.has_value());
     THOR_THROW_IF_FALSE(!maxValuesPerRow_.has_value());
-    THOR_THROW_IF_FALSE(!batchSize_.has_value());
     partition_ = partition;
     return *this;
 }

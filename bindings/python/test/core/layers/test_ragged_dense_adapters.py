@@ -30,8 +30,6 @@ def _round_trip_network(name: str, offsets_dtype=thor.DataType.uint32):
         "source",
         thor.DataType.fp32,
         [2],
-        max_total_values=10,
-        batch_size=4,
         offsets_data_type=offsets_dtype,
         max_values_per_row=4,
     )
@@ -51,7 +49,9 @@ def test_ragged_dense_adapters_build_lossless_partition_reusing_round_trip():
     assert padded.get_dimensions() == [4, 2]
     assert padded_layer.padding_value == -123.0
     assert isinstance(restored, thor.RaggedTensor)
-    assert restored.values.get_dimensions() == [10, 2]
+    assert restored.values.get_dimensions() == [4, 2]
+    assert source.values.get_dimensions() == [4, 2]
+    assert source.offsets.get_dimensions() == [1]
     assert restored.offsets == source.offsets
     assert restored.offsets.get_data_type() == thor.DataType.uint64
     assert restored_layer.get_partition_input().offsets == source.offsets
@@ -65,24 +65,16 @@ def test_ragged_dense_adapters_build_lossless_partition_reusing_round_trip():
 
 def test_ragged_dense_adapters_require_finite_partition_width():
     network = thor.Network("ragged-dense-adapter-validation")
-    unbounded = thor.layers.RaggedNetworkInput(
-        network,
-        "unbounded",
-        thor.DataType.fp32,
-        [2],
-        max_total_values=8,
-        batch_size=3,
-    )
+    # An independent logical ragged input cannot be constructed without M.
+    # The old physical capacity/batch hints must not stand in for that M.
     with pytest.raises(ValueError, match="max_values_per_row"):
-        thor.layers.RaggedToPaddedDense(network, unbounded)
+        thor.layers.RaggedNetworkInput(network, "unbounded", thor.DataType.fp32, [2])
 
     bounded = thor.layers.RaggedNetworkInput(
         network,
         "bounded",
         thor.DataType.fp32,
         [2],
-        max_total_values=8,
-        batch_size=3,
         max_values_per_row=4,
     )
     too_narrow = thor.layers.NetworkInput(network, "too_narrow", [3, 2], thor.DataType.fp32).get_feature_output()
@@ -105,8 +97,6 @@ def test_ragged_to_padded_dense_pads_rows_ignores_poison_and_reuses_extents(offs
         "source",
         thor.DataType.fp32,
         [2],
-        max_total_values=10,
-        batch_size=4,
         offsets_data_type=offsets_dtype,
         max_values_per_row=4,
     )
@@ -115,7 +105,7 @@ def test_ragged_to_padded_dense_pads_rows_ignores_poison_and_reuses_extents(offs
     placed = network.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
     def run(active, offsets):
-        values = np.full((10, 2), np.nan, dtype=np.float32)
+        values = np.full((4 * 4, 2), np.nan, dtype=np.float32)
         values[: len(active)] = active
         result = placed.infer(
             {
@@ -162,7 +152,7 @@ def test_ragged_dense_adapter_round_trip_and_save_load_accept_new_partition(tmp_
     placed = loaded.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
     active = (3000.0 + np.arange(18, dtype=np.float32)).reshape(9, 2)
-    values = np.full((10, 2), np.nan, dtype=np.float32)
+    values = np.full((4 * 4, 2), np.nan, dtype=np.float32)
     values[:9] = active
     output = placed.infer(
         {

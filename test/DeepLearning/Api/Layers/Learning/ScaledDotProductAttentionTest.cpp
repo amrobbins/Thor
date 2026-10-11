@@ -127,7 +127,7 @@ TEST(AttentionApi, SdpaBuildsRaggedAttentionWithFullDenseAdditiveBias) {
     Api::Network network("attention_api_sdpa_builds_ragged_attention_with_full_dense_additive_bias");
     Api::RaggedTensor q = Api::RaggedNetworkInput::Builder()
                               .network(network).name("qkv").valuesDataType(DataType::FP16)
-                              .trailingDimensions({2, 32}).maxTotalValues(6).batchSize(1).build();
+                              .trailingDimensions({2, 32}).maxValuesPerRow(6).build();
     Api::NetworkInput bias =
         Api::NetworkInput::Builder().network(network).name("bias").dimensions({1, 6, 6}).dataType(DataType::FP32).build();
 
@@ -151,10 +151,10 @@ TEST(AttentionApi, SdpaBuildsCrossAttentionWithSeparateRaggedMetadata) {
     Api::Network network("attention_api_sdpa_builds_cross_attention_with_separate_ragged_metadata");
     Api::RaggedTensor q = Api::RaggedNetworkInput::Builder()
                               .network(network).name("q").valuesDataType(DataType::BF16)
-                              .trailingDimensions({4, 16}).maxTotalValues(4).batchSize(1).offsetsDataType(DataType::UINT32).build();
+                              .trailingDimensions({4, 16}).offsetsDataType(DataType::UINT32).maxValuesPerRow(4).build();
     Api::RaggedTensor kv = Api::RaggedNetworkInput::Builder()
                                .network(network).name("kv").valuesDataType(DataType::BF16)
-                               .trailingDimensions({2, 16}).maxTotalValues(5).batchSize(1).offsetsDataType(DataType::UINT64).build();
+                               .trailingDimensions({2, 16}).offsetsDataType(DataType::UINT64).maxValuesPerRow(5).build();
 
     Api::ScaledDotProductAttention attention = Api::ScaledDotProductAttention::Builder()
                                                    .network(network)
@@ -236,7 +236,7 @@ TEST(AttentionApi, SdpaBuildsCanonicalRaggedOffsetsWithoutSequenceLengths) {
     Api::Network network("attention_api_sdpa_builds_canonical_ragged_offsets_without_sequence_lengths");
     Api::RaggedTensor q = Api::RaggedNetworkInput::Builder()
                               .network(network).name("q").valuesDataType(DataType::FP16)
-                              .trailingDimensions({8, 32}).maxTotalValues(16).maxValuesPerRow(8).batchSize(2).build();
+                              .trailingDimensions({8, 32}).maxValuesPerRow(8).build();
 
     Api::ScaledDotProductAttention attention = Api::ScaledDotProductAttention::Builder()
                                                    .network(network)
@@ -248,7 +248,7 @@ TEST(AttentionApi, SdpaBuildsCanonicalRaggedOffsetsWithoutSequenceLengths) {
     EXPECT_EQ(attention.getRaggedFeatureOutput()->getOffsets(), q.getOffsets());
     EXPECT_TRUE(attention.getRaggedFeatureOutput()->hasMaxValuesPerRow());
     EXPECT_EQ(attention.getRaggedFeatureOutput()->getMaxValuesPerRow(), 8u);
-    EXPECT_EQ(attention.getRaggedFeatureOutput()->getMaxTotalValues(), 16u);
+    EXPECT_EQ(attention.getRaggedFeatureOutput()->getValuesDimensions().front(), 8u);
     EXPECT_EQ(attention.getRaggedPartitionRequirementForInput(q.getOffsets()),
               Impl::RaggedPartitionRequirement::DEVICE_OFFSETS);
 }
@@ -257,11 +257,11 @@ TEST(AttentionApi, SdpaAllowsRaggedOffsetsWhenValueDimDiffersFromQkDim) {
     Api::Network network("attention_api_sdpa_allows_ragged_offsets_value_dim_mismatch");
     Api::RaggedTensor qk = Api::RaggedNetworkInput::Builder()
                                .network(network).name("qk").valuesDataType(DataType::FP16)
-                               .trailingDimensions({8, 32}).maxTotalValues(2).batchSize(1).offsetsDataType(DataType::UINT64).build();
+                               .trailingDimensions({8, 32}).offsetsDataType(DataType::UINT64).maxValuesPerRow(2).build();
     Api::NetworkInput vValues = Api::NetworkInput::Builder()
                                     .network(network).name("v.values")
                                     .dimensions({2, 8, 16}).dimensionsIncludeBatch(true).dataType(DataType::FP16).build();
-    Api::RaggedTensor v(vValues.getFeatureOutput().value(), qk.getOffsets());
+    Api::RaggedTensor v = qk.withValues(vValues.getFeatureOutput().value());
 
     Api::ScaledDotProductAttention attention = Api::ScaledDotProductAttention::Builder()
                                                    .network(network)
@@ -277,7 +277,7 @@ TEST(AttentionApi, SdpaRejectsInvalidVariableLengthMetadata) {
     Api::Network network("attention_api_sdpa_rejects_invalid_variable_length_metadata");
     Api::RaggedTensor q = Api::RaggedNetworkInput::Builder()
                               .network(network).name("q").valuesDataType(DataType::FP16)
-                              .trailingDimensions({8, 32}).maxTotalValues(2).batchSize(1).build();
+                              .trailingDimensions({8, 32}).maxValuesPerRow(2).build();
     Api::NetworkInput denseQ =
         Api::NetworkInput::Builder().network(network).name("dense_q").dimensions({2, 8, 32}).dataType(DataType::FP16).build();
     Api::NetworkInput seq = Api::NetworkInput::Builder().network(network).name("seq").dimensions({1}).dataType(DataType::INT32).build();
@@ -326,9 +326,7 @@ TEST(AttentionApi, SdpaDenseQueryRaggedKvMixedModeRoundTripsArchitecture) {
                                     .valuesDataType(DataType::FP16)
                                     .offsetsDataType(DataType::UINT64)
                                     .trailingDimensions({2, 16})
-                                    .maxTotalValues(11)
-                                    .batchSize(3)
-                                    .build();
+                                    .maxValuesPerRow(4).build();
 
     Api::ScaledDotProductAttention attention = Api::ScaledDotProductAttention::Builder()
                                                    .network(network)
@@ -347,7 +345,7 @@ TEST(AttentionApi, SdpaDenseQueryRaggedKvMixedModeRoundTripsArchitecture) {
               (std::vector<std::string>{"query", "key", "value", "key_value_ragged_offsets"}));
 
     const nlohmann::json arch = attention.architectureJson();
-    EXPECT_EQ(arch.at("version").get<std::string>(), "2.1.0");
+    EXPECT_EQ(arch.at("version").get<std::string>(), "2.2.0");
     EXPECT_TRUE(arch.at("use_ragged_input").get<bool>());
     EXPECT_FALSE(arch.at("query_ragged").get<bool>());
     EXPECT_TRUE(arch.at("key_value_ragged").get<bool>());
@@ -381,9 +379,7 @@ TEST(AttentionApi, SdpaRaggedQueryDenseKvMixedModeRoundTripsArchitecture) {
                                   .valuesDataType(DataType::BF16)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({4, 16})
-                                  .maxTotalValues(9)
-                                  .batchSize(3)
-                                  .build();
+                                  .maxValuesPerRow(3).build();
     Api::NetworkInput context = Api::NetworkInput::Builder()
                                     .network(network)
                                     .name("context")
@@ -404,7 +400,7 @@ TEST(AttentionApi, SdpaRaggedQueryDenseKvMixedModeRoundTripsArchitecture) {
     EXPECT_EQ(attention.getTensorLayout(), Impl::AttentionTensorLayout::BSHD);
     ASSERT_TRUE(attention.getRaggedFeatureOutput().has_value());
     EXPECT_EQ(attention.getRaggedFeatureOutput()->getOffsets(), query.getOffsets());
-    EXPECT_EQ(attention.getOutput("output").getDimensions(), (std::vector<uint64_t>{9, 4, 16}));
+    EXPECT_EQ(attention.getOutput("output").getDimensions(), (std::vector<uint64_t>{3, 4, 16}));
     EXPECT_EQ(attention.getInputNames(),
               (std::vector<std::string>{"query", "key", "value", "query_ragged_offsets"}));
 
@@ -446,9 +442,7 @@ TEST(AttentionApi, SdpaMixedModeRejectsMismatchedKeyValueDomains) {
                                           .name("ragged_context")
                                           .valuesDataType(DataType::FP16)
                                           .trailingDimensions({2, 16})
-                                          .maxTotalValues(8)
-                                          .batchSize(3)
-                                          .build();
+                                          .maxValuesPerRow(3).build();
 
     EXPECT_THROW(Api::ScaledDotProductAttention::Builder()
                      .network(network)
@@ -473,9 +467,7 @@ TEST(AttentionApi, SdpaLegacyV2AllRaggedArchitectureStillDeserializes) {
                               .name("q")
                               .valuesDataType(DataType::FP16)
                               .trailingDimensions({2, 16})
-                              .maxTotalValues(6)
-                              .batchSize(2)
-                              .build();
+                              .maxValuesPerRow(3).build();
     Api::ScaledDotProductAttention attention = Api::ScaledDotProductAttention::Builder().network(network).selfInput(q).build();
 
     nlohmann::json legacy = attention.architectureJson();

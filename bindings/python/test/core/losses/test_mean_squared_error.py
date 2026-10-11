@@ -180,8 +180,6 @@ def _ragged_pair(network, prediction_dtype=thor.DataType.fp32, label_dtype=None)
         "ragged_predictions",
         prediction_dtype,
         [2],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     labels = thor.layers.RaggedNetworkInput(
@@ -223,12 +221,46 @@ def test_mse_ragged_rejects_per_output_and_different_partition():
         "different_labels",
         thor.DataType.fp32,
         [2],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     with pytest.raises(ValueError, match=r"exact same row partition"):
         thor.losses.MSE(n, predictions, different_labels)
+
+
+# The regression bindings share one logical ragged-geometry contract. Keep this
+# migration-specific check together rather than duplicating numerical suites.
+@pytest.mark.parametrize(
+    "loss_type",
+    [
+        thor.losses.MSE,
+        thor.losses.MAE,
+        thor.losses.MAPE,
+        thor.losses.MeanPowerError,
+        thor.losses.SmoothL1Loss,
+        thor.losses.HuberLoss,
+        thor.losses.ExpectileLoss,
+        thor.losses.QuantileLoss,
+        thor.losses.AsymmetricPowerLoss,
+    ],
+)
+def test_regression_ragged_logical_values_geometry_without_model_batch(loss_type):
+    network = thor.Network("regression-logical-values-geometry")
+    predictions = thor.layers.RaggedNetworkInput(
+        network, "predictions", thor.DataType.fp32, [2], max_values_per_row=4
+    )
+    labels = thor.layers.RaggedNetworkInput(
+        network, "labels", thor.DataType.fp32, [2], partition=predictions
+    )
+    loss = loss_type(network, predictions, labels)
+    assert loss.is_ragged
+
+    # Same partition and semantic M, but different trailing logical geometry.
+    # This must fail without consulting the removed model-owned B/total getters.
+    wrong_shape = thor.layers.RaggedNetworkInput(
+        network, "wrong_shape", thor.DataType.fp32, [3], partition=predictions
+    )
+    with pytest.raises(ValueError, match="identical value geometry"):
+        loss_type(network, predictions, wrong_shape)
 
 
 def test_mse_ragged_accepts_dense_per_row_example_weights():

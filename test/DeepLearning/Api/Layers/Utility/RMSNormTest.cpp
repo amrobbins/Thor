@@ -646,9 +646,9 @@ TEST(UtilityApiLayers, RaggedRMSNormEpilogueAuxiliaryPreservesPartitionAndPlaces
                                     .valuesDataType(DataType::FP32)
                                     .offsetsDataType(DataType::UINT32)
                                     .trailingDimensions({4})
-                                    .maxTotalValues(8)
+                                    
                                     .maxValuesPerRow(5)
-                                    .batchSize(batchSize)
+                                    
                                     .build();
     shared_ptr<Api::Activation> relu = Api::Relu::Builder().network(network).featureInput(feature).build();
     ASSERT_TRUE(relu->getRaggedFeatureOutput().has_value());
@@ -701,9 +701,9 @@ TEST(UtilityApiLayers, RaggedRMSNormEpilogueAuxiliaryRequiresExactRowPartition) 
                                     .valuesDataType(DataType::FP32)
                                     .offsetsDataType(DataType::UINT32)
                                     .trailingDimensions({4})
-                                    .maxTotalValues(8)
+                                    
                                     .maxValuesPerRow(5)
-                                    .batchSize(batchSize)
+                                    
                                     .build();
     Api::RaggedTensor differentPartition = Api::RaggedNetworkInput::Builder()
                                                .network(network)
@@ -711,9 +711,9 @@ TEST(UtilityApiLayers, RaggedRMSNormEpilogueAuxiliaryRequiresExactRowPartition) 
                                                .valuesDataType(DataType::FP32)
                                                .offsetsDataType(DataType::UINT32)
                                                .trailingDimensions({4})
-                                               .maxTotalValues(8)
+                                               
                                                .maxValuesPerRow(5)
-                                               .batchSize(batchSize)
+                                               
                                                .build();
     Impl::Expression normalized = Api::RMSNorm::epilogueInput(DataType::FP32, DataType::FP32);
     Impl::Expression auxiliaryInput = Api::RMSNorm::epilogueAuxInput("aux", DataType::FP32, DataType::FP32);
@@ -728,16 +728,10 @@ TEST(UtilityApiLayers, RaggedRMSNormEpilogueAuxiliaryRequiresExactRowPartition) 
             .build(),
         std::invalid_argument);
 
-    Api::RaggedTensor conflictingBound(feature.getValues(), feature.getOffsets(), 4);
-    EXPECT_THROW(
-        (void)Api::RMSNorm::Builder()
-            .network(network)
-            .featureInput(feature)
-            .normalizedShape({4})
-            .epilogueInput("aux", conflictingBound)
-            .epilogue(normalized + auxiliaryInput)
-            .build(),
-        std::invalid_argument);
+    // Inconsistent semantic M cannot produce a valid logical RaggedTensor.
+    // Reject it at construction rather than letting an invalid model object
+    // reach RMSNorm's auxiliary-partition validation.
+    EXPECT_ANY_THROW((void)Api::RaggedTensor(feature.getValues(), feature.getOffsets(), 4));
 
     EXPECT_THROW(
         (void)Api::RMSNorm::Builder()
@@ -762,9 +756,9 @@ TEST(UtilityApiLayers, RMSNormAcceptsRaggedTensorPreservesPartitionAndUsesPacked
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({hidden})
-                             .maxTotalValues(fullRows)
+                             
                              .maxValuesPerRow(17)
-                             .batchSize(logicalBatchSize)
+                             
                              .build();
 
     RMSNorm layer = RMSNorm::Builder().network(network).featureInput(input).build();
@@ -775,12 +769,13 @@ TEST(UtilityApiLayers, RMSNormAcceptsRaggedTensorPreservesPartitionAndUsesPacked
     EXPECT_EQ(layer.getFeatureInputs()[0], input.getValues());
     EXPECT_EQ(layer.getFeatureInputs()[1], input.getOffsets());
     EXPECT_EQ(layer.getNormalizedShape(), (vector<uint64_t>{hidden}));
-    EXPECT_EQ(layer.getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{fullRows, hidden}));
+    EXPECT_EQ(layer.getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{17, hidden}));
     EXPECT_EQ(layer.getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
     ASSERT_TRUE(layer.getRaggedFeatureOutput()->hasMaxValuesPerRow());
     EXPECT_EQ(layer.getRaggedFeatureOutput()->getMaxValuesPerRow(), 17u);
     EXPECT_TRUE(layer.outputTensorDimensionsIncludeBatch(layer.getFeatureOutput().value()));
-    EXPECT_EQ(layer.getOutputTensorBytes(logicalBatchSize), layer.getFeatureOutput().value().getTotalSizeInBytes());
+    EXPECT_EQ(layer.getOutputTensorBytes(logicalBatchSize),
+              logicalBatchSize * layer.getFeatureOutput().value().getTotalSizeInBytes());
 
     const json architecture = layer.architectureJson();
     EXPECT_TRUE(architecture.at("use_ragged").get<bool>());
@@ -798,9 +793,7 @@ TEST(UtilityApiLayers, RMSNormAcceptsRaggedTensorPreservesPartitionAndUsesPacked
                                 .valuesDataType(DataType::FP32)
                                 .offsetsDataType(DataType::UINT32)
                                 .trailingDimensions({hidden})
-                                .maxTotalValues(fullRows)
-                                .batchSize(logicalBatchSize)
-                                .build();
+                                .maxValuesPerRow(17).build();
     EXPECT_THROW(RMSNorm::Builder().network(badNetwork).featureInput(badInput).normalizedShape({fullRows, hidden}).build(),
                  std::invalid_argument);
 }
@@ -821,9 +814,9 @@ TEST(UtilityApiLayers, RaggedRMSNormArchitectureSaveLoadPreservesCapacityContrac
                                  .valuesDataType(DataType::FP32)
                                  .offsetsDataType(DataType::UINT64)
                                  .trailingDimensions({hidden})
-                                 .maxTotalValues(fullRows)
+                                 
                                  .maxValuesPerRow(maxValuesPerRow)
-                                 .batchSize(logicalBatchSize)
+                                 
                                  .build();
         RMSNorm rmsNorm = RMSNorm::Builder().network(network).featureInput(input).build();
         ASSERT_TRUE(rmsNorm.getRaggedFeatureOutput().has_value());
@@ -843,13 +836,13 @@ TEST(UtilityApiLayers, RaggedRMSNormArchitectureSaveLoadPreservesCapacityContrac
         ASSERT_TRUE(loadedRmsNorm->getUseRagged());
         ASSERT_TRUE(loadedRmsNorm->getRaggedFeatureInput().has_value());
         ASSERT_TRUE(loadedRmsNorm->getRaggedFeatureOutput().has_value());
-        EXPECT_EQ(loadedRmsNorm->getRaggedFeatureInput()->getBatchSize(), logicalBatchSize);
-        EXPECT_EQ(loadedRmsNorm->getRaggedFeatureInput()->getMaxTotalValues(), fullRows);
+        EXPECT_EQ(loadedRmsNorm->getRaggedFeatureInput()->getValuesDimensions().front(), maxValuesPerRow);
+        EXPECT_EQ(loadedRmsNorm->getRaggedFeatureInput()->getOffsetsDimensions(), (vector<uint64_t>{1}));
         ASSERT_TRUE(loadedRmsNorm->getRaggedFeatureInput()->hasMaxValuesPerRow());
         EXPECT_EQ(loadedRmsNorm->getRaggedFeatureInput()->getMaxValuesPerRow(), maxValuesPerRow);
         EXPECT_EQ(loadedRmsNorm->getRaggedFeatureInput()->getOffsetsDataType(), DataType::UINT64);
         EXPECT_EQ(loadedRmsNorm->getRaggedFeatureOutput()->getValuesDimensions(),
-                  (vector<uint64_t>{fullRows, hidden}));
+                  (vector<uint64_t>{maxValuesPerRow, hidden}));
         EXPECT_EQ(loadedRmsNorm->getRaggedFeatureOutput()->getOffsets(),
                   loadedRmsNorm->getRaggedFeatureInput()->getOffsets());
         ASSERT_TRUE(loadedRmsNorm->getRaggedFeatureOutput()->hasMaxValuesPerRow());
@@ -875,9 +868,7 @@ TEST(UtilityApiLayers, RaggedRMSNormBf16PlacesWithFp32Scale) {
                              .valuesDataType(DataType::BF16)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({8})
-                             .maxTotalValues(66)
-                             .batchSize(logicalBatchSize)
-                             .build();
+                             .maxValuesPerRow(33).build();
     RMSNorm rmsNorm = RMSNorm::Builder().network(network).featureInput(input).normalizedShape({8}).build();
     ASSERT_TRUE(rmsNorm.getRaggedFeatureOutput().has_value());
     (void)RaggedNetworkOutput::Builder()
@@ -912,12 +903,10 @@ TEST(UtilityApiLayers, RaggedRMSNormForwardBackwardUsesCapacityBucketsAndIgnores
                                          .valuesDataType(dataType)
                                          .offsetsDataType(DataType::UINT32)
                                          .trailingDimensions({hidden})
-                                         .maxTotalValues(fullRows)
-                                         .batchSize(logicalBatchSize)
-                                         .build();
+                                         .maxValuesPerRow(33).build();
     Api::GradientRivet inputRivet =
         Api::GradientRivet::Builder().network(network).tensor(networkInput.getValues()).build();
-    Api::RaggedTensor raggedInput(inputRivet.getFeatureOutput().value(), networkInput.getOffsets());
+    Api::RaggedTensor raggedInput = networkInput.withValues(inputRivet.getFeatureOutput().value());
 
     shared_ptr<Api::Sgd> weightsSgd = Api::Sgd::Builder()
                                           .initialLearningRate(learningRate)

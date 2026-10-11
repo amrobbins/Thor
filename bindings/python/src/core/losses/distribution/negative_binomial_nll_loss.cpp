@@ -115,9 +115,8 @@ void validateRaggedArguments(const RaggedTensor& mean,
         throw nb::value_error("NegativeBinomialNLLLoss instance: labels must use boolean, unsigned integer, fp16, or fp32 dtype.");
     if (!mean.sharesPartitionWith(dispersion) || !mean.sharesPartitionWith(labels))
         throw nb::value_error("NegativeBinomialNLLLoss instance: ragged mean, dispersion, and labels must use the exact same row partition.");
-    if (mean.getBatchSize() != dispersion.getBatchSize() || mean.getBatchSize() != labels.getBatchSize() ||
-        mean.getMaxTotalValues() != dispersion.getMaxTotalValues() || mean.getMaxTotalValues() != labels.getMaxTotalValues() ||
-        mean.getTrailingDimensions() != dispersion.getTrailingDimensions() || mean.getTrailingDimensions() != labels.getTrailingDimensions())
+    if (mean.getValuesDimensions() != dispersion.getValuesDimensions() ||
+        mean.getValuesDimensions() != labels.getValuesDimensions())
         throw nb::value_error("NegativeBinomialNLLLoss instance: ragged mean, dispersion, and labels must have identical value geometry.");
     DataType effectiveLossDataType = lossDataType.value_or(mean.getValuesDataType());
     if (!isFloatingDType(effectiveLossDataType))

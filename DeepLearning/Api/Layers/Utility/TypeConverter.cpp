@@ -101,10 +101,7 @@ int TypeConverter::getConnectionType(Tensor connectingTensor) const {
 uint64_t TypeConverter::getOutputTensorBytes(uint32_t batchSize) const {
     THOR_THROW_IF_FALSE(!featureOutputs.empty());
     const uint64_t outputBytes = featureOutputs.front().getTotalSizeInBytes();
-    if (!raggedFeatureInput.has_value() || !raggedFeatureInput->isPlacementNeutral()) {
-        return raggedFeatureInput.has_value() ? outputBytes : outputBytes * batchSize;
-    }
-    THOR_THROW_IF_FALSE(batchSize > 0);
+    if (raggedFeatureInput.has_value()) THOR_THROW_IF_FALSE(batchSize > 0);
     THOR_THROW_IF_FALSE(outputBytes <= std::numeric_limits<uint64_t>::max() / batchSize);
     return outputBytes * batchSize;
 }
@@ -115,7 +112,7 @@ uint64_t TypeConverter::getFirstInstanceMemRequirementInBytes(uint32_t batchSize
     THOR_THROW_IF_FALSE(!featureInputs.empty());
     THOR_THROW_IF_FALSE(!featureOutputs.empty());
 
-    if (raggedFeatureInput.has_value() && raggedFeatureInput->isPlacementNeutral()) {
+    if (raggedFeatureInput.has_value()) {
         THOR_THROW_IF_FALSE(featureInputs.size() == 2);
         THOR_THROW_IF_FALSE(batchSize > 0);
         const uint64_t valuesInputBytes = featureInputs.front().getTotalSizeInBytes();
@@ -136,7 +133,7 @@ uint64_t TypeConverter::getFirstInstanceMemRequirementInBytes(uint32_t batchSize
         bytes += input.getTotalSizeInBytes();
     }
     bytes += featureOutputs.front().getTotalSizeInBytes();
-    return raggedFeatureInput.has_value() ? bytes : bytes * batchSize;
+    return bytes * batchSize;
 }
 
 shared_ptr<ThorImplementation::Layer> TypeConverter::stamp(ThorImplementation::TensorPlacement placement,
@@ -169,9 +166,7 @@ shared_ptr<ThorImplementation::Layer> TypeConverter::stamp(ThorImplementation::T
             SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
                 raggedInput, drivingLayer, "TypeConverter");
         const ThorImplementation::RaggedTensorDescriptor physicalOutputDescriptor =
-            raggedFeatureOutput->isPlacementNeutral()
-                ? raggedFeatureOutput->getDescriptorForPlacement(physicalInputDescriptor.getBatchSize())
-                : raggedFeatureOutput->getDescriptor();
+            raggedFeatureOutput->getDescriptorForPlacement(physicalInputDescriptor.getBatchSize());
         ThorImplementation::RaggedExpression input =
             ThorImplementation::RaggedExpression::input(
                 "feature_input",
@@ -239,12 +234,11 @@ json TypeConverter::architectureJson() const {
     THOR_THROW_IF_FALSE(!featureInputs.empty());
     THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
 
-    const bool placementNeutral = raggedFeatureInput.has_value() && raggedFeatureInput->isPlacementNeutral();
-    if (raggedFeatureOutput.has_value()) THOR_THROW_IF_FALSE(placementNeutral == raggedFeatureOutput->isPlacementNeutral());
+    THOR_THROW_IF_FALSE(raggedFeatureInput.has_value() == raggedFeatureOutput.has_value());
 
     json j;
     j["factory"] = Layer::Factory::Layer.value();
-    j["version"] = placementNeutral ? "1.1.0" : getLayerVersion();
+    j["version"] = raggedFeatureInput.has_value() ? "1.1.0" : getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
 
     j["feature_input"] = featureInputs.front().architectureJson();
@@ -273,10 +267,6 @@ void TypeConverter::deserialize(const json &j, Network *network) {
     if (useRagged) {
         RaggedTensor raggedInput =
             SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_feature_input"), network, "TypeConverter");
-        if ((version == "1.0.0" && raggedInput.isPlacementNeutral()) ||
-            (version == "1.1.0" && !raggedInput.isPlacementNeutral())) {
-            throw runtime_error("TypeConverter serialized layer version does not match its ragged geometry mode.");
-        }
         const uint64_t featureInputId = j.at("feature_input").at("id").get<uint64_t>();
         if (featureInputId != j.at("ragged_feature_input").at("values").at("id").get<uint64_t>()) {
             throw runtime_error("TypeConverter serialized feature_input must match its ragged input values.");
@@ -286,13 +276,19 @@ void TypeConverter::deserialize(const json &j, Network *network) {
             throw runtime_error("TypeConverter reconstructed feature_input must match its ragged input values.");
         }
 
-        Tensor outputValues = Tensor::deserialize(j.at("feature_output"));
         const json& outputJson = j.at("ragged_feature_output");
         if (outputJson.at("values").at("id").get<uint64_t>() != j.at("feature_output").at("id").get<uint64_t>()) {
             throw runtime_error("TypeConverter serialized ragged output values must match feature_output.");
         }
         SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
             outputJson, j.at("ragged_feature_input"), raggedInput, "TypeConverter");
+        // The historical feature_output and ragged output may both describe
+        // packed [B*M, ...] capacity. Only the owning logical input supplies M.
+        Tensor outputValues = SegmentedPrimitiveDetail::reconstructPreservedOutputValues(
+            j.at("feature_output"), outputJson, raggedInput, "TypeConverter");
+        if (outputValues.getOriginalId() == values.getOriginalId()) {
+            throw runtime_error("TypeConverter output values must have a distinct graph identity.");
+        }
         if (outputValues.getDimensions() != raggedInput.getValuesDimensions()) {
             throw runtime_error("TypeConverter serialized ragged output logical shape must match its input.");
         }

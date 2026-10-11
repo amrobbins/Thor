@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -171,10 +172,28 @@ class FullyConnected : public TrainableLayer, public TrainingDropoutControllable
         THOR_THROW_IF_FALSE(isFeatureOutput);
         return !raggedFeatureOutputs.empty();
     }
+    [[nodiscard]] uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
+        if (raggedFeatureInputs.empty())
+            return TrainableLayer::getOutputTensorBytes(batchSize);
+        if (batchSize == 0) throw std::overflow_error("FullyConnected neutral placement batch must be positive.");
+        uint64_t bytes = 0;
+        for (const Tensor& output : featureOutputs) {
+            const uint64_t n = output.getTotalSizeInBytes();
+            if (n > std::numeric_limits<uint64_t>::max() / batchSize ||
+                bytes > std::numeric_limits<uint64_t>::max() - n * batchSize)
+                throw std::overflow_error("FullyConnected neutral output memory overflows uint64_t.");
+            bytes += n * batchSize;
+        }
+        return bytes;
+    }
     float getOutputDropoutProbability() const { return outputDropoutProbability; }
     int64_t getOutputDropoutSeed() const { return outputDropoutSeed; }
     std::optional<Tensor> getResidualInput() const { return residualInput; }
-    std::optional<RaggedTensor> getRaggedResidualInput() const { return raggedResidualInput; }
+    std::optional<RaggedTensor> getRaggedResidualInput(uint32_t index = 0) const {
+        if (index == 0) return raggedResidualInput;
+        if (index - 1 >= additionalRaggedResidualInputs.size()) return std::nullopt;
+        return additionalRaggedResidualInputs[index - 1];
+    }
     bool getUseResidual() const { return residualInput.has_value(); }
     std::optional<RaggedTensor> getRaggedFeatureInput(uint32_t index = 0) const {
         if (index >= raggedFeatureInputs.size()) return std::nullopt;
@@ -214,6 +233,9 @@ class FullyConnected : public TrainableLayer, public TrainingDropoutControllable
     int64_t outputDropoutSeed = 0;
     std::optional<Tensor> residualInput;
     std::optional<RaggedTensor> raggedResidualInput;
+    // Application 0 uses the historical single-residual field. Subsequent
+    // applications own separate semantic partitions and residual values.
+    std::vector<RaggedTensor> additionalRaggedResidualInputs;
 
     std::vector<std::string> epilogueAuxInputNames() const;
     std::vector<uint32_t> inputPortIndicesForTensor(Tensor tensor) const;
@@ -274,9 +296,12 @@ class FullyConnected::Builder {
         this->_featureInputs.push_back(values);
         if (_featureInputs.size() > 1) {
             THOR_THROW_IF_FALSE(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
-            THOR_THROW_IF_FALSE(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
-            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getBatchSize() == _raggedFeatureInputs.front().getBatchSize());
-            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getOffsetsDataType() == _raggedFeatureInputs.front().getOffsetsDataType());
+            // Applications share learned [input_features, output_features] weights,
+            // not an M or a physical B*M capacity. Each owns its own row partition.
+            THOR_THROW_IF_FALSE(_featureInputs.back().getDimensions().back() ==
+                                _featureInputs.front().getDimensions().back());
+            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getOffsetsDataType() ==
+                                _raggedFeatureInputs.front().getOffsetsDataType());
         }
         return *this;
     }
@@ -426,11 +451,17 @@ class FullyConnected::Builder {
         return *this;
     }
 
+    // For ragged multiple applications, call once per application, in the
+    // same order as featureInput(). No placement B or packed capacity is saved.
     virtual FullyConnected::Builder &residualInput(RaggedTensor input) {
-        THOR_THROW_IF_FALSE(!this->_residualInput.has_value());
-        THOR_THROW_IF_FALSE(!this->_raggedResidualInput.has_value());
-        this->_raggedResidualInput = input;
-        this->_residualInput = input.getValues();
+        THOR_THROW_IF_FALSE(input.isInitialized());
+        if (!this->_residualInput.has_value()) {
+            this->_raggedResidualInput = input;
+            this->_residualInput = input.getValues();
+        } else {
+            THOR_THROW_IF_FALSE(this->_raggedResidualInput.has_value());
+            this->_additionalRaggedResidualInputs.push_back(input);
+        }
         return *this;
     }
 
@@ -493,6 +524,7 @@ class FullyConnected::Builder {
     std::optional<int64_t> _outputDropoutSeed;
     std::optional<Tensor> _residualInput;
     std::optional<RaggedTensor> _raggedResidualInput;
+    std::vector<RaggedTensor> _additionalRaggedResidualInputs;
 
     std::shared_ptr<Initializer> _weightsInitializer;
     std::shared_ptr<Initializer> _biasInitializer;

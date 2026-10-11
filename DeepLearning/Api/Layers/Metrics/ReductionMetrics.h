@@ -4,6 +4,7 @@
 
 #include "DeepLearning/Api/Layers/Metrics/Metric.h"
 #include "DeepLearning/Api/Tensor/RaggedTensor.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 #include "DeepLearning/Implementation/Layers/Metrics/ReductionMetricDType.h"
 #include "DeepLearning/Implementation/Layers/Metrics/ReductionMetrics.h"
 
@@ -133,13 +134,17 @@ class UnaryReductionMetric : public Metric {
 
     std::shared_ptr<ThorImplementation::Layer> stampRaggedUnaryReductionMetric(
         ThorImplementation::RaggedReductionMetric::Kind kind,
+        const std::shared_ptr<ThorImplementation::Layer>& drivingLayer,
         Thor::Tensor connectingApiTensor) const {
         THOR_THROW_IF_FALSE(initialized);
         THOR_THROW_IF_FALSE(raggedValues.has_value());
         if (connectingApiTensor != raggedValues->getValues() && connectingApiTensor != raggedValues->getOffsets())
             throw std::invalid_argument(getLayerType() + " ragged stamp received an unrelated tensor.");
+        const auto physical = SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+            raggedValues.value(), drivingLayer, getLayerType().c_str(),
+            connectingApiTensor == raggedValues->getOffsets());
         return std::make_shared<ThorImplementation::RaggedReductionMetric>(
-            kind, raggedValues->getBatchSize(), raggedValues->getMaxTotalValues());
+            kind, physical.getBatchSize(), physical.getMaxTotalValues());
     }
 
     std::optional<RaggedTensor> raggedValues;
@@ -163,13 +168,12 @@ class ApiName : public UnaryReductionMetric {                                   
                                                      Thor::Tensor connectingApiTensor,                                \
                                                      const bool inferenceOnly) const override {                       \
         (void)placement;                                                                                              \
-        (void)drivingLayer;                                                                                           \
         (void)drivingApiLayer;                                                                                        \
         (void)inferenceOnly;                                                                                          \
         if (getUseRagged()) {                                                                                         \
             if (!(RaggedSupported))                                                                                   \
                 throw std::invalid_argument(#ApiName " does not support RaggedTensor values.");                     \
-            return stampRaggedUnaryReductionMetric(RaggedKind, connectingApiTensor);                                 \
+            return stampRaggedUnaryReductionMetric(RaggedKind, drivingLayer, connectingApiTensor);                \
         }                                                                                                             \
         return stampDenseUnaryReductionMetric<ThorImplementation::ImplName>(connectingApiTensor);                    \
     }                                                                                                                 \
@@ -329,7 +333,6 @@ class WeightedMean : public Metric {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)placement;
-        (void)drivingLayer;
         (void)drivingApiLayer;
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
@@ -343,8 +346,16 @@ class WeightedMean : public Metric {
             connectingApiTensor != raggedValues->getOffsets()) {
             throw std::invalid_argument("WeightedMean ragged stamp received an unrelated tensor.");
         }
+        const RaggedTensor& connected = connectingApiTensor == raggedWeights->getValues()
+            ? raggedWeights.value() : raggedValues.value();
+        const auto physical = SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+            connected, drivingLayer, "WeightedMean", connectingApiTensor == raggedValues->getOffsets());
+        const uint64_t batchSize = physical.getBatchSize();
+        if (physical.getMaxTotalValues() !=
+                raggedValues->getDescriptorForPlacement(batchSize).getMaxTotalValues())
+            throw std::runtime_error("WeightedMean runtime partition geometry disagrees with the logical model.");
         return std::make_shared<ThorImplementation::RaggedWeightedMean>(
-            raggedValues->getBatchSize(), raggedValues->getMaxTotalValues());
+            batchSize, physical.getMaxTotalValues());
     }
 
     std::optional<RaggedTensor> raggedValues;
@@ -440,9 +451,7 @@ class WeightedMean::Builder {
             throw std::invalid_argument("WeightedMean ragged values and weights must use distinct packed value tensors.");
         if (!values.sharesPartitionWith(weights))
             throw std::invalid_argument("WeightedMean ragged values and weights must use the exact same row partition.");
-        if (values.getBatchSize() != weights.getBatchSize() ||
-            values.getMaxTotalValues() != weights.getMaxTotalValues() ||
-            values.getOffsetsDataType() != weights.getOffsetsDataType()) {
+        if (values.getOffsetsDataType() != weights.getOffsetsDataType()) {
             throw std::invalid_argument("WeightedMean ragged values and weights partition metadata must match.");
         }
         if (values.getTrailingDimensions() != weights.getTrailingDimensions())

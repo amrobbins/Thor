@@ -212,7 +212,8 @@ TEST(UtilityApiLayers, FlattenSerializeDeserialize) {
 
 TEST(UtilityApiLayers, RaggedFlattenPreservesPartitionAndFlattensOnlyTrailingValues) {
     Network network("raggedFlatten");
-    RaggedTensor input(DataType::FP16, {2, 3, 4}, 3, 8, DataType::UINT64);
+    RaggedTensor input = RaggedTensor::logical(
+        Tensor(DataType::FP16, {8, 2, 3, 4}), Tensor(DataType::UINT64, {1}), 8);
 
     Flatten flatten = Flatten::Builder().network(network).featureInput(input).numOutputDimensions(2).build();
 
@@ -223,15 +224,13 @@ TEST(UtilityApiLayers, RaggedFlattenPreservesPartitionAndFlattensOnlyTrailingVal
     EXPECT_EQ(output.getValuesDimensions(), std::vector<uint64_t>({8, 2, 12}));
     EXPECT_EQ(output.getTrailingDimensions(), std::vector<uint64_t>({2, 12}));
     EXPECT_EQ(output.getOffsets(), input.getOffsets());
-    EXPECT_EQ(output.getBatchSize(), input.getBatchSize());
-    EXPECT_EQ(output.getMaxTotalValues(), input.getMaxTotalValues());
+    EXPECT_EQ(output.getDescriptorForPlacement(3).getMaxTotalValues(), 24u);
+    EXPECT_EQ(output.getMaxValuesPerRow(), 8u);
     EXPECT_EQ(output.getOffsetsDataType(), DataType::UINT64);
     ASSERT_TRUE(flatten.getFeatureOutput().has_value());
-    EXPECT_TRUE(flatten.outputTensorDimensionsIncludeBatch(flatten.getFeatureOutput().value()));
-    // Flatten inherits Layer::getOutputTensorBytes(). Because this packed ragged
-    // output already contains the full batch capacity, the base estimator must
-    // not multiply it by the logical batch again.
-    EXPECT_EQ(flatten.getOutputTensorBytes(input.getBatchSize()), output.getValues().getTotalSizeInBytes());
+    EXPECT_FALSE(flatten.outputTensorDimensionsIncludeBatch(flatten.getFeatureOutput().value()));
+    // Logical M is architecture; bytes are physicalized at placement B.
+    EXPECT_EQ(flatten.getOutputTensorBytes(3), 3 * output.getValues().getTotalSizeInBytes());
 
     const json architecture = flatten.architectureJson();
     EXPECT_TRUE(architecture.at("use_ragged").get<bool>());
@@ -240,7 +239,8 @@ TEST(UtilityApiLayers, RaggedFlattenPreservesPartitionAndFlattensOnlyTrailingVal
 
 TEST(UtilityApiLayers, RaggedFlattenRejectsOutputRankNotSmallerThanTrailingRank) {
     Network network("raggedFlattenRejectsRank");
-    RaggedTensor input(DataType::FP32, {2, 3}, 3, 8, DataType::UINT32);
+    RaggedTensor input = RaggedTensor::logical(
+        Tensor(DataType::FP32, {8, 2, 3}), Tensor(DataType::UINT32, {1}), 8);
 
     EXPECT_THROW((void)Flatten::Builder().network(network).featureInput(input).numOutputDimensions(2).build(),
                  std::invalid_argument);

@@ -182,8 +182,6 @@ def _r10g_ragged_pair(network, prediction_dtype=thor.DataType.fp32, label_dtype=
         "r10g_predictions",
         prediction_dtype,
         [2],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     labels = thor.layers.RaggedNetworkInput(
@@ -225,8 +223,6 @@ def test_expectileloss_r10g_rejects_per_output_and_different_partition():
         "r10g_different_labels",
         thor.DataType.fp32,
         [2],
-        batch_size=3,
-        max_total_values=8,
         max_values_per_row=4,
     )
     with pytest.raises(ValueError, match=r"exact same row partition"):

@@ -80,18 +80,14 @@ class Embedding : public TrainableLayer {
 
     uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
         if (raggedFeatureOutputs.empty()) return MultiConnectionLayer::getOutputTensorBytes(batchSize);
-        (void)batchSize;
-        THOR_THROW_IF_FALSE(!featureOutputs.empty());
-        return featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();
+        return outputBytesForRaggedPlacement(batchSize);
     }
     uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize,
                                                       ThorImplementation::TensorPlacement tensorPlacement) const override {
         if (raggedFeatureOutputs.empty())
             return TrainableLayer::getNonFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
-        (void)batchSize;
         (void)tensorPlacement;
-        THOR_THROW_IF_FALSE(!featureOutputs.empty());
-        return featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();
+        return outputBytesForRaggedPlacement(batchSize);
     }
 
    protected:
@@ -108,6 +104,7 @@ class Embedding : public TrainableLayer {
     static bool isSupportedWeightsDataType(DataType dataType);
     static std::string dataTypeName(DataType dataType);
     static void validateIndexTensor(const Tensor& tensor, const std::string& what);
+    uint64_t outputBytesForRaggedPlacement(uint32_t batchSize) const;
 
     uint64_t vocabularySize = 0;
     uint64_t embeddingDim = 0;
@@ -160,7 +157,13 @@ class Embedding::Builder {
         if (_featureInputs.size() > 1) {
             THOR_THROW_IF_FALSE(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
             THOR_THROW_IF_FALSE(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
-            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getBatchSize() == _raggedFeatureInputs.front().getBatchSize());
+            // Applications may own distinct canonical row partitions. Their
+            // logical per-row capacity must agree, but runtime B belongs to
+            // placement, not to either API input.
+            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().hasMaxValuesPerRow());
+            THOR_THROW_IF_FALSE(_raggedFeatureInputs.front().hasMaxValuesPerRow());
+            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getMaxValuesPerRow() ==
+                                _raggedFeatureInputs.front().getMaxValuesPerRow());
             THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getOffsetsDataType() == _raggedFeatureInputs.front().getOffsetsDataType());
         }
         return *this;

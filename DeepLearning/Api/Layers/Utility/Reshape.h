@@ -26,7 +26,8 @@ class Reshape : public Layer {
     [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {
         THOR_THROW_IF_FALSE(featureOutput.has_value());
         THOR_THROW_IF_FALSE(outputTensor == featureOutput.value());
-        return raggedFeatureInput.has_value() && !raggedFeatureInput->isPlacementNeutral();
+        // API tensor dimensions are always per-example, not placement dimensions.
+        return false;
     }
 
     nlohmann::json architectureJson() const override;
@@ -45,14 +46,14 @@ class Reshape : public Layer {
         THOR_THROW_IF_FALSE(initialized);
         THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput().value());
 
-        if (raggedFeatureInput.has_value() && raggedFeatureInput->isPlacementNeutral()) {
+        if (raggedFeatureInput.has_value()) {
             THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
             THOR_THROW_IF_FALSE(!newDimensions.empty());
 
             // ThorImplementation::Reshape already uses a leading zero as an
             // explicit stamp-time contract: when the implementation layer is
             // connected, replace it with the actual physical input leading
-            // dimension. For a neutral ragged input that dimension is B*M.
+            // dimension. For a ragged input that dimension is B*M.
             // Keep API newDimensions semantic ([M, ...]) and resolve only the
             // physical view shape here without requiring the driving layer to
             // have created its featureOutput before this stamp call.

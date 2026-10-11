@@ -215,7 +215,6 @@ void expectNeutralSemanticJsonAndMalformed(const ActivationCase& activationCase)
                              .trailingDimensions({2})
                              .maxValuesPerRow(maxValuesPerRow)
                              .build();
-    ASSERT_TRUE(input.isPlacementNeutral());
 
     auto activation = buildActivation(activationCase.label, network, input);
     ASSERT_NE(activation, nullptr);
@@ -229,7 +228,7 @@ void expectNeutralSemanticJsonAndMalformed(const ActivationCase& activationCase)
     expectParameters(activationCase.label, architecture);
     const json& inputJson = architecture.at("ragged_feature_input");
     const json& outputJson = architecture.at("ragged_feature_output");
-    EXPECT_EQ(inputJson.at("geometry_mode").get<string>(), "placement_neutral");
+    EXPECT_FALSE(inputJson.contains("geometry_mode"));
     EXPECT_EQ(inputJson.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
     EXPECT_FALSE(inputJson.contains("batch_size"));
     EXPECT_FALSE(inputJson.contains("max_total_values"));
@@ -242,7 +241,7 @@ void expectNeutralSemanticJsonAndMalformed(const ActivationCase& activationCase)
     EXPECT_EQ(outputJson.at("values").at("id").get<uint64_t>(), architecture.at("feature_output").at("id").get<uint64_t>());
 
     json wrongVersion = architecture;
-    wrongVersion["version"] = "1.0.0";
+    wrongVersion["version"] = "0.0.0";
     EXPECT_THROW(Activation::deserialize(wrongVersion, &network), runtime_error);
 
     json wrongGeometry = architecture;
@@ -305,7 +304,6 @@ void expectNeutralSaveLoadPlaceAndExecute(const ActivationCase& activationCase) 
         const auto inputs = loaded.getExternalRaggedNetworkInputs();
         ASSERT_EQ(inputs.size(), 1U);
         const RaggedTensor loadedInput = inputs.front().raggedTensor;
-        ASSERT_TRUE(loadedInput.isPlacementNeutral());
         EXPECT_EQ(loadedInput.getValues().getOriginalId(), savedValuesOriginalId);
         EXPECT_EQ(loadedInput.getRowPartitionToken().getOriginalId(), savedPartitionOriginalId);
 
@@ -398,8 +396,6 @@ void expectFixedRaggedCompatibility(const ActivationCase& activationCase) {
                                  .valuesDataType(DataType::FP32)
                                  .offsetsDataType(DataType::UINT32)
                                  .trailingDimensions({2})
-                                 .batchSize(3)
-                                 .maxTotalValues(9)
                                  .maxValuesPerRow(4)
                                  .build();
         auto activation = buildActivation(activationCase.label, network, input);
@@ -411,10 +407,11 @@ void expectFixedRaggedCompatibility(const ActivationCase& activationCase) {
             .inputTensor(activation->getRaggedFeatureOutput().value())
             .build();
         savedArchitecture = activation->architectureJson();
-        EXPECT_EQ(savedArchitecture.at("version").get<string>(), "1.0.0");
-        EXPECT_EQ(savedArchitecture.at("ragged_feature_input").at("batch_size").get<uint64_t>(), 3U);
-        EXPECT_EQ(savedArchitecture.at("ragged_feature_input").at("max_total_values").get<uint64_t>(), 9U);
-        EXPECT_FALSE(savedArchitecture.at("ragged_feature_input").contains("layer_ragged_reference_version"));
+        EXPECT_EQ(savedArchitecture.at("version").get<string>(), "1.1.0");
+        EXPECT_EQ(savedArchitecture.at("ragged_feature_input").at("max_values_per_row").get<uint64_t>(), 4U);
+        EXPECT_FALSE(savedArchitecture.at("ragged_feature_input").contains("batch_size"));
+        EXPECT_FALSE(savedArchitecture.at("ragged_feature_input").contains("max_total_values"));
+        EXPECT_EQ(savedArchitecture.at("ragged_feature_input").at("offsets").at("dimensions"), json::array({1}));
         expectParameters(activationCase.label, savedArchitecture);
         network.save(archive.string(), true);
     }
@@ -425,8 +422,7 @@ void expectFixedRaggedCompatibility(const ActivationCase& activationCase) {
         auto activation = findOnlyActivation(loaded, activationCase.layerType);
         ASSERT_NE(activation, nullptr);
         ASSERT_TRUE(activation->getRaggedFeatureInput().has_value());
-        EXPECT_FALSE(activation->getRaggedFeatureInput()->isPlacementNeutral());
-        EXPECT_EQ(activation->architectureJson().at("version").get<string>(), "1.0.0");
+        EXPECT_EQ(activation->architectureJson().at("version").get<string>(), "1.1.0");
         expectParameters(activationCase.label, activation->architectureJson());
     } catch (...) {
         filesystem::remove_all(archive);
@@ -542,6 +538,51 @@ TEST(Activations, G1NeutralDeserializeAcceptsConcretePolymorphicOutput) {
     forged["ragged_feature_output"]["values"]["dimensions"] = vector<uint64_t>{4, 4};
     G1PolymorphicOutputProbe rejected;
     EXPECT_THROW(rejected.deserializeForTest(forged, &network), runtime_error);
+}
+
+// The historical packed-reference grammar must be read as the same logical
+// activation, even when the archived B/total-capacity hints are unreliable.
+// A GLU-shaped probe also checks that output trailing dimensions come from the
+// concrete activation rather than the archived packed tensor.
+TEST(Activations, HistoricalPackedStandaloneOutputUsesSourceMAndConcreteTrailingShape) {
+    Network network("historical_packed_activation_logical_output");
+    const RaggedTensor input = RaggedNetworkInput::Builder()
+                                   .network(network).name("tokens")
+                                   .valuesDataType(DataType::FP32)
+                                   .offsetsDataType(DataType::UINT32)
+                                   .trailingDimensions({6}).maxValuesPerRow(4).build();
+    G1PolymorphicOutputProbe source;
+    source.initializeForTest(input);
+    json historical = source.architectureJson();
+    historical["version"] = "1.0.0";
+    for (const char* field : {"ragged_feature_input", "ragged_feature_output"}) {
+        json& reference = historical[field];
+        reference.erase("layer_ragged_reference_version");
+        reference.erase("geometry_mode");
+        reference.erase("max_values_per_row");
+        reference["batch_size"] = 999;
+        reference["max_total_values"] = 987654;
+        reference["values"]["dimensions"][0] = 12;
+        reference["offsets"]["dimensions"] = std::vector<uint64_t>{4};
+    }
+    historical["feature_output"]["dimensions"][0] = 12;
+    G1PolymorphicOutputProbe restored;
+    ASSERT_NO_THROW(restored.deserializeForTest(historical, &network));
+    ASSERT_TRUE(restored.getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(restored.getRaggedFeatureOutput()->getValuesDimensions(),
+              (std::vector<uint64_t>{4, 3}));
+    EXPECT_EQ(restored.getFeatureOutput()->getOriginalId(),
+              source.getFeatureOutput()->getOriginalId());
+    EXPECT_TRUE(restored.getRaggedFeatureOutput()->sharesPartitionWith(input));
+    EXPECT_EQ(restored.getRaggedFeatureOutput()->getDescriptorForPlacement(2).getValuesDimensions(),
+              (std::vector<uint64_t>{8, 3}));
+    EXPECT_EQ(restored.getRaggedFeatureOutput()->getDescriptorForPlacement(7).getValuesDimensions(),
+              (std::vector<uint64_t>{28, 3}));
+
+    json invalid = historical;
+    invalid["ragged_feature_output"]["values"]["dimensions"][1] = 4;
+    G1PolymorphicOutputProbe rejected;
+    EXPECT_THROW(rejected.deserializeForTest(invalid, &network), std::runtime_error);
 }
 
 // Both serialized output descriptors are forged together, so their mutual

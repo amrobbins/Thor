@@ -19,6 +19,7 @@ def _physical_ragged(values: np.ndarray, offsets: np.ndarray) -> thor.physical.P
     return thor.physical.PhysicalRaggedTensor(
         _cpu_tensor(values, thor.DataType.fp32),
         _cpu_tensor(offsets, thor.DataType.uint32),
+        max_values_per_row=4,
     )
 
 
@@ -29,8 +30,7 @@ def _channel_reduction_network(name: str):
         "history",
         thor.DataType.fp32,
         [3],
-        max_total_values=9,
-        batch_size=3,
+        max_values_per_row=4,
         offsets_data_type=thor.DataType.uint32,
     )
     channel0_layer = thor.layers.Slice(network, history, axis=0, start=0, length=1)
@@ -53,7 +53,8 @@ def test_ragged_slice_preserves_partition_and_segmented_reduction_returns_dense_
 
     assert channel0_layer.get_use_ragged()
     assert isinstance(channel0, thor.RaggedTensor)
-    assert channel0.values.get_dimensions() == [9, 1]
+    assert channel0.values.get_dimensions() == [4, 1]
+    assert history.offsets.get_dimensions() == [1]
     assert channel0.offsets == history.offsets
     for layer in reductions.values():
         output = layer.get_feature_output()
@@ -77,7 +78,7 @@ def test_channel_zero_segmented_reductions_handle_unequal_lengths_empty_row_and_
     network, _, _, _, _ = _channel_reduction_network("ragged-channel-zero-segmented-reductions")
     placed = network.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
-    # offsets [0,3,3,7] gives lengths 3,0,4. Rows 7 and 8 are inactive and
+    # offsets [0,3,3,7] gives lengths 3,0,4. Packed values 7 onward are inactive and
     # contain values chosen to corrupt both min and max if capacity leaks in.
     values = np.array(
         [
@@ -90,6 +91,9 @@ def test_channel_zero_segmented_reductions_handle_unequal_lengths_empty_row_and_
             [6.0, 70.0, 700.0],
             [-1000.0, 8000.0, 80000.0],
             [1000.0, -9000.0, -90000.0],
+            [-1000.0, 8000.0, 80000.0],
+            [1000.0, -9000.0, -90000.0],
+            [-1000.0, 8000.0, 80000.0],
         ],
         dtype=np.float32,
     )
@@ -119,8 +123,7 @@ def test_ragged_slice_and_segment_mean_save_load_preserve_execution(tmp_path):
         "history",
         thor.DataType.fp32,
         [3],
-        max_total_values=9,
-        batch_size=3,
+        max_values_per_row=4,
         offsets_data_type=thor.DataType.uint32,
     )
     channel0 = thor.layers.Slice(network, history, axis=0, start=0, length=1).get_feature_output()
@@ -133,7 +136,7 @@ def test_ragged_slice_and_segment_mean_save_load_preserve_execution(tmp_path):
     loaded.load(str(save_dir))
     placed = loaded.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
-    values = np.arange(27, dtype=np.float32).reshape(9, 3)
+    values = np.arange(3 * 4 * 3, dtype=np.float32).reshape(3 * 4, 3)
     values[7:] = np.float32(9999.0)
     offsets = np.array([0, 3, 3, 7], dtype=np.uint32)
     output = np.array(placed.infer({"history": _physical_ragged(values, offsets)})["mean"].numpy(), copy=True)

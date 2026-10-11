@@ -46,12 +46,10 @@ json DropOut::architectureJson() const {
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
 
-    const bool placementNeutral = raggedFeatureInput.has_value() && raggedFeatureInput->isPlacementNeutral();
-    if (raggedFeatureOutput.has_value()) THOR_THROW_IF_FALSE(placementNeutral == raggedFeatureOutput->isPlacementNeutral());
 
     json j;
     j["factory"] = Layer::Factory::Layer.value();
-    j["version"] = placementNeutral ? "1.1.0" : getLayerVersion();
+    j["version"] = raggedFeatureInput.has_value() ? "1.1.0" : getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
 
     j["feature_input"] = featureInput.value().architectureJson();
@@ -81,10 +79,6 @@ void DropOut::deserialize(const json &j, Network *network) {
     if (useRagged) {
         RaggedTensor raggedInput =
             SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_feature_input"), network, "DropOut");
-        if ((version == "1.0.0" && raggedInput.isPlacementNeutral()) ||
-            (version == "1.1.0" && !raggedInput.isPlacementNeutral())) {
-            throw runtime_error("DropOut serialized layer version does not match its ragged geometry mode.");
-        }
         const uint64_t valuesId = j.at("ragged_feature_input").at("values").at("id").get<uint64_t>();
         if (j.at("feature_input").at("id").get<uint64_t>() != valuesId)
             throw runtime_error("DropOut serialized ragged feature_input must reference the ragged values tensor.");
@@ -94,7 +88,8 @@ void DropOut::deserialize(const json &j, Network *network) {
         if (!ThorImplementation::DropOut::nativeKernelSupportsDataType(values.getDataType()))
             throw runtime_error("Serialized ragged DropOut values dtype is unsupported.");
 
-        Tensor outputValues = Tensor::deserialize(j.at("feature_output"));
+        Tensor outputValues = SegmentedPrimitiveDetail::reconstructPreservedOutputValues(
+            j.at("feature_output"), j.at("ragged_feature_output"), raggedInput, "DropOut");
         if (outputValues.getDimensions() != values.getDimensions() || outputValues.getDataType() != values.getDataType())
             throw runtime_error("DropOut serialized ragged output descriptor must match its input values descriptor.");
         const json& outputJson = j.at("ragged_feature_output");

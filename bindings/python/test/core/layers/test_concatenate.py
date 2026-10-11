@@ -96,8 +96,6 @@ def _ragged_reassemble_network(name):
         "history",
         thor.DataType.fp32,
         [5],
-        max_total_values=9,
-        batch_size=3,
         offsets_data_type=thor.DataType.uint32,
         max_values_per_row=4,
     )
@@ -123,17 +121,16 @@ def test_concatenate_ragged_preserves_shared_partition_and_serializes():
     architecture = json.loads(network.get_architecture_json())
     layer = next(item for item in architecture["layers"] if item["layer_type"] == "concatenate")
     assert layer["use_ragged"] is True
-    # RaggedTensor architecture JSON uses the canonical nested Tensor schema
-    # for values.  The first values dimension is packed capacity; the
-    # remaining dimensions are the logical trailing dimensions.
-    assert [item["values"]["dimensions"] for item in layer["ragged_inputs"]] == [[9, 2], [9, 3]]
-    assert layer["ragged_output"]["values"]["dimensions"] == [9, 5]
-    assert all(item["batch_size"] == 3 for item in layer["ragged_inputs"])
-    assert all(item["max_total_values"] == 9 for item in layer["ragged_inputs"])
+    # Serialized model geometry is semantic M, not the placement B*M capacity.
+    assert [item["values"]["dimensions"] for item in layer["ragged_inputs"]] == [[4, 2], [4, 3]]
+    assert layer["ragged_output"]["values"]["dimensions"] == [4, 5]
+    assert all(item["offsets"]["dimensions"] == [1] for item in layer["ragged_inputs"])
+    assert layer["ragged_output"]["offsets"]["dimensions"] == [1]
     assert all(item["max_values_per_row"] == 4 for item in layer["ragged_inputs"])
-    assert layer["ragged_output"]["batch_size"] == 3
-    assert layer["ragged_output"]["max_total_values"] == 9
     assert layer["ragged_output"]["max_values_per_row"] == 4
+    assert all("batch_size" not in item and "max_total_values" not in item for item in layer["ragged_inputs"])
+    assert "batch_size" not in layer["ragged_output"]
+    assert "max_total_values" not in layer["ragged_output"]
     assert all(
         item["offsets"]["id"] == layer["ragged_output"]["offsets"]["id"]
         for item in layer["ragged_inputs"]
@@ -147,8 +144,6 @@ def test_concatenate_ragged_rejects_distinct_row_partitions():
         "left",
         thor.DataType.fp32,
         [2],
-        max_total_values=9,
-        batch_size=3,
         offsets_data_type=thor.DataType.uint32,
         max_values_per_row=4,
     )
@@ -157,8 +152,6 @@ def test_concatenate_ragged_rejects_distinct_row_partitions():
         "right",
         thor.DataType.fp32,
         [3],
-        max_total_values=9,
-        batch_size=3,
         offsets_data_type=thor.DataType.uint32,
         max_values_per_row=4,
     )
@@ -173,13 +166,14 @@ def test_concatenate_ragged_forward_and_save_load_touch_only_active_prefix(tmp_p
     name = "ragged-concatenate-forward-save-load"
     network, _, _, _ = _ragged_reassemble_network(name)
     offsets = np.asarray([0, 3, 3, 7], dtype=np.uint32)
-    values = np.arange(9 * 5, dtype=np.float32).reshape(9, 5)
+    values = np.arange(3 * 4 * 5, dtype=np.float32).reshape(3 * 4, 5)
     # Inactive packed capacity is deliberately poisoned. Concatenate is a
     # consumer of its ragged inputs and must not read or canonicalize this tail.
-    values[7:] = np.asarray(
+    poison = np.asarray(
         [[np.nan, np.inf, -np.inf, np.nan, np.inf], [-np.inf, np.nan, np.inf, -np.inf, np.nan]],
         dtype=np.float32,
     )
+    values[7:] = np.resize(poison, values[7:].shape)
     physical = _physical_ragged(values, offsets, max_values_per_row=4)
 
     placed = network.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
@@ -202,7 +196,6 @@ def test_concatenate_ragged_backward_preserves_batch_size_for_upstream_fused_opt
     import numpy as np
 
     batch_size = 2
-    max_total_values = 6
     max_values_per_row = 3
     feature_width = 4
 
@@ -212,8 +205,6 @@ def test_concatenate_ragged_backward_preserves_batch_size_for_upstream_fused_opt
         "history",
         thor.DataType.fp32,
         [feature_width],
-        max_total_values=max_total_values,
-        batch_size=batch_size,
         offsets_data_type=thor.DataType.uint32,
         max_values_per_row=max_values_per_row,
     )
@@ -288,8 +279,6 @@ def test_concatenate_ragged_rejects_duplicate_values_port():
         "value",
         thor.DataType.fp32,
         [2],
-        max_total_values=9,
-        batch_size=3,
         offsets_data_type=thor.DataType.uint32,
         max_values_per_row=4,
     )

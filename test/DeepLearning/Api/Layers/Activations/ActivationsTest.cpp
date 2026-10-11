@@ -113,8 +113,7 @@ TEST(Activations, ShapePreservingBuildersInferRaggedFromInputAndPreserveOffsets)
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({3})
-                             .maxTotalValues(8)
-                             .batchSize(2)
+                             .maxValuesPerRow(4)
                              .build();
 
     auto swish = std::dynamic_pointer_cast<Swish>(Swish::Builder().network(network).featureInput(input).build());
@@ -152,9 +151,7 @@ TEST(Activations, RaggedStandalonePointwiseMaterializesManagedActiveCountWithout
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({3})
-                             .maxTotalValues(maxTotalValues)
                              .maxValuesPerRow(5)
-                             .batchSize(batchSize)
                              .build();
 
     auto swish = std::dynamic_pointer_cast<Swish>(Swish::Builder().network(network).featureInput(input).build());

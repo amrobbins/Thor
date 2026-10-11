@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Api/Layers/Loss/RaggedCustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/RaggedLossShaper.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 #include "DeepLearning/Api/Tensor/RaggedTensor.h"
 
 #include "DeepLearning/Implementation/Layers/Activation/Softmax.h"
@@ -77,10 +78,13 @@ class CategoricalCrossEntropy : public Loss {
     }
 
     [[nodiscard]] uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
-        if (isRagged() && labelType == LabelType::SPARSE && logitsNativeLossAddedToNetwork) {
-            (void)batchSize;
+        // Both the public composite loss and its internal logits-native layer
+        // expose the same RAW tensor. The public layer has no featureOutput;
+        // delegating to Layer would incorrectly report zero bytes.
+        if (isRagged() && labelType == LabelType::SPARSE && lossShape == LossShape::RAW) {
             THOR_THROW_IF_FALSE(raggedRawLossTensor.has_value());
-            return raggedRawLossTensor->getValues().getTotalSizeInBytes();
+            return raggedRawLossTensor->getDescriptorForPlacement(batchSize)
+                .getValuesDescriptor().getArraySizeInBytes();
         }
         return Layer::getOutputTensorBytes(batchSize);
     }
@@ -140,7 +144,6 @@ class CategoricalCrossEntropy : public Loss {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)placement;
-        (void)drivingLayer;
         (void)drivingApiLayer;
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
@@ -153,8 +156,21 @@ class CategoricalCrossEntropy : public Loss {
         if (labelType == LabelType::SPARSE && logitsNativeLossAddedToNetwork) {
             std::optional<uint32_t> raggedBatchSize;
             if (isRagged()) {
-                THOR_THROW_IF_FALSE(raggedPredictionsTensor->getBatchSize() <= std::numeric_limits<uint32_t>::max());
-                raggedBatchSize = static_cast<uint32_t>(raggedPredictionsTensor->getBatchSize());
+                // The physical loss needs B for its managed active-count carrier.
+                // Recover B from the actual driving placement, never from the model.
+                const bool structural = connectingApiTensor == raggedPredictionsTensor->getRowPartitionToken();
+                const RaggedTensor& drivingInput =
+                    connectingApiTensor == labelsTensor ? raggedLabelsTensor.value() :
+                    (maskTensor.has_value() && connectingApiTensor == maskTensor.value())
+                        ? raggedMaskTensor.value() : raggedPredictionsTensor.value();
+                const auto physical = SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+                    drivingInput, drivingLayer, "SparseCategoricalCrossEntropy", structural);
+                const uint64_t b = physical.getBatchSize();
+                if (b == 0 || b > std::numeric_limits<uint32_t>::max() ||
+                    physical.getMaxTotalValues() != raggedPredictionsTensor->getDescriptorForPlacement(b).getMaxTotalValues()) {
+                    throw std::runtime_error("SparseCategoricalCrossEntropy runtime partition geometry mismatch.");
+                }
+                raggedBatchSize = static_cast<uint32_t>(b);
             }
             return std::make_shared<ThorImplementation::SparseCategoricalCrossEntropyWithLogits>(
                 lossDataType, lossWeight, ignoreIndex, raggedBatchSize);
@@ -180,14 +196,15 @@ class CategoricalCrossEntropy : public Loss {
     uint64_t getFirstInstanceMemRequirementInBytes(
         uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         if (isRagged() && labelType == LabelType::SPARSE && logitsNativeLossAddedToNetwork) {
-            (void)batchSize;
             (void)tensorPlacement;
             THOR_THROW_IF_FALSE(raggedRawLossTensor.has_value());
             // Inputs and the managed active-count carrier are owned by their
             // upstream producers. The sparse CE layer owns raw-loss storage and,
             // for training, a dense logits-gradient buffer with prediction geometry.
-            return raggedRawLossTensor->getValues().getTotalSizeInBytes() +
-                   raggedPredictionsTensor->getValues().getTotalSizeInBytes();
+            return raggedRawLossTensor->getDescriptorForPlacement(batchSize)
+                       .getValuesDescriptor().getArraySizeInBytes() +
+                   raggedPredictionsTensor->getDescriptorForPlacement(batchSize)
+                       .getValuesDescriptor().getArraySizeInBytes();
         }
         return Loss::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
     }
@@ -386,11 +403,11 @@ class CategoricalCrossEntropy::Builder {
                 throw std::invalid_argument(labelType == LabelType::SPARSE
                                                 ? "SparseCategoricalCrossEntropy ragged predictions and labels must use the exact same row partition."
                                                 : "CategoricalCrossEntropy ragged predictions and labels must use the exact same row partition.");
-            if (predictions.getBatchSize() != labels.getBatchSize() ||
-                predictions.getMaxTotalValues() != labels.getMaxTotalValues())
+            if (predictions.getMaxValuesPerRow() != labels.getMaxValuesPerRow() ||
+                predictions.getOffsetsDataType() != labels.getOffsetsDataType())
                 throw std::invalid_argument(labelType == LabelType::SPARSE
-                                                ? "SparseCategoricalCrossEntropy ragged predictions and labels must have the same batch size and packed capacity."
-                                                : "CategoricalCrossEntropy ragged predictions and labels must have identical value geometry.");
+                                                ? "SparseCategoricalCrossEntropy ragged predictions and labels must share semantic M and offsets dtype."
+                                                : "CategoricalCrossEntropy ragged predictions and labels must have identical logical partition geometry.");
             if (labelType == LabelType::DENSE && predictionDimensions != labelDimensions)
                 throw std::invalid_argument("CategoricalCrossEntropy ragged predictions and labels must have identical value geometry.");
         }
@@ -422,10 +439,10 @@ class CategoricalCrossEntropy::Builder {
                 if (!predictions.sharesPartitionWith(mask))
                     throw std::invalid_argument(
                         "SparseCategoricalCrossEntropy ragged predictions and mask must use the exact same row partition.");
-                if (predictions.getBatchSize() != mask.getBatchSize() ||
-                    predictions.getMaxTotalValues() != mask.getMaxTotalValues())
+                if (predictions.getMaxValuesPerRow() != mask.getMaxValuesPerRow() ||
+                    predictions.getOffsetsDataType() != mask.getOffsetsDataType())
                     throw std::invalid_argument(
-                        "SparseCategoricalCrossEntropy ragged predictions and mask must have the same batch size and packed capacity.");
+                        "SparseCategoricalCrossEntropy ragged predictions and mask must share semantic M and offsets dtype.");
                 if (!sparseRaggedValueIsScalar(mask.getTrailingDimensions()))
                     throw std::invalid_argument(
                         "SparseCategoricalCrossEntropy ragged mask must be scalar per active token (trailing shape [] or [1]).");
@@ -481,12 +498,12 @@ class CategoricalCrossEntropy::Builder {
         } else {
             THOR_THROW_IF_FALSE(categoricalCrossEntropy.lossShape == LossShape::RAW);
             std::vector<uint64_t> rawLossDimensions = categoricalCrossEntropy.isRagged()
-                ? std::vector<uint64_t>{categoricalCrossEntropy.raggedPredictionsTensor->getMaxTotalValues()}
+                ? std::vector<uint64_t>{categoricalCrossEntropy.raggedPredictionsTensor->getMaxValuesPerRow()}
                 : predictionDimensions;
             if (categoricalCrossEntropy.labelType == LabelType::SPARSE && categoricalCrossEntropy.logitsNativeLossAddedToNetwork) {
                 if (categoricalCrossEntropy.isRagged()) {
-                    // One scalar loss per packed token. The leading packed-capacity
-                    // dimension is already physical and must not be batch-expanded.
+                    // One scalar logical loss per token: [M]. Physical output
+                    // capacity [B*M] is derived by placement, not saved here.
                 } else if (rawLossDimensions.size() == 1)
                     rawLossDimensions = {1};
                 else

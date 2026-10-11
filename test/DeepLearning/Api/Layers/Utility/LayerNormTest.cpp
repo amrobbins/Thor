@@ -75,8 +75,6 @@ TEST(UtilityApiLayers, RaggedLayerNormBuildsAndPreservesCanonicalPartition) {
                              .name("tokens")
                              .valuesDataType(DataType::FP32)
                              .trailingDimensions({4})
-                             .batchSize(3)
-                             .maxTotalValues(11)
                              .maxValuesPerRow(7)
                              .offsetsDataType(DataType::UINT64)
                              .build();
@@ -87,11 +85,11 @@ TEST(UtilityApiLayers, RaggedLayerNormBuildsAndPreservesCanonicalPartition) {
     ASSERT_TRUE(layer.getRaggedFeatureInput().has_value());
     ASSERT_TRUE(layer.getRaggedFeatureOutput().has_value());
     const RaggedTensor output = layer.getRaggedFeatureOutput().value();
-    EXPECT_EQ(output.getValues().getDimensions(), (vector<uint64_t>{11, 4}));
+    EXPECT_EQ(output.getValues().getDimensions(), (vector<uint64_t>{7, 4}));
     EXPECT_EQ(output.getOffsets(), input.getOffsets());
     EXPECT_TRUE(layer.outputTensorDimensionsIncludeBatch(output.getValues()));
-    EXPECT_EQ(output.getBatchSize(), input.getBatchSize());
-    EXPECT_EQ(output.getMaxTotalValues(), input.getMaxTotalValues());
+    EXPECT_EQ(output.getMaxValuesPerRow(), input.getMaxValuesPerRow());
+    EXPECT_TRUE(output.sharesPartitionWith(input));
     ASSERT_TRUE(output.hasMaxValuesPerRow());
     EXPECT_EQ(output.getMaxValuesPerRow(), input.getMaxValuesPerRow());
     EXPECT_EQ(layer.getNormalizedShape(), (vector<uint64_t>{4}));
@@ -111,8 +109,7 @@ TEST(UtilityApiLayers, RaggedLayerNormRejectsGeometryOutsideExpressionContract) 
                              .name("tokens")
                              .valuesDataType(DataType::FP32)
                              .trailingDimensions({4})
-                             .batchSize(2)
-                             .maxTotalValues(9)
+                             .maxValuesPerRow(4)
                              .build();
 
     EXPECT_THROW(LayerNorm::Builder().network(network).featureInput(input).normalizedShape({9, 4}).build(),
@@ -123,8 +120,7 @@ TEST(UtilityApiLayers, RaggedLayerNormRejectsGeometryOutsideExpressionContract) 
                                        .name("matrix_tokens")
                                        .valuesDataType(DataType::FP32)
                                        .trailingDimensions({2, 2})
-                                       .batchSize(2)
-                                       .maxTotalValues(9)
+                                       .maxValuesPerRow(4)
                                        .build();
     EXPECT_THROW(LayerNorm::Builder().network(network).featureInput(rankTwoTrailing).normalizedShape({2}).build(),
                  std::invalid_argument);

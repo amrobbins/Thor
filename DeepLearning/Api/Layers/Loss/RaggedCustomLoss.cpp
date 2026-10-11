@@ -16,23 +16,16 @@ using namespace std;
 namespace Thor {
 namespace {
 
-// The semantic M is supplied by the logical neutral input, never recovered
-// from a historic physical capacity. Preserve legacy fixed/fixed contracts.
+// Logical operands share one partition and semantic M. The runtime packed
+// capacity belongs exclusively to placement; an archived fixed-batch object
+// must not be admitted as a model input during the remaining migration.
 void requireMatchingGeometry(const RaggedTensor& reference, const RaggedTensor& other, const char* description) {
-    if (!reference.sharesPartitionWith(other) || reference.isPlacementNeutral() != other.isPlacementNeutral() ||
-        reference.getOffsetsDataType() != other.getOffsetsDataType()) {
-        throw invalid_argument(string("RaggedCustomLoss ") + description + " must use the same canonical partition and geometry mode.");
-    }
-    if (reference.isPlacementNeutral()) {
-        if (!reference.hasMaxValuesPerRow() || !other.hasMaxValuesPerRow() ||
-            reference.getMaxValuesPerRow() != other.getMaxValuesPerRow()) {
-            throw invalid_argument(string("RaggedCustomLoss ") + description + " semantic max_values_per_row differs.");
-        }
-    } else if (reference.getBatchSize() != other.getBatchSize() ||
-               reference.getMaxTotalValues() != other.getMaxTotalValues() ||
-               (reference.hasMaxValuesPerRow() && other.hasMaxValuesPerRow() &&
-                reference.getMaxValuesPerRow() != other.getMaxValuesPerRow())) {
-        throw invalid_argument(string("RaggedCustomLoss ") + description + " fixed ragged geometry differs.");
+    if (!reference.sharesPartitionWith(other) ||
+        reference.getOffsetsDataType() != other.getOffsetsDataType() ||
+        !reference.hasMaxValuesPerRow() || !other.hasMaxValuesPerRow() ||
+        reference.getMaxValuesPerRow() != other.getMaxValuesPerRow()) {
+        throw invalid_argument(string("RaggedCustomLoss ") + description +
+                               " must share the canonical logical partition and semantic M.");
     }
 }
 
@@ -44,23 +37,29 @@ uint64_t checkedAdd(uint64_t a, uint64_t b) {
 
 uint64_t placementBytes(const RaggedTensor& tensor, uint32_t batchSize) {
     const uint64_t logicalBytes = tensor.getValues().getTotalSizeInBytes();
-    if (!tensor.isPlacementNeutral()) return logicalBytes;
     if (batchSize == 0 || logicalBytes > numeric_limits<uint64_t>::max() / batchSize)
         throw overflow_error("RaggedCustomLoss placement capacity overflows uint64_t.");
     return logicalBytes * batchSize;
 }
 
-// The shared reconstruction helper verifies the neutral semantic shape.
-// Reject nested JSON field forgery as well as wrong input IDs: the canonical
-// graph tensors, not user-supplied copies of their geometry, own identities.
-void validateNeutralReference(const json& serialized, const RaggedTensor& reconstructed) {
-    if (!reconstructed.isPlacementNeutral()) return;  // Legacy fixed 1.0.0 unchanged.
+// The common reader already validates historical IDs, dtypes and trailing
+// geometry against their canonical graph owners. Current-format references
+// additionally assert the exact logical dimensions and field set.
+void validateCanonicalReference(const json& serialized, const RaggedTensor& reconstructed) {
+    if (SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(serialized, "RaggedCustomLoss") !=
+        SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL) return;
+    if (!SegmentedPrimitiveDetail::hasCanonicalLayerRaggedReferenceFields(serialized) ||
+        serialized.at("ragged_rank").get<uint32_t>() != 1 ||
+        serialized.at("max_values_per_row").get<uint64_t>() != reconstructed.getMaxValuesPerRow()) {
+        throw runtime_error("RaggedCustomLoss canonical input reference has invalid semantic geometry.");
+    }
     const auto checkTensor = [](const json& j, const Tensor& actual) {
-        if (j.at("version").get<string>() != "1.0.0" ||
+        if (!j.is_object() || j.size() != 4 ||
+            j.at("version").get<string>() != "1.0.0" ||
             j.at("id").get<uint64_t>() != actual.getOriginalId() ||
             j.at("dimensions").get<vector<uint64_t>>() != actual.getDimensions() ||
             j.at("data_type").get<DataType>() != actual.getDataType()) {
-            throw runtime_error("RaggedCustomLoss serialized neutral input does not match the canonical graph tensor.");
+            throw runtime_error("RaggedCustomLoss canonical input disagrees with its graph tensor.");
         }
     };
     checkTensor(serialized.at("values"), reconstructed.getValues());
@@ -213,8 +212,7 @@ bool RaggedCustomLoss::outputTensorDimensionsIncludeBatch(const Tensor& outputTe
 }
 
 uint64_t RaggedCustomLoss::getOutputTensorBytes(uint32_t batchSize) const {
-    (void)batchSize;
-    // The logical neutral output is [M, ...]. Its physical RAW output is
+    // The logical output is [M, ...]. Its physical RAW output is
     // [B*M, ...]; the output-dimensions-include-batch flag stays true because
     // the physical loss already materializes this entire packed output.
     return placementBytes(raggedRawLoss, batchSize);
@@ -241,36 +239,28 @@ shared_ptr<ThorImplementation::Layer> RaggedCustomLoss::stamp(ThorImplementation
     (void)getConnectionType(connectingApiTensor);
     THOR_THROW_IF_FALSE(initialized);
 
-    uint64_t runtimeBatch = 0;
-    uint64_t runtimeCapacity = 0;
-    if (raggedPredictions.isPlacementNeutral()) {
-        const RaggedTensor* connected = &raggedPredictions;
-        if (connectingApiTensor == raggedLabels.getValues()) {
-            connected = &raggedLabels;
-        } else if (raggedExampleWeights.has_value() && connectingApiTensor == raggedExampleWeights->getValues()) {
-            connected = &raggedExampleWeights.value();
-        } else {
-            for (const RaggedTensor& secondary : raggedSecondaryInputs) {
-                if (connectingApiTensor == secondary.getValues()) {
-                    connected = &secondary;
-                    break;
-                }
+    const RaggedTensor* connected = &raggedPredictions;
+    if (connectingApiTensor == raggedLabels.getValues()) {
+        connected = &raggedLabels;
+    } else if (raggedExampleWeights.has_value() && connectingApiTensor == raggedExampleWeights->getValues()) {
+        connected = &raggedExampleWeights.value();
+    } else {
+        for (const RaggedTensor& secondary : raggedSecondaryInputs) {
+            if (connectingApiTensor == secondary.getValues()) {
+                connected = &secondary;
+                break;
             }
         }
-        // In particular, the structural-token connection resolves through the
-        // managed partition fanout's authoritative batch metadata, not [1]'s extent.
-        const ThorImplementation::RaggedTensorDescriptor physical =
-            SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
-                *connected, drivingLayer, "RaggedCustomLoss");
-        runtimeBatch = physical.getBatchSize();
-        runtimeCapacity = physical.getMaxTotalValues();
-        if (runtimeBatch == 0 || runtimeBatch > numeric_limits<uint32_t>::max() ||
-            runtimeCapacity != raggedPredictions.getDescriptorForPlacement(runtimeBatch).getMaxTotalValues()) {
-            throw runtime_error("RaggedCustomLoss physical placement disagrees with neutral semantic geometry.");
-        }
-    } else {
-        runtimeBatch = raggedPredictions.getBatchSize();
-        runtimeCapacity = raggedPredictions.getMaxTotalValues();
+    }
+    const ThorImplementation::RaggedTensorDescriptor physicalDescriptor =
+        SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
+            *connected, drivingLayer, "RaggedCustomLoss",
+            connectingApiTensor == raggedPredictions.getOffsets());
+    const uint64_t runtimeBatch = physicalDescriptor.getBatchSize();
+    const uint64_t runtimeCapacity = physicalDescriptor.getMaxTotalValues();
+    if (runtimeBatch == 0 || runtimeBatch > numeric_limits<uint32_t>::max() ||
+        runtimeCapacity != raggedPredictions.getDescriptorForPlacement(runtimeBatch).getMaxTotalValues()) {
+        throw runtime_error("RaggedCustomLoss physical placement disagrees with semantic geometry.");
     }
 
     auto physical = make_shared<ThorImplementation::RaggedCustomLoss>(lossExpression,
@@ -300,7 +290,7 @@ json RaggedCustomLoss::architectureJson() const {
     }
 
     json j{{"factory", Layer::Factory::Loss.value()},
-           {"version", raggedPredictions.isPlacementNeutral() ? "1.1.0" : getLayerVersion()},
+           {"version", "1.1.0"},
            {"layer_type", "ragged_custom_loss"},
            {"loss_shape", LossShape::RAW},
            {"loss_data_type", lossDataType},
@@ -348,25 +338,23 @@ void RaggedCustomLoss::deserialize(const json& j, Network* network) {
         throw runtime_error("Serialized RaggedCustomLoss must report raw loss.");
 
     RaggedTensor predictions = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_predictions"), network, "RaggedCustomLoss");
-    if ((version == "1.1.0") != predictions.isPlacementNeutral())
-        throw runtime_error("RaggedCustomLoss layer version disagrees with fixed/neutral geometry.");
-    validateNeutralReference(j.at("ragged_predictions"), predictions);
+    validateCanonicalReference(j.at("ragged_predictions"), predictions);
     RaggedTensor labels = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_labels"), network, "RaggedCustomLoss");
-    validateNeutralReference(j.at("ragged_labels"), labels);
+    validateCanonicalReference(j.at("ragged_labels"), labels);
     requireSamePartitionAndShape(predictions, labels);
     vector<RaggedTensor> secondaryInputs;
     vector<string> secondaryInputNames;
     vector<string> secondaryGradientNames;
     if (j.contains("ragged_secondary_inputs")) {
-        if (predictions.isPlacementNeutral() && j.at("ragged_secondary_inputs").size() == 1 &&
+        if (j.at("ragged_secondary_inputs").size() == 1 &&
             j.contains("ragged_secondary_input") &&
             j.at("ragged_secondary_input") != j.at("ragged_secondary_inputs").at(0).at("tensor")) {
-            throw runtime_error("RaggedCustomLoss neutral secondary aliases must preserve the same tensor reference.");
+            throw runtime_error("RaggedCustomLoss secondary aliases must preserve the same tensor reference.");
         }
         for (const json& serializedSecondary : j.at("ragged_secondary_inputs")) {
             RaggedTensor secondary =
                 SegmentedPrimitiveDetail::reconstructInput(serializedSecondary.at("tensor"), network, "RaggedCustomLoss");
-            validateNeutralReference(serializedSecondary.at("tensor"), secondary);
+            validateCanonicalReference(serializedSecondary.at("tensor"), secondary);
             requireSecondaryCompatible(predictions, labels, secondary);
             for (const RaggedTensor& existing : secondaryInputs)
                 if (existing.getValues() == secondary.getValues())
@@ -378,7 +366,7 @@ void RaggedCustomLoss::deserialize(const json& j, Network* network) {
     } else if (j.contains("ragged_secondary_input")) {
         RaggedTensor secondary =
             SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_secondary_input"), network, "RaggedCustomLoss");
-        validateNeutralReference(j.at("ragged_secondary_input"), secondary);
+        validateCanonicalReference(j.at("ragged_secondary_input"), secondary);
         requireSecondaryCompatible(predictions, labels, secondary);
         secondaryInputs.push_back(secondary);
         secondaryInputNames.push_back(j.value("secondary_input_name", string("secondary_input")));
@@ -387,7 +375,7 @@ void RaggedCustomLoss::deserialize(const json& j, Network* network) {
     optional<RaggedTensor> exampleWeights;
     if (j.contains("ragged_example_weights")) {
         exampleWeights = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_example_weights"), network, "RaggedCustomLoss");
-        validateNeutralReference(j.at("ragged_example_weights"), exampleWeights.value());
+        validateCanonicalReference(j.at("ragged_example_weights"), exampleWeights.value());
         requireExampleWeightsCompatible(predictions, labels, secondaryInputs, exampleWeights.value());
     }
     ThorImplementation::RegressionLossDType::validatePredictionsDType(
@@ -400,25 +388,26 @@ void RaggedCustomLoss::deserialize(const json& j, Network* network) {
     const json& rawJson = j.at("ragged_raw_loss");
     SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
         rawJson, j.at("ragged_predictions"), predictions, "RaggedCustomLoss");
-    Tensor rawValues = Tensor::deserialize(rawJson.at("values"));
-    if (predictions.isPlacementNeutral()) {
-        const uint64_t rawId = rawValues.getOriginalId();
-        if (rawId == predictions.getValues().getOriginalId() ||
-            rawId == labels.getValues().getOriginalId() ||
-            (exampleWeights.has_value() && rawId == exampleWeights->getValues().getOriginalId())) {
-            throw runtime_error("RaggedCustomLoss raw output must own a distinct canonical tensor identity.");
-        }
-        for (const RaggedTensor& secondary : secondaryInputs) {
-            if (rawId == secondary.getValues().getOriginalId())
-                throw runtime_error("RaggedCustomLoss raw output aliases a differentiable input tensor.");
-        }
-        // No independent output partition or physical extent may be forged.
-        if (rawJson.at("offsets").at("version").get<string>() != "1.0.0" ||
-            rawJson.at("offsets").at("dimensions").get<vector<uint64_t>>() != predictions.getOffsetsDimensions() ||
-            rawJson.at("offsets").at("data_type").get<DataType>() != predictions.getOffsetsDataType()) {
-            throw runtime_error("RaggedCustomLoss neutral raw output must retain the canonical partition token.");
-        }
+    Tensor rawValues = SegmentedPrimitiveDetail::reconstructRaggedOutputValues(
+        rawJson, predictions, "RaggedCustomLoss");
+    const uint64_t rawId = rawValues.getOriginalId();
+    if (rawId == predictions.getValues().getOriginalId() ||
+        rawId == labels.getValues().getOriginalId() ||
+        (exampleWeights.has_value() && rawId == exampleWeights->getValues().getOriginalId())) {
+        throw runtime_error("RaggedCustomLoss raw output must have a distinct tensor identity.");
     }
+    for (const RaggedTensor& secondary : secondaryInputs) {
+        if (rawId == secondary.getValues().getOriginalId())
+            throw runtime_error("RaggedCustomLoss raw output aliases a differentiable input tensor.");
+    }
+    if (SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(rawJson, "RaggedCustomLoss") ==
+        SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL &&
+        (rawJson.at("offsets").at("version").get<string>() != "1.0.0" ||
+         rawJson.at("offsets").at("dimensions").get<vector<uint64_t>>() != predictions.getOffsetsDimensions() ||
+         rawJson.at("offsets").at("data_type").get<DataType>() != predictions.getOffsetsDataType())) {
+        throw runtime_error("RaggedCustomLoss raw output must retain the canonical partition token.");
+    }
+
     if (rawValues.getDimensions() != predictions.getValuesDimensions() ||
         rawValues.getDataType() != serializedLossDType) {
         throw runtime_error("RaggedCustomLoss serialized raw loss values do not match prediction geometry/loss dtype.");

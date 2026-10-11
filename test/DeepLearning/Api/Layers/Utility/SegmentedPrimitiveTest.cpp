@@ -19,6 +19,7 @@
 #include "gtest/gtest.h"
 
 #include <chrono>
+#include <cstring>
 #include <cmath>
 #include <filesystem>
 #include <cstdint>
@@ -58,7 +59,8 @@ Impl::Tensor makePlacementNeutralBroadcastDenseRows(uint32_t batchSize) {
 }
 
 Impl::RaggedTensor makeRaggedInput(Api::DataType offsetsDtype, const vector<uint64_t>& offsets) {
-    constexpr uint64_t capacity = 8;
+    constexpr uint64_t maxValuesPerRow = 3;
+    const uint64_t capacity = (offsets.size() - 1) * maxValuesPerRow;
     Impl::Tensor values(cpuPlacement, Impl::TensorDescriptor(Api::DataType::FP32, {capacity, 2}));
     float* p = values.getMemPtr<float>();
     const float activeValues[] = {0.0F, 1.0F, 2.0F, 3.0F, 1.0F, 0.0F, 1.0F, 1.0F, 1.0F, 2.0F};
@@ -77,7 +79,7 @@ Impl::RaggedTensor makeRaggedInput(Api::DataType offsetsDtype, const vector<uint
         uint64_t* q = offsetTensor.getMemPtr<uint64_t>();
         for (uint32_t i = 0; i < offsets.size(); ++i) q[i] = offsets[i];
     }
-    return Impl::RaggedTensor(values, offsetTensor);
+    return Impl::RaggedTensor(values, offsetTensor, maxValuesPerRow);
 }
 
 Batch makePlacementNeutralSegmentedBatch(const std::string& inputName,
@@ -136,9 +138,7 @@ void runPublicRuntimeCase(Api::DataType offsetsDtype) {
                                    .valuesDataType(Api::DataType::FP32)
                                    .offsetsDataType(offsetsDtype)
                                    .trailingDimensions({2})
-                                   .maxTotalValues(8)
-                                   .batchSize(batchSize)
-                                   .build();
+                                   .maxValuesPerRow(3).build();
     Api::NetworkInput rowValues = Api::NetworkInput::Builder()
                                       .network(network)
                                       .name("row_values")
@@ -228,29 +228,7 @@ void runPublicRuntimeCase(Api::DataType offsetsDtype) {
 
 }  // namespace
 
-TEST(SegmentedPrimitiveApi, CommonLayerRaggedJsonHelperRoundTripsFixedAndNeutralReferences) {
-    Api::Network fixedNetwork("segmented_common_helper_fixed");
-    Api::RaggedTensor fixed = Api::RaggedNetworkInput::Builder()
-                                  .network(fixedNetwork)
-                                  .name("fixed_tokens")
-                                  .valuesDataType(Api::DataType::FP32)
-                                  .offsetsDataType(Api::DataType::UINT64)
-                                  .trailingDimensions({3})
-                                  .maxTotalValues(11)
-                                  .maxValuesPerRow(5)
-                                  .batchSize(4)
-                                  .build();
-    const nlohmann::json fixedJson = Api::SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(fixed);
-    EXPECT_EQ(fixedJson, fixed.architectureJson());
-    Api::RaggedTensor fixedRoundTrip =
-        Api::SegmentedPrimitiveDetail::reconstructInput(fixedJson, &fixedNetwork, "SegmentedPrimitiveHelperTest");
-    EXPECT_FALSE(fixedRoundTrip.isPlacementNeutral());
-    EXPECT_EQ(fixedRoundTrip.getBatchSize(), 4U);
-    EXPECT_EQ(fixedRoundTrip.getMaxTotalValues(), 11U);
-    EXPECT_EQ(fixedRoundTrip.getMaxValuesPerRow(), 5U);
-    EXPECT_EQ(fixedRoundTrip.getValues().getOriginalId(), fixed.getValues().getOriginalId());
-    EXPECT_EQ(fixedRoundTrip.getRowPartitionToken().getOriginalId(), fixed.getRowPartitionToken().getOriginalId());
-
+TEST(SegmentedPrimitiveApi, CommonLayerRaggedJsonHelperRoundTripsLogicalReferences) {
     Api::Network neutralNetwork("segmented_common_helper_neutral");
     Api::RaggedTensor neutral = Api::RaggedNetworkInput::Builder()
                                     .network(neutralNetwork)
@@ -262,7 +240,7 @@ TEST(SegmentedPrimitiveApi, CommonLayerRaggedJsonHelperRoundTripsFixedAndNeutral
                                     .build();
     const nlohmann::json neutralJson = Api::SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(neutral);
     EXPECT_EQ(neutralJson.at("layer_ragged_reference_version"), "1.0.0");
-    EXPECT_EQ(neutralJson.at("geometry_mode"), "placement_neutral");
+    EXPECT_FALSE(neutralJson.contains("geometry_mode"));
     EXPECT_FALSE(neutralJson.contains("batch_size"));
     EXPECT_FALSE(neutralJson.contains("max_total_values"));
     EXPECT_EQ(neutralJson.at("max_values_per_row"), 5U);
@@ -273,11 +251,47 @@ TEST(SegmentedPrimitiveApi, CommonLayerRaggedJsonHelperRoundTripsFixedAndNeutral
 
     Api::RaggedTensor neutralRoundTrip =
         Api::SegmentedPrimitiveDetail::reconstructInput(neutralJson, &neutralNetwork, "SegmentedPrimitiveHelperTest");
-    EXPECT_TRUE(neutralRoundTrip.isPlacementNeutral());
     EXPECT_EQ(neutralRoundTrip.getMaxValuesPerRow(), 5U);
     EXPECT_EQ(neutralRoundTrip.getValues().getOriginalId(), neutral.getValues().getOriginalId());
     EXPECT_EQ(neutralRoundTrip.getRowPartitionToken().getOriginalId(), neutral.getRowPartitionToken().getOriginalId());
     EXPECT_TRUE(neutralRoundTrip.sharesPartitionWith(neutral));
+
+    // The reference version describes an input grammar, not an alternate model
+    // geometry. An older archive's redundant marker remains readable.
+    nlohmann::json oldCanonical = neutralJson;
+    oldCanonical["geometry_mode"] = "placement_neutral";
+    const auto oldCanonicalRoundTrip = Api::SegmentedPrimitiveDetail::reconstructInput(
+        oldCanonical, &neutralNetwork, "SegmentedPrimitiveHelperTest");
+    EXPECT_TRUE(oldCanonicalRoundTrip.sharesPartitionWith(neutral));
+    EXPECT_EQ(oldCanonicalRoundTrip.getMaxValuesPerRow(), 5U);
+    oldCanonical["geometry_mode"] = "fixed";
+    EXPECT_THROW((Api::SegmentedPrimitiveDetail::reconstructInput(
+                     oldCanonical, &neutralNetwork, "SegmentedPrimitiveHelperTest")),
+                 std::runtime_error);
+
+    // Every reader using the shared reconstruction helper must reject unknown
+    // model fields, even when its owning layer has no local schema checker.
+    // The old six-field canonical marker remains accepted above.
+    auto malformedCanonical = neutralJson;
+    malformedCanonical["batch_size"] = 2;
+    EXPECT_THROW((Api::SegmentedPrimitiveDetail::reconstructInput(
+                     malformedCanonical, &neutralNetwork, "SegmentedPrimitiveHelperTest")),
+                 std::runtime_error);
+    malformedCanonical = neutralJson;
+    malformedCanonical["max_total_values"] = 10;
+    EXPECT_THROW((Api::SegmentedPrimitiveDetail::reconstructInput(
+                     malformedCanonical, &neutralNetwork, "SegmentedPrimitiveHelperTest")),
+                 std::runtime_error);
+    malformedCanonical = neutralJson;
+    malformedCanonical["unrecognized_field"] = 1;
+    EXPECT_THROW((Api::SegmentedPrimitiveDetail::reconstructInput(
+                     malformedCanonical, &neutralNetwork, "SegmentedPrimitiveHelperTest")),
+                 std::runtime_error);
+    malformedCanonical = neutralJson;
+    malformedCanonical.erase("max_values_per_row");
+    EXPECT_THROW((Api::SegmentedPrimitiveDetail::reconstructInput(
+                     malformedCanonical, &neutralNetwork, "SegmentedPrimitiveHelperTest")),
+                 std::runtime_error);
 
     EXPECT_NO_THROW(Api::SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
         neutralJson, neutralJson, neutralRoundTrip, "SegmentedPrimitiveHelperTest"));
@@ -288,41 +302,99 @@ TEST(SegmentedPrimitiveApi, CommonLayerRaggedJsonHelperRoundTripsFixedAndNeutral
                  std::runtime_error);
 }
 
-TEST(SegmentedPrimitiveApi, CommonLayerRaggedJsonHelperPreservesLegacyMissingRowBoundAndRequiresExplicitNeutralMode) {
-    Api::Network legacyNetwork("segmented_common_helper_legacy_without_row_bound");
-    Api::RaggedTensor legacy = Api::RaggedNetworkInput::Builder()
-                                   .network(legacyNetwork)
-                                   .name("legacy_tokens")
-                                   .valuesDataType(Api::DataType::FP32)
-                                   .trailingDimensions({2})
-                                   .maxTotalValues(8)
-                                   .batchSize(3)
-                                   .build();
-    const nlohmann::json legacyJson = Api::SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(legacy);
-    ASSERT_FALSE(legacyJson.contains("max_values_per_row"));
-    Api::RaggedTensor legacyRoundTrip =
-        Api::SegmentedPrimitiveDetail::reconstructInput(legacyJson, &legacyNetwork, "SegmentedPrimitiveHelperTest");
-    EXPECT_FALSE(legacyRoundTrip.hasMaxValuesPerRow());
+TEST(SegmentedPrimitiveApi, HistoricalRaggedReferenceGrammarUsesLiveLogicalMNotArchivedBatch) {
+    Api::Network network("segmented_common_helper_legacy_normalization");
+    Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .valuesDataType(Api::DataType::FP32)
+                                  .trailingDimensions({2})
+                                  .maxValuesPerRow(4)
+                                  .build();
+    auto historical = Api::SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(input);
+    historical.erase("layer_ragged_reference_version");
+    historical.erase("geometry_mode");
+    historical.erase("max_values_per_row"); // Recoverable from original graph source.
+    historical["batch_size"] = 2;
+    historical["max_total_values"] = 8;
+    historical["values"]["dimensions"] = vector<uint64_t>{8, 2};
+    historical["offsets"]["dimensions"] = vector<uint64_t>{3};
 
-    Api::Network neutralNetwork("segmented_common_helper_explicit_neutral_mode");
-    Api::RaggedTensor neutral = Api::RaggedNetworkInput::Builder()
-                                    .network(neutralNetwork)
-                                    .name("neutral_tokens")
-                                    .valuesDataType(Api::DataType::FP32)
-                                    .trailingDimensions({2})
-                                    .maxValuesPerRow(4)
-                                    .build();
-    nlohmann::json malformed = Api::SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(neutral);
-    malformed.erase("geometry_mode");
-    EXPECT_THROW((Api::SegmentedPrimitiveDetail::reconstructInput(
-                     malformed, &neutralNetwork, "SegmentedPrimitiveHelperTest")),
-                 std::runtime_error);
+    auto loaded = Api::SegmentedPrimitiveDetail::reconstructInput(historical, &network, "LegacyGrammar");
+    EXPECT_TRUE(loaded.sharesPartitionWith(input));
+    EXPECT_EQ(loaded.getValues().getOriginalId(), input.getValues().getOriginalId());
+    EXPECT_EQ(loaded.getMaxValuesPerRow(), 4U);
+    EXPECT_EQ(loaded.getDescriptorForPlacement(2).getMaxTotalValues(), 8U);
+    EXPECT_EQ(loaded.getDescriptorForPlacement(7).getMaxTotalValues(), 28U);
 
-    malformed = Api::SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(neutral);
-    malformed["geometry_mode"] = "fixed";
-    EXPECT_THROW((Api::SegmentedPrimitiveDetail::reconstructInput(
-                     malformed, &neutralNetwork, "SegmentedPrimitiveHelperTest")),
+    // Only the archived physical hints vary; the reconstructed logical model must not.
+    historical["batch_size"] = 99;
+    historical["max_total_values"] = 999;
+    historical["values"]["dimensions"][0] = 999;
+    historical["offsets"]["dimensions"][0] = 100;
+    auto reloaded = Api::SegmentedPrimitiveDetail::reconstructInput(historical, &network, "LegacyGrammar");
+    EXPECT_EQ(reloaded.getMaxValuesPerRow(), 4U);
+    EXPECT_TRUE(reloaded.sharesPartitionWith(input));
+    EXPECT_NO_THROW(Api::SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
+        historical, historical, reloaded, "LegacyGrammar"));
+
+    auto malformed = historical;
+    malformed["max_values_per_row"] = 3;
+    EXPECT_THROW((Api::SegmentedPrimitiveDetail::reconstructInput(malformed, &network, "LegacyGrammar")),
                  std::runtime_error);
+    malformed = historical;
+    malformed["offsets"]["id"] = input.getValues().getOriginalId();
+    EXPECT_THROW((Api::SegmentedPrimitiveDetail::reconstructInput(malformed, &network, "LegacyGrammar")),
+                 std::exception);
+    malformed = historical;
+    malformed["values"]["dimensions"][1] = 3;
+    EXPECT_THROW((Api::SegmentedPrimitiveDetail::reconstructInput(malformed, &network, "LegacyGrammar")),
+                 std::runtime_error);
+    malformed = historical;
+    malformed["offsets"]["data_type"] = "fp32";
+    EXPECT_THROW((Api::SegmentedPrimitiveDetail::reconstructInput(malformed, &network, "LegacyGrammar")),
+                 std::runtime_error);
+    malformed = historical;
+    malformed["layer_ragged_reference_version"] = "1.0.0";
+    EXPECT_THROW((Api::SegmentedPrimitiveDetail::reconstructInput(malformed, &network, "LegacyGrammar")),
+                 std::runtime_error);
+}
+
+TEST(SegmentedPrimitiveApi, HistoricalSoftmaxAndLogSoftmaxLayerReadersNormalizePhysicalReferences) {
+    for (bool logMode : {false, true}) {
+        Api::Network network(logMode ? "historical_log_softmax" : "historical_softmax");
+        Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                      .network(network).name("tokens")
+                                      .valuesDataType(Api::DataType::FP32)
+                                      .offsetsDataType(Api::DataType::UINT32)
+                                      .trailingDimensions({1}).maxValuesPerRow(4).build();
+        nlohmann::json layerJson;
+        if (logMode) {
+            auto layer = Api::SegmentedLogSoftmax::Builder().network(network).featureInput(input).build();
+            layerJson = layer.architectureJson();
+        } else {
+            auto layer = Api::SegmentedSoftmax::Builder().network(network).featureInput(input).build();
+            layerJson = layer.architectureJson();
+        }
+        layerJson["version"] = "1.0.0";
+        for (const char* field : {"ragged_feature_input", "ragged_feature_output"}) {
+            auto& record = layerJson[field];
+            record.erase("geometry_mode");
+            record.erase("layer_ragged_reference_version");
+            record["batch_size"] = 2;
+            record["max_total_values"] = 8;
+            record["values"]["dimensions"] = vector<uint64_t>{8, 1};
+            record["offsets"]["dimensions"] = vector<uint64_t>{3};
+        }
+        ASSERT_NO_THROW({
+            if (logMode) Api::SegmentedLogSoftmax::deserialize(layerJson, &network);
+            else Api::SegmentedSoftmax::deserialize(layerJson, &network);
+        });
+        auto malformed = layerJson;
+        malformed["ragged_feature_output"]["offsets"]["id"] = input.getValues().getOriginalId();
+        if (logMode) EXPECT_THROW(Api::SegmentedLogSoftmax::deserialize(malformed, &network), std::exception);
+        else EXPECT_THROW(Api::SegmentedSoftmax::deserialize(malformed, &network), std::exception);
+    }
 }
 
 TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedSoftmaxSaveLoadReplacesPlacementGeometryPerBatch) {
@@ -347,10 +419,8 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedSoftmaxSaveLoadReplacesPlac
                                       .trailingDimensions({1})
                                       .maxValuesPerRow(maxValuesPerRow)
                                       .build();
-        ASSERT_TRUE(input.isPlacementNeutral());
         Api::SegmentedSoftmax softmax =
             Api::SegmentedSoftmax::Builder().network(network).featureInput(input).build();
-        ASSERT_TRUE(softmax.getRaggedFeatureOutput().isPlacementNeutral());
         EXPECT_TRUE(softmax.getRaggedFeatureOutput().sharesPartitionWith(input));
         Api::RaggedNetworkOutput boundaryOutput = Api::RaggedNetworkOutput::Builder()
                                                       .network(network)
@@ -380,7 +450,7 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedSoftmaxSaveLoadReplacesPlac
         const nlohmann::json& outputJson = softmaxJson->at("ragged_feature_output");
         for (const nlohmann::json* raggedJson : {&inputJson, &outputJson}) {
             EXPECT_EQ(raggedJson->at("layer_ragged_reference_version").get<std::string>(), "1.0.0");
-            EXPECT_EQ(raggedJson->at("geometry_mode").get<std::string>(), "placement_neutral");
+            EXPECT_FALSE(raggedJson->contains("geometry_mode"));
             EXPECT_EQ(raggedJson->at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
             EXPECT_FALSE(raggedJson->contains("batch_size"));
             EXPECT_FALSE(raggedJson->contains("max_total_values"));
@@ -404,13 +474,11 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedSoftmaxSaveLoadReplacesPlac
         const auto loadedInputs = loaded.getExternalRaggedNetworkInputs();
         ASSERT_EQ(loadedInputs.size(), 1U);
         const Api::RaggedTensor loadedInput = loadedInputs.front().raggedTensor;
-        ASSERT_TRUE(loadedInput.isPlacementNeutral());
         EXPECT_EQ(loadedInput.getValues().getOriginalId(), savedInputValuesOriginalId);
         EXPECT_EQ(loadedInput.getRowPartitionToken().getOriginalId(), savedPartitionTokenOriginalId);
         const auto loadedOutputs = loaded.getExternalRaggedNetworkOutputs();
         ASSERT_EQ(loadedOutputs.size(), 1U);
         const Api::RaggedTensor loadedOutput = loadedOutputs.front().raggedTensor;
-        ASSERT_TRUE(loadedOutput.isPlacementNeutral());
         EXPECT_EQ(loadedOutput.getValues().getOriginalId(), savedBoundaryOutputValuesOriginalId);
         EXPECT_EQ(loadedOutput.getRowPartitionToken().getOriginalId(), savedPartitionTokenOriginalId);
 
@@ -421,7 +489,6 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedSoftmaxSaveLoadReplacesPlac
         }
         ASSERT_NE(loadedSoftmax, nullptr);
         const Api::RaggedTensor loadedSoftmaxOutput = loadedSoftmax->getRaggedFeatureOutput();
-        ASSERT_TRUE(loadedSoftmaxOutput.isPlacementNeutral());
         EXPECT_EQ(loadedSoftmaxOutput.getValues().getOriginalId(), savedSoftmaxOutputValuesOriginalId);
         EXPECT_EQ(loadedSoftmaxOutput.getRowPartitionToken().getOriginalId(), savedPartitionTokenOriginalId);
         EXPECT_NE(loadedSoftmaxOutput.getValues().getId(), loadedOutput.getValues().getId());
@@ -517,10 +584,8 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedLogSoftmaxSaveLoadReplacesP
                                       .trailingDimensions({1})
                                       .maxValuesPerRow(maxValuesPerRow)
                                       .build();
-        ASSERT_TRUE(input.isPlacementNeutral());
         Api::SegmentedLogSoftmax logSoftmax =
             Api::SegmentedLogSoftmax::Builder().network(network).featureInput(input).build();
-        ASSERT_TRUE(logSoftmax.getRaggedFeatureOutput().isPlacementNeutral());
         EXPECT_TRUE(logSoftmax.getRaggedFeatureOutput().sharesPartitionWith(input));
         Api::RaggedNetworkOutput boundaryOutput = Api::RaggedNetworkOutput::Builder()
                                                       .network(network)
@@ -550,7 +615,7 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedLogSoftmaxSaveLoadReplacesP
         const nlohmann::json& outputJson = logSoftmaxJson->at("ragged_feature_output");
         for (const nlohmann::json* raggedJson : {&inputJson, &outputJson}) {
             EXPECT_EQ(raggedJson->at("layer_ragged_reference_version").get<std::string>(), "1.0.0");
-            EXPECT_EQ(raggedJson->at("geometry_mode").get<std::string>(), "placement_neutral");
+            EXPECT_FALSE(raggedJson->contains("geometry_mode"));
             EXPECT_EQ(raggedJson->at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
             EXPECT_FALSE(raggedJson->contains("batch_size"));
             EXPECT_FALSE(raggedJson->contains("max_total_values"));
@@ -574,13 +639,11 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedLogSoftmaxSaveLoadReplacesP
         const auto loadedInputs = loaded.getExternalRaggedNetworkInputs();
         ASSERT_EQ(loadedInputs.size(), 1U);
         const Api::RaggedTensor loadedInput = loadedInputs.front().raggedTensor;
-        ASSERT_TRUE(loadedInput.isPlacementNeutral());
         EXPECT_EQ(loadedInput.getValues().getOriginalId(), savedInputValuesOriginalId);
         EXPECT_EQ(loadedInput.getRowPartitionToken().getOriginalId(), savedPartitionTokenOriginalId);
         const auto loadedOutputs = loaded.getExternalRaggedNetworkOutputs();
         ASSERT_EQ(loadedOutputs.size(), 1U);
         const Api::RaggedTensor loadedOutput = loadedOutputs.front().raggedTensor;
-        ASSERT_TRUE(loadedOutput.isPlacementNeutral());
         EXPECT_EQ(loadedOutput.getValues().getOriginalId(), savedBoundaryOutputValuesOriginalId);
         EXPECT_EQ(loadedOutput.getRowPartitionToken().getOriginalId(), savedPartitionTokenOriginalId);
 
@@ -591,7 +654,6 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedLogSoftmaxSaveLoadReplacesP
         }
         ASSERT_NE(loadedLogSoftmax, nullptr);
         const Api::RaggedTensor loadedLogSoftmaxOutput = loadedLogSoftmax->getRaggedFeatureOutput();
-        ASSERT_TRUE(loadedLogSoftmaxOutput.isPlacementNeutral());
         EXPECT_EQ(loadedLogSoftmaxOutput.getValues().getOriginalId(), savedLogSoftmaxOutputValuesOriginalId);
         EXPECT_EQ(loadedLogSoftmaxOutput.getRowPartitionToken().getOriginalId(), savedPartitionTokenOriginalId);
         EXPECT_NE(loadedLogSoftmaxOutput.getValues().getId(), loadedOutput.getValues().getId());
@@ -683,7 +745,6 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedBroadcastBatchRecoveryCover
                                   .dimensions({3})
                                   .dataType(Api::DataType::FP32)
                                   .build();
-    ASSERT_TRUE(partition.isPlacementNeutral());
 
     const auto denseDriver = std::make_shared<Impl::NetworkInput>(
         cpuPlacement, Api::DataType::FP32, std::vector<unsigned long>{7, 3});
@@ -732,8 +793,6 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedBroadcastBuildsAndExecutesA
                                                 .partitionInput(partition)
                                                 .build();
         const Api::RaggedTensor logicalOutput = broadcast.getRaggedFeatureOutput();
-        ASSERT_TRUE(partition.isPlacementNeutral());
-        ASSERT_TRUE(logicalOutput.isPlacementNeutral());
         EXPECT_EQ(logicalOutput.getValuesDimensions(), (std::vector<uint64_t>{maxValuesPerRow, 3}));
         EXPECT_EQ(logicalOutput.getRowPartitionToken(), partition.getRowPartitionToken());
         EXPECT_TRUE(logicalOutput.sharesPartitionWith(partition));
@@ -837,7 +896,6 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedBroadcastSaveLoadReplacesPl
                                                 .featureInput(dense.getFeatureOutput().value())
                                                 .partitionInput(partition)
                                                 .build();
-        ASSERT_TRUE(broadcast.getRaggedFeatureOutput().isPlacementNeutral());
         EXPECT_EQ(broadcast.getRaggedFeatureOutput().getValuesDimensions(),
                   (std::vector<uint64_t>{maxValuesPerRow, 3}));
         EXPECT_TRUE(broadcast.getRaggedFeatureOutput().sharesPartitionWith(partition));
@@ -874,8 +932,8 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedBroadcastSaveLoadReplacesPl
         const nlohmann::json& outputJson = broadcastJson->at("ragged_feature_output");
         EXPECT_EQ(partitionJson.at("layer_ragged_reference_version").get<std::string>(), "1.0.0");
         EXPECT_EQ(outputJson.at("layer_ragged_reference_version").get<std::string>(), "1.0.0");
-        EXPECT_EQ(partitionJson.at("geometry_mode").get<std::string>(), "placement_neutral");
-        EXPECT_EQ(outputJson.at("geometry_mode").get<std::string>(), "placement_neutral");
+        EXPECT_FALSE(partitionJson.contains("geometry_mode"));
+        EXPECT_FALSE(outputJson.contains("geometry_mode"));
         EXPECT_EQ(partitionJson.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
         EXPECT_EQ(outputJson.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
         EXPECT_FALSE(partitionJson.contains("batch_size"));
@@ -905,7 +963,6 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedBroadcastSaveLoadReplacesPl
         const auto loadedRaggedInputs = loaded.getExternalRaggedNetworkInputs();
         ASSERT_EQ(loadedRaggedInputs.size(), 1U);
         const Api::RaggedTensor loadedPartition = loadedRaggedInputs.front().raggedTensor;
-        ASSERT_TRUE(loadedPartition.isPlacementNeutral());
         EXPECT_EQ(loadedPartition.getValues().getOriginalId(), savedPartitionValuesOriginalId);
         EXPECT_EQ(loadedPartition.getRowPartitionToken().getOriginalId(), savedPartitionTokenOriginalId);
 
@@ -924,7 +981,6 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedBroadcastSaveLoadReplacesPl
         const auto loadedOutputs = loaded.getExternalRaggedNetworkOutputs();
         ASSERT_EQ(loadedOutputs.size(), 1U);
         const Api::RaggedTensor loadedBoundaryOutput = loadedOutputs.front().raggedTensor;
-        ASSERT_TRUE(loadedBoundaryOutput.isPlacementNeutral());
         EXPECT_EQ(loadedBoundaryOutput.getValues().getOriginalId(), savedBoundaryOutputValuesOriginalId);
         EXPECT_EQ(loadedBoundaryOutput.getRowPartitionToken().getOriginalId(), savedPartitionTokenOriginalId);
 
@@ -935,8 +991,6 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedBroadcastSaveLoadReplacesPl
         }
         ASSERT_NE(loadedBroadcast, nullptr);
         const Api::RaggedTensor loadedBroadcastOutput = loadedBroadcast->getRaggedFeatureOutput();
-        ASSERT_TRUE(loadedBroadcast->getPartitionInput().isPlacementNeutral());
-        ASSERT_TRUE(loadedBroadcastOutput.isPlacementNeutral());
         EXPECT_EQ(loadedBroadcast->getDenseFeatureInput().getOriginalId(), savedDenseValuesOriginalId);
         EXPECT_EQ(loadedBroadcastOutput.getValues().getOriginalId(), savedBroadcastOutputValuesOriginalId);
         EXPECT_EQ(loadedBroadcastOutput.getRowPartitionToken().getOriginalId(), savedPartitionTokenOriginalId);
@@ -1027,9 +1081,7 @@ TEST(SegmentedPrimitiveApi, BuildersPreservePartitionAndRejectFp64) {
                                   .name("tokens")
                                   .valuesDataType(Api::DataType::FP32)
                                   .trailingDimensions({4})
-                                  .maxTotalValues(9)
-                                  .batchSize(3)
-                                  .build();
+                                  .maxValuesPerRow(3).build();
     Api::NetworkInput dense = Api::NetworkInput::Builder()
                                   .network(network)
                                   .name("rows")
@@ -1047,7 +1099,7 @@ TEST(SegmentedPrimitiveApi, BuildersPreservePartitionAndRejectFp64) {
     EXPECT_EQ(softmax.getRaggedFeatureOutput().getOffsets(), input.getOffsets());
     EXPECT_EQ(logSoftmax.getRaggedFeatureOutput().getOffsets(), input.getOffsets());
     EXPECT_EQ(broadcast.getRaggedFeatureOutput().getOffsets(), input.getOffsets());
-    EXPECT_EQ(broadcast.getRaggedFeatureOutput().getValuesDimensions(), (vector<uint64_t>{9, 5}));
+    EXPECT_EQ(broadcast.getRaggedFeatureOutput().getValuesDimensions(), (vector<uint64_t>{3, 5}));
 
     Api::Network fp64Network("segmented_primitive_fp64_rejected");
     Api::RaggedTensor fp64Ragged = Api::RaggedNetworkInput::Builder()
@@ -1055,9 +1107,7 @@ TEST(SegmentedPrimitiveApi, BuildersPreservePartitionAndRejectFp64) {
                                        .name("fp64_tokens")
                                        .valuesDataType(Api::DataType::FP64)
                                        .trailingDimensions({2})
-                                       .maxTotalValues(4)
-                                       .batchSize(2)
-                                       .build();
+                                       .maxValuesPerRow(2).build();
     Api::NetworkInput fp64Dense = Api::NetworkInput::Builder()
                                       .network(fp64Network)
                                       .name("fp64_rows")
@@ -1075,102 +1125,85 @@ TEST(SegmentedPrimitiveApi, BuildersPreservePartitionAndRejectFp64) {
 }
 
 
-TEST(SegmentedPrimitiveApi, ArchitectureSaveLoadRoundTripsAllThreeLayers) {
-    const std::string name = "segmented_primitive_architecture_round_trip";
+TEST(SegmentedPrimitiveApi, HistoricalThreeLayerArchiveLoadsLogicalAtTwoPlacements) {
+    const std::string name = "segmented_primitive_historical_round_trip";
+    constexpr uint64_t m = 4;
     Api::Network network(name);
     Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
-                                  .network(network)
-                                  .name("tokens")
+                                  .network(network).name("tokens")
                                   .valuesDataType(Api::DataType::FP32)
                                   .offsetsDataType(Api::DataType::UINT64)
-                                  .trailingDimensions({2})
-                                  .maxTotalValues(8)
-                                  .batchSize(3)
-                                  .build();
+                                  .trailingDimensions({2}).maxValuesPerRow(m).build();
     Api::NetworkInput dense = Api::NetworkInput::Builder()
-                                  .network(network)
-                                  .name("rows")
-                                  .dimensions({3})
-                                  .dataType(Api::DataType::FP32)
-                                  .build();
-    Api::SegmentedSoftmax softmax = Api::SegmentedSoftmax::Builder().network(network).featureInput(input).build();
-    Api::SegmentedLogSoftmax logSoftmax =
-        Api::SegmentedLogSoftmax::Builder().network(network).featureInput(input).build();
-    Api::SegmentedBroadcast broadcast = Api::SegmentedBroadcast::Builder()
-                                            .network(network)
-                                            .featureInput(dense.getFeatureOutput().value())
-                                            .partitionInput(input)
-                                            .build();
-    (void)Api::RaggedNetworkOutput::Builder().network(network).name("softmax").inputTensor(softmax.getRaggedFeatureOutput()).build();
-    (void)Api::RaggedNetworkOutput::Builder().network(network).name("log_softmax").inputTensor(logSoftmax.getRaggedFeatureOutput()).build();
-    (void)Api::RaggedNetworkOutput::Builder().network(network).name("broadcast").inputTensor(broadcast.getRaggedFeatureOutput()).build();
+                                  .network(network).name("rows")
+                                  .dimensions({3}).dataType(Api::DataType::FP32).build();
+    auto softmax = Api::SegmentedSoftmax::Builder().network(network).featureInput(input).build();
+    auto logSoftmax = Api::SegmentedLogSoftmax::Builder().network(network).featureInput(input).build();
+    auto broadcast = Api::SegmentedBroadcast::Builder()
+                         .network(network).featureInput(dense.getFeatureOutput().value())
+                         .partitionInput(input).build();
+    (void)Api::RaggedNetworkOutput::Builder().network(network).name("softmax")
+        .inputTensor(softmax.getRaggedFeatureOutput()).build();
+    (void)Api::RaggedNetworkOutput::Builder().network(network).name("log_softmax")
+        .inputTensor(logSoftmax.getRaggedFeatureOutput()).build();
+    (void)Api::RaggedNetworkOutput::Builder().network(network).name("broadcast")
+        .inputTensor(broadcast.getRaggedFeatureOutput()).build();
 
-    const nlohmann::json fixedArchitecture = network.architectureJson();
-    const nlohmann::json* fixedSoftmaxJson = nullptr;
-    for (const nlohmann::json& layerJson : fixedArchitecture.at("layers")) {
-        if (layerJson.at("layer_type").get<std::string>() == "segmented_softmax") {
-            fixedSoftmaxJson = &layerJson;
-            break;
+    nlohmann::json historical = network.architectureJson();
+    uint32_t migrated = 0;
+    for (auto& layer : historical.at("layers")) {
+        const std::string type = layer.at("layer_type").get<std::string>();
+        if (type == "segmented_softmax" || type == "segmented_log_softmax" || type == "segmented_broadcast") {
+            layer["version"] = "1.0.0";
+            for (const char* key : {"ragged_feature_input", "partition_input", "ragged_feature_output"}) {
+                if (!layer.contains(key)) continue;
+                auto& ref = layer.at(key);
+                ref.erase("layer_ragged_reference_version");
+                ref.erase("geometry_mode");
+                ref.erase("max_values_per_row");
+                ref["batch_size"] = 91;
+                ref["max_total_values"] = 999;
+                ref["values"]["dimensions"][0] = 12;
+                ref["offsets"]["dimensions"][0] = 4;
+            }
+            ++migrated;
+        } else if (type == "network_input") {
+            const std::string inputName = layer.at("name").get<std::string>();
+            if (inputName != "tokens.values" && inputName != "__thor_row_partition.tokens") continue;
+            const uint64_t leading = inputName == "tokens.values" ? 12 : 4;
+            layer["dimensions"][0] = leading;
+            for (const char* key : {"feature_input", "feature_output"})
+                layer[key]["dimensions"][0] = leading;
         }
     }
-    ASSERT_NE(fixedSoftmaxJson, nullptr);
-    EXPECT_EQ(fixedSoftmaxJson->at("version").get<std::string>(), "1.0.0");
-    EXPECT_FALSE(fixedSoftmaxJson->at("ragged_feature_input").contains("layer_ragged_reference_version"));
-    EXPECT_TRUE(fixedSoftmaxJson->at("ragged_feature_input").contains("batch_size"));
-    EXPECT_TRUE(fixedSoftmaxJson->at("ragged_feature_input").contains("max_total_values"));
-
-    const nlohmann::json* fixedLogSoftmaxJson = nullptr;
-    for (const nlohmann::json& layerJson : fixedArchitecture.at("layers")) {
-        if (layerJson.at("layer_type").get<std::string>() == "segmented_log_softmax") {
-            fixedLogSoftmaxJson = &layerJson;
-            break;
-        }
-    }
-    ASSERT_NE(fixedLogSoftmaxJson, nullptr);
-    EXPECT_EQ(fixedLogSoftmaxJson->at("version").get<std::string>(), "1.0.0");
-    EXPECT_FALSE(fixedLogSoftmaxJson->at("ragged_feature_input").contains("layer_ragged_reference_version"));
-    EXPECT_TRUE(fixedLogSoftmaxJson->at("ragged_feature_input").contains("batch_size"));
-    EXPECT_TRUE(fixedLogSoftmaxJson->at("ragged_feature_input").contains("max_total_values"));
-
-    const nlohmann::json* fixedBroadcastJson = nullptr;
-    for (const nlohmann::json& layerJson : fixedArchitecture.at("layers")) {
-        if (layerJson.at("layer_type").get<std::string>() == "segmented_broadcast") {
-            fixedBroadcastJson = &layerJson;
-            break;
-        }
-    }
-    ASSERT_NE(fixedBroadcastJson, nullptr);
-    EXPECT_EQ(fixedBroadcastJson->at("version").get<std::string>(), "1.0.0");
-    EXPECT_FALSE(fixedBroadcastJson->at("partition_input").contains("layer_ragged_reference_version"));
-    EXPECT_TRUE(fixedBroadcastJson->at("partition_input").contains("batch_size"));
-    EXPECT_TRUE(fixedBroadcastJson->at("partition_input").contains("max_total_values"));
-    EXPECT_TRUE(fixedBroadcastJson->at("ragged_feature_output").contains("batch_size"));
-    EXPECT_TRUE(fixedBroadcastJson->at("ragged_feature_output").contains("max_total_values"));
-    EXPECT_EQ(fixedBroadcastJson->at("ragged_feature_output").at("values").at("dimensions")
-                  .get<std::vector<uint64_t>>(),
-              (std::vector<uint64_t>{8, 3}));
-
+    ASSERT_EQ(migrated, 3u);
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
     const std::filesystem::path archive = std::filesystem::temp_directory_path() /
-                                          ("thor_segmented_primitive_round_trip_" + std::to_string(nonce));
+        ("thor_historical_seg_primitives_" + std::to_string(nonce));
     std::filesystem::remove_all(archive);
-    network.save(archive.string(), true);
+    const std::string encoded = historical.dump(4);
+    Impl::Tensor bytes(cpuPlacement, Impl::TensorDescriptor(Api::DataType::UINT8, {encoded.size()}));
+    std::memcpy(bytes.getMemPtr<void>(), encoded.data(), encoded.size());
+    thor_file::TarWriter writer(name);
+    writer.addArchiveFile(name + ".thor.json", bytes);
+    writer.createArchive(archive, true);
 
-    Api::Network loaded(name);
-    ASSERT_NO_THROW(loaded.load(archive.string()));
-    const nlohmann::json architecture = loaded.architectureJson();
-    std::set<std::string> layerTypes;
-    for (const auto& layer : architecture.at("layers")) layerTypes.insert(layer.at("layer_type").get<std::string>());
-    EXPECT_TRUE(layerTypes.contains("segmented_softmax"));
-    EXPECT_TRUE(layerTypes.contains("segmented_log_softmax"));
-    EXPECT_TRUE(layerTypes.contains("segmented_broadcast"));
-    ASSERT_EQ(loaded.getExternalRaggedNetworkOutputs().size(), 3U);
-    for (const auto& output : loaded.getExternalRaggedNetworkOutputs()) {
-        EXPECT_EQ(output.raggedTensor.getOffsetsDataType(), Api::DataType::UINT64);
-        EXPECT_EQ(output.raggedTensor.getBatchSize(), 3U);
-        EXPECT_EQ(output.raggedTensor.getMaxTotalValues(), 8U);
+    for (const uint32_t b : {2u, 7u}) {
+        Api::Network loaded(name);
+        ASSERT_NO_THROW(loaded.load(archive.string()));
+        const auto outputs = loaded.getExternalRaggedNetworkOutputs();
+        ASSERT_EQ(outputs.size(), 3u);
+        for (const auto& output : outputs) {
+            EXPECT_EQ(output.raggedTensor.getOffsetsDataType(), Api::DataType::UINT64);
+            EXPECT_EQ(output.raggedTensor.getValuesDimensions().front(), m);
+            EXPECT_EQ(output.raggedTensor.getOffsetsDimensions(), (vector<uint64_t>{1}));
+            EXPECT_EQ(output.raggedTensor.getDescriptorForPlacement(b).getMaxTotalValues(), b * m);
+        }
+        vector<Event> events;
+        auto placed = loaded.place(b, events, true);
+        ASSERT_NE(placed, nullptr);
+        for (Event& event : events) event.synchronize();
     }
-
     std::filesystem::remove_all(archive);
 }
 

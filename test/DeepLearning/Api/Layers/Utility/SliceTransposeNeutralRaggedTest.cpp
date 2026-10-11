@@ -15,6 +15,7 @@
 #include "gtest/gtest.h"
 
 #include <chrono>
+#include <cstring>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -97,7 +98,7 @@ Batch makeSliceTransposeBatch(const std::string& inputName,
 
 void expectNeutralReference(const nlohmann::json& raggedJson, uint64_t maxValuesPerRow) {
     EXPECT_EQ(raggedJson.at("layer_ragged_reference_version").get<std::string>(), "1.0.0");
-    EXPECT_EQ(raggedJson.at("geometry_mode").get<std::string>(), "placement_neutral");
+    EXPECT_FALSE(raggedJson.contains("geometry_mode"));
     EXPECT_EQ(raggedJson.at("max_values_per_row").get<uint64_t>(), maxValuesPerRow);
     EXPECT_FALSE(raggedJson.contains("batch_size"));
     EXPECT_FALSE(raggedJson.contains("max_total_values"));
@@ -107,7 +108,6 @@ void expectNeutralReference(const nlohmann::json& raggedJson, uint64_t maxValues
 }
 
 void expectPreservedPartition(const Api::RaggedTensor& tensor, uint64_t partitionTokenOriginalId) {
-    ASSERT_TRUE(tensor.isPlacementNeutral());
     EXPECT_EQ(tensor.getRowPartitionToken().getOriginalId(), partitionTokenOriginalId);
 }
 
@@ -220,7 +220,6 @@ TEST(UtilityApiLayers, PlacementNeutralSliceTransposeChainSaveLoadReplacesPlacem
 
         savedPartitionTokenOriginalId = input.getRowPartitionToken().getOriginalId();
         for (const Api::RaggedTensor& tensor : {input, sliced, transposed}) {
-            ASSERT_TRUE(tensor.isPlacementNeutral());
             EXPECT_EQ(tensor.getRowPartitionToken(), input.getRowPartitionToken());
             EXPECT_EQ(tensor.getRowPartitionToken().getOriginalId(), savedPartitionTokenOriginalId);
             ASSERT_TRUE(tensor.hasMaxValuesPerRow());
@@ -348,65 +347,84 @@ TEST(UtilityApiLayers, PlacementNeutralSliceTransposeChainSaveLoadReplacesPlacem
     std::filesystem::remove_all(archive);
 }
 
-TEST(UtilityApiLayers, SliceTransposeFixedRaggedWritersRemainV1AndLoad) {
-    constexpr uint32_t batchSize = 2;
-    constexpr uint64_t maxTotalValues = 8;
-    constexpr uint64_t maxValuesPerRow = 4;
-    const std::string networkName = "fixed_slice_transpose_compatibility";
+TEST(UtilityApiLayers, HistoricalSliceTransposeReadersDiscardPackedGeometryAndPlaceAtTwoBatches) {
+    constexpr uint64_t m = 4;
+    const std::string networkName = "historical_slice_transpose_reconstruction";
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
     const std::filesystem::path archive = std::filesystem::temp_directory_path() /
-                                          ("thor_fixed_slice_transpose_" + std::to_string(nonce));
+                                          ("thor_historical_slice_transpose_" + std::to_string(nonce));
     std::filesystem::remove_all(archive);
 
-    {
-        Api::Network network(networkName);
-        Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
-                                      .network(network)
-                                      .name("tokens")
-                                      .valuesDataType(Api::DataType::FP32)
-                                      .offsetsDataType(Api::DataType::UINT32)
-                                      .trailingDimensions({2, 4})
-                                      .batchSize(batchSize)
-                                      .maxTotalValues(maxTotalValues)
-                                      .maxValuesPerRow(maxValuesPerRow)
-                                      .build();
-        Api::Slice slice = Api::Slice::Builder()
-                               .network(network)
-                               .featureInput(input)
-                               .axis(1)
-                               .start(1)
-                               .length(3)
-                               .build();
-        ASSERT_TRUE(slice.getRaggedFeatureOutput().has_value());
-        Api::Transpose transpose = Api::Transpose::Builder()
-                                       .network(network)
-                                       .featureInput(slice.getRaggedFeatureOutput().value())
-                                       .build();
-        ASSERT_TRUE(transpose.getRaggedFeatureOutput().has_value());
-        (void)Api::RaggedNetworkOutput::Builder()
-            .network(network)
-            .name("result")
-            .inputTensor(transpose.getRaggedFeatureOutput().value())
-            .build();
+    Api::Network network(networkName);
+    Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                  .network(network).name("tokens")
+                                  .valuesDataType(Api::DataType::FP32)
+                                  .offsetsDataType(Api::DataType::UINT32)
+                                  .trailingDimensions({2, 4}).maxValuesPerRow(m).build();
+    Api::Slice slice = Api::Slice::Builder().network(network).featureInput(input)
+                           .axis(1).start(1).length(3).build();
+    Api::Transpose transpose = Api::Transpose::Builder().network(network)
+                                   .featureInput(slice.getRaggedFeatureOutput().value()).build();
+    (void)Api::RaggedNetworkOutput::Builder().network(network).name("result")
+        .inputTensor(transpose.getRaggedFeatureOutput().value()).build();
 
-        EXPECT_EQ(slice.getRaggedFeatureOutput()->getValuesDimensions(), (std::vector<uint64_t>{8, 2, 3}));
-        EXPECT_EQ(transpose.getRaggedFeatureOutput()->getValuesDimensions(), (std::vector<uint64_t>{8, 3, 2}));
-        EXPECT_TRUE(transpose.outputTensorDimensionsIncludeBatch(transpose.getFeatureOutput().value()));
-
-        const nlohmann::json architecture = network.architectureJson();
-        for (const std::string& layerType : {"slice", "transpose"}) {
-            const nlohmann::json& layerJson = findLayerJson(architecture, layerType);
-            EXPECT_EQ(layerJson.at("version").get<std::string>(), "1.0.0") << layerType;
-            ASSERT_TRUE(layerJson.at("use_ragged").get<bool>()) << layerType;
-            EXPECT_EQ(layerJson.at("ragged_feature_input").at("batch_size").get<uint64_t>(), batchSize) << layerType;
-            EXPECT_EQ(layerJson.at("ragged_feature_input").at("max_total_values").get<uint64_t>(), maxTotalValues) << layerType;
-            EXPECT_EQ(layerJson.at("ragged_feature_output").at("batch_size").get<uint64_t>(), batchSize) << layerType;
-            EXPECT_EQ(layerJson.at("ragged_feature_output").at("max_total_values").get<uint64_t>(), maxTotalValues) << layerType;
+    nlohmann::json oldArtifact = network.architectureJson();
+    uint32_t changed = 0;
+    for (auto& layerJson : oldArtifact.at("layers")) {
+        const std::string layerType = layerJson.at("layer_type").get<std::string>();
+        if (layerType == "slice" || layerType == "transpose") {
+            layerJson["version"] = "1.0.0";
+            for (const char* key : {"ragged_feature_input", "ragged_feature_output"}) {
+                auto& reference = layerJson.at(key);
+                reference.erase("layer_ragged_reference_version");
+                reference.erase("geometry_mode");
+                reference.erase("max_values_per_row");
+                reference["batch_size"] = 91; // Ignored obsolete metadata.
+                reference["max_total_values"] = 999;
+                reference["values"]["dimensions"][0] = 12; // Old physical [B*M].
+                reference["offsets"]["dimensions"][0] = 4;
+            }
+            layerJson["feature_input"]["dimensions"][0] = 12;
+            layerJson["feature_output"]["dimensions"][0] = 12;
+            ++changed;
+        } else if (layerType == "network_input") {
+            const std::string name = layerJson.at("name").get<std::string>();
+            if (name != "tokens.values" && name != "__thor_row_partition.tokens") continue;
+            const uint64_t physicalLeading = name == "tokens.values" ? 12 : 4;
+            layerJson["dimensions"][0] = physicalLeading;
+            for (const char* key : {"feature_input", "feature_output"})
+                layerJson[key]["dimensions"][0] = physicalLeading;
         }
-        network.save(archive.string(), true);
     }
+    ASSERT_EQ(changed, 2u);
+    const std::string encoded = oldArtifact.dump(4);
+    Impl::Tensor bytes(cpuPlacement, Impl::TensorDescriptor(Api::DataType::UINT8, {encoded.size()}));
+    std::memcpy(bytes.getMemPtr<void>(), encoded.data(), encoded.size());
+    thor_file::TarWriter writer(networkName);
+    writer.addArchiveFile(networkName + ".thor.json", bytes);
+    writer.createArchive(archive, true);
 
-    Api::Network loaded(networkName);
-    EXPECT_NO_THROW(loaded.load(archive.string()));
+    for (const uint32_t b : {2u, 7u}) {
+        Api::Network loaded(networkName);
+        ASSERT_NO_THROW(loaded.load(archive.string()));
+        const auto loadedSlice = findOnlyLayerOfType<Api::Slice>(loaded);
+        const auto loadedTranspose = findOnlyLayerOfType<Api::Transpose>(loaded);
+        ASSERT_NE(loadedSlice, nullptr);
+        ASSERT_NE(loadedTranspose, nullptr);
+        ASSERT_TRUE(loadedSlice->getRaggedFeatureOutput().has_value());
+        ASSERT_TRUE(loadedTranspose->getRaggedFeatureOutput().has_value());
+        EXPECT_EQ(loadedSlice->getRaggedFeatureOutput()->getValuesDimensions(),
+                  (std::vector<uint64_t>{m, 2, 3}));
+        EXPECT_EQ(loadedTranspose->getRaggedFeatureOutput()->getValuesDimensions(),
+                  (std::vector<uint64_t>{m, 3, 2}));
+        EXPECT_EQ(loadedSlice->getRaggedFeatureOutput()->getRowPartitionToken(),
+                  loadedTranspose->getRaggedFeatureOutput()->getRowPartitionToken());
+        EXPECT_EQ(loadedTranspose->getRaggedFeatureOutput()->getDescriptorForPlacement(b).getValuesDimensions(),
+                  (std::vector<uint64_t>{b * m, 3, 2}));
+        std::vector<Event> events;
+        auto placed = loaded.place(b, events, true);
+        ASSERT_NE(placed, nullptr);
+        for (Event& event : events) event.synchronize();
+    }
     std::filesystem::remove_all(archive);
 }

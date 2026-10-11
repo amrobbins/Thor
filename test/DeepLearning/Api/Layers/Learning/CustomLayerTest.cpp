@@ -415,8 +415,7 @@ TEST(CustomLayerApi, RaggedMultipleApplicationsSaveLoadPreservesIndependentParti
                                       .valuesDataType(DataType::FP32)
                                       .offsetsDataType(DataType::UINT32)
                                       .trailingDimensions({4})
-                                      .maxTotalValues(capacity)
-                                      .batchSize(batchSize)
+                                      .maxValuesPerRow(capacity)
                                       .build();
         Api::RaggedTensor second = Api::RaggedNetworkInput::Builder()
                                        .network(network)
@@ -424,8 +423,7 @@ TEST(CustomLayerApi, RaggedMultipleApplicationsSaveLoadPreservesIndependentParti
                                        .valuesDataType(DataType::FP32)
                                        .offsetsDataType(DataType::UINT32)
                                        .trailingDimensions({4})
-                                       .maxTotalValues(capacity)
-                                       .batchSize(batchSize)
+                                       .maxValuesPerRow(capacity)
                                        .build();
         ASSERT_NE(first.getOffsets(), second.getOffsets());
 
@@ -480,11 +478,19 @@ TEST(CustomLayerApi, RaggedMultipleApplicationsSaveLoadPreservesIndependentParti
         ASSERT_EQ(loadedJson.at("ragged_input_interfaces").size(), 2u);
         ASSERT_EQ(loadedJson.at("ragged_output_interfaces").size(), 2u);
 
-        vector<Event> initDoneEvents;
-        shared_ptr<Api::PlacedNetwork> placed;
-        ASSERT_NO_THROW(placed = loaded.place(batchSize, initDoneEvents, true));
-        synchronizeEvents(initDoneEvents);
-        ASSERT_NE(placed, nullptr);
+        for (const uint32_t placementBatch : {2U, 7U}) {
+            vector<Event> initDoneEvents;
+            shared_ptr<Api::PlacedNetwork> placed;
+            ASSERT_NO_THROW(placed = loaded.place(placementBatch, initDoneEvents, true));
+            synchronizeEvents(initDoneEvents);
+            ASSERT_NE(placed, nullptr);
+            EXPECT_EQ(loadedCustom->getRaggedOutput("y", 0)
+                          .getDescriptorForPlacement(placementBatch).getMaxTotalValues(),
+                      placementBatch * capacity);
+            EXPECT_EQ(loadedCustom->getRaggedOutput("y", 1)
+                          .getDescriptorForPlacement(placementBatch).getMaxTotalValues(),
+                      placementBatch * capacity);
+        }
     } catch (...) {
         filesystem::remove_all(archiveDir);
         throw;
@@ -511,8 +517,7 @@ TEST(CustomLayerApi, RaggedTrainablePlacedSaveLoadRestoresParameterState) {
                                       .valuesDataType(DataType::FP32)
                                       .offsetsDataType(DataType::UINT32)
                                       .trailingDimensions({width})
-                                      .maxTotalValues(capacity)
-                                      .batchSize(batchSize)
+                                      .maxValuesPerRow(capacity)
                                       .build();
 
         Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
@@ -1280,8 +1285,7 @@ TEST(CustomLayerApi, RaggedSingleInputPreservesPartitionAndPlaces) {
                                   .valuesDataType(DataType::FP32)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({4})
-                                  .maxTotalValues(capacity)
-                                  .batchSize(batchSize)
+                                  .maxValuesPerRow(capacity)
                                   .build();
 
     Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
@@ -1325,9 +1329,7 @@ TEST(CustomLayerApi, RaggedPointwiseMaterializesManagedActiveCountWithoutFullOff
                                   .valuesDataType(DataType::FP32)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({4})
-                                  .maxTotalValues(capacity)
                                   .maxValuesPerRow(4)
-                                  .batchSize(batchSize)
                                   .build();
 
     Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
@@ -1383,8 +1385,7 @@ TEST(CustomLayerApi, RaggedCompositePointwiseExpressionStampsAsSingleRaggedCusto
                                   .valuesDataType(DataType::FP32)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({4})
-                                  .maxTotalValues(capacity)
-                                  .batchSize(batchSize)
+                                  .maxValuesPerRow(capacity)
                                   .build();
 
     Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
@@ -1429,22 +1430,27 @@ TEST(CustomLayerApi, RaggedMultiInputMultiOutputCanChangeTrailingShapeWithoutExp
                                 .valuesDataType(DataType::FP32)
                                 .offsetsDataType(DataType::UINT32)
                                 .trailingDimensions({4})
-                                .maxTotalValues(capacity)
-                                .batchSize(batchSize)
+                                .maxValuesPerRow(capacity)
                                 .build();
-    Api::NetworkInput rhsValues = Api::NetworkInput::Builder()
-                                      .network(network)
-                                      .name("rhs_values")
-                                      .dimensions({capacity, 4})
-                                      .dataType(DataType::FP32)
-                                      .dimensionsIncludeBatch(true)
-                                      .build();
-    Api::RaggedTensor rhs(rhsValues.getFeatureOutput().value(), lhs.getOffsets());
+    // A second packed-values boundary must physicalize to [B*M, 4] with lhs.
+    // Wrapping a dense NetworkInput with dimensionsIncludeBatch(true) would
+    // leave its physical extent fixed at M regardless of placement B.
+    Api::RaggedTensor rhs = Api::RaggedNetworkInput::Builder()
+                                .network(network)
+                                .name("rhs")
+                                .valuesDataType(DataType::FP32)
+                                .trailingDimensions({4})
+                                .partition(lhs)
+                                .build();
+    EXPECT_TRUE(rhs.sharesPartitionWith(lhs));
+    EXPECT_EQ(rhs.getValuesDimensions(), (vector<uint64_t>{capacity, 4}));
+    EXPECT_EQ(rhs.getDescriptorForPlacement(batchSize).getValuesDimensions(),
+              (vector<uint64_t>{batchSize * capacity, 4}));
 
     Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
     Impl::Expression y = Impl::Expression::input("y", DataType::FP32, DataType::FP32);
     Impl::Expression wide = x + y;
-    Impl::Expression narrow = wide.stridedView({capacity, 2}, {4, 1}, 1);
+    Impl::Expression narrow = wide.stridedView({0, 2}, {4, 1}, 1);
     Impl::ExpressionDefinition definition = Impl::ExpressionDefinition::fromOutputs(
         Impl::Expression::outputs({{"wide", wide}, {"narrow", narrow}}));
 
@@ -1481,16 +1487,14 @@ TEST(CustomLayerApi, RaggedInputsMustShareExactPartitionAndDenseRaggedBuildersCa
                                 .name("lhs")
                                 .valuesDataType(DataType::FP32)
                                 .trailingDimensions({4})
-                                .maxTotalValues(8)
-                                .batchSize(3)
+                                .maxValuesPerRow(8)
                                 .build();
     Api::RaggedTensor rhs = Api::RaggedNetworkInput::Builder()
                                 .network(network)
                                 .name("rhs")
                                 .valuesDataType(DataType::FP32)
                                 .trailingDimensions({4})
-                                .maxTotalValues(8)
-                                .batchSize(3)
+                                .maxValuesPerRow(8)
                                 .build();
     Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
     Impl::Expression y = Impl::Expression::input("y", DataType::FP32, DataType::FP32);
@@ -1503,6 +1507,18 @@ TEST(CustomLayerApi, RaggedInputsMustShareExactPartitionAndDenseRaggedBuildersCa
                       .inputNames({"x", "y"})
                       .outputNames({"z"})
                       .inputInterface(Api::CustomLayer::RaggedTensorMap{{"x", lhs}, {"y", rhs}})
+                      .build()),
+                 std::invalid_argument);
+
+    // A shared partition does not make differing semantic maxima compatible.
+    Api::RaggedTensor differentM = Api::RaggedTensor::logical(
+        Api::Tensor(DataType::FP32, {9, 4}), lhs.getRowPartitionToken(), 9);
+    EXPECT_THROW((Api::CustomLayer::Builder()
+                      .network(network)
+                      .expression(Impl::DynamicExpression::fromExpressionDefinition(definition))
+                      .inputNames({"x", "y"})
+                      .outputNames({"z"})
+                      .inputInterface(Api::CustomLayer::RaggedTensorMap{{"x", lhs}, {"y", differentM}})
                       .build()),
                  std::invalid_argument);
 
@@ -1529,8 +1545,7 @@ TEST(CustomLayerApi, RaggedTrainableParameterStampsIntoRaggedCustomLayer) {
                                   .valuesDataType(DataType::FP32)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({width})
-                                  .maxTotalValues(capacity)
-                                  .batchSize(batchSize)
+                                  .maxValuesPerRow(capacity)
                                   .build();
 
     Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);

@@ -44,13 +44,12 @@ Impl::DynamicExpression squaredDifference(bool gradient) {
 }
 
 RaggedTensor makeInput(Network& net, const string& name, const optional<RaggedTensor>& partition = nullopt,
-                       uint64_t m = 4, vector<uint64_t> trailing = {1}, bool fixed = false) {
+                       uint64_t m = 4, vector<uint64_t> trailing = {1}) {
     RaggedNetworkInput::Builder builder;
     builder.network(net).name(name).valuesDataType(DataType::FP32).trailingDimensions(trailing);
     if (partition) builder.partition(partition.value());
     else {
         builder.offsetsDataType(DataType::UINT32).maxValuesPerRow(m);
-        if (fixed) builder.batchSize(2).maxTotalValues(8);
     }
     return builder.build();
 }
@@ -183,7 +182,8 @@ TEST(RaggedCustomLossNeutralL1A, SemanticReferencesRejectForgedGeometryAndPreser
     EXPECT_EQ(loss.getFirstInstanceMemRequirementInBytes(7, cpu), 3U * 28U * sizeof(float));
 
     auto rejects = [&](json changed) { EXPECT_ANY_THROW(RaggedCustomLoss::deserialize(changed, &network)); };
-    json bad = j; bad["version"] = "1.0.0"; rejects(bad);
+    json bad = j; bad["version"] = "1.0.0";
+    EXPECT_NO_THROW(RaggedCustomLoss::deserialize(bad, &network)); // Historical grammar, same logical model.
     bad = j; bad["ragged_labels"]["max_values_per_row"] = 5; rejects(bad);
     bad = j; bad["ragged_labels"]["offsets"]["id"] = p.getValues().getId(); rejects(bad);
     bad = j; bad["ragged_predictions"]["values"]["dimensions"] = vector<uint64_t>{4, 2}; rejects(bad);
@@ -200,9 +200,9 @@ TEST(RaggedCustomLossNeutralL1A, SemanticReferencesRejectForgedGeometryAndPreser
     RaggedTensor l = makeInput(other, "labels", q);
     RaggedTensor different = makeInput(other, "other");
     EXPECT_THROW((void)makeRawLoss(other, q, different), invalid_argument);
-    RaggedTensor fixed = makeInput(other, "fixed", nullopt, 4, {1}, true);
+    RaggedTensor fixed = makeInput(other, "different_partition", nullopt, 4, {1});
     EXPECT_THROW((void)makeRawLoss(other, q, fixed), invalid_argument);
-    RaggedTensor wrongM = RaggedTensor::placementNeutral(
+    RaggedTensor wrongM = RaggedTensor::logical(
         Tensor(DataType::FP32, {5, 1}), q.getRowPartitionToken(), 5);
     EXPECT_THROW((void)makeRawLoss(other, q, wrongM), invalid_argument);
     RaggedTensor wrongTrailing = makeInput(other, "wrong_trailing", q, 4, {2});
@@ -211,14 +211,63 @@ TEST(RaggedCustomLossNeutralL1A, SemanticReferencesRejectForgedGeometryAndPreser
     EXPECT_THROW((void)makeRawLoss(other, q, l, nullopt, wrongWeights), invalid_argument);
     EXPECT_THROW((void)makeRawLoss(other, q, l, different), invalid_argument);
 
-    Network legacy("raw_fixed_legacy");
-    RaggedTensor fp = makeInput(legacy, "predictions", nullopt, 4, {1}, true);
+    Network legacy("raw_batch_hints_are_not_model_geometry");
+    RaggedTensor fp = makeInput(legacy, "predictions", nullopt, 4, {1});
     RaggedTensor fl = makeInput(legacy, "labels", fp);
     auto fixedLoss = makeRawLoss(legacy, fp, fl);
     json old = fixedLoss.architectureJson();
-    EXPECT_EQ(old.at("version").get<string>(), "1.0.0");
-    EXPECT_EQ(old.at("ragged_predictions").at("batch_size").get<uint64_t>(), 2U);
+    EXPECT_EQ(old.at("version").get<string>(), "1.1.0");
+    EXPECT_FALSE(old.at("ragged_predictions").contains("batch_size"));
+    EXPECT_EQ(old.at("ragged_predictions").at("max_values_per_row").get<uint64_t>(), 4U);
+    EXPECT_EQ(fixedLoss.getOutputTensorBytes(7), 28U * sizeof(float));
     EXPECT_NO_THROW(RaggedCustomLoss::deserialize(old, &legacy));
+}
+
+TEST(RaggedCustomLossNeutralL1A, HistoricalPackedLossReferencesRecoverLogicalMAndRetainSemantics) {
+    Network network("raw_l1a_historical_grammar");
+    const auto predictions = makeInput(network, "predictions");
+    const auto labels = makeInput(network, "labels", predictions);
+    const auto secondary = makeInput(network, "secondary", predictions);
+    const auto weights = makeInput(network, "weights", predictions);
+    auto loss = makeRawLoss(network, predictions, labels, secondary, weights);
+    json historical = loss.architectureJson();
+    historical["version"] = "1.0.0"; // Old reader grammar, not a fixed-batch model.
+    const auto historicalReference = [](json& reference) {
+        reference.erase("layer_ragged_reference_version");
+        reference.erase("geometry_mode");
+        reference.erase("max_values_per_row");
+        reference["batch_size"] = 41;
+        reference["max_total_values"] = 999;
+        auto dimensions = reference.at("values").at("dimensions").get<vector<uint64_t>>();
+        dimensions.front() = 999; // An untrusted archived packed extent.
+        reference["values"]["dimensions"] = dimensions;
+        reference["offsets"]["dimensions"] = vector<uint64_t>{42};
+    };
+    for (const char* field : {"ragged_predictions", "ragged_labels", "ragged_raw_loss", "ragged_example_weights"})
+        historicalReference(historical[field]);
+    historicalReference(historical["ragged_secondary_inputs"][0]["tensor"]);
+    historical["ragged_secondary_input"] = historical["ragged_secondary_inputs"][0]["tensor"];
+
+    ASSERT_NO_THROW(RaggedCustomLoss::deserialize(historical, &network));
+    const auto loaded = dynamic_pointer_cast<RaggedCustomLoss>(network.getLayer(network.getNumLayers() - 1));
+    ASSERT_NE(loaded, nullptr);
+    const auto raw = loaded->getRaggedRawLoss();
+    EXPECT_EQ(raw.getValuesDimensions(), (vector<uint64_t>{4, 1}));
+    EXPECT_TRUE(raw.sharesPartitionWith(predictions));
+    for (uint32_t batch : {2U, 7U}) {
+        EXPECT_EQ(raw.getDescriptorForPlacement(batch).getValuesDimensions(),
+                  (vector<uint64_t>{batch * 4U, 1}));
+        EXPECT_EQ(loaded->getOutputTensorBytes(batch), batch * 4U * sizeof(float));
+    }
+    json bad = historical;
+    bad["ragged_labels"]["max_values_per_row"] = 5; // Genuine semantic contradiction.
+    EXPECT_ANY_THROW(RaggedCustomLoss::deserialize(bad, &network));
+    bad = historical;
+    bad["ragged_predictions"]["values"]["dimensions"] = vector<uint64_t>{999, 2};
+    EXPECT_ANY_THROW(RaggedCustomLoss::deserialize(bad, &network));
+    bad = historical;
+    bad["ragged_raw_loss"]["offsets"]["id"] = predictions.getValues().getOriginalId();
+    EXPECT_ANY_THROW(RaggedCustomLoss::deserialize(bad, &network));
 }
 
 TEST(RaggedCustomLossNeutralL1A, SameSavedRawTerminalLossTrainsAtTwoAndSeven) {
@@ -247,7 +296,6 @@ TEST(RaggedCustomLossNeutralL1A, SameSavedRawTerminalLossTrainsAtTwoAndSeven) {
         });
         ASSERT_NE(primaryIt, inputs.end());
         const RaggedTensor p = primaryIt->raggedTensor;
-        ASSERT_TRUE(p.isPlacementNeutral());
         auto raw = findRaw(loaded);
         ASSERT_NE(raw, nullptr);
         EXPECT_EQ(raw->architectureJson().at("version").get<string>(), "1.1.0");

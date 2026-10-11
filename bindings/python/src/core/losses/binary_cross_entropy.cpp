@@ -89,9 +89,7 @@ void bind_binary_cross_entropy(nb::module_ &losses) {
                     throw nb::value_error("BinaryCrossEntropy instance: per_output reporting is undefined for ragged predictions.");
                 if (!predictions.sharesPartitionWith(labels))
                     throw nb::value_error("BinaryCrossEntropy instance: ragged predictions and labels must use the exact same row partition.");
-                if (predictions.getBatchSize() != labels.getBatchSize() ||
-                    predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
-                    predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+                if (predictions.getValuesDimensions() != labels.getValuesDimensions())
                     throw nb::value_error("BinaryCrossEntropy instance: ragged predictions and labels must have identical value geometry.");
                 builder.predictions(predictions).labels(labels);
             } else {

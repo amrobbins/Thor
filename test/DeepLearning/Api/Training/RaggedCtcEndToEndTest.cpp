@@ -45,7 +45,7 @@ namespace Impl = ThorImplementation;
 namespace {
 
 constexpr uint64_t BATCH_SIZE = 2;
-constexpr uint64_t MAX_TOTAL_LABELS = 2;
+constexpr uint64_t MAX_LABELS_PER_ROW = 2;
 constexpr uint64_t TIME_STEPS = 2;
 constexpr uint64_t NUM_CLASSES = 2;
 
@@ -150,8 +150,7 @@ CtcNetwork buildCtcNetwork(const std::string& name) {
             .valuesDataType(Impl::DataType::INT32)
             .offsetsDataType(Impl::DataType::UINT64)
             .trailingDimensions({})
-            .maxTotalValues(MAX_TOTAL_LABELS)
-            .batchSize(BATCH_SIZE)
+            .maxValuesPerRow(MAX_LABELS_PER_ROW)
             .build();
     Api::NetworkInput inputLengths =
         Api::NetworkInput::Builder()
@@ -388,8 +387,10 @@ TEST(RaggedCtcEndToEnd, SerializedNetworkTrainsFromCurrentDatasetThroughLogicalB
     ASSERT_EQ(raggedInputs.size(), 1u);
     EXPECT_EQ(raggedInputs.front().name, "labels");
     EXPECT_EQ(raggedInputs.front().raggedTensor.getOffsetsDataType(), Impl::DataType::UINT64);
-    EXPECT_EQ(raggedInputs.front().raggedTensor.getBatchSize(), BATCH_SIZE);
-    EXPECT_EQ(raggedInputs.front().raggedTensor.getMaxTotalValues(), MAX_TOTAL_LABELS);
+    EXPECT_EQ(raggedInputs.front().raggedTensor.getMaxValuesPerRow(), MAX_LABELS_PER_ROW);
+    EXPECT_EQ(raggedInputs.front().raggedTensor.getValuesDimensions(), (std::vector<uint64_t>{MAX_LABELS_PER_ROW}));
+    EXPECT_EQ(raggedInputs.front().raggedTensor.getDescriptorForPlacement(BATCH_SIZE).getValuesDimensions(),
+              (std::vector<uint64_t>{BATCH_SIZE * MAX_LABELS_PER_ROW}));
 
     const std::vector<Api::NetworkLossReference> reportableLosses = loaded->getReportableLosses();
     ASSERT_EQ(reportableLosses.size(), 1u);

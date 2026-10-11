@@ -187,7 +187,7 @@ def test_negative_binomial_nll_loss_elementwise_weights_scale_raw_loss():
 
 def _r10k_negative_binomial_ragged_inputs(network, prefix="r10k_nb"):
     mean = thor.layers.RaggedNetworkInput(
-        network, f"{prefix}_mean", thor.DataType.fp32, [2], batch_size=3, max_total_values=8, max_values_per_row=4
+        network, f"{prefix}_mean", thor.DataType.fp32, [2], max_values_per_row=4
     )
     dispersion = thor.layers.RaggedNetworkInput(network, f"{prefix}_dispersion", thor.DataType.fp32, [2], partition=mean)
     labels = thor.layers.RaggedNetworkInput(network, f"{prefix}_labels", thor.DataType.fp32, [2], partition=mean)
@@ -222,7 +222,7 @@ def test_negative_binomial_nll_loss_r10k_rejects_ragged_per_output_and_mismatche
             n, mean, dispersion, labels, reported_loss_shape=thor.losses.LossShape.per_output
         )
     different = thor.layers.RaggedNetworkInput(
-        n, "different_dispersion", thor.DataType.fp32, [2], batch_size=3, max_total_values=8, max_values_per_row=4
+        n, "different_dispersion", thor.DataType.fp32, [2], max_values_per_row=4
     )
     with pytest.raises(ValueError, match=r"exact same row partition"):
         thor.losses.distribution.NegativeBinomialNLLLoss(n, mean, different, labels)

@@ -454,8 +454,8 @@ TEST(UtilityImplementationLayers, ConcatenateReportsAllPhysicalShapesAndMismatch
 
 TEST(UtilityApiLayers, RaggedConcatenateBuildsPreservesPartitionAndStampsDedicatedImplementation) {
     constexpr uint64_t batchSize = 3;
-    constexpr uint64_t maxTotalValues = 9;
     constexpr uint64_t maxValuesPerRow = 4;
+    constexpr uint64_t physicalCapacity = batchSize * maxValuesPerRow;
 
     Network network("ragged_concatenate_build_stamp");
     RaggedTensor input = RaggedNetworkInput::Builder()
@@ -464,9 +464,7 @@ TEST(UtilityApiLayers, RaggedConcatenateBuildsPreservesPartitionAndStampsDedicat
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({2, 5})
-                             .maxTotalValues(maxTotalValues)
                              .maxValuesPerRow(maxValuesPerRow)
-                             .batchSize(batchSize)
                              .build();
     Slice first = Slice::Builder().network(network).featureInput(input).axis(1).start(0).length(2).build();
     Slice second = Slice::Builder().network(network).featureInput(input).axis(1).start(2).length(3).build();
@@ -484,10 +482,10 @@ TEST(UtilityApiLayers, RaggedConcatenateBuildsPreservesPartitionAndStampsDedicat
               ThorImplementation::RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT);
     ASSERT_TRUE(concatenate.getRaggedFeatureOutput().has_value());
     const RaggedTensor output = concatenate.getRaggedFeatureOutput().value();
-    EXPECT_EQ(output.getValuesDimensions(), (vector<uint64_t>{maxTotalValues, 2, 5}));
+    EXPECT_EQ(output.getValuesDimensions(), (vector<uint64_t>{maxValuesPerRow, 2, 5}));
     EXPECT_EQ(output.getOffsets(), input.getOffsets());
-    EXPECT_EQ(output.getBatchSize(), batchSize);
-    EXPECT_EQ(output.getMaxTotalValues(), maxTotalValues);
+    EXPECT_EQ(output.getMaxValuesPerRow(), maxValuesPerRow);
+    EXPECT_TRUE(output.sharesPartitionWith(input));
     ASSERT_TRUE(output.hasMaxValuesPerRow());
     EXPECT_EQ(output.getMaxValuesPerRow(), maxValuesPerRow);
 
@@ -513,7 +511,7 @@ TEST(UtilityApiLayers, RaggedConcatenateBuildsPreservesPartitionAndStampsDedicat
     EXPECT_EQ(physical->getFeatureInputs()[2]->getDataType(), DataType::UINT32);
     ASSERT_EQ(physical->getFeatureOutputs().size(), 1u);
     ASSERT_TRUE(physical->getFeatureOutputs()[0].has_value());
-    EXPECT_EQ(physical->getFeatureOutputs()[0]->getDimensions(), (vector<uint64_t>{maxTotalValues, 2, 5}));
+    EXPECT_EQ(physical->getFeatureOutputs()[0]->getDimensions(), (vector<uint64_t>{physicalCapacity, 2, 5}));
 }
 
 
@@ -528,9 +526,7 @@ TEST(UtilityApiLayers, RaggedConcatenateMaterializesManagedActiveCountWithoutFul
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({4})
-                             .maxTotalValues(maxTotalValues)
                              .maxValuesPerRow(3)
-                             .batchSize(batchSize)
                              .build();
 
     FullyConnected left = FullyConnected::Builder()
@@ -603,9 +599,7 @@ TEST(UtilityApiLayers, RaggedConcatenateRejectsDifferentPartitionsAndDuplicateVa
                             .valuesDataType(DataType::FP32)
                             .offsetsDataType(DataType::UINT32)
                             .trailingDimensions({2})
-                            .maxTotalValues(maxTotalValues)
                             .maxValuesPerRow(4)
-                            .batchSize(batchSize)
                             .build();
     RaggedTensor right = RaggedNetworkInput::Builder()
                              .network(network)
@@ -613,9 +607,7 @@ TEST(UtilityApiLayers, RaggedConcatenateRejectsDifferentPartitionsAndDuplicateVa
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({3})
-                             .maxTotalValues(maxTotalValues)
                              .maxValuesPerRow(4)
-                             .batchSize(batchSize)
                              .build();
 
     EXPECT_THROW((void)Concatenate::Builder()
@@ -633,9 +625,7 @@ TEST(UtilityApiLayers, RaggedConcatenateRejectsDifferentPartitionsAndDuplicateVa
                                  .valuesDataType(DataType::FP32)
                                  .offsetsDataType(DataType::UINT32)
                                  .trailingDimensions({2})
-                                 .maxTotalValues(maxTotalValues)
                                  .maxValuesPerRow(4)
-                                 .batchSize(batchSize)
                                  .build();
     EXPECT_THROW((void)Concatenate::Builder()
                      .network(duplicateNetwork)

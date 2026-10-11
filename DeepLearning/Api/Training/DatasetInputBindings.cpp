@@ -129,18 +129,8 @@ ThorImplementation::RaggedTensorDescriptor validateRaggedBinding(const RaggedNet
                                  "' requires a RAGGED dataset field, but field '" + field.name +
                                  "' is not ragged.");
     }
-    ThorImplementation::RaggedTensorDescriptor descriptor;
-    try {
-        descriptor = input.raggedTensor.getDescriptorForPlacement(batchSize);
-    } catch (const std::exception &) {
-        if (!input.raggedTensor.isPlacementNeutral()) {
-            throw std::runtime_error("DatasetInputBindings ragged batch-size mismatch: logical input '" +
-                                     input.name + "' declares batch capacity " +
-                                     std::to_string(input.raggedTensor.getBatchSize()) +
-                                     " but the dataset batch policy uses " + std::to_string(batchSize) + ".");
-        }
-        throw;
-    }
+    const ThorImplementation::RaggedTensorDescriptor descriptor =
+        input.raggedTensor.getDescriptorForPlacement(batchSize);
     if (descriptor.getValuesDataType() != field.dataType) {
         throw std::runtime_error("DatasetInputBindings ragged dtype mismatch: dataset field '" +
                                  field.name + "' cannot bind logical RaggedNetworkInput '" + input.name + "'.");
@@ -226,14 +216,11 @@ DatasetInputBindings &DatasetInputBindings::bind(const Network &network,
                             .networkInputName = match->name,
                             .networkInputDataType = match->raggedTensor.getValuesDataType(),
                             .networkInputDimensions = match->raggedTensor.getTrailingDimensions(),
-                            .raggedPlacementNeutral = match->raggedTensor.isPlacementNeutral(),
                             .raggedOffsetsDataType = match->raggedTensor.getOffsetsDataType(),
                             .raggedMaxValuesPerRow = match->raggedTensor.hasMaxValuesPerRow()
                                 ? std::optional<uint64_t>(match->raggedTensor.getMaxValuesPerRow())
                                 : std::nullopt,
-                            .raggedDescriptor = match->raggedTensor.isPlacementNeutral()
-                                ? std::nullopt
-                                : std::optional<ThorImplementation::RaggedTensorDescriptor>(match->raggedTensor.getDescriptor()),
+                            .raggedPartitionId = match->raggedTensor.getRowPartitionId(),
                             .field = field});
     return *this;
 }
@@ -303,20 +290,15 @@ CompiledDatasetInputBindings DatasetInputBindings::compile(const Network &networ
             const std::optional<uint64_t> maxValuesPerRow = hasMaxValuesPerRow
                 ? std::optional<uint64_t>(input.raggedTensor.getMaxValuesPerRow())
                 : std::nullopt;
-            if (input.raggedTensor.isPlacementNeutral() != entry.raggedPlacementNeutral ||
+            // Binding snapshots carry only semantic model identity and geometry.
+            // B-specific descriptors are owned by compile(batchSize), not bind().
+            if (input.raggedTensor.getRowPartitionId() != entry.raggedPartitionId ||
                 input.raggedTensor.getOffsetsDataType() != entry.raggedOffsetsDataType ||
                 maxValuesPerRow != entry.raggedMaxValuesPerRow ||
                 input.raggedTensor.getValuesDataType() != entry.networkInputDataType ||
                 input.raggedTensor.getTrailingDimensions() != entry.networkInputDimensions) {
                 throw std::runtime_error("DatasetInputBindings RaggedNetworkInput contract changed after binding: '" +
                                          entry.networkInputName + "'.");
-            }
-            if (!entry.raggedPlacementNeutral) {
-                if (!entry.raggedDescriptor.has_value() ||
-                    input.raggedTensor.getDescriptor() != entry.raggedDescriptor.value()) {
-                    throw std::runtime_error("DatasetInputBindings RaggedNetworkInput contract changed after binding: '" +
-                                             entry.networkInputName + "'.");
-                }
             }
             const ThorImplementation::RaggedTensorDescriptor descriptor = validateRaggedBinding(input, field, batchSize);
             insertRequirement(compiled, field, descriptor);

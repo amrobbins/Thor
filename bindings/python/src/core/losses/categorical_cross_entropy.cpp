@@ -104,9 +104,7 @@ void validateRaggedCategorical(const string& loss_name,
         throw nb::value_error("CategoricalCrossEntropy instance: ragged predictions must have exactly one trailing class dimension greater than one.");
     if (!predictions.sharesPartitionWith(labels))
         throw nb::value_error("CategoricalCrossEntropy instance: ragged predictions and labels must use the exact same row partition.");
-    if (predictions.getBatchSize() != labels.getBatchSize() ||
-        predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
-        predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+    if (predictions.getValuesDimensions() != labels.getValuesDimensions())
         throw nb::value_error("CategoricalCrossEntropy instance: ragged predictions and labels must have identical value geometry.");
     if (predictions.getValuesDataType() != DataType::FP16 && predictions.getValuesDataType() != DataType::FP32)
         throw nb::value_error("CategoricalCrossEntropy instance: ragged predictions must use fp16 or fp32 dtype.");
@@ -163,10 +161,9 @@ void validateRaggedSparseCategorical(const string& loss_name,
     if (!predictions.sharesPartitionWith(labels))
         throw nb::value_error(
             "SparseCategoricalCrossEntropy instance: ragged predictions and labels must use the exact same row partition.");
-    if (predictions.getBatchSize() != labels.getBatchSize() ||
-        predictions.getMaxTotalValues() != labels.getMaxTotalValues())
+    if (predictions.getValuesDimensions().front() != labels.getValuesDimensions().front())
         throw nb::value_error(
-            "SparseCategoricalCrossEntropy instance: ragged predictions and labels must have the same batch size and packed capacity.");
+            "SparseCategoricalCrossEntropy instance: ragged predictions and labels must have the same logical row bound.");
     if (num_classes <= 1) {
         string error_message = loss_name + ": num_classes must be greater than one. You passed num_classes == " +
                                to_string(num_classes);
@@ -193,10 +190,9 @@ void validateRaggedSparseMask(const RaggedTensor& predictions, const RaggedTenso
     if (!predictions.sharesPartitionWith(mask))
         throw nb::value_error(
             "SparseCategoricalCrossEntropy instance: ragged predictions and mask must use the exact same row partition.");
-    if (predictions.getBatchSize() != mask.getBatchSize() ||
-        predictions.getMaxTotalValues() != mask.getMaxTotalValues())
+    if (predictions.getValuesDimensions().front() != mask.getValuesDimensions().front())
         throw nb::value_error(
-            "SparseCategoricalCrossEntropy instance: ragged predictions and mask must have the same batch size and packed capacity.");
+            "SparseCategoricalCrossEntropy instance: ragged predictions and mask must have the same logical row bound.");
     const DataType maskDataType = mask.getValuesDataType();
     if (maskDataType != DataType::BOOLEAN && maskDataType != DataType::UINT8 && maskDataType != DataType::FP16 &&
         maskDataType != DataType::FP32)

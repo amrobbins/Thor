@@ -32,8 +32,6 @@ TEST(RaggedNetworkOutputApi, RegistersOneLogicalOutputBackedByValuesCarrier) {
                              .name("tokens")
                              .valuesDataType(DataType::FP32)
                              .trailingDimensions({2})
-                             .batchSize(2)
-                             .maxTotalValues(6)
                              .maxValuesPerRow(4)
                              .build();
 
@@ -87,8 +85,7 @@ TEST(RaggedNetworkOutputApi, RejectsDuplicateLogicalNames) {
                              .name("tokens")
                              .valuesDataType(DataType::FP32)
                              .trailingDimensions({2})
-                             .batchSize(2)
-                             .maxTotalValues(6)
+                             .maxValuesPerRow(3)
                              .build();
 
     (void)RaggedNetworkOutput::Builder().network(network).name("tokens_out").inputTensor(input).build();
@@ -105,8 +102,6 @@ TEST(RaggedNetworkOutputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTenso
                              .name("tokens")
                              .valuesDataType(DataType::FP32)
                              .trailingDimensions({2})
-                             .batchSize(2)
-                             .maxTotalValues(6)
                              .maxValuesPerRow(4)
                              .build();
     RaggedNetworkOutput output =
@@ -138,8 +133,10 @@ TEST(RaggedNetworkOutputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTenso
     ASSERT_EQ(loadedOutputs.size(), 1u);
     EXPECT_EQ(loadedOutputs[0].name, "tokens_out");
     EXPECT_EQ(loadedOutputs[0].valuesOutputName, "__thor_ragged_output.tokens_out.values");
-    EXPECT_EQ(loadedOutputs[0].raggedTensor.getValues().getDimensions(), (std::vector<uint64_t>{6, 2}));
-    EXPECT_EQ(loadedOutputs[0].raggedTensor.getOffsets().getDimensions(), (std::vector<uint64_t>{3}));
+    EXPECT_EQ(loadedOutputs[0].raggedTensor.getValues().getDimensions(), (std::vector<uint64_t>{4, 2}));
+    EXPECT_EQ(loadedOutputs[0].raggedTensor.getOffsets().getDimensions(), (std::vector<uint64_t>{1}));
+    EXPECT_EQ(loadedOutputs[0].raggedTensor.getDescriptorForPlacement(2).getMaxTotalValues(), 8u);
+    EXPECT_EQ(loadedOutputs[0].raggedTensor.getDescriptorForPlacement(7).getMaxTotalValues(), 28u);
     ASSERT_TRUE(loadedOutputs[0].raggedTensor.hasMaxValuesPerRow());
     EXPECT_EQ(loadedOutputs[0].raggedTensor.getMaxValuesPerRow(), 4u);
 
@@ -159,7 +156,8 @@ TEST(RaggedNetworkOutputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTenso
 
 TEST(RaggedNetworkOutputApi, IdentityOutputPreservesLogicalValuesAndHostPartitionWithPoisonedInactiveCapacity) {
     constexpr uint32_t batchSize = 2;
-    constexpr uint64_t maxTotalValues = 6;
+    constexpr uint64_t maxValuesPerRow = 3;
+    constexpr uint64_t maxTotalValues = batchSize * maxValuesPerRow;
     Network network("ragged_network_output_identity_logical_extent");
     RaggedTensor input = RaggedNetworkInput::Builder()
                              .network(network)
@@ -167,8 +165,7 @@ TEST(RaggedNetworkOutputApi, IdentityOutputPreservesLogicalValuesAndHostPartitio
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({2})
-                             .batchSize(batchSize)
-                             .maxTotalValues(maxTotalValues)
+                             .maxValuesPerRow(maxValuesPerRow)  // This test's runtime rows have lengths 1 and 3.
                              .build();
     (void)RaggedNetworkOutput::Builder().network(network).name("tokens_out").inputTensor(input).build();
 
@@ -209,7 +206,7 @@ TEST(RaggedNetworkOutputApi, IdentityOutputPreservesLogicalValuesAndHostPartitio
     offsetsPtr[2] = 4;
 
     Batch batch;
-    batch.insert("tokens", ThorImplementation::RaggedTensor(values, offsets));
+    batch.insert("tokens", ThorImplementation::RaggedTensor(values, offsets, maxValuesPerRow));
     std::map<std::string, InferenceOutputValue> outputs = placed->inferLogical(batch);
     ASSERT_EQ(outputs.size(), 1u);
     ASSERT_TRUE(outputs.contains("tokens_out"));

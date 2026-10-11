@@ -13,7 +13,7 @@ import thor
 
 
 BATCH_SIZE = 2
-HISTORY_CAPACITY = 32
+HISTORY_MAX_VALUES_PER_ROW = 32
 MODEL_WIDTH = 16
 FFN_WIDTH = 32
 FUTURE_DAYS = 100
@@ -217,9 +217,8 @@ def test_product_transformer_ragged_segmented_reduction_backward_baseline_places
         "history",
         thor.DataType.bf16,
         [MODEL_WIDTH],
-        max_total_values=HISTORY_CAPACITY,
-        batch_size=BATCH_SIZE,
         offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=HISTORY_MAX_VALUES_PER_ROW,
     )
     projected = thor.layers.FullyConnected(
         network,
@@ -262,9 +261,8 @@ def test_product_transformer_ragged_attention_postop_variants_place_for_training
         "history",
         thor.DataType.bf16,
         [MODEL_WIDTH],
-        max_total_values=HISTORY_CAPACITY,
-        batch_size=BATCH_SIZE,
         offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=HISTORY_MAX_VALUES_PER_ROW,
     )
     origins = thor.layers.NetworkInput(
         network, "history_origins", [1], thor.DataType.int32
@@ -304,9 +302,8 @@ def test_product_transformer_ragged_ffn_fused_fc_postop_places_for_training(
         "history",
         thor.DataType.bf16,
         [MODEL_WIDTH],
-        max_total_values=HISTORY_CAPACITY,
-        batch_size=BATCH_SIZE,
         offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=HISTORY_MAX_VALUES_PER_ROW,
     )
     gate_and_value = thor.layers.FullyConnected(
         network,
@@ -355,9 +352,8 @@ def test_product_transformer_ragged_encoder_block_with_fused_residual_dropout_pl
         "history",
         thor.DataType.bf16,
         [MODEL_WIDTH],
-        max_total_values=HISTORY_CAPACITY,
-        batch_size=BATCH_SIZE,
         offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=HISTORY_MAX_VALUES_PER_ROW,
     )
     origins = thor.layers.NetworkInput(
         network, "history_origins", [1], thor.DataType.int32
@@ -425,9 +421,8 @@ def test_product_transformer_dense_query_ragged_kv_decoder_with_fused_residual_d
         "history",
         thor.DataType.bf16,
         [MODEL_WIDTH],
-        max_total_values=HISTORY_CAPACITY,
-        batch_size=BATCH_SIZE,
         offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=HISTORY_MAX_VALUES_PER_ROW,
     )
     future = thor.layers.NetworkInput(
         network, "future", [FUTURE_DAYS, MODEL_WIDTH], thor.DataType.bf16
@@ -534,10 +529,8 @@ def test_product_transformer_ragged_fp32_diagnostic_custom_layer_backpropagates_
         "history",
         thor.DataType.bf16,
         [MODEL_WIDTH],
-        max_total_values=HISTORY_CAPACITY,
-        batch_size=BATCH_SIZE,
         offsets_data_type=thor.DataType.uint32,
-        max_values_per_row=HISTORY_CAPACITY,
+        max_values_per_row=HISTORY_MAX_VALUES_PER_ROW,
     )
     projected = thor.layers.FullyConnected(
         network,

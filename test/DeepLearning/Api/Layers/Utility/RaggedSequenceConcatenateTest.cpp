@@ -22,9 +22,9 @@ TEST(UtilityApiLayers, RaggedSequenceConcatenateBuildsNewCanonicalPartitionDescr
                             .valuesDataType(DataType::FP32)
                             .offsetsDataType(DataType::UINT64)
                             .trailingDimensions({2, 3})
-                            .maxTotalValues(5)
+                            
                             .maxValuesPerRow(3)
-                            .batchSize(3)
+                            
                             .build();
     RaggedTensor right = RaggedNetworkInput::Builder()
                              .network(network)
@@ -32,9 +32,9 @@ TEST(UtilityApiLayers, RaggedSequenceConcatenateBuildsNewCanonicalPartitionDescr
                              .valuesDataType(DataType::FP32)
                              .offsetsDataType(DataType::UINT64)
                              .trailingDimensions({2, 3})
-                             .maxTotalValues(7)
+                             
                              .maxValuesPerRow(4)
-                             .batchSize(3)
+                             
                              .build();
 
     RaggedSequenceConcatenate concatenate = RaggedSequenceConcatenate::Builder()
@@ -45,12 +45,12 @@ TEST(UtilityApiLayers, RaggedSequenceConcatenateBuildsNewCanonicalPartitionDescr
 
     ASSERT_TRUE(concatenate.isInitialized());
     const RaggedTensor output = concatenate.getRaggedFeatureOutput();
-    EXPECT_EQ(output.getValuesDimensions(), (vector<uint64_t>{12, 2, 3}));
-    EXPECT_EQ(output.getOffsetsDimensions(), (vector<uint64_t>{4}));
+    EXPECT_EQ(output.getValuesDimensions(), (vector<uint64_t>{7, 2, 3}));
+    EXPECT_EQ(output.getOffsetsDimensions(), (vector<uint64_t>{1}));
     EXPECT_EQ(output.getValuesDataType(), DataType::FP32);
     EXPECT_EQ(output.getOffsetsDataType(), DataType::UINT64);
-    EXPECT_EQ(output.getBatchSize(), 3u);
-    EXPECT_EQ(output.getMaxTotalValues(), 12u);
+    EXPECT_EQ(output.getMaxValuesPerRow(), 7u);
+    EXPECT_EQ(output.getOffsetsDimensions(), (vector<uint64_t>{1}));
     ASSERT_TRUE(output.hasMaxValuesPerRow());
     EXPECT_EQ(output.getMaxValuesPerRow(), 7u);
     EXPECT_NE(output.getOffsets(), left.getOffsets());
@@ -90,9 +90,9 @@ TEST(UtilityApiLayers, RaggedSequenceConcatenateDeduplicatesSharedStructuralPart
                               .valuesDataType(DataType::FP32)
                               .offsetsDataType(DataType::UINT32)
                               .trailingDimensions({4})
-                              .maxTotalValues(6)
+                              
                               .maxValuesPerRow(3)
-                              .batchSize(2)
+                              
                               .build();
     Slice left = Slice::Builder().network(network).featureInput(source).axis(0).start(0).length(2).build();
     Slice right = Slice::Builder().network(network).featureInput(source).axis(0).start(2).length(2).build();
@@ -112,7 +112,9 @@ TEST(UtilityApiLayers, RaggedSequenceConcatenateDeduplicatesSharedStructuralPart
     EXPECT_EQ(graphInputs[2], source.getOffsets());
 
     const RaggedTensor output = concatenate.getRaggedFeatureOutput();
-    EXPECT_EQ(output.getValuesDimensions(), (vector<uint64_t>{12, 2}));
+    EXPECT_EQ(output.getValuesDimensions(), (vector<uint64_t>{6, 2}));
+    EXPECT_EQ(output.getDescriptorForPlacement(2).getValuesDimensions(), (vector<uint64_t>{12, 2}));
+    EXPECT_EQ(output.getDescriptorForPlacement(7).getValuesDimensions(), (vector<uint64_t>{42, 2}));
     EXPECT_EQ(output.getMaxValuesPerRow(), 6u);
     EXPECT_NE(output.getOffsets(), source.getOffsets());
 }
@@ -126,9 +128,9 @@ TEST(UtilityApiLayers, RaggedSequenceConcatenateSubgraphCloneRemapsInputsAndAllo
                                   .valuesDataType(DataType::FP32)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({2})
-                                  .maxTotalValues(5)
+                                  
                                   .maxValuesPerRow(3)
-                                  .batchSize(3)
+                                  
                                   .build();
     RaggedTensor sourceRight = RaggedNetworkInput::Builder()
                                    .network(source)
@@ -136,9 +138,9 @@ TEST(UtilityApiLayers, RaggedSequenceConcatenateSubgraphCloneRemapsInputsAndAllo
                                    .valuesDataType(DataType::FP32)
                                    .offsetsDataType(DataType::UINT32)
                                    .trailingDimensions({2})
-                                   .maxTotalValues(7)
+                                   
                                    .maxValuesPerRow(4)
-                                   .batchSize(3)
+                                   
                                    .build();
     RaggedSequenceConcatenate sourceConcatenate = RaggedSequenceConcatenate::Builder()
                                                            .network(source)
@@ -158,9 +160,9 @@ TEST(UtilityApiLayers, RaggedSequenceConcatenateSubgraphCloneRemapsInputsAndAllo
                                        .valuesDataType(DataType::FP32)
                                        .offsetsDataType(DataType::UINT32)
                                        .trailingDimensions({2})
-                                       .maxTotalValues(5)
+                                       
                                        .maxValuesPerRow(3)
-                                       .batchSize(3)
+                                       
                                        .build();
     RaggedTensor destinationRight = RaggedNetworkInput::Builder()
                                         .network(destination)
@@ -168,9 +170,9 @@ TEST(UtilityApiLayers, RaggedSequenceConcatenateSubgraphCloneRemapsInputsAndAllo
                                         .valuesDataType(DataType::FP32)
                                         .offsetsDataType(DataType::UINT32)
                                         .trailingDimensions({2})
-                                        .maxTotalValues(7)
+                                        
                                         .maxValuesPerRow(4)
-                                        .batchSize(3)
+                                        
                                         .build();
 
     ApiTensorRemap remap;
@@ -191,8 +193,8 @@ TEST(UtilityApiLayers, RaggedSequenceConcatenateSubgraphCloneRemapsInputsAndAllo
     Tensor clonedValues = clone.outputTensorsByName.at("__thor_ragged_output.joined.values");
     Tensor clonedPartitionToken = clone.clonedTensorBySourceOriginalId.at(
         sourceConcatenate.getRaggedFeatureOutput().getRowPartitionToken().getOriginalId());
-    EXPECT_EQ(clonedValues.getDimensions(), (vector<uint64_t>{12, 2}));
-    EXPECT_EQ(clonedPartitionToken.getDimensions(), (vector<uint64_t>{4}));
+    EXPECT_EQ(clonedValues.getDimensions(), (vector<uint64_t>{7, 2}));
+    EXPECT_EQ(clonedPartitionToken.getDimensions(), (vector<uint64_t>{1}));
     EXPECT_NE(clonedPartitionToken, destinationLeft.getRowPartitionToken());
     EXPECT_NE(clonedPartitionToken, destinationRight.getRowPartitionToken());
 }
@@ -205,36 +207,28 @@ TEST(UtilityApiLayers, RaggedSequenceConcatenateRejectsIncompatibleDescriptorsAn
                                  .valuesDataType(DataType::FP32)
                                  .offsetsDataType(DataType::UINT32)
                                  .trailingDimensions({2})
-                                 .maxTotalValues(5)
-                                 .batchSize(3)
-                                 .build();
+                                 .maxValuesPerRow(3).build();
     RaggedTensor differentTrailing = RaggedNetworkInput::Builder()
                                          .network(network)
                                          .name("different_trailing")
                                          .valuesDataType(DataType::FP32)
                                          .offsetsDataType(DataType::UINT32)
                                          .trailingDimensions({3})
-                                         .maxTotalValues(5)
-                                         .batchSize(3)
-                                         .build();
+                                         .maxValuesPerRow(3).build();
     RaggedTensor differentOffsetsDtype = RaggedNetworkInput::Builder()
                                              .network(network)
                                              .name("different_offsets_dtype")
                                              .valuesDataType(DataType::FP32)
                                              .offsetsDataType(DataType::UINT64)
                                              .trailingDimensions({2})
-                                             .maxTotalValues(5)
-                                             .batchSize(3)
-                                             .build();
-    RaggedTensor differentBatch = RaggedNetworkInput::Builder()
+                                             .maxValuesPerRow(3).build();
+    RaggedTensor differentValuesDtype = RaggedNetworkInput::Builder()
                                       .network(network)
-                                      .name("different_batch")
-                                      .valuesDataType(DataType::FP32)
+                                      .name("different_values_dtype")
+                                      .valuesDataType(DataType::FP16)
                                       .offsetsDataType(DataType::UINT32)
                                       .trailingDimensions({2})
-                                      .maxTotalValues(5)
-                                      .batchSize(2)
-                                      .build();
+                                      .maxValuesPerRow(3).build();
 
     EXPECT_THROW((void)RaggedSequenceConcatenate::Builder()
                      .network(network)
@@ -251,7 +245,7 @@ TEST(UtilityApiLayers, RaggedSequenceConcatenateRejectsIncompatibleDescriptorsAn
     EXPECT_THROW((void)RaggedSequenceConcatenate::Builder()
                      .network(network)
                      .featureInput(reference)
-                     .featureInput(differentBatch)
+                     .featureInput(differentValuesDtype)
                      .build(),
                  std::invalid_argument);
     EXPECT_THROW((void)RaggedSequenceConcatenate::Builder()

@@ -19,6 +19,7 @@ def _physical_ragged(values: np.ndarray, offsets: np.ndarray, offsets_dtype: tho
     return thor.physical.PhysicalRaggedTensor(
         _cpu_tensor(values, thor.DataType.fp32),
         _cpu_tensor(offsets, offsets_dtype),
+        max_values_per_row=3,
     )
 
 
@@ -29,8 +30,7 @@ def _network(name: str, offsets_dtype: thor.DataType = thor.DataType.uint32):
         "tokens",
         thor.DataType.fp32,
         [2, 3, 4],
-        max_total_values=8,
-        batch_size=3,
+        max_values_per_row=3,
         offsets_data_type=offsets_dtype,
     )
     reshape = thor.layers.Reshape(network, tokens, [4, 6])
@@ -54,9 +54,10 @@ def test_ragged_shape_ops_preserve_partition_and_transform_only_trailing_shape()
     assert reshaped.offsets == tokens.offsets
     assert flattened.offsets == tokens.offsets
     assert transposed.offsets == tokens.offsets
-    assert reshaped.values.get_dimensions() == [8, 4, 6]
-    assert flattened.values.get_dimensions() == [8, 2, 12]
-    assert transposed.values.get_dimensions() == [8, 2, 4, 3]
+    assert reshaped.values.get_dimensions() == [3, 4, 6]
+    assert flattened.values.get_dimensions() == [3, 2, 12]
+    assert transposed.values.get_dimensions() == [3, 2, 4, 3]
+    assert tokens.offsets.get_dimensions() == [1]
 
     architecture = json.loads(network.get_architecture_json())
     by_type = {layer["layer_type"]: layer for layer in architecture["layers"] if layer["layer_type"] in {"reshape", "flatten", "transpose"}}
@@ -69,8 +70,7 @@ def test_ragged_shape_ops_preserve_partition_and_transform_only_trailing_shape()
         "vector",
         thor.DataType.fp32,
         [8],
-        max_total_values=4,
-        batch_size=2,
+        max_values_per_row=2,
     )
     with pytest.raises(Exception, match="elements per packed value|number of elements"):
         thor.layers.Reshape(reject, vector, [7])
@@ -93,7 +93,7 @@ def test_ragged_shape_ops_runtime_ignore_poison_and_reuse_changing_extents(offse
     placed = network.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
     def run(active_values: np.ndarray, offsets: np.ndarray):
-        packed = np.full((8, 2, 3, 4), np.nan, dtype=np.float32)
+        packed = np.full((3 * 3, 2, 3, 4), np.nan, dtype=np.float32)
         packed[: active_values.shape[0]] = active_values
         return placed.infer({"tokens": _physical_ragged(packed, offsets, offsets_dtype)})
 
@@ -154,7 +154,7 @@ def test_ragged_shape_ops_save_load_accepts_different_runtime_partition(tmp_path
     placed = loaded.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
     active = (3000.0 + np.arange(5 * 24, dtype=np.float32)).reshape(5, 2, 3, 4)
-    values = np.full((8, 2, 3, 4), np.nan, dtype=np.float32)
+    values = np.full((3 * 3, 2, 3, 4), np.nan, dtype=np.float32)
     values[:5] = active
     offsets = np.array([0, 2, 2, 5], dtype=np.uint32)
     outputs = placed.infer({"tokens": _physical_ragged(values, offsets, thor.DataType.uint32)})

@@ -192,8 +192,6 @@ def _ragged_input(
     n: thor.Network,
     channels: int = 8,
     *,
-    max_total_values: int = 96,
-    batch_size: int = 3,
     max_values_per_row: int | None = 48,
     name: str = "tokens",
 ):
@@ -202,16 +200,14 @@ def _ragged_input(
         name,
         thor.DataType.fp32,
         [channels],
-        max_total_values=max_total_values,
-        batch_size=batch_size,
         offsets_data_type=thor.DataType.uint32,
         max_values_per_row=max_values_per_row,
     )
 
 
-def test_conv1d_accepts_ragged_input_and_preserves_capacity_contract():
+def test_conv1d_accepts_ragged_input_and_preserves_logical_geometry():
     n = _net("test_conv1d_ragged_contract")
-    x = _ragged_input(n, channels=8, max_total_values=96, batch_size=3, max_values_per_row=48)
+    x = _ragged_input(n, channels=8, max_values_per_row=48)
 
     conv = thor.layers.Convolution1d(
         n,
@@ -227,10 +223,9 @@ def test_conv1d_accepts_ragged_input_and_preserves_capacity_contract():
 
     assert conv.get_use_ragged() is True
     assert isinstance(y, thor.RaggedTensor)
-    assert y.values.get_dimensions() == [96, 12]
+    assert y.values.get_dimensions() == [48, 12]
     assert y.offsets == x.offsets
-    assert y.batch_size == x.batch_size == 3
-    assert y.max_total_values == x.max_total_values == 96
+    assert y.offsets.get_dimensions() == [1]
     assert y.max_values_per_row == x.max_values_per_row == 48
 
     arch = _only_arch(n)
@@ -283,9 +278,10 @@ def test_conv1d_ragged_rejects_unsupported_geometry(kwargs, message):
 
 def test_conv1d_ragged_requires_max_values_per_row():
     n = _net("test_conv1d_ragged_missing_max_row")
-    x = _ragged_input(n, channels=4, max_values_per_row=None)
+    # A standalone boundary without semantic M must fail before any layer can
+    # reinterpret archived batch/capacity hints as a model property.
     with pytest.raises(ValueError, match="max_values_per_row"):
-        thor.layers.Convolution1d(n, x, num_output_channels=6, filter_width=3, padding="causal", activation=None)
+        _ragged_input(n, channels=4, max_values_per_row=None)
 
 
 def test_conv1d_rejects_non_tensor_feature_input():
@@ -304,7 +300,7 @@ def test_conv1d_rejects_non_tensor_feature_input():
 )
 def test_conv1d_ragged_grouped_and_depthwise_place(channels, num_output_channels, groups):
     n = _net(f"test_conv1d_ragged_place_g{groups}")
-    x = _ragged_input(n, channels=channels, max_total_values=96, batch_size=3, max_values_per_row=48)
+    x = _ragged_input(n, channels=channels, max_values_per_row=48)
     conv = thor.layers.Convolution1d(
         n,
         x,
@@ -326,7 +322,7 @@ def test_conv1d_ragged_grouped_and_depthwise_place(channels, num_output_channels
 def test_conv1d_ragged_places_for_training_with_network_default_optimizer():
     n = _net("test_conv1d_ragged_training_place")
     thor.optimizers.Sgd(initial_learning_rate=0.01, network=n)
-    x = _ragged_input(n, channels=8, max_total_values=96, batch_size=3, max_values_per_row=48)
+    x = _ragged_input(n, channels=8, max_values_per_row=48)
     conv = thor.layers.Convolution1d(
         n,
         x,
@@ -350,8 +346,6 @@ def test_conv1d_ragged_f2_style_public_layer_chain_preserves_partition_end_to_en
     x = _ragged_input(
         n,
         channels=6,
-        max_total_values=24,
-        batch_size=3,
         max_values_per_row=8,
         name="history",
     )
@@ -395,10 +389,9 @@ def test_conv1d_ragged_f2_style_public_layer_chain_preserves_partition_end_to_en
 
     for stage, channels in stages:
         assert isinstance(stage, thor.RaggedTensor)
-        assert stage.values.get_dimensions() == [24, channels]
+        assert stage.values.get_dimensions() == [8, channels]
         assert stage.offsets == root_offsets
-        assert stage.batch_size == 3
-        assert stage.max_total_values == 24
+        assert stage.offsets.get_dimensions() == [1]
         assert stage.max_values_per_row == 8
 
     arch = json.loads(n.get_architecture_json())

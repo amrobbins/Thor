@@ -139,9 +139,7 @@ F2ChainHandles buildF2PublicChain(Api::Network& network, bool addGradientRivets,
                                .valuesDataType(DataType::FP32)
                                .offsetsDataType(DataType::UINT32)
                                .trailingDimensions({kInputFeatures})
-                               .maxTotalValues(kMaxTotalValues)
                                .maxValuesPerRow(kMaxValuesPerRow)
-                               .batchSize(kBatchSize)
                                .build();
     handles.chainInput = handles.networkInput;
 
@@ -290,24 +288,35 @@ void expectSamePartitionContract(const Api::RaggedTensor& tensor,
                                  const Api::RaggedTensor& root,
                                  uint64_t channels) {
     EXPECT_EQ(tensor.getOffsets(), root.getOffsets());
-    EXPECT_EQ(tensor.getBatchSize(), root.getBatchSize());
-    EXPECT_EQ(tensor.getMaxTotalValues(), root.getMaxTotalValues());
+    ASSERT_TRUE(root.hasMaxValuesPerRow());
     ASSERT_TRUE(tensor.hasMaxValuesPerRow());
     EXPECT_EQ(tensor.getMaxValuesPerRow(), root.getMaxValuesPerRow());
-    EXPECT_EQ(tensor.getValuesDimensions(), (vector<uint64_t>{root.getMaxTotalValues(), channels}));
+    EXPECT_EQ(tensor.getOffsetsDimensions(), (vector<uint64_t>{1}));
+    EXPECT_EQ(tensor.getValuesDimensions(), (vector<uint64_t>{root.getMaxValuesPerRow(), channels}));
+    for (uint64_t batchSize : {2u, 7u}) {
+        const auto physical = tensor.getDescriptorForPlacement(batchSize);
+        EXPECT_EQ(physical.getValuesDimensions(),
+                  (vector<uint64_t>{batchSize * root.getMaxValuesPerRow(), channels}));
+        EXPECT_EQ(physical.getRowPartition(), root.getDescriptorForPlacement(batchSize).getRowPartition());
+    }
 }
 
 void expectSameExternalPartitionDescriptor(const Api::RaggedTensor& tensor, const Api::RaggedTensor& root) {
     // RaggedNetworkOutput is a real graph boundary: its internal NetworkOutput
-    // layers own distinct values/offsets tensors.  The canonical partition
-    // invariant across that boundary is descriptor/content equality, not API
-    // Tensor object identity.
-    EXPECT_EQ(tensor.getBatchSize(), root.getBatchSize());
-    EXPECT_EQ(tensor.getMaxTotalValues(), root.getMaxTotalValues());
+    // layers own distinct values/partition-token tensors. The invariant across
+    // that boundary is semantic M plus placement-derived partition equivalence,
+    // not API Tensor object identity or an archived physical batch size.
     ASSERT_EQ(tensor.hasMaxValuesPerRow(), root.hasMaxValuesPerRow());
-    if (root.hasMaxValuesPerRow()) EXPECT_EQ(tensor.getMaxValuesPerRow(), root.getMaxValuesPerRow());
+    ASSERT_TRUE(root.hasMaxValuesPerRow());
+    EXPECT_EQ(tensor.getMaxValuesPerRow(), root.getMaxValuesPerRow());
+    EXPECT_EQ(tensor.getValuesDimensions().front(), root.getValuesDimensions().front());
     EXPECT_EQ(tensor.getOffsetsDataType(), root.getOffsetsDataType());
-    EXPECT_EQ(tensor.getOffsets().getDimensions(), root.getOffsets().getDimensions());
+    EXPECT_EQ(tensor.getOffsetsDimensions(), (vector<uint64_t>{1}));
+    EXPECT_EQ(root.getOffsetsDimensions(), (vector<uint64_t>{1}));
+    for (uint64_t batchSize : {2u, 7u}) {
+        EXPECT_EQ(tensor.getDescriptorForPlacement(batchSize).getRowPartition(),
+                  root.getDescriptorForPlacement(batchSize).getRowPartition());
+    }
 }
 
 vector<float> makePoisonedInputValues() {
@@ -387,7 +396,7 @@ vector<uint32_t> readRaggedOutputOffsets(Api::PlacedNetwork& placed,
     physicalValuesOutput->getOutputReadyEvent().synchronize();
     Impl::RowPartitionRuntime partition = Impl::RowPartitionRuntime::fromHostStateCarrier(
         physicalValuesOutput->getFeatureOutput().value(),
-        outputReference.raggedTensor.getDescriptor().getRowPartition());
+        outputReference.raggedTensor.getDescriptorForPlacement(kBatchSize).getRowPartition());
     const vector<uint64_t> hostOffsets = partition.requireHostOffsets();
     vector<uint32_t> result;
     result.reserve(hostOffsets.size());
@@ -571,12 +580,15 @@ TEST(RaggedConvolution1dPublicIntegration, F2StyleChainPreservesCanonicalPartiti
     ASSERT_EQ(externalInputs.size(), 1u);
     ASSERT_EQ(externalOutputs.size(), 1u);
     expectSameExternalPartitionDescriptor(externalOutputs.front().raggedTensor, externalInputs.front().raggedTensor);
-    EXPECT_EQ(externalOutputs.front().raggedTensor.getBatchSize(), kBatchSize);
-    EXPECT_EQ(externalOutputs.front().raggedTensor.getMaxTotalValues(), kMaxTotalValues);
     ASSERT_TRUE(externalOutputs.front().raggedTensor.hasMaxValuesPerRow());
     EXPECT_EQ(externalOutputs.front().raggedTensor.getMaxValuesPerRow(), kMaxValuesPerRow);
     EXPECT_EQ(externalOutputs.front().raggedTensor.getValuesDimensions(),
-              (vector<uint64_t>{kMaxTotalValues, kInputFeatures}));
+              (vector<uint64_t>{kMaxValuesPerRow, kInputFeatures}));
+    EXPECT_EQ(externalOutputs.front().raggedTensor.getOffsetsDimensions(), (vector<uint64_t>{1}));
+    const auto placedOutput = externalOutputs.front().raggedTensor.getDescriptorForPlacement(kBatchSize);
+    EXPECT_EQ(placedOutput.getBatchSize(), kBatchSize);
+    EXPECT_EQ(placedOutput.getMaxTotalValues(), kMaxTotalValues);
+    EXPECT_EQ(placedOutput.getValuesDimensions(), (vector<uint64_t>{kMaxTotalValues, kInputFeatures}));
 }
 
 TEST(RaggedConvolution1dPublicIntegration, F2StyleChainPlacesBackpropagatesAndRoundTripsForTraining) {
@@ -701,10 +713,14 @@ TEST(RaggedConvolution1dPublicIntegration, F2StyleChainPlacesBackpropagatesAndRo
         ASSERT_EQ(loadedInputs.size(), 1u);
         ASSERT_EQ(loadedOutputs.size(), 1u);
         expectSameExternalPartitionDescriptor(loadedOutputs.front().raggedTensor, loadedInputs.front().raggedTensor);
-        EXPECT_EQ(loadedOutputs.front().raggedTensor.getBatchSize(), kBatchSize);
-        EXPECT_EQ(loadedOutputs.front().raggedTensor.getMaxTotalValues(), kMaxTotalValues);
         ASSERT_TRUE(loadedOutputs.front().raggedTensor.hasMaxValuesPerRow());
         EXPECT_EQ(loadedOutputs.front().raggedTensor.getMaxValuesPerRow(), kMaxValuesPerRow);
+        EXPECT_EQ(loadedOutputs.front().raggedTensor.getValuesDimensions(),
+                  (vector<uint64_t>{kMaxValuesPerRow, kInputFeatures}));
+        EXPECT_EQ(loadedOutputs.front().raggedTensor.getOffsetsDimensions(), (vector<uint64_t>{1}));
+        const auto loadedPhysicalOutput = loadedOutputs.front().raggedTensor.getDescriptorForPlacement(kBatchSize);
+        EXPECT_EQ(loadedPhysicalOutput.getBatchSize(), kBatchSize);
+        EXPECT_EQ(loadedPhysicalOutput.getMaxTotalValues(), kMaxTotalValues);
 
         uint32_t loadedConvCount = 0;
         vector<uint64_t> loadedDilations;

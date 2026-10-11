@@ -137,9 +137,7 @@ class BinaryFocalLoss::Builder {
                                 labelDType == DataType::UINT32 || labelDType == DataType::FP16 || labelDType == DataType::FP32);
             if (!predictions.sharesPartitionWith(labels))
                 throw std::invalid_argument("BinaryFocalLoss ragged predictions and labels must use the exact same row partition.");
-            if (predictions.getBatchSize() != labels.getBatchSize() ||
-                predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
-                predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+            if (predictions.getValuesDimensions() != labels.getValuesDimensions())
                 throw std::invalid_argument("BinaryFocalLoss ragged predictions and labels must have identical value geometry.");
             if (!_lossDataType.has_value()) _lossDataType = predictions.getValuesDataType();
             binaryFocalLoss.predictionsTensor = predictions.getValues();

@@ -56,7 +56,7 @@ ThorImplementation::Expression safePositive(const ThorImplementation::Expression
 vector<uint64_t> raggedPackedScalarWeightBroadcastDimensions(const vector<uint64_t>& predictionValueDimensions) {
     if (predictionValueDimensions.empty()) throw invalid_argument("TweedieLoss ragged prediction values must have a packed-capacity dimension.");
     vector<uint64_t> dimensions(predictionValueDimensions.size(), 1);
-    dimensions.front() = predictionValueDimensions.front();
+    dimensions.front() = 0;  // Copy the physical packed extent from exampleWeights at runtime.
     return dimensions;
 }
 

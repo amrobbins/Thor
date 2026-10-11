@@ -37,6 +37,7 @@ struct PhysicalExecutionStage {
         Softmax,
         RmsNorm,
         LayerNorm,
+        LayerNormBackward,
         RmsNormBackward,
         EmbeddingLookup,
         Matmul,
@@ -107,6 +108,7 @@ class EquationCompiler {
     static std::shared_ptr<CompiledRmsNorm> compileRmsNorm(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledLayerNorm> compileLayerNorm(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledRmsNormBackward> compileRmsNormBackward(const PhysicalExpression& expr);
+    static std::shared_ptr<CompiledLayerNormBackward> compileLayerNormBackward(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledEmbeddingLookup> compileEmbeddingLookup(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledMatmul> compileMatmul(const PhysicalExpression& expr, const std::vector<CompiledStageOutput>& outputs = {});
     static std::shared_ptr<CompiledInPlaceRope> compileInPlaceRope(const PhysicalExpression& expr, const std::vector<CompiledStageOutput>& outputs = {});

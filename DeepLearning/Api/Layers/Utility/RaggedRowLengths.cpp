@@ -36,11 +36,6 @@ RaggedRowLengths RaggedRowLengths::Builder::build() {
     if (!_network.has_value() || !_featureInput.has_value()) {
         throw std::runtime_error("RaggedRowLengths requires network and featureInput.");
     }
-    if (!_featureInput->isPlacementNeutral() &&
-        (_featureInput->getBatchSize() == 0 || _featureInput->getBatchSize() > std::numeric_limits<uint32_t>::max())) {
-        throw std::invalid_argument("RaggedRowLengths requires a nonzero batch size within uint32 capacity.");
-    }
-
     RaggedRowLengths layer;
     layer.raggedFeatureInput = _featureInput.value();
     // Row lengths are a property of the partition only. Deliberately depend on
@@ -56,9 +51,8 @@ RaggedRowLengths RaggedRowLengths::Builder::build() {
 uint64_t RaggedRowLengths::getOutputTensorBytes(uint32_t batchSize) const {
     THOR_THROW_IF_FALSE(featureOutput.has_value());
     const uint64_t perRow = featureOutput->getTotalSizeInBytes();
-    const uint64_t physicalBatchSize = raggedFeatureInput.isPlacementNeutral()
-        ? static_cast<uint64_t>(batchSize)
-        : raggedFeatureInput.getBatchSize();
+    THOR_THROW_IF_FALSE(batchSize > 0);
+    const uint64_t physicalBatchSize = batchSize;
     if (physicalBatchSize != 0 && perRow > std::numeric_limits<uint64_t>::max() / physicalBatchSize) {
         throw std::overflow_error("RaggedRowLengths output size overflows uint64_t.");
     }
@@ -70,24 +64,15 @@ uint64_t RaggedRowLengths::getFirstInstanceMemRequirementInBytes(
     (void)tensorPlacement;
     THOR_THROW_IF_FALSE(featureInput.has_value());
 
-    if (raggedFeatureInput.isPlacementNeutral()) {
-        THOR_THROW_IF_FALSE(batchSize > 0);
-        const ThorImplementation::RaggedTensorDescriptor physicalInputDescriptor =
-            raggedFeatureInput.getDescriptorForPlacement(batchSize);
-        const uint64_t offsetsBytes = physicalInputDescriptor.getOffsetsDescriptor().getArraySizeInBytes();
-        const uint64_t outputBytes = getOutputTensorBytes(batchSize);
-        if (offsetsBytes > std::numeric_limits<uint64_t>::max() - outputBytes) {
-            throw std::overflow_error("RaggedRowLengths neutral memory requirement overflows uint64_t.");
-        }
-        return offsetsBytes + outputBytes;
-    }
-
-    const uint64_t outputBytes = getOutputTensorBytes(0);
-    const uint64_t inputBytes = featureInput->getTotalSizeInBytes();
-    if (outputBytes > std::numeric_limits<uint64_t>::max() - inputBytes) {
+    THOR_THROW_IF_FALSE(batchSize > 0);
+    const ThorImplementation::RaggedTensorDescriptor physicalInputDescriptor =
+        raggedFeatureInput.getDescriptorForPlacement(batchSize);
+    const uint64_t offsetsBytes = physicalInputDescriptor.getOffsetsDescriptor().getArraySizeInBytes();
+    const uint64_t outputBytes = getOutputTensorBytes(batchSize);
+    if (offsetsBytes > std::numeric_limits<uint64_t>::max() - outputBytes) {
         throw std::overflow_error("RaggedRowLengths memory requirement overflows uint64_t.");
     }
-    return outputBytes + inputBytes;
+    return offsetsBytes + outputBytes;
 }
 
 std::shared_ptr<ThorImplementation::Layer> RaggedRowLengths::stamp(
@@ -144,9 +129,8 @@ std::shared_ptr<ThorImplementation::Layer> RaggedRowLengths::stamp(
 json RaggedRowLengths::architectureJson() const {
     THOR_THROW_IF_FALSE(initialized);
     THOR_THROW_IF_FALSE(featureInput.has_value() && featureOutput.has_value());
-    const bool placementNeutral = raggedFeatureInput.isPlacementNeutral();
     return json{{"factory", Layer::Factory::Layer.value()},
-                {"version", placementNeutral ? "1.1.0" : getLayerVersion()},
+                {"version", "1.1.0"},
                 {"layer_type", "ragged_row_lengths"},
                 {"ragged_feature_input",
                  SegmentedPrimitiveDetail::architectureJsonForLayerRaggedReference(raggedFeatureInput)},
@@ -165,19 +149,22 @@ void RaggedRowLengths::deserialize(const json& j, Network* network) {
 
     const json& inputJson = j.at("ragged_feature_input");
     RaggedTensor ragged = SegmentedPrimitiveDetail::reconstructInput(inputJson, network, "RaggedRowLengths");
-    if ((version == "1.0.0" && ragged.isPlacementNeutral()) ||
-        (version == "1.1.0" && !ragged.isPlacementNeutral())) {
-        throw std::runtime_error("RaggedRowLengths serialized layer version does not match its ragged geometry mode.");
-    }
+    // Older reference grammar may contain packed physical extents. The
+    // authoritative logical M and partition come from the graph's source.
+    const bool semanticReference =
+        SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(inputJson, "RaggedRowLengths") ==
+        SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL;
 
     const json& offsetsJson = j.at("offsets_input");
     const uint64_t serializedOffsetsId = offsetsJson.at("id").get<uint64_t>();
     if (serializedOffsetsId != inputJson.at("offsets").at("id").get<uint64_t>()) {
         throw std::runtime_error("RaggedRowLengths serialized offsets_input must match its ragged input partition token.");
     }
-    if (offsetsJson.at("dimensions").get<std::vector<uint64_t>>() != ragged.getOffsetsDimensions() ||
+    const auto archivedOffsets = offsetsJson.at("dimensions").get<std::vector<uint64_t>>();
+    if (archivedOffsets.size() != 1 || archivedOffsets.front() == 0 ||
+        (semanticReference && archivedOffsets != ragged.getOffsetsDimensions()) ||
         offsetsJson.at("data_type").get<DataType>() != ragged.getOffsetsDataType()) {
-        throw std::runtime_error("RaggedRowLengths serialized offsets_input descriptor must match its ragged input partition token.");
+        throw std::runtime_error("RaggedRowLengths serialized offsets_input descriptor must match its logical partition token.");
     }
     Tensor offsets = network->getApiTensorByOriginalId(serializedOffsetsId);
     if (offsets != ragged.getOffsets()) {

@@ -112,8 +112,7 @@ class PoissonNLLLoss::Builder {
             THOR_THROW_IF_FALSE(predictions.getValues() != labels.getValues());
             if (!predictions.sharesPartitionWith(labels))
                 throw std::invalid_argument("PoissonNLLLoss ragged predictions and labels must use the exact same row partition.");
-            if (predictions.getBatchSize() != labels.getBatchSize() || predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
-                predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+            if (predictions.getValuesDimensions() != labels.getValuesDimensions())
                 throw std::invalid_argument("PoissonNLLLoss ragged predictions and labels must have identical value geometry.");
             if (_exampleWeights.has_value() && _exampleWeights->getDimensions() != std::vector<uint64_t>{1})
                 throw std::invalid_argument("PoissonNLLLoss ragged example_weights must have dimensions [1] for one scalar weight per logical row.");

@@ -172,9 +172,8 @@ class GaussianNLLLoss::Builder {
             THOR_THROW_IF_FALSE(target.getValues() != variance.getValues());
             if (!mean.sharesPartitionWith(target) || !mean.sharesPartitionWith(variance))
                 throw std::invalid_argument("GaussianNLLLoss ragged mean, target, and variance must use the exact same row partition.");
-            if (mean.getBatchSize() != target.getBatchSize() || mean.getBatchSize() != variance.getBatchSize() ||
-                mean.getMaxTotalValues() != target.getMaxTotalValues() || mean.getMaxTotalValues() != variance.getMaxTotalValues() ||
-                mean.getTrailingDimensions() != target.getTrailingDimensions() || mean.getTrailingDimensions() != variance.getTrailingDimensions())
+            if (mean.getValuesDimensions() != target.getValuesDimensions() ||
+                mean.getValuesDimensions() != variance.getValuesDimensions())
                 throw std::invalid_argument("GaussianNLLLoss ragged mean, target, and variance must have identical value geometry.");
             if (_exampleWeights.has_value() && _exampleWeights->getDimensions() != std::vector<uint64_t>{1})
                 throw std::invalid_argument("GaussianNLLLoss ragged example_weights must have dimensions [1] for one scalar weight per logical row.");

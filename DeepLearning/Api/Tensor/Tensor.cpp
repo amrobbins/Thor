@@ -32,3 +32,13 @@ Tensor Tensor::deserialize(const json &j, thor_file::TarReader *archiveReader) {
     deserialized.initialized = true;
     return deserialized;
 }
+
+Tensor Tensor::deserializeWithDimensions(const json &j,
+                                         const vector<uint64_t> &logicalDimensions,
+                                         thor_file::TarReader *archiveReader) {
+    Tensor deserialized = deserialize(j, archiveReader);
+    THOR_THROW_IF_FALSE(!logicalDimensions.empty());
+    for (uint64_t dimension : logicalDimensions) THOR_THROW_IF_FALSE(dimension > 0);
+    deserialized.dimensions = logicalDimensions;
+    return deserialized;
+}

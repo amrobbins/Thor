@@ -1103,12 +1103,10 @@ RaggedAttentionPoisonTrainingResult runRaggedQueryAttentionPoisonTrainingCase(
                                   .valuesDataType(dataType)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({features})
-                                  .maxTotalValues(queryCapacity)
-                                  .batchSize(batchSize)
-                                  .build();
+                                  .maxValuesPerRow(4).build();
     Api::GradientRivet queryRivet =
         Api::GradientRivet::Builder().network(network).tensor(query.getValues()).build();
-    Api::RaggedTensor queryForAttention(queryRivet.getFeatureOutput().value(), query.getOffsets());
+    Api::RaggedTensor queryForAttention = query.withValues(queryRivet.getFeatureOutput().value());
 
     optional<Api::NetworkInput> context;
     optional<Api::GradientRivet> contextRivet;
@@ -2013,9 +2011,7 @@ TEST(AttentionApi, FirstClassResidualPreservesRaggedQueryPartition) {
                                   .valuesDataType(DataType::BF16)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({8})
-                                  .maxTotalValues(12)
-                                  .batchSize(3)
-                                  .build();
+                                  .maxValuesPerRow(4).build();
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
@@ -2037,7 +2033,7 @@ TEST(AttentionApi, FirstClassResidualPreservesRaggedQueryPartition) {
               (std::vector<std::string>{"query_input", "key_input", "value_input", "query_row_partition", "key_value_row_partition", "residual_input"}));
     ASSERT_TRUE(attention.getRaggedFeatureOutput().has_value());
     EXPECT_EQ(attention.getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
-    EXPECT_EQ(attention.getRaggedFeatureOutput()->getValuesDimensions(), (std::vector<uint64_t>{12, 8}));
+    EXPECT_EQ(attention.getRaggedFeatureOutput()->getValuesDimensions(), (std::vector<uint64_t>{4, 8}));
 
     Api::RaggedTensor differentPartition = Api::RaggedNetworkInput::Builder()
                                                .network(network)
@@ -2045,9 +2041,7 @@ TEST(AttentionApi, FirstClassResidualPreservesRaggedQueryPartition) {
                                                .valuesDataType(DataType::BF16)
                                                .offsetsDataType(DataType::UINT32)
                                                .trailingDimensions({8})
-                                               .maxTotalValues(12)
-                                               .batchSize(3)
-                                               .build();
+                                               .maxValuesPerRow(4).build();
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
                      .queryInput(input).keyInput(input).valueInput(input)
@@ -2804,12 +2798,10 @@ Impl::CudnnScaledDotProductAttention::TestExecutionCounters runDenseQueryRaggedK
                                     .valuesDataType(dataType)
                                     .offsetsDataType(DataType::UINT32)
                                     .trailingDimensions({features})
-                                    .maxTotalValues(contextCapacity)
-                                    .batchSize(batchSize)
-                                    .build();
+                                    .maxValuesPerRow(4).build();
     Api::GradientRivet contextRivet =
         Api::GradientRivet::Builder().network(network).tensor(context.getValues()).build();
-    Api::RaggedTensor contextForAttention(contextRivet.getFeatureOutput().value(), context.getOffsets());
+    Api::RaggedTensor contextForAttention = context.withValues(contextRivet.getFeatureOutput().value());
 
     shared_ptr<Api::Sgd> sgd =
         Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
@@ -3622,9 +3614,7 @@ TEST(AttentionApi, RaggedDynamicNtkRejectsCapacityBeyondFp32ExactIntegerRange) {
                                    .name("tokens")
                                    .valuesDataType(DataType::BF16)
                                    .trailingDimensions({8})
-                                   .batchSize(2)
-                                   .maxTotalValues(maxExactFp32Integer + 1)
-                                   .build();
+                                   .maxValuesPerRow(maxExactFp32Integer + 1).build();
 
     Impl::RotaryPositionEmbeddingOptions rope;
     rope.rotary_dim = 8;
@@ -4041,9 +4031,7 @@ TEST(AttentionApi, BuildsComposedAttentionWithCanonicalRaggedTensorInput) {
                                   .valuesDataType(DataType::FP16)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({64})
-                                  .maxTotalValues(8)
-                                  .batchSize(2)
-                                  .build();
+                                  .maxValuesPerRow(4).build();
 
     Api::Attention attention = Api::Attention::Builder().network(network).queryInput(input).keyInput(input).valueInput(input).numHeads(4).headDim(16).build();
 
@@ -4055,9 +4043,9 @@ TEST(AttentionApi, BuildsComposedAttentionWithCanonicalRaggedTensorInput) {
     ASSERT_TRUE(attention.getRaggedFeatureOutput().has_value());
     EXPECT_EQ(attention.getRaggedQueryInput()->getOffsets(), input.getOffsets());
     EXPECT_EQ(attention.getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
-    EXPECT_EQ(attention.getRaggedFeatureOutput()->getValuesDimensions(), (std::vector<uint64_t>{8, 64}));
-    EXPECT_EQ(attention.getRaggedFeatureOutput()->getBatchSize(), 2u);
-    EXPECT_EQ(attention.getRaggedFeatureOutput()->getMaxTotalValues(), 8u);
+    EXPECT_EQ(attention.getRaggedFeatureOutput()->getValuesDimensions(), (std::vector<uint64_t>{4, 64}));
+    EXPECT_EQ(attention.getRaggedFeatureOutput()->getMaxValuesPerRow(), input.getMaxValuesPerRow());
+    EXPECT_EQ(attention.getRaggedFeatureOutput()->getOffsetsDimensions(), (std::vector<uint64_t>{1}));
 }
 
 TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveCanonicalRaggedTensorInput) {
@@ -4068,9 +4056,9 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveCanonicalRaggedTensorIn
                                   .valuesDataType(DataType::FP16)
                                   .offsetsDataType(DataType::UINT64)
                                   .trailingDimensions({64})
-                                  .maxTotalValues(16)
+                                  
                                   .maxValuesPerRow(8)
-                                  .batchSize(2)
+                                  
                                   .build();
 
     Api::Attention attention = Api::Attention::Builder()
@@ -4090,7 +4078,7 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveCanonicalRaggedTensorIn
     ASSERT_TRUE(arch.contains("ragged_query_input"));
     ASSERT_TRUE(arch.contains("ragged_feature_output"));
     EXPECT_EQ(arch.at("ragged_query_input").at("offsets").at("data_type").get<DataType>(), DataType::UINT64);
-    EXPECT_EQ(arch.at("ragged_query_input").at("max_total_values").get<uint64_t>(), 16u);
+    EXPECT_FALSE(arch.at("ragged_query_input").contains("max_total_values"));
     EXPECT_EQ(arch.at("ragged_query_input").at("max_values_per_row").get<uint64_t>(), 8u);
     EXPECT_EQ(arch.at("ragged_feature_output").at("max_values_per_row").get<uint64_t>(), 8u);
 
@@ -4107,7 +4095,7 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveCanonicalRaggedTensorIn
     EXPECT_EQ(restored->getRaggedQueryInput()->getOffsetsDataType(), DataType::UINT64);
     EXPECT_TRUE(restored->getRaggedQueryInput()->hasMaxValuesPerRow());
     EXPECT_EQ(restored->getRaggedQueryInput()->getMaxValuesPerRow(), 8u);
-    EXPECT_EQ(restored->getRaggedQueryInput()->getMaxTotalValues(), 16u);
+    EXPECT_EQ(restored->getRaggedQueryInput()->getValuesDimensions().front(), 8u);
     EXPECT_TRUE(restored->getRaggedFeatureOutput()->hasMaxValuesPerRow());
     EXPECT_EQ(restored->getRaggedFeatureOutput()->getMaxValuesPerRow(), 8u);
     EXPECT_EQ(restored->getRaggedFeatureOutput()->getOffsets(), restored->getRaggedQueryInput()->getOffsets());
@@ -4123,9 +4111,7 @@ TEST(AttentionApi, DeserializeRejectsRemovedRawRaggedMetadataFields) {
                                   .valuesDataType(DataType::FP16)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({64})
-                                  .maxTotalValues(8)
-                                  .batchSize(2)
-                                  .build();
+                                  .maxValuesPerRow(4).build();
     Api::Attention attention = Api::Attention::Builder().network(network).queryInput(input).keyInput(input).valueInput(input).numHeads(4).headDim(16).build();
     const nlohmann::json arch = attention.architectureJson();
     shared_ptr<thor_file::TarReader> archiveReader;
@@ -4149,18 +4135,14 @@ TEST(AttentionApi, BuildsRaggedCrossAttentionWithIndependentPartitionsWithoutRop
                                     .valuesDataType(DataType::FP16)
                                     .offsetsDataType(DataType::UINT32)
                                     .trailingDimensions({32})
-                                    .maxTotalValues(5)
-                                    .batchSize(2)
-                                    .build();
+                                    .maxValuesPerRow(3).build();
     Api::RaggedTensor encoder = Api::RaggedNetworkInput::Builder()
                                     .network(network)
                                     .name("encoder")
                                     .valuesDataType(DataType::FP16)
                                     .offsetsDataType(DataType::UINT64)
                                     .trailingDimensions({48})
-                                    .maxTotalValues(7)
-                                    .batchSize(2)
-                                    .build();
+                                    .maxValuesPerRow(4).build();
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
@@ -4181,7 +4163,7 @@ TEST(AttentionApi, BuildsRaggedCrossAttentionWithIndependentPartitionsWithoutRop
     ASSERT_TRUE(attention.getRaggedFeatureOutput().has_value());
     EXPECT_EQ(attention.getRaggedQueryInput()->getOffsetsDataType(), DataType::UINT32);
     EXPECT_EQ(attention.getRaggedKeyInput()->getOffsetsDataType(), DataType::UINT64);
-    EXPECT_EQ(attention.getRaggedFeatureOutput()->getValuesDimensions(), (std::vector<uint64_t>{5, 40}));
+    EXPECT_EQ(attention.getRaggedFeatureOutput()->getValuesDimensions(), (std::vector<uint64_t>{3, 40}));
     EXPECT_EQ(attention.getRaggedFeatureOutput()->getOffsets(), decoder.getOffsets());
     EXPECT_EQ(attention.getInputNames(),
               (std::vector<std::string>{"query_input", "key_input", "value_input", "query_row_partition", "key_value_row_partition"}));
@@ -4202,9 +4184,7 @@ TEST(AttentionApi, DenseQueryRaggedKvInfersMixedModeAndRoundTripsArchitecture) {
                                     .valuesDataType(DataType::FP16)
                                     .offsetsDataType(DataType::UINT64)
                                     .trailingDimensions({32})
-                                    .maxTotalValues(11)
-                                    .batchSize(3)
-                                    .build();
+                                    .maxValuesPerRow(4).build();
     Api::NetworkInput keyOrigins =
         Api::NetworkInput::Builder().network(network).name("key_origins").dimensions({1}).dataType(DataType::INT32).build();
 
@@ -4264,9 +4244,7 @@ TEST(AttentionApi, RaggedQueryDenseKvInfersMixedModeAndRoundTripsArchitecture) {
                                   .valuesDataType(DataType::FP16)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({32})
-                                  .maxTotalValues(9)
-                                  .batchSize(3)
-                                  .build();
+                                  .maxValuesPerRow(3).build();
     Api::NetworkInput context = Api::NetworkInput::Builder()
                                     .network(network)
                                     .name("context")
@@ -4337,9 +4315,7 @@ TEST(AttentionApi, MixedCrossAttentionModesPlaceWithRopeForTraining) {
                                         .valuesDataType(DataType::FP16)
                                         .offsetsDataType(DataType::UINT64)
                                         .trailingDimensions({16})
-                                        .maxTotalValues(7)
-                                        .batchSize(2)
-                                        .build();
+                                        .maxValuesPerRow(4).build();
         Api::NetworkInput keyOrigins = Api::NetworkInput::Builder()
                                            .network(network)
                                            .name("key_origins")
@@ -4384,9 +4360,7 @@ TEST(AttentionApi, MixedCrossAttentionModesPlaceWithRopeForTraining) {
                                       .valuesDataType(DataType::FP16)
                                       .offsetsDataType(DataType::UINT32)
                                       .trailingDimensions({16})
-                                      .maxTotalValues(6)
-                                      .batchSize(2)
-                                      .build();
+                                      .maxValuesPerRow(3).build();
         Api::NetworkInput context = Api::NetworkInput::Builder()
                                         .network(network)
                                         .name("context")
@@ -4438,7 +4412,7 @@ TEST(AttentionApi, DenseQueryRaggedKvRopeMatchesUniformRaggedQueryReference) {
     constexpr uint32_t features = 16;
     constexpr uint64_t queryLength = 2;
     constexpr uint64_t queryCapacity = batchSize * queryLength;
-    constexpr uint64_t contextCapacity = 7;
+    constexpr uint64_t contextCapacity = batchSize * 4;
     constexpr int64_t historyBoundary = 371;
 
     Api::Network network("attention_api_dense_query_ragged_kv_rope_matches_uniform_ragged_query");
@@ -4454,18 +4428,14 @@ TEST(AttentionApi, DenseQueryRaggedKvRopeMatchesUniformRaggedQueryReference) {
                                         .valuesDataType(DataType::FP16)
                                         .offsetsDataType(DataType::UINT32)
                                         .trailingDimensions({features})
-                                        .maxTotalValues(queryCapacity)
-                                        .batchSize(batchSize)
-                                        .build();
+                                        .maxValuesPerRow(queryLength).build();
     Api::RaggedTensor context = Api::RaggedNetworkInput::Builder()
                                     .network(network)
                                     .name("context")
                                     .valuesDataType(DataType::FP16)
                                     .offsetsDataType(DataType::UINT64)
                                     .trailingDimensions({features})
-                                    .maxTotalValues(contextCapacity)
-                                    .batchSize(batchSize)
-                                    .build();
+                                    .maxValuesPerRow(4).build();
     Api::NetworkInput raggedQueryOrigins = Api::NetworkInput::Builder()
                                                .network(network)
                                                .name("ragged_query_origins")
@@ -4654,7 +4624,9 @@ TEST(AttentionApi, DenseQueryRaggedKvMatchesRightAlignedPaddedMaskedReference) {
     constexpr uint32_t features = 16;
     constexpr uint64_t queryLength = 3;
     constexpr uint64_t historyExtent = 371;
-    constexpr uint64_t raggedHistoryCapacity = 600;
+    // Physical capacity is placement B times the logical per-row M,
+    // independent of how many of those packed rows are active.
+    constexpr uint64_t raggedHistoryCapacity = batchSize * historyExtent;
     const std::vector<uint64_t> historyLengths{371, 187};
 
     Api::Network network("attention_api_dense_query_ragged_kv_matches_right_aligned_padded_reference");
@@ -4670,9 +4642,7 @@ TEST(AttentionApi, DenseQueryRaggedKvMatchesRightAlignedPaddedMaskedReference) {
                                           .valuesDataType(DataType::FP16)
                                           .offsetsDataType(DataType::UINT64)
                                           .trailingDimensions({features})
-                                          .maxTotalValues(raggedHistoryCapacity)
-                                          .batchSize(batchSize)
-                                          .build();
+                                          .maxValuesPerRow(historyExtent).build();
     Api::NetworkInput paddedContext = Api::NetworkInput::Builder()
                                           .network(network)
                                           .name("padded_context")
@@ -4877,7 +4847,7 @@ TEST(AttentionApi, RaggedQueryDenseKvMatchesRightAlignedPaddedQueryReference) {
     constexpr uint32_t batchSize = 2;
     constexpr uint32_t features = 16;
     constexpr uint64_t queryExtent = 371;
-    constexpr uint64_t raggedQueryCapacity = 600;
+    constexpr uint64_t raggedQueryCapacity = batchSize * queryExtent;
     constexpr uint64_t keyValueLength = 3;
     const std::vector<uint64_t> queryLengths{371, 187};
 
@@ -4888,9 +4858,7 @@ TEST(AttentionApi, RaggedQueryDenseKvMatchesRightAlignedPaddedQueryReference) {
                                         .valuesDataType(DataType::FP16)
                                         .offsetsDataType(DataType::UINT32)
                                         .trailingDimensions({features})
-                                        .maxTotalValues(raggedQueryCapacity)
-                                        .batchSize(batchSize)
-                                        .build();
+                                        .maxValuesPerRow(queryExtent).build();
     Api::NetworkInput paddedQuery = Api::NetworkInput::Builder()
                                         .network(network)
                                         .name("padded_query")
@@ -5104,9 +5072,7 @@ TEST(AttentionApi, RaggedRopeAllowsSelfAttentionAndIndependentCrossPartitions) {
                                       .valuesDataType(DataType::FP16)
                                       .offsetsDataType(DataType::UINT32)
                                       .trailingDimensions({64})
-                                      .maxTotalValues(8)
-                                      .batchSize(2)
-                                      .build();
+                                      .maxValuesPerRow(4).build();
         EXPECT_NO_THROW(Api::Attention::Builder()
                             .network(network)
                             .queryInput(input).keyInput(input).valueInput(input)
@@ -5124,18 +5090,14 @@ TEST(AttentionApi, RaggedRopeAllowsSelfAttentionAndIndependentCrossPartitions) {
                                       .valuesDataType(DataType::FP16)
                                       .offsetsDataType(DataType::UINT32)
                                       .trailingDimensions({64})
-                                      .maxTotalValues(8)
-                                      .batchSize(2)
-                                      .build();
+                                      .maxValuesPerRow(4).build();
         Api::RaggedTensor context = Api::RaggedNetworkInput::Builder()
                                         .network(network)
                                         .name("context")
                                         .valuesDataType(DataType::FP16)
                                         .offsetsDataType(DataType::UINT64)
                                         .trailingDimensions({64})
-                                        .maxTotalValues(10)
-                                        .batchSize(2)
-                                        .build();
+                                        .maxValuesPerRow(5).build();
         Api::Attention attention = Api::Attention::Builder()
                                        .network(network)
                                        .queryInput(query)
@@ -5161,18 +5123,14 @@ TEST(AttentionApi, RaggedRopePerRowOriginsArePublicInputsAndRoundTripThroughArch
                                   .valuesDataType(DataType::FP16)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({32})
-                                  .maxTotalValues(5)
-                                  .batchSize(2)
-                                  .build();
+                                  .maxValuesPerRow(3).build();
     Api::RaggedTensor context = Api::RaggedNetworkInput::Builder()
                                     .network(network)
                                     .name("context")
                                     .valuesDataType(DataType::FP16)
                                     .offsetsDataType(DataType::UINT64)
                                     .trailingDimensions({32})
-                                    .maxTotalValues(7)
-                                    .batchSize(2)
-                                    .build();
+                                    .maxValuesPerRow(4).build();
     Api::NetworkInput queryOrigins =
         Api::NetworkInput::Builder().network(network).name("query_origins").dimensions({1}).dataType(DataType::INT32).build();
     Api::NetworkInput keyOrigins =
@@ -5253,9 +5211,7 @@ TEST(AttentionApi, RaggedRopePerRowOriginsRejectInvalidInputsAndDenseMode) {
                                        .name("tokens")
                                        .valuesDataType(DataType::FP16)
                                        .trailingDimensions({32})
-                                       .maxTotalValues(6)
-                                       .batchSize(2)
-                                       .build();
+                                       .maxValuesPerRow(3).build();
         Api::NetworkInput badDtype =
             Api::NetworkInput::Builder().network(network).name("bad_dtype").dimensions({1}).dataType(DataType::FP16).build();
         Api::NetworkInput badShape =
@@ -5288,35 +5244,35 @@ TEST(AttentionApi, RaggedRopePerRowOriginsRejectInvalidInputsAndDenseMode) {
                                       .name("query")
                                       .valuesDataType(DataType::FP16)
                                       .trailingDimensions({32})
-                                      .maxTotalValues(6)
-                                      .batchSize(2)
-                                      .build();
+                                      .maxValuesPerRow(3).build();
         Api::RaggedTensor context = Api::RaggedNetworkInput::Builder()
                                         .network(network)
                                         .name("context")
                                         .valuesDataType(DataType::FP16)
                                         .trailingDimensions({32})
-                                        .maxTotalValues(9)
-                                        .batchSize(3)
-                                        .build();
+                                        .maxValuesPerRow(3).build();
 
-        EXPECT_THROW(Api::Attention::Builder()
-                         .network(network)
-                         .queryInput(query)
-                         .keyInput(context).valueInput(context)
-                         .numHeads(4)
-                         .headDim(8)
-                         .ropeOptions(rope)
-                         .build(),
-                     std::invalid_argument);
+        // Separate Q and KV logical partitions are valid, even without
+        // explicit per-row origins.  The output follows the Q partition.
+        Api::Attention cross = Api::Attention::Builder()
+                                   .network(network)
+                                   .queryInput(query)
+                                   .keyInput(context).valueInput(context)
+                                   .numHeads(4)
+                                   .headDim(8)
+                                   .ropeOptions(rope)
+                                   .build();
+        ASSERT_TRUE(cross.getRaggedFeatureOutput().has_value());
+        EXPECT_TRUE(cross.getRaggedFeatureOutput()->sharesPartitionWith(query));
+        EXPECT_FALSE(cross.getRaggedFeatureOutput()->sharesPartitionWith(context));
     }
 }
 
 TEST(AttentionApi, RaggedCrossAttentionRopePerRowOriginsExecuteWithIndependentPartitions) {
     constexpr uint32_t batchSize = 2;
     constexpr uint32_t features = 16;
-    constexpr uint64_t queryCapacity = 3;
-    constexpr uint64_t keyCapacity = 6;
+    constexpr uint64_t queryCapacity = batchSize * 2;
+    constexpr uint64_t keyCapacity = batchSize * 3;
 
     Api::Network network("attention_api_ragged_cross_attention_rope_per_row_origins_execute");
     Api::RaggedTensor query = Api::RaggedNetworkInput::Builder()
@@ -5325,18 +5281,14 @@ TEST(AttentionApi, RaggedCrossAttentionRopePerRowOriginsExecuteWithIndependentPa
                                   .valuesDataType(DataType::FP16)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({features})
-                                  .maxTotalValues(queryCapacity)
-                                  .batchSize(batchSize)
-                                  .build();
+                                  .maxValuesPerRow(2).build();
     Api::RaggedTensor context = Api::RaggedNetworkInput::Builder()
                                     .network(network)
                                     .name("context")
                                     .valuesDataType(DataType::FP16)
                                     .offsetsDataType(DataType::UINT64)
                                     .trailingDimensions({features})
-                                    .maxTotalValues(keyCapacity)
-                                    .batchSize(batchSize)
-                                    .build();
+                                    .maxValuesPerRow(3).build();
     Api::NetworkInput queryOrigins =
         Api::NetworkInput::Builder().network(network).name("query_origins").dimensions({1}).dataType(DataType::INT32).build();
     Api::NetworkInput keyOrigins =
@@ -5489,10 +5441,8 @@ TEST(AttentionApi, RaggedCrossAttentionWithRopeAllowsSharedPartition) {
                                   .name("query")
                                   .valuesDataType(DataType::FP16)
                                   .trailingDimensions({32})
-                                  .maxTotalValues(8)
-                                  .batchSize(2)
-                                  .build();
-    Api::RaggedTensor context(query.getValues(), query.getOffsets());
+                                  .maxValuesPerRow(4).build();
+    Api::RaggedTensor context = query.withValues(query.getValues());
 
     Impl::RotaryPositionEmbeddingOptions rope;
     rope.rotary_dim = 8;
@@ -5540,9 +5490,7 @@ TEST(AttentionApi, RejectsInvalidVariableLengthInputs) {
                                    .name("ragged")
                                    .valuesDataType(DataType::FP16)
                                    .trailingDimensions({64})
-                                   .maxTotalValues(8)
-                                   .batchSize(2)
-                                   .build();
+                                   .maxValuesPerRow(4).build();
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
                      .queryInput(ragged).keyInput(ragged).valueInput(ragged)
@@ -5590,9 +5538,7 @@ TEST(AttentionApi, ForwardWithCanonicalRaggedTensorMatchesPackedReference) {
                                   .valuesDataType(c.dataType)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({c.inputFeatures})
-                                  .maxTotalValues(maxTotalValues)
-                                  .batchSize(c.batchSize)
-                                  .build();
+                                  .maxValuesPerRow(c.sequenceLength).build();
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
@@ -5671,9 +5617,7 @@ TEST(AttentionApi, RaggedAttentionResidualAddUsesOffsetsRuntimeWithoutValuesMeta
                                   .valuesDataType(DataType::FP16)
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({features})
-                                  .maxTotalValues(maxTotalValues)
-                                  .batchSize(batchSize)
-                                  .build();
+                                  .maxValuesPerRow(4).build();
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
                                    .queryInput(input).keyInput(input).valueInput(input)
@@ -5739,7 +5683,7 @@ TEST(AttentionApi, RaggedAttentionResidualAddUsesOffsetsRuntimeWithoutValuesMeta
     writeCpuTensor(logicalValuesHost, packed);
     Impl::Tensor logicalOffsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {batchSize + 1}));
     writeCpuUint32Tensor(logicalOffsetsHost, {0, 2, 5});
-    Impl::RaggedTensor logicalInput(logicalValuesHost, logicalOffsetsHost);
+    Impl::RaggedTensor logicalInput(logicalValuesHost, logicalOffsetsHost, 4);
     logicalInput.getRowPartitionRuntime().setHostOffsets({0, 2, 5});
     Batch logicalBatch;
     logicalBatch.insert("tokens", logicalInput);
@@ -5818,9 +5762,7 @@ TEST(AttentionApi, RaggedDynamicNtkUsesLongestLogicalRowNotPackedCapacity) {
                                   .valuesDataType(c.dataType)
                                   .offsetsDataType(DataType::UINT64)
                                   .trailingDimensions({c.inputFeatures})
-                                  .maxTotalValues(maxTotalValues)
-                                  .batchSize(c.batchSize)
-                                  .build();
+                                  .maxValuesPerRow(c.sequenceLength).build();
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)

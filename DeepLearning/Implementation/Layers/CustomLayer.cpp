@@ -16,6 +16,7 @@
 #include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionDescriptor.h"
 #include "Utilities/Expression/AutoDiff.h"
 #include "Utilities/LogicalWork.h"
 using namespace std;
@@ -493,6 +494,32 @@ CustomLayer::CustomLayer(DynamicExpression expr,
             if (dimension == 0) {
                 throw runtime_error("CustomLayer declared output dimensions must be non-zero for output port '" +
                                     this->outputNames[outputPort] + "'.");
+            }
+        }
+        if (descriptor.packedRaggedByPartition.has_value()) {
+            const PackedRaggedOutputGeometry& packed = descriptor.packedRaggedByPartition.value();
+            if (descriptor.dimensionsIncludeBatch || this->fixedBatchCapacity.has_value() ||
+                descriptor.featureDimensions.empty() || packed.maxValuesPerRow == 0 ||
+                descriptor.featureDimensions.front() != packed.maxValuesPerRow ||
+                packed.offsetsPort >= this->inputNames.size() || packed.raggedInputs.empty()) {
+                throw runtime_error("CustomLayer packed-ragged output declaration has invalid semantic geometry or offsets port.");
+            }
+            // The output must name the same physical partition as at least
+            // one declared values input with its exact semantic M. This is
+            // how Q's partition is distinguished from the independent KV one.
+            bool outputPartitionIsBound = false;
+            for (const PackedRaggedInputGeometry& input : packed.raggedInputs) {
+                outputPartitionIsBound |= input.offsetsPort == packed.offsetsPort &&
+                                          input.maxValuesPerRow == packed.maxValuesPerRow;
+                if (input.valuesPort >= this->inputNames.size() || input.offsetsPort >= this->inputNames.size() ||
+                    input.valuesPort == input.offsetsPort || input.maxValuesPerRow == 0 ||
+                    !this->inputDimensionsIncludeBatch[input.valuesPort] ||
+                    !this->inputDimensionsIncludeBatch[input.offsetsPort]) {
+                    throw runtime_error("CustomLayer packed-ragged input declaration requires distinct physical values/offsets ports and M.");
+                }
+            }
+            if (!outputPartitionIsBound) {
+                throw runtime_error("CustomLayer packed-ragged output must inherit an explicitly bound values partition and semantic M.");
             }
         }
     }
@@ -1498,7 +1525,7 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::stampBackwardForApplication(
 
     // This plan is linked immediately to the already-stamped real forward. For
     // graph-level conditionals, defer child CUDA-graph capture until those links
-    // are installed so no unlinked RMSNorm/Attention backward operation is ever
+    // are installed so no unlinked RMSNorm/LayerNorm/Attention backward operation is ever
     // captured or executed.
     auto backwardPlan = std::make_shared<StampedExecutionPlan>(
         backwardEquation.stampForImmediateCrossPlanBackwardLinking(filteredStampInputs,
@@ -1507,6 +1534,7 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::stampBackwardForApplication(
                                                                    preallocatedGradOutputs));
     if (variant.forward != nullptr) {
         backwardPlan->linkRmsNormBackwardStatesFrom(*variant.forward);
+        backwardPlan->linkLayerNormBackwardStatesFrom(*variant.forward);
         backwardPlan->linkAttentionBackwardStatesFrom(*variant.forward);
         variant.forward->rebuildConditionalGraphsAfterCrossPlanLinking();
         backwardPlan->rebuildConditionalGraphsAfterCrossPlanLinking();
@@ -1703,6 +1731,7 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildGenericSharedBackwardWit
             filteredStampInputs, runStream, filteredTensorScalarInputs, preallocatedOutputs));
     if (variant.forward != nullptr) {
         plan->linkRmsNormBackwardStatesFrom(*variant.forward);
+        plan->linkLayerNormBackwardStatesFrom(*variant.forward);
         plan->linkAttentionBackwardStatesFrom(*variant.forward);
         variant.forward->rebuildConditionalGraphsAfterCrossPlanLinking();
         plan->rebuildConditionalGraphsAfterCrossPlanLinking();
@@ -2012,6 +2041,62 @@ std::optional<Tensor> CustomLayer::inferFeatureOutputTensor(uint32_t application
 
     if (!declaredOutputDescriptors.empty()) {
         const DeclaredOutputDescriptor& declared = declaredOutputDescriptors[outputPortIndex];
+        if (declared.packedRaggedByPartition.has_value()) {
+            const PackedRaggedOutputGeometry& geometry = declared.packedRaggedByPartition.value();
+            auto portTensor = [&](uint32_t port) -> const Tensor& {
+                return featureInputs[inputFlatIndex(applicationIndex, port)].value();
+            };
+            auto physicalBatchFromOffsets = [&](uint32_t port) -> uint64_t {
+                const Tensor& offsets = portTensor(port);
+                const std::vector<uint64_t>& dims = offsets.getDimensions();
+                if (!RowPartitionDescriptor::isValidOffsetsDataType(offsets.getDataType()) ||
+                    dims.size() != 1 || dims.front() < 2) {
+                    throw runtime_error("CustomLayer packed-ragged offsets input '" + inputNames[port] +
+                                        "' must be uint32/uint64 [B+1], B>0.");
+                }
+                return dims.front() - 1;
+            };
+            const uint64_t batch = physicalBatchFromOffsets(geometry.offsetsPort);
+            if (batch > std::numeric_limits<uint32_t>::max()) {
+                throw runtime_error("CustomLayer packed-ragged physical B exceeds uint32 runtime batch capacity.");
+            }
+            for (const PackedRaggedInputGeometry& input : geometry.raggedInputs) {
+                if (physicalBatchFromOffsets(input.offsetsPort) != batch) {
+                    throw runtime_error("CustomLayer packed-ragged Q/KV offsets disagree on physical B.");
+                }
+                const std::vector<uint64_t>& valueDims = portTensor(input.valuesPort).getDimensions();
+                if (input.maxValuesPerRow > std::numeric_limits<uint64_t>::max() / batch ||
+                    valueDims.empty() || valueDims.front() != batch * input.maxValuesPerRow) {
+                    throw runtime_error("CustomLayer packed-ragged values port '" + inputNames[input.valuesPort] +
+                                        "' has wrong B*M physical capacity.");
+                }
+            }
+            // Ordinary batch-leading dense ports must agree with the same B in
+            // mixed dense/ragged attention. Never infer B from packed values.
+            for (uint32_t port = 0; port < inputNames.size(); ++port) {
+                if (inputDimensionsIncludeBatch[port]) {
+                    continue;
+                }
+                const std::vector<uint64_t>& dims = portTensor(port).getDimensions();
+                if (dims.empty() || dims.front() != batch) {
+                    throw runtime_error("CustomLayer mixed packed/dense inputs disagree on physical B at port '" +
+                                        inputNames[port] + "'.");
+                }
+            }
+            if (geometry.maxValuesPerRow > std::numeric_limits<uint64_t>::max() / batch) {
+                throw runtime_error("CustomLayer packed-ragged output B*M overflows uint64.");
+            }
+            const uint32_t physicalBatch = static_cast<uint32_t>(batch);
+            ApplicationState& app = applications[applicationIndex];
+            if (app.packedRaggedPhysicalBatchCapacity.has_value() &&
+                app.packedRaggedPhysicalBatchCapacity.value() != physicalBatch) {
+                throw runtime_error("CustomLayer packed-ragged outputs disagree on physical B.");
+            }
+            app.packedRaggedPhysicalBatchCapacity = physicalBatch;
+            std::vector<uint64_t> physicalDimensions = declared.featureDimensions;
+            physicalDimensions.front() = batch * geometry.maxValuesPerRow;
+            return Tensor(placement, TensorDescriptor(declared.dataType, physicalDimensions));
+        }
         if (declared.dimensionsIncludeBatch) {
             return Tensor(placement, TensorDescriptor(declared.dataType, declared.featureDimensions));
         }
@@ -2702,6 +2787,7 @@ void CustomLayer::compileImpl() {
                             sharedBackwardTensorScalarInputs,
                             sharedBackwardPreallocatedOutputs));
                     sharedBackwardPlan->linkRmsNormBackwardStatesFrom(*variant.forward);
+                    sharedBackwardPlan->linkLayerNormBackwardStatesFrom(*variant.forward);
                     sharedBackwardPlan->linkAttentionBackwardStatesFrom(*variant.forward);
                     variant.forward->rebuildConditionalGraphsAfterCrossPlanLinking();
                     sharedBackwardPlan->rebuildConditionalGraphsAfterCrossPlanLinking();
@@ -3251,7 +3337,9 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
             }
             continue;
         }
-        std::optional<uint32_t> physicalBatchCapacity = fixedBatchCapacity;
+        std::optional<uint32_t> physicalBatchCapacity = app.packedRaggedPhysicalBatchCapacity.has_value()
+                                                             ? app.packedRaggedPhysicalBatchCapacity
+                                                             : fixedBatchCapacity;
         if (!physicalBatchCapacity.has_value()) {
             bool currentInputHasImplicitBatchDimension = false;
             for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
@@ -4174,6 +4262,9 @@ uint64_t CustomLayer::batchSizeForFlopEstimate() const {
     };
 
     for (const ApplicationState& app : applications) {
+        if (app.packedRaggedPhysicalBatchCapacity.has_value()) {
+            return app.packedRaggedPhysicalBatchCapacity.value();
+        }
         for (const auto& nameAndTensor : app.forwardOutputsByName) {
             const uint64_t batchSize = batchFromTensor(nameAndTensor.second);
             if (batchSize > 0) {
