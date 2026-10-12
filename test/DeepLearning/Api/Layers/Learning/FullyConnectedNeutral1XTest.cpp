@@ -780,9 +780,8 @@ TEST(RaggedFullyConnectedNeutral1YB, SavedResidualTrainingB2AndB7RoutesBothGradi
 
 
 // 1Y-C: output dropout uses the existing physical FC dropout post-op, with
-// placement-local Philox sequence state.  Only the configured probability and
-// seed are model reconstruction state.  We intentionally keep combinations
-// with residuals/activations and custom epilogues deferred.
+// placement-local Philox sequence state. Only the configured probability and
+// seed are model reconstruction state; FC-2A/FC-2B cover supported compositions.
 namespace {
 constexpr float kDropout1YC = 0.25f;
 constexpr int64_t kDropoutSeed1YC = 0x12345;
@@ -826,7 +825,9 @@ TEST(RaggedFullyConnectedNeutral1YC, DropoutSchemaIsStrictAndPreservesOldVariant
     bad=record; bad["output_dropout_probability"]=1.0f; reject(bad);
     bad=record; bad["output_dropout_probability"]=-0.1f; reject(bad);
     bad=record; bad["output_dropout_seed"]="random"; reject(bad);
-    bad=record; bad["activation"]=Sigmoid::Builder().build()->architectureJson(); reject(bad);
+    // Activation plus dropout is supported and round-trip tested by FC-2A;
+    // the schema must still reject malformed activation payloads.
+    bad=record; bad["activation"]="sigmoid"; reject(bad);
     bad=record; bad["use_residual"]=true; reject(bad);
     bad=record; bad["ragged_inputs"][0]["batch_size"]=2; reject(bad);
     bad=record; bad["ragged_outputs"][0]["offsets"]["id"]=tokens.getValues().getOriginalId(); reject(bad);
@@ -2312,11 +2313,20 @@ TEST(RaggedFullyConnectedNeutralFC3B, IndependentResidualsTrainAndRestoreAtB2B7)
         const RaggedTensor residual1 = RaggedNetworkInput::Builder().network(network)
             .name("residual1").valuesDataType(DataType::FP32)
             .trailingDimensions({outFeatures}).partition(second).build();
+        // External network inputs do not request upstream gradients. Preserve
+        // each residual gradient independently so the test can verify that
+        // multi-application backward routes both skip connections correctly.
+        const auto residualRivet0 = GradientRivet::Builder().network(network)
+            .tensor(residual0.getValues()).build();
+        const auto residualRivet1 = GradientRivet::Builder().network(network)
+            .tensor(residual1.getValues()).build();
         const auto fc = FullyConnected::Builder().network(network)
             .featureInput(first).featureInput(second).numOutputFeatures(outFeatures)
             .hasBias(true).weightsDataType(DataType::FP32)
             .computeDataType(DataType::FP32).outputDataType(DataType::FP32)
-            .noActivation().residualInput(residual0).residualInput(residual1).build();
+            .noActivation()
+            .residualInput(residual0.withValues(residualRivet0.getFeatureOutput().value()))
+            .residualInput(residual1.withValues(residualRivet1.getFeatureOutput().value())).build();
         const json authored = fc.architectureJson();
         EXPECT_EQ(authored.at("version"), "1.5.0");
         ASSERT_TRUE(authored.at("residual_input").is_array());
@@ -2480,6 +2490,308 @@ TEST(RaggedFullyConnectedNeutralFC3B, IndependentResidualsTrainAndRestoreAtB2B7)
             EXPECT_EQ(fc->architectureJson().at("ragged_outputs"), authored.at("ragged_outputs"));
             EXPECT_EQ(fc->architectureJson().at("residual_input"), authored.at("residual_input"));
             EXPECT_EQ(fc->architectureJson().at("ragged_residual_input"), authored.at("ragged_residual_input"));
+        }
+    }
+    filesystem::remove_all(archive);
+}
+
+// FC-3C: one learned projection and epilogue expression, but each application
+// supplies its own auxiliary values on its own partition and has its own M.
+// The existing 1.7.0 auxiliary objects repeat in application-major order.
+TEST(RaggedFullyConnectedNeutralFC3C, IndependentEpilogueAuxiliariesTrainAndRestoreAtB2B7) {
+    int devices = 0;
+    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0)
+        GTEST_SKIP() << "CUDA device unavailable";
+
+    constexpr uint64_t inFeatures = 3, outFeatures = 2;
+    const string name = "fc3c_multi_auxiliary";
+    const auto archive = archive1X(name);
+    filesystem::remove_all(archive);
+    {
+        Network network(name);
+        (void)Sgd::Builder().network(network).initialLearningRate(.001f).decay(0.f).momentum(0.f).build();
+        const auto first = RaggedNetworkInput::Builder().network(network).name("first")
+            .valuesDataType(DataType::FP32).offsetsDataType(DataType::UINT64)
+            .trailingDimensions({inFeatures}).maxValuesPerRow(4).build();
+        const auto second = RaggedNetworkInput::Builder().network(network).name("second")
+            .valuesDataType(DataType::FP32).offsetsDataType(DataType::UINT64)
+            .trailingDimensions({inFeatures}).maxValuesPerRow(6).build();
+        const auto aux0 = RaggedNetworkInput::Builder().network(network).name("aux0")
+            .valuesDataType(DataType::FP32).trailingDimensions({outFeatures}).partition(first).build();
+        const auto aux1 = RaggedNetworkInput::Builder().network(network).name("aux1")
+            .valuesDataType(DataType::FP32).trailingDimensions({outFeatures}).partition(second).build();
+        const auto rivet0 = GradientRivet::Builder().network(network).tensor(aux0.getValues()).build();
+        const auto rivet1 = GradientRivet::Builder().network(network).tensor(aux1.getValues()).build();
+        const auto projected = FullyConnected::epilogueInput(DataType::FP32, DataType::FP32);
+        const auto auxiliary = FullyConnected::epilogueAuxInput("aux", DataType::FP32, DataType::FP32);
+        const auto fc = FullyConnected::Builder().network(network)
+            .featureInput(first).featureInput(second).numOutputFeatures(outFeatures)
+            .hasBias(true).weightsDataType(DataType::FP32).computeDataType(DataType::FP32)
+            .outputDataType(DataType::FP32).noActivation()
+            .epilogueInput("aux", aux0.withValues(rivet0.getFeatureOutput().value()))
+            .epilogueInput("aux", aux1.withValues(rivet1.getFeatureOutput().value()))
+            .epilogue(projected + auxiliary).build();
+        const json authored = fc.architectureJson();
+        ASSERT_EQ(authored.at("version"), "1.7.0");
+        ASSERT_EQ(authored.at("epilogue_inputs").size(), 2u);
+        EXPECT_EQ(authored.at("epilogue_inputs").at(0).at("name"), "aux");
+        EXPECT_EQ(authored.at("epilogue_inputs").at(1).at("name"), "aux");
+        EXPECT_EQ(authored.at("epilogue_inputs").at(0).at("ragged_tensor").at("max_values_per_row"), 4u);
+        EXPECT_EQ(authored.at("epilogue_inputs").at(1).at("ragged_tensor").at("max_values_per_row"), 6u);
+        shared_ptr<thor_file::TarReader> reader;
+        auto reject = [&](json broken) { EXPECT_ANY_THROW(FullyConnected::deserialize(reader, broken, &network)); };
+        json broken = authored;
+        broken["epilogue_inputs"].erase(broken["epilogue_inputs"].begin());
+        reject(broken); // Every application must have the full symbolic input set.
+        broken = authored;
+        broken["epilogue_inputs"][1]["name"] = "unexpected";
+        reject(broken); // No accidental cross-application name substitution.
+        broken = authored;
+        broken["epilogue_inputs"][1]["ragged_tensor"] = broken["epilogue_inputs"][0]["ragged_tensor"];
+        reject(broken); // No cross-partition auxiliary substitution.
+        EXPECT_THROW((void)FullyConnected::Builder().network(network)
+            .featureInput(first).featureInput(second).numOutputFeatures(outFeatures)
+            .hasBias(true).noActivation().epilogueInput("aux", aux0)
+            .epilogue(projected + auxiliary).build(), std::invalid_argument);
+
+        const auto prediction = Impl::Expression::input("predictions", DataType::FP32, DataType::FP32);
+        const auto target = Impl::Expression::input("labels", DataType::FP32, DataType::FP32);
+        const auto difference = prediction - target;
+        const auto loss = Impl::DynamicExpression::fromExpressionDefinition(
+            Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{
+                "loss", (difference * difference).withOutputDType(DataType::FP32)}})));
+        const auto gradient = Impl::DynamicExpression::fromExpressionDefinition(
+            Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{
+                "predictions_grad", (difference * Impl::Expression(2.0 * Impl::Loss::getLossScalingFactor()))
+                    .withOutputDType(DataType::FP32)}})));
+        for (uint32_t app = 0; app < 2; ++app) {
+            const auto output = fc.getRaggedFeatureOutput(app).value();
+            (void)RaggedNetworkOutput::Builder().network(network)
+                .name("projected" + to_string(app)).inputTensor(output).build();
+            const auto feature = app == 0 ? first : second;
+            const auto labels = RaggedNetworkInput::Builder().network(network)
+                .name("target" + to_string(app)).valuesDataType(DataType::FP32)
+                .trailingDimensions({outFeatures}).partition(feature).build();
+            const auto raw = RaggedCustomLoss::Builder().network(network)
+                .predictions(output).labels(labels).lossExpression(loss)
+                .gradientExpression(gradient).build();
+            (void)NetworkOutput::Builder().network(network)
+                .name("loss" + to_string(app))
+                .inputTensor(raw.getRaggedRawLoss().getValues()).dataType(DataType::FP32).build();
+        }
+        network.save(archive.string(), true);
+    }
+
+    for (uint32_t b : {2u, 7u}) {
+        for (bool inferenceOnly : {true, false}) {
+            SCOPED_TRACE(::testing::Message() << "B=" << b << ", inferenceOnly=" << inferenceOnly);
+            Network network(name);
+            ASSERT_NO_THROW(network.load(archive.string()));
+            const auto fc = find1X(network);
+            ASSERT_NE(fc, nullptr);
+            const json authored = fc->architectureJson();
+            ASSERT_EQ(authored.at("version"), "1.7.0");
+            ASSERT_EQ(authored.at("epilogue_inputs").size(), 2u);
+            vector<Event> events;
+            auto placed = network.place(b, events, inferenceOnly);
+            ASSERT_NE(placed, nullptr);
+            for (auto& event : events) event.synchronize();
+            const auto physical = dynamic_pointer_cast<Impl::RaggedFullyConnected>(
+                placed->getStampedNetwork(0).getPhysicalLayerFromApiLayer(fc->getId()));
+            ASSERT_NE(physical, nullptr);
+            const auto weights = download1X(physical->getParameterStorage("weights"));
+            const auto biases = download1X(physical->getParameterStorage("biases"));
+            Impl::TensorPlacement cpu(Impl::TensorPlacement::MemDevices::CPU);
+            Batch batch;
+            vector<vector<uint64_t>> endsByApplication;
+            for (uint32_t app = 0; app < 2; ++app) {
+                const uint64_t m = app == 0 ? 4 : 6;
+                const auto feature = fc->getRaggedFeatureInput(app).value();
+                const auto descriptor = feature.getDescriptorForPlacement(b);
+                vector<uint64_t> ends(b + 1, 0);
+                for (uint32_t row = 0; row < b; ++row)
+                    ends[row + 1] = ends[row] + (app == 0 ? 1 + row % 3 : 1 + row % 5);
+                endsByApplication.push_back(ends);
+                Impl::Tensor values(cpu, descriptor.getValuesDescriptor());
+                Impl::Tensor boundaries(cpu, descriptor.getOffsetsDescriptor());
+                for (uint64_t t = 0; t < b * m; ++t)
+                    for (uint32_t c = 0; c < inFeatures; ++c)
+                        values.getMemPtr<float>()[t * inFeatures + c] =
+                            t < ends.back() ? .1f + .07f * app + .03f * t + .02f * c :
+                                             numeric_limits<float>::quiet_NaN();
+                for (uint32_t row = 0; row <= b; ++row) boundaries.getMemPtr<uint64_t>()[row] = ends[row];
+                Impl::RowPartitionRuntime partition(boundaries, descriptor.getRowPartition());
+                partition.setHostOffsets(ends);
+                batch.insert(app == 0 ? "first" : "second", Impl::RaggedTensor(values, partition));
+                Impl::Tensor auxiliaryValues(cpu, Impl::TensorDescriptor(DataType::FP32, {b * m, outFeatures}));
+                for (uint64_t t = 0; t < b * m; ++t)
+                    for (uint32_t c = 0; c < outFeatures; ++c)
+                        auxiliaryValues.getMemPtr<float>()[t * outFeatures + c] =
+                            t < ends.back() ? .4f + .12f * app + .02f * t + .03f * c :
+                                             numeric_limits<float>::quiet_NaN();
+                batch.insert("aux" + to_string(app), Impl::RaggedTensor(auxiliaryValues, partition));
+                if (!inferenceOnly) {
+                    Impl::Tensor labels(cpu, Impl::TensorDescriptor(DataType::FP32, {b * m, outFeatures}));
+                    std::fill_n(labels.getMemPtr<float>(), b * m * outFeatures, 0.0f);
+                    batch.insert("target" + to_string(app), Impl::RaggedTensor(labels, partition));
+                }
+            }
+            batch.setValidExampleCount(b);
+            auto expectedOutput = [&](uint32_t app, uint64_t t, uint32_t c) {
+                float result = biases[c] + .4f + .12f * app + .02f * t + .03f * c;
+                for (uint32_t i = 0; i < inFeatures; ++i)
+                    result += (.1f + .07f * app + .03f * t + .02f * i) * weights[i * outFeatures + c];
+                return result;
+            };
+            if (inferenceOnly) {
+                const auto results = placed->inferLogical(batch);
+                for (uint32_t app = 0; app < 2; ++app) {
+                    const auto& result = get<Impl::RaggedTensor>(results.at("projected" + to_string(app)));
+                    ASSERT_TRUE(result.getHostOffsetsIfAvailable().has_value());
+                    EXPECT_EQ(result.getHostOffsetsIfAvailable().value(), endsByApplication[app]);
+                    const float* data = result.getValues().getMemPtr<float>();
+                    for (uint64_t t = 0; t < endsByApplication[app].back(); ++t)
+                        for (uint32_t c = 0; c < outFeatures; ++c)
+                            EXPECT_NEAR(data[t * outFeatures + c], expectedOutput(app, t, c), 4e-3f);
+                }
+            } else {
+                map<string, Impl::Tensor> outputs;
+                map<string, Event> ready;
+                auto finished = placed->submitBatch(0, batch, outputs, ready, false);
+                finished.synchronize();
+                placed->synchronize();
+                ASSERT_TRUE(outputs.contains("loss0"));
+                ASSERT_TRUE(outputs.contains("loss1"));
+                const auto errors = physical->getErrorOutputs();
+                ASSERT_EQ(errors.size(), 6u);
+                for (uint32_t app = 0; app < 2; ++app) {
+                    ASSERT_TRUE(errors[app * 3 + 2].has_value());
+                    const auto gradient = download1X(errors[app * 3 + 2].value());
+                    for (uint64_t t = 0; t < endsByApplication[app].back(); ++t)
+                        for (uint32_t c = 0; c < outFeatures; ++c) {
+                            const uint64_t k = t * outFeatures + c;
+                            EXPECT_NEAR(gradient[k] / Impl::Loss::getLossScalingFactor(),
+                                        2.0f * expectedOutput(app, t, c), 4e-2f);
+                        }
+                }
+            }
+            EXPECT_EQ(fc->architectureJson(), authored);
+        }
+    }
+    filesystem::remove_all(archive);
+}
+
+
+// FC-4: 1.7.0 already encodes multi-application epilogue and residual
+// references together. Both must survive the same archive round-trip.
+// Numerical backward behavior is covered separately by FC-3B and FC-3C.
+TEST(RaggedFullyConnectedNeutralFC4, MultiApplicationEpilogueAndResidualVersion17RoundTrips) {
+    int devices = 0;
+    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0)
+        GTEST_SKIP() << "CUDA device unavailable";
+
+    constexpr uint64_t inFeatures = 3, outFeatures = 2;
+    const string name = "fc4_multi_epilogue_residual_archive";
+    const auto archive = archive1X(name);
+    filesystem::remove_all(archive);
+    {
+        Network network(name);
+        const auto first = RaggedNetworkInput::Builder().network(network).name("first")
+            .valuesDataType(DataType::FP32).offsetsDataType(DataType::UINT64)
+            .trailingDimensions({inFeatures}).maxValuesPerRow(4).build();
+        const auto second = RaggedNetworkInput::Builder().network(network).name("second")
+            .valuesDataType(DataType::FP32).offsetsDataType(DataType::UINT64)
+            .trailingDimensions({inFeatures}).maxValuesPerRow(6).build();
+        auto companion = [&](const string& label, const RaggedTensor& feature) {
+            return RaggedNetworkInput::Builder().network(network).name(label)
+                .valuesDataType(DataType::FP32).trailingDimensions({outFeatures})
+                .partition(feature).build();
+        };
+        const auto aux0 = companion("aux0", first);
+        const auto aux1 = companion("aux1", second);
+        const auto residual0 = companion("residual0", first);
+        const auto residual1 = companion("residual1", second);
+        const auto projected = FullyConnected::epilogueInput(DataType::FP32, DataType::FP32);
+        const auto auxiliary = FullyConnected::epilogueAuxInput("aux", DataType::FP32, DataType::FP32);
+        const auto fc = FullyConnected::Builder().network(network)
+            .featureInput(first).featureInput(second).numOutputFeatures(outFeatures)
+            .hasBias(true).weightsDataType(DataType::FP32).computeDataType(DataType::FP32)
+            .outputDataType(DataType::FP32).noActivation()
+            .outputDropoutProbability(.25f).outputDropoutSeed(2026)
+            .residualInput(residual0).residualInput(residual1)
+            .epilogueInput("aux", aux0).epilogueInput("aux", aux1)
+            .epilogue(projected + auxiliary).build();
+        const json authored = fc.architectureJson();
+        ASSERT_EQ(authored.at("version"), "1.7.0");
+        ASSERT_TRUE(authored.at("residual_input").is_array());
+        ASSERT_EQ(authored.at("residual_input").size(), 2u);
+        ASSERT_EQ(authored.at("ragged_residual_input").size(), 2u);
+        ASSERT_EQ(authored.at("epilogue_inputs").size(), 2u);
+        EXPECT_TRUE(authored.at("use_residual").get<bool>());
+        EXPECT_FALSE(authored.at("ragged_inputs").at(0).contains("batch_size"));
+        shared_ptr<thor_file::TarReader> reader;
+        json broken = authored;
+        broken["residual_input"][1] = broken["residual_input"][0];
+        EXPECT_ANY_THROW(FullyConnected::deserialize(reader, broken, &network));
+        broken = authored;
+        broken["ragged_residual_input"][1] = broken["ragged_residual_input"][0];
+        EXPECT_ANY_THROW(FullyConnected::deserialize(reader, broken, &network));
+        for (uint32_t app = 0; app < 2; ++app)
+            (void)RaggedNetworkOutput::Builder().network(network)
+                .name("projected" + to_string(app))
+                .inputTensor(fc.getRaggedFeatureOutput(app).value()).build();
+        network.save(archive.string(), true);
+    }
+
+    for (uint32_t b : {2u, 7u}) {
+        SCOPED_TRACE(::testing::Message() << "B=" << b);
+        Network network(name);
+        ASSERT_NO_THROW(network.load(archive.string()));
+        const auto fc = find1X(network);
+        ASSERT_NE(fc, nullptr);
+        const json restored = fc->architectureJson();
+        EXPECT_EQ(restored.at("version"), "1.7.0");
+        ASSERT_TRUE(restored.at("residual_input").is_array());
+        EXPECT_EQ(restored.at("residual_input").size(), 2u);
+        EXPECT_EQ(restored.at("epilogue_inputs").size(), 2u);
+        vector<Event> events;
+        auto placed = network.place(b, events, true);
+        ASSERT_NE(placed, nullptr);
+        for (auto& event : events) event.synchronize();
+
+        Impl::TensorPlacement cpu(Impl::TensorPlacement::MemDevices::CPU);
+        Batch batch;
+        vector<vector<uint64_t>> offsetsByApp;
+        for (uint32_t app = 0; app < 2; ++app) {
+            const auto feature = fc->getRaggedFeatureInput(app).value();
+            const auto descriptor = feature.getDescriptorForPlacement(b);
+            const uint64_t m = feature.getMaxValuesPerRow();
+            vector<uint64_t> ends(b + 1, 0);
+            for (uint32_t row = 0; row < b; ++row)
+                ends[row + 1] = ends[row] + 1 + row % (app == 0 ? 3 : 5);
+            offsetsByApp.push_back(ends);
+            Impl::Tensor boundaries(cpu, descriptor.getOffsetsDescriptor());
+            for (uint32_t row = 0; row <= b; ++row)
+                boundaries.getMemPtr<uint64_t>()[row] = ends[row];
+            Impl::RowPartitionRuntime partition(boundaries, descriptor.getRowPartition());
+            partition.setHostOffsets(ends);
+            auto insert = [&](const string& label, uint64_t width) {
+                Impl::Tensor values(cpu, Impl::TensorDescriptor(DataType::FP32, {b * m, width}));
+                for (uint64_t i = 0; i < b * m * width; ++i)
+                    values.getMemPtr<float>()[i] = .1f + .01f * i;
+                batch.insert(label, Impl::RaggedTensor(values, partition));
+            };
+            insert(app == 0 ? "first" : "second", inFeatures);
+            insert("aux" + to_string(app), outFeatures);
+            insert("residual" + to_string(app), outFeatures);
+        }
+        batch.setValidExampleCount(b);
+        const auto results = placed->inferLogical(std::move(batch));
+        for (uint32_t app = 0; app < 2; ++app) {
+            ASSERT_TRUE(results.contains("projected" + to_string(app)));
+            const auto& result = get<Impl::RaggedTensor>(results.at("projected" + to_string(app)));
+            ASSERT_TRUE(result.getHostOffsetsIfAvailable().has_value());
+            EXPECT_EQ(result.getHostOffsetsIfAvailable().value(), offsetsByApp[app]);
         }
     }
     filesystem::remove_all(archive);

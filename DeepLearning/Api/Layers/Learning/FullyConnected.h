@@ -15,6 +15,7 @@
 
 
 #include <cstdint>
+#include <algorithm>
 #include <memory>
 #include <limits>
 #include <stdexcept>
@@ -411,13 +412,22 @@ class FullyConnected::Builder {
         return *this;
     }
 
+    // For multiple ragged applications bind each epilogue auxiliary once per
+    // application, in application-major order, repeating the same symbolic
+    // name sequence (e.g. aux0,aux1,aux0,aux1). The expressions and weights
+    // are shared, while logical M and exact partition identities are not.
     virtual FullyConnected::Builder &epilogueInput(const std::string &inputName, RaggedTensor tensor) {
         FullyConnected::validateEpilogueAuxInputName(inputName);
         THOR_THROW_IF_FALSE(tensor.isInitialized());
-        for (const auto &[existingName, existingTensor] : _epilogueInputBindings) {
-            (void)existingTensor;
-            if (existingName == inputName) {
-                throw std::invalid_argument("FullyConnected epilogue input name is duplicated: " + inputName + ".");
+        // The same symbolic input name may be bound again for a different
+        // application. verifyConfig() checks the complete application-major grid.
+        // Single-application duplicate names remain invalid.
+        if (_raggedFeatureInputs.size() <= 1) {
+            for (const auto &[existingName, existingTensor] : _epilogueInputBindings) {
+                (void)existingTensor;
+                if (existingName == inputName) {
+                    throw std::invalid_argument("FullyConnected epilogue input name is duplicated: " + inputName + ".");
+                }
             }
         }
         _raggedEpilogueInputBindings.emplace_back(inputName, tensor);
@@ -545,7 +555,7 @@ class FullyConnected::Builder {
         names.reserve(_epilogueInputBindings.size());
         for (const auto &[name, tensor] : _epilogueInputBindings) {
             (void)tensor;
-            names.push_back(name);
+            if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
         }
         return names;
     }

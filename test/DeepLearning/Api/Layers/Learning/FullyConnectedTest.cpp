@@ -725,7 +725,7 @@ TEST(FullyConnectedApi, RaggedMultipleApplicationsExposeIndependentStructuralOff
     EXPECT_EQ(secondReady[0], fc.getRaggedFeatureOutput(1)->getValues());
 }
 
-TEST(FullyConnectedApi, NeutralMultipleApplicationsRequireMatchingSemanticGeometry) {
+TEST(FullyConnectedApi, NeutralMultipleApplicationsAllowDistinctMAndRequireMatchingOffsetsDtype) {
     Api::Network network("neutral_fc_multi_geometry_validation");
     auto input = [&](const string& name, uint64_t m, DataType offsetsDtype) {
         return Api::RaggedNetworkInput::Builder()
@@ -741,10 +741,32 @@ TEST(FullyConnectedApi, NeutralMultipleApplicationsRequireMatchingSemanticGeomet
     const Api::RaggedTensor differentM = input("different_m", 6, DataType::UINT32);
     const Api::RaggedTensor differentOffsetsDtype = input("different_offsets", 5, DataType::UINT64);
 
-    EXPECT_ANY_THROW((Api::FullyConnected::Builder()
-                          .network(network)
-                          .featureInput(first)
-                          .featureInput(differentM)));
+    // FC-1 permits independent semantic M values while sharing one projection.
+    const Api::FullyConnected fc = Api::FullyConnected::Builder()
+        .network(network)
+        .featureInput(first)
+        .featureInput(differentM)
+        .numOutputFeatures(3)
+        .hasBias(false)
+        .weightsDataType(DataType::FP32)
+        .computeDataType(DataType::FP32)
+        .outputDataType(DataType::FP32)
+        .noActivation()
+        .build();
+    ASSERT_EQ(fc.getParameters().size(), 1u);
+    ASSERT_TRUE(fc.getRaggedFeatureOutput(0).has_value());
+    ASSERT_TRUE(fc.getRaggedFeatureOutput(1).has_value());
+    EXPECT_EQ(fc.getRaggedFeatureOutput(0)->getValuesDimensions(),
+              (vector<uint64_t>{5, 3}));
+    EXPECT_EQ(fc.getRaggedFeatureOutput(1)->getValuesDimensions(),
+              (vector<uint64_t>{6, 3}));
+    EXPECT_TRUE(fc.getRaggedFeatureOutput(0)->sharesPartitionWith(first));
+    EXPECT_TRUE(fc.getRaggedFeatureOutput(1)->sharesPartitionWith(differentM));
+    EXPECT_FALSE(fc.getRaggedFeatureOutput(0)->sharesPartitionWith(differentM));
+    EXPECT_EQ(fc.architectureJson().at("version"), "1.3.0");
+
+    // Different M is valid, but applications still require compatible partition
+    // offset dtypes for their shared physical projection implementation.
     EXPECT_ANY_THROW((Api::FullyConnected::Builder()
                           .network(network)
                           .featureInput(first)
