@@ -192,7 +192,7 @@ void PaddedDenseToRagged::deserialize(const json& j, Network* network) {
     }
     if (version == "1.1.0" && (!j.is_object() || j.size() != 6 ||
                                j.at("factory") != Layer::Factory::Layer.value())) {
-        throw std::runtime_error("PaddedDenseToRagged neutral layer schema has unexpected fields.");
+        throw std::runtime_error("PaddedDenseToRagged canonical ragged layer schema has unexpected fields.");
     }
     const json& inputJson = j.at("feature_input");
     Tensor denseInput = network->getApiTensorByOriginalId(inputJson.at("id").get<uint64_t>());

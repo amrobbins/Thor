@@ -715,6 +715,26 @@ CubKernelOccupancyInfo queryFp8AwkwardAlignmentRotatedShardedCalibrationOccupanc
 #endif
 }
 
+void launchFp8GeneralRParallelKTileRotatedCalibrationFirstStage(
+    const Tensor& input,
+    Tensor& fp32_partials,
+    const CubReductionGeometry& geometry,
+    bool exact_tile,
+    uint64_t rows_per_shard,
+    uint64_t shards_per_output,
+    Stream& stream) {
+    // Generalized runtime-K tiling owns the policy surface. Reuse the established physical p16 rotated packet
+    // ownership backend so this calibration isolates access-layout choice from kernel duplication.
+    launchFp8AwkwardAlignmentRotatedShardedCalibrationFirstStage(
+        input, fp32_partials, geometry, 16, exact_tile, rows_per_shard, shards_per_output, stream);
+}
+
+CubKernelOccupancyInfo queryFp8GeneralRParallelKTileRotatedCalibrationOccupancy(
+    DataType input_dtype, bool exact_tile, uint64_t rows_per_shard) {
+    return queryFp8AwkwardAlignmentRotatedShardedCalibrationOccupancy(
+        input_dtype, 16, exact_tile, rows_per_shard);
+}
+
 CubKernelOccupancyInfo queryAwkwardAlignmentRotatedShardedFirstStageOccupancy(
     DataType input_dtype, uint64_t rows_per_shard) {
     switch (input_dtype) {

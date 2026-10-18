@@ -145,10 +145,9 @@ class Activation : public Layer {
         bool inferenceOnly,
         std::shared_ptr<ThorImplementation::Layer> drivingLayer = nullptr) const;
 
-    // Standalone neutral-ragged artifact versions are enabled per concrete activation.
-    // This keeps shared ownership machinery reusable without silently declaring the
-    // entire activation family migrated before each specialized shape contract is reviewed.
-    virtual std::optional<std::string> placementNeutralStandaloneVersion() const { return std::nullopt; }
+    // The version for a standalone ragged activation is defined by its concrete
+    // serialization grammar; different versions may encode different fields.
+    virtual std::optional<std::string> standaloneRaggedSchemaVersion() const { return std::nullopt; }
 
     uint64_t getExpressionBackedActivationMemRequirementInBytes(uint32_t batchSize) const;
     virtual Tensor standaloneOutputTensorForInput(const Tensor& inputTensor) const;

@@ -269,7 +269,7 @@ void Transpose::deserialize(const json &j, Network *network) {
         transpose.raggedFeatureOutput = input.withValues(featureOutput);
     } else {
         if (version != "1.0.0")
-            throw runtime_error("Transpose version 1.1.0 is reserved for placement-neutral ragged geometry.");
+            throw runtime_error("Transpose version 1.1.0 is reserved for canonical ragged schema.");
         featureOutput = Tensor::deserialize(j.at("feature_output"));
         if (featureOutput.getDataType() != transpose.outputDataType) {
             throw runtime_error("Transpose::deserialize feature_output dtype must match output_data_type.");

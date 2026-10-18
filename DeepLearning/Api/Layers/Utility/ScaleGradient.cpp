@@ -85,7 +85,7 @@ void ScaleGradient::deserialize(const json &j, Network *network) {
         scaleGradient.raggedFeatureOutput = raggedInput.withValues(featureOutput);
     } else {
         if (version != "1.0.0")
-            throw runtime_error("ScaleGradient version 1.1.0 is reserved for placement-neutral ragged geometry.");
+            throw runtime_error("ScaleGradient version 1.1.0 is reserved for canonical ragged schema.");
         const uint64_t originalTensorId = j.at("feature_input").at("id").get<uint64_t>();
         scaleGradient.featureInput = network->getApiTensorByOriginalId(originalTensorId);
         scaleGradient.featureOutput = Tensor::deserialize(j.at("feature_output"));

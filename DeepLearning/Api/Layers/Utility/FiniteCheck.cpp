@@ -175,7 +175,7 @@ void FiniteCheck::deserialize(const json &j, Network *network) {
 
     const bool serializedUseRagged = j.value("use_ragged", false);
     if (version == "1.2.0" && !serializedUseRagged) {
-        throw runtime_error("FiniteCheck version 1.2.0 is reserved for placement-neutral ragged geometry.");
+        throw runtime_error("FiniteCheck version 1.2.0 is reserved for canonical ragged schema.");
     }
     const bool useRagged = (version == "1.1.0" || version == "1.2.0") && serializedUseRagged;
 

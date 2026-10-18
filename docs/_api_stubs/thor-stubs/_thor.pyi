@@ -41,7 +41,7 @@ def version() -> str: ...
 
 def git_version() -> str: ...
 
-__git_version__: str = 'unknown'
+__git_version__: str = '3d342824-dirty'
 
 BATCH_VALIDITY_MASK_NAME: str = '__thor_batch_validity_mask'
 

@@ -190,6 +190,25 @@ void launchFp8AwkwardAlignmentRotatedShardedCalibrationFirstStage(
     DataType input_dtype, size_t packet_bytes, bool exact_tile, uint64_t rows_per_shard);
 
 /**
+ * Benchmark-only generalized runtime-K RParallel access mode backed by the calibrated p16 rotated packet-ownership
+ * kernel. This is not a new physical kernel family: it exposes RotatedPacketOwnership as a second access layout of
+ * generalized K tiling while the historical standalone Rotated entry points remain available as comparison controls.
+ * K tiles are runtime-sized (497 PrefixReserved or 512 Exact), R is sharded by the selected fixed row depth, and the
+ * stage emits FP32 [outer,shards,K] partials with no K-tile merge.
+ */
+void launchFp8GeneralRParallelKTileRotatedCalibrationFirstStage(
+    const Tensor& input,
+    Tensor& fp32_partials,
+    const CubReductionGeometry& geometry,
+    bool exact_tile,
+    uint64_t rows_per_shard,
+    uint64_t shards_per_output,
+    Stream& stream);
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp8GeneralRParallelKTileRotatedCalibrationOccupancy(
+    DataType input_dtype, bool exact_tile, uint64_t rows_per_shard);
+
+/**
  * Experimental modern R-cooperative primitive for FP8/FP16/BF16 K<=32. Each warp reads exactly 16*K bytes as one
  * flat contiguous 16-byte-packet window: sixteen FP8 rows or eight FP16/BF16 rows. FP8 preserves those packets in
  * packed shared storage through the ownership transpose and converts to FP32 only at the final logical component owner;
@@ -302,7 +321,16 @@ void launchFp8GeneralRParallelRCooperativeCalibrationComplete(
     uint32_t warps_per_output,
     uint32_t packet_bytes,
     Stream& stream,
-    bool linear_packets = false);
+    bool linear_packets = false,
+    const CubReductionStageSemantics& semantics = {});
+
+/** Measurement-only original FP8 epilogues. These are not selector candidates. */
+void launchFp8OneWindowLegacyStoreBenchmark(
+    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry,
+    uint32_t warps_per_output, Stream& stream);
+void launchFp8RuntimeKCompleteLegacyStoreBenchmark(
+    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry,
+    uint32_t warps_per_output, uint32_t tile_components, Stream& stream);
 
 [[nodiscard]] CubKernelOccupancyInfo queryFp8GeneralRParallelRCooperativeCalibrationOccupancy(
     DataType input_dtype,
@@ -333,6 +361,36 @@ void launchFp8GeneralRParallelRCooperativeCalibrationFirstStage(
     uint32_t warps_per_output,
     uint32_t packet_bytes,
     bool linear_packets = false);
+
+
+/** Benchmark-only runtime-K tiled continuation of generalized RParallel. K is partitioned into independent p16
+ * component tiles; tile size is runtime-selected from device parallelism, so total K is not a compile-time dispatch
+ * axis. Complete writes disjoint output slices directly. */
+void launchFp8GeneralRParallelKTileRCooperativeCalibrationComplete(
+    const Tensor& input,
+    Tensor& output,
+    const CubReductionGeometry& geometry,
+    uint32_t warps_per_output,
+    uint32_t tile_components,
+    Stream& stream,
+    const CubReductionStageSemantics& semantics = {});
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp8GeneralRParallelKTileRCooperativeCalibrationOccupancy(
+    DataType input_dtype);
+
+/** Benchmark-only runtime-K tiled FirstStage. Work is [outer, shard, k_tile] and writes the ordinary FP32
+ * [outer, shard, K] partial tensor; K tiles never communicate with each other. */
+void launchFp8GeneralRParallelKTileRCooperativeCalibrationFirstStage(
+    const Tensor& input,
+    Tensor& fp32_partials,
+    const CubReductionGeometry& geometry,
+    uint32_t warps_per_output,
+    uint32_t shards_per_output,
+    uint32_t tile_components,
+    Stream& stream);
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp8GeneralRParallelKTileRCooperativeCalibrationFirstStageOccupancy(
+    DataType input_dtype);
 
 /** Compatibility wrapper for the original small-K W2/W4/W8 calibration entry point. It now routes through the
  * general Complete RParallel physical kernel above. */

@@ -135,8 +135,64 @@ void runFp8KParallelStagedLayoutSweep(Tensor& cache_flush, Stream& stream);
  */
 void runFp8RCooperativeSinglePassSweep(Tensor& cache_flush, Stream& stream);
 
-/** Full-space FP8 RCooperative calibration across R depth, total input size, packet width, and physical layout. */
+/**
+ * Full-space FP8 RK calibration over the pruned surviving candidate inventory, including generalized RParallel
+ * Complete/staged geometry and unresolved historical baselines whose global niches have not yet been disproven.
+ */
 void runFp8RCooperativeFullSpaceSweep(Tensor& cache_flush, Stream& stream);
+
+/** Focused runtime-K tiled generalized RParallel census. Uses adaptive K-tile/W/S geometry chosen from exact device
+ * occupancy and compares only against the surviving large-K controls. */
+void runFp8RCooperativeKTiledSweep(Tensor& cache_flush, Stream& stream);
+
+/** Broad deletion-oriented FP8 selector census. Compares generalized runtime-K RParallel against the historical
+ * controls that can still falsify consolidation: production KParallel, PacketAdaptive, FlatRows, old one-window
+ * generalized Complete, and the unresolved legacy p4 RParallel path. */
+void runFp8RCooperativeSelectorSimplificationSweep(Tensor& cache_flush, Stream& stream);
+void runFp8RCooperativeUnifiedSelectorValidationSweep(Tensor& cache_flush, Stream& stream);
+/** Fixed out-of-887-training-R policy validation; benchmark and oracle only. */
+void runFp8RCooperativeGeometryPolicyHoldoutSweep(Tensor& cache_flush, Stream& stream);
+
+/** Focused RuntimeK PacketStaged vs rotated p16 physical end-to-end inventory census.
+ * FP32 staged partials run through stamped production CubReduction, with common FP8 output. */
+void runFp8RuntimeKEndToEndSweep(Tensor& cache_flush, Stream& stream);
+/** Independent RuntimeK 24/128 MiB inventory holdout with every legal compiled rotated depth. */
+void runFp8RuntimeKInventoryHoldoutSweep(Tensor& cache_flush, Stream& stream);
+/** Fresh full-oracle RuntimeK selector holdout, 12/96 MiB, five timed samples. */
+void runFp8RuntimeKSelectorHoldoutSweep(Tensor& cache_flush, Stream& stream);
+/** Fresh 16/112 MiB holdout for RuntimeK five-plan legal shortlist recall. */
+void runFp8RuntimeKShortlistHoldoutSweep(Tensor& cache_flush, Stream& stream);
+/** Original FP8 epilogue vs runtime-selected output storage on OneWindow and RuntimeK Complete. */
+void runFp8CompleteRuntimeOutputRegression(Tensor& cache_flush, Stream& stream);
+/** Compare runtime identity/divide/sqrt finalizers against identical-output identity and original FP8 identity. */
+void runFp8CompleteRuntimeFinalizeRegression(Tensor& cache_flush, Stream& stream);
+
+/** Benchmark-only AlignedK / production FP8 KParallel Complete vs staged packet/CTA/shard inventory.
+ * Staged candidates include the real stamped FP32 continuation in the total time. */
+void runFp8AlignedKEndToEndSweep(Tensor& cache_flush, Stream& stream);
+/** Expanded lean-inventory calibration, NOT an acceptance holdout. */
+void runFp8AlignedKLeanCalibration(Tensor& cache_flush, Stream& stream);
+/** Fresh, fixed geometry holdout for the offline topology rule and CTA256 inventory deletion. */
+void runFp8AlignedKTopologyHoldout(Tensor& cache_flush, Stream& stream);
+/** Experimental nine-inventory AlignedK local-selector holdout, no production changes. */
+void runFp8AlignedKSelectorHoldout(Tensor& cache_flush, Stream& stream);
+
+/** FlatRows physical p4/p8/p16 / rows-per-shard sweep, followed by production FP32 continuation.
+ * Timed end-to-end plus first-stage/continuation timing; five interleaved samples per candidate. */
+void runFp8DeepRSmallKEndToEndSweep(Tensor& cache_flush, Stream& stream);
+/** Fixed independent DeepRSmallK local-selector holdout with exact compiled P16 occupancy. */
+void runFp8DeepRSmallKFourWayHoldout(Tensor& cache_flush, Stream& stream);
+void runFp8DeepRSmallKFiveWayHoldout(Tensor& cache_flush, Stream& stream);
+
+/** Frozen ten-variant OneWindow-only policy; independent larger benchmark (no production changes). */
+void runFp8OneWindowSelectorValidationSweep(Tensor& cache_flush, Stream& stream);
+void runFp8OneWindowGeneralizationHoldoutSweep(Tensor& cache_flush, Stream& stream);
+
+/** Nine promoted OneWindow physical variants, twelve explicitly demoted oracles: original dense in-domain census. */
+void runFp8RCooperativeOneWindowDenseBoundarySweep(Tensor& cache_flush, Stream& stream);
+
+/** Paired 887 OneWindow decode/gather micro-census, benchmark only. */
+void runFp8RCooperativeOneWindowDecodeSweep(Tensor& cache_flush, Stream& stream);
 
 /** Focused shallow-R / narrow-K FP8 coverage sweep, including R,K down to 2 and 64..512 MiB actual work. */
 void runFp8RCooperativeSmallRSmallKSweep(Tensor& cache_flush, Stream& stream);
@@ -152,6 +208,9 @@ void runRKKParallelEndToEndCrossoverCalibration(Tensor& cache_flush, Stream& str
 
 /** End-to-end realistic-work calibration ranked by absolute full-reduction time and microseconds saved. */
 void runRKRealisticEndToEndProgressCalibration(Tensor& cache_flush, Stream& stream);
+/** Cache-cold FP16 RK production-versus-forced-physical sampled autotuning opportunity census.
+ * No production routing changes. */
+void runFp16ProductionAutotuneCensus(Tensor& cache_flush, Stream& stream);
 void runRKFamilyBoundaryCalibration(Tensor& cache_flush, Stream& stream);
 
 /** Convenience registrar for a candidate translation unit linked into only the benchmark executable. */

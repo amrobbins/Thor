@@ -118,7 +118,7 @@ class ScaledDotProductAttention : public CustomLayer {
           outputDataType(outputDataType) {}
 
    protected:
-    // Bind placement-neutral packed Q output to the same physical partition as
+    // Bind ragged packed Q output to the same physical partition as
     // the real Q offsets/values ports. The parent stamping path invokes this
     // once, before physical graph connection and expression compilation.
     std::shared_ptr<ThorImplementation::TrainableLayer> createPhysicalLayer(

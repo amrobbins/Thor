@@ -176,13 +176,13 @@ class FullyConnected : public TrainableLayer, public TrainingDropoutControllable
     [[nodiscard]] uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
         if (raggedFeatureInputs.empty())
             return TrainableLayer::getOutputTensorBytes(batchSize);
-        if (batchSize == 0) throw std::overflow_error("FullyConnected neutral placement batch must be positive.");
+        if (batchSize == 0) throw std::overflow_error("FullyConnected placement batch must be positive.");
         uint64_t bytes = 0;
         for (const Tensor& output : featureOutputs) {
             const uint64_t n = output.getTotalSizeInBytes();
             if (n > std::numeric_limits<uint64_t>::max() / batchSize ||
                 bytes > std::numeric_limits<uint64_t>::max() - n * batchSize)
-                throw std::overflow_error("FullyConnected neutral output memory overflows uint64_t.");
+                throw std::overflow_error("FullyConnected output memory overflows uint64_t.");
             bytes += n * batchSize;
         }
         return bytes;

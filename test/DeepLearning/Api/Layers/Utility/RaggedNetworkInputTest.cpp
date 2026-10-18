@@ -265,7 +265,7 @@ TEST(RaggedNetworkInputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTensor
     std::filesystem::remove_all(archiveDir);
 }
 
-TEST(RaggedNetworkInputApi, PlacementNeutralBoundarySaveLoadAndReplacesPlacementGeometryPerBatch) {
+TEST(RaggedNetworkInputApi, LogicalBoundarySaveLoadAndReplacesPlacementGeometryPerBatch) {
     constexpr uint64_t maxValuesPerRow = 4;
     const std::string networkName = "ragged_network_input_placement_neutral_round_trip";
     const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -373,7 +373,7 @@ TEST(RaggedNetworkInputApi, PlacementNeutralBoundarySaveLoadAndReplacesPlacement
     std::filesystem::remove_all(archiveDir);
 }
 
-TEST(RaggedNetworkInputApi, PlacementNeutralSharedPartitionKeepsCanonicalOwnerSemantics) {
+TEST(RaggedNetworkInputApi, LogicalSharedPartitionKeepsCanonicalOwnerSemantics) {
     Network network("ragged_network_input_neutral_shared_partition");
     RaggedTensor owner = RaggedNetworkInput::Builder()
                              .network(network)

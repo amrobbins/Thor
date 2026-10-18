@@ -55,7 +55,7 @@ TEST(RaggedTensorApi, RequiresExplicitMAndCanonicalPartitionToken) {
     EXPECT_EQ(logical.getDescriptorForPlacement(3).getValuesDimensions(), (vector<uint64_t>{51, 64}));
 }
 
-TEST(RaggedTensorApi, PlacementNeutralGeometryCarriesOnlySemanticRowBoundUntilPlacement) {
+TEST(RaggedTensorApi, LogicalGeometryCarriesOnlySemanticRowBoundUntilPlacement) {
     Tensor values(DataType::FP32, {5, 3});
     Tensor partitionToken(DataType::UINT32, {1});
 
@@ -140,7 +140,7 @@ TEST(RaggedTensorApi, ArchitectureJsonRoundTrips) {
     EXPECT_EQ(copy.getDescriptorForPlacement(7).getMaxTotalValues(), 49u);
 }
 
-TEST(RaggedTensorApi, PlacementNeutralDescriptorRejectsOverflowAndOffsetDTypeOverflow) {
+TEST(RaggedTensorApi, LogicalDescriptorRejectsOverflowAndOffsetDTypeOverflow) {
     RaggedTensor uint64Offsets = RaggedTensor::logical(
         Tensor(DataType::FP32, {4, 2}), Tensor(DataType::UINT64, {1}), 4);
     EXPECT_THROW(

@@ -227,6 +227,33 @@ TEST(CubReduction, KParallelTiledCompleteTopologyAppliesStageSemanticsScaleAndOu
     expectFloatVectorNear(copyGpuTensorAsFloat(first_output, stream), expected_sum_squares, 1.0e-5f);
 }
 
+// Regression: Complete KParallel previously capped its launch at 65535 CTAs
+// without a grid-stride loop. FP32 continuations with >65535 narrow-K outputs
+// silently left the tail unwritten (observed after the FP8 FlatRows first stage).
+TEST(CubReduction, KParallelCompleteGridStridesBeyond65535OuterRows) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer_size = 65537;
+    constexpr uint64_t reduction_size = 32;
+    constexpr uint64_t inner_size = 3;
+    Tensor input(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size, reduction_size, inner_size}));
+    Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size, inner_size}));
+    input.fill(1.0f, stream);
+    output.fill(-1.0f, stream);
+
+    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
+    ASSERT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
+    const CubReductionInternal::KParallelTiledStagePlan plan{
+        CubReductionInternal::TiledRKStageTopology::Complete, 4, 32, 1};
+    const auto semantics = CubReductionInternal::makeValueReductionStageSemantics(
+        CubReductionOp::Sum, CubReductionInternal::CubReductionStageRole::Complete, reduction_size);
+    CubReductionInternal::launchKParallelTiledStage(semantics, input, output, geometry, plan, 1.0f, stream);
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(output, stream),
+                          std::vector<float>(outer_size * inner_size, 32.0f), 1.0e-5f);
+}
+
 TEST(CubReduction, KParallelTiledStagedTopologyDefersFinalizerAndScale) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);

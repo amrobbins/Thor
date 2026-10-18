@@ -725,7 +725,7 @@ TEST(FullyConnectedApi, RaggedMultipleApplicationsExposeIndependentStructuralOff
     EXPECT_EQ(secondReady[0], fc.getRaggedFeatureOutput(1)->getValues());
 }
 
-TEST(FullyConnectedApi, NeutralMultipleApplicationsAllowDistinctMAndRequireMatchingOffsetsDtype) {
+TEST(FullyConnectedApi, MultipleApplicationsAllowDistinctMAndRequireMatchingOffsetsDtype) {
     Api::Network network("neutral_fc_multi_geometry_validation");
     auto input = [&](const string& name, uint64_t m, DataType offsetsDtype) {
         return Api::RaggedNetworkInput::Builder()

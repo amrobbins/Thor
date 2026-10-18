@@ -2664,3 +2664,73 @@ else ()
             COMMENT "Thor: running M11 materialization/broadcast gate (Python diagnostics disabled)"
     )
 endif ()
+
+# Optional, explicitly requested size probe for the four FP8 mode-local selector
+# inventories.  Its generated translation units, objects and archive live entirely
+# in the build directory.  It never changes Thor/ThorCubCudaObjects and is not ALL.
+option(THOR_ENABLE_FP8_SELECTED_INVENTORY_SIZE_TARGET
+       "Expose isolated compile target for FP8 selector-reachable first-stage kernel sizes" ON)
+if (THOR_ENABLE_FP8_SELECTED_INVENTORY_SIZE_TARGET AND NOT _thor_python_release_wheel_bundle)
+    find_program(_thor_fp8_inventory_python NAMES python3 REQUIRED)
+    set(_thor_fp8_inventory_dir "${CMAKE_BINARY_DIR}/fp8-selected-inventory")
+    set(_thor_fp8_inventory_script "${CMAKE_SOURCE_DIR}/benchmarks/fp8_selected_inventory_size.py")
+    set(_thor_fp8_inventory_sources
+            "${_thor_fp8_inventory_dir}/narrow.cu"
+            "${_thor_fp8_inventory_dir}/aligned.cu"
+            "${_thor_fp8_inventory_dir}/rotated.cu"
+    )
+    add_custom_command(
+            OUTPUT ${_thor_fp8_inventory_sources} "${_thor_fp8_inventory_dir}/expected.json"
+            COMMAND "${_thor_fp8_inventory_python}" "${_thor_fp8_inventory_script}"
+                    generate --source "${CMAKE_SOURCE_DIR}" --out "${_thor_fp8_inventory_dir}"
+            DEPENDS "${_thor_fp8_inventory_script}"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubReductionNarrowFlatRCooperative.cu"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubReductionKParallelShardedTiled.cu"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubReductionAwkwardRotatedSharded.cu"
+                    "${CMAKE_SOURCE_DIR}/benchmarks/Fp8OneWindowSelector.h"
+                    "${CMAKE_SOURCE_DIR}/benchmarks/Fp8DeepRSmallKSelector.h"
+                    "${CMAKE_SOURCE_DIR}/benchmarks/Fp8AlignedKSelector.h"
+                    "${CMAKE_SOURCE_DIR}/benchmarks/Fp8RuntimeKSelector.h"
+            COMMENT "Generate isolated selector-reachable FP8 CUDA kernels"
+            VERBATIM
+    )
+    add_library(thor_fp8_selected_inventory_objects OBJECT ${_thor_fp8_inventory_sources})
+    set_target_properties(thor_fp8_selected_inventory_objects PROPERTIES
+            EXCLUDE_FROM_ALL TRUE
+            CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
+            CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
+            CUDA_SEPARABLE_COMPILATION OFF
+            POSITION_INDEPENDENT_CODE ON
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
+    )
+    foreach (_prop IN ITEMS INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS COMPILE_FEATURES)
+        thor_copy_target_property(Thor thor_fp8_selected_inventory_objects ${_prop})
+    endforeach ()
+    # This measurement-only target extracts kernel definitions from larger CUDA
+    # translation units and intentionally leaves many unrelated helpers unused.
+    # Suppress NVCC's unused-entity diagnostic only here; Thor and all other
+    # warnings-as-errors settings remain unchanged. This does not affect codegen.
+    target_compile_options(thor_fp8_selected_inventory_objects PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=177>)
+    if (THOR_CUDA_INCLUDE_DIRS)
+        target_include_directories(thor_fp8_selected_inventory_objects SYSTEM PRIVATE ${THOR_CUDA_INCLUDE_DIRS})
+    endif ()
+    if (THOR_CUDA_STACK STREQUAL "python")
+        set_property(TARGET thor_fp8_selected_inventory_objects PROPERTY CUDA_RUNTIME_LIBRARY None)
+    endif ()
+    add_library(thor_fp8_selected_inventory_archive STATIC
+            $<TARGET_OBJECTS:thor_fp8_selected_inventory_objects>)
+    set_target_properties(thor_fp8_selected_inventory_archive PROPERTIES
+            EXCLUDE_FROM_ALL TRUE
+            LINKER_LANGUAGE CXX
+            ARCHIVE_OUTPUT_DIRECTORY "${_thor_fp8_inventory_dir}")
+    add_custom_target(thor_fp8_selected_inventory_size
+            COMMAND "${_thor_fp8_inventory_python}" "${_thor_fp8_inventory_script}"
+                    analyze --archive "$<TARGET_FILE:thor_fp8_selected_inventory_archive>"
+                    --out "${_thor_fp8_inventory_dir}/report"
+                    --objects $<TARGET_OBJECTS:thor_fp8_selected_inventory_objects>
+            DEPENDS thor_fp8_selected_inventory_archive
+            COMMAND_EXPAND_LISTS VERBATIM
+            COMMENT "Measure only compiled selector-reachable FP8 kernel device symbols"
+    )
+endif ()

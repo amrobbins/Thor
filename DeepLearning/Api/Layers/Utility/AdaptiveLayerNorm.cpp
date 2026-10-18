@@ -17,27 +17,27 @@ using json = nlohmann::json;
 namespace Thor {
 namespace {
 
-void validateNeutralTensorReference(const json& serialized, const Tensor& live) {
+void validateCanonicalTensorReference(const json& serialized, const Tensor& live) {
     if (!serialized.is_object() || serialized.size() != 4 ||
         serialized.at("version").get<string>() != "1.0.0" ||
         serialized.at("id").get<uint64_t>() != live.getOriginalId() ||
         serialized.at("data_type").get<DataType>() != live.getDataType() ||
         serialized.at("dimensions").get<vector<uint64_t>>() != live.getDimensions()) {
-        throw runtime_error("AdaptiveLayerNorm neutral tensor reference does not match its live graph tensor.");
+        throw runtime_error("AdaptiveLayerNorm canonical schema tensor reference does not match its live graph tensor.");
     }
 }
 
-void validateNeutralRaggedReference(const json& serialized, const RaggedTensor& live) {
+void validateCanonicalRaggedReference(const json& serialized, const RaggedTensor& live) {
     if (!SegmentedPrimitiveDetail::hasCanonicalLayerRaggedReferenceFields(serialized) ||
         SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(serialized, "AdaptiveLayerNorm") !=
             SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL ||
         serialized.at("ragged_rank").get<uint32_t>() != 1 ||
         serialized.at("max_values_per_row").get<uint64_t>() != live.getMaxValuesPerRow() ||
         serialized.contains("batch_size") || serialized.contains("max_total_values")) {
-        throw runtime_error("AdaptiveLayerNorm neutral ragged reference has invalid semantic geometry.");
+        throw runtime_error("AdaptiveLayerNorm canonical ragged reference has invalid semantic geometry.");
     }
-    validateNeutralTensorReference(serialized.at("values"), live.getValues());
-    validateNeutralTensorReference(serialized.at("offsets"), live.getRowPartitionToken());
+    validateCanonicalTensorReference(serialized.at("values"), live.getValues());
+    validateCanonicalTensorReference(serialized.at("offsets"), live.getRowPartitionToken());
 }
 
 } // namespace
@@ -372,12 +372,12 @@ void AdaptiveLayerNorm::deserialize(const json& j, Network* network) {
     const string version = j.at("version").get<string>();
     if (version != "1.0.0" && version != "1.1.0")
         throw runtime_error("Unsupported version in AdaptiveLayerNorm::deserialize: " + version);
-    const bool neutral = version == "1.1.0";
-    if (neutral && (!j.is_object() || j.size() != 12 ||
+    const bool canonicalRaggedSchema = version == "1.1.0";
+    if (canonicalRaggedSchema && (!j.is_object() || j.size() != 12 ||
                     j.at("factory") != Layer::Factory::Layer.value() ||
                     !j.at("use_ragged").get<bool>() || !j.at("inputs").is_array() ||
                     !j.at("outputs").is_array())) {
-        throw runtime_error("AdaptiveLayerNorm 1.1.0 requires the explicit neutral ragged schema.");
+        throw runtime_error("AdaptiveLayerNorm 1.1.0 requires the explicit canonical ragged schema.");
     }
     if (j.at("layer_type").get<string>() != "adaptive_layer_norm")
         throw runtime_error("Layer type mismatch in AdaptiveLayerNorm::deserialize: " + j.at("layer_type").get<string>());
@@ -386,10 +386,10 @@ void AdaptiveLayerNorm::deserialize(const json& j, Network* network) {
     layer.normalizedShape = j.at("normalized_shape").get<vector<uint64_t>>();
     layer.epsilon = j.at("epsilon").get<double>();
     layer.scaleBiasDataType = j.at("scale_bias_data_type").get<DataType>();
-    if (neutral && (layer.normalizedShape.size() != 1 ||
+    if (canonicalRaggedSchema && (layer.normalizedShape.size() != 1 ||
                     checkedFeatureCount(layer.normalizedShape, "normalizedShape") == 0 ||
                     !(layer.epsilon > 0.0) || layer.scaleBiasDataType != DataType::FP32)) {
-        throw runtime_error("AdaptiveLayerNorm neutral normalization configuration is invalid.");
+        throw runtime_error("AdaptiveLayerNorm canonical schema normalization configuration is invalid.");
     }
 
     const auto inputsJson = j.at("inputs").get<vector<json>>();
@@ -400,12 +400,12 @@ void AdaptiveLayerNorm::deserialize(const json& j, Network* network) {
     for (uint32_t i = 0; i < NUM_INPUT_PORTS; ++i) {
         const uint64_t originalTensorId = inputsJson[i].at("id").get<uint64_t>();
         layer.featureInputs[i] = network->getApiTensorByOriginalId(originalTensorId);
-        if (neutral) {
+        if (canonicalRaggedSchema) {
             if (inputsJson[i].at("port").get<string>() != portName(i) || inputsJson[i].size() != 5)
-                throw runtime_error("AdaptiveLayerNorm neutral input port metadata is invalid.");
+                throw runtime_error("AdaptiveLayerNorm canonical schema input port metadata is invalid.");
             json serializedTensor = inputsJson[i];
             serializedTensor.erase("port");
-            validateNeutralTensorReference(serializedTensor, layer.featureInputs[i]);
+            validateCanonicalTensorReference(serializedTensor, layer.featureInputs[i]);
         }
     }
 
@@ -413,10 +413,10 @@ void AdaptiveLayerNorm::deserialize(const json& j, Network* network) {
     std::optional<RaggedTensor> logicalRaggedInput;
     if (useRagged) {
         if ((SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(j.at("ragged_feature_input"), "AdaptiveLayerNorm") ==
-             SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL) != neutral)
+             SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL) != canonicalRaggedSchema)
             throw runtime_error("AdaptiveLayerNorm layer version disagrees with ragged reference grammar.");
         if ((SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(j.at("ragged_feature_output"), "AdaptiveLayerNorm") ==
-             SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL) != neutral)
+             SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL) != canonicalRaggedSchema)
             throw runtime_error("AdaptiveLayerNorm layer version disagrees with ragged reference grammar.");
         logicalRaggedInput = SegmentedPrimitiveDetail::reconstructInput(
             j.at("ragged_feature_input"), network, "AdaptiveLayerNorm");
@@ -432,7 +432,7 @@ void AdaptiveLayerNorm::deserialize(const json& j, Network* network) {
     if (layer.featureOutputs.size() != 1) {
         throw runtime_error("AdaptiveLayerNorm deserialize expected exactly one output.");
     }
-    if (neutral) validateNeutralTensorReference(j.at("outputs").at(0), layer.featureOutputs[0]);
+    if (canonicalRaggedSchema) validateCanonicalTensorReference(j.at("outputs").at(0), layer.featureOutputs[0]);
 
     for (uint32_t i = 0; i < layer.featureInputs.size(); ++i) {
         layer.outputTensorFromInputTensor[layer.featureInputs[i]] = layer.featureOutputs[0];
@@ -445,9 +445,9 @@ void AdaptiveLayerNorm::deserialize(const json& j, Network* network) {
         const RaggedTensor raggedOutput = raggedInput.withValues(layer.featureOutputs[0]);
         SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
             raggedOutputJson, raggedInputJson, raggedInput, "AdaptiveLayerNorm");
-        if (neutral) {
-            validateNeutralRaggedReference(raggedInputJson, raggedInput);
-            validateNeutralRaggedReference(raggedOutputJson, raggedOutput);
+        if (canonicalRaggedSchema) {
+            validateCanonicalRaggedReference(raggedInputJson, raggedInput);
+            validateCanonicalRaggedReference(raggedOutputJson, raggedOutput);
         }
         {
             if (raggedInput.getValues().getOriginalId() != layer.featureInputs[DATA].getOriginalId() ||
@@ -466,7 +466,7 @@ void AdaptiveLayerNorm::deserialize(const json& j, Network* network) {
                 layer.featureInputs[SCALE].getOriginalId() == layer.featureInputs[BIAS].getOriginalId() ||
                 layer.featureInputs[SCALE].getOriginalId() == layer.featureInputs[DATA].getOriginalId() ||
                 layer.featureInputs[BIAS].getOriginalId() == layer.featureInputs[DATA].getOriginalId()) {
-                throw runtime_error("AdaptiveLayerNorm neutral tensor semantics or input identities are invalid.");
+                throw runtime_error("AdaptiveLayerNorm canonical schema tensor semantics or input identities are invalid.");
             }
         }
         layer.raggedFeatureInput = raggedInput;

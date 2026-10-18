@@ -183,7 +183,7 @@ std::shared_ptr<ThorImplementation::Layer> Add::stamp(
         if (driven != (connectingApiTensor == raggedRight->getValues() ? rightDescriptor : leftDescriptor) ||
             leftDescriptor.getValuesDescriptor() != rightDescriptor.getValuesDescriptor() ||
             leftDescriptor.getRowPartition() != rightDescriptor.getRowPartition()) {
-            throw std::runtime_error("Add physical descriptor disagrees with both neutral operands.");
+            throw std::runtime_error("Add physical descriptor disagrees with both logical ragged operands.");
         }
         Expression offsets = Expression::input("offsets");
         RaggedExpression left(Expression::input("left"), offsets, leftDescriptor,
@@ -297,7 +297,7 @@ void Add::deserialize(const json& j, Network* network) {
         add.featureInputs = {add.raggedLeft->getValues(), add.raggedRight->getValues(), add.raggedLeft->getOffsets()};
         add.featureOutputs = {outputValues};
     } else {
-        if (version != "1.0.0") throw std::runtime_error("Add neutral version requires ragged operands.");
+        if (version != "1.0.0") throw std::runtime_error("Add canonical ragged schema requires ragged operands.");
         Tensor left = network->getApiTensorByOriginalId(j.at("left").at("id").get<uint64_t>());
         Tensor right = network->getApiTensorByOriginalId(j.at("right").at("id").get<uint64_t>());
         requireCompatibleDense(left, right);

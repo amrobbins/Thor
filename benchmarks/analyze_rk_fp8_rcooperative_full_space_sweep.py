@@ -65,6 +65,29 @@ class Row:
         if self.access.startswith("r_parallel_multi_warp_"):
             warps_per_output = self.access.removeprefix("r_parallel_multi_warp_")
             return f"r_parallel_multi_w{warps_per_output}_p{self.packet_bytes}"
+        if self.access == "r_parallel_general_aligned_k":
+            return f"generalized_aligned_k_p{self.packet_bytes}"
+        if self.access == "r_parallel_general_deep_r_small_k_flat_rows":
+            return f"generalized_deep_r_small_k_flat_rows_p{self.packet_bytes}"
+        if self.access.startswith("r_parallel_general_runtime_k_rotated_"):
+            ownership = self.access.removeprefix("r_parallel_general_runtime_k_")
+            return f"generalized_runtime_k_{ownership}_p{self.packet_bytes}"
+        if self.access.startswith("r_parallel_general_runtime_k_packetstaged_"):
+            ownership = self.access.removeprefix("r_parallel_general_runtime_k_")
+            return f"generalized_runtime_k_{ownership}_p{self.packet_bytes}"
+        if self.access.startswith("r_parallel_general_one_window_"):
+            ownership = self.access.removeprefix("r_parallel_general_one_window_")
+            return f"generalized_one_window_{ownership}_p{self.packet_bytes}"
+        if self.access == "oracle_packet_adaptive_complete":
+            return f"ORACLE_packet_adaptive_p{self.packet_bytes}"
+        if self.access == "oracle_legacy_r_parallel_p4":
+            return "ORACLE_legacy_r_parallel_p4"
+        if self.access.startswith("r_parallel_general_ktiled_rotated_"):
+            ownership = self.access.removeprefix("r_parallel_general_ktiled_")
+            return f"r_parallel_general_ktiled_{ownership}_p{self.packet_bytes}"
+        if self.access.startswith("r_parallel_general_ktiled_w"):
+            ownership = self.access.removeprefix("r_parallel_general_ktiled_")
+            return f"r_parallel_general_ktiled_{ownership}_p{self.packet_bytes}"
         if self.access.startswith("r_parallel_general_w"):
             warps_per_output = self.access.removeprefix("r_parallel_general_w")
             return f"r_parallel_general_w{warps_per_output}_p{self.packet_bytes}"
@@ -265,10 +288,14 @@ def main() -> None:
     # The old one-output-per-warp outer-grouped kernel is deliberately retained only as an experimental baseline.
     # The raw p4 read/write row is a physical roofline reference rather than a reduction candidate. Exclude both from
     # every coverage, winner, line-rate, packet-policy, and promotion-oriented decision.
+    def selector_probe(row: Row) -> bool:
+        return "_selector_probe_" in row.access
+
     def promotion_candidate(row: Row) -> bool:
         return (
-            row.strategy != "reference"
+            row.strategy not in ("reference", "oracle_control")
             and row.access not in ("outer_grouped", "experimental_deprecated_outer_grouped")
+            and not selector_probe(row)
         )
 
     eligible_by_key: dict[tuple[str, str, str], list[Row]] = {
@@ -294,6 +321,287 @@ def main() -> None:
     )
 
     focused_holes_only = metadata.get("focused_holes_only") == "1"
+    pruned_inventory = metadata.get("pruned_candidate_inventory") == "1"
+    unified_validation = metadata.get("unified_generalized_selector_validation") == "1"
+
+    print("\nCANDIDATE INVENTORY OBSERVED")
+    access_counts = Counter(row.access for row in rows)
+    for access, count in sorted(access_counts.items()):
+        print(f"{access:35s} rows={count}")
+    if pruned_inventory:
+        print("inventory_mode=pruned_full_space")
+
+    selector_probe_rows = [row for row in rows if selector_probe(row)]
+    if selector_probe_rows:
+        print("\nROTATED SELECTOR ADJACENT-DEPTH AUDIT (PROBES EXCLUDED FROM PROMOTION/COVERAGE)")
+        audited = 0
+        stable_selected = 0
+        stable_probe_pairs = 0
+        faster_probe_deltas: list[float] = []
+        holes: list[tuple[float, Row, Row]] = []
+        for key, group in groups.items():
+            stable_group = stable_all_by_key[key]
+            for layout in ("prefix", "exact"):
+                selected_access_options = (
+                    f"r_parallel_general_runtime_k_rotated_{layout}",
+                    f"r_parallel_general_ktiled_rotated_{layout}",
+                )
+                selected_access = next(
+                    (access for access in selected_access_options if any(r.access == access for r in group)),
+                    selected_access_options[0],
+                )
+                selected_rows = [r for r in group if r.access == selected_access]
+                if not selected_rows:
+                    continue
+                audited += 1
+                stable_selected_rows = [r for r in stable_group if r.access == selected_access]
+                if not stable_selected_rows:
+                    continue
+                stable_selected += 1
+                selected = fastest(stable_selected_rows)
+                if unified_validation:
+                    promoted = stable_by_key.get(key, [])
+                    if not promoted or fastest(promoted).access != selected_access:
+                        continue
+                probe_prefix = selected_access + "_selector_probe_"
+                probes = [r for r in stable_group if r.access.startswith(probe_prefix)]
+                if not probes:
+                    continue
+                stable_probe_pairs += 1
+                best_probe = fastest(probes)
+                delta = selected.median_ms / best_probe.median_ms - 1.0
+                if delta > 0.0:
+                    faster_probe_deltas.append(delta)
+                if delta > 0.02:
+                    holes.append((delta, selected, best_probe))
+
+        within_1pct = stable_probe_pairs - sum(1 for delta in faster_probe_deltas if delta > 0.01)
+        within_2pct = stable_probe_pairs - sum(1 for delta in faster_probe_deltas if delta > 0.02)
+        within_5pct = stable_probe_pairs - sum(1 for delta in faster_probe_deltas if delta > 0.05)
+        max_delta = max(faster_probe_deltas, default=0.0)
+        print(
+            f"audited_selected_layout_cells={audited} stable_selected={stable_selected} "
+            f"with_stable_adjacent_probe={stable_probe_pairs} "
+            f"selector_within_1pct={within_1pct}/{stable_probe_pairs} "
+            f"within_2pct={within_2pct}/{stable_probe_pairs} "
+            f"within_5pct={within_5pct}/{stable_probe_pairs} "
+            f"worst_adjacent_regret={max_delta*100:.2f}%"
+        )
+        if holes:
+            print("adjacent_selector_holes_gt_2pct:")
+            for delta, selected, probe in sorted(holes, key=lambda item: item[0], reverse=True):
+                direction = "more_shards" if probe.rows_per_shard < selected.rows_per_shard else "fewer_shards"
+                print(
+                    f"{selected.family:15s} R={selected.reduction:<6d} K={selected.inner:<6d} "
+                    f"layout={'prefix' if 'prefix' in selected.access else 'exact':6s} "
+                    f"selected_rows={selected.rows_per_shard:<5d} selected={selected.median_ms*1000:.2f}us "
+                    f"probe_{direction}_rows={probe.rows_per_shard:<5d} probe={probe.median_ms*1000:.2f}us "
+                    f"regret={delta*100:.2f}%"
+                )
+        else:
+            print("adjacent_selector_holes_gt_2pct=0")
+
+
+    # Consolidation/deletion audit. Generalized RParallel includes both the runtime-K PacketStaged/Rotated access
+    # modes and the historical one-window generalized Cartesian. Everything else below is a control that must show a
+    # real latency or coverage niche to justify remaining in the eventual production selector.
+    def architecture(row: Row) -> str:
+        if row.access == "r_parallel_general_aligned_k":
+            return "generalized_aligned_k"
+        if row.access == "r_parallel_general_deep_r_small_k_flat_rows":
+            return "generalized_deep_r_small_k"
+        if row.access.startswith("r_parallel_general_runtime_k_"):
+            return "generalized_runtime_k"
+        if row.access.startswith("r_parallel_general_one_window_"):
+            return "generalized_one_window"
+        if row.access.startswith("r_parallel_general_ktiled_"):
+            return "generalized_ktiled"
+        if row.access.startswith("r_parallel_general_"):
+            return "generalized_one_window"
+        if row.strategy == "k_parallel":
+            return "production_kparallel"
+        if row.access == "oracle_packet_adaptive_complete" or row.implementation == "packet_adaptive_complete":
+            return "packet_adaptive"
+        if row.access == "r_parallel_general_deep_r_small_k_flat_rows":
+            return "generalized_deep_r_small_k"
+        if row.access == "flat_rows":
+            return "flat_rows"
+        if row.access == "oracle_legacy_r_parallel_p4" or row.access == "r_parallel_warp":
+            return "legacy_r_parallel_p4"
+        return "other"
+
+
+    if unified_validation:
+        print("\nUNIFIED GENERALIZED RPARALLEL VALIDATION")
+        generalized_modes = (
+            "generalized_one_window",
+            "generalized_aligned_k",
+            "generalized_deep_r_small_k",
+            "generalized_runtime_k",
+        )
+        unified_winner_modes = Counter(architecture(row) for row in abs_winner.values())
+        print("selected_generalized_winner_modes=" + repr(dict(sorted(unified_winner_modes.items()))))
+        generalized_stable_cells = sum(
+            1 for stable in stable_by_key.values()
+            if any(architecture(row) in generalized_modes for row in stable)
+        )
+        generalized_floor_cells = sum(
+            1 for stable in stable_by_key.values()
+            if any(architecture(row) in generalized_modes and row.physical_gbps >= args.line_rate_gbps for row in stable)
+        )
+        print(
+            f"generalized_stable_cells={generalized_stable_cells}/{len(groups)} "
+            f"generalized_floor_cells={generalized_floor_cells}/{len(groups)}"
+        )
+
+        oracle_specs = (
+            ("packet_adaptive", "oracle_packet_adaptive_complete"),
+            ("legacy_r_parallel_p4", "oracle_legacy_r_parallel_p4"),
+        )
+        for oracle_name, oracle_access in oracle_specs:
+            paired = 0
+            unique_stable = 0
+            unique_floor = 0
+            deltas: list[float] = []
+            examples: list[tuple[float, Row, Row]] = []
+            for key in groups:
+                generalized = [
+                    row for row in stable_by_key[key]
+                    if architecture(row) in generalized_modes
+                ]
+                oracle = [
+                    row for row in stable_all_by_key[key]
+                    if row.access == oracle_access
+                ]
+                if oracle and not generalized:
+                    unique_stable += 1
+                    if any(row.physical_gbps >= args.line_rate_gbps for row in oracle):
+                        unique_floor += 1
+                    continue
+                if not oracle or not generalized:
+                    continue
+                paired += 1
+                best_generalized = fastest(generalized)
+                best_oracle = fastest(oracle)
+                delta = best_generalized.median_ms / best_oracle.median_ms - 1.0
+                if delta > 0.0:
+                    deltas.append(delta)
+                    examples.append((delta, best_oracle, best_generalized))
+            print(
+                f"oracle_{oracle_name:20s} paired={paired:<4d} unique_stable={unique_stable:<3d} "
+                f"unique_floor={unique_floor:<3d} wins_gt1pct={sum(d > 0.01 for d in deltas):<3d} "
+                f"gt2pct={sum(d > 0.02 for d in deltas):<3d} gt5pct={sum(d > 0.05 for d in deltas):<3d} "
+                f"gt10pct={sum(d > 0.10 for d in deltas):<3d} max_advantage={max(deltas, default=0.0)*100:.2f}%"
+            )
+            for delta, oracle, generalized in sorted(examples, key=lambda item: item[0], reverse=True)[:30]:
+                if delta <= 0.01:
+                    break
+                print(
+                    f"  {oracle.family:15s} R={oracle.reduction:<6d} K={oracle.inner:<6d} "
+                    f"oracle={oracle.variant}:{oracle.median_ms*1000:.2f}us "
+                    f"generalized={generalized.variant}:{generalized.median_ms*1000:.2f}us "
+                    f"advantage={delta*100:.2f}%"
+                )
+
+    print("\nGENERALIZED RPARALLEL CONSOLIDATION AUDIT")
+    winner_arch = Counter(architecture(row) for row in abs_winner.values())
+    print("absolute_winner_architectures=" + repr(dict(sorted(winner_arch.items()))))
+
+    control_architectures = () if unified_validation else (
+        "production_kparallel",
+        "packet_adaptive",
+        "flat_rows",
+        "legacy_r_parallel_p4",
+    )
+    for control_arch in control_architectures:
+        paired = 0
+        unique_stable = 0
+        unique_floor = 0
+        faster_deltas: list[float] = []
+        examples: list[tuple[float, Row, Row]] = []
+        winning_packets: Counter[int] = Counter()
+        for key, stable in stable_by_key.items():
+            generalized = [r for r in stable if architecture(r) in ("generalized_ktiled", "generalized_one_window")]
+            controls = [r for r in stable if architecture(r) == control_arch]
+            if controls and not generalized:
+                unique_stable += 1
+                if any(r.physical_gbps >= args.line_rate_gbps for r in controls):
+                    unique_floor += 1
+                continue
+            if not controls or not generalized:
+                continue
+            paired += 1
+            best_generalized = fastest(generalized)
+            best_control = fastest(controls)
+            delta = best_generalized.median_ms / best_control.median_ms - 1.0
+            if delta > 0.0:
+                faster_deltas.append(delta)
+                examples.append((delta, best_control, best_generalized))
+            if abs_winner.get(key) in controls:
+                winning_packets[abs_winner[key].packet_bytes] += 1
+
+        gt1 = sum(delta > 0.01 for delta in faster_deltas)
+        gt2 = sum(delta > 0.02 for delta in faster_deltas)
+        gt5 = sum(delta > 0.05 for delta in faster_deltas)
+        gt10 = sum(delta > 0.10 for delta in faster_deltas)
+        max_delta = max(faster_deltas, default=0.0)
+        print(
+            f"{control_arch:24s} paired={paired:<4d} unique_stable={unique_stable:<3d} unique_floor={unique_floor:<3d} "
+            f"wins_over_generalized_gt1pct={gt1:<3d} gt2pct={gt2:<3d} gt5pct={gt5:<3d} gt10pct={gt10:<3d} "
+            f"max_advantage={max_delta*100:.2f}% winner_packet_bytes={dict(sorted(winning_packets.items()))}"
+        )
+        for delta, control, generalized in sorted(examples, key=lambda item: item[0], reverse=True)[:8]:
+            if delta <= 0.02:
+                break
+            print(
+                f"  {control.family:15s} R={control.reduction:<6d} K={control.inner:<6d} "
+                f"control={control.variant}:{control.median_ms*1000:.2f}us "
+                f"generalized={generalized.variant}:{generalized.median_ms*1000:.2f}us "
+                f"advantage={delta*100:.2f}%"
+            )
+
+    # The old one-window Cartesian is itself generalized RParallel, but it is still a code/compile-time inventory
+    # candidate for deletion. Measure whether it has a niche over the runtime-K implementation before removing it.
+    paired = 0
+    one_window_unique_stable = 0
+    one_window_unique_floor = 0
+    one_window_deltas: list[float] = []
+    one_window_examples: list[tuple[float, Row, Row]] = []
+    for key, stable in stable_by_key.items():
+        runtime_k = [r for r in stable if architecture(r) in ("generalized_ktiled", "generalized_runtime_k")]
+        one_window = [r for r in stable if architecture(r) == "generalized_one_window"]
+        if one_window and not runtime_k:
+            one_window_unique_stable += 1
+            if any(r.physical_gbps >= args.line_rate_gbps for r in one_window):
+                one_window_unique_floor += 1
+            continue
+        if not one_window or not runtime_k:
+            continue
+        paired += 1
+        best_runtime = fastest(runtime_k)
+        best_one_window = fastest(one_window)
+        delta = best_runtime.median_ms / best_one_window.median_ms - 1.0
+        if delta > 0.0:
+            one_window_deltas.append(delta)
+            one_window_examples.append((delta, best_one_window, best_runtime))
+    print(
+        ("generalized_one_window_mode " if unified_validation else "old_generalized_one_window ") +
+        f"paired={paired} unique_stable={one_window_unique_stable} unique_floor={one_window_unique_floor} "
+        f"wins_over_runtime_k_gt1pct={sum(d > 0.01 for d in one_window_deltas)} "
+        f"gt2pct={sum(d > 0.02 for d in one_window_deltas)} "
+        f"gt5pct={sum(d > 0.05 for d in one_window_deltas)} "
+        f"gt10pct={sum(d > 0.10 for d in one_window_deltas)} "
+        f"max_advantage={max(one_window_deltas, default=0.0)*100:.2f}%"
+    )
+    for delta, old_row, runtime_row in sorted(one_window_examples, key=lambda item: item[0], reverse=True)[:12]:
+        if delta <= 0.02:
+            break
+        print(
+            f"  {old_row.family:15s} R={old_row.reduction:<6d} K={old_row.inner:<6d} "
+            f"one_window={old_row.variant}:{old_row.median_ms*1000:.2f}us "
+            f"runtime_k={runtime_row.variant}:{runtime_row.median_ms*1000:.2f}us "
+            f"advantage={delta*100:.2f}%"
+        )
 
     # Classify whether production KParallel already solves an exact geometry. Keep legality separate from
     # measurement stability: a production KParallel candidate that exists but is noisy is not the same thing as an
@@ -306,9 +614,9 @@ def main() -> None:
     for key, stable in stable_by_key.items():
         group = eligible_by_key[key]
         kp_all = [r for r in group if r.strategy == "k_parallel"]
-        rcoop_all = [r for r in group if r.strategy == "r_cooperative"]
+        rcoop_all = [r for r in group if r.strategy in ("r_cooperative", "generalized_rparallel")]
         kp = [r for r in stable if r.strategy == "k_parallel"]
-        rcoop = [r for r in stable if r.strategy == "r_cooperative"]
+        rcoop = [r for r in stable if r.strategy in ("r_cooperative", "generalized_rparallel")]
         best_kp = fastest(kp) if kp else None
         best_rcoop = fastest(rcoop) if rcoop else None
         coverage_detail[key] = (best_kp, best_rcoop)
@@ -422,6 +730,7 @@ def main() -> None:
         if row.access in ("multi_output_compact", "r_parallel_warp", "direct_component_warp")
         or row.access.startswith("r_parallel_general_w")
         or row.access.startswith("r_parallel_general_o")
+        or row.access.startswith("r_parallel_general_ktiled_")
     ]
     replacement_by_key: dict[tuple[str, str, str], Row] = {}
     for row in replacement_rows:
@@ -439,6 +748,8 @@ def main() -> None:
             f"replacement_faster={replacement_wins} deprecated_faster={deprecated_wins} ties={ties} "
             f"deprecated_over_best_replacement_median={statistics.median(ratios):.4f}x"
         )
+    elif pruned_inventory and not deprecated_rows:
+        print("deprecated_rows=0 (pruned from this full-space inventory)")
     else:
         print(f"deprecated_rows={len(deprecated_rows)} paired_with_replacement=0")
 
@@ -621,8 +932,13 @@ def main() -> None:
     else:
         print("production policy remains unchanged; production KParallel is measured as the existing-solution baseline")
         print("KPARALLEL_UNAVAILABLE means no production KParallel candidate exists; KPARALLEL_UNSTABLE means it exists but failed the robust timing gate")
+        if pruned_inventory:
+            print("pruned_candidate_inventory=1: displaced experiment rows were intentionally omitted; surviving historical rows remain only to test unresolved global niches")
     print("line-rate decisions use physical input+output traffic; stability uses median/best while raw worst/best outliers remain diagnostic")
-    print("p4 read+write roofline rows are physical references only and are excluded from every promotion/coverage decision")
+    if any(row.access == "p4_read_write_roofline" for row in rows):
+        print("p4 read+write roofline rows are physical references only and are excluded from every promotion/coverage decision")
+    elif pruned_inventory:
+        print("p4 read+write roofline reference is not measured in the pruned full-space inventory")
 
 
 if __name__ == "__main__":

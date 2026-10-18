@@ -14,38 +14,38 @@ namespace Thor {
 namespace {
 // The saved original IDs, never deserialization-assigned live IDs, are the
 // identity of referenced graph tensors in MODEL_RECONSTRUCTION.
-void validateNeutralTensorReference(const json& serialized, const Tensor& live) {
+void validateCanonicalTensorReference(const json& serialized, const Tensor& live) {
     if (!serialized.is_object() || serialized.size() != 4 ||
         serialized.at("version").get<string>() != "1.0.0" ||
         serialized.at("id").get<uint64_t>() != live.getOriginalId() ||
         serialized.at("data_type").get<DataType>() != live.getDataType() ||
         serialized.at("dimensions").get<vector<uint64_t>>() != live.getDimensions()) {
-        throw runtime_error("Concatenate neutral reference does not match canonical graph tensor.");
+        throw runtime_error("Concatenate canonical reference does not match canonical graph tensor.");
     }
 }
 
-void validateNeutralRaggedReference(const json& serialized, const RaggedTensor& live) {
+void validateCanonicalRaggedReference(const json& serialized, const RaggedTensor& live) {
     if (!SegmentedPrimitiveDetail::hasCanonicalLayerRaggedReferenceFields(serialized) ||
         SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(serialized, "Concatenate") !=
             SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL ||
         serialized.at("ragged_rank").get<uint32_t>() != 1 ||
         serialized.at("max_values_per_row").get<uint64_t>() != live.getMaxValuesPerRow() ||
         serialized.contains("batch_size") || serialized.contains("max_total_values")) {
-        throw runtime_error("Concatenate neutral reference has invalid semantic metadata.");
+        throw runtime_error("Concatenate canonical reference has invalid semantic metadata.");
     }
-    validateNeutralTensorReference(serialized.at("values"), live.getValues());
-    validateNeutralTensorReference(serialized.at("offsets"), live.getRowPartitionToken());
+    validateCanonicalTensorReference(serialized.at("values"), live.getValues());
+    validateCanonicalTensorReference(serialized.at("offsets"), live.getRowPartitionToken());
 }
 
 // Validate geometry again during deserialize: a forged artifact can have
 // individually valid input references yet an invalid output/axis relationship.
-void validateNeutralConcatGeometry(const vector<RaggedTensor>& inputs, const Tensor& output,
+void validateLogicalConcatGeometry(const vector<RaggedTensor>& inputs, const Tensor& output,
                                    uint32_t axis) {
     if (inputs.size() < 2)
-        throw runtime_error("Concatenate neutral artifact requires two or more neutral inputs.");
+        throw runtime_error("Concatenate canonical ragged artifact requires two or more canonical schema inputs.");
     const RaggedTensor& reference = inputs.front();
     const vector<uint64_t> trailing = reference.getTrailingDimensions();
-    if (axis >= trailing.size()) throw runtime_error("Concatenate neutral artifact axis out of range.");
+    if (axis >= trailing.size()) throw runtime_error("Concatenate canonical ragged artifact axis out of range.");
     vector<uint64_t> expected = reference.getValuesDimensions();
     expected.at(axis + 1) = 0;
     set<uint64_t> valueIds;
@@ -57,20 +57,20 @@ void validateNeutralConcatGeometry(const vector<RaggedTensor>& inputs, const Ten
             input.getOffsetsDataType() != reference.getOffsetsDataType() ||
             input.getTrailingDimensions().size() != trailing.size() ||
             !valueIds.insert(input.getValues().getOriginalId()).second) {
-            throw runtime_error("Concatenate neutral inputs disagree on partition, dtype, M or port identity.");
+            throw runtime_error("Concatenate canonical schema inputs disagree on partition, dtype, M or port identity.");
         }
         const auto dims = input.getTrailingDimensions();
         for (uint32_t d = 0; d < dims.size(); ++d) {
             if (d != axis && dims[d] != trailing[d])
-                throw runtime_error("Concatenate neutral non-concatenated dimensions disagree.");
+                throw runtime_error("Concatenate logical non-concatenated dimensions disagree.");
         }
         if (expected[axis + 1] > numeric_limits<uint64_t>::max() - dims[axis])
-            throw overflow_error("Concatenate neutral output dimension overflows.");
+            throw overflow_error("Concatenate canonical schema output dimension overflows.");
         expected[axis + 1] += dims[axis];
     }
     if (output.getDataType() != reference.getValuesDataType() ||
         output.getDimensions() != expected || valueIds.count(output.getOriginalId())) {
-        throw runtime_error("Concatenate neutral output does not match concatenated semantic dimensions.");
+        throw runtime_error("Concatenate canonical schema output does not match concatenated semantic dimensions.");
     }
 }
 } // namespace
@@ -120,19 +120,19 @@ void Concatenate::deserialize(const json &j, Network *network) {
     concatenate.numInputConnectionsMade = 0;
 
     if (j.value("use_ragged", false)) {
-        const bool neutral = version == "1.1.0";
+        const bool canonicalRaggedSchema = version == "1.1.0";
         const json& inputJson = j.at("ragged_inputs");
         if (!inputJson.is_array() || inputJson.size() < 2 ||
-            (neutral && (j.contains("inputs") || !j.at("outputs").is_array() ||
+            (canonicalRaggedSchema && (j.contains("inputs") || !j.at("outputs").is_array() ||
                          j.at("outputs").size() != 1))) {
             throw runtime_error("Concatenate malformed ragged input/output arrays.");
         }
         auto restoreRagged = [&](const json &r) {
             const auto grammar = SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(r, "Concatenate");
-            if ((grammar == SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL) != neutral)
+            if ((grammar == SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL) != canonicalRaggedSchema)
                 throw runtime_error("Concatenate layer version disagrees with serialized reference grammar.");
             RaggedTensor input = SegmentedPrimitiveDetail::reconstructInput(r, network, "Concatenate");
-            if (neutral) validateNeutralRaggedReference(r, input);
+            if (canonicalRaggedSchema) validateCanonicalRaggedReference(r, input);
             return input;
         };
         for (const json &input : inputJson)
@@ -156,18 +156,18 @@ void Concatenate::deserialize(const json &j, Network *network) {
         }
         // Geometry and partition sharing are semantic requirements for every
         // recognized artifact version, not merely for the newest JSON syntax.
-        validateNeutralConcatGeometry(concatenate.raggedFeatureInputs, outputValues, concatenate.concatenationAxis);
+        validateLogicalConcatGeometry(concatenate.raggedFeatureInputs, outputValues, concatenate.concatenationAxis);
         SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
             serializedOutput, inputJson.at(0), concatenate.raggedFeatureInputs.front(), "Concatenate");
-        if (neutral) {
-            validateNeutralRaggedReference(serializedOutput, concatenate.raggedFeatureOutput.value());
+        if (canonicalRaggedSchema) {
+            validateCanonicalRaggedReference(serializedOutput, concatenate.raggedFeatureOutput.value());
             // Each nested output tensor must be the same canonical output as the
             // standalone outputs[0], including saved original ID and geometry.
-            validateNeutralTensorReference(j.at("outputs").at(0), outputValues);
+            validateCanonicalTensorReference(j.at("outputs").at(0), outputValues);
         }
     } else {
         if (version != "1.0.0")
-            throw runtime_error("Concatenate 1.1.0 is reserved for neutral ragged geometry.");
+            throw runtime_error("Concatenate 1.1.0 is reserved for the canonical ragged schema.");
         for (const json &input : j.at("inputs")) {
             concatenate.featureInputs.push_back(
                 network->getApiTensorByOriginalId(input.at("id").get<uint64_t>()));

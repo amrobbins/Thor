@@ -76,8 +76,8 @@ class NetworkInput : public Layer {
 
     // Narrow placement hook for logical inputs whose serialized/API shape is not
     // itself the physical runtime shape. SERIALIZATION-OWNERSHIP-1B uses this only
-    // for placement-neutral RaggedNetworkInput packed values; ordinary dense and
-    // legacy fixed ragged inputs continue through stamp(..., batchSize).
+    // for logical RaggedNetworkInput packed values; ordinary dense and
+    // ragged physical inputs continue through stamp(..., batchSize).
     std::shared_ptr<ThorImplementation::NetworkInput> stampWithPhysicalDimensions(
         ThorImplementation::TensorPlacement placement,
         const std::vector<uint64_t>& physicalDimensions) const {

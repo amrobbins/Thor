@@ -504,7 +504,7 @@ class G1PolymorphicOutputProbe final : public Relu {
     }
 };
 
-TEST(Activations, G1NeutralDeserializeAcceptsConcretePolymorphicOutput) {
+TEST(Activations, G1DeserializeAcceptsConcretePolymorphicOutput) {
     Network network("g1_neutral_polymorphic_output");
     RaggedTensor input = RaggedNetworkInput::Builder()
                              .network(network)
@@ -589,7 +589,7 @@ TEST(Activations, HistoricalPackedStandaloneOutputUsesSourceMAndConcreteTrailing
 // consistency and partition IDs still look valid. The concrete activation's
 // model-derived output contract must be checked independently of either JSON
 // field; ordinary activations are shape preserving.
-TEST(Activations, G1NeutralConcreteOutputRejectsPairedForgedDescriptors) {
+TEST(Activations, G1ConcreteOutputRejectsPairedForgedDescriptors) {
     for (const ActivationCase& activationCase : cases) {
         SCOPED_TRACE(activationCase.label);
         Network network("g1_neutral_output_" + activationCase.label);
@@ -623,11 +623,11 @@ TEST(Activations, G1NeutralConcreteOutputRejectsPairedForgedDescriptors) {
     }
 }
 
-TEST(Activations, K3OrdinaryPlacementNeutralRaggedActivationsSerializeSemanticGeometryAndParameters) {
+TEST(Activations, K3OrdinaryLogicalRaggedActivationsSerializeSemanticGeometryAndParameters) {
     for (const ActivationCase& activationCase : cases) expectNeutralSemanticJsonAndMalformed(activationCase);
 }
 
-TEST(Activations, K3OrdinaryPlacementNeutralRaggedActivationsSaveLoadPlaceAndExecute) {
+TEST(Activations, K3OrdinaryLogicalRaggedActivationsSaveLoadPlaceAndExecute) {
     for (const ActivationCase& activationCase : cases) expectNeutralSaveLoadPlaceAndExecute(activationCase);
 }
 

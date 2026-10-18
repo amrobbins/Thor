@@ -562,7 +562,7 @@ TEST(Activations, ReluRegistered) {
 }
 
 
-TEST(Activations, PlacementNeutralReluSerializesSemanticGeometryAndRejectsMismatches) {
+TEST(Activations, LogicalReluSerializesSemanticGeometryAndRejectsMismatches) {
     constexpr uint64_t maxValuesPerRow = 4;
     Network network("placement_neutral_relu_json");
     RaggedTensor input = RaggedNetworkInput::Builder()
@@ -622,7 +622,7 @@ TEST(Activations, PlacementNeutralReluSerializesSemanticGeometryAndRejectsMismat
     EXPECT_THROW(Activation::deserialize(wrongOutputValues, &network), runtime_error);
 }
 
-TEST(Activations, PlacementNeutralReluSaveLoadReplacesPlacementGeometryPerBatchAndExecutesEmptyRows) {
+TEST(Activations, LogicalReluSaveLoadReplacesPlacementGeometryPerBatchAndExecutesEmptyRows) {
     constexpr uint64_t maxValuesPerRow = 4;
     const string networkName = "placement_neutral_relu_round_trip";
     const auto nonce = chrono::steady_clock::now().time_since_epoch().count();

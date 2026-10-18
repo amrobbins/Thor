@@ -931,6 +931,7 @@ template <typename InputT,
 __global__ __launch_bounds__(BlockThreads) void kParallelLeanCompleteKernel(const InputT* input,
                                                                            void* output,
                                                                            DataType output_dtype,
+                                                                           uint64_t outer_size,
                                                                            uint64_t reduction_size,
                                                                            uint64_t inner_size,
                                                                            uint64_t output_outer_stride,
@@ -947,46 +948,55 @@ __global__ __launch_bounds__(BlockThreads) void kParallelLeanCompleteKernel(cons
     constexpr float Init = KParallelReductionIdentityFp32<ReductionOpT>::value;
     const ReductionOpT reduction_op{};
 
-    const uint64_t outer_component = static_cast<uint64_t>(blockIdx.x);
-    const uint64_t outer_index = outer_component / component_tiles;
-    const uint64_t component_tile = outer_component - outer_index * component_tiles;
-    const uint64_t packet_component_begin =
-        component_tile * components_per_cta
-        + static_cast<uint64_t>(threadIdx.x) * static_cast<uint64_t>(ItemsPerLane);
-    if (packet_component_begin >= inner_size) {
-        return;
-    }
+    // Grid X is deliberately capped at 65535 CTAs. A Complete reduction must
+    // therefore stride over *all* outer/component work, not just process one
+    // tile per CTA. In particular, FP32 continuations of FP8 staged reductions
+    // commonly have more than 65535 outer rows with narrow K.
+    const uint64_t total_work = outer_size * component_tiles;
+    const uint64_t grid_stride = static_cast<uint64_t>(gridDim.x);
+    for (uint64_t outer_component = static_cast<uint64_t>(blockIdx.x);
+         outer_component < total_work;
+         outer_component += grid_stride) {
+        const uint64_t outer_index = outer_component / component_tiles;
+        const uint64_t component_tile = outer_component - outer_index * component_tiles;
+        const uint64_t packet_component_begin =
+            component_tile * components_per_cta
+            + static_cast<uint64_t>(threadIdx.x) * static_cast<uint64_t>(ItemsPerLane);
+        if (packet_component_begin >= inner_size) {
+            continue;
+        }
 
-    float local[ItemsPerLane];
-#pragma unroll
-    for (int item = 0; item < ItemsPerLane; ++item) {
-        local[item] = Init;
-    }
-
-    uint64_t input_index = outer_index * reduction_size * inner_size + packet_component_begin;
-    for (uint64_t row = 0; row < reduction_size; ++row) {
-        const PackedInputValues<InputT, ItemsPerLane> values =
-            loadVectorizedInputPacket<InputT, ItemsPerLane>(input + input_index);
+        float local[ItemsPerLane];
 #pragma unroll
         for (int item = 0; item < ItemsPerLane; ++item) {
-            local[item] = reduction_op(local[item], input_transform(ToFp32<InputT>{}(values.values[item])));
+            local[item] = Init;
         }
-        input_index += inner_size;
-    }
 
-    const uint64_t remaining = inner_size - packet_component_begin;
-    const uint64_t valid_items =
-        remaining < static_cast<uint64_t>(ItemsPerLane) ? remaining : static_cast<uint64_t>(ItemsPerLane);
-    storeKParallelFinalPacket(output,
-                              output_dtype,
-                              outer_index,
-                              packet_component_begin,
-                              output_outer_stride,
-                              output_inner_stride,
-                              local,
-                              valid_items,
-                              output_finalize,
-                              output_scale);
+        uint64_t input_index = outer_index * reduction_size * inner_size + packet_component_begin;
+        for (uint64_t row = 0; row < reduction_size; ++row) {
+            const PackedInputValues<InputT, ItemsPerLane> values =
+                loadVectorizedInputPacket<InputT, ItemsPerLane>(input + input_index);
+#pragma unroll
+            for (int item = 0; item < ItemsPerLane; ++item) {
+                local[item] = reduction_op(local[item], input_transform(ToFp32<InputT>{}(values.values[item])));
+            }
+            input_index += inner_size;
+        }
+
+        const uint64_t remaining = inner_size - packet_component_begin;
+        const uint64_t valid_items =
+            remaining < static_cast<uint64_t>(ItemsPerLane) ? remaining : static_cast<uint64_t>(ItemsPerLane);
+        storeKParallelFinalPacket(output,
+                                  output_dtype,
+                                  outer_index,
+                                  packet_component_begin,
+                                  output_outer_stride,
+                                  output_inner_stride,
+                                  local,
+                                  valid_items,
+                                  output_finalize,
+                                  output_scale);
+    }
 }
 
 template <typename InputT,
@@ -1277,6 +1287,7 @@ void launchKParallelForPacketAndBlock(const Tensor& input,
             <<<grid_blocks, BlockThreads, 0, stream.getStream()>>>(input.getMemPtr<InputT>(),
                                                                    stage_output.getMemPtr(),
                                                                    stage_output.getDataType(),
+                                                                   geometry.outer_size,
                                                                    geometry.reduction_size,
                                                                    geometry.inner_size,
                                                                    geometry.tiled_output_outer_stride,

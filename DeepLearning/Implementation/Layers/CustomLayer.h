@@ -23,7 +23,7 @@ class Loss;
 
 class CustomLayer : public TrainableLayer {
    public:
-    // Opt-in physical geometry for a packed, placement-neutral ragged output.
+    // Opt-in physical geometry for a packed, ragged output.
     // Ports are indices into the ordinary *physical* CustomLayer input interface.
     // The offsets are real DEVICE_OFFSETS [B+1] tensors, not HOST_EXTENT
     // carriers; each values port has physical [B*M, ...] capacity.

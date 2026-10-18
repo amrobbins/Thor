@@ -140,7 +140,7 @@ void Reshape::deserialize(const json &j, Network *network) {
         reshape.newDimensions = outputDimensions;
     } else {
         if (version != "1.0.0")
-            throw runtime_error("Reshape version 1.1.0 is reserved for placement-neutral ragged geometry.");
+            throw runtime_error("Reshape version 1.1.0 is reserved for canonical ragged schema.");
         const uint64_t originalTensorId = j.at("feature_input").at("id").get<uint64_t>();
         Tensor featureInput = network->getApiTensorByOriginalId(originalTensorId);
         Tensor featureOutput = Tensor::deserialize(j.at("feature_output"));

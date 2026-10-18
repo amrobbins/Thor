@@ -19,7 +19,7 @@ void validateCanonicalTensorReference(const json& serialized, const Tensor& live
         serialized.at("id").get<uint64_t>() != live.getOriginalId() ||
         serialized.at("data_type").get<DataType>() != live.getDataType() ||
         serialized.at("dimensions").get<vector<uint64_t>>() != live.getDimensions()) {
-        throw runtime_error("RaggedLossShaper neutral tensor reference disagrees with its logical tensor.");
+        throw runtime_error("RaggedLossShaper canonical tensor reference disagrees with its logical tensor.");
     }
 }
 
@@ -29,7 +29,7 @@ void validateCanonicalInputReference(const json& serialized, const RaggedTensor&
             SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL ||
         serialized.at("ragged_rank").get<uint32_t>() != 1 ||
         serialized.at("max_values_per_row").get<uint64_t>() != live.getMaxValuesPerRow()) {
-        throw runtime_error("RaggedLossShaper neutral input reference has invalid semantic geometry.");
+        throw runtime_error("RaggedLossShaper canonical input reference has invalid semantic geometry.");
     }
     validateCanonicalTensorReference(serialized.at("values"), live.getValues());
     validateCanonicalTensorReference(serialized.at("offsets"), live.getRowPartitionToken());
@@ -198,7 +198,7 @@ void RaggedLossShaper::deserialize(const json& j, Network* network) {
         throw runtime_error("Layer type mismatch in RaggedLossShaper::deserialize.");
     if (version == "1.1.0" && (!j.is_object() || j.size() != 6 ||
                                j.at("factory") != Layer::Factory::Loss.value()))
-        throw runtime_error("RaggedLossShaper neutral layer schema contains missing or extra fields.");
+        throw runtime_error("RaggedLossShaper canonical ragged layer schema contains missing or extra fields.");
 
     const json& inputJson = j.at("ragged_loss_input");
     RaggedTensor input = SegmentedPrimitiveDetail::reconstructInput(inputJson, network, "RaggedLossShaper");

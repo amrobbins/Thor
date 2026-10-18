@@ -361,7 +361,7 @@ void Slice::deserialize(const json& j, Network* network) {
         slice.featureOutput = outputValues;
     } else {
         if (version != "1.0.0")
-            throw std::runtime_error("Slice version 1.1.0 is reserved for placement-neutral ragged geometry.");
+            throw std::runtime_error("Slice version 1.1.0 is reserved for canonical ragged schema.");
         const uint64_t inputOriginalId = j.at("feature_input").at("id").get<uint64_t>();
         Tensor input = network->getApiTensorByOriginalId(inputOriginalId);
         Tensor serializedOutput = Tensor::deserialize(j.at("feature_output"));

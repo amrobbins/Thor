@@ -134,7 +134,7 @@ void Flatten::deserialize(const json &j, Network *network) {
         flatten.raggedFeatureOutput = input.withValues(outputValues);
     } else {
         if (version != "1.0.0")
-            throw runtime_error("Flatten version 1.1.0 is reserved for placement-neutral ragged geometry.");
+            throw runtime_error("Flatten version 1.1.0 is reserved for the canonical ragged schema.");
         const uint64_t originalTensorId = j.at("feature_input").at("id").get<uint64_t>();
         Tensor featureInput = network->getApiTensorByOriginalId(originalTensorId);
         Tensor featureOutput = Tensor::deserialize(j.at("feature_output"));

@@ -99,7 +99,7 @@ class NetworkInput : public Layer {
     virtual bool requiresBatchInput() const { return mode != Mode::PassThrough; }
 
     // Read-only stamp-time view of the concrete payload descriptor selected by
-    // the existing placement flow. API layers with placement-neutral logical
+    // the existing placement flow. API layers with logical
     // shapes may use this to build their physical execution descriptor without
     // mutating the logical model or threading placement state through Layer::stamp.
     [[nodiscard]] std::optional<TensorDescriptor> getContentDescriptorForStamp() const {

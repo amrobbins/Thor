@@ -324,7 +324,7 @@ TEST(DatasetInputBindings, RaggedLogicalInputBindsOneDatasetFieldAndCarriesMater
     EXPECT_EQ(requirement.raggedTensorDescriptor->getBatchSize(), 4u);
 }
 
-TEST(DatasetInputBindings, PlacementNeutralRaggedInputDerivesCapacityFromSessionBatchAndSemanticRowBound) {
+TEST(DatasetInputBindings, LogicalRaggedInputDerivesCapacityFromSessionBatchAndSemanticRowBound) {
     auto dataset = std::make_shared<InMemoryNamedDataset>(std::vector<DatasetField>{
         DatasetField{.id = 7,
                      .name = "labels",

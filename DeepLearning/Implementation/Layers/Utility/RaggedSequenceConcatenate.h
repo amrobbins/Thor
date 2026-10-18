@@ -360,7 +360,7 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         previousLayers[inputIndex] = previousLayer;
         featureInputs[inputIndex] = featureInput;
         streams[inputIndex] = stream;
-        // Downstream neutral stamp may need this descriptor before all source ports connect.
+        // Downstream ragged stamp may need this descriptor before all source ports connect.
         ensureOutputAllocated();
         if (inputIndex < valueInputCount && backPropagateError && !isInferenceOnly()) {
             errorOutputs[inputIndex] = featureInput->clone();

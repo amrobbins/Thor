@@ -80,7 +80,7 @@ void synchronizeEvents(vector<Event>& events) {
     events.clear();
 }
 
-float neutralInputValue(uint64_t elementIndex) {
+float raggedInputValue(uint64_t elementIndex) {
     return 0.5F * static_cast<float>(static_cast<int>(elementIndex % 9) - 4);
 }
 
@@ -103,7 +103,7 @@ Batch makeNeutralActivationBatch(const string& inputName, const RaggedTensor& lo
     for (uint64_t value = 0; value < descriptor.getMaxTotalValues(); ++value) {
         for (uint64_t element = 0; element < elementsPerValue; ++element) {
             const uint64_t i = value * elementsPerValue + element;
-            valuesPtr[i] = value < activeValues ? neutralInputValue(i) : numeric_limits<float>::quiet_NaN();
+            valuesPtr[i] = value < activeValues ? raggedInputValue(i) : numeric_limits<float>::quiet_NaN();
         }
     }
 
@@ -273,7 +273,7 @@ void expectNeutralSaveLoadAndExecute(const string& label, const function<float(f
         for (uint64_t value = 0; value < activeValues; ++value) {
             for (uint64_t element = 0; element < 2; ++element) {
                 const uint64_t i = value * 2 + element;
-                EXPECT_NEAR(values[i], expectedValue(neutralInputValue(i)), 2e-3F)
+                EXPECT_NEAR(values[i], expectedValue(raggedInputValue(i)), 2e-3F)
                     << label << " mismatch at active element " << i;
             }
         }
@@ -353,7 +353,7 @@ float softPlusExpected(float x) {
 
 }  // namespace
 
-TEST(Activations, OrdinaryPlacementNeutralRaggedActivationsSerializeSemanticGeometry) {
+TEST(Activations, OrdinaryLogicalRaggedActivationsSerializeSemanticGeometry) {
     expectNeutralSemanticJson<Sigmoid>("sigmoid");
     expectNeutralSemanticJson<Tanh>("tanh");
     expectNeutralSemanticJson<Gelu>("gelu");
@@ -391,7 +391,7 @@ TEST(Activations, OrdinaryPlacementNeutralRaggedActivationsSerializeSemanticGeom
     EXPECT_THROW(Activation::deserialize(wrongOutputValues, &network), runtime_error);
 }
 
-TEST(Activations, OrdinaryPlacementNeutralRaggedActivationsSaveLoadPlaceAndExecute) {
+TEST(Activations, OrdinaryLogicalRaggedActivationsSaveLoadPlaceAndExecute) {
     expectNeutralSaveLoadAndExecute<Sigmoid>("sigmoid", sigmoidExpected);
     expectNeutralSaveLoadAndExecute<Tanh>("tanh", [](float x) { return tanh(x); });
     expectNeutralSaveLoadAndExecute<Gelu>("gelu", geluExpected);

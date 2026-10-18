@@ -33,7 +33,7 @@ inline ThorImplementation::TensorDescriptor physicalDescriptorForStamp(
     if (output.has_value()) return output->getDescriptor();
 
     throw std::runtime_error(std::string(layerName) +
-                             " placement-neutral input requires an already-materialized physical descriptor.");
+                             " ragged logical input requires an already-materialized physical descriptor.");
 }
 
 inline uint32_t placementBatchSizeForStamp(
@@ -115,7 +115,7 @@ inline ThorImplementation::RaggedTensorDescriptor physicalRaggedDescriptorForSta
             logicalInput.getDescriptorForPlacement(placementBatchSize);
         if (descriptor.getRowPartition() != runtimePartition) {
             throw std::runtime_error(std::string(layerName) +
-                                     " managed row-partition metadata disagrees with the neutral placement descriptor.");
+                                     " managed row-partition metadata disagrees with the placement descriptor.");
         }
 
         const ThorImplementation::TensorDescriptor carrier = physicalDescriptorForStamp(drivingLayer, layerName);
@@ -157,7 +157,7 @@ inline ThorImplementation::RaggedTensorDescriptor physicalRaggedDescriptorForSta
                     logicalTrailingDimensions.end(),
                     physicalDimensions.begin() + 1)) {
         throw std::runtime_error(std::string(layerName) +
-                                 " placement-neutral physical values descriptor does not match the logical input.");
+                                 " physical values descriptor does not match the logical input.");
     }
 
     const uint64_t maxValuesPerRow = logicalInput.getMaxValuesPerRow();
@@ -167,14 +167,14 @@ inline ThorImplementation::RaggedTensorDescriptor physicalRaggedDescriptorForSta
     // geometry; it does not infer M or persist either value back into the model.
     if (physicalCapacity == 0 || physicalCapacity % maxValuesPerRow != 0) {
         throw std::runtime_error(std::string(layerName) +
-                                 " placement-neutral physical capacity is not an integral placement batch times max_values_per_row.");
+                                 " physical capacity is not an integral placement batch times max_values_per_row.");
     }
     const uint64_t placementBatchSize = physicalCapacity / maxValuesPerRow;
     const ThorImplementation::RaggedTensorDescriptor descriptor =
         logicalInput.getDescriptorForPlacement(placementBatchSize);
     if (descriptor.getValuesDescriptor() != physicalValues) {
         throw std::runtime_error(std::string(layerName) +
-                                 " placement-neutral descriptor disagrees with the already-materialized physical values input.");
+                                 " physical descriptor disagrees with the already-materialized physical values input.");
     }
     return descriptor;
 }

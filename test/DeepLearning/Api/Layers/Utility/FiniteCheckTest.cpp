@@ -152,7 +152,7 @@ TEST(UtilityApiLayers, RaggedFiniteCheckPreservesExactPartitionAndSerializes) {
     EXPECT_EQ(cloned->getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
 }
 
-TEST(UtilityApiLayers, PlacementNeutralFiniteCheckSerializesSemanticGeometryAndRejectsMismatches) {
+TEST(UtilityApiLayers, LogicalFiniteCheckSerializesSemanticGeometryAndRejectsMismatches) {
     constexpr uint64_t maxValuesPerRow = 4;
     Network neutralNetwork("placement_neutral_finite_check_json");
     RaggedTensor input = RaggedNetworkInput::Builder()
@@ -239,7 +239,7 @@ TEST(UtilityApiLayers, PlacementNeutralFiniteCheckSerializesSemanticGeometryAndR
     EXPECT_THROW(FiniteCheck::deserialize(invalidArchivedMarker, &neutralNetwork), runtime_error);
 }
 
-TEST(UtilityApiLayers, PlacementNeutralFiniteCheckSaveLoadReplacesRuntimeConfigurationPerBatch) {
+TEST(UtilityApiLayers, LogicalFiniteCheckSaveLoadReplacesRuntimeConfigurationPerBatch) {
     constexpr uint64_t maxValuesPerRow = 4;
     constexpr uint64_t elementsPerValue = 2;
     const string networkName = "placement_neutral_finite_check_round_trip";

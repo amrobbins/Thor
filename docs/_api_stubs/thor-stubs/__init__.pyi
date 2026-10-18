@@ -279,7 +279,7 @@ class Tensor:
 
     def version(self) -> str: ...
 
-__git_version__: str = 'unknown'
+__git_version__: str = '3d342824-dirty'
 
 def einsum(equation: str, *operands: Tensor, network: Network | None = None) -> Tensor:
     """

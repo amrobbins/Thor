@@ -57,27 +57,27 @@ bool supportedRaggedFcStorageType(DataType dataType) {
 // application-major order, one complete set per independent partition.
 // These are extensions of existing optional fields, not new grammars.
 // Older 1.0/1.1/1.2 are historical input grammars; they do not select a geometry mode.
-void validateNeutralFcTensorReference(const json& record, const Tensor& live) {
+void validateCanonicalFcTensorReference(const json& record, const Tensor& live) {
     if (!record.is_object() || record.size() != 4 ||
         record.at("version").get<std::string>() != "1.0.0" ||
         record.at("id").get<uint64_t>() != live.getOriginalId() ||
         record.at("data_type").get<DataType>() != live.getDataType() ||
         record.at("dimensions").get<std::vector<uint64_t>>() != live.getDimensions()) {
-        throw std::runtime_error("FullyConnected neutral tensor reference differs from its live graph tensor.");
+        throw std::runtime_error("FullyConnected canonical tensor reference differs from its live graph tensor.");
     }
 }
 
-void validateNeutralFcRaggedReference(const json& record, const RaggedTensor& live) {
+void validateCanonicalFcRaggedReference(const json& record, const RaggedTensor& live) {
     if (!SegmentedPrimitiveDetail::hasCanonicalLayerRaggedReferenceFields(record) ||
         SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(record, "FullyConnected") !=
             SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL ||
         record.at("ragged_rank").get<uint32_t>() != 1 ||
         record.at("max_values_per_row").get<uint64_t>() != live.getMaxValuesPerRow() ||
         record.contains("batch_size") || record.contains("max_total_values")) {
-        throw std::runtime_error("FullyConnected neutral ragged reference has invalid semantic geometry.");
+        throw std::runtime_error("FullyConnected canonical ragged reference has invalid semantic geometry.");
     }
-    validateNeutralFcTensorReference(record.at("values"), live.getValues());
-    validateNeutralFcTensorReference(record.at("offsets"), live.getRowPartitionToken());
+    validateCanonicalFcTensorReference(record.at("values"), live.getValues());
+    validateCanonicalFcTensorReference(record.at("offsets"), live.getRowPartitionToken());
 }
 
 bool isFullyConnectedFloatingDataType(DataType dataType) {
@@ -1825,40 +1825,40 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
             }
         }
     }
-    const bool neutral = serializedVersion == "1.3.0" || serializedVersion == "1.4.0" ||
+    const bool canonicalRaggedSchema = serializedVersion == "1.3.0" || serializedVersion == "1.4.0" ||
                          serializedVersion == "1.5.0" || serializedVersion == "1.6.0" ||
                          serializedVersion == "1.7.0";
-    const bool neutralActivation = serializedVersion == "1.4.0";
-    const bool neutralResidual = serializedVersion == "1.5.0";
-    const bool neutralDropout = serializedVersion == "1.6.0";
-    const bool neutralEpilogue = serializedVersion == "1.7.0";
+    const bool hasV14ActivationSchema = serializedVersion == "1.4.0";
+    const bool hasV15ResidualSchema = serializedVersion == "1.5.0";
+    const bool hasV16DropoutSchema = serializedVersion == "1.6.0";
+    const bool hasV17EpilogueSchema = serializedVersion == "1.7.0";
     // The established 1.7.0 grammar already has optional activation, dropout,
     // and residual fields. A residual contributes exactly two reference objects.
-    const bool canonicalResidual = neutralResidual || (neutralEpilogue && j.value("use_residual", false));
-    if (neutral && (!j.is_object() || j.size() != (canonicalResidual ? 24u : 22u) ||
+    const bool canonicalResidual = hasV15ResidualSchema || (hasV17EpilogueSchema && j.value("use_residual", false));
+    if (canonicalRaggedSchema && (!j.is_object() || j.size() != (canonicalResidual ? 24u : 22u) ||
                     !j.at("use_ragged").get<bool>() ||
                     !j.at("preserve_input_prefix_dimensions").get<bool>() ||
                     j.at("use_residual").get<bool>() != canonicalResidual ||
                     (canonicalResidual ? (j.at("inputs").size() == 1
                         ? (!j.at("residual_input").is_object() ||
                            !j.at("ragged_residual_input").is_object())
-                        : (!(neutralResidual || neutralEpilogue) || !j.at("residual_input").is_array() ||
+                        : (!(hasV15ResidualSchema || hasV17EpilogueSchema) || !j.at("residual_input").is_array() ||
                            !j.at("ragged_residual_input").is_array() ||
                            j.at("residual_input").size() != j.at("inputs").size() ||
                            j.at("ragged_residual_input").size() != j.at("inputs").size()))
                                      : (j.contains("residual_input") || j.contains("ragged_residual_input"))) ||
-                    ((neutralDropout || neutralResidual || neutralEpilogue)
+                    ((hasV16DropoutSchema || hasV15ResidualSchema || hasV17EpilogueSchema)
                         ? (!std::isfinite(j.at("output_dropout_probability").get<float>()) ||
-                           (neutralDropout ? j.at("output_dropout_probability").get<float>() <= 0.0f
+                           (hasV16DropoutSchema ? j.at("output_dropout_probability").get<float>() <= 0.0f
                                            : j.at("output_dropout_probability").get<float>() < 0.0f) ||
                            j.at("output_dropout_probability").get<float>() >= 1.0f)
                         : j.at("output_dropout_probability").get<float>() != 0.0f) ||
                     !j.at("output_dropout_seed").is_number_integer() ||
-                    (neutralActivation ? !j.at("activation").is_object() :
-                     (neutralResidual || neutralDropout || neutralEpilogue)
+                    (hasV14ActivationSchema ? !j.at("activation").is_object() :
+                     (hasV15ResidualSchema || hasV16DropoutSchema || hasV17EpilogueSchema)
                          ? (!j.at("activation").is_null() && !j.at("activation").is_object())
                          : !j.at("activation").is_null()) ||
-                    (neutralEpilogue ? (!j.at("epilogue").is_object() ||
+                    (hasV17EpilogueSchema ? (!j.at("epilogue").is_object() ||
                         !j.at("epilogue_inputs").is_array())
                         : (!j.at("epilogue").is_null() || !j.at("epilogue_inputs").is_array() ||
                            !j.at("epilogue_inputs").empty())) ||
@@ -1884,7 +1884,7 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
                 throw runtime_error("FullyConnected multi-application residual references must be unique objects.");
         }
     }
-    if (neutralEpilogue) {
+    if (hasV17EpilogueSchema) {
         const uint32_t applications = static_cast<uint32_t>(j.at("inputs").size());
         const json& bindings = j.at("epilogue_inputs");
         if (bindings.size() % applications != 0) {
@@ -1912,7 +1912,7 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
             validateEpilogueAuxInputName(inputName);
             uint64_t originalTensorId = epilogueInputJson.at("tensor").at("id").get<uint64_t>();
             Tensor values = network->getApiTensorByOriginalId(originalTensorId);
-            if (neutralEpilogue) validateNeutralFcTensorReference(epilogueInputJson.at("tensor"), values);
+            if (hasV17EpilogueSchema) validateCanonicalFcTensorReference(epilogueInputJson.at("tensor"), values);
             epilogueInputBindings.emplace_back(inputName, values);
             if (epilogueInputJson.contains("ragged_tensor")) {
                 const json& raggedJson = epilogueInputJson.at("ragged_tensor");
@@ -1921,8 +1921,8 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
                 }
                 RaggedTensor ragged = SegmentedPrimitiveDetail::reconstructInput(
                     raggedJson, network, "FullyConnected epilogue auxiliary");
-                if (neutralEpilogue)
-                    validateNeutralFcRaggedReference(raggedJson, ragged);
+                if (hasV17EpilogueSchema)
+                    validateCanonicalFcRaggedReference(raggedJson, ragged);
                 if (ragged.getValues().getOriginalId() != values.getOriginalId()) {
                     throw runtime_error("FullyConnected epilogue auxiliary values identity does not match the graph.");
                 }
@@ -1961,13 +1961,13 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
             for (const json& reference : references) {
                 const uint64_t id = reference.at("id").get<uint64_t>();
                 Tensor value = network->getApiTensorByOriginalId(id);
-                validateNeutralFcTensorReference(reference, value);
+                validateCanonicalFcTensorReference(reference, value);
                 applicationResidualValues.push_back(value);
             }
         } else {
             const uint64_t id = references.at("id").get<uint64_t>();
             Tensor value = network->getApiTensorByOriginalId(id);
-            if (neutral) validateNeutralFcTensorReference(references, value);
+            if (canonicalRaggedSchema) validateCanonicalFcTensorReference(references, value);
             applicationResidualValues.push_back(value);
         }
         residualInput = applicationResidualValues.front();
@@ -1982,8 +1982,8 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
         !j.value("use_ragged", false)) {
         throw runtime_error("FullyConnected serialized dense epilogue cannot be combined with residual/output dropout.");
     }
-    if (!raggedEpilogueInputBindings.empty() && serializedVersion != "1.2.0" && !neutralEpilogue) {
-        throw runtime_error("FullyConnected serialized ragged epilogue inputs require fixed 1.2.0 or neutral 1.7.0.");
+    if (!raggedEpilogueInputBindings.empty() && serializedVersion != "1.2.0" && !hasV17EpilogueSchema) {
+        throw runtime_error("FullyConnected serialized ragged epilogue inputs require historical 1.2.0 or epilogue schema 1.7.0.");
     }
 
     FullyConnected fullyConnected(epilogue,
@@ -2028,8 +2028,8 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
         throw runtime_error("FullyConnected deserialize expected equal numbers of inputs and outputs.");
     }
     const bool useRagged = j.value("use_ragged", false);
-    if (useRagged && epilogue.has_value() && serializedVersion != "1.2.0" && !neutralEpilogue) {
-        throw runtime_error("FullyConnected serialized ragged custom epilogue requires fixed 1.2.0 or neutral 1.7.0.");
+    if (useRagged && epilogue.has_value() && serializedVersion != "1.2.0" && !hasV17EpilogueSchema) {
+        throw runtime_error("FullyConnected serialized ragged custom epilogue requires historical 1.2.0 or epilogue schema 1.7.0.");
     }
     if (useRagged) {
         if (!j.contains("ragged_inputs") || !j.contains("ragged_outputs") ||
@@ -2047,11 +2047,11 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
             RaggedTensor raggedInput = SegmentedPrimitiveDetail::reconstructInput(
                 raggedInputJson, network, "FullyConnected");
             const RaggedTensor raggedOutput = raggedInput.withValues(fullyConnected.featureOutputs[i]);
-            if (neutral) {
-                validateNeutralFcTensorReference(j.at("inputs").at(i), fullyConnected.featureInputs[i]);
-                validateNeutralFcTensorReference(j.at("outputs").at(i), fullyConnected.featureOutputs[i]);
-                validateNeutralFcRaggedReference(raggedInputJson, raggedInput);
-                validateNeutralFcRaggedReference(j.at("ragged_outputs").at(i), raggedOutput);
+            if (canonicalRaggedSchema) {
+                validateCanonicalFcTensorReference(j.at("inputs").at(i), fullyConnected.featureInputs[i]);
+                validateCanonicalFcTensorReference(j.at("outputs").at(i), fullyConnected.featureOutputs[i]);
+                validateCanonicalFcRaggedReference(raggedInputJson, raggedInput);
+                validateCanonicalFcRaggedReference(j.at("ragged_outputs").at(i), raggedOutput);
             }
             SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
                 j.at("ragged_outputs").at(i), raggedInputJson, raggedInput, "FullyConnected");
@@ -2137,9 +2137,9 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
                 const RaggedTensor& feature = fullyConnected.raggedFeatureInputs[i];
                 RaggedTensor residual = SegmentedPrimitiveDetail::reconstructInput(
                     raggedRecord, network, "FullyConnected residual application");
-                if (neutral) {
-                    validateNeutralFcTensorReference(valueRecord, residualValue);
-                    validateNeutralFcRaggedReference(raggedRecord, residual);
+                if (canonicalRaggedSchema) {
+                    validateCanonicalFcTensorReference(valueRecord, residualValue);
+                    validateCanonicalFcRaggedReference(raggedRecord, residual);
                 }
                 if (residual.getValues().getOriginalId() != residualValue.getOriginalId() ||
                     residual.getValues().getDataType() != fullyConnected.outputDataType ||
@@ -2193,27 +2193,27 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
         if (!parametersJson.is_object()) {
             throw runtime_error("FullyConnected parameters must be an object keyed by parameter name.");
         }
-        if (neutral) {
+        if (canonicalRaggedSchema) {
             // Check the learned inference-state shapes against this layer's
             // semantic projection, not against placement-selected B*M.
             if (parametersJson.size() != (fullyConnected.hasBias ? 2u : 1u)) {
-                throw runtime_error("FullyConnected neutral parameter inventory differs from the projection configuration.");
+                throw runtime_error("FullyConnected canonical schema parameter inventory differs from the projection configuration.");
             }
             const uint64_t inFeatures = fullyConnected.raggedFeatureInputs.front().getTrailingDimensions().at(0);
             auto checkParameter = [&](const char* name, const std::vector<uint64_t>& shape, DataType dtype) {
                 const json& entry = parametersJson.at(name);
                 if (!entry.is_object() || entry.at("name").get<std::string>() != name) {
-                    throw runtime_error("FullyConnected neutral parameter identity is invalid.");
+                    throw runtime_error("FullyConnected canonical schema parameter identity is invalid.");
                 }
                 if (entry.contains("storage")) {
                     const json& storage = entry.at("storage");
                     if (storage.at("dimensions").get<std::vector<uint64_t>>() != shape ||
                         storage.at("data_type").get<DataType>() != dtype) {
-                        throw runtime_error("FullyConnected neutral stored parameter shape or dtype is invalid.");
+                        throw runtime_error("FullyConnected canonical schema stored parameter shape or dtype is invalid.");
                     }
                 } else if (entry.at("shape").get<std::vector<uint64_t>>() != shape ||
                            entry.at("dtype").get<DataType>() != dtype) {
-                    throw runtime_error("FullyConnected neutral parameter shape or dtype is invalid.");
+                    throw runtime_error("FullyConnected canonical schema parameter shape or dtype is invalid.");
                 }
             };
             checkParameter("weights", {inFeatures, fullyConnected.numOutputFeatures}, fullyConnected.weightsDataType);

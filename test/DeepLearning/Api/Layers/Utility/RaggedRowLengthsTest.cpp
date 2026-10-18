@@ -43,7 +43,7 @@ shared_ptr<Api::RaggedRowLengths> findRowLengths(Api::Network& network) {
     return nullptr;
 }
 
-Batch makePlacementNeutralRowLengthsBatch(const std::string& inputName,
+Batch makeLogicalRaggedRowLengthsBatch(const std::string& inputName,
                                            const Api::RaggedTensor& logicalInput,
                                            uint32_t batchSize,
                                            vector<int32_t>& expectedLengths) {
@@ -88,7 +88,7 @@ Batch makePlacementNeutralRowLengthsBatch(const std::string& inputName,
 
 }  // namespace
 
-TEST(RaggedRowLengthsApi, PlacementNeutralBuilderUsesOnlyPartitionAndPlacementBatchForDenseOutput) {
+TEST(RaggedRowLengthsApi, LogicalBuilderUsesOnlyPartitionAndPlacementBatchForDenseOutput) {
     constexpr uint64_t maxValuesPerRow = 4;
     Api::Network network("ragged_row_lengths_neutral_builder");
     Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
@@ -121,7 +121,7 @@ TEST(RaggedRowLengthsApi, PlacementNeutralBuilderUsesOnlyPartitionAndPlacementBa
               8U * sizeof(uint32_t) + 7U * sizeof(int32_t));
 }
 
-TEST(RaggedRowLengthsApi, PlacementNeutralSerializationIsSemanticAndRejectsVersionGeometryOrIdentityMismatch) {
+TEST(RaggedRowLengthsApi, LogicalSerializationIsSemanticAndRejectsVersionGeometryOrIdentityMismatch) {
     constexpr uint64_t maxValuesPerRow = 4;
     Api::Network neutralNetwork("ragged_row_lengths_neutral_json");
     Api::RaggedTensor neutralInput = Api::RaggedNetworkInput::Builder()
@@ -187,7 +187,7 @@ TEST(RaggedRowLengthsApi, PlacementNeutralSerializationIsSemanticAndRejectsVersi
     EXPECT_NO_THROW(Api::RaggedRowLengths::deserialize(fixedAsNeutral, &fixedNetwork));
 }
 
-TEST(RaggedRowLengthsApi, PlacementNeutralSaveLoadReplacesPlacementGeometryPerBatchAndExecutesEmptyRows) {
+TEST(RaggedRowLengthsApi, LogicalSaveLoadReplacesPlacementGeometryPerBatchAndExecutesEmptyRows) {
     constexpr uint64_t maxValuesPerRow = 4;
     const std::string networkName = "ragged_row_lengths_placement_neutral_round_trip";
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -288,7 +288,7 @@ TEST(RaggedRowLengthsApi, PlacementNeutralSaveLoadReplacesPlacementGeometryPerBa
         EXPECT_EQ(loaded.architectureJson(), architectureBeforePlacement);
 
         vector<int32_t> expectedLengths;
-        const Batch batch = makePlacementNeutralRowLengthsBatch(
+        const Batch batch = makeLogicalRaggedRowLengthsBatch(
             "tokens", loadedInput, placementBatchSize, expectedLengths);
         const std::map<std::string, Impl::Tensor> outputs = placed->infer(batch);
         ASSERT_TRUE(outputs.contains("lengths"));

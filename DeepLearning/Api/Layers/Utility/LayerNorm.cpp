@@ -467,11 +467,11 @@ void LayerNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, con
     const string version = j.at("version").get<string>();
     if (version != "1.0.0" && version != "1.1.0")
         throw runtime_error("Unsupported version in LayerNorm::deserialize: " + version);
-    const bool neutral = version == "1.1.0";
-    if (neutral && (!j.is_object() || j.size() != 13 ||
+    const bool canonicalRaggedSchema = version == "1.1.0";
+    if (canonicalRaggedSchema && (!j.is_object() || j.size() != 13 ||
                     j.at("factory") != Layer::Factory::Learning.value() ||
                     !j.at("use_ragged").get<bool>())) {
-        throw runtime_error("LayerNorm 1.1.0 requires the explicit neutral ragged schema.");
+        throw runtime_error("LayerNorm 1.1.0 requires the explicit canonical ragged schema.");
     }
     if (j.at("layer_type").get<string>() != "layer_norm")
         throw runtime_error("Layer type mismatch in LayerNorm::deserialize: " + j.at("layer_type").get<string>());
@@ -480,19 +480,19 @@ void LayerNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, con
     layer.normalizedShape = j.at("normalized_shape").get<vector<uint64_t>>();
     layer.epsilon = j.at("epsilon").get<double>();
     layer.parameterDataType = j.at("parameter_data_type").get<DataType>();
-    if (neutral && (layer.normalizedShape.size() != 1 ||
+    if (canonicalRaggedSchema && (layer.normalizedShape.size() != 1 ||
                     checkedFeatureCount(layer.normalizedShape, "normalizedShape") == 0 ||
                     !(layer.epsilon > 0.0) || layer.parameterDataType != DataType::FP32 ||
                     !j.at("inputs").is_array() || j.at("inputs").empty() ||
                     !j.at("outputs").is_array() || !j.at("ragged_inputs").is_array() ||
                     !j.at("ragged_outputs").is_array())) {
-        throw runtime_error("LayerNorm neutral configuration is malformed.");
+        throw runtime_error("LayerNorm canonical schema configuration is malformed.");
     }
 
     for (const json& inputJson : j.at("inputs")) {
         const uint64_t originalTensorId = inputJson.at("id").get<uint64_t>();
         Tensor input = network->getApiTensorByOriginalId(originalTensorId);
-        if (neutral) validateCanonicalTensorReference(inputJson, input);
+        if (canonicalRaggedSchema) validateCanonicalTensorReference(inputJson, input);
         layer.featureInputs.push_back(input);
     }
     const bool useRagged = j.value("use_ragged", false);
@@ -503,10 +503,10 @@ void LayerNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, con
             throw runtime_error("LayerNorm serialized ragged input arity mismatch.");
         for (uint32_t i = 0; i < layer.featureInputs.size(); ++i) {
             if ((SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(records.at(i), "LayerNorm") ==
-                 SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL) != neutral)
+                 SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL) != canonicalRaggedSchema)
                 throw runtime_error("LayerNorm layer version disagrees with ragged reference grammar.");
             if ((SegmentedPrimitiveDetail::layerRaggedReferenceGrammar(j.at("ragged_outputs").at(i), "LayerNorm") ==
-                 SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL) != neutral)
+                 SegmentedPrimitiveDetail::LayerRaggedReferenceGrammar::CANONICAL_LOGICAL) != canonicalRaggedSchema)
                 throw runtime_error("LayerNorm layer version disagrees with ragged reference grammar.");
             RaggedTensor logical = SegmentedPrimitiveDetail::reconstructInput(records.at(i), network, "LayerNorm");
             if (logical.getValues().getOriginalId() != layer.featureInputs[i].getOriginalId())
@@ -541,7 +541,7 @@ void LayerNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, con
             const json& raggedOutputJson = j.at("ragged_outputs").at(i);
             SegmentedPrimitiveDetail::validateSerializedPreservedPartition(
                 raggedOutputJson, raggedInputJson, raggedInput, "LayerNorm");
-            if (neutral) {
+            if (canonicalRaggedSchema) {
                 validateCanonicalRaggedReference(raggedInputJson, raggedInput);
                 validateCanonicalRaggedReference(raggedOutputJson, raggedOutput);
             }
@@ -554,21 +554,21 @@ void LayerNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, con
                     raggedInput.getValuesDataType() != raggedOutput.getValuesDataType() ||
                     !isLayerNormInputDataType(raggedInput.getValuesDataType()) ||
                     raggedInput.getValuesDimensions() != raggedOutput.getValuesDimensions()) {
-                    throw runtime_error("LayerNorm neutral input/output identity, type or shape mismatch.");
+                    throw runtime_error("LayerNorm canonical schema input/output identity, type or shape mismatch.");
                 }
             }
             layer.raggedFeatureInputs.push_back(raggedInput);
             layer.raggedFeatureOutputs.push_back(raggedOutput);
         }
     }
-    if (neutral) {
+    if (canonicalRaggedSchema) {
         const RaggedTensor& first = layer.raggedFeatureInputs.front();
         for (const RaggedTensor& current : layer.raggedFeatureInputs) {
             if (current.getValuesDataType() != first.getValuesDataType() ||
                 current.getValuesDimensions() != first.getValuesDimensions() ||
                 current.getOffsetsDataType() != first.getOffsetsDataType() ||
                 current.getMaxValuesPerRow() != first.getMaxValuesPerRow()) {
-                throw runtime_error("LayerNorm neutral multi-input applications require the same semantic geometry.");
+                throw runtime_error("LayerNorm canonical schema multi-input applications require the same semantic geometry.");
             }
         }
     }
@@ -590,9 +590,9 @@ void LayerNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, con
     if (!layer.hasParameter("weights") || !layer.hasParameter("biases")) {
         throw runtime_error("LayerNorm deserialize did not find required weights/biases parameters.");
     }
-    if (neutral) {
+    if (canonicalRaggedSchema) {
         const auto& specs = layer.getParameters();
-        if (specs.size() != 2) throw runtime_error("LayerNorm neutral parameters require weights and biases only.");
+        if (specs.size() != 2) throw runtime_error("LayerNorm canonical schema parameters require weights and biases only.");
         for (const char* name : {"weights", "biases"}) {
             const auto spec = layer.getParameterSpecification(name);
             const json parameterJson = spec->architectureJson();
@@ -601,7 +601,7 @@ void LayerNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, con
             const auto& dtype = direct ? parameterJson.at("dtype") : parameterJson.at("storage").at("data_type");
             if (shape.get<vector<uint64_t>>() != layer.normalizedShape ||
                 dtype.get<DataType>() != layer.parameterDataType || !spec->isTrainable()) {
-                throw runtime_error("LayerNorm neutral affine parameter shape/dtype is invalid.");
+                throw runtime_error("LayerNorm canonical schema affine parameter shape/dtype is invalid.");
             }
         }
     }

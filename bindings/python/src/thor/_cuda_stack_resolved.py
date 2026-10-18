@@ -55,8 +55,8 @@ CUDA_STACK = CudaStack(
         CudaDistribution("nvidia-cusparse", "12.8.2.51"),
         CudaDistribution("nvidia-cusolver", "12.2.6.9"),
         CudaDistribution("nvidia-cuda-cccl", "13.3.3.4.1"),
-        CudaDistribution("nvidia-cudnn-cu13", "9.26.0.51"),
-        CudaDistribution("nvidia-cudnn-frontend", "1.30.0"),
+        CudaDistribution("nvidia-cudnn-cu13", "9.27.0.42"),
+        CudaDistribution("nvidia-cudnn-frontend", "1.31.0"),
     ),
     includes=(
         IncludeSpec("THOR_CUDA_INCLUDE_DIR", "nvidia-cuda-runtime", Path('vector_types.h')),

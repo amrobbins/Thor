@@ -133,8 +133,8 @@ class GatedLinearUnitActivation : public Activation {
     }
 
    protected:
-    // The five GLUs share one shape-changing neutral standalone schema.
-    std::optional<std::string> placementNeutralStandaloneVersion() const override { return "1.1.0"; }
+    // The five GLUs share one shape-changing standalone ragged schema.
+    std::optional<std::string> standaloneRaggedSchemaVersion() const override { return "1.1.0"; }
 
     Tensor standaloneOutputTensorForInput(const Tensor& input) const override { return outputTensorForInput(input); }
 

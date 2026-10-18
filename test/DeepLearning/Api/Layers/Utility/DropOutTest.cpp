@@ -351,7 +351,7 @@ TEST(UtilityApiLayers, RaggedDropOutPlacesForInferenceAndPreservesLogicalOutput)
 }
 
 
-TEST(UtilityApiLayers, PlacementNeutralDropOutSerializesSemanticGeometryAndAccountsPlacementCapacity) {
+TEST(UtilityApiLayers, LogicalDropOutSerializesSemanticGeometryAndAccountsPlacementCapacity) {
     constexpr uint64_t maxValuesPerRow = 4;
     Network network("placement_neutral_dropout_json");
     RaggedTensor input = RaggedNetworkInput::Builder()
@@ -451,7 +451,7 @@ TEST(UtilityApiLayers, PlacementNeutralDropOutSerializesSemanticGeometryAndAccou
     filesystem::remove_all(fixedArchive);
 }
 
-TEST(UtilityApiLayers, PlacementNeutralDropOutSaveLoadReplacesCapacityAtDifferentBatchesAndPreservesHostExtent) {
+TEST(UtilityApiLayers, LogicalDropOutSaveLoadReplacesCapacityAtDifferentBatchesAndPreservesHostExtent) {
     constexpr uint64_t maxValuesPerRow = 4;
     constexpr uint64_t elementsPerValue = 2;
     const string networkName = "placement_neutral_dropout_round_trip";
@@ -596,7 +596,7 @@ TEST(UtilityApiLayers, PlacementNeutralDropOutSaveLoadReplacesCapacityAtDifferen
     filesystem::remove_all(archive);
 }
 
-TEST(UtilityApiLayers, PlacementNeutralDropOutZeroRateAndTrainingPlacementPreserveRuntimePolicy) {
+TEST(UtilityApiLayers, LogicalDropOutZeroRateAndTrainingPlacementPreserveRuntimePolicy) {
     constexpr uint32_t batchSize = 3;
     constexpr uint64_t maxValuesPerRow = 4;
     ThorImplementation::TensorPlacement gpuPlacement(ThorImplementation::TensorPlacement::MemDevices::GPU, 0);

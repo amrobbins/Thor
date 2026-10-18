@@ -212,7 +212,7 @@ void RaggedToPaddedDense::deserialize(const json& j, Network* network) {
     }
     if (version == "1.1.0" && (!j.is_object() || j.size() != 6 ||
                                j.at("factory") != Layer::Factory::Layer.value())) {
-        throw std::runtime_error("RaggedToPaddedDense neutral layer schema has unexpected or missing fields.");
+        throw std::runtime_error("RaggedToPaddedDense canonical ragged layer schema has unexpected or missing fields.");
     }
 
     const json& inputJson = j.at("ragged_feature_input");

@@ -13,7 +13,7 @@ import thor
 _MAX_VALUES_PER_ROW = 4
 
 
-def _build_neutral_ragged_network(name: str) -> thor.Network:
+def _build_logical_ragged_network(name: str) -> thor.Network:
     network = thor.Network(name)
     values = thor.layers.RaggedNetworkInput(
         network,
@@ -70,7 +70,7 @@ def test_ragged_network_input_model_contract_does_not_require_placement_capacity
 
 def test_saved_ragged_artifact_omits_placement_derived_batch_and_capacity(tmp_path):
     network_name = "ragged_artifact_contract"
-    network = _build_neutral_ragged_network(network_name)
+    network = _build_logical_ragged_network(network_name)
     save_dir = tmp_path / "artifact"
 
     network.save(str(save_dir), overwrite=False)
@@ -100,7 +100,7 @@ def test_saved_ragged_artifact_omits_placement_derived_batch_and_capacity(tmp_pa
 @pytest.mark.cuda
 def test_loaded_ragged_model_can_be_placed_repeatedly_at_different_batch_sizes(tmp_path):
     network_name = "ragged_cross_batch_placement_contract"
-    network = _build_neutral_ragged_network(network_name)
+    network = _build_logical_ragged_network(network_name)
     save_dir = tmp_path / "artifact"
     network.save(str(save_dir), overwrite=False)
 

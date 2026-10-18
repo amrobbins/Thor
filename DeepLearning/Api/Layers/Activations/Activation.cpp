@@ -236,13 +236,13 @@ uint64_t Activation::getExpressionBackedActivationMemRequirementInBytes(uint32_t
         const uint64_t outputBytes = featureOutput->getTotalSizeInBytes();
         if (inputBytes > std::numeric_limits<uint64_t>::max() / batchSize ||
             outputBytes > std::numeric_limits<uint64_t>::max() / batchSize) {
-            throw std::overflow_error("Placement-neutral activation memory requirement overflows uint64_t.");
+            throw std::overflow_error("Ragged activation memory requirement overflows uint64_t.");
         }
         uint64_t bytes = batchSize * inputBytes + batchSize * outputBytes;
         // DEVICE_ACTIVE_COUNT reuses the logical partition token dtype and has physical shape [1].
         const uint64_t carrierBytes = raggedFeatureInput->getOffsets().getTotalSizeInBytes();
         if (bytes > std::numeric_limits<uint64_t>::max() - carrierBytes) {
-            throw std::overflow_error("Placement-neutral activation memory requirement overflows uint64_t.");
+            throw std::overflow_error("Ragged activation memory requirement overflows uint64_t.");
         }
         bytes += carrierBytes;
         for (const auto& [name, tensor] : epilogueInputBindings) {
@@ -250,7 +250,7 @@ uint64_t Activation::getExpressionBackedActivationMemRequirementInBytes(uint32_t
             const uint64_t tensorBytes = tensor.getTotalSizeInBytes();
             if (tensorBytes > std::numeric_limits<uint64_t>::max() / batchSize ||
                 bytes > std::numeric_limits<uint64_t>::max() - batchSize * tensorBytes) {
-                throw std::overflow_error("Placement-neutral activation epilogue memory requirement overflows uint64_t.");
+                throw std::overflow_error("Ragged activation epilogue memory requirement overflows uint64_t.");
             }
             bytes += batchSize * tensorBytes;
         }
@@ -349,7 +349,7 @@ void Activation::deserializeStandaloneFields(const json& j, Network* network) {
         raggedInput = SegmentedPrimitiveDetail::reconstructInput(raggedJson, network, getLayerType().c_str());
         // Older standalone-ragged versions are alternate JSON grammars, not
         // a second model geometry. Both reconstruct through the logical graph.
-        const std::optional<std::string> canonicalRaggedVersion = placementNeutralStandaloneVersion();
+        const std::optional<std::string> canonicalRaggedVersion = standaloneRaggedSchemaVersion();
         if (version != getLayerVersion() &&
             (!canonicalRaggedVersion.has_value() || version != canonicalRaggedVersion.value())) {
             throw std::runtime_error(getLayerType() + " serialized ragged version is unsupported: " + version);
@@ -424,7 +424,7 @@ json Activation::architectureJson() const {
     json j;
     j["factory"] = Layer::Factory::Activation.value();
     if (raggedFeatureInput.has_value()) {
-        const std::optional<std::string> canonicalRaggedVersion = placementNeutralStandaloneVersion();
+        const std::optional<std::string> canonicalRaggedVersion = standaloneRaggedSchemaVersion();
         if (!canonicalRaggedVersion.has_value()) {
             throw std::runtime_error(getLayerType() + " has no supported standalone ragged serialization schema.");
         }
@@ -553,9 +553,9 @@ std::shared_ptr<Activation> Activation::deserializeTemplate(const json& j) {
     }
 
     const std::string version = j.at("version").get<std::string>();
-    const std::optional<std::string> neutralVersion = activation->placementNeutralStandaloneVersion();
+    const std::optional<std::string> raggedSchemaVersion = activation->standaloneRaggedSchemaVersion();
     if (version != activation->getLayerVersion() &&
-        (!neutralVersion.has_value() || version != neutralVersion.value())) {
+        (!raggedSchemaVersion.has_value() || version != raggedSchemaVersion.value())) {
         throw std::runtime_error("Unsupported version in Activation::deserializeTemplate: " + version);
     }
 

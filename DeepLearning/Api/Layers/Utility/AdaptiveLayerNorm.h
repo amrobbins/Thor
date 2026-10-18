@@ -70,7 +70,7 @@ class AdaptiveLayerNorm : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
         const uint64_t bytes = featureOutputs.front().getTotalSizeInBytes();
         if (batchSize == 0 || bytes > std::numeric_limits<uint64_t>::max() / batchSize)
-            throw std::overflow_error("AdaptiveLayerNorm neutral output capacity overflows uint64_t.");
+            throw std::overflow_error("AdaptiveLayerNorm ragged output capacity overflows uint64_t.");
         return bytes * batchSize;
     }
     void informThatInputConnectionMade(Tensor inputTensor) override;

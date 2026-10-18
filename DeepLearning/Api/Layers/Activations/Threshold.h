@@ -48,7 +48,7 @@ class Threshold : public Activation {
     }
 
    protected:
-    std::optional<std::string> placementNeutralStandaloneVersion() const override { return "1.1.0"; }
+    std::optional<std::string> standaloneRaggedSchemaVersion() const override { return "1.1.0"; }
 
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,

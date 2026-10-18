@@ -304,7 +304,7 @@ Batch embeddingBatch1U(const RaggedTensor& tokens, uint32_t b) {
 
 } // namespace
 
-TEST(RaggedEmbeddingNeutral1U, SemanticGeometryMemoryAndStrictReferences) {
+TEST(RaggedEmbedding1U, SemanticGeometryMemoryAndStrictReferences) {
     Network network("neutral_embedding_1u_schema");
     const RaggedTensor input = neutralTokens1U(network);
     Embedding embedding = Embedding::Builder().network(network).featureInput(input)
@@ -394,7 +394,7 @@ TEST(RaggedEmbeddingNeutral1U, SemanticGeometryMemoryAndStrictReferences) {
     bad = historicalLayer; bad["ragged_outputs"][0]["offsets"]["id"] = input.getValues().getOriginalId(); rejected(bad);
 }
 
-TEST(RaggedEmbeddingNeutral1U, SavedNetworkReplacesAtB2AndB7WithEmptyRowsAndPadding) {
+TEST(RaggedEmbedding1U, SavedNetworkReplacesAtB2AndB7WithEmptyRowsAndPadding) {
     int count = 0;
     if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0)
         GTEST_SKIP() << "CUDA device unavailable";
@@ -459,7 +459,7 @@ TEST(RaggedEmbeddingNeutral1U, SavedNetworkReplacesAtB2AndB7WithEmptyRowsAndPadd
 }
 
 
-TEST(RaggedEmbeddingNeutral1U, SavedTrainingBackpropagatesSparseWeightsWithoutPaddingOrInactiveRows) {
+TEST(RaggedEmbedding1U, SavedTrainingBackpropagatesSparseWeightsWithoutPaddingOrInactiveRows) {
     namespace Impl = ThorImplementation;
     int count = 0;
     if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0)

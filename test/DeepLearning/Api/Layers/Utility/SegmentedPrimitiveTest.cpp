@@ -47,7 +47,7 @@ Impl::Tensor makeDenseRows() {
     return rows;
 }
 
-Impl::Tensor makePlacementNeutralBroadcastDenseRows(uint32_t batchSize) {
+Impl::Tensor makeLogicalRaggedBroadcastDenseRows(uint32_t batchSize) {
     Impl::Tensor rows(cpuPlacement, Impl::TensorDescriptor(Api::DataType::FP32, {batchSize, 3}));
     float* p = rows.getMemPtr<float>();
     for (uint32_t row = 0; row < batchSize; ++row) {
@@ -82,7 +82,7 @@ Impl::RaggedTensor makeRaggedInput(Api::DataType offsetsDtype, const vector<uint
     return Impl::RaggedTensor(values, offsetTensor, maxValuesPerRow);
 }
 
-Batch makePlacementNeutralSegmentedBatch(const std::string& inputName,
+Batch makeLogicalRaggedSegmentedBatch(const std::string& inputName,
                                                 const Api::RaggedTensor& logicalInput,
                                                 uint32_t batchSize) {
     const Impl::RaggedTensorDescriptor descriptor = logicalInput.getDescriptorForPlacement(batchSize);
@@ -397,7 +397,7 @@ TEST(SegmentedPrimitiveApi, HistoricalSoftmaxAndLogSoftmaxLayerReadersNormalizeP
     }
 }
 
-TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedSoftmaxSaveLoadReplacesPlacementGeometryPerBatch) {
+TEST(SegmentedPrimitiveApi, LogicalSegmentedSoftmaxSaveLoadReplacesPlacementGeometryPerBatch) {
     constexpr uint64_t maxValuesPerRow = 4;
     const std::string networkName = "segmented_softmax_placement_neutral_round_trip";
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -535,7 +535,7 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedSoftmaxSaveLoadReplacesPlac
         EXPECT_EQ(loaded.architectureJson(), architectureBeforePlacement);
 
         const std::map<std::string, Api::InferenceOutputValue> outputs =
-            placed->inferLogical(makePlacementNeutralSegmentedBatch("tokens", loadedInput, placementBatchSize));
+            placed->inferLogical(makeLogicalRaggedSegmentedBatch("tokens", loadedInput, placementBatchSize));
         ASSERT_TRUE(outputs.contains("softmax"));
         ASSERT_TRUE(std::holds_alternative<Impl::RaggedTensor>(outputs.at("softmax")));
         const Impl::RaggedTensor result = std::get<Impl::RaggedTensor>(outputs.at("softmax"));
@@ -562,7 +562,7 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedSoftmaxSaveLoadReplacesPlac
     std::filesystem::remove_all(archive);
 }
 
-TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedLogSoftmaxSaveLoadReplacesPlacementGeometryPerBatch) {
+TEST(SegmentedPrimitiveApi, LogicalSegmentedLogSoftmaxSaveLoadReplacesPlacementGeometryPerBatch) {
     constexpr uint64_t maxValuesPerRow = 4;
     const std::string networkName = "segmented_log_softmax_placement_neutral_round_trip";
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -700,7 +700,7 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedLogSoftmaxSaveLoadReplacesP
         EXPECT_EQ(loaded.architectureJson(), architectureBeforePlacement);
 
         const std::map<std::string, Api::InferenceOutputValue> outputs =
-            placed->inferLogical(makePlacementNeutralSegmentedBatch("tokens", loadedInput, placementBatchSize));
+            placed->inferLogical(makeLogicalRaggedSegmentedBatch("tokens", loadedInput, placementBatchSize));
         ASSERT_TRUE(outputs.contains("log_softmax"));
         ASSERT_TRUE(std::holds_alternative<Impl::RaggedTensor>(outputs.at("log_softmax")));
         const Impl::RaggedTensor result = std::get<Impl::RaggedTensor>(outputs.at("log_softmax"));
@@ -728,7 +728,7 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedLogSoftmaxSaveLoadReplacesP
     std::filesystem::remove_all(archive);
 }
 
-TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedBroadcastBatchRecoveryCoversDenseAndOffsetsDrivers) {
+TEST(SegmentedPrimitiveApi, LogicalSegmentedBroadcastBatchRecoveryCoversDenseAndOffsetsDrivers) {
     constexpr uint64_t maxValuesPerRow = 4;
     Api::Network network("segmented_broadcast_batch_recovery");
     Api::RaggedTensor partition = Api::RaggedNetworkInput::Builder()
@@ -767,7 +767,7 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedBroadcastBatchRecoveryCover
               7U);
 }
 
-TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedBroadcastBuildsAndExecutesAtDifferentBatches) {
+TEST(SegmentedPrimitiveApi, LogicalSegmentedBroadcastBuildsAndExecutesAtDifferentBatches) {
     constexpr uint64_t maxValuesPerRow = 4;
 
     auto buildPlaceAndRun = [&](uint32_t placementBatchSize) {
@@ -826,8 +826,8 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedBroadcastBuildsAndExecutesA
         EXPECT_EQ(broadcast.getRaggedFeatureOutput().getValuesDimensions(),
                   (std::vector<uint64_t>{maxValuesPerRow, 3}));
 
-        Batch batch = makePlacementNeutralSegmentedBatch("tokens", partition, placementBatchSize);
-        batch.insert("rows", makePlacementNeutralBroadcastDenseRows(placementBatchSize));
+        Batch batch = makeLogicalRaggedSegmentedBatch("tokens", partition, placementBatchSize);
+        batch.insert("rows", makeLogicalRaggedBroadcastDenseRows(placementBatchSize));
         const std::map<std::string, Api::InferenceOutputValue> outputs = placed->inferLogical(batch);
         ASSERT_TRUE(outputs.contains("broadcast"));
         ASSERT_TRUE(std::holds_alternative<Impl::RaggedTensor>(outputs.at("broadcast")));
@@ -861,7 +861,7 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedBroadcastBuildsAndExecutesA
     buildPlaceAndRun(7);
 }
 
-TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedBroadcastSaveLoadReplacesPlacementGeometryPerBatch) {
+TEST(SegmentedPrimitiveApi, LogicalSegmentedBroadcastSaveLoadReplacesPlacementGeometryPerBatch) {
     constexpr uint64_t maxValuesPerRow = 4;
     const std::string networkName = "segmented_broadcast_placement_neutral_round_trip";
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -1040,8 +1040,8 @@ TEST(SegmentedPrimitiveApi, PlacementNeutralSegmentedBroadcastSaveLoadReplacesPl
                   (std::vector<uint64_t>{static_cast<uint64_t>(placementBatchSize) + 1}));
         EXPECT_EQ(loaded.architectureJson(), architectureBeforePlacement);
 
-        Batch batch = makePlacementNeutralSegmentedBatch("tokens", loadedPartition, placementBatchSize);
-        batch.insert("rows", makePlacementNeutralBroadcastDenseRows(placementBatchSize));
+        Batch batch = makeLogicalRaggedSegmentedBatch("tokens", loadedPartition, placementBatchSize);
+        batch.insert("rows", makeLogicalRaggedBroadcastDenseRows(placementBatchSize));
         const std::map<std::string, Api::InferenceOutputValue> outputs = placed->inferLogical(batch);
         ASSERT_TRUE(outputs.contains("broadcast"));
         ASSERT_TRUE(std::holds_alternative<Impl::RaggedTensor>(outputs.at("broadcast")));

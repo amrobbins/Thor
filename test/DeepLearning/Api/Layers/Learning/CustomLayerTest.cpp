@@ -16,11 +16,13 @@
 #include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
+#include "Utilities/TarFile/TarWriter.h"
 
 #include "gtest/gtest.h"
 
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -397,6 +399,97 @@ vector<float> runForward(Impl::NetworkInput& physicalInput,
     return readCpuTensor(physicalOutput.getFeatureOutput().value());
 }
 
+
+// The historical format used physical extents in the *CustomLayer reference*
+// even though the input boundary supplied a separately recoverable semantic M.
+// Verify archive compatibility without retaining historical B after load.
+TEST(CustomLayerApi, HistoricalPhysicalRaggedCustomLayerReferencesLoadWithLogicalGeometry) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Ragged CustomLayer archive fixture requires a GPU";
+
+    constexpr uint64_t M = 3;
+    constexpr uint64_t archivedBatch = 4;
+    const string name = "custom_layer_historical_physical_references";
+    const filesystem::path dir = makeUniqueTestArchiveDir(name);
+    try {
+        Api::Network network(name);
+        Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+            .network(network).name("tokens").valuesDataType(DataType::FP32)
+            .offsetsDataType(DataType::UINT32).trailingDimensions({2})
+            .maxValuesPerRow(M).build();
+        Api::CustomLayer custom = Api::CustomLayer::Builder()
+            .network(network).expression(makeSerializableAffineExpression())
+            .inputNames({"x"}).outputNames({"y"})
+            .inputInterface(Api::CustomLayer::RaggedTensorMap{{"x", input}})
+            .build();
+        (void)Api::RaggedNetworkOutput::Builder()
+            .network(network).name("result").inputTensor(custom.getRaggedOutput("y", 0)).build();
+
+        const nlohmann::json canonical = network.architectureJson();
+        auto archiveVariant = [&](nlohmann::json modelJson) {
+            const string dump = modelJson.dump();
+            Impl::Tensor bytes(cpuPlacement, Impl::TensorDescriptor(DataType::UINT8, {dump.size()}));
+            std::memcpy(bytes.getMemPtr<void>(), dump.data(), dump.size());
+            thor_file::TarWriter writer(name);
+            writer.addArchiveFile(name + ".thor.json", bytes);
+            writer.createArchive(dir, /*overwriteIfExists=*/true);
+        };
+        auto historical = canonical;
+        bool foundCustom = false;
+        for (auto& layer : historical.at("layers")) {
+            if (layer.at("layer_type") != "custom_layer") continue;
+            foundCustom = true;
+            auto& archivedInput = layer.at("ragged_input_interfaces").at(0).at("x");
+            auto& archivedOutput = layer.at("ragged_output_interfaces").at(0).at("y");
+            ASSERT_EQ(archivedInput.at("version"), "1.1.0");
+            ASSERT_EQ(archivedOutput.at("version"), "1.1.0");
+            archivedInput.at("values").at("dimensions").at(0) = archivedBatch * M;
+            archivedInput.at("offsets").at("dimensions").at(0) = archivedBatch + 1;
+            archivedOutput.at("values").at("dimensions").at(0) = archivedBatch * M;
+            archivedOutput.at("offsets").at("dimensions").at(0) = archivedBatch + 1;
+            layer.at("input_interfaces").at(0).at("x").at("dimensions").at(0) = archivedBatch * M;
+            layer.at("output_interfaces").at(0).at("y").at("dimensions").at(0) = archivedBatch * M;
+        }
+        ASSERT_TRUE(foundCustom);
+        archiveVariant(historical);
+        {
+            Api::Network restored(name);
+            ASSERT_NO_THROW(restored.load(dir.string()));
+            auto restoredCustom = findOnlyLayerOfType<Api::CustomLayer>(restored);
+            ASSERT_NE(restoredCustom, nullptr);
+            EXPECT_EQ(restoredCustom->getRaggedInputInterface(0).at("x").getValuesDimensions().at(0), M);
+            EXPECT_EQ(restoredCustom->getRaggedOutput("y", 0).getValuesDimensions().at(0), M);
+            EXPECT_EQ(restoredCustom->getRaggedOutput("y", 0)
+                          .getDescriptorForPlacement(7).getMaxTotalValues(), 7 * M);
+        }
+
+        // A physically inconsistent reference is corruption, not a reason to
+        // infer M or to silently assign the checkpoint's old batch size.
+        auto corruptInput = historical;
+        for (auto& layer : corruptInput.at("layers")) {
+            if (layer.at("layer_type") == "custom_layer")
+                layer.at("ragged_input_interfaces").at(0).at("x")
+                     .at("values").at("dimensions").at(0) = archivedBatch * M - 1;
+        }
+        archiveVariant(corruptInput);
+        Api::Network rejectsInput(name);
+        EXPECT_THROW(rejectsInput.load(dir.string()), std::runtime_error);
+
+        auto corruptOutput = historical;
+        for (auto& layer : corruptOutput.at("layers")) {
+            if (layer.at("layer_type") == "custom_layer")
+                layer.at("ragged_output_interfaces").at(0).at("y")
+                     .at("values").at("dimensions").at(0) = archivedBatch * M - 1;
+        }
+        archiveVariant(corruptOutput);
+        Api::Network rejectsOutput(name);
+        EXPECT_THROW(rejectsOutput.load(dir.string()), std::runtime_error);
+    } catch (...) {
+        filesystem::remove_all(dir);
+        throw;
+    }
+    filesystem::remove_all(dir);
+}
 
 TEST(CustomLayerApi, RaggedMultipleApplicationsSaveLoadPreservesIndependentPartitions) {
     if (MachineEvaluator::instance().getNumGpus() == 0)

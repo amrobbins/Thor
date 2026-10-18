@@ -26,6 +26,26 @@ namespace {
 
 constexpr const char* kRaggedOffsetsInputName = ThorImplementation::RaggedCustomLayer::RAGGED_OFFSETS_INPUT_NAME;
 
+// RaggedTensor reference version 1.1.0 also occurred in archives whose
+// per-layer tensor references described physical [B*M,...] values and [B+1]
+// offsets. The network loader recovers logical M from its authoritative source
+// before deserializing this layer. Treat those physical extents as historical
+// storage metadata, never as a model batch-size constraint.
+bool validArchivedRaggedReferenceGeometry(const std::string& version,
+                                          const std::vector<uint64_t>& archivedValues,
+                                          const std::vector<uint64_t>& archivedOffsets,
+                                          uint64_t semanticM) {
+    if (version != "1.1.0") return true; // 1.0.0 retained its existing compatibility grammar.
+    if (archivedValues.empty() || archivedOffsets.size() != 1 || semanticM == 0)
+        return false;
+    const uint64_t historicalOffsetsCount = archivedOffsets.front();
+    if (historicalOffsetsCount == 1) return archivedValues.front() == semanticM;
+    if (historicalOffsetsCount <= 1) return false;
+    const uint64_t historicalBatch = historicalOffsetsCount - 1;
+    return historicalBatch <= std::numeric_limits<uint64_t>::max() / semanticM &&
+           archivedValues.front() == historicalBatch * semanticM;
+}
+
 PhysicalTensor makeFakePlacedTensor(const Thor::Tensor& apiTensor, uint64_t batchSize, bool dimensionsIncludeBatch = false) {
     std::vector<uint64_t> fakeDims;
     if (dimensionsIncludeBatch) {
@@ -1758,9 +1778,15 @@ void CustomLayer::deserialize(std::shared_ptr<thor_file::TarReader>& archiveRead
                      tensorJson.at("max_values_per_row").get<uint64_t>() != dimensions.front())) {
                     throw runtime_error("Serialized ragged CustomLayer input semantic metadata mismatch.");
                 }
-                if (tensorJson.at("version").get<std::string>() == "1.1.0" &&
-                    (oldDimensions.front() != dimensions.front() || oldOffsetsDimensions.front() != 1)) {
-                    throw runtime_error("Serialized ragged CustomLayer canonical input geometry mismatch.");
+                if (!validArchivedRaggedReferenceGeometry(referenceVersion, oldDimensions,
+                                                          oldOffsetsDimensions, dimensions.front())) {
+                    std::ostringstream details;
+                    details << "Serialized ragged CustomLayer canonical input geometry mismatch: application="
+                            << interfaceIndex << " name=" << name << " version=" << referenceVersion
+                            << " archived_values_first=" << oldDimensions.front()
+                            << " archived_offsets_count=" << oldOffsetsDimensions.front()
+                            << " semantic_M=" << dimensions.front() << ".";
+                    throw runtime_error(details.str());
                 }
                 raggedInputInterface.emplace(name, RaggedTensor::logical(values, offsets, dimensions.front()));
             }
@@ -1800,10 +1826,18 @@ void CustomLayer::deserialize(std::shared_ptr<thor_file::TarReader>& archiveRead
                      tensorJson.at("max_values_per_row").get<uint64_t>() != logicalDimensions.front())) {
                     throw runtime_error("Serialized ragged CustomLayer output semantic metadata mismatch.");
                 }
-                if (tensorJson.at("version").get<std::string>() == "1.1.0" &&
-                    (archivedDimensions.front() != logicalDimensions.front() || archivedOffsetsDimensions.front() != 1 ||
-                     j.at("output_interfaces").at(interfaceIndex).at(name).at("dimensions").at(0) != logicalDimensions.front())) {
-                    throw runtime_error("Serialized ragged CustomLayer canonical output geometry mismatch.");
+                if (!validArchivedRaggedReferenceGeometry(referenceVersion, archivedDimensions,
+                                                          archivedOffsetsDimensions, logicalDimensions.front()) ||
+                    (referenceVersion == "1.1.0" &&
+                     j.at("output_interfaces").at(interfaceIndex).at(name).at("dimensions")
+                         .get<std::vector<uint64_t>>() != archivedDimensions)) {
+                    std::ostringstream details;
+                    details << "Serialized ragged CustomLayer canonical output geometry mismatch: application="
+                            << interfaceIndex << " name=" << name << " version=" << referenceVersion
+                            << " archived_values_first=" << archivedDimensions.front()
+                            << " archived_offsets_count=" << archivedOffsetsDimensions.front()
+                            << " semantic_M=" << logicalDimensions.front() << ".";
+                    throw runtime_error(details.str());
                 }
                 raggedOutputInterface.emplace(
                     name, RaggedTensor::logical(outputValues, commonOffsets.value(), logicalDimensions.front()));

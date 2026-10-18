@@ -71,7 +71,7 @@ shared_ptr<Api::NetworkInput> findInput(Api::Network& network, const std::string
     return nullptr;
 }
 
-Batch makePlacementNeutralReductionBatch(const std::string& inputName,
+Batch makeLogicalRaggedReductionBatch(const std::string& inputName,
                                          const Api::RaggedTensor& logicalInput,
                                          uint32_t batchSize) {
     const Impl::RaggedTensorDescriptor descriptor = logicalInput.getDescriptorForPlacement(batchSize);
@@ -294,7 +294,7 @@ TEST(SegmentedReductionApi, BuilderProducesNormalDensePerExampleShape) {
     EXPECT_EQ(scalarMean.getFeatureOutput()->getDimensions(), (vector<uint64_t>{1}));
 }
 
-TEST(SegmentedReductionApi, PlacementNeutralBuilderProducesDensePerExampleShapeWithoutBatch) {
+TEST(SegmentedReductionApi, LogicalBuilderProducesDensePerExampleShapeWithoutBatch) {
     constexpr uint64_t maxValuesPerRow = 4;
     Api::Network network("segmented_reduction_neutral_shape");
     Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
@@ -332,7 +332,7 @@ TEST(SegmentedReductionApi, PlacementNeutralBuilderProducesDensePerExampleShapeW
     EXPECT_EQ(scalarMean.getFeatureOutput()->getDimensions(), (vector<uint64_t>{1}));
 }
 
-TEST(SegmentedReductionApi, PlacementNeutralReductionBuildsAndExecutesAtDifferentBatches) {
+TEST(SegmentedReductionApi, LogicalReductionBuildsAndExecutesAtDifferentBatches) {
     constexpr uint64_t maxValuesPerRow = 4;
 
     auto buildPlaceAndRun = [&](uint32_t placementBatchSize) {
@@ -385,7 +385,7 @@ TEST(SegmentedReductionApi, PlacementNeutralReductionBuildsAndExecutesAtDifferen
         EXPECT_EQ(physicalMean->getFeatureOutput()->getDimensions(),
                   (vector<uint64_t>{placementBatchSize, 1}));
 
-        const Batch batch = makePlacementNeutralReductionBatch("tokens", input, placementBatchSize);
+        const Batch batch = makeLogicalRaggedReductionBatch("tokens", input, placementBatchSize);
         const std::map<std::string, Impl::Tensor> outputs = placed->infer(batch);
         ASSERT_TRUE(outputs.contains("mean"));
         const Impl::Tensor& output = outputs.at("mean");
@@ -403,7 +403,7 @@ TEST(SegmentedReductionApi, PlacementNeutralReductionBuildsAndExecutesAtDifferen
     buildPlaceAndRun(7);
 }
 
-TEST(SegmentedReductionApi, PlacementNeutralManagedOffsetsCarrierDrivesPhysicalDescriptorRecovery) {
+TEST(SegmentedReductionApi, LogicalManagedOffsetsCarrierDrivesPhysicalDescriptorRecovery) {
     constexpr uint32_t placementBatchSize = 7;
     constexpr uint64_t maxValuesPerRow = 4;
     Api::Network network("segmented_reduction_neutral_offsets_driver");
@@ -472,7 +472,7 @@ TEST(SegmentedReductionApi, PlacementNeutralManagedOffsetsCarrierDrivesPhysicalD
               static_cast<uint64_t>(placementBatchSize) * maxValuesPerRow);
 }
 
-TEST(SegmentedReductionApi, PlacementNeutralReductionSaveLoadReplacesPlacementGeometryPerBatch) {
+TEST(SegmentedReductionApi, LogicalReductionSaveLoadReplacesPlacementGeometryPerBatch) {
     constexpr uint64_t maxValuesPerRow = 4;
     const std::string networkName = "segmented_reduction_placement_neutral_round_trip";
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -608,7 +608,7 @@ TEST(SegmentedReductionApi, PlacementNeutralReductionSaveLoadReplacesPlacementGe
 
         EXPECT_EQ(loaded.architectureJson(), architectureBeforePlacement);
 
-        const Batch batch = makePlacementNeutralReductionBatch("tokens", loadedInput, placementBatchSize);
+        const Batch batch = makeLogicalRaggedReductionBatch("tokens", loadedInput, placementBatchSize);
         const std::map<std::string, Impl::Tensor> outputs = placed->infer(batch);
         ASSERT_TRUE(outputs.contains("mean"));
         const Impl::Tensor& output = outputs.at("mean");

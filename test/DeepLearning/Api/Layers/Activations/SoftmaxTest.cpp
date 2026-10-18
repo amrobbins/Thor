@@ -100,7 +100,7 @@ shared_ptr<Softmax> findOnlySoftmax(Network& network) {
 
 } // namespace
 
-TEST(Activations, PlacementNeutralSoftmaxSerializesSemanticGeometryAndRejectsMismatches) {
+TEST(Activations, LogicalSoftmaxSerializesSemanticGeometryAndRejectsMismatches) {
     constexpr uint64_t maxValuesPerRow = 4;
     Network network("placement_neutral_softmax_json");
     RaggedTensor input = RaggedNetworkInput::Builder()
@@ -169,7 +169,7 @@ TEST(Activations, PlacementNeutralSoftmaxSerializesSemanticGeometryAndRejectsMis
     EXPECT_THROW(Softmax::deserialize(wrongInputValues, &network), runtime_error);
 }
 
-TEST(Activations, PlacementNeutralSoftmaxSaveLoadReplacesPlacementGeometryPerBatchAndExecutesEmptyRows) {
+TEST(Activations, LogicalSoftmaxSaveLoadReplacesPlacementGeometryPerBatchAndExecutesEmptyRows) {
     constexpr uint64_t maxValuesPerRow = 4;
     const string networkName = "placement_neutral_softmax_round_trip";
     const auto nonce = chrono::steady_clock::now().time_since_epoch().count();
@@ -349,7 +349,7 @@ TEST(Activations, FixedRaggedSoftmaxRemainsVersionOneAndLoads) {
     filesystem::remove_all(archive);
 }
 
-TEST(Activations, PlacementNeutralSoftmaxRejectsFp8Input) {
+TEST(Activations, LogicalSoftmaxRejectsFp8Input) {
     Network network("neutral_softmax_fp8");
     RaggedTensor input = RaggedNetworkInput::Builder()
         .network(network).name("tokens")
