@@ -155,27 +155,39 @@ def generate(source: Path, out: Path):
                     ow_emitted.add((k,p,o))
                     add('narrow','OneWindow',short,'fp8GeneralRParallelPackedCompleteKernel',
                         f'{dtype}, {k}, {p}, {o}, false',f'K{k}/O{o}/P{p}')
-        for rows in DEEP_ROWS:
-            for lanes in (8,4):
-                add('narrow','DeepRSmallK',short,'narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel',
-                    f'{dtype}, cuda::std::plus<float>, IdentityFp32, {rows}, 16, {lanes}',
-                    f'rows{rows}/P16/tiny-lanes{lanes}')
-            for components in (1,2,4,5,8):
-                add('narrow','DeepRSmallK',short,'narrowFp8PackedFlatRCooperativeFirstStageKernel',
-                    f'{dtype}, cuda::std::plus<float>, IdentityFp32, {rows}, 16, {components}',
-                    f'rows{rows}/P16/components{components}')
-        for topology, combos in [('Complete',ALIGNED_COMPLETE),('Staged',ALIGNED_STAGED)]:
-            for p,threads in combos:
-                add('aligned','AlignedK',short,'kParallelFp8PacketKernel',
-                    f'{dtype}, IdentityFp32, cuda::std::plus<float>, AdditiveFinalizeFp32, {p}, {threads}, TiledRKStageTopology::{topology}',
-                    f'{topology}/P{p}/CTA{threads}')
-        for name in ('fp8GeneralRParallelKTileP16CompleteKernel', 'fp8GeneralRParallelKTileP16FirstStageKernel'):
-            add('narrow','RuntimeK',short,name,dtype,'PacketP16/'+('Complete' if 'Complete' in name else 'Staged'))
+        # TEMPORARY INPUT-TRANSFORM INVENTORY PROBE (NOT AN ACCEPTED SELECTION):
+        # Census the three existing compiled SUM transforms for DeepRSmallK and
+        # AlignedK. No kernel source, production selection, or dispatch changes.
+        for transform, label in (('IdentityFp32', 'Identity'),
+                                 ('AbsoluteValueFp32', 'ABS'),
+                                 ('SquareFp32', 'Square')):
+            for rows in DEEP_ROWS:
+                for lanes in (8,4):
+                    add('narrow','DeepRSmallK',short,'narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel',
+                        f'{dtype}, cuda::std::plus<float>, {transform}, {rows}, 16, {lanes}',
+                        f'rows{rows}/P16/tiny-lanes{lanes}/{label}')
+                for components in (1,2,4,5,8):
+                    add('narrow','DeepRSmallK',short,'narrowFp8PackedFlatRCooperativeFirstStageKernel',
+                        f'{dtype}, cuda::std::plus<float>, {transform}, {rows}, 16, {components}',
+                        f'rows{rows}/P16/components{components}/{label}')
+            for topology, combos in [('Complete',ALIGNED_COMPLETE),('Staged',ALIGNED_STAGED)]:
+                for p,threads in combos:
+                    add('aligned','AlignedK',short,'kParallelFp8PacketKernel',
+                        f'{dtype}, {transform}, cuda::std::plus<float>, AdditiveFinalizeFp32, {p}, {threads}, TiledRKStageTopology::{topology}',
+                        f'{topology}/P{p}/CTA{threads}/{label}')
+        # RuntimeK's input transform is a compiled x3 dimension, including
+        # PacketStaged FirstStage and both rotated layouts. Other axes stay runtime.
+        for transform, label in ((0, 'Identity'), (1, 'ABS'), (2, 'Square')):
+            add('narrow', 'RuntimeK', short, 'fp8GeneralRParallelKTileP16CompleteKernel',
+                f'{dtype}, false, {transform}', f'PacketP16/Complete/{label}')
+            add('narrow', 'RuntimeK', short, 'fp8GeneralRParallelKTileP16FirstStageKernel',
+                f'{dtype}, {transform}', f'PacketP16/Staged/{label}')
         for exact in (False,True):
             for rows in ROTATED_ROWS:
-                add('rotated','RuntimeK',short,'awkwardAlignmentRotatedShardedFirstStageKernel',
-                    f'{dtype}, cuda::std::plus<float>, IdentityFp32, {rows}, 16, 16, {str(exact).lower()}',
-                    f'Rotated/{"Exact" if exact else "Prefix"}/P16/rows{rows}')
+                for transform, label in (('IdentityFp32','Identity'), ('AbsoluteValueFp32','ABS'), ('SquareFp32','Square')):
+                    add('rotated','RuntimeK',short,'awkwardAlignmentRotatedShardedFirstStageKernel',
+                        f'{dtype}, cuda::std::plus<float>, {transform}, {rows}, 16, 16, {str(exact).lower()}',
+                        f'Rotated/{"Exact" if exact else "Prefix"}/P16/rows{rows}/{label}')
 
     # The first two TU prefixes already opened both namespaces. The aligned
     # prefix also has THOR_CUB_ENABLE_FP8_TYPES #if closed before its cut.
@@ -194,7 +206,7 @@ def generate(source: Path, out: Path):
     for tu in ('narrow','aligned','rotated'):
         assert (out/f'{tu}.cu').exists()
     modes = Counter(m['mode'] for m in manifest)
-    assert modes == Counter({'OneWindow':252,'DeepRSmallK':70,'AlignedK':18,'RuntimeK':28}), modes
+    assert modes == Counter({'OneWindow':252,'DeepRSmallK':210,'AlignedK':54,'RuntimeK':84}), modes
     print('Generated 3 CUDA source TUs in',out)
     print('Expected selected first-stage specializations:',dict(modes))
 
@@ -265,7 +277,7 @@ def analyze(objects: list[Path], archive: Path, out: Path):
     # CUDA ABI functions can be present in cubins even when only the selected
     # kernels are referenced. Count helpers separately; don't pretend they're
     # identifiable per kernel.
-    exp={'OneWindow':252,'DeepRSmallK':70,'AlignedK':18,'RuntimeK':28}
+    exp={'OneWindow':252,'DeepRSmallK':210,'AlignedK':54,'RuntimeK':84}
     # Compare only first-party selected kernels against the manifest. CUDA/CCCL
     # support symbols are accounted for separately, and unexpected Thor kernels
     # are rejected through `extra` below; neither belongs in these counts.

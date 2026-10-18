@@ -166,6 +166,8 @@ void runFp8RuntimeKShortlistHoldoutSweep(Tensor& cache_flush, Stream& stream);
 void runFp8CompleteRuntimeOutputRegression(Tensor& cache_flush, Stream& stream);
 /** Compare runtime identity/divide/sqrt finalizers against identical-output identity and original FP8 identity. */
 void runFp8CompleteRuntimeFinalizeRegression(Tensor& cache_flush, Stream& stream);
+/** Compare compile-time vs runtime Identity/ABS/Square for Complete, including FP32 output. */
+void runFp8CompleteRuntimeInputTransformRegression(Tensor& cache_flush, Stream& stream);
 
 /** Benchmark-only AlignedK / production FP8 KParallel Complete vs staged packet/CTA/shard inventory.
  * Staged candidates include the real stamped FP32 continuation in the total time. */

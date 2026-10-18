@@ -119,6 +119,7 @@ struct BenchmarkOptions {
     bool rk_fp8_runtime_k_shortlist_holdout = false;
     bool rk_fp8_complete_runtime_output_regression = false;
     bool rk_fp8_complete_runtime_finalize_regression = false;
+    bool rk_fp8_complete_runtime_input_transform_regression = false;
     bool rk_fp8_aligned_k_end_to_end_sweep = false;
     bool rk_fp8_aligned_k_lean_calibration = false;
     bool rk_fp8_aligned_k_topology_holdout = false;
@@ -2966,7 +2967,7 @@ void runArgCase(const ReductionShape& shape,
 
 void printUsage(const char* executable) {
     std::cout << "Usage: " << executable
-              << " [--arg-x4-focused|--arg-x4-awkward-focused|--arg-census|--view-census|--reduction-census|--full-row-shard-census|--wide-awkward-2d-census|--awkward-shard-census|--sub4096-awkward-shard-census|--sub512-awkward-shard-census|--sub256-awkward-shard-census|--sub64-awkward-shard-census|--rk-census-gate|--rk-fp8-kparallel-packet-census|--rk-fp8-kparallel-small-packet-sweep|--rk-fp8-kparallel-straddled-sweep|--rk-fp8-kparallel-complete-layout-sweep|--rk-fp8-kparallel-staged-layout-sweep|--rk-fp8-rcooperative-single-pass-sweep|--rk-fp8-rcooperative-full-space-sweep|--rk-fp8-rcooperative-k-tiled-sweep|--rk-fp8-complete-runtime-output-regression|--rk-fp8-complete-runtime-finalize-regression|--rk-fp8-runtime-k-end-to-end-sweep|--rk-fp8-runtime-k-inventory-holdout|--rk-fp8-runtime-k-selector-holdout|--rk-fp8-rcooperative-selector-simplification-sweep|--rk-fp8-rcooperative-unified-selector-validation-sweep|--rk-fp8-rcooperative-geometry-policy-holdout-sweep|--rk-fp8-one-window-dense-boundary-sweep|--rk-fp8-rcooperative-small-r-small-k-sweep|--rk-fp8-rcooperative-small-r-medium-k-sweep|--rk-fp8-rcooperative-medium-r-small-k-sweep|--rk-modern-single-pass-sweep|--rk-modern-single-pass-focus|--rk-modern-gap-census|--rk-narrow-low-precision-calibration|--rk-lean-complete-calibration|--rk-kparallel-stage-crossover-calibration|--rk-kparallel-staged-geometry-calibration|--rk-kparallel-end-to-end-crossover-calibration|--rk-realistic-end-to-end-progress-calibration|--rk-family-boundary-calibration|--rk-fp16-production-autotune-census|--dense-stage-cost-calibration] [--dense-run-stage-census] [--candidate=<name>]...\n"
+              << " [--arg-x4-focused|--arg-x4-awkward-focused|--arg-census|--view-census|--reduction-census|--full-row-shard-census|--wide-awkward-2d-census|--awkward-shard-census|--sub4096-awkward-shard-census|--sub512-awkward-shard-census|--sub256-awkward-shard-census|--sub64-awkward-shard-census|--rk-census-gate|--rk-fp8-kparallel-packet-census|--rk-fp8-kparallel-small-packet-sweep|--rk-fp8-kparallel-straddled-sweep|--rk-fp8-kparallel-complete-layout-sweep|--rk-fp8-kparallel-staged-layout-sweep|--rk-fp8-rcooperative-single-pass-sweep|--rk-fp8-rcooperative-full-space-sweep|--rk-fp8-rcooperative-k-tiled-sweep|--rk-fp8-complete-runtime-output-regression|--rk-fp8-complete-runtime-finalize-regression|--rk-fp8-complete-runtime-input-transform-regression|--rk-fp8-runtime-k-end-to-end-sweep|--rk-fp8-runtime-k-inventory-holdout|--rk-fp8-runtime-k-selector-holdout|--rk-fp8-rcooperative-selector-simplification-sweep|--rk-fp8-rcooperative-unified-selector-validation-sweep|--rk-fp8-rcooperative-geometry-policy-holdout-sweep|--rk-fp8-one-window-dense-boundary-sweep|--rk-fp8-rcooperative-small-r-small-k-sweep|--rk-fp8-rcooperative-small-r-medium-k-sweep|--rk-fp8-rcooperative-medium-r-small-k-sweep|--rk-modern-single-pass-sweep|--rk-modern-single-pass-focus|--rk-modern-gap-census|--rk-narrow-low-precision-calibration|--rk-lean-complete-calibration|--rk-kparallel-stage-crossover-calibration|--rk-kparallel-staged-geometry-calibration|--rk-kparallel-end-to-end-crossover-calibration|--rk-realistic-end-to-end-progress-calibration|--rk-family-boundary-calibration|--rk-fp16-production-autotune-census|--dense-stage-cost-calibration] [--dense-run-stage-census] [--candidate=<name>]...\n"
               << "       " << executable << " --list-reduction-candidates\n"
               << "  --arg-x4-focused          Run ARGMIN only for FP8 E4M3/FP16/FP32, R=64/256/1024, and "
                  "D=128/256/512/1024/2048/4096/65536.\n"
@@ -3054,6 +3055,7 @@ void printUsage(const char* executable) {
               << "  --rk-fp8-aligned-k-topology-holdout  Independent topology/depth and CTA256 inventory holdout with new R/K and 32/64/128MiB targets; no selector or production changes.\n"
               << "  --rk-fp8-complete-runtime-output-regression  Interleaved old FP8 vs runtime output-storage epilogue, OneWindow and RuntimeK Complete.\n"
               << "  --rk-fp8-complete-runtime-finalize-regression  Old FP8 identity vs runtime identity/divide/sqrt Complete epilogues.\n"
+              << "  --rk-fp8-complete-runtime-input-transform-regression  Compile-time vs runtime input transform for FP8 Complete.\n"
               << "  --rk-fp8-runtime-k-end-to-end-sweep  Focused RuntimeK PacketStaged/rotated benchmark with stamped FP32-partial continuation and common FP8 output.\n"
               << "  --rk-fp8-runtime-k-inventory-holdout  Independent 24/128 MiB RuntimeK inventory test of every compiled rotated row depth vs PacketStaged, five complete samples.\n"
               << "  --rk-fp8-runtime-k-selector-holdout  New 12/96 MiB RuntimeK local-policy test against all physical controls, five samples.\n"
@@ -3189,6 +3191,8 @@ BenchmarkOptions parseOptions(int argc, char** argv) {
             options.rk_fp8_complete_runtime_output_regression = true;
         } else if (argument == "--rk-fp8-complete-runtime-finalize-regression") {
             options.rk_fp8_complete_runtime_finalize_regression = true;
+        } else if (argument == "--rk-fp8-complete-runtime-input-transform-regression") {
+            options.rk_fp8_complete_runtime_input_transform_regression = true;
         } else if (argument == "--rk-fp8-runtime-k-end-to-end-sweep") {
             options.rk_fp8_runtime_k_end_to_end_sweep = true;
         } else if (argument == "--rk-fp8-runtime-k-inventory-holdout") {
@@ -3584,6 +3588,11 @@ int main(int argc, char** argv) {
         if (options.rk_fp8_complete_runtime_finalize_regression) {
             Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
             runFp8CompleteRuntimeFinalizeRegression(cache_flush, stream);
+            return EXIT_SUCCESS;
+        }
+        if (options.rk_fp8_complete_runtime_input_transform_regression) {
+            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
+            runFp8CompleteRuntimeInputTransformRegression(cache_flush, stream);
             return EXIT_SUCCESS;
         }
         if (options.rk_fp8_runtime_k_end_to_end_sweep) {

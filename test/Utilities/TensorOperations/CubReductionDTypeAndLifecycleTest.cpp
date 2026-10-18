@@ -2,6 +2,7 @@
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 #include "Utilities/Common/LowPrecisionFloat.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -560,7 +561,10 @@ TEST(CubReduction, Fp8CompleteRuntimeFinalizationMatchesFp32ThenStorage) {
             SCOPED_TRACE(shape.inner);
             SCOPED_TRACE(shape.warps);
             std::vector<float> values(shape.outer * shape.reduction * shape.inner);
-            std::vector<float> sums(shape.outer * shape.inner, 0.0f);
+            std::array<std::vector<float>, 3> transform_sums = {
+                std::vector<float>(shape.outer * shape.inner, 0.0f),
+                std::vector<float>(shape.outer * shape.inner, 0.0f),
+                std::vector<float>(shape.outer * shape.inner, 0.0f)};
             for (uint64_t o = 0; o < shape.outer; ++o) {
                 for (uint64_t r = 0; r < shape.reduction; ++r) {
                     for (uint64_t k = 0; k < shape.inner; ++k) {
@@ -571,7 +575,9 @@ TEST(CubReduction, Fp8CompleteRuntimeFinalizationMatchesFp32ThenStorage) {
                                             pattern == 1 ? 0.0625f :
                                             pattern == 2 ? 0.03125f : 0.125f;
                         values[(o * shape.reduction + r) * shape.inner + k] = value;
-                        sums[o * shape.inner + k] += value;
+                        transform_sums[0][o * shape.inner + k] += value;
+                        transform_sums[1][o * shape.inner + k] += std::fabs(value);
+                        transform_sums[2][o * shape.inner + k] += value * value;
                     }
                 }
             }
@@ -584,50 +590,195 @@ TEST(CubReduction, Fp8CompleteRuntimeFinalizationMatchesFp32ThenStorage) {
 #if THOR_CUB_ENABLE_64BIT_TYPES
             output_types.push_back(DataType::FP64);
 #endif
-            for (DataType output_dtype : output_types) {
-                for (CubReductionStageFinalize mode : {CubReductionStageFinalize::Identity,
-                                                       CubReductionStageFinalize::Divide,
-                                                       CubReductionStageFinalize::SquareRoot}) {
-                    SCOPED_TRACE(static_cast<int>(output_dtype));
-                    SCOPED_TRACE(static_cast<int>(mode));
-                    CubReductionStageSemantics semantics;
-                    semantics.finalize = mode;
-                    semantics.finalize_divisor = shape.reduction;
-                    Tensor output(gpuPlacement, TensorDescriptor(output_dtype, geometry.output_dimensions));
-                    if (shape.tiled) {
-                        launchFp8GeneralRParallelKTileRCooperativeCalibrationComplete(
-                            input, output, geometry, shape.warps, shape.tile, stream, semantics);
-                    } else {
-                        launchFp8GeneralRParallelRCooperativeCalibrationComplete(
-                            input, output, geometry, shape.outputs_per_warp, shape.warps,
-                            shape.packet, stream, false, semantics);
-                    }
-                    stream.synchronize();
-                    const auto actual = copyGpuTensorAsFloat(output, stream);
-                    ASSERT_EQ(actual.size(), sums.size());
-                    for (size_t i = 0; i < sums.size(); ++i) {
-                        float result = sums[i];
-                        if (mode == CubReductionStageFinalize::Divide)
-                            result /= static_cast<float>(shape.reduction);
-                        else if (mode == CubReductionStageFinalize::SquareRoot)
-                            result = std::sqrt(result);
-                        switch (output_dtype) {
-                            case DataType::FP8_E4M3:
-                                result = static_cast<float>(ThorLowPrecision::toFp8E4M3Satfinite(result));
-                                break;
-                            case DataType::FP8_E5M2:
-                                result = static_cast<float>(ThorLowPrecision::toFp8E5M2Satfinite(result));
-                                break;
-                            case DataType::FP16:
-                                result = __half2float(__float2half_rn(result));
-                                break;
-                            case DataType::BF16:
-                                result = __bfloat162float(__float2bfloat16_rn(result));
-                                break;
-                            default: break;
+            for (CubReductionStageInputTransform transform :
+                 {CubReductionStageInputTransform::Identity,
+                  CubReductionStageInputTransform::AbsoluteValue,
+                  CubReductionStageInputTransform::Square}) {
+                const size_t transform_index = static_cast<size_t>(transform);
+                const auto& sums = transform_sums[transform_index];
+                SCOPED_TRACE(static_cast<int>(transform));
+                for (DataType output_dtype : output_types) {
+                    for (CubReductionStageFinalize mode : {CubReductionStageFinalize::Identity,
+                                                           CubReductionStageFinalize::Divide,
+                                                           CubReductionStageFinalize::SquareRoot}) {
+                        SCOPED_TRACE(static_cast<int>(output_dtype));
+                        SCOPED_TRACE(static_cast<int>(mode));
+                        CubReductionStageSemantics semantics;
+                        semantics.input_transform = transform;
+                        semantics.finalize = mode;
+                        semantics.finalize_divisor = shape.reduction;
+                        Tensor output(gpuPlacement, TensorDescriptor(output_dtype, geometry.output_dimensions));
+                        if (shape.tiled) {
+                            launchFp8GeneralRParallelKTileRCooperativeCalibrationComplete(
+                                input, output, geometry, shape.warps, shape.tile, stream, semantics);
+                        } else {
+                            launchFp8GeneralRParallelRCooperativeCalibrationComplete(
+                                input, output, geometry, shape.outputs_per_warp, shape.warps,
+                                shape.packet, stream, false, semantics);
                         }
-                        EXPECT_NEAR(actual[i], result, output_dtype == DataType::FP32 ? 1.0e-6f : 0.0f)
-                            << "output index=" << i;
+                        stream.synchronize();
+                        const auto actual = copyGpuTensorAsFloat(output, stream);
+                        ASSERT_EQ(actual.size(), sums.size());
+                        for (size_t i = 0; i < sums.size(); ++i) {
+                            float result = sums[i];
+                            if (mode == CubReductionStageFinalize::Divide)
+                                result /= static_cast<float>(shape.reduction);
+                            else if (mode == CubReductionStageFinalize::SquareRoot)
+                                result = std::sqrt(result);
+                            switch (output_dtype) {
+                                case DataType::FP8_E4M3:
+                                    result = static_cast<float>(ThorLowPrecision::toFp8E4M3Satfinite(result));
+                                    break;
+                                case DataType::FP8_E5M2:
+                                    result = static_cast<float>(ThorLowPrecision::toFp8E5M2Satfinite(result));
+                                    break;
+                                case DataType::FP16:
+                                    result = __half2float(__float2half_rn(result));
+                                    break;
+                                case DataType::BF16:
+                                    result = __bfloat162float(__float2bfloat16_rn(result));
+                                    break;
+                                default: break;
+                            }
+                            EXPECT_NEAR(actual[i], result, output_dtype == DataType::FP32 ? 1.0e-6f : 0.0f)
+                                << "output index=" << i;
+                        }
+                    }
+                }
+            } // runtime input transform
+        }
+    }
+}
+
+// With negative FP8 values the three transforms must produce DISTINCT aggregates;
+// this catches applying ABS/SQUARE after reduction (or silently retaining identity).
+TEST(CubReduction, Fp8CompleteRuntimeInputTransformBeforeReduction) {
+    REQUIRE_CUDA_DEVICE();
+    using namespace CubReductionInternal;
+    Stream stream(0);
+    for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        for (bool tiled : {false, true}) {
+            const uint64_t k = tiled ? 513 : 3;
+            constexpr uint64_t R = 79;
+            const auto geometry = CubReduction::analyzeValueGeometry(
+                CubReductionOp::Sum, {3, R, k}, {1});
+            std::vector<float> values(3 * R * k);
+            for (uint64_t o = 0; o < 3; ++o) {
+                for (uint64_t r = 0; r < R; ++r) {
+                    for (uint64_t j = 0; j < k; ++j) {
+                        values[(o * R + r) * k + j] = ((o + r + j) % 2 == 0) ? -0.25f : 0.5f;
+                    }
+                }
+            }
+            Tensor input = makeGpuTensor(values, {3, R, k}, stream, dtype);
+            for (auto transform : {CubReductionStageInputTransform::Identity,
+                                   CubReductionStageInputTransform::AbsoluteValue,
+                                   CubReductionStageInputTransform::Square}) {
+                CubReductionStageSemantics semantics;
+                semantics.input_transform = transform;
+                Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, geometry.output_dimensions));
+                if (tiled) {
+                    launchFp8GeneralRParallelKTileRCooperativeCalibrationComplete(
+                        input, output, geometry, 2, 496, stream, semantics);
+                } else {
+                    launchFp8GeneralRParallelRCooperativeCalibrationComplete(
+                        input, output, geometry, 1, 2, 16, stream, false, semantics);
+                }
+                stream.synchronize();
+                const auto actual = copyGpuTensorAsFloat(output, stream);
+                ASSERT_EQ(actual.size(), 3 * k);
+                for (uint64_t o = 0; o < 3; ++o) {
+                    for (uint64_t j = 0; j < k; ++j) {
+                        float expected = 0.0f;
+                        for (uint64_t r = 0; r < R; ++r) {
+                            const float value = values[(o * R + r) * k + j];
+                            expected += transform == CubReductionStageInputTransform::AbsoluteValue
+                                ? std::fabs(value)
+                                : (transform == CubReductionStageInputTransform::Square
+                                       ? value * value : value);
+                        }
+                        EXPECT_FLOAT_EQ(actual[o * k + j], expected)
+                            << "tiled=" << tiled << " o=" << o << " k=" << j
+                            << " transform=" << static_cast<int>(transform);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// RuntimeK PacketStaged and both p16 rotated layouts must transform decoded FP8
+// values BEFORE producing per-shard FP32 sums. This extends the existing Complete
+// coverage without re-testing the independent FP32 continuation/output conversion.
+TEST(CubReduction, Fp8RuntimeKStagedCompiledInputTransformBeforePartials) {
+    REQUIRE_CUDA_DEVICE();
+    using namespace CubReductionInternal;
+    Stream stream(0);
+    constexpr uint64_t Outer = 2;
+    constexpr uint64_t R = 257;
+    constexpr uint64_t K = 513; // awkward p16 tails, two K tiles in both rotated layouts
+    const auto geometry = CubReduction::analyzeValueGeometry(
+        CubReductionOp::Sum, {Outer, R, K}, {1});
+    std::vector<float> values(Outer * R * K);
+    for (uint64_t o = 0; o < Outer; ++o) {
+        for (uint64_t r = 0; r < R; ++r) {
+            for (uint64_t k = 0; k < K; ++k) {
+                const auto residue = (o + 3 * r + k) % 4;
+                values[(o * R + r) * K + k] = residue == 0 ? -0.25f :
+                    residue == 1 ? 0.5f : residue == 2 ? -0.125f : 0.25f;
+            }
+        }
+    }
+    for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        Tensor input = makeGpuTensor(values, {Outer, R, K}, stream, dtype);
+        for (auto transform : {CubReductionStageInputTransform::Identity,
+                               CubReductionStageInputTransform::AbsoluteValue,
+                               CubReductionStageInputTransform::Square}) {
+            for (int mode = 0; mode < 3; ++mode) {
+                const bool packet_staged = mode == 0;
+                const uint64_t rows = 64;
+                const uint64_t shards = packet_staged ? 3 : (R + rows - 1) / rows;
+                Tensor partials(gpuPlacement, TensorDescriptor(
+                    DataType::FP32, {Outer, shards, K}));
+                SCOPED_TRACE(static_cast<int>(dtype));
+                SCOPED_TRACE(static_cast<int>(transform));
+                SCOPED_TRACE(mode);
+                const auto occupancy = packet_staged
+                    ? queryFp8GeneralRParallelKTileRCooperativeCalibrationFirstStageOccupancy(dtype, transform)
+                    : queryFp8GeneralRParallelKTileRotatedCalibrationOccupancy(dtype, mode == 2, rows, transform);
+                EXPECT_GT(occupancy.max_active_blocks_per_sm, 0);
+                if (packet_staged) {
+                    launchFp8GeneralRParallelKTileRCooperativeCalibrationFirstStage(
+                        input, partials, geometry, 2, static_cast<uint32_t>(shards),
+                        496, stream, transform);
+                } else {
+                    launchFp8GeneralRParallelKTileRotatedCalibrationFirstStage(
+                        input, partials, geometry, mode == 2, rows, shards, stream, transform);
+                }
+                stream.synchronize();
+                const auto actual = copyGpuTensorAsFloat(partials, stream);
+                ASSERT_EQ(actual.size(), Outer * shards * K);
+                for (uint64_t o = 0; o < Outer; ++o) {
+                    for (uint64_t shard = 0; shard < shards; ++shard) {
+                        const uint64_t base = R / shards;
+                        const uint64_t extra = R % shards;
+                        const uint64_t row_begin = packet_staged
+                            ? shard * base + std::min(shard, extra) : shard * rows;
+                        const uint64_t row_end = packet_staged
+                            ? row_begin + base + static_cast<uint64_t>(shard < extra)
+                            : std::min(R, row_begin + rows);
+                        for (uint64_t k = 0; k < K; ++k) {
+                            float expected = 0.0f;
+                            for (uint64_t r = row_begin; r < row_end; ++r) {
+                                const float value = values[(o * R + r) * K + k];
+                                expected += transform == CubReductionStageInputTransform::AbsoluteValue
+                                    ? std::fabs(value)
+                                    : transform == CubReductionStageInputTransform::Square
+                                        ? value * value : value;
+                            }
+                            EXPECT_FLOAT_EQ(actual[(o * shards + shard) * K + k], expected)
+                                << "outer=" << o << " shard=" << shard << " k=" << k;
+                        }
                     }
                 }
             }
@@ -655,8 +806,13 @@ TEST(CubReduction, Fp8CompleteRuntimeFinalizationRejectsUnsupportedSemantics) {
             }
         };
         CubReductionStageSemantics semantics;
-        semantics.input_transform = CubReductionStageInputTransform::AbsoluteValue;
+        semantics.input_transform = static_cast<CubReductionStageInputTransform>(255);
         EXPECT_THROW(launch(semantics), std::logic_error);
+        semantics = {};
+        semantics.input_transform = CubReductionStageInputTransform::AbsoluteValue;
+        EXPECT_NO_THROW(launch(semantics));
+        semantics.input_transform = CubReductionStageInputTransform::Square;
+        EXPECT_NO_THROW(launch(semantics));
         semantics = {};
         semantics.combine = CubReductionStageCombine::Product;
         EXPECT_THROW(launch(semantics), std::logic_error);

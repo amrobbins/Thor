@@ -9690,6 +9690,128 @@ void runFp8CompleteRuntimeFinalizeRegression(Tensor& cache_flush, Stream& stream
 #endif
 }
 
+// Direct A/B between runtime-transform and compile-time-transform Complete kernels.
+// OneWindow selects runtime transforms; RuntimeK now selects the fixed variants.
+// Both A/B controls use identical runtime output-storage/finalizer semantics.
+void runFp8CompleteRuntimeInputTransformRegression(Tensor& cache_flush, Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    constexpr int Samples = 9;
+    struct Shape { const char* family; uint64_t outer, r, k; uint32_t warps, tile; };
+    const std::array<Shape, 4> shapes = {{{"one_window", 128, 1024, 3, 1, 0},
+                                           {"one_window", 4096, 128, 3, 4, 0},
+                                           {"runtime_k", 128, 256, 513, 1, 496},
+                                           {"runtime_k", 32, 1024, 513, 4, 496}}};
+    using T = CubReductionInternal::CubReductionStageInputTransform;
+    struct Variant { T transform; bool fixed; bool fp32_output; };
+    const auto median = [](std::vector<float> values) {
+        std::sort(values.begin(), values.end());
+        return values.at(values.size() / 2);
+    };
+    std::cout << "# mode=fp8_complete_runtime_input_transform_regression samples=9 "
+              << "cache_flush_outside_timing=1 compare=fixed_transform_vs_runtime_transform "
+              << "complete_only=1 input_value=-0.125\n"
+              << "family,outer,R,K,input_dtype,output_dtype,transform,version,warps_per_output,"
+                 "median_ms,min_ms,max_ms,fixed_fp8_ms,ratio_to_fixed_fp8\n";
+    for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        for (const Shape& shape : shapes) {
+            Tensor input(cache_flush.getPlacement(), TensorDescriptor(dtype, {shape.outer, shape.r, shape.k}));
+            input.fill(-0.125f, stream);
+            const CubReductionGeometry geometry = CubReduction::analyzeValueGeometry(
+                CubReductionOp::Sum, input.getDimensions(), {1});
+            if (geometry.path != CubReductionPath::TiledFixedSegment)
+                throw std::logic_error("Runtime input-transform benchmark requires tiled RK geometry.");
+            const std::array<Variant, 9> variants = {{{T::Identity,true,false}, {T::Identity,false,false}, {T::Identity,false,true},
+                {T::AbsoluteValue,true,false}, {T::AbsoluteValue,false,false}, {T::AbsoluteValue,false,true},
+                {T::Square,true,false}, {T::Square,false,false}, {T::Square,false,true}}};
+            std::vector<Tensor> outputs;
+            outputs.reserve(variants.size());
+            std::vector<std::vector<float>> times(variants.size());
+            for (const Variant& v : variants)
+                outputs.emplace_back(input.getPlacement(), TensorDescriptor(
+                    v.fp32_output ? DataType::FP32 : dtype, geometry.output_dimensions));
+            const auto launch = [&](size_t index) {
+                const Variant& v = variants[index];
+                Tensor& output = outputs[index];
+                if (v.fixed) {
+                    if (shape.tile == 0)
+                        CubReductionInternal::launchFp8OneWindowFixedTransformBenchmark(
+                            input, output, geometry, shape.warps, v.transform, stream);
+                    else
+                        CubReductionInternal::launchFp8RuntimeKCompleteFixedTransformBenchmark(
+                            input, output, geometry, shape.warps, shape.tile, v.transform, stream);
+                } else {
+                    CubReductionInternal::CubReductionStageSemantics semantics;
+                    semantics.input_transform = v.transform;
+                    if (shape.tile == 0)
+                        CubReductionInternal::launchFp8GeneralRParallelRCooperativeCalibrationComplete(
+                            input, output, geometry, 1, shape.warps, 16, stream, false, semantics);
+                    else
+                        // RuntimeK calibration now selects compile-time transforms.
+                        // Preserve the old runtime kernel as the benchmark-only A/B control.
+                        CubReductionInternal::launchFp8RuntimeKCompleteRuntimeTransformBenchmark(
+                            input, output, geometry, shape.warps, shape.tile, v.transform, stream);
+                }
+            };
+            for (size_t i = 0; i < variants.size(); ++i)
+                for (int warmup = 0; warmup < 3; ++warmup) launch(i);
+            stream.synchronize();
+            for (size_t i = 0; i < variants.size(); ++i) {
+                const T mode = variants[i].transform;
+                const double per_item = mode == T::Identity ? -0.125 :
+                                        mode == T::AbsoluteValue ? 0.125 : 0.015625;
+                const double expected = static_cast<double>(shape.r) * per_item;
+                validateSinglePassSample(outputs[i], 0, expected, stream, "fp8_runtime_input_transform");
+                validateSinglePassSample(outputs[i], outputs[i].getTotalNumElements() - 1,
+                                         expected, stream, "fp8_runtime_input_transform");
+            }
+            cudaEvent_t start{}, stop{};
+            if (cudaEventCreate(&start) != cudaSuccess || cudaEventCreate(&stop) != cudaSuccess)
+                throw std::runtime_error("Runtime input-transform benchmark event creation failed.");
+            for (int sample = 0; sample < Samples; ++sample) {
+                for (size_t slot = 0; slot < variants.size(); ++slot) {
+                    const size_t index = (slot + static_cast<size_t>(sample)) % variants.size();
+                    checkSinglePassCuda(cudaMemsetAsync(cache_flush.getMemPtr<void>(),
+                        0x31 + sample, cache_flush.getArraySizeInBytes(), stream.getStream()),
+                        "Runtime input-transform benchmark cache flush");
+                    checkSinglePassCuda(cudaEventRecord(start, stream.getStream()),
+                                        "Runtime input-transform benchmark event start");
+                    launch(index);
+                    checkSinglePassCuda(cudaEventRecord(stop, stream.getStream()),
+                                        "Runtime input-transform benchmark event stop");
+                    checkSinglePassCuda(cudaEventSynchronize(stop),
+                                        "Runtime input-transform benchmark synchronize");
+                    float elapsed = 0.0f;
+                    checkSinglePassCuda(cudaEventElapsedTime(&elapsed, start, stop),
+                                        "Runtime input-transform benchmark timing");
+                    times[index].push_back(elapsed);
+                }
+            }
+            cudaEventDestroy(start); cudaEventDestroy(stop);
+            for (size_t i = 0; i < variants.size(); ++i) {
+                const Variant& v = variants[i];
+                const float current_ms = median(times[i]);
+                const size_t base_index = (i / 3) * 3;
+                const float fixed_ms = median(times[base_index]);
+                const char* mode = v.transform == T::Identity ? "identity" :
+                    v.transform == T::AbsoluteValue ? "absolute" : "square";
+                std::cout << shape.family << ',' << shape.outer << ',' << shape.r << ',' << shape.k << ','
+                          << singlePassDtypeName(dtype) << ','
+                          << singlePassDtypeName(v.fp32_output ? DataType::FP32 : dtype) << ','
+                          << mode << ',' << (v.fixed ? "compile_time" : "runtime") << ','
+                          << shape.warps << ',' << std::fixed << std::setprecision(6) << current_ms << ','
+                          << *std::min_element(times[i].begin(), times[i].end()) << ','
+                          << *std::max_element(times[i].begin(), times[i].end()) << ','
+                          << fixed_ms << ',' << current_ms / fixed_ms << '\n';
+            }
+        }
+    }
+    std::cout << "# fp8_complete_runtime_input_transform_regression_complete\n";
+#else
+    static_cast<void>(cache_flush); static_cast<void>(stream);
+    throw std::logic_error("FP8 runtime input-transform benchmark requires FP8 support.");
+#endif
+}
+
 void runFp8RuntimeKEndToEndSweep(Tensor& cache_flush, Stream& stream) {
     runFp8RuntimeKEndToEndSweepImpl(cache_flush, stream, false);
 }

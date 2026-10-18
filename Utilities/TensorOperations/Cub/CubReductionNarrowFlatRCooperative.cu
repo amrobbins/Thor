@@ -1314,14 +1314,21 @@ __global__ void fp8MultiOutputRParallelWarpPackedCompleteKernel(const InputT* in
 }
 
 
-// Match the additive finalization semantics of the production dense reducer. The
-// FP8 physical kernels still implement SUM with an identity input transform;
-// this conversion must never silently treat ABS/SQUARE as identity.
+// Match the additive finalization semantics of the production dense reducer. Input
+// transformation now belongs to each decoded value; finalization belongs only to
+// the complete FP32 aggregate before runtime output conversion.
 [[nodiscard]] AdditiveFinalizeFp32 fp8CompleteFinalizerFromSemantics(
     const CubReductionStageSemantics& semantics) {
-    if (semantics.combine != CubReductionStageCombine::Sum ||
-        semantics.input_transform != CubReductionStageInputTransform::Identity) {
-        throw std::logic_error("FP8 Complete requires SUM and identity input transform.");
+    if (semantics.combine != CubReductionStageCombine::Sum) {
+        throw std::logic_error("FP8 Complete requires additive SUM combine.");
+    }
+    switch (semantics.input_transform) {
+        case CubReductionStageInputTransform::Identity:
+        case CubReductionStageInputTransform::AbsoluteValue:
+        case CubReductionStageInputTransform::Square:
+            break;
+        default:
+            throw std::logic_error("FP8 Complete received an unsupported input transform.");
     }
     switch (semantics.finalize) {
         case CubReductionStageFinalize::Identity:
@@ -1336,6 +1343,44 @@ __global__ void fp8MultiOutputRParallelWarpPackedCompleteKernel(const InputT* in
         default:
             throw std::logic_error("FP8 Complete received an unsupported finalization mode.");
     }
+}
+
+// Transform a decoded packet under one launch-uniform branch, before the
+// per-component tail guards. This avoids a separate transform-selection branch
+// inside each valid-value guard in both OneWindow and RuntimeK PacketStaged
+// Complete. The fixed forms remain measurement-only A/B controls.
+template <int FixedInputTransform = -1>
+__device__ __forceinline__ float4 transformFp8CompleteDecodedPacket(
+    float4 values, CubReductionStageInputTransform transform) {
+    if constexpr (FixedInputTransform >= 0) {
+        static_cast<void>(transform);
+    }
+    if constexpr (FixedInputTransform == 0) {
+        return values;
+    } else if constexpr (FixedInputTransform == 1) {
+        values.x = ::fabsf(values.x);
+        values.y = ::fabsf(values.y);
+        values.z = ::fabsf(values.z);
+        values.w = ::fabsf(values.w);
+    } else if constexpr (FixedInputTransform == 2) {
+        values.x *= values.x;
+        values.y *= values.y;
+        values.z *= values.z;
+        values.w *= values.w;
+    } else {
+        if (transform == CubReductionStageInputTransform::AbsoluteValue) {
+            values.x = ::fabsf(values.x);
+            values.y = ::fabsf(values.y);
+            values.z = ::fabsf(values.z);
+            values.w = ::fabsf(values.w);
+        } else if (transform == CubReductionStageInputTransform::Square) {
+            values.x *= values.x;
+            values.y *= values.y;
+            values.z *= values.z;
+            values.w *= values.w;
+        }
+    }
+    return values;
 }
 
 // Shared FP32-to-storage contract for the FP8 Complete families. Runtime dtype is
@@ -1365,14 +1410,15 @@ __device__ __forceinline__ void storeFp8CompleteResult(void* output,
 // ownership mechanics of the earlier MultiOutput path while extending them through the current one-window K range; output multiplicity,
 // warps/output, and packet width are axes of one family rather than distinct physical kernel families.
 template <typename InputT, int K, int PacketBytes, int OutputsPerWarp, bool LinearPackets = false,
-          bool LegacyFp8Store = false>
+          bool LegacyFp8Store = false, int FixedInputTransform = -1>
 __global__ void fp8GeneralRParallelPackedCompleteKernel(const InputT* input,
                                                         void* output,
                                                         DataType output_dtype,
                                                         uint32_t outer_size,
                                                         uint32_t reduction_size,
                                                         uint32_t warps_per_output,
-                                                        AdditiveFinalizeFp32 output_finalize) {
+                                                        AdditiveFinalizeFp32 output_finalize,
+                                                        CubReductionStageInputTransform input_transform) {
     static_assert(sizeof(InputT) == 1);
     static_assert(K >= 1 && K <= RPARALLEL_FP8_MAX_K);
     static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
@@ -1529,7 +1575,8 @@ __global__ void fp8GeneralRParallelPackedCompleteKernel(const InputT* input,
                                     ++valid_values;
                                 }
                             }
-                            const float4 decoded = decodeFp8x4ToFp32<InputT>(packed_component_values);
+                            const float4 decoded = transformFp8CompleteDecodedPacket<FixedInputTransform>(
+                                decodeFp8x4ToFp32<InputT>(packed_component_values), input_transform);
                             if (valid_values > 0) local[slot] += decoded.x;
                             if (valid_values > 1) local[slot] += decoded.y;
                             if (valid_values > 2) local[slot] += decoded.z;
@@ -1698,7 +1745,8 @@ __global__ void fp8GeneralRParallelPackedCompleteKernel(const InputT* input,
                                 ++valid_values;
                             }
                         }
-                        const float4 decoded = decodeFp8x4ToFp32<InputT>(packed_component_values);
+                        const float4 decoded = transformFp8CompleteDecodedPacket<FixedInputTransform>(
+                            decodeFp8x4ToFp32<InputT>(packed_component_values), input_transform);
                         if (valid_values > 0) local[slot] += decoded.x;
                         if (valid_values > 1) local[slot] += decoded.y;
                         if (valid_values > 2) local[slot] += decoded.z;
@@ -1797,7 +1845,7 @@ __global__ void fp8GeneralRParallelPackedCompleteKernel(const InputT* input,
 // one work item owns [outer, k_tile], K tiles are mathematically independent, and W1/W2/W4/W8 cooperate only over R.
 // Total K and tile width are runtime values; only the p16 physical packet shape is specialized. A tile is capped at
 // 496 logical bytes so an arbitrary per-row prefix (0..15 bytes) still fits in one 32-lane p16 packet window.
-template <typename InputT, bool LegacyFp8Store = false>
+template <typename InputT, bool LegacyFp8Store = false, int FixedInputTransform = -1>
 __global__ void fp8GeneralRParallelKTileP16CompleteKernel(const InputT* input,
                                                           void* output,
                                                           DataType output_dtype,
@@ -1807,7 +1855,8 @@ __global__ void fp8GeneralRParallelKTileP16CompleteKernel(const InputT* input,
                                                           uint32_t tile_components,
                                                           uint32_t tile_count,
                                                           uint32_t warps_per_output,
-                                                          AdditiveFinalizeFp32 output_finalize) {
+                                                          AdditiveFinalizeFp32 output_finalize,
+                                                          CubReductionStageInputTransform input_transform) {
     static_assert(sizeof(InputT) == 1);
     constexpr uint32_t PacketBytes = 16;
     constexpr uint32_t PacketShift = 4;
@@ -1912,7 +1961,8 @@ __global__ void fp8GeneralRParallelKTileP16CompleteKernel(const InputT* input,
                         }
                     }
 
-                    const float4 decoded = decodeFp8x4ToFp32<InputT>(packed_component_values);
+                    const float4 decoded = transformFp8CompleteDecodedPacket<FixedInputTransform>(
+                        decodeFp8x4ToFp32<InputT>(packed_component_values), input_transform);
                     local[slot_base] += decoded.x;
                     if (first_component + TILED_REDUCTION_WARP_THREADS < tile_width) {
                         local[slot_base + 1] += decoded.y;
@@ -1968,7 +2018,7 @@ __global__ void fp8GeneralRParallelKTileP16CompleteKernel(const InputT* input,
 
 // Runtime-K tiled FirstStage topology. Work is [outer, shard, k_tile], and each tile writes its own disjoint
 // component range into the ordinary FP32 [outer, shard, K] partial tensor. No K-tile fold is required.
-template <typename InputT>
+template <typename InputT, int FixedInputTransform = 0>
 __global__ void fp8GeneralRParallelKTileP16FirstStageKernel(const InputT* input,
                                                             float* fp32_partials,
                                                             uint32_t outer_size,
@@ -1979,6 +2029,8 @@ __global__ void fp8GeneralRParallelKTileP16FirstStageKernel(const InputT* input,
                                                             uint32_t warps_per_output,
                                                             uint32_t shards_per_output) {
     static_assert(sizeof(InputT) == 1);
+    static_assert(FixedInputTransform >= 0 && FixedInputTransform <= 2,
+                  "RuntimeK staged input transforms must be compile-time Identity/ABS/Square.");
     constexpr uint32_t PacketBytes = 16;
     constexpr uint32_t PacketShift = 4;
     constexpr uint32_t PacketMask = 15;
@@ -2096,7 +2148,9 @@ __global__ void fp8GeneralRParallelKTileP16FirstStageKernel(const InputT* input,
                         }
                     }
 
-                    const float4 decoded = decodeFp8x4ToFp32<InputT>(packed_component_values);
+                    const float4 decoded = transformFp8CompleteDecodedPacket<FixedInputTransform>(
+                        decodeFp8x4ToFp32<InputT>(packed_component_values),
+                        CubReductionStageInputTransform::Identity);
                     local[slot_base] += decoded.x;
                     if (first_component + TILED_REDUCTION_WARP_THREADS < tile_width) {
                         local[slot_base + 1] += decoded.y;
@@ -4172,13 +4226,14 @@ void launchFp8MultiOutputRParallelP4ForOutputs(const Tensor& input,
 
 
 template <typename InputT, int K, int PacketBytes, int OutputsPerWarp, bool LinearPackets = false,
-          bool LegacyFp8Store = false>
+          bool LegacyFp8Store = false, int FixedInputTransform = -1>
 void launchFp8GeneralRParallelPacked(const Tensor& input,
                                      Tensor& output,
                                      const CubReductionGeometry& geometry,
                                      uint32_t warps_per_output,
                                      cudaStream_t stream,
-                                     AdditiveFinalizeFp32 output_finalize = {1.0f, false}) {
+                                     AdditiveFinalizeFp32 output_finalize = {1.0f, false},
+                                     CubReductionStageInputTransform input_transform = CubReductionStageInputTransform::Identity) {
     static_assert(sizeof(InputT) == 1);
     static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
     static_assert(OutputsPerWarp == 1 || OutputsPerWarp == 2 || OutputsPerWarp == 4 || OutputsPerWarp == 8);
@@ -4200,7 +4255,7 @@ void launchFp8GeneralRParallelPacked(const Tensor& input,
     const uint64_t block_count = std::min<uint64_t>(
         ceilDivideU64(geometry.outer_size, static_cast<uint64_t>(outputs_per_block)),
         NARROW_FLAT_MAX_GRID_BLOCKS);
-    fp8GeneralRParallelPackedCompleteKernel<InputT, K, PacketBytes, OutputsPerWarp, LinearPackets, LegacyFp8Store>
+    fp8GeneralRParallelPackedCompleteKernel<InputT, K, PacketBytes, OutputsPerWarp, LinearPackets, LegacyFp8Store, FixedInputTransform>
         <<<static_cast<unsigned int>(block_count), SHALLOW_FP8_THREADS, 0, stream>>>(
             input.getMemPtr<InputT>(),
             output.getMemPtr<void>(),
@@ -4208,7 +4263,8 @@ void launchFp8GeneralRParallelPacked(const Tensor& input,
             static_cast<uint32_t>(geometry.outer_size),
             static_cast<uint32_t>(geometry.reduction_size),
             warps_per_output,
-            output_finalize);
+            output_finalize,
+            input_transform);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -4246,14 +4302,15 @@ void launchFp8GeneralRParallelPackedFirstStage(const Tensor& input,
 }
 
 
-template <typename InputT, bool LegacyFp8Store = false>
+template <typename InputT, bool LegacyFp8Store = false, int FixedInputTransform = -1>
 void launchFp8GeneralRParallelKTileP16Complete(const Tensor& input,
                                                Tensor& output,
                                                const CubReductionGeometry& geometry,
                                                uint32_t warps_per_output,
                                                uint32_t tile_components,
                                                cudaStream_t stream,
-                                               AdditiveFinalizeFp32 output_finalize = {1.0f, false}) {
+                                               AdditiveFinalizeFp32 output_finalize = {1.0f, false},
+                                               CubReductionStageInputTransform input_transform = CubReductionStageInputTransform::Identity) {
     static_assert(sizeof(InputT) == 1);
     if (tile_components == 0 || tile_components > 496 ||
         (warps_per_output != 1 && warps_per_output != 2 && warps_per_output != 4 && warps_per_output != 8)) {
@@ -4269,7 +4326,7 @@ void launchFp8GeneralRParallelKTileP16Complete(const Tensor& input,
     const uint64_t block_count = std::min<uint64_t>(
         ceilDivideU64(work_count, static_cast<uint64_t>(outputs_per_block)),
         NARROW_FLAT_MAX_GRID_BLOCKS);
-    fp8GeneralRParallelKTileP16CompleteKernel<InputT, LegacyFp8Store>
+    fp8GeneralRParallelKTileP16CompleteKernel<InputT, LegacyFp8Store, FixedInputTransform>
         <<<static_cast<unsigned int>(block_count), SHALLOW_FP8_THREADS, 0, stream>>>(
             input.getMemPtr<InputT>(),
             output.getMemPtr<void>(),
@@ -4280,11 +4337,12 @@ void launchFp8GeneralRParallelKTileP16Complete(const Tensor& input,
             tile_components,
             tile_count,
             warps_per_output,
-            output_finalize);
+            output_finalize,
+            input_transform);
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <typename InputT>
+template <typename InputT, int FixedInputTransform = 0>
 void launchFp8GeneralRParallelKTileP16FirstStage(const Tensor& input,
                                                  Tensor& fp32_partials,
                                                  const CubReductionGeometry& geometry,
@@ -4309,7 +4367,7 @@ void launchFp8GeneralRParallelKTileP16FirstStage(const Tensor& input,
     const uint64_t block_count = std::min<uint64_t>(
         ceilDivideU64(work_count, static_cast<uint64_t>(outputs_per_block)),
         NARROW_FLAT_MAX_GRID_BLOCKS);
-    fp8GeneralRParallelKTileP16FirstStageKernel<InputT>
+    fp8GeneralRParallelKTileP16FirstStageKernel<InputT, FixedInputTransform>
         <<<static_cast<unsigned int>(block_count), SHALLOW_FP8_THREADS, 0, stream>>>(
             input.getMemPtr<InputT>(),
             fp32_partials.getMemPtr<float>(),
@@ -4329,10 +4387,11 @@ void launchFp8GeneralRParallelPackedForOwnership(const Tensor& input,
                                                   const CubReductionGeometry& geometry,
                                                   uint32_t warps_per_output,
                                                   cudaStream_t stream,
-                                                  AdditiveFinalizeFp32 output_finalize = {1.0f, false}) {
+                                                  AdditiveFinalizeFp32 output_finalize = {1.0f, false},
+                                                  CubReductionStageInputTransform input_transform = CubReductionStageInputTransform::Identity) {
     static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
     launchFp8GeneralRParallelPacked<InputT, K, PacketBytes, OutputsPerWarp, LinearPackets>(
-        input, output, geometry, warps_per_output, stream, output_finalize);
+        input, output, geometry, warps_per_output, stream, output_finalize, input_transform);
 }
 
 template <typename InputT, int K>
@@ -5956,15 +6015,33 @@ void launchFp8GeneralRParallelKTileRCooperativeCalibrationComplete(
         tile_components == 0 || tile_components > 496) {
         throw std::logic_error("FP8 tiled general RParallel calibration received unsupported Complete geometry.");
     }
+    // RuntimeK PacketStaged Complete deliberately spends three compiled input-transform
+    // variants per input dtype. Dispatch only once on the host; no uniform transform
+    // branch remains in the hot device accumulation loop. Output dtype and additive
+    // finalization stay runtime parameters and do not multiply this inventory.
+    const auto dispatch = [&]<typename InputT>() {
+        switch (semantics.input_transform) {
+            case CubReductionStageInputTransform::Identity:
+                launchFp8GeneralRParallelKTileP16Complete<InputT, false, 0>(
+                    input, output, geometry, warps_per_output, tile_components,
+                    stream.getStream(), output_finalize);
+                return;
+            case CubReductionStageInputTransform::AbsoluteValue:
+                launchFp8GeneralRParallelKTileP16Complete<InputT, false, 1>(
+                    input, output, geometry, warps_per_output, tile_components,
+                    stream.getStream(), output_finalize);
+                return;
+            case CubReductionStageInputTransform::Square:
+                launchFp8GeneralRParallelKTileP16Complete<InputT, false, 2>(
+                    input, output, geometry, warps_per_output, tile_components,
+                    stream.getStream(), output_finalize);
+                return;
+        }
+        throw std::logic_error("FP8 tiled general RParallel received unsupported input transform.");
+    };
     switch (input.getDataType()) {
-        case DataType::FP8_E4M3:
-            launchFp8GeneralRParallelKTileP16Complete<__nv_fp8_e4m3>(
-                input, output, geometry, warps_per_output, tile_components, stream.getStream(), output_finalize);
-            return;
-        case DataType::FP8_E5M2:
-            launchFp8GeneralRParallelKTileP16Complete<__nv_fp8_e5m2>(
-                input, output, geometry, warps_per_output, tile_components, stream.getStream(), output_finalize);
-            return;
+        case DataType::FP8_E4M3: dispatch.template operator()<__nv_fp8_e4m3>(); return;
+        case DataType::FP8_E5M2: dispatch.template operator()<__nv_fp8_e5m2>(); return;
         default:
             throw std::logic_error("FP8 tiled general RParallel calibration requires FP8 input.");
     }
@@ -5995,11 +6072,11 @@ void launchFp8RuntimeKCompleteLegacyStoreBenchmark(const Tensor& input,
     }
     switch (input.getDataType()) {
         case DataType::FP8_E4M3:
-            launchFp8GeneralRParallelKTileP16Complete<__nv_fp8_e4m3, true>(
+            launchFp8GeneralRParallelKTileP16Complete<__nv_fp8_e4m3, true, 0>(
                 input, output, geometry, warps_per_output, tile_components, stream.getStream());
             return;
         case DataType::FP8_E5M2:
-            launchFp8GeneralRParallelKTileP16Complete<__nv_fp8_e5m2, true>(
+            launchFp8GeneralRParallelKTileP16Complete<__nv_fp8_e5m2, true, 0>(
                 input, output, geometry, warps_per_output, tile_components, stream.getStream());
             return;
         default:
@@ -6012,18 +6089,112 @@ void launchFp8RuntimeKCompleteLegacyStoreBenchmark(const Tensor& input,
 #endif
 }
 
-CubKernelOccupancyInfo queryFp8GeneralRParallelKTileRCooperativeCalibrationOccupancy(DataType input_dtype) {
+// Compile-time input-transform control for RuntimeK Complete. These same three
+// specializations are now the mode-local selectable inventory; the runtime-transform
+// A/B control below is deliberately outside the selected inventory.
+void launchFp8RuntimeKCompleteFixedTransformBenchmark(const Tensor& input,
+                                                      Tensor& output,
+                                                      const CubReductionGeometry& geometry,
+                                                      uint32_t warps_per_output,
+                                                      uint32_t tile_components,
+                                                      CubReductionStageInputTransform transform,
+                                                      Stream& stream) {
 #if THOR_CUB_ENABLE_FP8_TYPES
-    switch (input_dtype) {
+    if (output.getDataType() != input.getDataType() ||
+        output.getDimensions() != geometry.output_dimensions) {
+        throw std::logic_error("RuntimeK fixed transform requires matching FP8 output.");
+    }
+    const auto dispatch = [&]<typename T>() {
+        switch (transform) {
+            case CubReductionStageInputTransform::Identity:
+                launchFp8GeneralRParallelKTileP16Complete<T, false, 0>(input, output, geometry, warps_per_output, tile_components, stream.getStream()); return;
+            case CubReductionStageInputTransform::AbsoluteValue:
+                launchFp8GeneralRParallelKTileP16Complete<T, false, 1>(input, output, geometry, warps_per_output, tile_components, stream.getStream()); return;
+            case CubReductionStageInputTransform::Square:
+                launchFp8GeneralRParallelKTileP16Complete<T, false, 2>(input, output, geometry, warps_per_output, tile_components, stream.getStream()); return;
+        }
+        throw std::logic_error("Invalid fixed input transform.");
+    };
+    switch (input.getDataType()) {
+        case DataType::FP8_E4M3: dispatch.template operator()<__nv_fp8_e4m3>(); return;
+        case DataType::FP8_E5M2: dispatch.template operator()<__nv_fp8_e5m2>(); return;
+        default: throw std::logic_error("RuntimeK fixed transform requires FP8 input.");
+    }
+#else
+    static_cast<void>(input); static_cast<void>(output); static_cast<void>(geometry);
+    static_cast<void>(warps_per_output); static_cast<void>(tile_components);
+    static_cast<void>(transform); static_cast<void>(stream);
+    throw std::logic_error("FP8 benchmark requires FP8 support.");
+#endif
+}
+
+// A/B diagnostic only: retain the pre-change runtime input-transform kernel.
+// It uses the same runtime output-storage/finalizer epilogue as selected RuntimeK.
+void launchFp8RuntimeKCompleteRuntimeTransformBenchmark(const Tensor& input,
+                                                        Tensor& output,
+                                                        const CubReductionGeometry& geometry,
+                                                        uint32_t warps_per_output,
+                                                        uint32_t tile_components,
+                                                        CubReductionStageInputTransform transform,
+                                                        Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    CubReductionStageSemantics semantics;
+    semantics.input_transform = transform;
+    const AdditiveFinalizeFp32 output_finalize = fp8CompleteFinalizerFromSemantics(semantics);
+    if (geometry.outer_size == 0 || geometry.reduction_size == 0 || geometry.inner_size == 0 ||
+        geometry.inner_size > std::numeric_limits<uint32_t>::max() ||
+        !shallowFp8FitsUint32Indexing(geometry) ||
+        !fp8CompleteSupportsOutputStorage(output.getDataType()) ||
+        output.getDimensions() != geometry.output_dimensions ||
+        tile_components == 0 || tile_components > 496) {
+        throw std::logic_error("RuntimeK benchmark runtime-transform control received unsupported Complete geometry.");
+    }
+    switch (input.getDataType()) {
         case DataType::FP8_E4M3:
-            return queryShallowFp8Occupancy(fp8GeneralRParallelKTileP16CompleteKernel<__nv_fp8_e4m3>);
+            launchFp8GeneralRParallelKTileP16Complete<__nv_fp8_e4m3, false, -1>(
+                input, output, geometry, warps_per_output, tile_components,
+                stream.getStream(), output_finalize, transform);
+            return;
         case DataType::FP8_E5M2:
-            return queryShallowFp8Occupancy(fp8GeneralRParallelKTileP16CompleteKernel<__nv_fp8_e5m2>);
+            launchFp8GeneralRParallelKTileP16Complete<__nv_fp8_e5m2, false, -1>(
+                input, output, geometry, warps_per_output, tile_components,
+                stream.getStream(), output_finalize, transform);
+            return;
+        default:
+            throw std::logic_error("RuntimeK runtime-transform benchmark requires FP8 input.");
+    }
+#else
+    static_cast<void>(input); static_cast<void>(output); static_cast<void>(geometry);
+    static_cast<void>(warps_per_output); static_cast<void>(tile_components);
+    static_cast<void>(transform); static_cast<void>(stream);
+    throw std::logic_error("FP8 benchmark requires FP8 support.");
+#endif
+}
+
+// Query the actual mode-local Complete specialization, not the runtime-transform
+// benchmark control. Transform-specific registers/occupancy may differ.
+CubKernelOccupancyInfo queryFp8GeneralRParallelKTileRCooperativeCalibrationOccupancy(
+    DataType input_dtype, CubReductionStageInputTransform transform) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    const auto dispatch = [&]<typename InputT>() -> CubKernelOccupancyInfo {
+        switch (transform) {
+            case CubReductionStageInputTransform::Identity:
+                return queryShallowFp8Occupancy(fp8GeneralRParallelKTileP16CompleteKernel<InputT, false, 0>);
+            case CubReductionStageInputTransform::AbsoluteValue:
+                return queryShallowFp8Occupancy(fp8GeneralRParallelKTileP16CompleteKernel<InputT, false, 1>);
+            case CubReductionStageInputTransform::Square:
+                return queryShallowFp8Occupancy(fp8GeneralRParallelKTileP16CompleteKernel<InputT, false, 2>);
+        }
+        throw std::logic_error("RuntimeK Complete occupancy requires a supported input transform.");
+    };
+    switch (input_dtype) {
+        case DataType::FP8_E4M3: return dispatch.template operator()<__nv_fp8_e4m3>();
+        case DataType::FP8_E5M2: return dispatch.template operator()<__nv_fp8_e5m2>();
         default:
             throw std::logic_error("FP8 tiled general RParallel occupancy requires FP8 input.");
     }
 #else
-    static_cast<void>(input_dtype);
+    static_cast<void>(input_dtype); static_cast<void>(transform);
     throw std::logic_error("FP8 tiled general RParallel occupancy requires THOR_CUB_ENABLE_FP8_TYPES.");
 #endif
 }
@@ -6035,7 +6206,8 @@ void launchFp8GeneralRParallelKTileRCooperativeCalibrationFirstStage(
     uint32_t warps_per_output,
     uint32_t shards_per_output,
     uint32_t tile_components,
-    Stream& stream) {
+    Stream& stream,
+    CubReductionStageInputTransform transform) {
 #if THOR_CUB_ENABLE_FP8_TYPES
     const std::vector<uint64_t> expected_dimensions = {
         geometry.outer_size, static_cast<uint64_t>(shards_per_output), geometry.inner_size};
@@ -6048,17 +6220,24 @@ void launchFp8GeneralRParallelKTileRCooperativeCalibrationFirstStage(
         shards_per_output < 2 || shards_per_output > geometry.reduction_size) {
         throw std::logic_error("FP8 tiled general RParallel calibration received unsupported FirstStage geometry.");
     }
+    const auto dispatch = [&]<typename InputT>() {
+        switch (transform) {
+            case CubReductionStageInputTransform::Identity:
+                launchFp8GeneralRParallelKTileP16FirstStage<InputT, 0>(
+                    input, fp32_partials, geometry, warps_per_output, shards_per_output, tile_components, stream.getStream()); return;
+            case CubReductionStageInputTransform::AbsoluteValue:
+                launchFp8GeneralRParallelKTileP16FirstStage<InputT, 1>(
+                    input, fp32_partials, geometry, warps_per_output, shards_per_output, tile_components, stream.getStream()); return;
+            case CubReductionStageInputTransform::Square:
+                launchFp8GeneralRParallelKTileP16FirstStage<InputT, 2>(
+                    input, fp32_partials, geometry, warps_per_output, shards_per_output, tile_components, stream.getStream()); return;
+        }
+        throw std::logic_error("FP8 tiled first stage received unsupported input transform.");
+    };
     switch (input.getDataType()) {
-        case DataType::FP8_E4M3:
-            launchFp8GeneralRParallelKTileP16FirstStage<__nv_fp8_e4m3>(
-                input, fp32_partials, geometry, warps_per_output, shards_per_output, tile_components, stream.getStream());
-            return;
-        case DataType::FP8_E5M2:
-            launchFp8GeneralRParallelKTileP16FirstStage<__nv_fp8_e5m2>(
-                input, fp32_partials, geometry, warps_per_output, shards_per_output, tile_components, stream.getStream());
-            return;
-        default:
-            throw std::logic_error("FP8 tiled general RParallel calibration requires FP8 input.");
+        case DataType::FP8_E4M3: dispatch.template operator()<__nv_fp8_e4m3>(); return;
+        case DataType::FP8_E5M2: dispatch.template operator()<__nv_fp8_e5m2>(); return;
+        default: throw std::logic_error("FP8 tiled general RParallel calibration requires FP8 input.");
     }
 #else
     static_cast<void>(input);
@@ -6068,22 +6247,32 @@ void launchFp8GeneralRParallelKTileRCooperativeCalibrationFirstStage(
     static_cast<void>(shards_per_output);
     static_cast<void>(tile_components);
     static_cast<void>(stream);
+    static_cast<void>(transform);
     throw std::logic_error("FP8 tiled general RParallel calibration requires THOR_CUB_ENABLE_FP8_TYPES.");
 #endif
 }
 
-CubKernelOccupancyInfo queryFp8GeneralRParallelKTileRCooperativeCalibrationFirstStageOccupancy(DataType input_dtype) {
+CubKernelOccupancyInfo queryFp8GeneralRParallelKTileRCooperativeCalibrationFirstStageOccupancy(
+    DataType input_dtype, CubReductionStageInputTransform transform) {
 #if THOR_CUB_ENABLE_FP8_TYPES
+    const auto dispatch = [&]<typename InputT>() -> CubKernelOccupancyInfo {
+        switch (transform) {
+            case CubReductionStageInputTransform::Identity:
+                return queryShallowFp8Occupancy(fp8GeneralRParallelKTileP16FirstStageKernel<InputT, 0>);
+            case CubReductionStageInputTransform::AbsoluteValue:
+                return queryShallowFp8Occupancy(fp8GeneralRParallelKTileP16FirstStageKernel<InputT, 1>);
+            case CubReductionStageInputTransform::Square:
+                return queryShallowFp8Occupancy(fp8GeneralRParallelKTileP16FirstStageKernel<InputT, 2>);
+        }
+        throw std::logic_error("FP8 tiled FirstStage occupancy received unsupported input transform.");
+    };
     switch (input_dtype) {
-        case DataType::FP8_E4M3:
-            return queryShallowFp8Occupancy(fp8GeneralRParallelKTileP16FirstStageKernel<__nv_fp8_e4m3>);
-        case DataType::FP8_E5M2:
-            return queryShallowFp8Occupancy(fp8GeneralRParallelKTileP16FirstStageKernel<__nv_fp8_e5m2>);
-        default:
-            throw std::logic_error("FP8 tiled general RParallel FirstStage occupancy requires FP8 input.");
+        case DataType::FP8_E4M3: return dispatch.template operator()<__nv_fp8_e4m3>();
+        case DataType::FP8_E5M2: return dispatch.template operator()<__nv_fp8_e5m2>();
+        default: throw std::logic_error("FP8 tiled general RParallel FirstStage occupancy requires FP8 input.");
     }
 #else
-    static_cast<void>(input_dtype);
+    static_cast<void>(input_dtype); static_cast<void>(transform);
     throw std::logic_error("FP8 tiled general RParallel FirstStage occupancy requires THOR_CUB_ENABLE_FP8_TYPES.");
 #endif
 }
@@ -6128,14 +6317,14 @@ void launchFp8GeneralRParallelRCooperativeCalibrationComplete(
                             if constexpr (OutputsPerWarp == 1) {
                                 if (linear_packets) {
                                     launchFp8GeneralRParallelPackedForOwnership<InputT, K, 4, OutputsPerWarp, true>(
-                                        input, output, geometry, warps_per_output, stream.getStream(), output_finalize);
+                                        input, output, geometry, warps_per_output, stream.getStream(), output_finalize, semantics.input_transform);
                                 } else {
                                     launchFp8GeneralRParallelPackedForOwnership<InputT, K, 4, OutputsPerWarp, false>(
-                                        input, output, geometry, warps_per_output, stream.getStream(), output_finalize);
+                                        input, output, geometry, warps_per_output, stream.getStream(), output_finalize, semantics.input_transform);
                                 }
                             } else {
                                 launchFp8GeneralRParallelPackedForOwnership<InputT, K, 4, OutputsPerWarp, false>(
-                                    input, output, geometry, warps_per_output, stream.getStream(), output_finalize);
+                                    input, output, geometry, warps_per_output, stream.getStream(), output_finalize, semantics.input_transform);
                             }
                             return;
                         }
@@ -6148,14 +6337,14 @@ void launchFp8GeneralRParallelRCooperativeCalibrationComplete(
                             if constexpr (OutputsPerWarp == 1) {
                                 if (linear_packets) {
                                     launchFp8GeneralRParallelPackedForOwnership<InputT, K, 8, OutputsPerWarp, true>(
-                                        input, output, geometry, warps_per_output, stream.getStream(), output_finalize);
+                                        input, output, geometry, warps_per_output, stream.getStream(), output_finalize, semantics.input_transform);
                                 } else {
                                     launchFp8GeneralRParallelPackedForOwnership<InputT, K, 8, OutputsPerWarp, false>(
-                                        input, output, geometry, warps_per_output, stream.getStream(), output_finalize);
+                                        input, output, geometry, warps_per_output, stream.getStream(), output_finalize, semantics.input_transform);
                                 }
                             } else {
                                 launchFp8GeneralRParallelPackedForOwnership<InputT, K, 8, OutputsPerWarp, false>(
-                                    input, output, geometry, warps_per_output, stream.getStream(), output_finalize);
+                                    input, output, geometry, warps_per_output, stream.getStream(), output_finalize, semantics.input_transform);
                             }
                             return;
                         }
@@ -6168,14 +6357,14 @@ void launchFp8GeneralRParallelRCooperativeCalibrationComplete(
                             if constexpr (OutputsPerWarp == 1) {
                                 if (linear_packets) {
                                     launchFp8GeneralRParallelPackedForOwnership<InputT, K, 16, OutputsPerWarp, true>(
-                                        input, output, geometry, warps_per_output, stream.getStream(), output_finalize);
+                                        input, output, geometry, warps_per_output, stream.getStream(), output_finalize, semantics.input_transform);
                                 } else {
                                     launchFp8GeneralRParallelPackedForOwnership<InputT, K, 16, OutputsPerWarp, false>(
-                                        input, output, geometry, warps_per_output, stream.getStream(), output_finalize);
+                                        input, output, geometry, warps_per_output, stream.getStream(), output_finalize, semantics.input_transform);
                                 }
                             } else {
                                 launchFp8GeneralRParallelPackedForOwnership<InputT, K, 16, OutputsPerWarp, false>(
-                                    input, output, geometry, warps_per_output, stream.getStream(), output_finalize);
+                                    input, output, geometry, warps_per_output, stream.getStream(), output_finalize, semantics.input_transform);
                             }
                             return;
                         }
@@ -6263,11 +6452,11 @@ void launchFp8OneWindowLegacyStoreBenchmark(const Tensor& input,
     }
     switch (input.getDataType()) {
         case DataType::FP8_E4M3:
-            launchFp8GeneralRParallelPacked<__nv_fp8_e4m3, 3, 16, 1, false, true>(
+            launchFp8GeneralRParallelPacked<__nv_fp8_e4m3, 3, 16, 1, false, true, 0>(
                 input, output, geometry, warps_per_output, stream.getStream());
             return;
         case DataType::FP8_E5M2:
-            launchFp8GeneralRParallelPacked<__nv_fp8_e5m2, 3, 16, 1, false, true>(
+            launchFp8GeneralRParallelPacked<__nv_fp8_e5m2, 3, 16, 1, false, true, 0>(
                 input, output, geometry, warps_per_output, stream.getStream());
             return;
         default:
@@ -6276,6 +6465,42 @@ void launchFp8OneWindowLegacyStoreBenchmark(const Tensor& input,
 #else
     static_cast<void>(input); static_cast<void>(output); static_cast<void>(geometry);
     static_cast<void>(warps_per_output); static_cast<void>(stream);
+    throw std::logic_error("FP8 benchmark requires FP8 support.");
+#endif
+}
+
+// Benchmark-only compile-time input-transform controls for OneWindow K3/O1/P16.
+// Both paths use the same runtime output dtype/finalizer epilogue for an isolated input A/B.
+void launchFp8OneWindowFixedTransformBenchmark(const Tensor& input,
+                                               Tensor& output,
+                                               const CubReductionGeometry& geometry,
+                                               uint32_t warps_per_output,
+                                               CubReductionStageInputTransform transform,
+                                               Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    if (geometry.inner_size != 3 || output.getDataType() != input.getDataType() ||
+        output.getDimensions() != geometry.output_dimensions) {
+        throw std::logic_error("OneWindow fixed transform requires K3 and matching FP8 output.");
+    }
+    const auto dispatch = [&]<typename T>() {
+        switch (transform) {
+            case CubReductionStageInputTransform::Identity:
+                launchFp8GeneralRParallelPacked<T, 3, 16, 1, false, false, 0>(input, output, geometry, warps_per_output, stream.getStream()); return;
+            case CubReductionStageInputTransform::AbsoluteValue:
+                launchFp8GeneralRParallelPacked<T, 3, 16, 1, false, false, 1>(input, output, geometry, warps_per_output, stream.getStream()); return;
+            case CubReductionStageInputTransform::Square:
+                launchFp8GeneralRParallelPacked<T, 3, 16, 1, false, false, 2>(input, output, geometry, warps_per_output, stream.getStream()); return;
+        }
+        throw std::logic_error("Invalid fixed input transform.");
+    };
+    switch (input.getDataType()) {
+        case DataType::FP8_E4M3: dispatch.template operator()<__nv_fp8_e4m3>(); return;
+        case DataType::FP8_E5M2: dispatch.template operator()<__nv_fp8_e5m2>(); return;
+        default: throw std::logic_error("OneWindow fixed transform requires FP8 input.");
+    }
+#else
+    static_cast<void>(input); static_cast<void>(output); static_cast<void>(geometry);
+    static_cast<void>(warps_per_output); static_cast<void>(transform); static_cast<void>(stream);
     throw std::logic_error("FP8 benchmark requires FP8 support.");
 #endif
 }

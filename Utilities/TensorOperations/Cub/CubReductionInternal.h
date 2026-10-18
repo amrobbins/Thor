@@ -172,9 +172,10 @@ void launchAwkwardAlignmentRotatedShardedFirstStage(const CubReductionStageSeman
     DataType input_dtype, uint64_t rows_per_shard);
 
 /**
- * Benchmark-only FP8 SUM/identity rotated launch. Calibration may compare prefix-reserved p4/p8/p16 layouts and
- * the exact p16 layout across shallow through deep R. Packet width is benchmark geometry only; production policy is
- * unchanged and continues to call the established production entry point.
+ * Benchmark-only FP8 SUM rotated launch. Calibration may compare prefix-reserved p4/p8/p16 layouts and
+ * the exact p16 layout across shallow through deep R. RuntimeK p16 uses compile-time Identity/ABS/Square
+ * transforms at the retained row depths; historical p4/p8 and additional oracle row depths stay Identity-only.
+ * Packet width is benchmark geometry only; production policy remains unchanged.
  */
 void launchFp8AwkwardAlignmentRotatedShardedCalibrationFirstStage(
     const Tensor& input,
@@ -184,10 +185,12 @@ void launchFp8AwkwardAlignmentRotatedShardedCalibrationFirstStage(
     bool exact_tile,
     uint64_t rows_per_shard,
     uint64_t shards_per_output,
-    Stream& stream);
+    Stream& stream,
+    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity);
 
 [[nodiscard]] CubKernelOccupancyInfo queryFp8AwkwardAlignmentRotatedShardedCalibrationOccupancy(
-    DataType input_dtype, size_t packet_bytes, bool exact_tile, uint64_t rows_per_shard);
+    DataType input_dtype, size_t packet_bytes, bool exact_tile, uint64_t rows_per_shard,
+    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity);
 
 /**
  * Benchmark-only generalized runtime-K RParallel access mode backed by the calibrated p16 rotated packet-ownership
@@ -203,10 +206,12 @@ void launchFp8GeneralRParallelKTileRotatedCalibrationFirstStage(
     bool exact_tile,
     uint64_t rows_per_shard,
     uint64_t shards_per_output,
-    Stream& stream);
+    Stream& stream,
+    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity);
 
 [[nodiscard]] CubKernelOccupancyInfo queryFp8GeneralRParallelKTileRotatedCalibrationOccupancy(
-    DataType input_dtype, bool exact_tile, uint64_t rows_per_shard);
+    DataType input_dtype, bool exact_tile, uint64_t rows_per_shard,
+    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity);
 
 /**
  * Experimental modern R-cooperative primitive for FP8/FP16/BF16 K<=32. Each warp reads exactly 16*K bytes as one
@@ -332,6 +337,21 @@ void launchFp8RuntimeKCompleteLegacyStoreBenchmark(
     const Tensor& input, Tensor& output, const CubReductionGeometry& geometry,
     uint32_t warps_per_output, uint32_t tile_components, Stream& stream);
 
+/** Measurement controls for OneWindow and RuntimeK Complete input transforms.
+ * OneWindow fixed transforms are oracle-only. RuntimeK fixed transforms are now
+ * selectable physical variants; its runtime transform remains benchmark-only. */
+void launchFp8OneWindowFixedTransformBenchmark(
+    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry,
+    uint32_t warps_per_output, CubReductionStageInputTransform transform, Stream& stream);
+void launchFp8RuntimeKCompleteFixedTransformBenchmark(
+    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry,
+    uint32_t warps_per_output, uint32_t tile_components,
+    CubReductionStageInputTransform transform, Stream& stream);
+void launchFp8RuntimeKCompleteRuntimeTransformBenchmark(
+    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry,
+    uint32_t warps_per_output, uint32_t tile_components,
+    CubReductionStageInputTransform transform, Stream& stream);
+
 [[nodiscard]] CubKernelOccupancyInfo queryFp8GeneralRParallelRCooperativeCalibrationOccupancy(
     DataType input_dtype,
     uint64_t inner_size,
@@ -376,10 +396,12 @@ void launchFp8GeneralRParallelKTileRCooperativeCalibrationComplete(
     const CubReductionStageSemantics& semantics = {});
 
 [[nodiscard]] CubKernelOccupancyInfo queryFp8GeneralRParallelKTileRCooperativeCalibrationOccupancy(
-    DataType input_dtype);
+    DataType input_dtype,
+    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity);
 
 /** Benchmark-only runtime-K tiled FirstStage. Work is [outer, shard, k_tile] and writes the ordinary FP32
- * [outer, shard, K] partial tensor; K tiles never communicate with each other. */
+ * [outer, shard, K] partial tensor after the compile-time selected Identity/ABS/Square input transform.
+ * K tiles never communicate with each other. Finalization belongs to the FP32 continuation. */
 void launchFp8GeneralRParallelKTileRCooperativeCalibrationFirstStage(
     const Tensor& input,
     Tensor& fp32_partials,
@@ -387,10 +409,12 @@ void launchFp8GeneralRParallelKTileRCooperativeCalibrationFirstStage(
     uint32_t warps_per_output,
     uint32_t shards_per_output,
     uint32_t tile_components,
-    Stream& stream);
+    Stream& stream,
+    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity);
 
 [[nodiscard]] CubKernelOccupancyInfo queryFp8GeneralRParallelKTileRCooperativeCalibrationFirstStageOccupancy(
-    DataType input_dtype);
+    DataType input_dtype,
+    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity);
 
 /** Compatibility wrapper for the original small-K W2/W4/W8 calibration entry point. It now routes through the
  * general Complete RParallel physical kernel above. */
