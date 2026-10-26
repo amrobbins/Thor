@@ -1546,8 +1546,8 @@ size_t queryArgReductionBytesForInput(DataType value_output_dtype,
             queried_bytes = 1;
             break;
         case CubReductionPath::TiledFixedSegment:
-            queried_bytes = 1;
-            break;
+            // Thor-owned tiled ARG kernels do not use temporary storage.
+            return 0;
         case CubReductionPath::OffsetSegmented:
             throw std::logic_error("Dense CUB arg reduction received offset-segmented geometry.");
         case CubReductionPath::ComposedDense:
@@ -1567,7 +1567,13 @@ void launchArgReductionForInput(const Tensor& temp_storage,
                                 ReductionOpT reduction_op,
                                 ArgReductionCandidateFp32 init,
                                 cudaStream_t stream) {
-    void* temp_storage_ptr = const_cast<void*>(static_cast<const void*>(temp_storage.getMemPtr<void>()));
+    // Only actual CUB primitives need a non-null execution pointer. Thor-owned
+    // tiled passes can run with zero scratch and an empty Tensor handle.
+    auto cub_temp_storage = [&]() -> void* {
+        if (temp_storage_bytes == 0 || !temp_storage.isInitialized())
+            throw std::logic_error("CUB ARG reduction requires preallocated temporary storage");
+        return const_cast<void*>(static_cast<const void*>(temp_storage.getMemPtr<void>()));
+    };
     auto output_iterator = makeRuntimeArgReductionOutputIterator(value_output, index_output);
 
     switch (geometry.path) {
@@ -1575,7 +1581,7 @@ void launchArgReductionForInput(const Tensor& temp_storage,
             auto dispatch_index = [&]<typename IndexT>() -> void {
                 auto input_iterator = makeCompactDeviceArgCandidateIterator<InputT, IndexT>(input);
                 const auto compact_init = makeDenseArgReductionInit<IndexT>(init);
-                CUDA_CHECK(cub::DeviceReduce::Reduce(temp_storage_ptr,
+                CUDA_CHECK(cub::DeviceReduce::Reduce(cub_temp_storage(),
                                                      temp_storage_bytes,
                                                      input_iterator,
                                                      output_iterator,
@@ -1763,8 +1769,8 @@ size_t queryComposedArgReductionStageBytesForInput(bool has_carried_index_input,
             }
         }
         case CubReductionPath::TiledFixedSegment:
-            queried_bytes = 1;
-            break;
+            // Thor-owned tiled ARG kernels do not use temporary storage.
+            return 0;
         case CubReductionPath::OffsetSegmented:
         case CubReductionPath::ComposedDense:
             throw std::logic_error("Composed dense CUB arg stage must resolve to a direct dense reducer family.");
@@ -1786,13 +1792,19 @@ void launchComposedArgReductionStageForInput(const Tensor& temp_storage,
                                              cudaStream_t stream) {
     using CandidateT = DenseArgReductionCandidateFp32<IndexT>;
     const CandidateT typed_init = makeDenseArgReductionInit<IndexT>(init);
-    void* temp_storage_ptr = const_cast<void*>(static_cast<const void*>(temp_storage.getMemPtr<void>()));
+    // Only actual CUB primitives need a non-null execution pointer. Thor-owned
+    // tiled passes can run with zero scratch and an empty Tensor handle.
+    auto cub_temp_storage = [&]() -> void* {
+        if (temp_storage_bytes == 0 || !temp_storage.isInitialized())
+            throw std::logic_error("CUB ARG reduction requires preallocated temporary storage");
+        return const_cast<void*>(static_cast<const void*>(temp_storage.getMemPtr<void>()));
+    };
     auto output_iterator = makeRuntimeArgReductionOutputIterator(value_output, index_output);
 
     switch (geometry.path) {
         case CubReductionPath::DeviceTransformReduce: {
             auto input_iterator = makeComposedDeviceArgCandidateIterator<InputT, IndexT>(value_input, carried_index_input, domain_stride);
-            CUDA_CHECK(cub::DeviceReduce::Reduce(temp_storage_ptr,
+            CUDA_CHECK(cub::DeviceReduce::Reduce(cub_temp_storage(),
                                                  temp_storage_bytes,
                                                  input_iterator,
                                                  output_iterator,
@@ -1844,7 +1856,7 @@ void launchComposedArgReductionStageForInput(const Tensor& temp_storage,
                 }
                 auto input_iterator =
                     makeComposedContiguousArgCandidateIterator<InputT, IndexT>(value_input, carried_index_input, geometry, domain_stride);
-                CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(temp_storage_ptr,
+                CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(cub_temp_storage(),
                                                               temp_storage_bytes,
                                                               input_iterator,
                                                               output_iterator,

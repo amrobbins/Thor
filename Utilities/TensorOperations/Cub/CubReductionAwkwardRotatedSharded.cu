@@ -1,5 +1,6 @@
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 #include "Utilities/TensorOperations/Cub/CubReductionOperation.cuh"
+#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RuntimeKSelector.h"
 
 #include "Utilities/Exceptions.h"
 
@@ -107,7 +108,11 @@ __global__ void awkwardAlignmentRotatedShardedFirstStageKernel(const InputT* inp
     constexpr int ItemsPerLane = awkwardItemsPerLaneForPacket<InputT, PacketBytes>;
     constexpr int PacketSpanElements = awkwardPacketSpanElementsForPacket<InputT, PacketBytes>;
     constexpr int LogicalTileElements = awkwardLogicalTileElementsForPacket<InputT, PacketBytes, ExactFp8Tile>;
-    constexpr float Init = AwkwardReductionIdentityFp32<ReductionOpT>::value;
+    ReductionOpT reduction_op{};
+    const float Init = [&] {
+        if constexpr (requires { reduction_op.identity(); }) return reduction_op.identity();
+        else return AwkwardReductionIdentityFp32<ReductionOpT>::value;
+    }();
     static_assert(sizeof(InputT) == 1 || sizeof(InputT) == 2 || sizeof(InputT) == 4);
     static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
     static_assert(PacketBytes % sizeof(InputT) == 0);
@@ -124,7 +129,6 @@ __global__ void awkwardAlignmentRotatedShardedFirstStageKernel(const InputT* inp
     __shared__ float warp_partials[CooperativeWarps][PacketSpanElements];
     __shared__ uint32_t warp_prefix_elements[CooperativeWarps];
 
-    const ReductionOpT reduction_op{};
     const InputTransformT input_transform{};
     const int warp = static_cast<int>(threadIdx.x) / TILED_REDUCTION_WARP_THREADS;
     const int lane = static_cast<int>(threadIdx.x) % TILED_REDUCTION_WARP_THREADS;
@@ -389,17 +393,8 @@ void dispatchAwkwardFirstStageInput(const Tensor& input,
             launchAwkwardFirstStageForTransform<float, ReductionOpT, InputTransformT, RowsPerShard>(
                 input, fp32_partials, geometry, shards_per_output, stream);
             return;
-#if THOR_CUB_ENABLE_FP8_TYPES
-        case DataType::FP8_E4M3:
-            launchAwkwardFirstStageForTransform<__nv_fp8_e4m3, ReductionOpT, InputTransformT, RowsPerShard>(
-                input, fp32_partials, geometry, shards_per_output, stream);
-            return;
-        case DataType::FP8_E5M2:
-            launchAwkwardFirstStageForTransform<__nv_fp8_e5m2, ReductionOpT, InputTransformT, RowsPerShard>(
-                input, fp32_partials, geometry, shards_per_output, stream);
-            return;
-#endif
         default:
+            // Original FP8 input uses the retained RuntimeK rotated first stage, never this generic RK family.
             throw std::logic_error("Awkward rotated sharded first stage received an unsupported input dtype.");
     }
 }
@@ -494,10 +489,11 @@ void validateAwkwardAlignmentRotatedShardedFirstStage(const Tensor& fp32_partial
 }
 
 template <typename InputT, int RowsPerShard, int PacketBytes, int CooperativeWarps,
-          bool ExactFp8Tile = true, typename InputTransformT = IdentityFp32>
+          bool ExactFp8Tile = true, typename InputTransformT = IdentityFp32,
+          typename ReductionOpT = cuda::std::plus<float>>
 [[nodiscard]] CubKernelOccupancyInfo queryRotatedRCooperativePacketOccupancyForRows() {
     const auto kernel = awkwardAlignmentRotatedShardedFirstStageKernel<InputT,
-                                                                        cuda::std::plus<float>,
+                                                                        ReductionOpT,
                                                                         InputTransformT,
                                                                         RowsPerShard,
                                                                         PacketBytes,
@@ -539,275 +535,144 @@ template <typename InputT>
     }
 }
 
-template <typename InputT, int PacketBytes, int CooperativeWarps, bool ExactFp8Tile,
-          typename InputTransformT = IdentityFp32>
-void launchFp8RotatedCalibrationRows(const Tensor& input,
-                                     Tensor& fp32_partials,
-                                     const CubReductionGeometry& geometry,
-                                     uint64_t rows_per_shard,
-                                     uint64_t shards_per_output,
-                                     cudaStream_t stream) {
-    static_assert(sizeof(InputT) == 1);
-    static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
-    static_assert(CooperativeWarps == PacketBytes);  // FP8 natural p4/4w, p8/8w, p16/16w calibration geometry.
-    switch (rows_per_shard) {
-        case 8:
-            if constexpr (std::is_same_v<InputTransformT, IdentityFp32>) {
-                // Historical oracle-only rows remain Identity; do not triple calibration inventory.
-                launchAwkwardFirstStageForTransformPacket<InputT, cuda::std::plus<float>, IdentityFp32,
-                                                           8, PacketBytes, CooperativeWarps, ExactFp8Tile>(
-                    input, fp32_partials, geometry, shards_per_output, stream);
-                return;
-            } else {
-                throw std::logic_error("RuntimeK rotated transform is selectable only at retained row depths.");
-            }
-        case 16:
-            if constexpr (std::is_same_v<InputTransformT, IdentityFp32>) {
-                // Historical oracle-only rows remain Identity; do not triple calibration inventory.
-                launchAwkwardFirstStageForTransformPacket<InputT, cuda::std::plus<float>, IdentityFp32,
-                                                           16, PacketBytes, CooperativeWarps, ExactFp8Tile>(
-                    input, fp32_partials, geometry, shards_per_output, stream);
-                return;
-            } else {
-                throw std::logic_error("RuntimeK rotated transform is selectable only at retained row depths.");
-            }
-        case 32:
-            launchAwkwardFirstStageForTransformPacket<InputT, cuda::std::plus<float>, InputTransformT,
-                                                       32, PacketBytes, CooperativeWarps, ExactFp8Tile>(
-                input, fp32_partials, geometry, shards_per_output, stream);
-            return;
-        case 64:
-            launchAwkwardFirstStageForTransformPacket<InputT, cuda::std::plus<float>, InputTransformT,
-                                                       64, PacketBytes, CooperativeWarps, ExactFp8Tile>(
-                input, fp32_partials, geometry, shards_per_output, stream);
-            return;
-        case 128:
-            launchAwkwardFirstStageForTransformPacket<InputT, cuda::std::plus<float>, InputTransformT,
-                                                       128, PacketBytes, CooperativeWarps, ExactFp8Tile>(
-                input, fp32_partials, geometry, shards_per_output, stream);
-            return;
-        case 256:
-            launchAwkwardFirstStageForTransformPacket<InputT, cuda::std::plus<float>, InputTransformT,
-                                                       256, PacketBytes, CooperativeWarps, ExactFp8Tile>(
-                input, fp32_partials, geometry, shards_per_output, stream);
-            return;
-        case 512:
-            launchAwkwardFirstStageForTransformPacket<InputT, cuda::std::plus<float>, InputTransformT,
-                                                       512, PacketBytes, CooperativeWarps, ExactFp8Tile>(
-                input, fp32_partials, geometry, shards_per_output, stream);
-            return;
-        case 1024:
-            launchAwkwardFirstStageForTransformPacket<InputT, cuda::std::plus<float>, InputTransformT,
-                                                       1024, PacketBytes, CooperativeWarps, ExactFp8Tile>(
-                input, fp32_partials, geometry, shards_per_output, stream);
-            return;
-        case 2048:
-            if constexpr (std::is_same_v<InputTransformT, IdentityFp32>) {
-                // Historical oracle-only rows remain Identity; do not triple calibration inventory.
-                launchAwkwardFirstStageForTransformPacket<InputT, cuda::std::plus<float>, IdentityFp32,
-                                                           2048, PacketBytes, CooperativeWarps, ExactFp8Tile>(
-                    input, fp32_partials, geometry, shards_per_output, stream);
-                return;
-            } else {
-                throw std::logic_error("RuntimeK rotated transform is selectable only at retained row depths.");
-            }
-        case 4096:
-            if constexpr (std::is_same_v<InputTransformT, IdentityFp32>) {
-                // Historical oracle-only rows remain Identity; do not triple calibration inventory.
-                launchAwkwardFirstStageForTransformPacket<InputT, cuda::std::plus<float>, IdentityFp32,
-                                                           4096, PacketBytes, CooperativeWarps, ExactFp8Tile>(
-                    input, fp32_partials, geometry, shards_per_output, stream);
-                return;
-            } else {
-                throw std::logic_error("RuntimeK rotated transform is selectable only at retained row depths.");
-            }
-        case 8192:
-            if constexpr (std::is_same_v<InputTransformT, IdentityFp32>) {
-                // Historical oracle-only rows remain Identity; do not triple calibration inventory.
-                launchAwkwardFirstStageForTransformPacket<InputT, cuda::std::plus<float>, IdentityFp32,
-                                                           8192, PacketBytes, CooperativeWarps, ExactFp8Tile>(
-                    input, fp32_partials, geometry, shards_per_output, stream);
-                return;
-            } else {
-                throw std::logic_error("RuntimeK rotated transform is selectable only at retained row depths.");
-            }
-        case 16384:
-            if constexpr (std::is_same_v<InputTransformT, IdentityFp32>) {
-                // Historical oracle-only rows remain Identity; do not triple calibration inventory.
-                launchAwkwardFirstStageForTransformPacket<InputT, cuda::std::plus<float>, IdentityFp32,
-                                                           16384, PacketBytes, CooperativeWarps, ExactFp8Tile>(
-                    input, fp32_partials, geometry, shards_per_output, stream);
-                return;
-            } else {
-                throw std::logic_error("RuntimeK rotated transform is selectable only at retained row depths.");
-            }
-        default:
-            throw std::logic_error("FP8 rotated calibration received unsupported rows-per-shard.");
+#if THOR_CUB_ENABLE_FP8_TYPES
+
+// Retained FP8 RuntimeK rotated first stage, owned by Fp8RK::Fp8RuntimeKPolicy: p16 packets with
+// 16 cooperative warps, exact (512) or prefix-reserved (497) K tiles, and only the retained row
+// depths. Packet width is not a runtime axis and no other row depth is compiled.
+constexpr int FP8_RUNTIME_K_ROTATED_PACKET_BYTES = 16;
+static_assert(AWKWARD_ROTATED_FP8_SHARDED_WARPS == FP8_RUNTIME_K_ROTATED_PACKET_BYTES);
+
+template <int RowsPerShard>
+[[nodiscard]] constexpr bool fp8RuntimeKRotatedRetainedRows() {
+    for (uint64_t retained : Fp8RK::Fp8RuntimeKPolicy::rotated_row_depths) {
+        if (retained == static_cast<uint64_t>(RowsPerShard)) return true;
     }
+    return false;
 }
 
-template <typename InputT, int PacketBytes, int CooperativeWarps, bool ExactFp8Tile,
-          typename InputTransformT = IdentityFp32>
-[[nodiscard]] CubKernelOccupancyInfo queryFp8RotatedCalibrationOccupancyForInput(uint64_t rows_per_shard) {
-    static_assert(sizeof(InputT) == 1);
-    static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
-    static_assert(CooperativeWarps == PacketBytes);
-    switch (rows_per_shard) {
-        case 8:
-            if constexpr (std::is_same_v<InputTransformT, IdentityFp32>) {
-                return queryRotatedRCooperativePacketOccupancyForRows<InputT, 8, PacketBytes, CooperativeWarps, ExactFp8Tile>();
-            } else {
-                throw std::logic_error("RuntimeK rotated transform occupancy requires a retained row depth.");
+// Invokes callback.template operator()<InputT, InputTransformT, RowsPerShard, ExactTile>() for the
+// retained compiled rotated specialization matching the runtime request; returns false otherwise.
+template <typename Callback>
+[[nodiscard]] bool dispatchRetainedFp8RuntimeKRotated(DataType input_dtype,
+                                                      bool exact_tile,
+                                                      uint64_t rows_per_shard,
+                                                      CubReductionStageInputTransform transform,
+                                                      Callback&& callback) {
+    bool dispatched = false;
+    const auto for_rows = [&]<typename InputT, typename InputTransformT, bool ExactTile>() {
+        const auto rows = [&]<int RowsPerShard>() {
+            if constexpr (fp8RuntimeKRotatedRetainedRows<RowsPerShard>()) {
+                callback.template operator()<InputT, InputTransformT, RowsPerShard, ExactTile>();
+                dispatched = true;
             }
-        case 16:
-            if constexpr (std::is_same_v<InputTransformT, IdentityFp32>) {
-                return queryRotatedRCooperativePacketOccupancyForRows<InputT, 16, PacketBytes, CooperativeWarps, ExactFp8Tile>();
-            } else {
-                throw std::logic_error("RuntimeK rotated transform occupancy requires a retained row depth.");
-            }
-        case 32: return queryRotatedRCooperativePacketOccupancyForRows<InputT, 32, PacketBytes, CooperativeWarps, ExactFp8Tile, InputTransformT>();
-        case 64: return queryRotatedRCooperativePacketOccupancyForRows<InputT, 64, PacketBytes, CooperativeWarps, ExactFp8Tile, InputTransformT>();
-        case 128: return queryRotatedRCooperativePacketOccupancyForRows<InputT, 128, PacketBytes, CooperativeWarps, ExactFp8Tile, InputTransformT>();
-        case 256: return queryRotatedRCooperativePacketOccupancyForRows<InputT, 256, PacketBytes, CooperativeWarps, ExactFp8Tile, InputTransformT>();
-        case 512: return queryRotatedRCooperativePacketOccupancyForRows<InputT, 512, PacketBytes, CooperativeWarps, ExactFp8Tile, InputTransformT>();
-        case 1024: return queryRotatedRCooperativePacketOccupancyForRows<InputT, 1024, PacketBytes, CooperativeWarps, ExactFp8Tile, InputTransformT>();
-        case 2048:
-            if constexpr (std::is_same_v<InputTransformT, IdentityFp32>) {
-                return queryRotatedRCooperativePacketOccupancyForRows<InputT, 2048, PacketBytes, CooperativeWarps, ExactFp8Tile>();
-            } else {
-                throw std::logic_error("RuntimeK rotated transform occupancy requires a retained row depth.");
-            }
-        case 4096:
-            if constexpr (std::is_same_v<InputTransformT, IdentityFp32>) {
-                return queryRotatedRCooperativePacketOccupancyForRows<InputT, 4096, PacketBytes, CooperativeWarps, ExactFp8Tile>();
-            } else {
-                throw std::logic_error("RuntimeK rotated transform occupancy requires a retained row depth.");
-            }
-        case 8192:
-            if constexpr (std::is_same_v<InputTransformT, IdentityFp32>) {
-                return queryRotatedRCooperativePacketOccupancyForRows<InputT, 8192, PacketBytes, CooperativeWarps, ExactFp8Tile>();
-            } else {
-                throw std::logic_error("RuntimeK rotated transform occupancy requires a retained row depth.");
-            }
-        case 16384:
-            if constexpr (std::is_same_v<InputTransformT, IdentityFp32>) {
-                return queryRotatedRCooperativePacketOccupancyForRows<InputT, 16384, PacketBytes, CooperativeWarps, ExactFp8Tile>();
-            } else {
-                throw std::logic_error("RuntimeK rotated transform occupancy requires a retained row depth.");
-            }
-        default:
-            throw std::logic_error("FP8 rotated calibration occupancy received unsupported rows-per-shard.");
+        };
+        switch (rows_per_shard) {
+            case 32: rows.template operator()<32>(); return;
+            case 64: rows.template operator()<64>(); return;
+            case 128: rows.template operator()<128>(); return;
+            case 256: rows.template operator()<256>(); return;
+            case 512: rows.template operator()<512>(); return;
+            case 1024: rows.template operator()<1024>(); return;
+            default: return;
+        }
+    };
+    const auto for_tile = [&]<typename InputT, typename InputTransformT>() {
+        if (exact_tile) {
+            for_rows.template operator()<InputT, InputTransformT, true>();
+        } else {
+            for_rows.template operator()<InputT, InputTransformT, false>();
+        }
+    };
+    const auto for_transform = [&]<typename InputT>() {
+        switch (transform) {
+            case CubReductionStageInputTransform::Identity:
+                for_tile.template operator()<InputT, IdentityFp32>(); return;
+            case CubReductionStageInputTransform::AbsoluteValue:
+                for_tile.template operator()<InputT, AbsoluteValueFp32>(); return;
+            case CubReductionStageInputTransform::Square:
+                for_tile.template operator()<InputT, SquareFp32>(); return;
+        }
+    };
+    switch (input_dtype) {
+        case DataType::FP8_E4M3: for_transform.template operator()<__nv_fp8_e4m3>(); break;
+        case DataType::FP8_E5M2: for_transform.template operator()<__nv_fp8_e5m2>(); break;
+        default: break;
     }
+    return dispatched;
 }
+
+#endif  // THOR_CUB_ENABLE_FP8_TYPES
 
 }  // namespace
 
-void launchFp8AwkwardAlignmentRotatedShardedCalibrationFirstStage(
-    const Tensor& input,
-    Tensor& fp32_partials,
-    const CubReductionGeometry& geometry,
-    size_t packet_bytes,
-    bool exact_tile,
-    uint64_t rows_per_shard,
-    uint64_t shards_per_output,
-    Stream& stream,
-    CubReductionStageInputTransform transform) {
+template <typename ReductionOpT>
+void launchFp8RuntimeKRotatedFirstStageTyped(const Tensor& input,
+                                             Tensor& fp32_partials,
+                                             const CubReductionGeometry& geometry,
+                                             bool exact_tile,
+                                             uint64_t rows_per_shard,
+                                             uint64_t shards_per_output,
+                                             Stream& stream,
+                                             CubReductionStageInputTransform transform) {
 #if THOR_CUB_ENABLE_FP8_TYPES
-    if ((packet_bytes != 4 && packet_bytes != 8 && packet_bytes != 16)
-        || (exact_tile && packet_bytes != 16)
-        || shards_per_output <= 1
+    if (rows_per_shard == 0 || shards_per_output <= 1
         || shards_per_output != ceilDivideU64(geometry.reduction_size, rows_per_shard)
         || fp32_partials.getDataType() != DataType::FP32
         || fp32_partials.getDimensions()
                != std::vector<uint64_t>{geometry.outer_size, shards_per_output, geometry.inner_size}) {
-        throw std::logic_error("FP8 rotated calibration received invalid staged geometry.");
+        throw std::logic_error("FP8 RuntimeK rotated first stage received invalid staged geometry.");
     }
-    if (packet_bytes != 16 && transform != CubReductionStageInputTransform::Identity) {
-        throw std::logic_error("FP8 rotated p4/p8 calibration only supports identity input transform.");
-    }
-    const auto dispatch = [&]<typename InputT>() {
-        if (packet_bytes == 4) {
-            launchFp8RotatedCalibrationRows<InputT, 4, 4, false>(
-                input, fp32_partials, geometry, rows_per_shard, shards_per_output, stream.getStream());
-        } else if (packet_bytes == 8) {
-            launchFp8RotatedCalibrationRows<InputT, 8, 8, false>(
-                input, fp32_partials, geometry, rows_per_shard, shards_per_output, stream.getStream());
-        } else {
-            // Only the selected RuntimeK p16 access layouts carry the x3 transform axis.
-            // Keep the historical p4/p8 calibration controls identity-only.
-            const auto p16 = [&]<typename InputTransformT>() {
-                if (exact_tile) {
-                    launchFp8RotatedCalibrationRows<InputT, 16, 16, true, InputTransformT>(
-                        input, fp32_partials, geometry, rows_per_shard, shards_per_output, stream.getStream());
-                } else {
-                    launchFp8RotatedCalibrationRows<InputT, 16, 16, false, InputTransformT>(
-                        input, fp32_partials, geometry, rows_per_shard, shards_per_output, stream.getStream());
-                }
-            };
-            switch (transform) {
-                case CubReductionStageInputTransform::Identity:
-                    p16.template operator()<IdentityFp32>(); return;
-                case CubReductionStageInputTransform::AbsoluteValue:
-                    p16.template operator()<AbsoluteValueFp32>(); return;
-                case CubReductionStageInputTransform::Square:
-                    p16.template operator()<SquareFp32>(); return;
-            }
-            throw std::logic_error("FP8 rotated calibration received unsupported input transform.");
-        }
-    };
-    switch (input.getDataType()) {
-        case DataType::FP8_E4M3: dispatch.template operator()<__nv_fp8_e4m3>(); return;
-        case DataType::FP8_E5M2: dispatch.template operator()<__nv_fp8_e5m2>(); return;
-        default: throw std::logic_error("FP8 rotated calibration requires FP8 input.");
+    const bool launched = dispatchRetainedFp8RuntimeKRotated(
+        input.getDataType(), exact_tile, rows_per_shard, transform,
+        [&]<typename InputT, typename InputTransformT, int RowsPerShard, bool ExactTile>() {
+            launchAwkwardFirstStageForTransformPacket<InputT, ReductionOpT, InputTransformT, RowsPerShard,
+                                                       FP8_RUNTIME_K_ROTATED_PACKET_BYTES,
+                                                       AWKWARD_ROTATED_FP8_SHARDED_WARPS, ExactTile>(
+                input, fp32_partials, geometry, shards_per_output, stream.getStream());
+        });
+    if (!launched) {
+        throw std::logic_error("FP8 RuntimeK rotated first stage requires a retained compiled specialization.");
     }
 #else
     static_cast<void>(input);
     static_cast<void>(fp32_partials);
     static_cast<void>(geometry);
-    static_cast<void>(packet_bytes);
     static_cast<void>(exact_tile);
     static_cast<void>(rows_per_shard);
     static_cast<void>(shards_per_output);
     static_cast<void>(stream);
     static_cast<void>(transform);
-    throw std::logic_error("FP8 rotated calibration requires THOR_CUB_ENABLE_FP8_TYPES.");
+    throw std::logic_error("FP8 RuntimeK rotated first stage requires THOR_CUB_ENABLE_FP8_TYPES.");
 #endif
 }
 
-CubKernelOccupancyInfo queryFp8AwkwardAlignmentRotatedShardedCalibrationOccupancy(
-    DataType input_dtype, size_t packet_bytes, bool exact_tile, uint64_t rows_per_shard,
-    CubReductionStageInputTransform transform) {
+template <typename ReductionOpT>
+CubKernelOccupancyInfo queryFp8RuntimeKRotatedOccupancyTyped(DataType input_dtype,
+                                                             bool exact_tile,
+                                                             uint64_t rows_per_shard,
+                                                             CubReductionStageInputTransform transform) {
 #if THOR_CUB_ENABLE_FP8_TYPES
-    if (packet_bytes != 16 && transform != CubReductionStageInputTransform::Identity) {
-        throw std::logic_error("FP8 rotated p4/p8 occupancy only supports identity input transform.");
+    CubKernelOccupancyInfo occupancy{};
+    const bool queried = dispatchRetainedFp8RuntimeKRotated(
+        input_dtype, exact_tile, rows_per_shard, transform,
+        [&]<typename InputT, typename InputTransformT, int RowsPerShard, bool ExactTile>() {
+            occupancy = queryRotatedRCooperativePacketOccupancyForRows<InputT, RowsPerShard,
+                                                                        FP8_RUNTIME_K_ROTATED_PACKET_BYTES,
+                                                                        AWKWARD_ROTATED_FP8_SHARDED_WARPS,
+                                                                        ExactTile, InputTransformT, ReductionOpT>();
+        });
+    if (!queried) {
+        // Not a retained compiled specialization; the selector treats this as an absent candidate.
+        throw std::logic_error("FP8 RuntimeK rotated occupancy requires a retained compiled specialization.");
     }
-    const auto dispatch = [&]<typename InputT>() -> CubKernelOccupancyInfo {
-        if (packet_bytes == 4) return queryFp8RotatedCalibrationOccupancyForInput<InputT, 4, 4, false>(rows_per_shard);
-        if (packet_bytes == 8) return queryFp8RotatedCalibrationOccupancyForInput<InputT, 8, 8, false>(rows_per_shard);
-        const auto p16 = [&]<typename TransformT>() -> CubKernelOccupancyInfo {
-            if (exact_tile)
-                return queryFp8RotatedCalibrationOccupancyForInput<InputT, 16, 16, true, TransformT>(rows_per_shard);
-            return queryFp8RotatedCalibrationOccupancyForInput<InputT, 16, 16, false, TransformT>(rows_per_shard);
-        };
-        switch (transform) {
-            case CubReductionStageInputTransform::Identity: return p16.template operator()<IdentityFp32>();
-            case CubReductionStageInputTransform::AbsoluteValue: return p16.template operator()<AbsoluteValueFp32>();
-            case CubReductionStageInputTransform::Square: return p16.template operator()<SquareFp32>();
-        }
-        throw std::logic_error("FP8 rotated calibration occupancy received unsupported input transform.");
-    };
-    switch (input_dtype) {
-        case DataType::FP8_E4M3: return dispatch.template operator()<__nv_fp8_e4m3>();
-        case DataType::FP8_E5M2: return dispatch.template operator()<__nv_fp8_e5m2>();
-        default: throw std::logic_error("FP8 rotated calibration occupancy requires FP8 input.");
-    }
+    return occupancy;
 #else
     static_cast<void>(input_dtype);
-    static_cast<void>(packet_bytes);
     static_cast<void>(exact_tile);
     static_cast<void>(rows_per_shard);
     static_cast<void>(transform);
-    throw std::logic_error("FP8 rotated calibration requires THOR_CUB_ENABLE_FP8_TYPES.");
+    throw std::logic_error("FP8 RuntimeK rotated occupancy requires THOR_CUB_ENABLE_FP8_TYPES.");
 #endif
 }
 
@@ -819,18 +684,42 @@ void launchFp8GeneralRParallelKTileRotatedCalibrationFirstStage(
     uint64_t rows_per_shard,
     uint64_t shards_per_output,
     Stream& stream,
-    CubReductionStageInputTransform transform) {
-    // Generalized runtime-K tiling owns the policy surface. Reuse the established physical p16 rotated packet
-    // ownership backend so this calibration isolates access-layout choice from kernel duplication.
-    launchFp8AwkwardAlignmentRotatedShardedCalibrationFirstStage(
-        input, fp32_partials, geometry, 16, exact_tile, rows_per_shard, shards_per_output, stream, transform);
+    CubReductionStageInputTransform transform, CubReductionStageCombine combine) {
+    switch (combine) {
+        case CubReductionStageCombine::Sum:
+            return launchFp8RuntimeKRotatedFirstStageTyped<cuda::std::plus<float>>(
+                input, fp32_partials, geometry, exact_tile, rows_per_shard, shards_per_output, stream, transform);
+        case CubReductionStageCombine::Product:
+            return launchFp8RuntimeKRotatedFirstStageTyped<cuda::std::multiplies<float>>(
+                input, fp32_partials, geometry, exact_tile, rows_per_shard, shards_per_output, stream, transform);
+        case CubReductionStageCombine::Minimum:
+            return launchFp8RuntimeKRotatedFirstStageTyped<PropagatingMinimumFp32>(
+                input, fp32_partials, geometry, exact_tile, rows_per_shard, shards_per_output, stream, transform);
+        case CubReductionStageCombine::Maximum:
+            return launchFp8RuntimeKRotatedFirstStageTyped<PropagatingMaximumFp32>(
+                input, fp32_partials, geometry, exact_tile, rows_per_shard, shards_per_output, stream, transform);
+    }
+    throw std::logic_error("Invalid RuntimeK Rotated combine operation.");
 }
 
 CubKernelOccupancyInfo queryFp8GeneralRParallelKTileRotatedCalibrationOccupancy(
     DataType input_dtype, bool exact_tile, uint64_t rows_per_shard,
-    CubReductionStageInputTransform transform) {
-    return queryFp8AwkwardAlignmentRotatedShardedCalibrationOccupancy(
-        input_dtype, 16, exact_tile, rows_per_shard, transform);
+    CubReductionStageInputTransform transform, CubReductionStageCombine combine) {
+    switch (combine) {
+        case CubReductionStageCombine::Sum:
+            return queryFp8RuntimeKRotatedOccupancyTyped<cuda::std::plus<float>>(
+                input_dtype, exact_tile, rows_per_shard, transform);
+        case CubReductionStageCombine::Product:
+            return queryFp8RuntimeKRotatedOccupancyTyped<cuda::std::multiplies<float>>(
+                input_dtype, exact_tile, rows_per_shard, transform);
+        case CubReductionStageCombine::Minimum:
+            return queryFp8RuntimeKRotatedOccupancyTyped<PropagatingMinimumFp32>(
+                input_dtype, exact_tile, rows_per_shard, transform);
+        case CubReductionStageCombine::Maximum:
+            return queryFp8RuntimeKRotatedOccupancyTyped<PropagatingMaximumFp32>(
+                input_dtype, exact_tile, rows_per_shard, transform);
+    }
+    throw std::logic_error("Invalid RuntimeK Rotated occupancy combine operation.");
 }
 
 CubKernelOccupancyInfo queryAwkwardAlignmentRotatedShardedFirstStageOccupancy(
@@ -842,12 +731,6 @@ CubKernelOccupancyInfo queryAwkwardAlignmentRotatedShardedFirstStageOccupancy(
             return queryRotatedRCooperativeOccupancy<__nv_bfloat16>(rows_per_shard);
         case DataType::FP32:
             return queryRotatedRCooperativeOccupancy<float>(rows_per_shard);
-#if THOR_CUB_ENABLE_FP8_TYPES
-        case DataType::FP8_E4M3:
-            return queryRotatedRCooperativeOccupancy<__nv_fp8_e4m3>(rows_per_shard);
-        case DataType::FP8_E5M2:
-            return queryRotatedRCooperativeOccupancy<__nv_fp8_e5m2>(rows_per_shard);
-#endif
         default:
             throw std::logic_error("Rotated R-cooperative occupancy query received unsupported input dtype.");
     }

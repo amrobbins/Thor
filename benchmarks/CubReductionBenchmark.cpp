@@ -99,38 +99,6 @@ struct BenchmarkOptions {
     bool sub256_awkward_shard_census = false;
     bool sub64_awkward_shard_census = false;
     bool rk_census_gate = false;
-    bool rk_fp8_kparallel_packet_census = false;
-    bool rk_fp8_kparallel_small_packet_sweep = false;
-    bool rk_fp8_kparallel_straddled_sweep = false;
-    bool rk_fp8_kparallel_complete_layout_sweep = false;
-    bool rk_fp8_kparallel_staged_layout_sweep = false;
-    bool rk_fp8_rcooperative_single_pass_sweep = false;
-    bool rk_fp8_rcooperative_full_space_sweep = false;
-    bool rk_fp8_rcooperative_k_tiled_sweep = false;
-    bool rk_fp8_rcooperative_selector_simplification_sweep = false;
-    bool rk_fp8_rcooperative_unified_selector_validation_sweep = false;
-    bool rk_fp8_rcooperative_geometry_policy_holdout_sweep = false;
-    bool rk_fp8_deep_r_small_k_end_to_end_sweep = false;
-    bool rk_fp8_deep_r_small_k_four_way_holdout = false;
-    bool rk_fp8_deep_r_small_k_five_way_holdout = false;
-    bool rk_fp8_runtime_k_end_to_end_sweep = false;
-    bool rk_fp8_runtime_k_inventory_holdout = false;
-    bool rk_fp8_runtime_k_selector_holdout = false;
-    bool rk_fp8_runtime_k_shortlist_holdout = false;
-    bool rk_fp8_complete_runtime_output_regression = false;
-    bool rk_fp8_complete_runtime_finalize_regression = false;
-    bool rk_fp8_complete_runtime_input_transform_regression = false;
-    bool rk_fp8_aligned_k_end_to_end_sweep = false;
-    bool rk_fp8_aligned_k_lean_calibration = false;
-    bool rk_fp8_aligned_k_topology_holdout = false;
-    bool rk_fp8_aligned_k_selector_holdout = false;
-    bool rk_fp8_one_window_selector_validation_sweep = false;
-    bool rk_fp8_one_window_generalization_holdout_sweep = false;
-    bool rk_fp8_one_window_dense_boundary_sweep = false;
-    bool rk_fp8_rcooperative_one_window_decode_sweep = false;
-    bool rk_fp8_rcooperative_small_r_small_k_sweep = false;
-    bool rk_fp8_rcooperative_small_r_medium_k_sweep = false;
-    bool rk_fp8_rcooperative_medium_r_small_k_sweep = false;
     bool rk_modern_single_pass_sweep = false;
     bool rk_modern_single_pass_focus = false;
     bool rk_modern_gap_census = false;
@@ -813,7 +781,9 @@ void runProductionExactCase(const ExactReductionCase& benchmark_case,
     const char* index_bits = "n/a";
 
     const bool modern_rk = stamped->usesModernRKFamilyPlan();
-    const size_t modern_packet_bytes = modern_rk ? stamped->getModernRKFirstPacketBytes() : 0;
+    const auto physical_passes = stamped->getDensePhysicalPassDiagnostics();
+    const auto* first = physical_passes.empty() ? nullptr : &physical_passes.front();
+    const auto packet_bytes = first ? first->packet_bytes : std::nullopt;
     const size_t dtype_bytes = TensorDescriptor::getElementSizeInBytes(dtype);
     printExactResult(benchmark_case,
                      dtype,
@@ -824,12 +794,12 @@ void runProductionExactCase(const ExactReductionCase& benchmark_case,
                      index_bits,
                      stamped->getGeometry().output_elements,
                      stamped->getGeometry().reduction_size,
-                     modern_rk && modern_packet_bytes != 0 && dtype_bytes != 0
-                         ? std::optional<uint32_t>(static_cast<uint32_t>(modern_packet_bytes / dtype_bytes))
+                     modern_rk && packet_bytes && dtype_bytes != 0
+                         ? std::optional<uint32_t>(static_cast<uint32_t>(*packet_bytes / dtype_bytes))
                          : std::nullopt,
-                     modern_rk ? std::optional<uint32_t>(stamped->getModernRKFirstBlockThreads()) : std::nullopt,
-                     modern_rk ? std::optional<uint64_t>(stamped->getModernRKFirstStageBlocks()) : std::nullopt,
-                     modern_rk ? std::optional<uint64_t>(stamped->getModernRKFirstShardsPerOutput()) : std::nullopt,
+                     modern_rk && first ? first->block_threads : std::nullopt,
+                     modern_rk && first ? first->stage_blocks : std::nullopt,
+                     modern_rk && first ? first->shards_per_output : std::nullopt,
                      stamped->getWorkspaceSizeInBytes(),
                      input.getArraySizeInBytes(),
                      output.getArraySizeInBytes(),
@@ -1419,11 +1389,6 @@ void runRKFamilyCensusGate(Tensor& cache_flush,
               << " skipped_case_dtypes_over_input_ceiling=" << skipped_for_size << '\n';
 }
 
-void runFp8KParallelPacketCensus(Tensor& cache_flush,
-                                 Stream& stream,
-                                 const TensorPlacement&) {
-    runFp8KParallelPacketABCensus(cache_flush, stream);
-}
 
 void runFullRowShardCensus(Tensor& cache_flush,
                            Stream& stream,
@@ -2967,7 +2932,7 @@ void runArgCase(const ReductionShape& shape,
 
 void printUsage(const char* executable) {
     std::cout << "Usage: " << executable
-              << " [--arg-x4-focused|--arg-x4-awkward-focused|--arg-census|--view-census|--reduction-census|--full-row-shard-census|--wide-awkward-2d-census|--awkward-shard-census|--sub4096-awkward-shard-census|--sub512-awkward-shard-census|--sub256-awkward-shard-census|--sub64-awkward-shard-census|--rk-census-gate|--rk-fp8-kparallel-packet-census|--rk-fp8-kparallel-small-packet-sweep|--rk-fp8-kparallel-straddled-sweep|--rk-fp8-kparallel-complete-layout-sweep|--rk-fp8-kparallel-staged-layout-sweep|--rk-fp8-rcooperative-single-pass-sweep|--rk-fp8-rcooperative-full-space-sweep|--rk-fp8-rcooperative-k-tiled-sweep|--rk-fp8-complete-runtime-output-regression|--rk-fp8-complete-runtime-finalize-regression|--rk-fp8-complete-runtime-input-transform-regression|--rk-fp8-runtime-k-end-to-end-sweep|--rk-fp8-runtime-k-inventory-holdout|--rk-fp8-runtime-k-selector-holdout|--rk-fp8-rcooperative-selector-simplification-sweep|--rk-fp8-rcooperative-unified-selector-validation-sweep|--rk-fp8-rcooperative-geometry-policy-holdout-sweep|--rk-fp8-one-window-dense-boundary-sweep|--rk-fp8-rcooperative-small-r-small-k-sweep|--rk-fp8-rcooperative-small-r-medium-k-sweep|--rk-fp8-rcooperative-medium-r-small-k-sweep|--rk-modern-single-pass-sweep|--rk-modern-single-pass-focus|--rk-modern-gap-census|--rk-narrow-low-precision-calibration|--rk-lean-complete-calibration|--rk-kparallel-stage-crossover-calibration|--rk-kparallel-staged-geometry-calibration|--rk-kparallel-end-to-end-crossover-calibration|--rk-realistic-end-to-end-progress-calibration|--rk-family-boundary-calibration|--rk-fp16-production-autotune-census|--dense-stage-cost-calibration] [--dense-run-stage-census] [--candidate=<name>]...\n"
+              << " [--arg-x4-focused|--arg-x4-awkward-focused|--arg-census|--view-census|--reduction-census|--full-row-shard-census|--wide-awkward-2d-census|--awkward-shard-census|--sub4096-awkward-shard-census|--sub512-awkward-shard-census|--sub256-awkward-shard-census|--sub64-awkward-shard-census|--rk-census-gate|--rk-modern-single-pass-sweep|--rk-modern-single-pass-focus|--rk-modern-gap-census|--rk-narrow-low-precision-calibration|--rk-lean-complete-calibration|--rk-kparallel-stage-crossover-calibration|--rk-kparallel-staged-geometry-calibration|--rk-kparallel-end-to-end-crossover-calibration|--rk-realistic-end-to-end-progress-calibration|--rk-family-boundary-calibration|--rk-fp16-production-autotune-census|--dense-stage-cost-calibration] [--dense-run-stage-census] [--candidate=<name>]...\n"
               << "       " << executable << " --list-reduction-candidates\n"
               << "  --arg-x4-focused          Run ARGMIN only for FP8 E4M3/FP16/FP32, R=64/256/1024, and "
                  "D=128/256/512/1024/2048/4096/65536.\n"
@@ -3003,88 +2968,6 @@ void printUsage(const char* executable) {
                  "Production rows report the current selector for the band immediately above K<=32. --candidate may add an "
                  "explicitly linked experiment.\n"
               << "  --rk-census-gate          Run the post-delete gate for the modern dense RK production inventory across aligned, awkward, deep-R, output-count, operation, and dtype coverage. Historical VALUE RK reference kernels are not compiled.\n"
-              << "  --rk-fp8-kparallel-packet-census  Exact-shape FP8 KParallel packet A/B: hold dtype/O/R/K, input/output "
-                 "buffers, topology, CTA width, and shard count fixed; vary only packet_bytes=16/8/4/2. Covers E4M3/E5M2 "
-                 "SUM for complete and staged physical kernels.\n"
-              << "  --rk-fp8-kparallel-small-packet-sweep  Exact-shape small-reduction FP8 KParallel sweep. Uses Complete "
-                 "one-warp CTAs and holds dtype/O/R/K plus input/output buffers fixed while comparing every legal "
-                 "packet width. Sweeps launch supply, awkward R, awkward K, and combined awkward R/K cases.\n"
-              << "  --rk-fp8-kparallel-straddled-sweep  Benchmark-only KParallel Straddled FP8 p16 calibration for K<=31. "
-                 "Packets stay physically aligned while crossing logical rows; production selection is unchanged.\n"
-              << "  --rk-fp8-kparallel-complete-layout-sweep  Small/awkward FP8 KParallel Complete layout optimization. "
-                 "For every exact shape and every legal 16/8/4/2-byte packet, times CTA widths 32/64/128/256, reports "
-                 "exact compiled-kernel occupancy and launch supply, and lets analysis compare each packet reducer at "
-                 "its measured-best CTA layout. Production selection is unchanged.\n"
-              << "  --rk-fp8-kparallel-staged-layout-sweep  Large/saturating FP8 KParallel staged layout optimization. "
-                 "For fixed 512 MiB / 1 GiB clean and awkward exact shapes, every legal 16/8/4/2-byte packet sweeps "
-                 "CTA widths 32/64/128/256 and occupancy-derived shard counts. Reports physical/useful residency and "
-                 "times every layout so analysis can compare each packet reducer at its measured-best staged geometry. "
-                 "Production selection is unchanged.\n"
-              << "  --rk-fp8-rcooperative-single-pass-sweep  Single-pass FP8 RCooperative calibration. Times Complete, packed-FP8 "
-                 "FlatRows, and both p16 Rotated physical layouts (497-component PrefixReserved and 512-component Exact) "
-                 "in isolation over a deep rows/shard ladder. Consume as much R as possible at >=1.50 TB/s input bandwidth; "
-                 "1.60 TB/s remains the peak reference. Production selection is unchanged.\n"
-              << "  --rk-fp8-rcooperative-full-space-sweep  Full Cartesian FP8 RK coverage census across requested "
-                 "tiny/small/medium/large nice+awkward R and K values and 256 KiB..512 MiB actual-work targets. Uses the "
-                 "pruned inventory: exact production KParallel; generalized RParallel Complete O/W and staged S/W "
-                 "p4/p8/p16 with LinearPackets at calibrated awkward small K; packet-adaptive Complete; the unresolved "
-                 "legacy K=4 r_parallel_p4 control; FlatRows p4/p8/p16; and only the two surviving p16 Rotated layouts. "
-                 "Deprecated outer-grouped, CompactMultiOutput, DirectComponent, p4 roofline, and Rotated p4/p8 rows are "
-                 "not rerun. Production policy is unchanged.\n"
-              << "  --rk-fp8-rcooperative-k-tiled-sweep  Focused large-K FP8 RParallel tiling census. Runs only K=511/"
-                 "993/1023/1024/1493/4095/4096 across representative R and 16/64/256/512 MiB work sizes. For each "
-                 "shape, the generalized family selects one Complete and one staged p16 K-tiled geometry from SM count "
-                 "and exact kernel occupancy instead of sweeping tile size/W/S. Production policy is unchanged.\n"
-              << "  --rk-fp8-rcooperative-selector-simplification-sweep  Broad E4M3 deletion-oriented selector census. "
-                 "Compares generalized runtime-K PacketStaged + RotatedPacketOwnership against production KParallel, "
-                 "PacketAdaptive Complete, FlatRows, old one-window generalized Complete, and the unresolved legacy p4 "
-                 "RParallel control across R=2..32768, K=3..16383, and 1/16/64/512 MiB work targets. Selector probes "
-                 "remain diagnostic-only. Production policy is unchanged.\n"
-              << "  --rk-fp8-rcooperative-unified-selector-validation-sweep  Broad E4M3 validation of the unified "
-                 "generalized-RParallel vocabulary. OneWindow, AlignedK (existing KParallel physical kernel), "
-                 "DeepRSmallK (existing FlatRows physical kernel), RuntimeKTiled PacketStaged, and RuntimeKTiled "
-                 "RotatedPacketOwnership are generalized modes. PacketAdaptive Complete and legacy p4 are oracle-only "
-                 "controls. Production policy is unchanged.\n"
-              << "  --rk-fp8-rcooperative-geometry-policy-holdout-sweep  Fixed unseen-R generalized-mode/OneWindow crossover holdout; no production changes.\n"
-              << "  --rk-fp8-deep-r-small-k-end-to-end-sweep  FP8 FlatRows p4/p8/p16 x rows/shard; "
-                 "force only first stage, then use stamped production FP32 continuation. 5 round-robin samples "
-                 "per candidate; report first, continuation and total GPU time. No selector or production changes.\n"
-              << "  --rk-fp8-deep-r-small-k-four-way-holdout  Historical four-depth holdout; 1024 diagnostic only.\n"
-              << "  --rk-fp8-aligned-k-lean-calibration  New R/K and outer calibration for candidate p2/p4/p8 x CTA32/64/128/256 x Complete/Staged32/128; NOT a final holdout.\n"
-              << "  --rk-fp8-aligned-k-selector-holdout  Full experimental nine-inventory local selector, fresh 24/80/160 MiB geometries. No production changes.\n"
-              << "  --rk-fp8-aligned-k-topology-holdout  Independent topology/depth and CTA256 inventory holdout with new R/K and 32/64/128MiB targets; no selector or production changes.\n"
-              << "  --rk-fp8-complete-runtime-output-regression  Interleaved old FP8 vs runtime output-storage epilogue, OneWindow and RuntimeK Complete.\n"
-              << "  --rk-fp8-complete-runtime-finalize-regression  Old FP8 identity vs runtime identity/divide/sqrt Complete epilogues.\n"
-              << "  --rk-fp8-complete-runtime-input-transform-regression  Compile-time vs runtime input transform for FP8 Complete.\n"
-              << "  --rk-fp8-runtime-k-end-to-end-sweep  Focused RuntimeK PacketStaged/rotated benchmark with stamped FP32-partial continuation and common FP8 output.\n"
-              << "  --rk-fp8-runtime-k-inventory-holdout  Independent 24/128 MiB RuntimeK inventory test of every compiled rotated row depth vs PacketStaged, five complete samples.\n"
-              << "  --rk-fp8-runtime-k-selector-holdout  New 12/96 MiB RuntimeK local-policy test against all physical controls, five samples.\n"
-              << "  --rk-fp8-runtime-k-shortlist-holdout  Fresh 16/112 MiB RuntimeK top-five shortlist holdout, five samples.\n"
-              << "  --rk-fp8-aligned-k-end-to-end-sweep  FP8 AlignedK production KParallel p2/p4/p8/p16 x CTA32/64/128/256 "
-                 "x Complete/Staged R shards, measured end-to-end with FP32 output and real FP32 continuation. "
-                 "Five interleaved cache-cold samples, actual occupancy; no selector or production changes.\n"
-              << "  --rk-fp8-deep-r-small-k-five-way-holdout  Compiled P16 depths 64/128/256/512/1024 "
-                 "on 20 new R/K pairs with independently varied outer; 5 interleaved complete timings. "
-                 "Actual occupancy; no production changes.\n"
-              << "  --rk-fp8-one-window-selector-validation-sweep  OneWindow-only 10-variant hardware selector, 8/32/128 MiB validation; 10 interleaved samples per candidate. No production/cross-mode changes.\n"
-              << "  --rk-fp8-one-window-generalization-holdout-sweep  New R/outer and 24/96/192 MiB OneWindow-leaning holdout; 5 interleaved samples per promoted and demoted candidate. No production/cross-mode changes.\n"
-              << "  --rk-fp8-one-window-dense-boundary-sweep  Dense ONE-WINDOW-ONLY 16/64 MiB R/K geometry sweep; nine promoted variants and twelve demoted oracle controls. No selector or production changes.\n"
-              << "  --rk-fp8-rcooperative-one-window-decode-sweep  Focused E4M3 OneWindow O/W x p4/p8/p16 before/after micro-census. Shared rotating cold workload, same CSV schema.\n"
-              << "  --rk-fp8-rcooperative-small-r-small-k-sweep  Focused FP8 RK census for the shallow/narrow hole: "
-                 "R=2/3/4/7/8/15/16/31/32/63/64, odd K=3/5/7/9/11/13/15/17/19 plus K=31 control, and 64/128/256/512 MiB actual-work "
-                 "targets. Includes split compact-multi-output, R-parallel, and direct-component p4 candidates; a raw p4 "
-                 "read+write roofline reference; the explicitly deprecated one-output-per-warp p4 baseline; production "
-                 "KParallel; and the established RCooperative candidates.\n"
-              << "  --rk-fp8-rcooperative-small-r-medium-k-sweep  Focused FP8 RK census for small R x medium K: "
-                 "R=2/3/4/7/8/15/16/31/32/63/64, K=63/64/127/128/129/255/256, and 64/128/256/512 MiB actual-work "
-                 "targets. Runs the real production KParallel selector plus packet-adaptive Complete and the modern FlatRows/Rotated "
-                 "RCooperative calibration layouts. The K<=32 specialized Compact/RParallel kernels are intentionally out of scope; "
-                 "production policy is unchanged.\n"
-              << "  --rk-fp8-rcooperative-medium-r-small-k-sweep  Focused FP8 RK census for medium R x small K: "
-                 "R=255/256/511/512/1023/1024, K=2/3/4/5/7/8/9/11/13/15/16/17/19/31/32, and "
-                 "64/128/256/512 MiB actual-work targets. Enables generalized RParallel O1/O2/O4/O8 x "
-                 "W1/W2/W4/W8 p4/p8/p16 at K<=32 and compares it directly with production KParallel plus "
-                 "packet-adaptive Complete and the existing FlatRows/Rotated baselines. Production policy is unchanged.\n"
               << "  --rk-modern-single-pass-sweep  Sweep the production modern RK primitives one physical pass at a time. "
                  "No row launches a continuation. SUM is swept across FP16/BF16/FP32, deep-R retained-width boundaries, "
                  "reduction depth, output count, and wide aligned/awkward controls. K-parallel packet/shard geometry and "
@@ -3161,70 +3044,6 @@ BenchmarkOptions parseOptions(int argc, char** argv) {
             options.sub64_awkward_shard_census = true;
         } else if (argument == "--rk-census-gate") {
             options.rk_census_gate = true;
-        } else if (argument == "--rk-fp8-kparallel-packet-census") {
-            options.rk_fp8_kparallel_packet_census = true;
-        } else if (argument == "--rk-fp8-kparallel-small-packet-sweep") {
-            options.rk_fp8_kparallel_small_packet_sweep = true;
-        } else if (argument == "--rk-fp8-kparallel-straddled-sweep") {
-            options.rk_fp8_kparallel_straddled_sweep = true;
-        } else if (argument == "--rk-fp8-kparallel-complete-layout-sweep") {
-            options.rk_fp8_kparallel_complete_layout_sweep = true;
-        } else if (argument == "--rk-fp8-kparallel-staged-layout-sweep") {
-            options.rk_fp8_kparallel_staged_layout_sweep = true;
-        } else if (argument == "--rk-fp8-rcooperative-single-pass-sweep") {
-            options.rk_fp8_rcooperative_single_pass_sweep = true;
-        } else if (argument == "--rk-fp8-rcooperative-full-space-sweep") {
-            options.rk_fp8_rcooperative_full_space_sweep = true;
-        } else if (argument == "--rk-fp8-rcooperative-k-tiled-sweep") {
-            options.rk_fp8_rcooperative_k_tiled_sweep = true;
-        } else if (argument == "--rk-fp8-rcooperative-selector-simplification-sweep") {
-            options.rk_fp8_rcooperative_selector_simplification_sweep = true;
-        } else if (argument == "--rk-fp8-rcooperative-unified-selector-validation-sweep") {
-            options.rk_fp8_rcooperative_unified_selector_validation_sweep = true;
-        } else if (argument == "--rk-fp8-rcooperative-geometry-policy-holdout-sweep") {
-            options.rk_fp8_rcooperative_geometry_policy_holdout_sweep = true;
-        } else if (argument == "--rk-fp8-deep-r-small-k-end-to-end-sweep") {
-            options.rk_fp8_deep_r_small_k_end_to_end_sweep = true;
-        } else if (argument == "--rk-fp8-deep-r-small-k-four-way-holdout") {
-            options.rk_fp8_deep_r_small_k_four_way_holdout = true;
-        } else if (argument == "--rk-fp8-complete-runtime-output-regression") {
-            options.rk_fp8_complete_runtime_output_regression = true;
-        } else if (argument == "--rk-fp8-complete-runtime-finalize-regression") {
-            options.rk_fp8_complete_runtime_finalize_regression = true;
-        } else if (argument == "--rk-fp8-complete-runtime-input-transform-regression") {
-            options.rk_fp8_complete_runtime_input_transform_regression = true;
-        } else if (argument == "--rk-fp8-runtime-k-end-to-end-sweep") {
-            options.rk_fp8_runtime_k_end_to_end_sweep = true;
-        } else if (argument == "--rk-fp8-runtime-k-inventory-holdout") {
-            options.rk_fp8_runtime_k_inventory_holdout = true;
-        } else if (argument == "--rk-fp8-runtime-k-selector-holdout") {
-            options.rk_fp8_runtime_k_selector_holdout = true;
-        } else if (argument == "--rk-fp8-runtime-k-shortlist-holdout") {
-            options.rk_fp8_runtime_k_shortlist_holdout = true;
-        } else if (argument == "--rk-fp8-aligned-k-end-to-end-sweep") {
-            options.rk_fp8_aligned_k_end_to_end_sweep = true;
-        } else if (argument == "--rk-fp8-aligned-k-lean-calibration") {
-            options.rk_fp8_aligned_k_lean_calibration = true;
-        } else if (argument == "--rk-fp8-aligned-k-topology-holdout") {
-            options.rk_fp8_aligned_k_topology_holdout = true;
-        } else if (argument == "--rk-fp8-aligned-k-selector-holdout") {
-            options.rk_fp8_aligned_k_selector_holdout = true;
-        } else if (argument == "--rk-fp8-deep-r-small-k-five-way-holdout") {
-            options.rk_fp8_deep_r_small_k_five_way_holdout = true;
-        } else if (argument == "--rk-fp8-one-window-selector-validation-sweep") {
-            options.rk_fp8_one_window_selector_validation_sweep = true;
-        } else if (argument == "--rk-fp8-one-window-generalization-holdout-sweep") {
-            options.rk_fp8_one_window_generalization_holdout_sweep = true;
-        } else if (argument == "--rk-fp8-one-window-dense-boundary-sweep") {
-            options.rk_fp8_one_window_dense_boundary_sweep = true;
-        } else if (argument == "--rk-fp8-rcooperative-one-window-decode-sweep") {
-            options.rk_fp8_rcooperative_one_window_decode_sweep = true;
-        } else if (argument == "--rk-fp8-rcooperative-small-r-small-k-sweep") {
-            options.rk_fp8_rcooperative_small_r_small_k_sweep = true;
-        } else if (argument == "--rk-fp8-rcooperative-small-r-medium-k-sweep") {
-            options.rk_fp8_rcooperative_small_r_medium_k_sweep = true;
-        } else if (argument == "--rk-fp8-rcooperative-medium-r-small-k-sweep") {
-            options.rk_fp8_rcooperative_medium_r_small_k_sweep = true;
         } else if (argument == "--rk-modern-single-pass-sweep") {
             options.rk_modern_single_pass_sweep = true;
         } else if (argument == "--rk-modern-single-pass-focus") {
@@ -3267,8 +3086,10 @@ BenchmarkOptions parseOptions(int argc, char** argv) {
         }
     }
 
-    const int mode_count = static_cast<int>(options.focused_arg_x4) + static_cast<int>(options.focused_arg_x4_awkward)
-                           + static_cast<int>(options.arg_census) + static_cast<int>(options.view_census)
+    const int mode_count = static_cast<int>(options.focused_arg_x4)
+                           + static_cast<int>(options.focused_arg_x4_awkward)
+                           + static_cast<int>(options.arg_census)
+                           + static_cast<int>(options.view_census)
                            + static_cast<int>(options.reduction_census)
                            + static_cast<int>(options.full_row_shard_census)
                            + static_cast<int>(options.wide_awkward_2d_census)
@@ -3278,30 +3099,6 @@ BenchmarkOptions parseOptions(int argc, char** argv) {
                            + static_cast<int>(options.sub256_awkward_shard_census)
                            + static_cast<int>(options.sub64_awkward_shard_census)
                            + static_cast<int>(options.rk_census_gate)
-                           + static_cast<int>(options.rk_fp8_kparallel_packet_census)
-                           + static_cast<int>(options.rk_fp8_kparallel_small_packet_sweep)
-                           + static_cast<int>(options.rk_fp8_kparallel_straddled_sweep)
-                           + static_cast<int>(options.rk_fp8_rcooperative_single_pass_sweep)
-                           + static_cast<int>(options.rk_fp8_rcooperative_full_space_sweep)
-                           + static_cast<int>(options.rk_fp8_complete_runtime_output_regression)
-                           + static_cast<int>(options.rk_fp8_complete_runtime_finalize_regression)
-                           + static_cast<int>(options.rk_fp8_runtime_k_end_to_end_sweep)
-                           + static_cast<int>(options.rk_fp8_runtime_k_inventory_holdout)
-                           + static_cast<int>(options.rk_fp8_runtime_k_selector_holdout)
-                           + static_cast<int>(options.rk_fp8_runtime_k_shortlist_holdout)
-                           + static_cast<int>(options.rk_fp8_aligned_k_end_to_end_sweep)
-                           + static_cast<int>(options.rk_fp8_rcooperative_selector_simplification_sweep)
-                           + static_cast<int>(options.rk_fp8_rcooperative_unified_selector_validation_sweep)
-                           + static_cast<int>(options.rk_fp8_rcooperative_geometry_policy_holdout_sweep)
-                           + static_cast<int>(options.rk_fp8_deep_r_small_k_end_to_end_sweep)
-                           + static_cast<int>(options.rk_fp8_deep_r_small_k_four_way_holdout)
-                           + static_cast<int>(options.rk_fp8_deep_r_small_k_five_way_holdout)
-                           + static_cast<int>(options.rk_fp8_one_window_selector_validation_sweep)
-                           + static_cast<int>(options.rk_fp8_one_window_generalization_holdout_sweep)
-                           + static_cast<int>(options.rk_fp8_one_window_dense_boundary_sweep)
-                           + static_cast<int>(options.rk_fp8_rcooperative_one_window_decode_sweep)
-                           + static_cast<int>(options.rk_fp8_rcooperative_small_r_small_k_sweep)
-                           + static_cast<int>(options.rk_fp8_rcooperative_small_r_medium_k_sweep)
                            + static_cast<int>(options.rk_modern_single_pass_sweep)
                            + static_cast<int>(options.rk_modern_single_pass_focus)
                            + static_cast<int>(options.rk_modern_gap_census)
@@ -3414,103 +3211,11 @@ int main(int argc, char** argv) {
                   << " target_input_bytes=" << target_input_bytes << " free_bytes=" << free_bytes
                   << " total_bytes=" << total_bytes << " target_over_l2=" << std::fixed << std::setprecision(2)
                   << static_cast<double>(target_input_bytes) / l2_cache_bytes << '\n';
-        if (options.reduction_census || options.full_row_shard_census || options.wide_awkward_2d_census || options.awkward_shard_census
-            || options.sub4096_awkward_shard_census || options.sub512_awkward_shard_census
-            || options.sub256_awkward_shard_census || options.sub64_awkward_shard_census
-            || options.rk_census_gate || options.rk_fp8_kparallel_packet_census || options.rk_fp8_kparallel_small_packet_sweep || options.rk_fp8_kparallel_straddled_sweep
-            || options.rk_fp8_rcooperative_single_pass_sweep || options.rk_fp8_rcooperative_full_space_sweep
-            || options.rk_fp8_rcooperative_k_tiled_sweep
-            || options.rk_fp8_rcooperative_selector_simplification_sweep
-            || options.rk_fp8_rcooperative_unified_selector_validation_sweep
-                || options.rk_fp8_rcooperative_geometry_policy_holdout_sweep
-                || options.rk_fp8_deep_r_small_k_end_to_end_sweep
-                || options.rk_fp8_deep_r_small_k_four_way_holdout
-                || options.rk_fp8_deep_r_small_k_five_way_holdout
-                || options.rk_fp8_one_window_selector_validation_sweep
-                || options.rk_fp8_one_window_generalization_holdout_sweep
-                || options.rk_fp8_runtime_k_end_to_end_sweep
-                || options.rk_fp8_runtime_k_inventory_holdout
-                || options.rk_fp8_runtime_k_selector_holdout
-                || options.rk_fp8_runtime_k_shortlist_holdout
-                || options.rk_fp8_one_window_dense_boundary_sweep
-            || options.rk_fp8_rcooperative_one_window_decode_sweep
-            || options.rk_fp8_rcooperative_small_r_small_k_sweep
-            || options.rk_fp8_rcooperative_small_r_medium_k_sweep
-            || options.rk_modern_single_pass_sweep || options.rk_modern_single_pass_focus
-            || options.rk_modern_gap_census || options.rk_lean_complete_calibration || options.rk_kparallel_stage_crossover_calibration || options.rk_kparallel_staged_geometry_calibration || options.rk_kparallel_end_to_end_crossover_calibration || options.rk_realistic_end_to_end_progress_calibration || options.rk_family_boundary_calibration || options.rk_fp16_production_autotune_census || options.arg_census || options.view_census || options.dense_stage_cost_calibration) {
-            if (options.rk_fp8_rcooperative_small_r_small_k_sweep
-                || options.rk_fp8_rcooperative_small_r_medium_k_sweep
-                || options.rk_fp8_rcooperative_k_tiled_sweep
-                || options.rk_fp8_rcooperative_selector_simplification_sweep
-                || options.rk_fp8_rcooperative_unified_selector_validation_sweep
-                || options.rk_fp8_rcooperative_geometry_policy_holdout_sweep
-                || options.rk_fp8_one_window_selector_validation_sweep
-                || options.rk_fp8_one_window_generalization_holdout_sweep
-                || options.rk_fp8_one_window_dense_boundary_sweep
-            || options.rk_fp8_rcooperative_one_window_decode_sweep) {
-                std::cout << "# Cache-cold timing uses a rotating input/output working set with >=8x-L2 input reuse distance. "
-                             "One bootstrap eviction is issued per exact shape/dtype; no per-sample eviction memset is used.\n";
-            } else {
-                std::cout << "# A separate >=8x-L2 cache-flush buffer is touched outside every cache-cold timed sample.\n";
-            }
-            if (options.reduction_census || options.full_row_shard_census || options.wide_awkward_2d_census || options.awkward_shard_census
-                || options.sub4096_awkward_shard_census || options.sub512_awkward_shard_census
-                || options.sub256_awkward_shard_census || options.sub64_awkward_shard_census) {
-                std::cout << "# Exact production-census shapes are preserved. Experimental candidates are benchmark-only "
-                             "and do not participate in CubReduction production path selection.\n";
-            }
-        } else if (options.rk_fp8_runtime_k_end_to_end_sweep ||
-                   options.rk_fp8_runtime_k_inventory_holdout ||
-                   options.rk_fp8_runtime_k_selector_holdout ||
-                   options.rk_fp8_runtime_k_shortlist_holdout) {
-            std::cout << "# RuntimeK reductions use explicitly sized input tensors, which can be smaller "
-                         "than L2. A separate >=8x-L2 cache-flush buffer is touched before each "
-                         "timed candidate; input size is determined by outer*R*K bytes.\n";
-        } else {
-            std::cout << "# Each timed reduction reads an input >= target_input_bytes. Because the input is >= 8x L2, "
-                         "successive iterations cannot benchmark an L2-resident working set.\n";
-        }
-        if (options.full_row_shard_census || options.wide_awkward_2d_census || options.awkward_shard_census
-                   || options.sub4096_awkward_shard_census || options.sub512_awkward_shard_census
-                   || options.sub256_awkward_shard_census || options.sub64_awkward_shard_census
-                   || options.rk_census_gate || options.rk_fp8_kparallel_packet_census || options.rk_fp8_kparallel_small_packet_sweep || options.rk_fp8_kparallel_straddled_sweep
-            || options.rk_modern_single_pass_sweep || options.rk_modern_single_pass_focus
-                   || options.rk_modern_gap_census || options.rk_lean_complete_calibration || options.rk_kparallel_stage_crossover_calibration || options.rk_kparallel_staged_geometry_calibration || options.rk_kparallel_end_to_end_crossover_calibration || options.rk_realistic_end_to_end_progress_calibration || options.rk_family_boundary_calibration) {
-            std::cout << "# timing_samples=" << BROAD_TIMING_SAMPLES
-                      << " warmup_iterations=" << BROAD_WARMUP_ITERATIONS
-                      << " timed_iterations_per_sample=1 reported_time=median\n";
-        } else {
-            std::cout << "# timing_samples=" <<
-                (options.rk_fp8_deep_r_small_k_end_to_end_sweep || options.rk_fp8_deep_r_small_k_four_way_holdout || options.rk_fp8_deep_r_small_k_five_way_holdout ? 5 :
-                 options.rk_fp8_one_window_selector_validation_sweep ? 10 :
-                 options.rk_fp8_one_window_generalization_holdout_sweep ? 5 :
-                 options.rk_fp8_runtime_k_end_to_end_sweep ||
-                 options.rk_fp8_runtime_k_inventory_holdout ||
-                 options.rk_fp8_runtime_k_selector_holdout ||
-                 options.rk_fp8_runtime_k_shortlist_holdout ? 5 : TIMING_SAMPLES);
-            if (options.reduction_census || options.arg_census || options.view_census
-                || options.dense_stage_cost_calibration
-                || options.rk_fp8_rcooperative_single_pass_sweep
-                || options.rk_fp8_rcooperative_full_space_sweep
-                || options.rk_fp8_rcooperative_k_tiled_sweep
-                || options.rk_fp8_rcooperative_selector_simplification_sweep
-                || options.rk_fp8_rcooperative_unified_selector_validation_sweep
-                || options.rk_fp8_rcooperative_geometry_policy_holdout_sweep
-                || options.rk_fp8_deep_r_small_k_end_to_end_sweep
-                || options.rk_fp8_deep_r_small_k_four_way_holdout
-                || options.rk_fp8_deep_r_small_k_five_way_holdout
-                || options.rk_fp8_one_window_selector_validation_sweep
-                || options.rk_fp8_one_window_generalization_holdout_sweep
-                || options.rk_fp8_one_window_dense_boundary_sweep
-            || options.rk_fp8_rcooperative_one_window_decode_sweep
-                || options.rk_fp8_rcooperative_small_r_small_k_sweep
-                || options.rk_fp8_rcooperative_small_r_medium_k_sweep) {
-                std::cout << " timed_iterations_per_sample=1 reported_time=median\n";
-            } else {
-                std::cout << " timed_iterations_per_sample=" << TIMED_ITERATIONS_PER_SAMPLE
-                          << " reported_time=median\n";
-            }
-        }
+        std::cout << "# Cache-cold timings use an input working set at least 8x L2, or a separate cache-flush buffer "
+                     "outside the timed sample for exact-shape cases.\n";
+        std::cout << "# timing_samples=" << TIMING_SAMPLES
+                  << " warmup_iterations=" << WARMUP_ITERATIONS
+                  << " timed_iterations_per_sample=" << TIMED_ITERATIONS_PER_SAMPLE << '\n';
         std::cout << "# argmin_index/argmax_index benchmark the production index-only UINT32 path using randomized "
                      "finite input initialized outside the timed interval.\n";
         if (options.focused_arg_x4) {
@@ -3543,166 +3248,6 @@ int main(int argc, char** argv) {
         if (options.rk_census_gate) {
             Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
             runRKFamilyCensusGate(cache_flush, stream, gpu_placement);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_kparallel_packet_census) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8KParallelPacketCensus(cache_flush, stream, gpu_placement);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_kparallel_small_packet_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8KParallelSmallPacketSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_kparallel_straddled_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8KParallelStraddledSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_kparallel_complete_layout_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8KParallelCompleteLayoutSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_kparallel_staged_layout_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8KParallelStagedLayoutSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_rcooperative_single_pass_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8RCooperativeSinglePassSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_rcooperative_full_space_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8RCooperativeFullSpaceSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_complete_runtime_output_regression) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8CompleteRuntimeOutputRegression(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_complete_runtime_finalize_regression) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8CompleteRuntimeFinalizeRegression(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_complete_runtime_input_transform_regression) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8CompleteRuntimeInputTransformRegression(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_runtime_k_end_to_end_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8RuntimeKEndToEndSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_runtime_k_inventory_holdout) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8RuntimeKInventoryHoldoutSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_runtime_k_selector_holdout) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8RuntimeKSelectorHoldoutSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_runtime_k_shortlist_holdout) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8RuntimeKShortlistHoldoutSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_aligned_k_end_to_end_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8RCooperativeKTiledSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_rcooperative_selector_simplification_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8RCooperativeSelectorSimplificationSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_rcooperative_unified_selector_validation_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8RCooperativeUnifiedSelectorValidationSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_rcooperative_geometry_policy_holdout_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8RCooperativeGeometryPolicyHoldoutSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_aligned_k_end_to_end_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8AlignedKEndToEndSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_aligned_k_lean_calibration) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8AlignedKLeanCalibration(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_aligned_k_topology_holdout) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8AlignedKTopologyHoldout(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_aligned_k_selector_holdout) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8AlignedKSelectorHoldout(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_deep_r_small_k_end_to_end_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8DeepRSmallKEndToEndSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_deep_r_small_k_four_way_holdout) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8DeepRSmallKFourWayHoldout(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_deep_r_small_k_five_way_holdout) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8DeepRSmallKFiveWayHoldout(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_one_window_selector_validation_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8OneWindowSelectorValidationSweep(cache_flush,stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_one_window_generalization_holdout_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8OneWindowGeneralizationHoldoutSweep(cache_flush,stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_one_window_dense_boundary_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8RCooperativeOneWindowDenseBoundarySweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_rcooperative_one_window_decode_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8RCooperativeOneWindowDecodeSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_rcooperative_small_r_small_k_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8RCooperativeSmallRSmallKSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_rcooperative_small_r_medium_k_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8RCooperativeSmallRMediumKSweep(cache_flush, stream);
-            return EXIT_SUCCESS;
-        }
-        if (options.rk_fp8_rcooperative_medium_r_small_k_sweep) {
-            Tensor cache_flush(gpu_placement, TensorDescriptor(DataType::UINT8, {target_input_bytes}));
-            runFp8RCooperativeMediumRSmallKSweep(cache_flush, stream);
             return EXIT_SUCCESS;
         }
         if (options.rk_modern_single_pass_sweep) {

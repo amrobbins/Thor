@@ -140,6 +140,44 @@ TEST(Tensor, MemsetHonorsAliasViewStorageOffsetOnCpuAndGpu) {
         EXPECT_EQ(hostValues[i], 0.0f);
 }
 
+TEST(TensorSharedOwnership, ByteStorageReinterpretationHonorsSubviewBoundsAndOwnership) {
+    const TensorPlacement cpu(TensorPlacement::MemDevices::CPU);
+    Tensor arena(cpu, TensorDescriptor(DataType::UINT8, {80}));
+    auto* base = arena.getMemPtr<uint8_t>();
+
+    // The autotuner allocates an owning byte arena and passes its candidates
+    // per-slot byte views. They must be reusable for typed partials and temp.
+    Tensor slot = arena.aliasByteStorageAs(DataType::UINT8, {24}, 32);
+    Tensor partials = slot.aliasByteStorageAs(DataType::FP32, {4}, 4);
+    Tensor temp = slot.aliasByteStorageAs(DataType::UINT8, {4}, 20);
+    ASSERT_EQ(partials.getMemPtr<float>(), reinterpret_cast<float*>(base + 36));
+    ASSERT_EQ(temp.getMemPtr<uint8_t>(), base + 52);
+    EXPECT_EQ(partials.getTensorId(), slot.getTensorId());
+
+    // A subview cannot reach into another slot even when the full backing
+    // allocation has enough bytes for the requested region.
+    EXPECT_THROW((void)slot.aliasByteStorageAs(DataType::FP32, {2}, 20), std::runtime_error);
+    EXPECT_THROW((void)slot.aliasByteStorageAs(DataType::FP32, {1}, 2), std::runtime_error);
+    EXPECT_THROW((void)slot.aliasByteStorageAs(DataType::FP64, {1}, 4), std::runtime_error);
+    Tensor strided = arena.aliasView({8}, {2}, 32);
+    EXPECT_THROW((void)strided.aliasByteStorageAs(DataType::FP32, {2}, 0), std::runtime_error);
+    Tensor unaligned_slot = arena.aliasByteStorageAs(DataType::UINT8, {20}, 33);
+    EXPECT_THROW((void)unaligned_slot.aliasByteStorageAs(DataType::FP32, {1}, 0), std::runtime_error);
+    EXPECT_NO_THROW((void)unaligned_slot.aliasByteStorageAs(DataType::FP32, {1}, 3));
+
+    // Keep the memory alive through a nested alias after dropping its owners.
+    temp.dropReference();
+    arena.dropReference();
+    slot.dropReference();
+    partials.getMemPtr<float>()[0] = 123.0f;
+    EXPECT_EQ(partials.getMemPtr<float>()[0], 123.0f);
+
+    // The physical backing need not end on a destination-element boundary.
+    Tensor odd_bytes(cpu, TensorDescriptor(DataType::UINT8, {79}));
+    Tensor odd_slot = odd_bytes.aliasByteStorageAs(DataType::UINT8, {16}, 32);
+    EXPECT_NO_THROW((void)odd_slot.aliasByteStorageAs(DataType::FP32, {4}, 0));
+}
+
 TEST(TensorSharedOwnership, CopiesAndAliasesKeepAllocationAliveAfterOriginalReset) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorDescriptor descriptor(DataType::FP32, {8});

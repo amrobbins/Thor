@@ -184,8 +184,16 @@ TEST(CubReduction, AwkwardLargeVectorizedShardsHandleAlignmentAndPaddedInputTail
         std::shared_ptr<StampedCubReduction> stamped =
             CubReduction(CubReductionOp::Sum, 1, DataType::FP32).stamp(input, stream);
         EXPECT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
-        if (dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP32) {
+        if (dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP32 ||
+            dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2) {
+            // Original FP8 RK now uses the retained physical selector rather
+            // than the old generic legacy path.
             EXPECT_TRUE(stamped->usesModernRKFamilyPlan());
+            if (dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2) {
+                const auto passes = stamped->getDensePhysicalPassDiagnostics();
+                ASSERT_FALSE(passes.empty());
+                EXPECT_EQ(passes.front().family.find("retained_fp8_rk:"), 0U);
+            }
         } else {
             EXPECT_FALSE(stamped->usesModernRKFamilyPlan());
         }
@@ -207,17 +215,15 @@ TEST(CubReduction, AwkwardLargeVectorizedShardsHandleAlignmentAndPaddedInputTail
 }
 
 #if THOR_CUB_ENABLE_FP8_TYPES
-TEST(CubReduction, UnderSuppliedPacketAlignedFp8OrdinaryDenseUsesNarrowModernKParallelValuePlan) {
+TEST(CubReduction, UnderSuppliedFp8OrdinaryDenseUsesRetainedFirstStageWithoutLegacyFallback) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
     constexpr uint64_t outer_size = 2;
     constexpr uint64_t reduction_size = 256;
-    // These K values successively make 16/8/4/2 bytes the widest naturally aligned packet. This is deliberately a
-    // small, under-supplied reduction, however, so the final FP8 packet policy must maximize useful K-side work
-    // rather than blindly choose that widest legal packet. Packet2 exposes the most useful launch warps in every
-    // case and is therefore the expected production choice. The family-policy unit tests cover the selector rule;
-    // this lifecycle test verifies that the stamped ordinary VALUE plan preserves it end to end.
+    // These K values exercise differing natural packet alignments on an under-supplied FP8 RK reduction.
+    // The retained selector chooses the first-stage physical kernel; no legacy packet-width policy is fixed here.
+    // Verify that the stamped production path starts with a retained FP8 kernel and produces correct values.
     for (uint64_t inner_size : std::vector<uint64_t>{528, 264, 132, 66}) {
         SCOPED_TRACE(inner_size);
         std::vector<float> values(outer_size * reduction_size * inner_size);
@@ -240,9 +246,12 @@ TEST(CubReduction, UnderSuppliedPacketAlignedFp8OrdinaryDenseUsesNarrowModernKPa
                 CubReduction(CubReductionOp::Sum, 1, DataType::FP32).stamp(input, stream);
 
             ASSERT_TRUE(stamped->usesModernRKFamilyPlan());
-            EXPECT_NE(stamped->getModernRKStrategyChain().find("k_parallel:aligned"), std::string::npos);
             EXPECT_EQ(stamped->getModernRKStrategyChain().find("rk:generic"), std::string::npos);
-            EXPECT_EQ(stamped->getModernRKFirstPacketBytes(), 2U);
+            const auto physical_passes = stamped->getDensePhysicalPassDiagnostics();
+            ASSERT_FALSE(physical_passes.empty());
+            EXPECT_EQ(physical_passes.front().family.find("retained_fp8_rk:"), 0U);
+            EXPECT_EQ(physical_passes.front().input_dtype, dtype);
+            EXPECT_EQ(physical_passes.front().output_dtype, DataType::FP32);
 
             stamped->run();
             stream.synchronize();
@@ -614,7 +623,7 @@ TEST(CubReduction, Fp8CompleteRuntimeFinalizationMatchesFp32ThenStorage) {
                         } else {
                             launchFp8GeneralRParallelRCooperativeCalibrationComplete(
                                 input, output, geometry, shape.outputs_per_warp, shape.warps,
-                                shape.packet, stream, false, semantics);
+                                shape.packet, stream, semantics);
                         }
                         stream.synchronize();
                         const auto actual = copyGpuTensorAsFloat(output, stream);
@@ -682,7 +691,7 @@ TEST(CubReduction, Fp8CompleteRuntimeInputTransformBeforeReduction) {
                         input, output, geometry, 2, 496, stream, semantics);
                 } else {
                     launchFp8GeneralRParallelRCooperativeCalibrationComplete(
-                        input, output, geometry, 1, 2, 16, stream, false, semantics);
+                        input, output, geometry, 1, 2, 16, stream, semantics);
                 }
                 stream.synchronize();
                 const auto actual = copyGpuTensorAsFloat(output, stream);
@@ -707,16 +716,16 @@ TEST(CubReduction, Fp8CompleteRuntimeInputTransformBeforeReduction) {
     }
 }
 
-// RuntimeK PacketStaged and both p16 rotated layouts must transform decoded FP8
-// values BEFORE producing per-shard FP32 sums. This extends the existing Complete
-// coverage without re-testing the independent FP32 continuation/output conversion.
-TEST(CubReduction, Fp8RuntimeKStagedCompiledInputTransformBeforePartials) {
+// Both retained RuntimeK p16 rotated layouts must transform decoded FP8 values
+// BEFORE producing per-shard FP32 sums. PacketStaged was removed from the
+// inventory and must not be exercised by this test.
+TEST(CubReduction, Fp8RuntimeKRotatedStagedCompiledInputTransformBeforePartials) {
     REQUIRE_CUDA_DEVICE();
     using namespace CubReductionInternal;
     Stream stream(0);
     constexpr uint64_t Outer = 2;
     constexpr uint64_t R = 257;
-    constexpr uint64_t K = 513; // awkward p16 tails, two K tiles in both rotated layouts
+    constexpr uint64_t K = 513; // awkward p16 tails in both rotated layouts
     const auto geometry = CubReduction::analyzeValueGeometry(
         CubReductionOp::Sum, {Outer, R, K}, {1});
     std::vector<float> values(Outer * R * K);
@@ -734,39 +743,26 @@ TEST(CubReduction, Fp8RuntimeKStagedCompiledInputTransformBeforePartials) {
         for (auto transform : {CubReductionStageInputTransform::Identity,
                                CubReductionStageInputTransform::AbsoluteValue,
                                CubReductionStageInputTransform::Square}) {
-            for (int mode = 0; mode < 3; ++mode) {
-                const bool packet_staged = mode == 0;
-                const uint64_t rows = 64;
-                const uint64_t shards = packet_staged ? 3 : (R + rows - 1) / rows;
+            for (bool exact_tile : {false, true}) {
+                constexpr uint64_t rows = 64;
+                const uint64_t shards = (R + rows - 1) / rows;
                 Tensor partials(gpuPlacement, TensorDescriptor(
                     DataType::FP32, {Outer, shards, K}));
                 SCOPED_TRACE(static_cast<int>(dtype));
                 SCOPED_TRACE(static_cast<int>(transform));
-                SCOPED_TRACE(mode);
-                const auto occupancy = packet_staged
-                    ? queryFp8GeneralRParallelKTileRCooperativeCalibrationFirstStageOccupancy(dtype, transform)
-                    : queryFp8GeneralRParallelKTileRotatedCalibrationOccupancy(dtype, mode == 2, rows, transform);
-                EXPECT_GT(occupancy.max_active_blocks_per_sm, 0);
-                if (packet_staged) {
-                    launchFp8GeneralRParallelKTileRCooperativeCalibrationFirstStage(
-                        input, partials, geometry, 2, static_cast<uint32_t>(shards),
-                        496, stream, transform);
-                } else {
-                    launchFp8GeneralRParallelKTileRotatedCalibrationFirstStage(
-                        input, partials, geometry, mode == 2, rows, shards, stream, transform);
-                }
+                SCOPED_TRACE(exact_tile);
+                const auto occupancy = queryFp8GeneralRParallelKTileRotatedCalibrationOccupancy(
+                    dtype, exact_tile, rows, transform);
+                ASSERT_GT(occupancy.max_active_blocks_per_sm, 0);
+                launchFp8GeneralRParallelKTileRotatedCalibrationFirstStage(
+                    input, partials, geometry, exact_tile, rows, shards, stream, transform);
                 stream.synchronize();
                 const auto actual = copyGpuTensorAsFloat(partials, stream);
                 ASSERT_EQ(actual.size(), Outer * shards * K);
                 for (uint64_t o = 0; o < Outer; ++o) {
                     for (uint64_t shard = 0; shard < shards; ++shard) {
-                        const uint64_t base = R / shards;
-                        const uint64_t extra = R % shards;
-                        const uint64_t row_begin = packet_staged
-                            ? shard * base + std::min(shard, extra) : shard * rows;
-                        const uint64_t row_end = packet_staged
-                            ? row_begin + base + static_cast<uint64_t>(shard < extra)
-                            : std::min(R, row_begin + rows);
+                        const uint64_t row_begin = shard * rows;
+                        const uint64_t row_end = std::min(R, row_begin + rows);
                         for (uint64_t k = 0; k < K; ++k) {
                             float expected = 0.0f;
                             for (uint64_t r = row_begin; r < row_end; ++r) {
@@ -786,14 +782,14 @@ TEST(CubReduction, Fp8RuntimeKStagedCompiledInputTransformBeforePartials) {
     }
 }
 
-TEST(CubReduction, Fp8CompleteRuntimeFinalizationRejectsUnsupportedSemantics) {
+TEST(CubReduction, Fp8CompleteRuntimeFinalizationValidatesSemantics) {
     REQUIRE_CUDA_DEVICE();
     using namespace CubReductionInternal;
     Stream stream(0);
     for (bool tiled : {false, true}) {
         const uint64_t k = tiled ? 513 : 3;
         const auto geometry = CubReduction::analyzeValueGeometry(CubReductionOp::Sum, {1, 79, k}, {1});
-        Tensor input = makeGpuTensor(std::vector<float>(79 * k, 0.125f),
+        Tensor input = makeGpuTensor(std::vector<float>(79 * k, 0.5f),
                                      {1, 79, k}, stream, DataType::FP8_E4M3);
         Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, geometry.output_dimensions));
         const auto launch = [&](const CubReductionStageSemantics& semantics) {
@@ -802,7 +798,7 @@ TEST(CubReduction, Fp8CompleteRuntimeFinalizationRejectsUnsupportedSemantics) {
                     input, output, geometry, 1, 496, stream, semantics);
             } else {
                 launchFp8GeneralRParallelRCooperativeCalibrationComplete(
-                    input, output, geometry, 1, 1, 16, stream, false, semantics);
+                    input, output, geometry, 1, 1, 16, stream, semantics);
             }
         };
         CubReductionStageSemantics semantics;
@@ -813,8 +809,22 @@ TEST(CubReduction, Fp8CompleteRuntimeFinalizationRejectsUnsupportedSemantics) {
         EXPECT_NO_THROW(launch(semantics));
         semantics.input_transform = CubReductionStageInputTransform::Square;
         EXPECT_NO_THROW(launch(semantics));
+        // Product is a retained compile-time complete-kernel operation for both
+        // OneWindow and RuntimeK. Its FP32 result must be correct, not rejected.
         semantics = {};
         semantics.combine = CubReductionStageCombine::Product;
+        ASSERT_NO_THROW(launch(semantics));
+        const auto products = copyGpuTensorAsFloat(output, stream);
+        ASSERT_EQ(products.size(), k);
+        for (float value : products) {
+            EXPECT_FLOAT_EQ(value, std::ldexp(1.0f, -79));
+        }
+        // Nonadditive combines still cannot request an additive finalizer.
+        semantics.finalize = CubReductionStageFinalize::Divide;
+        semantics.finalize_divisor = 79;
+        EXPECT_THROW(launch(semantics), std::logic_error);
+        semantics = {};
+        semantics.combine = static_cast<CubReductionStageCombine>(255);
         EXPECT_THROW(launch(semantics), std::logic_error);
         semantics = {};
         semantics.finalize = CubReductionStageFinalize::Divide;

@@ -146,6 +146,15 @@ class Tensor {
     [[nodiscard]] Tensor aliasView(std::vector<uint64_t> dimensions,
                                    std::vector<uint64_t> strides_elements,
                                    uint64_t element_offset = 0) const;
+    // Reinterpret bytes in a contiguous, flat UINT8 Tensor as a typed view.
+    // byte_offset is relative to the source Tensor's visible byte range,
+    // including when the source is itself an alias of a larger allocation.
+    // The returned view shares backing ownership and allocates no storage.
+    // Both visible-view bounds and typed element alignment are checked;
+    // callers are responsible for preventing overlapping live writes.
+    [[nodiscard]] Tensor aliasByteStorageAs(DataType data_type,
+                                            std::vector<uint64_t> dimensions,
+                                            uint64_t byte_offset) const;
     [[nodiscard]] bool hasCustomStrides() const { return !customStridesElements.empty(); }
     [[nodiscard]] bool isDenseContiguous() const;
     [[nodiscard]] uint64_t getStorageElementOffset() const { return storageElementOffset; }

@@ -2100,6 +2100,172 @@ target_compile_options(thor_type_converter_benchmark PRIVATE
         $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G>
 )
 
+# Host-only regression for the production-owned retained FP8 RK candidate
+# selector. No Thor/CUDA linkage, no additional kernel specializations.
+add_executable(thor_fp8_rk_production_selector_smoke EXCLUDE_FROM_ALL
+        benchmarks/Fp8RKProductionCandidatesSmoke.cpp)
+target_include_directories(thor_fp8_rk_production_selector_smoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+
+# CPU-only structural FP8 RK physical-plan contract test.  The seven new
+# production binder/adapter .cpp files are independently compiled through
+# THOR_SOURCES; no separate CUDA compilation or kernel instantiation is added.
+add_executable(thor_fp8_rk_physical_identity_smoke EXCLUDE_FROM_ALL
+        benchmarks/Fp8RKPhysicalIdentitySmoke.cpp
+        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalIdentity.cpp)
+target_include_directories(thor_fp8_rk_physical_identity_smoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Host-only retained RuntimeK proposal census, in its own independently
+# compiled translation unit. No CUDA or XGBoost code is instantiated here.
+add_executable(thor_fp8_rk_runtime_proposals_smoke EXCLUDE_FROM_ALL
+        benchmarks/Fp8RKRuntimeProposalsSmoke.cpp
+        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKRuntimeProposals.cpp
+        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalIdentity.cpp)
+target_include_directories(thor_fp8_rk_runtime_proposals_smoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Standalone host regression: FP8 RK first-stage/FP32-continuation shape
+# and workspace lower-bound contract. Does not instantiate CUDA kernels.
+add_executable(thor_fp8_rk_continuation_layout_smoke EXCLUDE_FROM_ALL
+        benchmarks/Fp8RKContinuationLayoutSmoke.cpp
+        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalIdentity.cpp
+        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKContinuationLayout.cpp)
+target_include_directories(thor_fp8_rk_continuation_layout_smoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Host-only common physical-selector channel and iterative-planner contract. Fake family implementations are confined
+# to this test TU; real R/KR/RK policy parity is checked by CubDensePhysicalSelector in thor_tests.
+add_executable(thor_dense_physical_selector_channel_smoke EXCLUDE_FROM_ALL
+        benchmarks/DensePhysicalSelectorChannelSmoke.cpp
+        Utilities/TensorOperations/Cub/DenseReductionPhysicalSelector.cpp
+        Utilities/TensorOperations/Cub/DenseReductionPlanner.cpp
+        Utilities/TensorOperations/Cub/DenseReductionPlanning.cpp)
+target_include_directories(thor_dense_physical_selector_channel_smoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(thor_dense_physical_selector_channel_smoke PRIVATE nlohmann_json::nlohmann_json)
+
+# Host-only retained FP8 RK first-stage physical-plan/ordinary planner contract.
+# Tests inject FP8 physical identities and subsequent FP32 candidates.
+add_executable(thor_dense_retained_fp8_rk_physical_plan_smoke EXCLUDE_FROM_ALL
+        benchmarks/DenseRetainedFp8RKPhysicalPlanSmoke.cpp
+        Utilities/TensorOperations/Cub/DenseRetainedFp8RKPhysicalPlan.cpp
+        Utilities/TensorOperations/Cub/DenseReductionPhysicalSelector.cpp
+        Utilities/TensorOperations/Cub/DenseReductionPlanner.cpp
+        Utilities/TensorOperations/Cub/DenseReductionPlanning.cpp
+        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalIdentity.cpp
+        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKContinuationLayout.cpp)
+target_include_directories(thor_dense_retained_fp8_rk_physical_plan_smoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(thor_dense_retained_fp8_rk_physical_plan_smoke PRIVATE nlohmann_json::nlohmann_json)
+
+# P2-D: real default-production selector, flat stamped passes, multi-axis,
+# explicit unsupported semantics, descriptor workspace, and no run-time selection.
+add_executable(thor_fp8_rk_production_cutover_smoke EXCLUDE_FROM_ALL
+        benchmarks/Fp8RKProductionCutoverSmoke.cpp)
+target_link_libraries(thor_fp8_rk_production_cutover_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_include_directories(thor_fp8_rk_production_cutover_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Ordinary dense planner/stamp/run integration of one retained FP8 RK
+# physical pass plus independently selected FP32 passes.
+add_executable(thor_dense_retained_fp8_rk_execution_smoke EXCLUDE_FROM_ALL
+        benchmarks/DenseRetainedFp8RKExecutionSmoke.cpp)
+target_link_libraries(thor_dense_retained_fp8_rk_execution_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_include_directories(thor_dense_retained_fp8_rk_execution_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Host-only site contract. Kept in separate compilation units; no CUDA
+# template instantiations are introduced by the isolated RK planning layer.
+add_executable(thor_fp8_rk_isolated_site_smoke EXCLUDE_FROM_ALL
+        benchmarks/Fp8RKIsolatedSiteSmoke.cpp
+        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKIsolatedSite.cpp
+        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKContinuationLayout.cpp
+        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalIdentity.cpp
+        Utilities/TensorOperations/Cub/DenseReductionPlanning.cpp)
+target_include_directories(thor_fp8_rk_isolated_site_smoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(thor_fp8_rk_isolated_site_smoke PRIVATE nlohmann_json::nlohmann_json)
+
+# CUDA-free official-selector continuation chain: zero, one and multiple
+# individually selected FP32 physical passes, no alternative FP32 policy.
+add_executable(thor_fp8_rk_selected_continuation_smoke EXCLUDE_FROM_ALL
+        benchmarks/Fp8RKSelectedContinuationSmoke.cpp
+        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKSelectedContinuation.cpp
+        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKIsolatedSite.cpp
+        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKContinuationLayout.cpp
+        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalIdentity.cpp
+        Utilities/TensorOperations/Cub/DenseReductionPhysicalSelector.cpp
+        Utilities/TensorOperations/Cub/DenseReductionPlanning.cpp)
+target_include_directories(thor_fp8_rk_selected_continuation_smoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(thor_fp8_rk_selected_continuation_smoke PRIVATE nlohmann_json::nlohmann_json)
+
+# Host-only GEMM-style selection recipe boundary. No CUDA or Thor objects.
+add_executable(thor_fp8_rk_selection_recipe_smoke EXCLUDE_FROM_ALL
+    benchmarks/Fp8RKSelectionRecipeSmoke.cpp)
+target_include_directories(thor_fp8_rk_selection_recipe_smoke PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+
+# P2-A descriptor-only FP8 key/ownership boundary (no CUDA runtime).
+add_executable(thor_fp8_rk_descriptor_selection_smoke EXCLUDE_FROM_ALL
+        benchmarks/Fp8RKDescriptorSelectionSmoke.cpp)
+target_include_directories(thor_fp8_rk_descriptor_selection_smoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(thor_fp8_rk_descriptor_selection_smoke PRIVATE nlohmann_json::nlohmann_json)
+
+# P2-A real GPU cache-miss input construction and cross-overload cache parity.
+# No CUDA kernel specialization additions.
+add_executable(thor_fp8_rk_descriptor_selection_gpu_smoke EXCLUDE_FROM_ALL
+        benchmarks/Fp8RKDescriptorSelectionGpuSmoke.cpp)
+target_link_libraries(thor_fp8_rk_descriptor_selection_gpu_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_include_directories(thor_fp8_rk_descriptor_selection_gpu_smoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+
+# CUDA-independent regression for recipe-only caching, LRU eviction,
+# concurrent same-key misses, failure/retry, and clear/in-flight races.
+add_executable(thor_fp8_rk_selection_cache_smoke EXCLUDE_FROM_ALL
+    benchmarks/Fp8RKSelectionCacheSmoke.cpp)
+target_include_directories(thor_fp8_rk_selection_cache_smoke PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(thor_fp8_rk_selection_cache_smoke PRIVATE pthread)
+
+# P1-D host-only lock and cache lifecycle, without CUDA runtime/device objects.
+# This shared lock is also the serialization primitive for future FP32 tuning.
+add_executable(thor_reduction_gpu_measurement_lifecycle_smoke EXCLUDE_FROM_ALL
+        benchmarks/ReductionGpuMeasurementLifecycleSmoke.cpp
+        Utilities/TensorOperations/Cub/ReductionGpuMeasurementLock.cpp)
+target_include_directories(thor_reduction_gpu_measurement_lifecycle_smoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(thor_reduction_gpu_measurement_lifecycle_smoke PRIVATE pthread)
+
+# Phase-3 CUDA lifecycle regression. Separate host TU: no additional GPU
+# specializations, and it can build in parallel with the other smoke targets.
+add_executable(thor_fp8_rk_stamp_lifecycle_smoke EXCLUDE_FROM_ALL
+        benchmarks/Fp8RKStampLifecycleSmoke.cpp)
+target_link_libraries(thor_fp8_rk_stamp_lifecycle_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_include_directories(thor_fp8_rk_stamp_lifecycle_smoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+
+# P1-C temporary benchmark-only FP32 continuation with real physical
+# production selection/launch; does not alter the active FP8 autotuner.
+add_executable(thor_fp8_rk_selected_continuation_gpu_smoke EXCLUDE_FROM_ALL
+        benchmarks/Fp8RKSelectedContinuationGpuSmoke.cpp)
+target_link_libraries(thor_fp8_rk_selected_continuation_gpu_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_include_directories(thor_fp8_rk_selected_continuation_gpu_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Permanent retained-only FP8 cold-L2 oracle census. Uses the same production
+# physical launches/FP32 completions; no removed experimental CUDA kernels.
+add_executable(thor_fp8_retained_cold_l2_sweep EXCLUDE_FROM_ALL
+        benchmarks/Fp8RetainedColdL2Sweep.cpp)
+thor_apply_linker_settings(thor_fp8_retained_cold_l2_sweep)
+target_link_libraries(thor_fp8_retained_cold_l2_sweep PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_include_directories(thor_fp8_retained_cold_l2_sweep PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(thor_fp8_rk_stamp_autotuner_smoke EXCLUDE_FROM_ALL
+        benchmarks/Fp8RKStampAutotunerSmoke.cpp)
+target_link_libraries(thor_fp8_rk_stamp_autotuner_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_include_directories(thor_fp8_rk_stamp_autotuner_smoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+
 add_executable(thor_cub_reduction_benchmark EXCLUDE_FROM_ALL
         benchmarks/CubReductionBenchmark.cpp
         benchmarks/CubReductionBenchmarkCandidate.cpp
@@ -2123,12 +2289,17 @@ target_compile_options(thor_cub_reduction_benchmark PRIVATE
         $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Debug>>:-O0 -ggdb>
         $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:-O3>
         $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:RelWithDebInfo>>:-O3>
-        # This is a performance benchmark. Benchmark-only CUDA candidates must remain optimized even when the
-        # surrounding Thor build is Debug; -G would make their timing incomparable with production/library kernels.
-        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-O3>
+        # Debug CUDA optimization is per-source below: one explicit -O level per NVCC compilation.
 )
-# The RK calibration harness executes the modern family directly. Match the Thor library's Debug optimization level so
-# calibration never measures a benchmark-only optimization-level advantage.
+# Benchmark-only kernels remain optimized in Debug, without imposing -O3 on the RK calibration TU.
+foreach(_thor_cub_benchmark_optimized_cuda_source IN ITEMS
+        benchmarks/CubReductionBenchmarkDenseRunTrailingReducedCandidate.cu
+        benchmarks/CubReductionBenchmarkCudnnFrontendLayout.cu)
+    set_property(SOURCE ${_thor_cub_benchmark_optimized_cuda_source} APPEND PROPERTY COMPILE_OPTIONS
+            $<$<CONFIG:Debug>:-O3>)
+endforeach()
+# RK calibration runs the production family directly. Match Thor's Debug optimization level to avoid
+# measuring an artificial benchmark-only advantage, and don't pass a conflicting target-wide -O3.
 set_property(SOURCE benchmarks/CubReductionBenchmarkDenseRKFamilyCandidate.cu APPEND PROPERTY COMPILE_OPTIONS
         $<$<CONFIG:Debug>:-O0>)
 
@@ -2684,13 +2855,17 @@ if (THOR_ENABLE_FP8_SELECTED_INVENTORY_SIZE_TARGET AND NOT _thor_python_release_
             COMMAND "${_thor_fp8_inventory_python}" "${_thor_fp8_inventory_script}"
                     generate --source "${CMAKE_SOURCE_DIR}" --out "${_thor_fp8_inventory_dir}"
             DEPENDS "${_thor_fp8_inventory_script}"
+                    "${CMAKE_SOURCE_DIR}/benchmarks/fp8_accepted_pruning.csv"
                     "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubReductionNarrowFlatRCooperative.cu"
                     "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubReductionKParallelShardedTiled.cu"
                     "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubReductionAwkwardRotatedSharded.cu"
-                    "${CMAKE_SOURCE_DIR}/benchmarks/Fp8OneWindowSelector.h"
-                    "${CMAKE_SOURCE_DIR}/benchmarks/Fp8DeepRSmallKSelector.h"
-                    "${CMAKE_SOURCE_DIR}/benchmarks/Fp8AlignedKSelector.h"
-                    "${CMAKE_SOURCE_DIR}/benchmarks/Fp8RuntimeKSelector.h"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/Fp8RK/Fp8OneWindowSelector.h"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/Fp8RK/Fp8DeepRSmallKSelector.h"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/Fp8RK/Fp8AlignedKSelector.h"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/Fp8RK/Fp8RuntimeKSelector.h"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/Fp8RK/Fp8GeometryRankerModel.h"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/Fp8RK/Fp8GeneralRParallelSelector.h"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/Fp8RK/Fp8RKProductionCandidates.h"
             COMMENT "Generate isolated selector-reachable FP8 CUDA kernels"
             VERBATIM
     )
@@ -2733,4 +2908,13 @@ if (THOR_ENABLE_FP8_SELECTED_INVENTORY_SIZE_TARGET AND NOT _thor_python_release_
             COMMAND_EXPAND_LISTS VERBATIM
             COMMENT "Measure only compiled selector-reachable FP8 kernel device symbols"
     )
+
 endif ()
+
+# Standalone CUDA validation of the reusable cold-L2 reduction autotuner.
+# Excluded from normal builds; no production dispatch or kernel inventory change.
+add_executable(thor_reduction_autotuner_smoke EXCLUDE_FROM_ALL
+        benchmarks/ReductionAutotunerCudaSmoke.cu)
+thor_apply_linker_settings(thor_reduction_autotuner_smoke)
+set_target_properties(thor_reduction_autotuner_smoke PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
+target_link_libraries(thor_reduction_autotuner_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})

@@ -1,33 +1,12 @@
 #pragma once
 
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
+#include "Utilities/TensorOperations/Cub/CubReductionStageSemantics.h"
 
 #include <cstddef>
 #include <optional>
 
 namespace ThorImplementation::CubReductionInternal {
-
-// Physical execution and dense composition share one semantic pass-role vocabulary.
-using CubReductionStageRole = CubReductionPassRole;
-
-enum class CubReductionStageInputTransform : uint8_t {
-    Identity = 0,
-    AbsoluteValue = 1,
-    Square = 2,
-};
-
-enum class CubReductionStageCombine : uint8_t {
-    Sum = 0,
-    Product = 1,
-    Minimum = 2,
-    Maximum = 3,
-};
-
-enum class CubReductionStageFinalize : uint8_t {
-    Identity = 0,
-    Divide = 1,
-    SquareRoot = 2,
-};
 
 /**
  * Physical topology of one TiledRK reduction stage.
@@ -49,14 +28,6 @@ struct KParallelTiledStagePlan {
     uint64_t shards_per_output = 0;
 };
 
-/** Benchmark-only FP8 KParallel Straddled physical plan. The kernel always consumes aligned 16-byte packets from the
- * flattened [R,K] byte stream; block_threads selects how many independent warp work-items share a CTA. */
-struct KParallelStraddledStagePlan {
-    TiledRKStageTopology topology = TiledRKStageTopology::Staged;
-    uint32_t block_threads = 0;
-    uint64_t shards_per_output = 0;
-};
-
 /**
  * Exact CUDA resource/occupancy metadata for one concrete kernel specialization.
  *
@@ -71,27 +42,6 @@ struct CubKernelOccupancyInfo {
     int max_active_blocks_per_sm = 0;
     int max_active_warps_per_sm = 0;
 };
-
-/**
- * Mathematical semantics of one physical value-reduction pass.
- *
- * Public CubReductionOp intentionally describes the complete operation, while a composed dense reduction must apply
- * the input transform only on its first pass and the output finalizer only on its last pass.  This descriptor separates
- * those concerns without adding more public reduction operations or changing the direct reducer families.
- *
- * finalize_divisor is consulted only for Divide and is the total original reduction-domain size, not the current
- * physical stage's reduction size.
- */
-struct CubReductionStageSemantics {
-    CubReductionStageInputTransform input_transform = CubReductionStageInputTransform::Identity;
-    CubReductionStageCombine combine = CubReductionStageCombine::Sum;
-    CubReductionStageFinalize finalize = CubReductionStageFinalize::Identity;
-    uint64_t finalize_divisor = 1;
-};
-
-[[nodiscard]] CubReductionStageSemantics makeValueReductionStageSemantics(CubReductionOp op,
-                                                                           CubReductionStageRole role,
-                                                                           uint64_t total_reduction_size);
 
 /**
  * Launches the benchmark-proven cooperative y8/16-byte-packet first stage for a natural dense tiled reduction.
@@ -119,10 +69,14 @@ void launchCooperativeShardedTiledFirstStage(const CubReductionStageSemantics& s
  * topology requires shards_per_output == 1 and writes the supplied stage output directly, applying the semantic
  * finalizer, runtime output scale, and output dtype conversion for this mathematical pass.
  *
- * packet_bytes is the naturally aligned per-lane input transaction width. Established FP16/BF16/FP32 KParallel uses
- * 4/8/16 B; FP8 additionally specializes 2 B so narrow even-K rows can remain on the same modern family. Every global
- * lane transaction remains <=16 B. block_threads must select one of the compile-time-specialized
- * 32/64/128/256-thread kernels.
+ * packet_bytes is the naturally aligned per-lane input transaction width. FP16/BF16/FP32 KParallel uses 4/8/16 B
+ * with block_threads in {32,64,128,256}. Every global lane transaction remains <=16 B.
+ *
+ * FP8 input is the retained AlignedK family only (Fp8RK::Fp8AlignedKPolicy): Staged P2/P8 x CTA32/64/128 and
+ * Complete P2/CTA32, P8/CTA32 and P8/CTA64. Any other FP8 packet/CTA request is not compiled and throws
+ * std::logic_error. Staged Identity SUM/PRODUCT/MIN/MAX share one operation-unified kernel per configuration;
+ * Complete Identity uses joined P2/CTA32, in-branch P8/CTA32, and typed SUM/MEAN plus in-branch nonadditive
+ * P8/CTA64. ABS/Square compositions use the typed packet kernel, minus the accepted pruned specializations.
  */
 void launchKParallelTiledStage(const CubReductionStageSemantics& semantics,
                                const Tensor& input,
@@ -132,27 +86,22 @@ void launchKParallelTiledStage(const CubReductionStageSemantics& semantics,
                                float output_scale,
                                Stream& stream);
 
-/** Query exact CUDA occupancy metadata for the SUM/identity K-parallel specialization selected by plan. */
+/** Query exact CUDA occupancy metadata for the physical production K-parallel kernel selected by plan.
+ * For FP8 input only the retained AlignedK Identity configurations are compiled; others throw std::logic_error. */
 [[nodiscard]] CubKernelOccupancyInfo queryKParallelTiledStageOccupancy(DataType input_dtype,
                                                                        const KParallelTiledStagePlan& plan);
 
-/**
- * Benchmark-only FP8 KParallel Straddled stage for 1 <= K <= 31 with K % 16 != 0. It preserves aligned p16 global
- * loads by allowing physical packets to cross logical row boundaries. A warp-private shared-memory epilogue folds the
- * repeating row phases back to one accumulator per logical K component. Production selector policy never calls this
- * entry point.
- */
-void launchFp8KParallelStraddledStage(const CubReductionStageSemantics& semantics,
-                                      const Tensor& input,
-                                      Tensor& stage_output,
-                                      const CubReductionGeometry& geometry,
-                                      const KParallelStraddledStagePlan& plan,
-                                      float output_scale,
-                                      Stream& stream);
+/** Exact operation/output-aware occupancy of a retained AlignedK Identity Complete kernel.
+ * In P8/CTA64, SUM/MEAN uses typed additive and PRODUCT/MIN/MAX uses unified
+ * in-branch; neither the packet nor the CTA axis implies a compiled R depth. */
+[[nodiscard]] CubKernelOccupancyInfo queryFp8AlignedKCompleteOccupancy(
+    DataType input_dtype, DataType output_dtype, CubReductionStageCombine operation,
+    const KParallelTiledStagePlan& plan);
 
-/** Query exact CUDA occupancy metadata for the benchmark-only FP8 KParallel Straddled specialization. */
-[[nodiscard]] CubKernelOccupancyInfo queryFp8KParallelStraddledStageOccupancy(
-    DataType input_dtype, const KParallelStraddledStagePlan& plan);
+/** Exact physical occupancy for both Identity and transformed AlignedK kernels. */
+[[nodiscard]] CubKernelOccupancyInfo queryFp8AlignedKStageOccupancy(
+    DataType input_dtype, DataType output_dtype, CubReductionStageInputTransform transform,
+    CubReductionStageCombine operation, const KParallelTiledStagePlan& plan);
 
 /**
  * Launches exactly one rotated R-cooperative TiledRK stage. The stage applies the input transform and associative
@@ -167,37 +116,16 @@ void launchAwkwardAlignmentRotatedShardedFirstStage(const CubReductionStageSeman
                                                      uint64_t shards_per_output,
                                                      Stream& stream);
 
-/** Query exact CUDA occupancy metadata for the SUM/identity rotated R-cooperative staged specialization. */
+/** Query exact CUDA occupancy metadata for the SUM/identity rotated R-cooperative staged specialization.
+ * FP16/BF16/FP32 only; original FP8 input uses the retained RuntimeK rotated first stage. */
 [[nodiscard]] CubKernelOccupancyInfo queryAwkwardAlignmentRotatedShardedFirstStageOccupancy(
     DataType input_dtype, uint64_t rows_per_shard);
 
 /**
- * Benchmark-only FP8 SUM rotated launch. Calibration may compare prefix-reserved p4/p8/p16 layouts and
- * the exact p16 layout across shallow through deep R. RuntimeK p16 uses compile-time Identity/ABS/Square
- * transforms at the retained row depths; historical p4/p8 and additional oracle row depths stay Identity-only.
- * Packet width is benchmark geometry only; production policy remains unchanged.
- */
-void launchFp8AwkwardAlignmentRotatedShardedCalibrationFirstStage(
-    const Tensor& input,
-    Tensor& fp32_partials,
-    const CubReductionGeometry& geometry,
-    size_t packet_bytes,
-    bool exact_tile,
-    uint64_t rows_per_shard,
-    uint64_t shards_per_output,
-    Stream& stream,
-    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity);
-
-[[nodiscard]] CubKernelOccupancyInfo queryFp8AwkwardAlignmentRotatedShardedCalibrationOccupancy(
-    DataType input_dtype, size_t packet_bytes, bool exact_tile, uint64_t rows_per_shard,
-    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity);
-
-/**
- * Benchmark-only generalized runtime-K RParallel access mode backed by the calibrated p16 rotated packet-ownership
- * kernel. This is not a new physical kernel family: it exposes RotatedPacketOwnership as a second access layout of
- * generalized K tiling while the historical standalone Rotated entry points remain available as comparison controls.
- * K tiles are runtime-sized (497 PrefixReserved or 512 Exact), R is sharded by the selected fixed row depth, and the
- * stage emits FP32 [outer,shards,K] partials with no K-tile merge.
+ * Retained RuntimeK rotated first stage: p16 packets, exact (512) or prefix-reserved (497) runtime K tiles,
+ * and only the retained Fp8RuntimeKPolicy::rotated_row_depths. Emits FP32 [outer,shards,K] partials with no
+ * K-tile merge; finalizer, scale and output conversion belong to the independently planned continuation.
+ * Any other row depth is not compiled and fails with std::logic_error (occupancy: absent candidate).
  */
 void launchFp8GeneralRParallelKTileRotatedCalibrationFirstStage(
     const Tensor& input,
@@ -207,18 +135,19 @@ void launchFp8GeneralRParallelKTileRotatedCalibrationFirstStage(
     uint64_t rows_per_shard,
     uint64_t shards_per_output,
     Stream& stream,
-    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity);
+    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity,
+    CubReductionStageCombine combine = CubReductionStageCombine::Sum);
 
 [[nodiscard]] CubKernelOccupancyInfo queryFp8GeneralRParallelKTileRotatedCalibrationOccupancy(
     DataType input_dtype, bool exact_tile, uint64_t rows_per_shard,
-    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity);
+    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity,
+    CubReductionStageCombine combine = CubReductionStageCombine::Sum);
 
 /**
- * Experimental modern R-cooperative primitive for FP8/FP16/BF16 K<=32. Each warp reads exactly 16*K bytes as one
- * flat contiguous 16-byte-packet window: sixteen FP8 rows or eight FP16/BF16 rows. FP8 preserves those packets in
- * packed shared storage through the ownership transpose and converts to FP32 only at the final logical component owner;
- * FP16/BF16 retain the established implementation. The stage emits one FP32 partial per [outer,shard,K], is exactly one
- * physical pass, and owns no continuation. FP8 remains policy-gated pending this calibration.
+ * Production FP16/BF16 narrow-flat R-cooperative stage for K<=32.
+ * Emits unfinalized FP32 [outer,shard,K] partials in one physical pass.
+ * Original FP8 RK VALUE inputs use the separate retained first-stage selector;
+ * this generic family is not an FP8 compatibility fallback.
  */
 void launchNarrowLowPrecisionFlatRCooperativeFirstStage(const CubReductionStageSemantics& semantics,
                                                          const Tensor& input,
@@ -232,92 +161,28 @@ void launchNarrowLowPrecisionFlatRCooperativeFirstStage(const CubReductionStageS
 [[nodiscard]] CubKernelOccupancyInfo queryNarrowLowPrecisionFlatRCooperativeFirstStageOccupancy(
     DataType input_dtype, uint64_t rows_per_shard);
 
-/** Benchmark-only FP8 SUM/identity FlatRows calibration entry point. Packet widths 4/8/16 are exposed only for
- * full-space calibration; each keeps the eight-warp FlatRows topology and adaptively fills its packet-width-specific
- * warp window. Production policy remains unchanged. */
-void launchFp8NarrowLowPrecisionFlatRCooperativeCalibrationFirstStage(
-    const Tensor& input,
-    Tensor& fp32_partials,
-    const CubReductionGeometry& geometry,
-    size_t packet_bytes,
-    uint64_t rows_per_shard,
-    uint64_t shards_per_output,
+/** Retained DeepRSmallK FP8 P16 first stage, with typed SUM/PRODUCT/MIN/MAX,
+ * typed Identity/ABS/Square, typed E4M3/E5M2, and the selected five depths.
+ * Emits UNFINALIZED FP32 [outer, ceil(R/rows), K] partials. The caller must
+ * independently plan an FP32 continuation with the same combine semantics.
+ * This does not change the existing production planner or selector.
+ */
+void launchFp8DeepRSmallKRetainedFirstStage(
+    const CubReductionStageSemantics& semantics, const Tensor& input, Tensor& fp32_partials,
+    const CubReductionGeometry& geometry, uint64_t rows_per_shard, uint64_t shards_per_output,
     Stream& stream);
 
-[[nodiscard]] CubKernelOccupancyInfo queryFp8NarrowLowPrecisionFlatRCooperativeCalibrationOccupancy(
-    DataType input_dtype, size_t packet_bytes, uint64_t rows_per_shard, uint64_t inner_size);
-
-/** DEPRECATED EXPERIMENT ONLY -- NOT A PRODUCTION CANDIDATE. Benchmark-only one-output-per-warp FP8 p4 complete
- * reducer retained solely as a calibration baseline. The focused census showed that it wins over older inventory but
- * still underutilizes tiny-K warps and reaches no line-rate cells. Do not promote or schedule this path. */
-void launchDeprecatedExperimentalFp8OuterGroupedP4RCooperativeCalibrationComplete(
-    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry, Stream& stream);
-
-[[nodiscard]] CubKernelOccupancyInfo
-queryDeprecatedExperimentalFp8OuterGroupedP4RCooperativeCalibrationOccupancy(
-    DataType input_dtype, uint64_t inner_size);
-
-/** Benchmark-only compact multi-output FP8 SUM/identity complete reducer. Multiple adjacent outputs share one
- * 128-byte p4 warp window. Group strides are chosen to keep both input and output naturally p4 aligned, and complete
- * groups use p4 output stores. Calibration-only; production policy remains unchanged. */
-void launchFp8CompactMultiOutputWarpP4RCooperativeCalibrationComplete(
-    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry, Stream& stream);
-
-[[nodiscard]] CubKernelOccupancyInfo queryFp8CompactMultiOutputWarpP4RCooperativeCalibrationOccupancy(
-    DataType input_dtype, uint64_t inner_size, uint32_t outputs_per_warp);
-
-[[nodiscard]] uint32_t fp8CompactMultiOutputWarpP4RCooperativeCalibrationOutputsPerWarp(
-    uint64_t reduction_size, uint64_t inner_size);
+[[nodiscard]] CubKernelOccupancyInfo queryFp8DeepRSmallKRetainedOccupancy(
+    DataType input_dtype, uint64_t rows_per_shard, uint64_t inner_size,
+    const CubReductionStageSemantics& semantics);
 
 
-/** Benchmark-only CompactMultiOutput packet-width calibration. p4 routes to the established compact kernel;
- * p8/p16 load one wide packet per producer lane, keep FP8 packed in plane-major shared memory, and decode in the
- * component consumers. R remains runtime and the packet window determines how many adjacent outputs fit per warp. */
-void launchFp8CompactMultiOutputWarpRCooperativeCalibrationComplete(
-    const Tensor& input,
-    Tensor& output,
-    const CubReductionGeometry& geometry,
-    uint32_t packet_bytes,
-    Stream& stream);
 
-[[nodiscard]] CubKernelOccupancyInfo queryFp8CompactMultiOutputWarpRCooperativeCalibrationOccupancy(
-    DataType input_dtype,
-    uint64_t inner_size,
-    uint32_t outputs_per_warp,
-    uint32_t packet_bytes);
 
-[[nodiscard]] uint32_t fp8CompactMultiOutputWarpRCooperativeCalibrationOutputsPerWarp(
-    uint64_t reduction_size,
-    uint64_t inner_size,
-    uint32_t packet_bytes);
 
-/** Benchmark-only one-output-per-warp FP8 p4 reducer that spends otherwise-idle lanes across R for each K component. */
-void launchFp8RParallelWarpP4RCooperativeCalibrationComplete(
-    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry, Stream& stream);
-
-[[nodiscard]] CubKernelOccupancyInfo queryFp8RParallelWarpP4RCooperativeCalibrationOccupancy(
-    DataType input_dtype, uint64_t inner_size);
-
-/** Benchmark-only general RParallel calibration family. One warp is partitioned into 1/2/4/8/16/32 independent
- * output groups while preserving component/R-worker ownership. O1 p4 routes to the established one-output kernel;
- * packet_bytes=8/16 use one wide global packet per producer lane, plane-major packed shared staging, and packed FP8
- * decode in the component consumers. R remains runtime; packet width and outputs-per-warp are physical shapes, not
- * K x R specializations. */
-void launchFp8MultiOutputRParallelWarpRCooperativeCalibrationComplete(
-    const Tensor& input,
-    Tensor& output,
-    const CubReductionGeometry& geometry,
-    uint32_t outputs_per_warp,
-    uint32_t packet_bytes,
-    Stream& stream);
-
-[[nodiscard]] CubKernelOccupancyInfo queryFp8MultiOutputRParallelWarpRCooperativeCalibrationOccupancy(
-    DataType input_dtype, uint64_t inner_size, uint32_t outputs_per_warp, uint32_t packet_bytes);
-
-/** Benchmark-only general Complete RParallel calibration family. Ownership is factored along two mutually exclusive
- * axes: O1 may use W1/W2/W4/W8 warps per output, while O2/O4/O8 partition one W1 warp among outputs. Within each
- * output, spare lanes become R workers/component for narrow K and larger K assigns multiple components/lane.
- * p4/p8/p16 packed shared remapping handles aligned and awkward K in the same physical family. */
+/** Retained OneWindow Complete kernel. O1 supports W1/W2/W4/W8, while O2/O4/O8
+ * partition a warp among outputs. Applies the runtime finalizer/scale and converts
+ * to the final output dtype. This function name predates the retained cutover. */
 void launchFp8GeneralRParallelRCooperativeCalibrationComplete(
     const Tensor& input,
     Tensor& output,
@@ -326,31 +191,8 @@ void launchFp8GeneralRParallelRCooperativeCalibrationComplete(
     uint32_t warps_per_output,
     uint32_t packet_bytes,
     Stream& stream,
-    bool linear_packets = false,
-    const CubReductionStageSemantics& semantics = {});
-
-/** Measurement-only original FP8 epilogues. These are not selector candidates. */
-void launchFp8OneWindowLegacyStoreBenchmark(
-    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry,
-    uint32_t warps_per_output, Stream& stream);
-void launchFp8RuntimeKCompleteLegacyStoreBenchmark(
-    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry,
-    uint32_t warps_per_output, uint32_t tile_components, Stream& stream);
-
-/** Measurement controls for OneWindow and RuntimeK Complete input transforms.
- * OneWindow fixed transforms are oracle-only. RuntimeK fixed transforms are now
- * selectable physical variants; its runtime transform remains benchmark-only. */
-void launchFp8OneWindowFixedTransformBenchmark(
-    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry,
-    uint32_t warps_per_output, CubReductionStageInputTransform transform, Stream& stream);
-void launchFp8RuntimeKCompleteFixedTransformBenchmark(
-    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry,
-    uint32_t warps_per_output, uint32_t tile_components,
-    CubReductionStageInputTransform transform, Stream& stream);
-void launchFp8RuntimeKCompleteRuntimeTransformBenchmark(
-    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry,
-    uint32_t warps_per_output, uint32_t tile_components,
-    CubReductionStageInputTransform transform, Stream& stream);
+    const CubReductionStageSemantics& semantics = {},
+    float output_scale = 1.0f);
 
 [[nodiscard]] CubKernelOccupancyInfo queryFp8GeneralRParallelRCooperativeCalibrationOccupancy(
     DataType input_dtype,
@@ -358,34 +200,11 @@ void launchFp8RuntimeKCompleteRuntimeTransformBenchmark(
     uint32_t outputs_per_warp,
     uint32_t warps_per_output,
     uint32_t packet_bytes,
-    bool linear_packets = false);
+    CubReductionStageCombine combine = CubReductionStageCombine::Sum);
 
 
-/** Benchmark-only staged topology of generalized RParallel. S2/S4/S8 balance R across independent CTA shards and
- * emit FP32 [outer, shard, K] partials. Staging is O1-only because S already supplies independent work; W1/W2/W4/W8
- * remains the intra-shard cooperation axis and p4/p8/p16 retain the same packed producer/component ownership as the
- * Complete family. Production policy is unchanged. */
-void launchFp8GeneralRParallelRCooperativeCalibrationFirstStage(
-    const Tensor& input,
-    Tensor& fp32_partials,
-    const CubReductionGeometry& geometry,
-    uint32_t warps_per_output,
-    uint32_t packet_bytes,
-    uint32_t shards_per_output,
-    Stream& stream,
-    bool linear_packets = false);
-
-[[nodiscard]] CubKernelOccupancyInfo queryFp8GeneralRParallelRCooperativeCalibrationFirstStageOccupancy(
-    DataType input_dtype,
-    uint64_t inner_size,
-    uint32_t warps_per_output,
-    uint32_t packet_bytes,
-    bool linear_packets = false);
-
-
-/** Benchmark-only runtime-K tiled continuation of generalized RParallel. K is partitioned into independent p16
- * component tiles; tile size is runtime-selected from device parallelism, so total K is not a compile-time dispatch
- * axis. Complete writes disjoint output slices directly. */
+/** Retained RuntimeK PacketP16 Complete kernel. K tiles and warp ownership are
+ * runtime geometry; finalizer, scale, and output conversion occur on the completed result. */
 void launchFp8GeneralRParallelKTileRCooperativeCalibrationComplete(
     const Tensor& input,
     Tensor& output,
@@ -393,121 +212,13 @@ void launchFp8GeneralRParallelKTileRCooperativeCalibrationComplete(
     uint32_t warps_per_output,
     uint32_t tile_components,
     Stream& stream,
-    const CubReductionStageSemantics& semantics = {});
+    const CubReductionStageSemantics& semantics = {},
+    float output_scale = 1.0f);
 
 [[nodiscard]] CubKernelOccupancyInfo queryFp8GeneralRParallelKTileRCooperativeCalibrationOccupancy(
     DataType input_dtype,
-    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity);
-
-/** Benchmark-only runtime-K tiled FirstStage. Work is [outer, shard, k_tile] and writes the ordinary FP32
- * [outer, shard, K] partial tensor after the compile-time selected Identity/ABS/Square input transform.
- * K tiles never communicate with each other. Finalization belongs to the FP32 continuation. */
-void launchFp8GeneralRParallelKTileRCooperativeCalibrationFirstStage(
-    const Tensor& input,
-    Tensor& fp32_partials,
-    const CubReductionGeometry& geometry,
-    uint32_t warps_per_output,
-    uint32_t shards_per_output,
-    uint32_t tile_components,
-    Stream& stream,
-    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity);
-
-[[nodiscard]] CubKernelOccupancyInfo queryFp8GeneralRParallelKTileRCooperativeCalibrationFirstStageOccupancy(
-    DataType input_dtype,
-    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity);
-
-/** Compatibility wrapper for the original small-K W2/W4/W8 calibration entry point. It now routes through the
- * general Complete RParallel physical kernel above. */
-void launchFp8MultiWarpRParallelRCooperativeCalibrationComplete(
-    const Tensor& input,
-    Tensor& output,
-    const CubReductionGeometry& geometry,
-    uint32_t warps_per_output,
-    uint32_t packet_bytes,
-    Stream& stream);
-
-[[nodiscard]] CubKernelOccupancyInfo queryFp8MultiWarpRParallelRCooperativeCalibrationOccupancy(
-    DataType input_dtype, uint64_t inner_size, uint32_t warps_per_output, uint32_t packet_bytes);
-
-/** Compatibility wrappers for the original p4 calibration entry points. */
-void launchFp8MultiOutputRParallelWarpP4RCooperativeCalibrationComplete(
-    const Tensor& input,
-    Tensor& output,
-    const CubReductionGeometry& geometry,
-    uint32_t outputs_per_warp,
-    Stream& stream);
-
-[[nodiscard]] CubKernelOccupancyInfo queryFp8MultiOutputRParallelWarpP4RCooperativeCalibrationOccupancy(
-    DataType input_dtype, uint64_t inner_size, uint32_t outputs_per_warp);
-
-/** Benchmark-only K=2 RParallel specialization. One p4 load spans both K components across two adjacent R rows;
- * 16 lanes cooperate per output at R=31/32 and a full warp cooperates at R=63/64. Production policy is unchanged. */
-void launchFp8K2PairedRowsRParallelP4RCooperativeCalibrationComplete(
-    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry, Stream& stream);
-
-[[nodiscard]] CubKernelOccupancyInfo queryFp8K2PairedRowsRParallelP4RCooperativeCalibrationOccupancy(
-    DataType input_dtype, uint64_t reduction_size);
-
-/** Benchmark-only K=3 phase-stream RParallel specialization. Consecutive aligned p4 loads are canonicalized
- * lane-locally into K=3 FP32 partials before subwarp/warp reduction. Production policy is unchanged. */
-void launchFp8K3PhaseStreamRParallelP4RCooperativeCalibrationComplete(
-    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry, Stream& stream);
-
-[[nodiscard]] CubKernelOccupancyInfo queryFp8K3PhaseStreamRParallelP4RCooperativeCalibrationOccupancy(
-    DataType input_dtype, uint64_t reduction_size);
-
-/** Benchmark-only even-R K=3 phase-stream p8-input specialization. Each lane reads one aligned p8 and decodes
- * four FP8x2 pairs; p4 writeback is retained to isolate input packet width. Production policy is unchanged. */
-void launchFp8K3PhaseStreamRParallelP8InputRCooperativeCalibrationComplete(
-    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry, Stream& stream);
-
-[[nodiscard]] CubKernelOccupancyInfo queryFp8K3PhaseStreamRParallelP8InputRCooperativeCalibrationOccupancy(
-    DataType input_dtype, uint64_t reduction_size);
-
-/** Benchmark-only K=3 runtime-R phase-stream experiment. R is a runtime kernel argument; PacketBytes is the only
- * physical phase-stream template dimension (besides FP8 dtype). The kernel preserves 4/8/16/32-lane subgroup
- * geometries internally and supports aligned or boundary-masked packet streams. Production policy is unchanged. */
-void launchFp8K3RuntimeRPhaseStreamRParallelP4RCooperativeCalibrationComplete(
-    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry, Stream& stream);
-void launchFp8K3RuntimeRPhaseStreamRParallelP8InputRCooperativeCalibrationComplete(
-    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry, Stream& stream);
-
-[[nodiscard]] CubKernelOccupancyInfo queryFp8K3RuntimeRPhaseStreamRParallelP4RCooperativeCalibrationOccupancy(
-    DataType input_dtype);
-[[nodiscard]] CubKernelOccupancyInfo queryFp8K3RuntimeRPhaseStreamRParallelP8InputRCooperativeCalibrationOccupancy(
-    DataType input_dtype);
-
-/** Benchmark-only K=7 phase-stream p8-input specialization. Naturally aligned for R={8,16,32,64}; p4 writeback
- * is retained so the calibration isolates input packet width. Production policy is unchanged. */
-void launchFp8K7PhaseStreamRParallelP8InputRCooperativeCalibrationComplete(
-    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry, Stream& stream);
-
-[[nodiscard]] CubKernelOccupancyInfo queryFp8K7PhaseStreamRParallelP8InputRCooperativeCalibrationOccupancy(
-    DataType input_dtype, uint64_t reduction_size);
-
-/** Benchmark-only K=7 phase-stream p16-input specialization. Naturally aligned for R={16,32,64}; p4 writeback
- * is retained to compare p16 directly with the p8 candidate. Production policy is unchanged. */
-void launchFp8K7PhaseStreamRParallelP16InputRCooperativeCalibrationComplete(
-    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry, Stream& stream);
-
-[[nodiscard]] CubKernelOccupancyInfo queryFp8K7PhaseStreamRParallelP16InputRCooperativeCalibrationOccupancy(
-    DataType input_dtype, uint64_t reduction_size);
-
-/** Benchmark-only direct component-parallel FP8 p4 reducer for the wider-K side of the shallow-R handoff. */
-void launchFp8DirectComponentWarpP4RCooperativeCalibrationComplete(
-    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry, Stream& stream);
-
-[[nodiscard]] CubKernelOccupancyInfo queryFp8DirectComponentWarpP4RCooperativeCalibrationOccupancy(
-    DataType input_dtype, uint64_t inner_size);
-
-/** Benchmark-only raw p4 read+write roofline reference. Reads exactly the reduction's input/output traffic ratio and
- * writes one raw p4 output packet per R raw p4 input packets, with a tiny exact scalar tail. No reduction semantics. */
-void launchFp8P4ReadWriteRooflineCalibrationReference(
-    const Tensor& input, Tensor& output, const CubReductionGeometry& geometry, Stream& stream);
-
-[[nodiscard]] CubKernelOccupancyInfo queryFp8P4ReadWriteRooflineCalibrationOccupancy();
-
-
+    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity,
+    CubReductionStageCombine combine = CubReductionStageCombine::Sum);
 
 size_t querySumReductionBytes(DataType input_dtype,
                               const void* input,

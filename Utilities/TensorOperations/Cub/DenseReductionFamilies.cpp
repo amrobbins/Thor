@@ -25,17 +25,14 @@ constexpr uint64_t K_PARALLEL_DEEP_CROSSOVER_ROWS = 96;
 constexpr uint32_t K_PARALLEL_STAGED_PROGRESS_WARPS_PER_SM = 6;
 constexpr uint32_t K_PARALLEL_MAX_WARPS = 8;
 constexpr uint32_t K_PARALLEL_MAX_THREADS = 256;
-constexpr std::array<uint64_t, 9> FP8_K_PARALLEL_ROW_DEPTHS = {4096, 2048, 1024, 512, 256, 128, 64, 32, 16};
 constexpr uint32_t R_COOPERATIVE_BLOCK_WARPS = 8;
 constexpr uint32_t R_COOPERATIVE_BLOCK_THREADS = R_COOPERATIVE_BLOCK_WARPS * 32;
 constexpr uint32_t R_COOPERATIVE_MAX_COMPLETE_WARPS = 32;
 constexpr uint64_t R_COOPERATIVE_COMPLETE_TARGET_WARPS =
     CubReductionTiledPolicy::TARGET_ACTIVE_WARPS * CubReductionTiledPolicy::DENSE_RK_TARGET_SM_WAVES;
 
-// Calibrated from the modern single-pass occupancy sweep. The established FP16/BF16/FP32 staged policy keeps its
-// one-warp CTA and 16 -> 8 -> 4 transaction preference unchanged. FP8 is calibrated separately below: 16/8/4/2-byte
-// packet reducers may use 32/64/128/256-thread CTAs, and useful-warp saturation determines whether packet efficiency
-// or additional K-side parallelism is the scarce resource.
+// Calibrated from the modern single-pass occupancy sweep. FP16/BF16/FP32 staged reduction uses one-warp CTAs
+// and the established 16 -> 8 -> 4 transaction preference. Retained original FP8 RK bypasses this planner.
 constexpr uint32_t K_PARALLEL_COMPLETE_MIN_WARPS_PER_SM = 8;
 constexpr uint64_t K_PARALLEL_COMPLETE_MAX_REDUCTION_ROWS = 2048;
 constexpr uint32_t ALIGNED_R_COOPERATIVE_STAGED_COMFORT_WARPS_PER_SM = 24;
@@ -75,28 +72,11 @@ constexpr uint64_t FP32_SCALAR_PACKET_RCOOPERATIVE_MIN_INPUT_BYTES = 768ULL * 10
 }
 
 [[nodiscard]] bool kParallelStorageDTypeSupported(DataType dtype) {
-#if THOR_CUB_ENABLE_FP8_TYPES
-    if (dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2) {
-        return true;
-    }
-#endif
     return dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP32;
 }
 
 [[nodiscard]] bool rCooperativeStorageDTypeSupported(DataType dtype) {
-    // FP8 FlatRows/Rotated/Complete adaptations are intentionally benchmark-only until the dedicated single-pass
-    // calibration establishes their line-rate regions. Keeping this gate unchanged guarantees the experiment cannot
-    // silently alter production selection while physical kernel capability is being characterized.
     return dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP32;
-}
-
-[[nodiscard]] bool isFp8StorageDType(DataType dtype) {
-#if THOR_CUB_ENABLE_FP8_TYPES
-    return dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2;
-#else
-    static_cast<void>(dtype);
-    return false;
-#endif
 }
 
 [[nodiscard]] bool additiveValueOperation(DenseRKValueOperation op) {
@@ -473,9 +453,8 @@ void annotateRKOccupancy(DenseRKFamilyPhysicalPlan& plan, const DenseRKPlanningC
 [[nodiscard]] bool kParallelHasLegalPacket(uint64_t inner_size, uint64_t element_bytes) {
     constexpr std::array<size_t, 4> PACKET_BYTES = {16, 8, 4, 2};
     for (size_t packet_bytes : PACKET_BYTES) {
-        // Two-byte packets are an FP8-only specialization. Keep the established FP16/BF16/FP32 packet surface
-        // byte-for-byte unchanged while giving one-byte storage one more naturally coalesced geometry.
-        if (packet_bytes == 2 && element_bytes != 1) {
+        // Two-byte packets are reserved for retained FP8 RK; the generic RK planner handles other dtypes.
+        if (packet_bytes == 2) {
             continue;
         }
         if (packet_bytes < element_bytes || packet_bytes % element_bytes != 0) {
@@ -501,427 +480,6 @@ void annotateRKOccupancy(DenseRKFamilyPhysicalPlan& plan, const DenseRKPlanningC
     return warps * 32;
 }
 
-[[nodiscard]] uint32_t fp8KParallelSaturationWarpsPerSm(const DenseRKPlanningContext& context,
-                                                               size_t packet_bytes) {
-    if (context.warp_size == 0 || context.max_threads_per_sm == 0 || context.max_threads_per_sm < context.warp_size) {
-        throw std::invalid_argument("FP8 KParallel saturation policy requires valid device warp/thread limits.");
-    }
-    if (packet_bytes != 16 && packet_bytes != 8 && packet_bytes != 4 && packet_bytes != 2) {
-        throw std::invalid_argument("FP8 KParallel saturation policy received unsupported packet width.");
-    }
-    const uint32_t hardware_warps_per_sm = context.max_threads_per_sm / context.warp_size;
-    const uint32_t base = static_cast<uint32_t>(ceilDivide(hardware_warps_per_sm, 4));
-    const uint32_t packet_multiplier = packet_bytes >= 8 ? 1U : static_cast<uint32_t>(8 / packet_bytes);
-    const uint64_t target = checkedMultiply(base,
-                                            packet_multiplier,
-                                            "FP8 KParallel per-SM saturation target overflows uint64_t.");
-    return static_cast<uint32_t>(std::min<uint64_t>(target, std::numeric_limits<uint32_t>::max()));
-}
-
-[[nodiscard]] uint64_t fp8KParallelSaturationTarget(const DenseRKPlanningContext& context,
-                                                     size_t packet_bytes) {
-    return checkedMultiply(static_cast<uint64_t>(context.multiprocessors),
-                           fp8KParallelSaturationWarpsPerSm(context, packet_bytes),
-                           "FP8 KParallel device saturation target overflows uint64_t.");
-}
-
-// Calibration of the saturated FP8 staged kernels shows that the 2-byte path needs at least four physical warps/CTA
-// before it can reach the ~1.6 TB/s regime. Keep smaller CTAs available for latency/under-supplied reductions, but do
-// not allow them to claim saturation merely because their useful-warp count reaches the device target.
-[[nodiscard]] bool fp8KParallelLayoutCanClaimSaturation(const DenseRKFamilyPhysicalPlan& plan) {
-    return plan.packet_bytes != 2 || plan.block_threads >= 128;
-}
-
-[[nodiscard]] bool fp8KParallelOptionIsSaturated(const DenseRKOption& option,
-                                                  const DenseRKPlanningContext& context) {
-    return fp8KParallelLayoutCanClaimSaturation(*option.plan)
-           && option.plan->launch_warp_supply >= fp8KParallelSaturationTarget(context, option.plan->packet_bytes);
-}
-
-void addFp8KParallelShardCandidate(std::vector<uint64_t>& shards,
-                                   uint64_t reduction_size,
-                                   uint64_t candidate) {
-    if (candidate <= 1 || candidate > reduction_size) {
-        return;
-    }
-    if (reduction_size / candidate < K_PARALLEL_MIN_ROWS_PER_SHARD) {
-        return;
-    }
-    if (std::find(shards.begin(), shards.end(), candidate) == shards.end()) {
-        shards.push_back(candidate);
-    }
-}
-
-void addFp8KParallelShardNeighborhood(std::vector<uint64_t>& shards,
-                                      uint64_t reduction_size,
-                                      uint64_t candidate) {
-    if (candidate > 2) {
-        addFp8KParallelShardCandidate(shards, reduction_size, candidate - 1);
-    }
-    addFp8KParallelShardCandidate(shards, reduction_size, candidate);
-    if (candidate < std::numeric_limits<uint64_t>::max()) {
-        addFp8KParallelShardCandidate(shards, reduction_size, candidate + 1);
-    }
-}
-
-[[nodiscard]] uint64_t fp8KParallelRowDepthDistance(uint64_t rows_per_shard) {
-    uint64_t best = std::numeric_limits<uint64_t>::max();
-    for (uint64_t calibrated_rows : FP8_K_PARALLEL_ROW_DEPTHS) {
-        const uint64_t distance = rows_per_shard > calibrated_rows ? rows_per_shard - calibrated_rows
-                                                                    : calibrated_rows - rows_per_shard;
-        best = std::min(best, distance);
-    }
-    return best;
-}
-
-[[nodiscard]] uint64_t fp8KParallelShardSlack(const DenseRKFamilyPhysicalPlan& plan) {
-    const uint64_t covered_rows = checkedMultiply(
-        plan.rows_per_shard, plan.shards_per_output, "FP8 KParallel shard coverage overflows uint64_t.");
-    if (covered_rows < plan.reduction_size) {
-        throw std::logic_error("FP8 KParallel shard coverage does not span the reduction.");
-    }
-    return covered_rows - plan.reduction_size;
-}
-
-[[nodiscard]] uint32_t fp8KParallelPreferredWidePacketSaturatedBlockThreads(
-    const DenseRKFamilyPhysicalPlan& plan, uint32_t warp_size) {
-    if (plan.packet_bytes != 16 && plan.packet_bytes != 8) {
-        throw std::logic_error("FP8 wide-packet CTA preference requires an 8- or 16-byte packet.");
-    }
-    const uint64_t element_bytes = dtypeBytes(plan.input_dtype);
-    const uint64_t items_per_lane = plan.packet_bytes / element_bytes;
-    if (warp_size == 0) {
-        throw std::invalid_argument("FP8 wide-packet CTA preference requires a non-zero warp size.");
-    }
-    const uint64_t packet_owners = ceilDivide(plan.inner_size, items_per_lane);
-    const uint64_t owner_warps = ceilDivide(packet_owners, warp_size);
-
-    // The saturated staged-layout sweep separates two concerns that the old resident-capacity ranking conflated.
-    // Useful launch supply decides whether the packet has reached the streaming regime. Once it has, packet16/8
-    // perform best when the physical CTA roughly matches the K-side owner geometry: at least two warps so tiny CTAs
-    // do not pay excessive scheduling/epilogue overhead, but no more than four warps because extra non-cooperative
-    // warps do not create reduction cooperation. This is an intrinsic packet-owner geometry rule, not an O/R/K
-    // lookup table.
-    uint32_t preferred_warps = 2;
-    while (preferred_warps < 4 && static_cast<uint64_t>(preferred_warps) < owner_warps) {
-        preferred_warps <<= 1;
-    }
-    return preferred_warps * warp_size;
-}
-
-[[nodiscard]] uint32_t fp8KParallelBlockThreadDistance(uint32_t lhs, uint32_t rhs) {
-    return lhs > rhs ? lhs - rhs : rhs - lhs;
-}
-
-[[nodiscard]] bool betterFp8SaturatedLayout(const DenseRKOption& candidate,
-                                             const DenseRKOption& incumbent,
-                                             const DenseRKPlanningContext& context) {
-    if (candidate.plan->packet_bytes != incumbent.plan->packet_bytes) {
-        throw std::logic_error("FP8 saturated layout comparison requires one packet width.");
-    }
-
-    if (candidate.plan->packet_bytes >= 8) {
-        // Once packet16/8 already expose the calibrated useful-warp supply, additional useful resident capacity is no
-        // longer a reliable speed predictor. Prefer the CTA width implied by the independent K packet-owner geometry
-        // instead. The sweep shows this avoids both the CTA32-over-CTA64 miss at K=512 and the CTA64-over-CTA128 miss
-        // around K=2048 while leaving packet-width selection and the saturation frontier unchanged.
-        const uint32_t preferred_threads =
-            fp8KParallelPreferredWidePacketSaturatedBlockThreads(*candidate.plan, context.warp_size);
-        const uint32_t candidate_distance =
-            fp8KParallelBlockThreadDistance(candidate.plan->block_threads, preferred_threads);
-        const uint32_t incumbent_distance =
-            fp8KParallelBlockThreadDistance(incumbent.plan->block_threads, preferred_threads);
-        if (candidate_distance != incumbent_distance) {
-            return candidate_distance < incumbent_distance;
-        }
-    } else if (candidate.plan->useful_resident_warp_capacity != incumbent.plan->useful_resident_warp_capacity) {
-        // Packet4/2 need materially more useful warps/SM to reach their measured frontiers. Preserve the established
-        // residency discriminator for those narrow-packet regimes rather than perturbing policy that this calibration
-        // did not target.
-        return candidate.plan->useful_resident_warp_capacity > incumbent.plan->useful_resident_warp_capacity;
-    }
-
-    // The staged kernels are calibrated on the existing rows/shard ladder. Around the saturation boundary, prefer
-    // the layout whose actual ceil-divided shard depth stays closest to that ladder rather than blindly taking one
-    // fewer shard. This makes exact 512/1024/... partitions survive the quantization boundary when they are available.
-    const uint64_t candidate_depth_distance = fp8KParallelRowDepthDistance(candidate.plan->rows_per_shard);
-    const uint64_t incumbent_depth_distance = fp8KParallelRowDepthDistance(incumbent.plan->rows_per_shard);
-    if (candidate_depth_distance != incumbent_depth_distance) {
-        return candidate_depth_distance < incumbent_depth_distance;
-    }
-
-    // For equally calibrated depths, minimize inactive tail rows across the shard grid. This handles awkward R
-    // without requiring shape-specific lookup tables.
-    const uint64_t candidate_slack = fp8KParallelShardSlack(*candidate.plan);
-    const uint64_t incumbent_slack = fp8KParallelShardSlack(*incumbent.plan);
-    if (candidate_slack != incumbent_slack) {
-        return candidate_slack < incumbent_slack;
-    }
-
-    const auto [candidate_owners, candidate_slots] = kParallelLaneUtilization(candidate);
-    const auto [incumbent_owners, incumbent_slots] = kParallelLaneUtilization(incumbent);
-    const long double candidate_fill = static_cast<long double>(candidate_owners) / candidate_slots;
-    const long double incumbent_fill = static_cast<long double>(incumbent_owners) / incumbent_slots;
-    if (candidate_fill != incumbent_fill) {
-        return candidate_fill > incumbent_fill;
-    }
-
-    // Only after CTA geometry and partition quality are equivalent should continuation size decide the tie.
-    if (candidate.next_bytes != incumbent.next_bytes) {
-        return candidate.next_bytes < incumbent.next_bytes;
-    }
-    if (candidate.scratch_bytes != incumbent.scratch_bytes) {
-        return candidate.scratch_bytes < incumbent.scratch_bytes;
-    }
-    if (candidate.plan->block_threads != incumbent.plan->block_threads) {
-        return candidate.plan->block_threads < incumbent.plan->block_threads;
-    }
-    return static_cast<uint8_t>(candidate.plan->implementation)
-           < static_cast<uint8_t>(incumbent.plan->implementation);
-}
-
-[[nodiscard]] DenseRKOption chooseFp8KParallelLayoutForPacket(std::vector<DenseRKOption> options,
-                                                               const DenseRKPlanningContext& context) {
-    if (options.empty()) {
-        throw std::logic_error("FP8 KParallel packet policy received no layouts.");
-    }
-
-    uint64_t minimum_saturated_shards = std::numeric_limits<uint64_t>::max();
-    for (DenseRKOption& option : options) {
-        const uint64_t target = fp8KParallelSaturationTarget(context, option.plan->packet_bytes);
-        option.comfort_supply = option.plan->launch_warp_supply;
-        option.comfort_target = target;
-        option.calibrated_efficient = fp8KParallelOptionIsSaturated(option, context);
-        if (option.calibrated_efficient) {
-            minimum_saturated_shards = std::min(minimum_saturated_shards, option.plan->shards_per_output);
-        }
-    }
-
-    if (minimum_saturated_shards != std::numeric_limits<uint64_t>::max()) {
-        // Preserve the architecture's deepest-progress preference, but leave one shard of quantization freedom around
-        // the first saturated layout. The measured FP8 sweep showed that this immediate neighbor is often the clean
-        // 512/1024-row partition while the minimally saturated count can be one shard short of it.
-        const uint64_t saturated_shard_limit = minimum_saturated_shards < std::numeric_limits<uint64_t>::max()
-                                                   ? minimum_saturated_shards + 1
-                                                   : minimum_saturated_shards;
-        std::optional<DenseRKOption> saturated;
-        for (const DenseRKOption& option : options) {
-            if (!option.calibrated_efficient || option.plan->shards_per_output > saturated_shard_limit) {
-                continue;
-            }
-            if (!saturated.has_value() || betterFp8SaturatedLayout(option, *saturated, context)) {
-                saturated = option;
-            }
-        }
-        if (!saturated.has_value()) {
-            throw std::logic_error("FP8 KParallel saturated layout envelope unexpectedly became empty.");
-        }
-        return *saturated;
-    }
-
-    DenseRKOption* best = &options.front();
-    for (DenseRKOption& option : options) {
-        if (option.plan->launch_warp_supply > best->plan->launch_warp_supply
-            || (option.plan->launch_warp_supply == best->plan->launch_warp_supply
-                && betterProgressOption(option, *best))) {
-            best = &option;
-        }
-    }
-    best->calibrated_efficient = false;
-    best->comfort_supply = best->plan->launch_warp_supply;
-    best->comfort_target = fp8KParallelSaturationTarget(context, best->plan->packet_bytes);
-    return *best;
-}
-
-[[nodiscard]] DenseRKOption chooseFp8KParallelPacket(std::vector<DenseRKOption> packet_choices,
-                                                       const DenseRKPlanningContext& context) {
-    if (packet_choices.empty()) {
-        throw std::logic_error("FP8 KParallel packet policy received no packet candidates.");
-    }
-
-    // Once line-rate useful supply is available, transaction efficiency is the stable discriminator: choose the
-    // widest saturated packet. Below saturation, useful parallel work is the scarce resource, so maximize useful warp
-    // supply and use packet width only as the tie-break. This reproduces the measured small-reduction behavior without
-    // shape/K lookup tables and converges to 16-byte packets in the saturated streaming regime.
-    std::optional<DenseRKOption> saturated;
-    for (DenseRKOption& option : packet_choices) {
-        if (!fp8KParallelOptionIsSaturated(option, context)) {
-            continue;
-        }
-        if (!saturated.has_value()
-            || option.plan->packet_bytes > saturated->plan->packet_bytes
-            || (option.plan->packet_bytes == saturated->plan->packet_bytes
-                && betterProgressOption(option, *saturated))) {
-            saturated = option;
-        }
-    }
-    if (saturated.has_value()) {
-        return *saturated;
-    }
-
-    DenseRKOption* best = &packet_choices.front();
-    for (DenseRKOption& option : packet_choices) {
-        if (option.plan->launch_warp_supply > best->plan->launch_warp_supply
-            || (option.plan->launch_warp_supply == best->plan->launch_warp_supply
-                && (option.plan->packet_bytes > best->plan->packet_bytes
-                    || (option.plan->packet_bytes == best->plan->packet_bytes
-                        && betterProgressOption(option, *best))))) {
-            best = &option;
-        }
-    }
-    return *best;
-}
-
-[[nodiscard]] std::optional<DenseRKOption> selectFp8KParallel(const DenseReductionProblem& problem,
-                                                               DenseReductionSite site,
-                                                               const DenseRKPlanningContext& context,
-                                                               const CubReductionGeometry& geometry,
-                                                               const std::vector<uint64_t>& input_dimensions,
-                                                               DataType input_dtype) {
-    constexpr std::array<size_t, 4> PACKET_BYTES = {16, 8, 4, 2};
-    constexpr std::array<uint32_t, 4> CTA_WIDTHS = {32, 64, 128, 256};
-    std::vector<DenseRKOption> complete_packet_choices;
-    std::vector<DenseRKOption> staged_packet_choices;
-
-    for (size_t packet_bytes : PACKET_BYTES) {
-        const uint64_t items_per_lane = packet_bytes;
-        if (geometry.inner_size % items_per_lane != 0) {
-            continue;
-        }
-        const uint64_t packet_owners = geometry.inner_size / items_per_lane;
-        const uint64_t useful_warps_per_output_shard = ceilDivide(packet_owners, context.warp_size);
-        const uint64_t useful_warps_per_shard = checkedMultiply(
-            geometry.outer_size,
-            useful_warps_per_output_shard,
-            "FP8 KParallel useful warps per shard overflows uint64_t.");
-
-        std::vector<DenseRKOption> packet_complete_layouts;
-        std::vector<DenseRKOption> packet_staged_layouts;
-
-        for (uint32_t block_threads : CTA_WIDTHS) {
-            if (block_threads > K_PARALLEL_MAX_THREADS) {
-                continue;
-            }
-            const uint64_t components_per_cta = checkedMultiply(
-                block_threads, items_per_lane, "FP8 KParallel components-per-CTA overflows uint64_t.");
-            const uint64_t component_tiles = ceilDivide(geometry.inner_size, components_per_cta);
-            const uint64_t base_blocks_per_shard = checkedMultiply(
-                geometry.outer_size, component_tiles, "FP8 KParallel blocks-per-shard overflows uint64_t.");
-
-            std::vector<uint64_t> shard_counts{1};
-            for (uint64_t requested_rows : FP8_K_PARALLEL_ROW_DEPTHS) {
-                if (geometry.reduction_size <= requested_rows) {
-                    continue;
-                }
-                addFp8KParallelShardCandidate(
-                    shard_counts, geometry.reduction_size, ceilDivide(geometry.reduction_size, requested_rows));
-            }
-
-            // The measured saturation frontier is hardware-relative. Add the exact shard neighborhood that would
-            // expose the required useful warp supply for this packet width, plus the maximum legal sharding point for
-            // truly under-supplied problems. Exact physical residency is evaluated after the plan is materialized.
-            if (useful_warps_per_shard != 0) {
-                const uint64_t saturation_shards = ceilDivide(
-                    fp8KParallelSaturationTarget(context, packet_bytes), useful_warps_per_shard);
-                addFp8KParallelShardNeighborhood(shard_counts, geometry.reduction_size, saturation_shards);
-            }
-            addFp8KParallelShardCandidate(
-                shard_counts, geometry.reduction_size, geometry.reduction_size / K_PARALLEL_MIN_ROWS_PER_SHARD);
-            std::sort(shard_counts.begin(), shard_counts.end());
-
-            for (uint64_t shards : shard_counts) {
-                const uint64_t first_stage_blocks = checkedMultiply(
-                    base_blocks_per_shard, shards, "FP8 KParallel first-stage block count overflows uint64_t.");
-                const uint64_t useful_warps = checkedMultiply(
-                    useful_warps_per_shard, shards, "FP8 KParallel useful warp count overflows uint64_t.");
-
-                auto plan = std::make_shared<DenseRKFamilyPhysicalPlan>();
-                plan->strategy = DenseRKStrategy::KParallel;
-                plan->access = DenseRKAccess::Aligned;
-                plan->implementation = DenseRKProductionImplementation::KParallelPass;
-                plan->input_dimensions = input_dimensions;
-                plan->reduction_axis = site.run_index;
-                plan->input_dtype = input_dtype;
-                plan->value_operation = context.value_operation;
-                plan->outer_size = geometry.outer_size;
-                plan->reduction_size = geometry.reduction_size;
-                plan->inner_size = geometry.inner_size;
-                plan->packet_bytes = packet_bytes;
-                plan->block_threads = block_threads;
-                plan->rows_per_shard = ceilDivide(geometry.reduction_size, shards);
-                plan->shards_per_output = shards;
-                plan->component_tiles = component_tiles;
-                plan->first_stage_blocks = first_stage_blocks;
-                plan->useful_stage_warps = useful_warps;
-                plan->progress = shards == 1 ? DenseRKProgress::Complete : DenseRKProgress::Staged;
-                annotateRKOccupancy(*plan, context);
-
-                DenseRKOption option = makeRKOption(problem, site, std::move(plan), shards, false);
-                option.comfort_supply = option.plan->launch_warp_supply;
-                option.comfort_target = fp8KParallelSaturationTarget(context, packet_bytes);
-                option.calibrated_efficient = fp8KParallelOptionIsSaturated(option, context);
-                if (shards == 1) {
-                    packet_complete_layouts.push_back(std::move(option));
-                } else {
-                    packet_staged_layouts.push_back(std::move(option));
-                }
-            }
-        }
-
-        if (!packet_complete_layouts.empty()) {
-            complete_packet_choices.push_back(
-                chooseFp8KParallelLayoutForPacket(std::move(packet_complete_layouts), context));
-        }
-        if (!packet_staged_layouts.empty()) {
-            staged_packet_choices.push_back(
-                chooseFp8KParallelLayoutForPacket(std::move(packet_staged_layouts), context));
-        }
-    }
-
-    if (complete_packet_choices.empty() && staged_packet_choices.empty()) {
-        return std::nullopt;
-    }
-
-    std::optional<DenseRKOption> complete;
-    if (!complete_packet_choices.empty()) {
-        complete = chooseFp8KParallelPacket(std::move(complete_packet_choices), context);
-    }
-    std::optional<DenseRKOption> staged;
-    if (!staged_packet_choices.empty()) {
-        staged = chooseFp8KParallelPacket(std::move(staged_packet_choices), context);
-    }
-
-    // Preserve the existing measured Complete/Staged crossover. Packet/CTA/shard selection inside each topology is
-    // now FP8 saturation-aware, but the topology itself retains the established end-to-end continuation calibration.
-    if (geometry.reduction_size < K_PARALLEL_DEEP_CROSSOVER_ROWS && complete.has_value()) {
-        return complete;
-    }
-
-    const bool complete_saturated = complete.has_value() && fp8KParallelOptionIsSaturated(*complete, context);
-    const bool complete_calibrated = complete.has_value()
-                                     && geometry.reduction_size <= K_PARALLEL_COMPLETE_MAX_REDUCTION_ROWS
-                                     && complete_saturated;
-    if (complete.has_value()) {
-        complete->calibrated_efficient = complete_calibrated;
-    }
-    if (staged.has_value()) {
-        staged->calibrated_efficient = fp8KParallelOptionIsSaturated(*staged, context);
-    }
-
-    if (geometry.reduction_size >= K_PARALLEL_DEEP_CROSSOVER_ROWS
-        && !complete_calibrated
-        && staged.has_value()) {
-        return staged;
-    }
-    if (!complete.has_value()) {
-        return staged;
-    }
-    if (!staged.has_value()) {
-        return complete;
-    }
-    return betterProgressOption(*staged, *complete) ? staged : complete;
-}
-
 [[nodiscard]] std::optional<DenseRKOption> selectKParallel(const DenseReductionProblem& problem,
                                                             DenseReductionSite site,
                                                             const DenseRKPlanningContext& context,
@@ -932,19 +490,14 @@ void addFp8KParallelShardNeighborhood(std::vector<uint64_t>& shards,
         return std::nullopt;
     }
     const uint64_t element_bytes = dtypeBytes(input_dtype);
-    const bool fp8_input = isFp8StorageDType(input_dtype);
-    if (fp8_input) {
-        return selectFp8KParallel(problem, site, context, geometry, input_dimensions, input_dtype);
-    }
 
     std::vector<DenseRKOption> options;
     constexpr std::array<uint64_t, 9> ROW_DEPTHS = {4096, 2048, 1024, 512, 256, 128, 64, 32, 16};
     constexpr std::array<size_t, 4> PACKET_BYTES = {16, 8, 4, 2};
 
     for (size_t packet_bytes : PACKET_BYTES) {
-        // FP8 owns 16/8/4/2-byte KParallel packets. The 2-byte specialization is deliberately not admitted for the
-        // established FP16/BF16/FP32 populations, so their candidate set and calibrated policy remain unchanged.
-        if (!fp8_input && packet_bytes == 2) {
+        // Two-byte packets are only used by the independent retained FP8 RK selector.
+        if (packet_bytes == 2) {
             continue;
         }
         if (packet_bytes < element_bytes || packet_bytes % element_bytes != 0) {
@@ -1554,6 +1107,15 @@ DenseReductionCandidate ReducersDenseRK::propose(const DenseReductionProblem& pr
     if (geometry.path != CubReductionPath::TiledFixedSegment || geometry.axes.size() != 1
         || geometry.axes.front() != site.run_index || geometry.inner_size <= 1) {
         throw std::logic_error("Dense RK family expected one ordinary TiledFixedSegment nominated site.");
+    }
+
+    // Original-input FP8 RK VALUE has exactly one owner: the retained cached physical selector reached through
+    // selectDensePhysicalPass(). The generic KParallel/RCooperative families compile no FP8 kernels outside the
+    // retained AlignedK/RuntimeK inventory, so refuse here rather than proposing an uncompiled physical pass.
+    const DataType rk_input_dtype = currentRKInputDType(problem, context);
+    if (rk_input_dtype == DataType::FP8_E4M3 || rk_input_dtype == DataType::FP8_E5M2) {
+        throw std::logic_error("Generic dense RK families do not own original-input FP8 RK VALUE; "
+                               "use the retained FP8 RK physical selector.");
     }
 
     const std::optional<DenseRKOption> k_parallel =

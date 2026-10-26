@@ -6,6 +6,109 @@ they do not stage inputs through compatibility tensors and do not call `cudnnRed
 allowed to use either CUB device primitives or Thor-owned CUDA kernels when tensor geometry requires a layout-aware
 implementation. Expression's vector-valued segmented forward caller is migrated to the central API separately.
 
+## Ordinary dense VALUE production lifecycle
+
+The shared `DenseReductionPlanner.cpp::planDenseReduction()` is the single
+ordinary-dense VALUE pass planner. For each current mathematical reduction site,
+`selectDensePhysicalPass()` chooses one physical implementation; the planner
+compares actual next-tensor bytes, selects its deterministic minimum, and
+continues until all reduction axes are complete. The selected immutable
+physical passes form a flat `DenseReductionPlan`; **no cached complete plan** or
+family-specific production continuation exists.
+
+```text
+stamp/query: current problem -> nominate R/KR/RK sites -> official physical selector
+                   |                                  |
+                   |                         FP8 first-stage cache
+                   |                          (physical recipe only)
+                   v
+             selected one-pass plan -> next problem -> ... -> completed plan
+                   |
+              stamp allocates each FP32 intermediate and per-pass scratch
+                   |
+run/runOn:   existing stamped physical passes -> GPU launches (no planning/tuning/allocation)
+```
+
+Original FP8 E4M3/E5M2 ordinary RK VALUE reductions (SUM, MEAN,
+PRODUCT, MIN, MAX, L1Norm, L2Norm, SumSquares), with the enabled floating
+output storage dtypes, use retained OneWindow, DeepRSmallK, AlignedK and
+RuntimeK through the same selector as normal production. The frozen ranker
+nominates a 28-candidate shortlist.
+A staged retained kernel emits a real FP32 `[O,N,K]` output and reduces **one**
+physical stage; FP32 continuation is selected independently by the global
+planner. During cache-miss *measurement only*, `Fp8RKSelectedContinuation`
+chooses hypothetical FP32 passes via that same official selector, before the
+per-device GPU measurement lock is acquired. The cached answer holds only the
+winning first FP8 physical recipe, not those hypothetical passes or buffers.
+Original-input transforms occur once; all nonfinal outputs are FP32, and final
+reduction finalization/divisor, runtime float scale and dtype conversion occur
+only on the last mathematical pass. Unsupported physical geometries and
+storage dtypes reject explicitly without a private FP8 fallback.
+
+`CubReduction::queryWorkspaceSizeInBytes()` sums each nonfinal output's actual
+bytes and each pass's physical scratch. Stamping allocates exactly those
+buffers per independent executor, checks the workspace accounting, and retains
+them across cache clear and subsequent `runOn()` calls on compatible streams.
+Thor-owned zero-scratch kernels allocate nothing. True CUB two-phase APIs may
+still need a preallocated one-byte minimum physical buffer, even when CUB's
+query reports zero. Read-only `getDensePhysicalPassDiagnostics()` describes
+these physical passes without returning invented generic RK parameters.
+
+Cache single-flight is per key; a shared per-device mutex serializes competing
+GPU timing contests and the setup/destruction of internally allocated tuning
+representatives. FP32 hypothetical dependency selection is done before the
+contest lock. Cached immutable device identity avoids CUDA property queries on
+cache hits. Tuning failures are not cached; cache clearing cannot invalidate
+already stamped executable sequences. No GPU tuning, cache access, extra
+allocation, or kernel selection is permitted within normal `runOn()`.
+
+## Implementation ownership and extension boundaries
+
+| Concern | Authoritative owner |
+| --- | --- |
+| Mathematical runs, advancement and output bytes | `DenseReductionPlanning.{h,cpp}` |
+| Global one-pass-at-a-time choices and deterministic ties | `DenseReductionPlanner.{h,cpp}` |
+| One physical-pass selection for R/KR/RK | `DenseReductionPhysicalSelector.{h,cpp}` |
+| Production GPU occupancy and FP32 policy context | `DenseProductionPhysicalSelectionContext.{h,cpp}` |
+| Retained FP8 first-kernel identity and legal physical candidates | `Fp8RK/Fp8RKPhysicalIdentity.*`, `Fp8RK/Fp8RKBoundSelection.*` |
+| Cache-miss FP8 candidate measurement and immutable recipe cache | `Fp8RK/Fp8RKStampAutotuner.*`, `Fp8RK/Fp8RKSelectionCache.h` |
+| Benchmark-only hypothetical FP32 completion | `Fp8RK/Fp8RKSelectedContinuation*` |
+| Pass workspace, tensor ownership, and launch order | `CubReduction.{h,cpp}`, `DensePhysicalPassExecution.h` |
+
+The hypothetical FP32 continuation is an ephemeral **measurement program**, not
+part of a production stamp. The production planner independently chooses each
+subsequent physical pass from the actual next tensor geometry. The original
+FP8 input has no old RK fallback; unrelated non-RK paths retain their own
+selection policies. The full retained FP8 VALUE operation/output surface is
+specified and exercised by `Fp8RK/README.md` and the production cutover tests.
+
+Do not treat implementation extensibility as a mandate to add a universal
+selection cache or shared autotuner framework. FP32/FP16/BF16 autotuning and
+additional policy-injection or execution-lifecycle hardening remain separate
+design decisions; this source ownership map does not implement them.
+
+## Compiled kernel inventory boundaries
+
+`thor_fp8_selected_inventory_size` compiles an **isolated, selector-reachable**
+first-stage inventory. It proves the selected specializations in that target,
+not that no additional FP8 kernels are present in production CUDA objects.
+Inspect production objects separately after building `Thor`:
+
+```bash
+# From an existing build directory:
+cmake --build . --target Thor thor_fp8_selected_inventory_size -j
+python3 ../benchmarks/fp8_production_object_census.py \
+    --build . --out fp8-production-census
+```
+
+Review `fp8-production-census/device-functions.csv`, especially
+`other-fp8-kernel`, against genuine R/KR, ARG, specialized-view and benchmark
+ownership. This is an **audit**, not an automatic deletion list: FP8-looking
+functions can belong to other legitimate reduction domains. Production object
+SASS, selected-inventory SASS and final linked-library size are different
+measurements; record SM target and compiler/build settings when comparing.
+The read-only census produces no kernels and does not change selection.
+
 ## Numeric contract
 
 - Input storage may be FP8 E4M3, FP8 E5M2, FP16, BF16, FP32, or an enabled FP64 type.
@@ -183,10 +286,12 @@ Consequences:
   otherwise.
 - Workspace accounting includes every intermediate tensor and every recursively stamped remainder.
 
-`CubReduction::stampPhysicalStage()` already follows this invariant for cooperative sharded tiled reductions: after the
-first pass writes FP32 partials, it analyzes `[outer, shards, inner]` and calls the same physical-stage planner again.
-Benchmark staged candidates must preserve the same behavior so a census measures reducer chains rather than artificial
-first-stage/finalizer pairings.
+For ordinary dense VALUE, `planDenseReduction()` implements this rule through the
+canonical `DenseReductionProblem` and stores the resulting flat physical-pass list.
+Special view paths retain their independent physical-stage adapters. Retained
+FP8 benchmark programs use the production selector for hypothetical FP32
+continuation so a census compares equivalent completed reductions rather than
+artificially paired first-stage/finalizer kernels.
 
 ### Low-output / deep full-row reduction sharding
 

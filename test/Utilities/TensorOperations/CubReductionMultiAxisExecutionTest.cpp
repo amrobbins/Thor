@@ -9,6 +9,102 @@
 using namespace ThorImplementation;
 using namespace ThorImplementation::CubReductionTestSupport;
 
+// Test-only inspection: assert actual stamp-owned scratch allocations, not just
+// the public byte count. Intermediates are separate and are not scratch.
+namespace ThorImplementation {
+struct CubReductionTiledWorkspaceProbe {
+    static size_t scratchBytes(const StampedCubReduction& stamp) {
+        if (stamp.dense_executable_plan.passes.empty()) {
+            return stamp.temp_storage.isInitialized() ? stamp.temp_storage.getArraySizeInBytes() : 0;
+        }
+        size_t bytes = 0;
+        for (const auto& pass : stamp.dense_executable_plan.passes) {
+            const size_t allocated = pass.temp_storage.isInitialized()
+                                         ? pass.temp_storage.getArraySizeInBytes() : 0;
+            EXPECT_EQ(allocated, pass.temp_storage_bytes);
+            bytes += allocated;
+        }
+        return bytes;
+    }
+
+    static size_t scratchBytes(const StampedCubArgReduction& stamp) {
+        if (stamp.composed_stages.empty()) {
+            return stamp.temp_storage.isInitialized() ? stamp.temp_storage.getArraySizeInBytes() : 0;
+        }
+        size_t bytes = 0;
+        for (const auto& stage : stamp.composed_stages) bytes += scratchBytes(*stage);
+        return bytes;
+    }
+};
+}  // namespace ThorImplementation
+
+TEST(CubReduction, TiledKernelsHaveNoScratchAndCubScratchIsStampedAheadOfRun) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor input = makeGpuTensor({1.0f, 3.0f, 5.0f, 7.0f, 9.0f, 11.0f,
+                                  2.0f, 4.0f, 6.0f, 8.0f, 10.0f, 12.0f}, {2, 3, 2}, stream);
+
+    // A permuted view deliberately exercises the direct tiled VALUE path,
+    // bypassing ordinary dense-family selection. Workspace queries for a view
+    // must use its actual strides; the stamped footprint is authoritative here.
+    Tensor tiled_view = input.aliasView({2, 2, 3}, {1, 6, 2}, 0);
+    CubReduction tiled(CubReductionOp::Sum, 2, DataType::FP32);
+    const auto tiled_stamp = tiled.stamp(tiled_view, stream);
+    ASSERT_EQ(tiled_stamp->getPath(), CubReductionPath::TiledFixedSegment);
+    EXPECT_EQ(tiled_stamp->getWorkspaceSizeInBytes(), 0U);
+    EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*tiled_stamp), 0U);
+
+    CubArgReduction tiled_arg(CubArgReductionOp::ArgMax, 1);
+    const auto tiled_arg_stamp = tiled_arg.stamp(input, stream);
+    ASSERT_EQ(tiled_arg_stamp->getPath(), CubReductionPath::TiledFixedSegment);
+    EXPECT_EQ(tiled_arg.queryWorkspaceSizeInBytes(input.getDescriptor(), stream), 0U);
+    EXPECT_EQ(tiled_arg_stamp->getWorkspaceSizeInBytes(), 0U);
+    EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*tiled_arg_stamp), 0U);
+
+    // A real CUB DeviceReduce must have a non-null execution pointer. Its
+    // queried storage, including CUB's one-byte minimum, is allocated at stamp
+    // time and remains allocated across run() calls.
+    Tensor vector_input = makeGpuTensor({1.0f, 2.0f, 3.0f}, {3}, stream);
+    CubReduction cub_value(CubReductionOp::Sum, 0, DataType::FP32);
+    const size_t cub_value_bytes = cub_value.queryWorkspaceSizeInBytes(vector_input.getDescriptor(), stream);
+    const auto cub_value_stamp = cub_value.stamp(vector_input, stream);
+    ASSERT_EQ(cub_value_stamp->getPath(), CubReductionPath::DeviceTransformReduce);
+    ASSERT_GT(cub_value_bytes, 0U);
+    EXPECT_EQ(cub_value_stamp->getWorkspaceSizeInBytes(), cub_value_bytes);
+    EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*cub_value_stamp), cub_value_bytes);
+
+    CubArgReduction cub_arg(CubArgReductionOp::ArgMax, 0);
+    const size_t cub_arg_bytes = cub_arg.queryWorkspaceSizeInBytes(vector_input.getDescriptor(), stream);
+    const auto cub_arg_stamp = cub_arg.stamp(vector_input, stream);
+    ASSERT_EQ(cub_arg_stamp->getPath(), CubReductionPath::DeviceTransformReduce);
+    ASSERT_GT(cub_arg_bytes, 0U);
+    EXPECT_EQ(cub_arg_stamp->getWorkspaceSizeInBytes(), cub_arg_bytes);
+    EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*cub_arg_stamp), cub_arg_bytes);
+
+    tiled_stamp->run();
+    tiled_arg_stamp->run();
+    cub_value_stamp->run();
+    cub_arg_stamp->run();
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(tiled_stamp->getOutputTensor(), stream),
+                          {15.0f, 18.0f, 21.0f, 24.0f});
+    expectFloatVectorNear(copyGpuTensorAsFloat(cub_value_stamp->getOutputTensor(), stream), {6.0f});
+    ASSERT_TRUE(tiled_arg_stamp->getIndexOutputTensor().has_value());
+    EXPECT_EQ(copyGpuTensorAsUnsigned(tiled_arg_stamp->getIndexOutputTensor().value(), stream),
+              (std::vector<uint64_t>{2, 2, 2, 2}));
+    ASSERT_TRUE(cub_arg_stamp->getIndexOutputTensor().has_value());
+    EXPECT_EQ(copyGpuTensorAsUnsigned(cub_arg_stamp->getIndexOutputTensor().value(), stream),
+              (std::vector<uint64_t>{2}));
+
+    // run() must reuse the existing pointers, not allocate them on demand.
+    cub_value_stamp->run();
+    cub_arg_stamp->run();
+    stream.synchronize();
+    EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*cub_value_stamp), cub_value_bytes);
+    EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*cub_arg_stamp), cub_arg_bytes);
+}
+
+
 TEST(CubReduction, MultiAxisContiguousSuffixUsesFixedSegments) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -308,7 +404,7 @@ TEST(CubReduction, PermutedViewUsesProductionTiledPathWithoutMaterialization) {
     EXPECT_EQ(stamped->getGeometry().inner_size, 2U);
     EXPECT_EQ(stamped->getGeometry().tiled_output_outer_stride, 1U);
     EXPECT_EQ(stamped->getGeometry().tiled_output_inner_stride, 2U);
-    EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 1U);
+    EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 0U);
     stamped->run();
     stream.synchronize();
     expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {9.0f, 27.0f, 12.0f, 30.0f});
@@ -463,7 +559,7 @@ TEST(CubReduction, Direct2BPayloadTranspose32x33WritesLogicalBAPOrder) {
     ASSERT_TRUE(stamped->getGeometry().payload_transpose_tiled_geometry.has_value());
     EXPECT_FALSE(stamped->getGeometry().permutation_aware_tiled_geometry.has_value());
     EXPECT_FALSE(stamped->getGeometry().pitched_tiled_geometry.has_value());
-    EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 1U);
+    EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 0U);
 
     const CubReductionPayloadTransposeTiledGeometry& transposed =
         stamped->getGeometry().payload_transpose_tiled_geometry.value();
@@ -552,7 +648,7 @@ TEST(CubReduction, Direct2BPayloadTranspose32x33SupportsEveryValueOperationThrou
         ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
         ASSERT_TRUE(stamped->getGeometry().payload_transpose_tiled_geometry.has_value());
         EXPECT_FALSE(stamped->getGeometry().pitched_tiled_geometry.has_value());
-        EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 1U);
+        EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 0U);
 
         stamped->run();
         stream.synchronize();
@@ -578,7 +674,7 @@ TEST(CubReduction, PitchedTiledViewReducesDiagonalSlabsWithoutMaterialization) {
     ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
     ASSERT_TRUE(stamped->getGeometry().pitched_tiled_geometry.has_value());
     EXPECT_FALSE(stamped->getGeometry().permutation_aware_tiled_geometry.has_value());
-    EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 1U);
+    EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 0U);
     const CubReductionPitchedTiledGeometry& pitched = stamped->getGeometry().pitched_tiled_geometry.value();
     EXPECT_EQ(pitched.outer_size, 2U);
     EXPECT_EQ(pitched.reduction_size, 2U);
@@ -619,7 +715,7 @@ TEST(CubReduction, PitchedTiledViewSupportsEveryValueOperation) {
         auto stamped = CubReduction(test_case.op, 1, DataType::FP32).stamp(pitched_view, stream);
         ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
         ASSERT_TRUE(stamped->getGeometry().pitched_tiled_geometry.has_value());
-        EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 1U);
+        EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 0U);
 
         stamped->run();
         stream.synchronize();

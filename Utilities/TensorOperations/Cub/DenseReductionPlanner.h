@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Utilities/TensorOperations/Cub/DenseReductionFamilies.h"
+#include "Utilities/TensorOperations/Cub/DenseReductionPhysicalSelector.h"
 
 #include <string>
 #include <vector>
@@ -26,14 +26,13 @@ struct DenseReductionPlan {
 };
 
 /** Device/planning facts that are not mathematical tensor state. */
-struct DenseReductionPlannerContext {
-    DenseRKPlanningContext rk;
-};
+using DenseReductionPlannerContext = DensePhysicalSelectionContext;
 
 /**
  * Plans an ordinary dense reduction as a flat sequence of physical passes.
  *
- * A current problem consisting only of [R] is fast-pathed directly to ReducersDenseR and must finish in one pass.
+ * A current problem consisting only of [R] is fast-pathed through the official physical selector and must finish
+ * in one pass.
  * Otherwise every current reduction site is nominated independently, its applicable KR/RK family is asked for one
  * candidate, and the candidate with the smallest next_bytes wins. Equal-byte candidates prefer KR to RK and then
  * stable current-site order. The selected next_problem is treated as a fresh problem and planning repeats.

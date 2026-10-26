@@ -10,6 +10,7 @@
 #include <cub/warp/warp_reduce.cuh>
 #include <cuda/std/bit>
 #include <cuda/std/functional>
+#include <cuda/std/limits>
 #include <cooperative_groups.h>
 #include <cuda/pipeline>
 #include <cuda_bf16.h>
@@ -140,6 +141,27 @@ struct PropagatingMaximumFp32 {
         }
         return ::fmaxf(lhs, rhs);
 #endif
+    }
+};
+
+// Retained FP8 OneWindow and RuntimeK policy: the combine is a compile-time
+// specialization. No runtime operation dispatch is generated in the hot loop.
+// 0=SUM, 1=PRODUCT, 2=MIN, 3=MAX. FP32 semantics match the staged combine.
+template <int FixedOp>
+struct Fp8TypedReductionOp {
+    static_assert(FixedOp >= 0 && FixedOp <= 3);
+
+    __host__ __device__ float identity() const {
+        if constexpr (FixedOp == 0) return 0.0f;
+        else if constexpr (FixedOp == 1) return 1.0f;
+        else if constexpr (FixedOp == 2) return cuda::std::numeric_limits<float>::infinity();
+        else return -cuda::std::numeric_limits<float>::infinity();
+    }
+    __host__ __device__ float operator()(float a, float b) const {
+        if constexpr (FixedOp == 0) return a + b;
+        else if constexpr (FixedOp == 1) return a * b;
+        else if constexpr (FixedOp == 2) return PropagatingMinimumFp32{}(a, b);
+        else return PropagatingMaximumFp32{}(a, b);
     }
 };
 
@@ -2246,10 +2268,8 @@ size_t queryReductionBytesForInput(const InputT* input,
             break;
         }
         case CubReductionPath::TiledFixedSegment:
-            // Ordinary dense RK workspace is planned by CubReduction::queryPhysicalStageWorkspace(). The retained
-            // generic/view Tiled path itself owns no temporary tensor.
-            queried_bytes = 1;
-            break;
+            // Thor-owned tiled kernels consume no scratch and do not use CUB's two-phase API.
+            return 0;
         case CubReductionPath::OffsetSegmented:
             throw std::logic_error("Dense CUB reduction received offset-segmented geometry.");
         case CubReductionPath::ComposedDense:
@@ -2257,6 +2277,9 @@ size_t queryReductionBytesForInput(const InputT* input,
                 "Composed dense VALUE geometry must be materialized into direct physical passes before workspace query.");
     }
 
+    // The CUB two-phase API uses nullptr to request a workspace query, even
+    // when its scratch requirement is zero. Reserve a real non-null byte at
+    // stamp time for those CUB launches; never allocate it during execution.
     return std::max<size_t>(queried_bytes, 1);
 }
 
@@ -2276,14 +2299,20 @@ void launchReductionForInput(const Tensor& temp_storage,
         std::decay_t<decltype(std::declval<ReductionOpT>()(std::declval<float>(), std::declval<float>()))>;
     static_assert(std::is_same_v<AccumulatorT, float>, "CUB tensor reductions must accumulate in FP32.");
 
-    void* temp_storage_ptr =
-        const_cast<void*>(static_cast<const void*>(temp_storage.getMemPtr<void>()));
+    // Only real CUB operations need a temporary-storage pointer. Tiled
+    // reductions launch their own CUDA kernels and accept an empty handle.
+    auto cub_temp_storage = [&]() -> void* {
+        if (temp_storage_bytes == 0 || !temp_storage.isInitialized())
+            throw std::logic_error("CUB reduction requires nonzero allocated temporary storage");
+        return const_cast<void*>(static_cast<const void*>(temp_storage.getMemPtr<void>()));
+    };
     auto output_iterator =
         makeRuntimeFp32OutputIterator(output.getMemPtr<void>(), output.getDataType(), output_finalize, output_scale);
     const ConvertAndTransformInputToFp32<InputT, InputTransformT> device_input_transform{input_transform};
 
     switch (geometry.path) {
-        case CubReductionPath::DeviceTransformReduce:
+        case CubReductionPath::DeviceTransformReduce: {
+            void* temp_storage_ptr = cub_temp_storage();
             if (geometry.device_transform_uses_affine_stride) {
                 auto input_iterator = makeAffineStridedFp32Iterator<InputT>(
                     input.getMemPtr<InputT>(), geometry.affine_input_stride, input_transform);
@@ -2307,7 +2336,9 @@ void launchReductionForInput(const Tensor& temp_storage,
                                                               stream));
             }
             break;
+        }
         case CubReductionPath::ContiguousFixedSegment: {
+            void* temp_storage_ptr = cub_temp_storage();
             auto input_iterator = makeContiguousFp32Iterator(input.getMemPtr<InputT>(), input_transform);
             CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(temp_storage_ptr,
                                                           temp_storage_bytes,

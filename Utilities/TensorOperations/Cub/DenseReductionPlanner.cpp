@@ -1,4 +1,5 @@
 #include "Utilities/TensorOperations/Cub/DenseReductionPlanner.h"
+#include "Utilities/TensorOperations/Cub/DenseRetainedFp8RKPhysicalPlan.h"
 
 #include <algorithm>
 #include <sstream>
@@ -78,21 +79,6 @@ namespace {
             return "Staged";
     }
     return "unknown";
-}
-
-[[nodiscard]] DenseReductionCandidate proposeForFamily(const DenseReductionProblem& problem,
-                                                        DenseReductionSite site,
-                                                        DenseReducerFamily family,
-                                                        const DenseReductionPlannerContext& context) {
-    switch (family) {
-        case DenseReducerFamily::R:
-            return ReducersDenseR::propose(problem, site);
-        case DenseReducerFamily::KR:
-            return ReducersDenseKR::propose(problem, site);
-        case DenseReducerFamily::RK:
-            return ReducersDenseRK::propose(problem, site, context.rk);
-    }
-    throw std::logic_error("Unknown dense reducer family.");
 }
 
 [[nodiscard]] size_t reducedRunCount(const DenseReductionProblem& problem) {
@@ -215,7 +201,25 @@ void validateCandidateTransition(const DenseReductionProblem& current,
     return out.str();
 }
 
+[[nodiscard]] const char* retainedFp8FamilyName(Fp8RK::PhysicalFamily family) {
+    switch (family) {
+        case Fp8RK::PhysicalFamily::OneWindow: return "OneWindow";
+        case Fp8RK::PhysicalFamily::DeepRSmallK: return "DeepRSmallK";
+        case Fp8RK::PhysicalFamily::AlignedK: return "AlignedK";
+        case Fp8RK::PhysicalFamily::RuntimeK: return "RuntimeK";
+    }
+    return "unknown";
+}
+
 [[nodiscard]] std::string physicalImplementationString(const DenseReductionCandidate& candidate) {
+    if (const auto fp8 = std::dynamic_pointer_cast<const DenseRetainedFp8RKPhysicalPlan>(
+            candidate.physical_plan); fp8) {
+        std::ostringstream out;
+        out << "retained_fp8_rk/family=" << retainedFp8FamilyName(fp8->kernel.family)
+            << "/shards=" << fp8->output_dimensions.at(fp8->reduction_axis)
+            << "/dtype=" << static_cast<unsigned>(fp8->output_dtype);
+        return out.str();
+    }
     if (const auto rk = std::dynamic_pointer_cast<const DenseRKFamilyPhysicalPlan>(candidate.physical_plan); rk) {
         std::ostringstream out;
         out << rkStrategyName(rk->strategy) << '/' << rkAccessName(rk->access) << '/' << rkProgressName(rk->progress)
@@ -253,11 +257,11 @@ DenseReductionPlan planDenseReduction(const DenseReductionProblem& initial_probl
             throw std::logic_error("Dense reduction planner found reductions but no reducible sites.");
         }
 
-        // Pure [R] is not a planning competition. Hand the complete domain to the vendored whole-domain reducer and
+        // Pure [R] is not a planning competition. Ask the shared selector for the whole-domain physical pass and
         // require it to finish. The later ragged overhaul can use the same architectural shortcut independently.
         if (current.runs.size() == 1 && sites.size() == 1
             && classifyDenseReducerFamily(current, sites.front()) == DenseReducerFamily::R) {
-            DenseReductionCandidate candidate = ReducersDenseR::propose(current, sites.front());
+            DenseReductionCandidate candidate = selectDensePhysicalPass(current, sites.front(), context);
             validateCandidateTransition(current, sites.front(), DenseReducerFamily::R, candidate);
             if (hasDenseReductionSites(candidate.next_problem)) {
                 throw std::logic_error("DenseR pure-[R] proposal must complete the reduction in one pass.");
@@ -270,7 +274,7 @@ DenseReductionPlan planDenseReduction(const DenseReductionProblem& initial_probl
                 if (family == DenseReducerFamily::R) {
                     throw std::logic_error("DenseR is only valid for the pure-[R] planner fast path.");
                 }
-                DenseReductionCandidate candidate = proposeForFamily(current, site, family, context);
+                DenseReductionCandidate candidate = selectDensePhysicalPass(current, site, context);
                 validateCandidateTransition(current, site, family, candidate);
                 step.considered_candidates.push_back(std::move(candidate));
             }

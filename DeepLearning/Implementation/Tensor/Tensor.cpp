@@ -644,6 +644,43 @@ Tensor Tensor::aliasView(vector<unsigned long> dimensions, vector<unsigned long>
     return view;
 }
 
+Tensor Tensor::aliasByteStorageAs(DataType data_type,
+                                  std::vector<uint64_t> dimensions,
+                                  uint64_t byte_offset) const {
+    THOR_THROW_IF_FALSE(isInitialized());
+    if (descriptor.getDataType() != DataType::UINT8 || descriptor.getNumDimensions() != 1 ||
+        !isDenseContiguous()) {
+        throw std::runtime_error("Tensor::aliasByteStorageAs requires a contiguous flat UINT8 tensor");
+    }
+    const uint64_t element_bytes = checkedWholeByteElementSizeBytes(
+        data_type, "Tensor::aliasByteStorageAs");
+    const uint64_t visible_bytes = descriptor.getArraySizeInBytes();
+    // The source is UINT8: its storage-element offset is a byte offset.
+    // Validate the source view before computing an absolute byte offset.
+    if (storageElementOffset > storageNumElements ||
+        visible_bytes > storageNumElements - storageElementOffset) {
+        throw std::runtime_error("Tensor::aliasByteStorageAs source view exceeds backing storage");
+    }
+    TensorDescriptor view_descriptor(data_type, dimensions);
+    const uint64_t view_bytes = view_descriptor.getArraySizeInBytes();
+    if (view_bytes == 0 || byte_offset > visible_bytes ||
+        view_bytes > visible_bytes - byte_offset) {
+        throw std::runtime_error("Tensor::aliasByteStorageAs exceeds source byte view");
+    }
+    const uint64_t absolute_byte_offset = storageElementOffset + byte_offset;
+    if (absolute_byte_offset % element_bytes != 0) {
+        throw std::runtime_error("Tensor::aliasByteStorageAs requires aligned whole-element storage");
+    }
+    // All visible typed elements fit inside the allocation, even if its
+    // trailing byte count isn't a multiple of the destination element size.
+    Tensor view = *this;
+    view.descriptor = std::move(view_descriptor);
+    view.storageElementOffset = absolute_byte_offset / element_bytes;
+    view.storageNumElements = storageNumElements / element_bytes;
+    view.customStridesElements.clear();
+    return view;
+}
+
 std::vector<uint64_t> Tensor::getStridesElements() const {
     THOR_THROW_IF_FALSE(isInitialized());
     if (!customStridesElements.empty()) {

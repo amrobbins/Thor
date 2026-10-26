@@ -343,6 +343,24 @@ struct DenseExecutablePlan {
 
 }  // namespace CubReductionInternal
 
+/** Read-only view of one already stamped dense pass (no GPU allocation or selection).
+ * Fields that do not apply to the selected physical family remain nullopt;
+ * there is no invented packet, CTA, or shard geometry for retained FP8.
+ */
+struct DensePhysicalPassDiagnostic {
+    std::string family;
+    CubReductionInternal::DensePassRole role;
+    DataType input_dtype;
+    DataType output_dtype;
+    std::vector<uint64_t> input_dimensions;
+    std::vector<uint64_t> output_dimensions;
+    size_t intermediate_bytes = 0;
+    size_t scratch_bytes = 0;
+    std::optional<size_t> packet_bytes;
+    std::optional<uint32_t> block_threads;
+    std::optional<uint64_t> stage_blocks;
+    std::optional<uint64_t> shards_per_output;
+};
 
 class StampedCubReduction;
 class StampedCubArgReduction;
@@ -779,6 +797,8 @@ class StampedCubArgReduction {
 
    private:
     friend class CubArgReduction;
+    // Workspace-allocation regression tests; never used by production dispatch.
+    friend struct CubReductionTiledWorkspaceProbe;
 
     StampedCubArgReduction(CubArgReductionOp op,
                            CubReductionGeometry geometry,
@@ -864,17 +884,23 @@ class StampedCubReduction {
     /** True when ordinary dense execution is represented as a flat ordered physical-pass plan. */
     [[nodiscard]] bool usesDenseExecutablePlan() const { return !dense_executable_plan.passes.empty(); }
     [[nodiscard]] size_t getDenseExecutablePassCount() const { return dense_executable_plan.passes.size(); }
+    /** Physical sequence as stamped; never selects, allocates, or retunes. */
+    [[nodiscard]] std::vector<DensePhysicalPassDiagnostic> getDensePhysicalPassDiagnostics() const;
 
-    // Transitional RK diagnostics retained for the census; mixed R/KR/RK plans simply report false here.
+    // Backward-compatible census metadata; physical parameters belong to the
+    // per-pass diagnostics above, not a misleading first-RK special case.
     [[nodiscard]] bool usesModernRKFamilyPlan() const;
     [[nodiscard]] const std::string& getModernRKStrategyChain() const { return modern_rk_strategy_chain; }
-    [[nodiscard]] size_t getModernRKFirstPacketBytes() const;
-    [[nodiscard]] uint32_t getModernRKFirstBlockThreads() const;
-    [[nodiscard]] uint64_t getModernRKFirstStageBlocks() const;
-    [[nodiscard]] uint64_t getModernRKFirstShardsPerOutput() const;
 
    private:
     friend class CubReduction;
+    // Phase-3 GPU smoke verifies that independent stamps never share their
+    // mutable workspace. This is test-only friendship, not a public accessor.
+    friend struct Fp8RKStampLifecycleProbe;
+    // GPU integration smoke: inject a deterministic already-selected flat plan.
+    friend struct DenseRetainedFp8RKExecutionProbe;
+    // Workspace-allocation regression tests; never used by production dispatch.
+    friend struct CubReductionTiledWorkspaceProbe;
 
     StampedCubReduction(CubReductionOp op,
                         CubReductionGeometry geometry,
@@ -908,7 +934,6 @@ class StampedCubReduction {
     Tensor temp_storage;
     CubReductionInternal::DenseExecutablePlan dense_executable_plan;
     std::string modern_rk_strategy_chain;
-
     // Physical passes need the logical operation's transform/finalizer placement, not merely the public operation.
     // This prevents L1/L2/SumSquares transforms from being re-applied to FP32 shard partials.
     bool apply_input_transform = true;
