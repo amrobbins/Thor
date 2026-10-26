@@ -1,0 +1,5 @@
+dtype,operation,family,physical_kernel
+fp8_e4m3,min_square,aligned_k,p8_cta64_complete
+fp8_e5m2,max_abs,aligned_k,p8_cta64_complete
+fp8_e5m2,max_square,aligned_k,p8_cta64_complete
+fp8_e5m2,min_square,aligned_k,p8_cta64_complete

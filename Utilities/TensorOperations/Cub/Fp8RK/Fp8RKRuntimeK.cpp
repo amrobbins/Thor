@@ -1,0 +1,52 @@
+#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalKernels.h"
+
+#include <stdexcept>
+
+namespace ThorImplementation::CubReductionInternal::Fp8RK {
+
+uint32_t runtimeKResidency(DataType input_dtype,
+                            const CubReductionStageSemantics& semantics,
+                            const PhysicalKernel& kernel) {
+    if (kernel.family != PhysicalFamily::RuntimeK) return 0;
+    CubKernelOccupancyInfo occupancy{};
+    switch (static_cast<RuntimeLayout>(kernel.a)) {
+        case RuntimeLayout::PacketComplete:
+            occupancy = queryFp8GeneralRParallelKTileRCooperativeCalibrationOccupancy(
+                input_dtype, semantics.input_transform, semantics.combine);
+            break;
+        case RuntimeLayout::RotatedPrefix:
+        case RuntimeLayout::RotatedExact:
+            occupancy = queryFp8GeneralRParallelKTileRotatedCalibrationOccupancy(
+                input_dtype, static_cast<RuntimeLayout>(kernel.a) == RuntimeLayout::RotatedExact,
+                kernel.e, semantics.input_transform, semantics.combine);
+            break;
+        default: return 0;
+    }
+    return occupancy.max_active_blocks_per_sm > 0
+        ? static_cast<uint32_t>(occupancy.max_active_blocks_per_sm) : 0u;
+}
+
+void launchRuntimeK(const PhysicalKernel& kernel, const CubReductionStageSemantics& semantics,
+                    const Tensor& input, Tensor& stage_output,
+                    const CubReductionGeometry& geometry, float output_scale, Stream& stream) {
+    if (kernel.family != PhysicalFamily::RuntimeK ||
+        !structurallyValid(kernel, geometry.outer_size, geometry.reduction_size, geometry.inner_size))
+        throw std::logic_error("Invalid retained RuntimeK physical stage");
+    switch (static_cast<RuntimeLayout>(kernel.a)) {
+        case RuntimeLayout::PacketComplete:
+            launchFp8GeneralRParallelKTileRCooperativeCalibrationComplete(
+                input, stage_output, geometry, static_cast<uint32_t>(kernel.b),
+                static_cast<uint32_t>(kernel.c), stream, semantics, output_scale);
+            return;
+        case RuntimeLayout::RotatedPrefix:
+        case RuntimeLayout::RotatedExact:
+            launchFp8GeneralRParallelKTileRotatedCalibrationFirstStage(
+                input, stage_output, geometry,
+                static_cast<RuntimeLayout>(kernel.a) == RuntimeLayout::RotatedExact,
+                kernel.e, kernel.f, stream, semantics.input_transform, semantics.combine);
+            return;
+    }
+    throw std::logic_error("No retained RuntimeK physical launcher");
+}
+
+}  // namespace ThorImplementation::CubReductionInternal::Fp8RK
