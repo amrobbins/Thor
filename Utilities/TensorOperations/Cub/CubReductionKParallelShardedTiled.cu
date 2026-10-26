@@ -289,6 +289,79 @@ template <typename T>
 inline constexpr bool IS_K_PARALLEL_FP8_TYPE =
     std::is_same_v<T, __nv_fp8_e4m3> || std::is_same_v<T, __nv_fp8_e5m2>;
 
+// P5-E: AlignedK R loop with explicit load-ahead and paired FP8 decode.
+//
+// Each lane owns one packet per row and walks its shard's rows with stride inner_size. The loop is software-pipelined
+// in batches of K_PARALLEL_FP8_LOAD_AHEAD_ROWS rows: the next batch is issued before the current batch is decoded, so
+// up to two batches of loads are in flight while the lane converts and accumulates. P8 lanes keep 4 rows (2 x 32
+// bytes of packets in registers), P2 lanes 8 rows (2 x 16 bytes). Leaving this to nvcc's unroller produced 4-row
+// trips with no cross-trip overlap, and the factor flipped with unrelated edits (1068 vs 1069). Rows are still
+// accumulated in increasing order per component, so results are bit-identical to the plain row loop.
+template <size_t PacketBytes>
+inline constexpr uint32_t K_PARALLEL_FP8_LOAD_AHEAD_ROWS = PacketBytes >= 8 ? 4U : 8U;
+
+template <typename InputT, int ItemsPerLane, uint32_t Rows>
+struct KParallelFp8RowBatch {
+    PackedInputValues<InputT, ItemsPerLane> rows[Rows];
+};
+
+template <typename InputT, int ItemsPerLane, uint32_t Rows>
+__device__ __forceinline__ void loadKParallelFp8RowBatch(KParallelFp8RowBatch<InputT, ItemsPerLane, Rows>& batch,
+                                                         const InputT* row_input,
+                                                         uint64_t inner_size) {
+#pragma unroll
+    for (uint32_t row = 0; row < Rows; ++row) {
+        batch.rows[row] = loadVectorizedInputPacket<InputT, ItemsPerLane>(row_input + row * inner_size);
+    }
+}
+
+template <typename InputT, int ItemsPerLane, uint32_t Rows, typename ReductionOpT, typename InputTransformT>
+__device__ __forceinline__ void reduceKParallelFp8RowBatch(float (&local)[ItemsPerLane],
+                                                           const KParallelFp8RowBatch<InputT, ItemsPerLane, Rows>& batch,
+                                                           const ReductionOpT& reduction_op,
+                                                           const InputTransformT& input_transform) {
+#pragma unroll
+    for (uint32_t row = 0; row < Rows; ++row) {
+        reducePackedFp8ValuesToFp32<InputT>(local, batch.rows[row], reduction_op, input_transform);
+    }
+}
+
+// Accumulates row_count packets starting at row_input (stride inner_size) into local, which the caller initialized.
+template <typename InputT, int ItemsPerLane, typename ReductionOpT, typename InputTransformT>
+__device__ __forceinline__ void accumulateKParallelFp8Rows(float (&local)[ItemsPerLane],
+                                                           const InputT* row_input,
+                                                           uint32_t row_count,
+                                                           uint64_t inner_size,
+                                                           const ReductionOpT& reduction_op,
+                                                           const InputTransformT& input_transform) {
+    static_assert(IS_K_PARALLEL_FP8_TYPE<InputT>);
+    constexpr uint32_t Rows = K_PARALLEL_FP8_LOAD_AHEAD_ROWS<sizeof(InputT) * ItemsPerLane>;
+    using BatchT = KParallelFp8RowBatch<InputT, ItemsPerLane, Rows>;
+    const uint64_t batch_stride = static_cast<uint64_t>(Rows) * inner_size;
+    uint32_t remaining = row_count;
+    if (remaining >= Rows) {
+        BatchT current;
+        loadKParallelFp8RowBatch(current, row_input, inner_size);
+        row_input += batch_stride;
+        remaining -= Rows;
+        while (remaining >= Rows) {
+            BatchT next;
+            loadKParallelFp8RowBatch(next, row_input, inner_size);
+            row_input += batch_stride;
+            remaining -= Rows;
+            reduceKParallelFp8RowBatch(local, current, reduction_op, input_transform);
+            current = next;
+        }
+        reduceKParallelFp8RowBatch(local, current, reduction_op, input_transform);
+    }
+    for (; remaining != 0; --remaining) {
+        const PackedInputValues<InputT, ItemsPerLane> values =
+            loadVectorizedInputPacket<InputT, ItemsPerLane>(row_input);
+        reducePackedFp8ValuesToFp32<InputT>(local, values, reduction_op, input_transform);
+        row_input += inner_size;
+    }
+}
+
 [[nodiscard]] bool kParallelFp8OutputDTypeSupported(DataType dtype) {
     switch (dtype) {
         case DataType::FP8_E4M3:
@@ -424,6 +497,8 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
                                                                         uint64_t output_outer_stride,
                                                                         uint64_t output_inner_stride,
                                                                         uint64_t shards_per_output,
+                                                                        uint64_t component_tiles,
+                                                                        ReductionShardRows shard_rows,
                                                                         InputTransformT input_transform,
                                                                         OutputFinalizeT output_finalize,
                                                                         float output_scale) {
@@ -447,25 +522,22 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
                        + static_cast<size_t>(warp) * static_cast<size_t>(ItemsPerLane)
                              * K_PARALLEL_FP8_SHARED_STRIPE_PITCH;
 
-    const uint64_t component_tiles = ceilDivideU64(inner_size, components_per_cta);
-    const uint64_t total_work = outer_size * component_tiles * shards_per_output;
-    const uint64_t grid_stride = static_cast<uint64_t>(gridDim.x);
-
-    for (uint64_t work_index = static_cast<uint64_t>(blockIdx.x); work_index < total_work; work_index += grid_stride) {
-        const uint64_t shard = work_index % shards_per_output;
-        const uint64_t outer_component_work = work_index / shards_per_output;
-        const uint64_t component_tile = outer_component_work % component_tiles;
-        const uint64_t outer_index = outer_component_work / component_tiles;
+    // Grid: x = shard, y = component tile, z = outer (see reductionWorkGrid). The balanced row split is precomputed on
+    // the host; the per-shard row loop runs on a 32-bit counter and a 64-bit row pointer.
+    // reductionWorkGrid() limits every work extent to 2^31 - 1, so 32-bit work coordinates never wrap.
+    const uint32_t outer_count = static_cast<uint32_t>(outer_size);
+    const uint32_t tile_count = static_cast<uint32_t>(component_tiles);
+    const uint32_t shard_count = static_cast<uint32_t>(shards_per_output);
+    for (uint32_t outer_index = blockIdx.z; outer_index < outer_count; outer_index += gridDim.z)
+    for (uint32_t component_tile = blockIdx.y; component_tile < tile_count; component_tile += gridDim.y)
+    for (uint32_t shard = blockIdx.x; shard < shard_count; shard += gridDim.x) {
         const uint64_t tile_component_begin = component_tile * components_per_cta;
         const uint64_t packet_component_begin =
             tile_component_begin + static_cast<uint64_t>(threadIdx.x) * static_cast<uint64_t>(ItemsPerLane);
         const bool owns_packet = packet_component_begin < inner_size;
 
-        const uint64_t base_rows = reduction_size / shards_per_output;
-        const uint64_t extra_rows = reduction_size % shards_per_output;
-        const uint64_t row_begin = shard * base_rows + (shard < extra_rows ? shard : extra_rows);
-        const uint64_t row_count = base_rows + static_cast<uint64_t>(shard < extra_rows);
-        const uint64_t row_end = row_begin + row_count;
+        const uint64_t row_begin = reductionShardRowBegin(shard_rows, shard);
+        const uint32_t row_count = reductionShardRowCount(shard_rows, shard);
 
         float local[ItemsPerLane];
 #pragma unroll
@@ -474,8 +546,8 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
         }
 
         if (owns_packet) {
-            uint64_t input_index =
-                (outer_index * reduction_size + row_begin) * inner_size + packet_component_begin;
+            const InputT* row_input =
+                input + ((outer_index * reduction_size + row_begin) * inner_size + packet_component_begin);
 
             // Whole-row packet divisibility means every row start preserves PacketBytes alignment whenever the tensor
             // base does. That is the normal allocator path for all 16/8/4/2-byte specializations. Packet16 retains the
@@ -483,39 +555,31 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
             // for that geometry; narrower packets use their native coalesced vector load directly.
             if constexpr (PacketBytes == 16) {
                 if ((reinterpret_cast<uintptr_t>(input) & uintptr_t{15}) == 0) {
-                    for (uint64_t row = row_begin; row < row_end; ++row) {
+                    for (uint32_t row = 0; row < row_count; ++row) {
                         const PackedInputValues<InputT, ItemsPerLane> values =
-                            loadVectorizedInputPacket<InputT, ItemsPerLane>(input + input_index);
+                            loadVectorizedInputPacket<InputT, ItemsPerLane>(row_input);
 #pragma unroll
                         for (int item = 0; item < ItemsPerLane; ++item) {
                             local[item] = reduction_op(
                                 local[item], input_transform(ToFp32<InputT>{}(values.values[item])));
                         }
-                        input_index += inner_size;
+                        row_input += inner_size;
                     }
                 } else {
-                    for (uint64_t row = row_begin; row < row_end; ++row) {
+                    for (uint32_t row = 0; row < row_count; ++row) {
                         const PackedInputValues<InputT, ItemsPerLane> values =
-                            loadAlignmentSafeInputPacket<InputT, ItemsPerLane>(input + input_index);
+                            loadAlignmentSafeInputPacket<InputT, ItemsPerLane>(row_input);
 #pragma unroll
                         for (int item = 0; item < ItemsPerLane; ++item) {
                             local[item] = reduction_op(
                                 local[item], input_transform(ToFp32<InputT>{}(values.values[item])));
                         }
-                        input_index += inner_size;
+                        row_input += inner_size;
                     }
                 }
             } else {
-                for (uint64_t row = row_begin; row < row_end; ++row) {
-                    const PackedInputValues<InputT, ItemsPerLane> values =
-                        loadVectorizedInputPacket<InputT, ItemsPerLane>(input + input_index);
-#pragma unroll
-                    for (int item = 0; item < ItemsPerLane; ++item) {
-                        local[item] = reduction_op(
-                            local[item], input_transform(ToFp32<InputT>{}(values.values[item])));
-                    }
-                    input_index += inner_size;
-                }
+                accumulateKParallelFp8Rows<InputT, ItemsPerLane>(
+                    local, row_input, row_count, inner_size, reduction_op, input_transform);
             }
         }
 
@@ -699,8 +763,8 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
             }
         }
 
-        // A grid-stride iteration may reuse this warp's private shared tile. No inter-warp reduction/cooperation is
-        // involved, so a warp-local barrier is sufficient and keeps KParallel distinct from RCooperative.
+        // A later work item of this block may reuse this warp's private shared tile. No inter-warp reduction/cooperation
+        // is involved, so a warp-local barrier is sufficient and keeps KParallel distinct from RCooperative.
         __syncwarp();
     }
 }
@@ -715,11 +779,11 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
 // The launch-uniform operation branch is outside the R row loop and is executed once
 // per owned (outer, K-tile, shard) work item, rather than once per input packet.
 // Input-transformed staged variants continue using typed kernels.
+// Force-inlined: the hoisted staged and unified complete kernels call this from four operation branches. As an
+// out-of-line call, `local` is passed by reference and lives on the stack (1071 showed STACK > 0 for hoisted kernels).
 template <typename InputT, typename ReductionOpT, int PacketBytes>
-__device__ inline void kParallelFp8HoistedAccumulateRows(const InputT* input,
-                                                          uint64_t input_index,
-                                                          uint64_t row_begin,
-                                                          uint64_t row_end,
+__device__ __forceinline__ void kParallelFp8HoistedAccumulateRows(const InputT* row_input,
+                                                          uint32_t row_count,
                                                           uint64_t inner_size,
                                                           float (&local)[PacketBytes]) {
     constexpr float Init = KParallelReductionIdentityFp32<ReductionOpT>::value;
@@ -728,21 +792,14 @@ __device__ inline void kParallelFp8HoistedAccumulateRows(const InputT* input,
     for (int item = 0; item < PacketBytes; ++item) {
         local[item] = Init;
     }
-    for (uint64_t row = row_begin; row < row_end; ++row) {
-        const PackedInputValues<InputT, PacketBytes> values =
-            loadVectorizedInputPacket<InputT, PacketBytes>(input + input_index);
-#pragma unroll
-        for (int item = 0; item < PacketBytes; ++item) {
-            local[item] = reduction_op(local[item], ToFp32<InputT>{}(values.values[item]));
-        }
-        input_index += inner_size;
-    }
+    accumulateKParallelFp8Rows<InputT, PacketBytes>(local, row_input, row_count, inner_size, reduction_op, IdentityFp32{});
 }
 
 template <typename InputT, int PacketBytes, int BlockThreads>
 __global__ __launch_bounds__(BlockThreads) void kParallelFp8StagedHoistedCombineKernel(
     const InputT* input, float* fp32_partials, uint64_t outer_size,
     uint64_t reduction_size, uint64_t inner_size, uint64_t shards_per_output,
+    uint64_t component_tiles, ReductionShardRows shard_rows,
     CubReductionStageCombine operation) {
     static_assert(IS_K_PARALLEL_FP8_TYPE<InputT>);
     static_assert(PacketBytes == 2 || PacketBytes == 8);
@@ -753,43 +810,41 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8StagedHoistedCombine
     const int lane = static_cast<int>(threadIdx.x) % TILED_REDUCTION_WARP_THREADS;
     float* warp_tile = fp8_writeback_shared + static_cast<size_t>(warp) * PacketBytes
                                             * K_PARALLEL_FP8_SHARED_STRIPE_PITCH;
-    const uint64_t component_tiles = ceilDivideU64(inner_size, ComponentsPerCTA);
-    const uint64_t total_work = outer_size * component_tiles * shards_per_output;
-
-    for (uint64_t work_index = blockIdx.x; work_index < total_work; work_index += gridDim.x) {
-        const uint64_t shard = work_index % shards_per_output;
-        const uint64_t outer_component_work = work_index / shards_per_output;
-        const uint64_t component_tile = outer_component_work % component_tiles;
-        const uint64_t outer_index = outer_component_work / component_tiles;
+    // Grid: x = shard, y = component tile, z = outer (see reductionWorkGrid).
+    // reductionWorkGrid() limits every work extent to 2^31 - 1, so 32-bit work coordinates never wrap.
+    const uint32_t outer_count = static_cast<uint32_t>(outer_size);
+    const uint32_t tile_count = static_cast<uint32_t>(component_tiles);
+    const uint32_t shard_count = static_cast<uint32_t>(shards_per_output);
+    for (uint32_t outer_index = blockIdx.z; outer_index < outer_count; outer_index += gridDim.z)
+    for (uint32_t component_tile = blockIdx.y; component_tile < tile_count; component_tile += gridDim.y)
+    for (uint32_t shard = blockIdx.x; shard < shard_count; shard += gridDim.x) {
         const uint64_t tile_component_begin = component_tile * ComponentsPerCTA;
         const uint64_t packet_component_begin =
             tile_component_begin + static_cast<uint64_t>(threadIdx.x) * PacketBytes;
         const bool owns_packet = packet_component_begin < inner_size;
-        const uint64_t base_rows = reduction_size / shards_per_output;
-        const uint64_t extra_rows = reduction_size % shards_per_output;
-        const uint64_t row_begin = shard * base_rows + minU64(shard, extra_rows);
-        const uint64_t row_end = row_begin + base_rows + static_cast<uint64_t>(shard < extra_rows);
+        const uint64_t row_begin = reductionShardRowBegin(shard_rows, shard);
+        const uint32_t row_count = reductionShardRowCount(shard_rows, shard);
         float local[PacketBytes]{};
         if (owns_packet) {
-            const uint64_t input_index =
-                (outer_index * reduction_size + row_begin) * inner_size + packet_component_begin;
+            const InputT* row_input =
+                input + ((outer_index * reduction_size + row_begin) * inner_size + packet_component_begin);
             // One uniform switch PER shard/tile, not per R row or decoded packet.
             switch (operation) {
                 case CubReductionStageCombine::Sum:
                     kParallelFp8HoistedAccumulateRows<InputT, cuda::std::plus<float>, PacketBytes>(
-                        input, input_index, row_begin, row_end, inner_size, local);
+                        row_input, row_count, inner_size, local);
                     break;
                 case CubReductionStageCombine::Product:
                     kParallelFp8HoistedAccumulateRows<InputT, cuda::std::multiplies<float>, PacketBytes>(
-                        input, input_index, row_begin, row_end, inner_size, local);
+                        row_input, row_count, inner_size, local);
                     break;
                 case CubReductionStageCombine::Minimum:
                     kParallelFp8HoistedAccumulateRows<InputT, PropagatingMinimumFp32, PacketBytes>(
-                        input, input_index, row_begin, row_end, inner_size, local);
+                        row_input, row_count, inner_size, local);
                     break;
                 case CubReductionStageCombine::Maximum:
                     kParallelFp8HoistedAccumulateRows<InputT, PropagatingMaximumFp32, PacketBytes>(
-                        input, input_index, row_begin, row_end, inner_size, local);
+                        row_input, row_count, inner_size, local);
                     break;
             }
         }
@@ -839,6 +894,8 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8CompleteUnifiedKerne
                                                                         uint64_t output_outer_stride,
                                                                         uint64_t output_inner_stride,
                                                                         uint64_t shards_per_output,
+                                                                        uint64_t component_tiles,
+                                                                        ReductionShardRows shard_rows,
                                                                         CubReductionStageCombine operation,
                                                                         AdditiveFinalizeFp32 output_finalize,
                                                                         float output_scale) {
@@ -866,31 +923,27 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8CompleteUnifiedKerne
                        + static_cast<size_t>(warp) * static_cast<size_t>(ItemsPerLane)
                              * K_PARALLEL_FP8_SHARED_STRIPE_PITCH;
 
-    const uint64_t component_tiles = ceilDivideU64(inner_size, components_per_cta);
-    const uint64_t total_work = outer_size * component_tiles * shards_per_output;
-    const uint64_t grid_stride = static_cast<uint64_t>(gridDim.x);
-
-    for (uint64_t work_index = static_cast<uint64_t>(blockIdx.x); work_index < total_work; work_index += grid_stride) {
-        const uint64_t shard = work_index % shards_per_output;
-        const uint64_t outer_component_work = work_index / shards_per_output;
-        const uint64_t component_tile = outer_component_work % component_tiles;
-        const uint64_t outer_index = outer_component_work / component_tiles;
+    // Grid: x = shard, y = component tile, z = outer (see reductionWorkGrid).
+    // reductionWorkGrid() limits every work extent to 2^31 - 1, so 32-bit work coordinates never wrap.
+    const uint32_t outer_count = static_cast<uint32_t>(outer_size);
+    const uint32_t tile_count = static_cast<uint32_t>(component_tiles);
+    const uint32_t shard_count = static_cast<uint32_t>(shards_per_output);
+    for (uint32_t outer_index = blockIdx.z; outer_index < outer_count; outer_index += gridDim.z)
+    for (uint32_t component_tile = blockIdx.y; component_tile < tile_count; component_tile += gridDim.y)
+    for (uint32_t shard = blockIdx.x; shard < shard_count; shard += gridDim.x) {
         const uint64_t tile_component_begin = component_tile * components_per_cta;
         const uint64_t packet_component_begin =
             tile_component_begin + static_cast<uint64_t>(threadIdx.x) * static_cast<uint64_t>(ItemsPerLane);
         const bool owns_packet = packet_component_begin < inner_size;
 
-        const uint64_t base_rows = reduction_size / shards_per_output;
-        const uint64_t extra_rows = reduction_size % shards_per_output;
-        const uint64_t row_begin = shard * base_rows + (shard < extra_rows ? shard : extra_rows);
-        const uint64_t row_count = base_rows + static_cast<uint64_t>(shard < extra_rows);
-        const uint64_t row_end = row_begin + row_count;
+        const uint64_t row_begin = reductionShardRowBegin(shard_rows, shard);
+        const uint32_t row_count = reductionShardRowCount(shard_rows, shard);
 
         float local[ItemsPerLane]{};
 
         if (owns_packet) {
-            uint64_t input_index =
-                (outer_index * reduction_size + row_begin) * inner_size + packet_component_begin;
+            const InputT* row_input =
+                input + ((outer_index * reduction_size + row_begin) * inner_size + packet_component_begin);
 
             // Uniform operation selection outside the R loop. Both policies
             // retain all four operation bodies, including the additive branch
@@ -898,7 +951,7 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8CompleteUnifiedKerne
             switch (operation) {
                 case CubReductionStageCombine::Sum:
                     kParallelFp8HoistedAccumulateRows<InputT, cuda::std::plus<float>, ItemsPerLane>(
-                        input, input_index, row_begin, row_end, inner_size, local);
+                        row_input, row_count, inner_size, local);
                     if constexpr (Policy == Fp8CompleteFinalizePolicy::InBranch) {
 #pragma unroll
                         for (int item = 0; item < ItemsPerLane; ++item)
@@ -907,15 +960,15 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8CompleteUnifiedKerne
                     break;
                 case CubReductionStageCombine::Product:
                     kParallelFp8HoistedAccumulateRows<InputT, cuda::std::multiplies<float>, ItemsPerLane>(
-                        input, input_index, row_begin, row_end, inner_size, local);
+                        row_input, row_count, inner_size, local);
                     break;
                 case CubReductionStageCombine::Minimum:
                     kParallelFp8HoistedAccumulateRows<InputT, PropagatingMinimumFp32, ItemsPerLane>(
-                        input, input_index, row_begin, row_end, inner_size, local);
+                        row_input, row_count, inner_size, local);
                     break;
                 case CubReductionStageCombine::Maximum:
                     kParallelFp8HoistedAccumulateRows<InputT, PropagatingMaximumFp32, ItemsPerLane>(
-                        input, input_index, row_begin, row_end, inner_size, local);
+                        row_input, row_count, inner_size, local);
                     break;
             }
             if constexpr (Policy == Fp8CompleteFinalizePolicy::Joined) {
@@ -1107,8 +1160,8 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8CompleteUnifiedKerne
             }
         }
 
-        // A grid-stride iteration may reuse this warp's private shared tile. No inter-warp reduction/cooperation is
-        // involved, so a warp-local barrier is sufficient and keeps KParallel distinct from RCooperative.
+        // A later work item of this block may reuse this warp's private shared tile. No inter-warp reduction/cooperation
+        // is involved, so a warp-local barrier is sufficient and keeps KParallel distinct from RCooperative.
         __syncwarp();
     }
 }
@@ -1694,17 +1747,22 @@ void launchKParallelFp8ForBlock(const Tensor& input,
                                      : kParallelFp8CompleteNeedsTranspose<PacketBytes>(stage_output.getDataType());
     const size_t dynamic_shared_bytes = needs_transpose ? max_dynamic_shared_bytes : 0;
 
+    // Division-free launch: x = shard, y = component tile, z = outer. The balanced row split is computed here once
+    // instead of by every block, and every shard's row count must fit the kernels' 32-bit row counter.
     const uint64_t component_tiles = ceilDivideU64(geometry.inner_size, components_per_cta);
-    if (geometry.outer_size > std::numeric_limits<uint64_t>::max() / component_tiles
-        || geometry.outer_size * component_tiles > std::numeric_limits<uint64_t>::max() / shards_per_output) {
-        throw std::overflow_error("FP8 K-parallel tiled stage work count overflows uint64_t.");
-    }
-    const uint64_t total_work = geometry.outer_size * component_tiles * shards_per_output;
-    const unsigned int grid_blocks = static_cast<unsigned int>(
-        std::min<uint64_t>(total_work, TILED_REDUCTION_MAX_GRID_BLOCKS));
-    if (grid_blocks == 0) {
+    if (geometry.outer_size == 0 || component_tiles == 0 || shards_per_output == 0) {
         throw std::logic_error("FP8 K-parallel tiled stage requires non-zero work.");
     }
+    const ReductionShardRows shard_rows = balancedReductionShardRows(geometry.reduction_size, shards_per_output);
+    // Complete items of <= 8 rows and <= 512 bytes keep a persistent grid (see REDUCTION_PERSISTENT_MAX_BLOCKS).
+    const uint64_t rows_per_work_item =
+        static_cast<uint64_t>(shard_rows.base_rows) + static_cast<uint64_t>(shard_rows.extra_rows != 0);
+    const uint64_t bytes_per_work_item =
+        rows_per_work_item * std::min<uint64_t>(geometry.inner_size, components_per_cta) * sizeof(InputT);
+    const bool persistent = Topology == TiledRKStageTopology::Complete && rows_per_work_item <= 8
+                            && bytes_per_work_item <= 512;
+    const dim3 grid_blocks = reductionWorkGrid(shards_per_output, component_tiles, geometry.outer_size,
+                                               persistent ? REDUCTION_PERSISTENT_MAX_BLOCKS : 0);
 
     // Production Staged AlignedK: remove the operation dimension from the six retained
     // P2/P8 x CTA32/64/128 kernels. Compile-time routing is important: a runtime
@@ -1731,7 +1789,8 @@ void launchKParallelFp8ForBlock(const Tensor& input,
         kParallelFp8StagedHoistedCombineKernel<InputT, PacketBytes, BlockThreads>
             <<<grid_blocks, BlockThreads, dynamic_shared_bytes, stream.getStream()>>>(
                 input.getMemPtr<InputT>(), stage_output.getMemPtr<float>(), geometry.outer_size,
-                geometry.reduction_size, geometry.inner_size, shards_per_output, operation);
+                geometry.reduction_size, geometry.inner_size, shards_per_output, component_tiles, shard_rows,
+                operation);
         CUDA_CHECK(cudaGetLastError());
     } else if constexpr (Topology == TiledRKStageTopology::Complete
                          && std::is_same_v<InputTransformT, IdentityFp32>
@@ -1768,7 +1827,7 @@ void launchKParallelFp8ForBlock(const Tensor& input,
                 input.getMemPtr<InputT>(), stage_output.getMemPtr<void>(), stage_output.getDataType(),
                 geometry.outer_size, geometry.reduction_size, geometry.inner_size,
                 geometry.tiled_output_outer_stride, geometry.tiled_output_inner_stride,
-                shards_per_output, operation, additive_finalize, output_scale);
+                shards_per_output, component_tiles, shard_rows, operation, additive_finalize, output_scale);
         CUDA_CHECK(cudaGetLastError());
     } else {
         if constexpr (prunedFp8AlignedInstantiation<InputT, InputTransformT, ReductionOpT,
@@ -1791,6 +1850,8 @@ void launchKParallelFp8ForBlock(const Tensor& input,
                                                                                           geometry.tiled_output_outer_stride,
                                                                                           geometry.tiled_output_inner_stride,
                                                                                           shards_per_output,
+                                                                                          component_tiles,
+                                                                                          shard_rows,
                                                                                           input_transform,
                                                                                           output_finalize,
                                                                                           output_scale);

@@ -352,6 +352,89 @@ constexpr size_t ASYNC_TILED_REDUCTION_SHARED_BYTES =
     return lhs < rhs ? lhs : rhs;
 }
 
+// Division-free reducer work grids.
+//
+// A sharded reducer stage owns a (shard, component tile, outer) work space. The launch maps it directly onto the
+// grid: shards on x, component tiles on y, outer rows on z. Shards stay on the fastest-dispatched axis so the blocks
+// resident at any moment keep walking consecutive rows of one outer slab, the same dispatch order as the former
+// shard-fastest linear decomposition. x has the 2^31-1 hardware limit and y/z have 65535. Kernels visit their work
+// with three 32-bit stride loops,
+//
+//     for (uint32_t outer_index = blockIdx.z; outer_index < outer_size; outer_index += gridDim.z)
+//     for (uint32_t component_tile = blockIdx.y; component_tile < component_tiles; component_tile += gridDim.y)
+//     for (uint32_t shard = blockIdx.x; shard < shards; shard += gridDim.x) { ... }
+//
+// so geometries beyond the grid limits stay correct, while normally every block owns exactly one work item and no
+// device code divides by a runtime work-space extent. Every extent is limited to 2^31-1 so that index + stride can
+// never wrap a 32-bit loop variable; address arithmetic widens to 64 bits at the multiply. 2^31 outer rows of even
+// one reduced row pair of 2-byte K would already be an 8 GiB FP8 tensor, and the DeepRSmallK / rotated families
+// require R > 32, so the limit is not reachable by those families on current devices.
+constexpr uint64_t REDUCTION_WORK_GRID_MAX_EXTENT = 2147483647ULL;
+constexpr uint64_t REDUCTION_WORK_GRID_MAX_X = 2147483647ULL;
+constexpr uint64_t REDUCTION_WORK_GRID_MAX_YZ = 65535ULL;
+
+// Some stages own work items so small that block launch and teardown dominate their loads. Measured on RTX 5090
+// against the pre-P5-B persistent 65535-block linear grid, one block per work item was 11% slower for AlignedK Complete
+// items of <= 8 rows and <= 512 bytes and 15% slower for DeepRSmallK tiny-K items of <= 256 bytes, while every other
+// measured stage was neutral or faster with a full grid. Those launches pass this cap to reductionWorkGrid() and the
+// stride loops give each block several work items.
+constexpr uint64_t REDUCTION_PERSISTENT_MAX_BLOCKS = 65535;
+
+// max_blocks == 0 launches one block per work item (up to the hardware axis limits). A nonzero max_blocks caps the
+// total block count, shrinking outer (z) first, then component tiles (y), then shards (x), so the shard-fastest
+// dispatch order is preserved and each block strides over several work items.
+[[nodiscard]] inline dim3 reductionWorkGrid(uint64_t shards,
+                                            uint64_t component_tiles,
+                                            uint64_t outer_size,
+                                            uint64_t max_blocks = 0) {
+    if (shards == 0 || component_tiles == 0 || outer_size == 0) {
+        throw std::logic_error("Reduction work grid requires non-zero shards, component tiles and outer size.");
+    }
+    if (shards > REDUCTION_WORK_GRID_MAX_EXTENT || component_tiles > REDUCTION_WORK_GRID_MAX_EXTENT ||
+        outer_size > REDUCTION_WORK_GRID_MAX_EXTENT) {
+        throw std::invalid_argument("Reduction work grid extent exceeds the 32-bit work-index range (2^31 - 1).");
+    }
+    uint64_t x = std::min(shards, REDUCTION_WORK_GRID_MAX_X);
+    uint64_t y = std::min(component_tiles, REDUCTION_WORK_GRID_MAX_YZ);
+    uint64_t z = std::min(outer_size, REDUCTION_WORK_GRID_MAX_YZ);
+    if (max_blocks != 0) {
+        x = std::min(x, max_blocks);
+        y = std::min(y, std::max<uint64_t>(1, max_blocks / x));
+        z = std::min(z, std::max<uint64_t>(1, max_blocks / (x * y)));
+    }
+    return dim3(static_cast<unsigned int>(x), static_cast<unsigned int>(y), static_cast<unsigned int>(z));
+}
+
+// Balanced R split, precomputed on the host: shards [0, extra_rows) own base_rows + 1 rows and the remaining shards own
+// base_rows rows. Both fields are 32-bit: the host guarantees base_rows + 1 fits the kernels' 32-bit per-shard row
+// counter, and extra_rows < shards <= 2^31 - 1 (reductionWorkGrid). The row offset widens to 64 bits.
+struct ReductionShardRows {
+    uint32_t base_rows;
+    uint32_t extra_rows;
+};
+
+[[nodiscard]] inline ReductionShardRows balancedReductionShardRows(uint64_t reduction_size, uint64_t shards) {
+    if (shards == 0 || shards > REDUCTION_WORK_GRID_MAX_EXTENT) {
+        throw std::logic_error("Balanced reduction shard rows require 1 <= shards <= 2^31 - 1.");
+    }
+    const uint64_t base_rows = reduction_size / shards;
+    const uint64_t extra_rows = reduction_size % shards;
+    if (base_rows + static_cast<uint64_t>(extra_rows != 0) > std::numeric_limits<uint32_t>::max()) {
+        throw std::invalid_argument("Reduction shard owns more rows than its 32-bit row counter supports.");
+    }
+    return ReductionShardRows{static_cast<uint32_t>(base_rows), static_cast<uint32_t>(extra_rows)};
+}
+
+[[nodiscard]] __host__ __device__ __forceinline__ uint64_t reductionShardRowBegin(const ReductionShardRows& rows,
+                                                                                  uint32_t shard) {
+    return static_cast<uint64_t>(shard) * rows.base_rows + (shard < rows.extra_rows ? shard : rows.extra_rows);
+}
+
+[[nodiscard]] __host__ __device__ __forceinline__ uint32_t reductionShardRowCount(const ReductionShardRows& rows,
+                                                                                  uint32_t shard) {
+    return rows.base_rows + static_cast<uint32_t>(shard < rows.extra_rows);
+}
+
 [[nodiscard]] inline __host__ __device__ uint64_t largestRowsWithByteAlignment(uint64_t max_rows,
                                                                               size_t row_bytes,
                                                                               size_t alignment) {

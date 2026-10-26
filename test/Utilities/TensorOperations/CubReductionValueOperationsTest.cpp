@@ -860,6 +860,192 @@ TEST(CubReduction, Fp8AlignedKCompleteKeepsRetainedPacketWidthsPacketized) {
         }
     }
 }
+
+namespace {
+
+// Powers of two only: exact in E4M3/E5M2, and every partial SUM/MAX below is exact in FP32.
+float fp8GridMappingValue(uint64_t outer, uint64_t row, uint64_t component) {
+    constexpr std::array<float, 5> pattern = {0.5f, -1.0f, 2.0f, -0.25f, 1.0f};
+    return pattern[(outer * 7 + row * 3 + component) % pattern.size()];
+}
+
+std::vector<float> fp8GridMappingValues(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size) {
+    std::vector<float> values(outer_size * reduction_size * inner_size);
+    for (uint64_t outer = 0; outer < outer_size; ++outer) {
+        for (uint64_t row = 0; row < reduction_size; ++row) {
+            for (uint64_t component = 0; component < inner_size; ++component) {
+                values[(outer * reduction_size + row) * inner_size + component] =
+                    fp8GridMappingValue(outer, row, component);
+            }
+        }
+    }
+    return values;
+}
+
+enum class Fp8GridMappingOp { Sum, AbsSum, Max };
+
+// Reference [outer, shards, K] partials for explicit per-shard row ranges.
+std::vector<float> fp8GridMappingExpected(uint64_t outer_size,
+                                          uint64_t inner_size,
+                                          const std::vector<std::pair<uint64_t, uint64_t>>& shard_rows,
+                                          Fp8GridMappingOp op) {
+    const bool maximum = op == Fp8GridMappingOp::Max;
+    std::vector<float> expected;
+    expected.reserve(outer_size * shard_rows.size() * inner_size);
+    for (uint64_t outer = 0; outer < outer_size; ++outer) {
+        for (const auto& [begin, end] : shard_rows) {
+            for (uint64_t component = 0; component < inner_size; ++component) {
+                float acc = maximum ? -std::numeric_limits<float>::infinity() : 0.0f;
+                for (uint64_t row = begin; row < end; ++row) {
+                    float value = fp8GridMappingValue(outer, row, component);
+                    if (op == Fp8GridMappingOp::AbsSum) value = std::fabs(value);
+                    acc = maximum ? std::max(acc, value) : acc + value;
+                }
+                expected.push_back(acc);
+            }
+        }
+    }
+    return expected;
+}
+
+}  // namespace
+
+// The retained FP8 families map (shard, K tile, outer) onto grid (x, y, z) without device-side division. Outer sizes
+// above 65535 exceed the z limit, so these shapes run the outer stride loop (z blocks 0 and 1 own two outer rows) as
+// well as uneven shard tails: DeepRSmallK and rotated end with a short shard, AlignedK uses an uneven balanced split.
+TEST(CubReduction, Fp8RetainedFamiliesMapWorkPast65535OuterRows) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    using CubReductionInternal::CubReductionStageCombine;
+    using CubReductionInternal::CubReductionStageInputTransform;
+    constexpr uint64_t outer_size = 65537;
+
+    for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        SCOPED_TRACE(static_cast<int>(dtype));
+
+        {  // DeepRSmallK: rows 64, R = 65 -> shards of 64 and 1 rows.
+            SCOPED_TRACE("DeepRSmallK");
+            constexpr uint64_t reduction_size = 65;
+            constexpr uint64_t rows = 64;
+            constexpr uint64_t shards = 2;
+            for (uint64_t inner_size : {uint64_t{3}, uint64_t{9}}) {  // tiny-K lanes and component-owned kernels
+                SCOPED_TRACE(inner_size);
+                Tensor input = makeGpuTensor(fp8GridMappingValues(outer_size, reduction_size, inner_size),
+                                             {outer_size, reduction_size, inner_size}, stream, dtype);
+                const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
+                Tensor partials(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size, shards, inner_size}));
+                for (const bool maximum : {false, true}) {
+                    CubReductionInternal::CubReductionStageSemantics semantics{};
+                    semantics.combine = maximum ? CubReductionStageCombine::Maximum : CubReductionStageCombine::Sum;
+                    CubReductionInternal::launchFp8DeepRSmallKRetainedFirstStage(
+                        semantics, input, partials, geometry, rows, shards, stream);
+                    expectFloatVectorNear(
+                        copyGpuTensorAsFloat(partials, stream),
+                        fp8GridMappingExpected(outer_size, inner_size, {{0, 64}, {64, 65}},
+                                               maximum ? Fp8GridMappingOp::Max : Fp8GridMappingOp::Sum),
+                        0.0f);
+                }
+            }
+        }
+
+        {  // AlignedK: hoisted staged (Identity), typed staged (L1 = ABS + SUM), unified complete (MAX) and typed
+           // complete (SUM) kernels.
+            SCOPED_TRACE("AlignedK");
+            constexpr uint64_t reduction_size = 7;
+            constexpr uint64_t inner_size = 8;
+            Tensor input = makeGpuTensor(fp8GridMappingValues(outer_size, reduction_size, inner_size),
+                                         {outer_size, reduction_size, inner_size}, stream, dtype);
+            const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
+            constexpr uint64_t shards = 3;  // balanced split 3, 2, 2
+            Tensor partials(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size, shards, inner_size}));
+            Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, geometry.output_dimensions));
+            struct Case {
+                CubReductionInternal::TiledRKStageTopology topology;
+                size_t packet_bytes;
+                uint32_t block_threads;
+                CubReductionOp op;
+            };
+            const std::array<Case, 4> cases = {{
+                {CubReductionInternal::TiledRKStageTopology::Staged, 8, 32, CubReductionOp::Sum},
+                {CubReductionInternal::TiledRKStageTopology::Staged, 2, 64, CubReductionOp::L1Norm},
+                {CubReductionInternal::TiledRKStageTopology::Complete, 8, 32, CubReductionOp::Max},
+                {CubReductionInternal::TiledRKStageTopology::Complete, 8, 64, CubReductionOp::Sum},
+            }};
+            for (const Case& c : cases) {
+                SCOPED_TRACE(c.packet_bytes);
+                SCOPED_TRACE(c.block_threads);
+                const bool staged = c.topology == CubReductionInternal::TiledRKStageTopology::Staged;
+                const CubReductionInternal::KParallelTiledStagePlan plan{
+                    c.topology, c.packet_bytes, c.block_threads, staged ? shards : 1};
+                const auto semantics = CubReductionInternal::makeValueReductionStageSemantics(
+                    c.op,
+                    staged ? CubReductionInternal::CubReductionStageRole::First
+                           : CubReductionInternal::CubReductionStageRole::Complete,
+                    reduction_size);
+                Tensor& destination = staged ? partials : output;
+                CubReductionInternal::launchKParallelTiledStage(
+                    semantics, input, destination, geometry, plan, 1.0f, stream);
+                const std::vector<std::pair<uint64_t, uint64_t>> rows =
+                    staged ? std::vector<std::pair<uint64_t, uint64_t>>{{0, 3}, {3, 5}, {5, 7}}
+                           : std::vector<std::pair<uint64_t, uint64_t>>{{0, 7}};
+                const Fp8GridMappingOp expected_op = c.op == CubReductionOp::Max      ? Fp8GridMappingOp::Max
+                                                     : c.op == CubReductionOp::L1Norm ? Fp8GridMappingOp::AbsSum
+                                                                                      : Fp8GridMappingOp::Sum;
+                expectFloatVectorNear(copyGpuTensorAsFloat(destination, stream),
+                                      fp8GridMappingExpected(outer_size, inner_size, rows, expected_op), 0.0f);
+            }
+        }
+
+        {  // RuntimeK rotated: rows 32, R = 40 -> shards of 32 and 8 rows; awkward K, exact and prefix tiles.
+            SCOPED_TRACE("RuntimeK rotated");
+            constexpr uint64_t reduction_size = 40;
+            constexpr uint64_t inner_size = 5;
+            constexpr uint64_t rows = 32;
+            constexpr uint64_t shards = 2;
+            Tensor input = makeGpuTensor(fp8GridMappingValues(outer_size, reduction_size, inner_size),
+                                         {outer_size, reduction_size, inner_size}, stream, dtype);
+            const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
+            Tensor partials(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size, shards, inner_size}));
+            for (const bool exact_tile : {false, true}) {
+                SCOPED_TRACE(exact_tile);
+                CubReductionInternal::launchFp8GeneralRParallelKTileRotatedCalibrationFirstStage(
+                    input, partials, geometry, exact_tile, rows, shards, stream,
+                    CubReductionStageInputTransform::Identity, CubReductionStageCombine::Sum);
+                expectFloatVectorNear(
+                    copyGpuTensorAsFloat(partials, stream),
+                    fp8GridMappingExpected(outer_size, inner_size, {{0, 32}, {32, 40}}, Fp8GridMappingOp::Sum), 0.0f);
+            }
+        }
+    }
+}
+
+// RuntimeK packet-complete packs W-warp outputs into persistent blocks and splits the flat [outer, K tile] index.
+// W8 with 4 K tiles and 16500 outer rows is 66000 work items on a 65535-block grid, so the persistent loop wraps;
+// W1 packs eight work items per block across outer boundaries.
+TEST(CubReduction, Fp8RuntimeKPacketCompleteCoversOuterAndKTilesAcrossPersistentGrid) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    constexpr uint64_t reduction_size = 3;
+    constexpr uint64_t inner_size = 200;      // tiles of 64, 64, 64 and 8 components
+    constexpr uint32_t tile_components = 64;
+    for (const auto& [outer_size, warps_per_output] :
+         std::vector<std::pair<uint64_t, uint32_t>>{{16500, 8}, {1001, 1}, {37, 2}}) {
+        SCOPED_TRACE(outer_size);
+        SCOPED_TRACE(warps_per_output);
+        for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+            SCOPED_TRACE(static_cast<int>(dtype));
+            Tensor input = makeGpuTensor(fp8GridMappingValues(outer_size, reduction_size, inner_size),
+                                         {outer_size, reduction_size, inner_size}, stream, dtype);
+            const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
+            Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, geometry.output_dimensions));
+            CubReductionInternal::launchFp8GeneralRParallelKTileRCooperativeCalibrationComplete(
+                input, output, geometry, warps_per_output, tile_components, stream);
+            expectFloatVectorNear(
+                copyGpuTensorAsFloat(output, stream),
+                fp8GridMappingExpected(outer_size, inner_size, {{0, reduction_size}}, Fp8GridMappingOp::Sum), 0.0f);
+        }
+    }
+}
 #endif
 
 TEST(CubReduction, AwkwardRotatedRCooperativeFirstStageIsAnIndependentPhysicalPass) {

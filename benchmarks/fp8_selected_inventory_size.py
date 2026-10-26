@@ -61,7 +61,8 @@ FAMILIES = {
 # This distinguishes an accidentally instantiated Thor kernel from CUDA/CCCL
 # support kernels whose names legitimately contain "kernel<".
 CUDA_GLOBAL_DECLARATION = re.compile(
-    r'__global__\s+(?:__launch_bounds__\([^)]*\)\s+)?void\s+(\w+)\s*\('
+    # One level of nested parentheses inside __launch_bounds__(...), e.g. a parenthesized min-blocks expression.
+    r'__global__\s+(?:__launch_bounds__\((?:[^()]|\([^()]*\))*\)\s+)?void\s+(\w+)\s*\('
 )
 
 

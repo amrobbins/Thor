@@ -1101,6 +1101,7 @@ __global__ void narrowFp8PackedFlatRCooperativeFirstStageKernel(const InputT* in
                                                                 uint64_t reduction_size,
                                                                 uint64_t inner_size,
                                                                 uint64_t shards_per_output,
+                                                                uint32_t rows_per_warp_group,
                                                                 InputTransformT input_transform, DecoderT decoder = DecoderT{}) {
     static_assert(sizeof(InputT) == 1);
     static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
@@ -1110,10 +1111,9 @@ __global__ void narrowFp8PackedFlatRCooperativeFirstStageKernel(const InputT* in
     static_assert(MaxComponentsPerLane == 1 || MaxComponentsPerLane == 2 || MaxComponentsPerLane == 4 || MaxComponentsPerLane == 5 ||
                   MaxComponentsPerLane == 8);
     constexpr int MaxSupportedK = TILED_REDUCTION_WARP_THREADS * MaxComponentsPerLane;
-    constexpr uint64_t MaxRowsPerWarpFromShard = static_cast<uint64_t>(RowsPerShard / NARROW_FLAT_WARPS);
     constexpr float Init = NarrowFlatReductionIdentityFp32<ReductionOpT>::value;
     static_assert(MaxSupportedK <= NARROW_FP8_CALIBRATION_MAX_K);
-    static_assert(MaxRowsPerWarpFromShard >= 1);
+    static_assert(RowsPerShard / NARROW_FLAT_WARPS >= 1);
 
     __shared__ RawVectorPacket<PacketBytes> staged_packets[NARROW_FLAT_WARPS][NARROW_FP8_PACKETS_PER_WARP];
     __shared__ float warp_partials[NARROW_FLAT_WARPS][MaxSupportedK];
@@ -1121,38 +1121,38 @@ __global__ void narrowFp8PackedFlatRCooperativeFirstStageKernel(const InputT* in
     const ReductionOpT reduction_op{};
     const int warp = static_cast<int>(threadIdx.x) / TILED_REDUCTION_WARP_THREADS;
     const int lane = static_cast<int>(threadIdx.x) % TILED_REDUCTION_WARP_THREADS;
-    const uint64_t total_work = outer_size * shards_per_output;
-    const uint64_t grid_stride = static_cast<uint64_t>(gridDim.x);
 
-    // DeepRSmallK's retained launcher guarantees 1 <= inner_size <= 256.
-    // One warp stages at most 32 * PacketBytes <= 512 bytes, including an
-    // alignment prefix < PacketBytes. Keep global tensor addressing in 64 bits,
-    // but use 32-bit arithmetic for every offset within this packet window.
+    // DeepRSmallK's retained launcher guarantees 1 <= inner_size <= 256, and RowsPerShard <= 16384, so every offset inside
+    // one shard (< 2^22 bytes) is 32-bit. One warp stages at most 32 * PacketBytes <= 512 bytes, including an alignment
+    // prefix < PacketBytes. The shard base pointer is formed once per work item in 64 bits.
     const uint32_t inner_size_32 = static_cast<uint32_t>(inner_size);
 
-    // Fill toward the packet window, but never choose a group so deep that fewer than eight warps can participate in a
-    // full RowsPerShard shard. RowsPerShard is always divisible by eight in the calibration ladder.
-    const uint32_t rows_from_packet_window = static_cast<uint32_t>(narrowFp8MaxLogicalGroupBytes<PacketBytes>) / inner_size_32;
-    const uint32_t rows_per_warp_group =
-        rows_from_packet_window < static_cast<uint32_t>(MaxRowsPerWarpFromShard)
-            ? rows_from_packet_window : static_cast<uint32_t>(MaxRowsPerWarpFromShard);
-    const uint64_t rows_per_block_round = static_cast<uint64_t>(rows_per_warp_group) * NARROW_FLAT_WARPS;
+    // rows_per_warp_group is computed by the launcher: fill toward the packet window, but never choose a group so deep
+    // that fewer than eight warps can participate in a full RowsPerShard shard.
+    const uint32_t rows_per_block_round = rows_per_warp_group * NARROW_FLAT_WARPS;
 
-    for (uint64_t work_index = static_cast<uint64_t>(blockIdx.x); work_index < total_work; work_index += grid_stride) {
-        const uint64_t shard = work_index % shards_per_output;
-        const uint64_t outer_index = work_index / shards_per_output;
+    // Grid: x = shard, z = outer (see reductionWorkGrid); this family has one component tile.
+    // reductionWorkGrid() limits every work extent to 2^31 - 1, so 32-bit work coordinates never wrap.
+    const uint32_t outer_count = static_cast<uint32_t>(outer_size);
+    const uint32_t shard_count = static_cast<uint32_t>(shards_per_output);
+    for (uint32_t outer_index = blockIdx.z; outer_index < outer_count; outer_index += gridDim.z)
+    for (uint32_t shard = blockIdx.x; shard < shard_count; shard += gridDim.x) {
         const uint64_t row_begin = shard * static_cast<uint64_t>(RowsPerShard);
-        const uint64_t row_end = minU64(row_begin + static_cast<uint64_t>(RowsPerShard), reduction_size);
+        const uint32_t shard_rows = row_begin < reduction_size
+            ? static_cast<uint32_t>(minU64(static_cast<uint64_t>(RowsPerShard), reduction_size - row_begin))
+            : 0U;
+        const InputT* shard_input = input + (outer_index * reduction_size + row_begin) * inner_size;
 
         float local[MaxComponentsPerLane];
         for (int slot = 0; slot < MaxComponentsPerLane; ++slot) {
             local[slot] = Init;
         }
 
-        const uint64_t first_group_row = row_begin + static_cast<uint64_t>(warp) * rows_per_warp_group;
-        for (uint64_t group_row = first_group_row; group_row < row_end; group_row += rows_per_block_round) {
-            const uint32_t group_rows = static_cast<uint32_t>(minU64(rows_per_warp_group, row_end - group_row));
-            const InputT* group_begin = input + (outer_index * reduction_size + group_row) * inner_size;
+        for (uint32_t group_row = static_cast<uint32_t>(warp) * rows_per_warp_group; group_row < shard_rows;
+             group_row += rows_per_block_round) {
+            const uint32_t group_rows =
+                rows_per_warp_group < shard_rows - group_row ? rows_per_warp_group : shard_rows - group_row;
+            const InputT* group_begin = shard_input + group_row * inner_size_32;
             const uintptr_t group_address = reinterpret_cast<uintptr_t>(group_begin);
             const uint32_t prefix_elements = static_cast<uint32_t>(group_address & uintptr_t{PacketBytes - 1});
             const auto* aligned_begin = reinterpret_cast<const RawVectorPacket<PacketBytes>*>(group_address & ~uintptr_t{PacketBytes - 1});
@@ -1206,6 +1206,7 @@ __global__ void narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel(const Input
                                                                      uint64_t reduction_size,
                                                                      uint64_t inner_size,
                                                                      uint64_t shards_per_output,
+                                                                     uint32_t rows_per_warp_group,
                                                                 InputTransformT input_transform, DecoderT decoder = DecoderT{}) {
     static_assert(sizeof(InputT) == 1);
     static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
@@ -1215,10 +1216,9 @@ __global__ void narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel(const Input
     static_assert(LanesPerComponent == 4 || LanesPerComponent == 8);
     static_assert(TILED_REDUCTION_WARP_THREADS % LanesPerComponent == 0);
     constexpr int MaxSupportedK = TILED_REDUCTION_WARP_THREADS / LanesPerComponent;
-    constexpr uint64_t MaxRowsPerWarpFromShard = static_cast<uint64_t>(RowsPerShard / NARROW_FLAT_WARPS);
     constexpr float Init = NarrowFlatReductionIdentityFp32<ReductionOpT>::value;
     static_assert(MaxSupportedK == 4 || MaxSupportedK == 8);
-    static_assert(MaxRowsPerWarpFromShard >= 1);
+    static_assert(RowsPerShard / NARROW_FLAT_WARPS >= 1);
 
     __shared__ RawVectorPacket<PacketBytes> staged_packets[NARROW_FLAT_WARPS][NARROW_FP8_PACKETS_PER_WARP];
     __shared__ float cooperative_lane_partials[NARROW_FLAT_WARPS][TILED_REDUCTION_WARP_THREADS];
@@ -1229,32 +1229,33 @@ __global__ void narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel(const Input
     const int lane = static_cast<int>(threadIdx.x) % TILED_REDUCTION_WARP_THREADS;
     const int component = lane / LanesPerComponent;
     const int component_lane = lane % LanesPerComponent;
-    const uint64_t total_work = outer_size * shards_per_output;
-    const uint64_t grid_stride = static_cast<uint64_t>(gridDim.x);
 
-    // DeepRSmallK's retained launcher guarantees 1 <= inner_size <= 256.
-    // One warp stages at most 32 * PacketBytes <= 512 bytes, including an
-    // alignment prefix < PacketBytes. Keep global tensor addressing in 64 bits,
-    // but use 32-bit arithmetic for every offset within this packet window.
+    // inner_size <= 8 here and RowsPerShard <= 16384, so every offset inside one shard is 32-bit. One warp stages at most
+    // 32 * PacketBytes <= 512 bytes, including an alignment prefix < PacketBytes. The shard base pointer is formed once
+    // per work item in 64 bits.
     const uint32_t inner_size_32 = static_cast<uint32_t>(inner_size);
 
-    const uint32_t rows_from_packet_window = static_cast<uint32_t>(narrowFp8MaxLogicalGroupBytes<PacketBytes>) / inner_size_32;
-    const uint32_t rows_per_warp_group =
-        rows_from_packet_window < static_cast<uint32_t>(MaxRowsPerWarpFromShard)
-            ? rows_from_packet_window : static_cast<uint32_t>(MaxRowsPerWarpFromShard);
-    const uint64_t rows_per_block_round = static_cast<uint64_t>(rows_per_warp_group) * NARROW_FLAT_WARPS;
+    // rows_per_warp_group is computed by the launcher (see narrowFp8PackedRowsPerWarpGroup).
+    const uint32_t rows_per_block_round = rows_per_warp_group * NARROW_FLAT_WARPS;
 
-    for (uint64_t work_index = static_cast<uint64_t>(blockIdx.x); work_index < total_work; work_index += grid_stride) {
-        const uint64_t shard = work_index % shards_per_output;
-        const uint64_t outer_index = work_index / shards_per_output;
+    // Grid: x = shard, z = outer (see reductionWorkGrid); this family has one component tile.
+    // reductionWorkGrid() limits every work extent to 2^31 - 1, so 32-bit work coordinates never wrap.
+    const uint32_t outer_count = static_cast<uint32_t>(outer_size);
+    const uint32_t shard_count = static_cast<uint32_t>(shards_per_output);
+    for (uint32_t outer_index = blockIdx.z; outer_index < outer_count; outer_index += gridDim.z)
+    for (uint32_t shard = blockIdx.x; shard < shard_count; shard += gridDim.x) {
         const uint64_t row_begin = shard * static_cast<uint64_t>(RowsPerShard);
-        const uint64_t row_end = minU64(row_begin + static_cast<uint64_t>(RowsPerShard), reduction_size);
+        const uint32_t shard_rows = row_begin < reduction_size
+            ? static_cast<uint32_t>(minU64(static_cast<uint64_t>(RowsPerShard), reduction_size - row_begin))
+            : 0U;
+        const InputT* shard_input = input + (outer_index * reduction_size + row_begin) * inner_size;
 
         float local = Init;
-        const uint64_t first_group_row = row_begin + static_cast<uint64_t>(warp) * rows_per_warp_group;
-        for (uint64_t group_row = first_group_row; group_row < row_end; group_row += rows_per_block_round) {
-            const uint32_t group_rows = static_cast<uint32_t>(minU64(rows_per_warp_group, row_end - group_row));
-            const InputT* group_begin = input + (outer_index * reduction_size + group_row) * inner_size;
+        for (uint32_t group_row = static_cast<uint32_t>(warp) * rows_per_warp_group; group_row < shard_rows;
+             group_row += rows_per_block_round) {
+            const uint32_t group_rows =
+                rows_per_warp_group < shard_rows - group_row ? rows_per_warp_group : shard_rows - group_row;
+            const InputT* group_begin = shard_input + group_row * inner_size_32;
             const uintptr_t group_address = reinterpret_cast<uintptr_t>(group_begin);
             const uint32_t prefix_elements = static_cast<uint32_t>(group_address & uintptr_t{PacketBytes - 1});
             const auto* aligned_begin = reinterpret_cast<const RawVectorPacket<PacketBytes>*>(group_address & ~uintptr_t{PacketBytes - 1});
@@ -1303,6 +1304,20 @@ __global__ void narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel(const Input
     }
 }
 
+// Rows per warp group for the packed DeepRSmallK kernels, computed once on the host: fill toward the packet window, but
+// never choose a group so deep that fewer than eight warps can participate in a full RowsPerShard shard.
+template <int PacketBytes, int RowsPerShard>
+[[nodiscard]] uint32_t narrowFp8PackedRowsPerWarpGroup(uint64_t inner_size) {
+    constexpr uint32_t MaxRowsPerWarpFromShard = static_cast<uint32_t>(RowsPerShard / NARROW_FLAT_WARPS);
+    static_assert(MaxRowsPerWarpFromShard >= 1);
+    if (inner_size == 0 || inner_size > static_cast<uint64_t>(narrowFp8MaxLogicalGroupBytes<PacketBytes>)) {
+        throw std::logic_error("Packed FP8 narrow-flat launch received K outside one packet window.");
+    }
+    const uint32_t rows_from_packet_window =
+        static_cast<uint32_t>(narrowFp8MaxLogicalGroupBytes<PacketBytes>) / static_cast<uint32_t>(inner_size);
+    return rows_from_packet_window < MaxRowsPerWarpFromShard ? rows_from_packet_window : MaxRowsPerWarpFromShard;
+}
+
 template <typename InputT, typename ReductionOpT, typename InputTransformT, int RowsPerShard, int PacketBytes, int LanesPerComponent,
           typename DecoderT = NarrowFp8TypedFormatDecoder<InputT>>
 void launchNarrowFp8PackedTinyKForTransform(
@@ -1315,14 +1330,17 @@ void launchNarrowFp8PackedTinyKForTransform(
     if (geometry.inner_size == 0 || geometry.inner_size > MaxSupportedK) {
         throw std::logic_error("Cooperative tiny-K packed FP8 narrow-flat launch received K outside its specialization.");
     }
-    if (geometry.outer_size > std::numeric_limits<uint64_t>::max() / shards_per_output) {
-        throw std::overflow_error("Cooperative tiny-K packed FP8 narrow-flat first-stage work count overflows uint64_t.");
-    }
-    const uint64_t total_work = geometry.outer_size * shards_per_output;
-    const unsigned int grid_blocks = static_cast<unsigned int>(std::min<uint64_t>(total_work, NARROW_FLAT_MAX_GRID_BLOCKS));
-    if (grid_blocks == 0) {
+    if (geometry.outer_size == 0 || shards_per_output == 0) {
         throw std::logic_error("Cooperative tiny-K packed FP8 narrow-flat first stage requires non-zero work.");
     }
+    // Division-free launch: x = shard, z = outer. Shards of <= 256 bytes keep a persistent grid
+    // (see REDUCTION_PERSISTENT_MAX_BLOCKS).
+    const uint64_t bytes_per_work_item =
+        std::min<uint64_t>(RowsPerShard, geometry.reduction_size) * geometry.inner_size * sizeof(InputT);
+    const dim3 grid_blocks = reductionWorkGrid(shards_per_output, 1, geometry.outer_size,
+                                               bytes_per_work_item <= 256 ? REDUCTION_PERSISTENT_MAX_BLOCKS : 0);
+    const uint32_t rows_per_warp_group =
+        narrowFp8PackedRowsPerWarpGroup<PacketBytes, RowsPerShard>(geometry.inner_size);
 
     narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel<InputT,
                                                          ReductionOpT,
@@ -1340,6 +1358,7 @@ void launchNarrowFp8PackedTinyKForTransform(
                                                           geometry.reduction_size,
                                                           geometry.inner_size,
                                                           shards_per_output,
+                                                          rows_per_warp_group,
                                                           input_transform, decoder);
     CUDA_CHECK(cudaGetLastError());
 }
@@ -1355,14 +1374,17 @@ void launchNarrowFp8PackedForTransform(
     if (geometry.inner_size == 0 || geometry.inner_size > MaxSupportedK) {
         throw std::logic_error("Packed FP8 narrow-flat launch received K outside its component-per-lane specialization.");
     }
-    if (geometry.outer_size > std::numeric_limits<uint64_t>::max() / shards_per_output) {
-        throw std::overflow_error("Packed FP8 narrow-flat first-stage work count overflows uint64_t.");
-    }
-    const uint64_t total_work = geometry.outer_size * shards_per_output;
-    const unsigned int grid_blocks = static_cast<unsigned int>(std::min<uint64_t>(total_work, NARROW_FLAT_MAX_GRID_BLOCKS));
-    if (grid_blocks == 0) {
+    if (geometry.outer_size == 0 || shards_per_output == 0) {
         throw std::logic_error("Packed FP8 narrow-flat first stage requires non-zero work.");
     }
+    // Division-free launch: x = shard, z = outer. Shards of <= 256 bytes keep a persistent grid
+    // (see REDUCTION_PERSISTENT_MAX_BLOCKS).
+    const uint64_t bytes_per_work_item =
+        std::min<uint64_t>(RowsPerShard, geometry.reduction_size) * geometry.inner_size * sizeof(InputT);
+    const dim3 grid_blocks = reductionWorkGrid(shards_per_output, 1, geometry.outer_size,
+                                               bytes_per_work_item <= 256 ? REDUCTION_PERSISTENT_MAX_BLOCKS : 0);
+    const uint32_t rows_per_warp_group =
+        narrowFp8PackedRowsPerWarpGroup<PacketBytes, RowsPerShard>(geometry.inner_size);
 
     narrowFp8PackedFlatRCooperativeFirstStageKernel<InputT, ReductionOpT, InputTransformT, RowsPerShard, PacketBytes, MaxComponentsPerLane, DecoderT>
         <<<grid_blocks, NARROW_FLAT_THREADS, 0, stream>>>(([](const Tensor& src) -> const InputT* {
@@ -1374,6 +1396,7 @@ void launchNarrowFp8PackedForTransform(
                                                           geometry.reduction_size,
                                                           geometry.inner_size,
                                                           shards_per_output,
+                                                          rows_per_warp_group,
                                                           input_transform, decoder);
     CUDA_CHECK(cudaGetLastError());
 }

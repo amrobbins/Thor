@@ -54,6 +54,42 @@ actual ordered pass families, input/output tensor geometries and dtypes, and
 intermediate/scratch bytes; family-specific packet/CTA/shard parameters are
 optional when they do not apply. There is no synthetic all-family RK geometry.
 
+## Kernel work mapping
+
+DeepRSmallK, AlignedK (packet, hoisted staged and unified complete) and
+RuntimeK rotated divide nothing by a runtime work-space extent on the device.
+They launch `reductionWorkGrid(shards, component_tiles, outer)`: shard on
+`blockIdx.x` (kept fastest so resident blocks stream consecutive rows of one
+outer slab), component tile on `y`, outer on `z`. Each axis is a 32-bit stride
+loop, so geometries beyond the 2^31-1 / 65535 grid limits stay correct;
+normally every block owns one work item. Every extent is limited to 2^31-1 so a
+32-bit index plus its stride cannot wrap. AlignedK's balanced row split
+(`ReductionShardRows`) is computed once on the host, and every shard's row
+count must fit a 32-bit counter. Row loops use 32-bit counters and a 64-bit row
+pointer; DeepRSmallK forms one 64-bit shard base pointer and uses 32-bit
+offsets inside the shard.
+
+Two measured exceptions keep the pre-P5-B persistent 65535-block grid, where
+one block per work item was slower because launch and teardown outweigh the
+loads: AlignedK Complete items of at most 8 rows and 512 bytes (11%), and
+DeepRSmallK shards of at most 256 bytes (15%). Every other measured stage was
+neutral or faster with a full grid.
+
+The FP8 PrefixReserved rotated kernel is pinned to three 512-thread blocks per
+SM (`__launch_bounds__(512, 3)`, i.e. at most 40 registers): at 41 or more
+registers it drops to two blocks and loses 15-23% on one-tile shapes. Check
+`cuobjdump -res-usage` for REG <= 40 and no LOCAL/STACK spill after changing it.
+
+AlignedK lanes walk their rows with an explicit load-ahead
+(`accumulateKParallelFp8Rows`): batches of 4 rows (P8) or 8 rows (P2) are
+software-pipelined so the next batch is in flight while the current one is
+decoded, and FP8 bytes are decoded in pairs. Accumulation order per component
+is unchanged, so results are bit-identical to the plain row loop.
+
+RuntimeK packet-complete keeps its persistent grid (several W-warp outputs
+share a block) and its original per-work-item split; replacing that split with
+a multiply-high division measured 4-5% slower in the R loop. OneWindow already
+used 32-bit indexing with compile-time divisors and is unchanged.
 
 ## Cache-miss measurement (not a production executor)
 

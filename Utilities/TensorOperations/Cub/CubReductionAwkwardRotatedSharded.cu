@@ -36,7 +36,6 @@ constexpr int AWKWARD_ROTATED_SHARDED_THREADS =
 constexpr int AWKWARD_ROTATED_FP8_SHARDED_WARPS = 16;
 constexpr int AWKWARD_ROTATED_FP8_SHARDED_THREADS =
     AWKWARD_ROTATED_FP8_SHARDED_WARPS * TILED_REDUCTION_WARP_THREADS;
-constexpr uint64_t AWKWARD_ROTATED_MAX_GRID_BLOCKS = 65535;
 static_assert(AWKWARD_ROTATED_SHARDED_THREADS == 256);
 static_assert(AWKWARD_ROTATED_FP8_SHARDED_THREADS == 512);
 
@@ -88,6 +87,14 @@ struct AwkwardReductionIdentityFp32<PropagatingMaximumFp32> {
     static constexpr float value = -std::numeric_limits<float>::infinity();
 };
 
+// Occupancy contract for the rotated first stage. FP8 PrefixReserved (16 warps, 512 threads, 33,856 B static shared
+// including the 1 KiB per-block reserve) fits three blocks = 48 warps per SM only at <= 40 registers/thread; at 41..64
+// it drops to two. Thor1067 compiled it at 36 registers; P5-B's loop rework moved it to 43 and cost 15-23% on
+// one-tile shapes, so the 40-register budget is pinned here. FP8 Exact (46+ registers, distributed tail state) and
+// the 8-warp FP16/BF16/FP32 kernels keep their natural allocation; maxThreads is their exact launch block size.
+template <typename InputT, bool ExactFp8Tile>
+inline constexpr int awkwardRotatedMinBlocksPerSm = sizeof(InputT) == 1 && !ExactFp8Tile ? 3 : 1;
+
 template <typename InputT,
           typename ReductionOpT,
           typename InputTransformT,
@@ -95,12 +102,15 @@ template <typename InputT,
           int PacketBytes,
           int CooperativeWarps,
           bool ExactFp8Tile = true>
-__global__ void awkwardAlignmentRotatedShardedFirstStageKernel(const InputT* input,
+__global__ __launch_bounds__(CooperativeWarps * TILED_REDUCTION_WARP_THREADS,
+                             (awkwardRotatedMinBlocksPerSm<InputT, ExactFp8Tile>))
+void awkwardAlignmentRotatedShardedFirstStageKernel(const InputT* input,
                                                                 float* fp32_partials,
                                                                 uint64_t outer_size,
                                                                 uint64_t reduction_size,
                                                                 uint64_t inner_size,
-                                                                uint64_t shards_per_output) {
+                                                                uint64_t shards_per_output,
+                                                                uint64_t component_tiles) {
     static_assert(RowsPerShard == 8 || RowsPerShard == 16 || RowsPerShard == 32 || RowsPerShard == 64
                   || RowsPerShard == 128 || RowsPerShard == 256 || RowsPerShard == 512 || RowsPerShard == 1024
                   || RowsPerShard == 2048 || RowsPerShard == 4096 || RowsPerShard == 8192
@@ -132,21 +142,23 @@ __global__ void awkwardAlignmentRotatedShardedFirstStageKernel(const InputT* inp
     const InputTransformT input_transform{};
     const int warp = static_cast<int>(threadIdx.x) / TILED_REDUCTION_WARP_THREADS;
     const int lane = static_cast<int>(threadIdx.x) % TILED_REDUCTION_WARP_THREADS;
-    const uint64_t component_tiles = ceilDivideU64(inner_size, static_cast<uint64_t>(LogicalTileElements));
-    const uint64_t total_work = outer_size * component_tiles * shards_per_output;
-    const uint64_t grid_stride = static_cast<uint64_t>(gridDim.x);
-
-    for (uint64_t work_index = static_cast<uint64_t>(blockIdx.x); work_index < total_work; work_index += grid_stride) {
-        const uint64_t shard = work_index % shards_per_output;
-        const uint64_t outer_component_work = work_index / shards_per_output;
-        const uint64_t component_tile = outer_component_work % component_tiles;
-        const uint64_t outer_index = outer_component_work / component_tiles;
+    // Grid: x = shard, y = component tile, z = outer (see reductionWorkGrid). The launcher computes the component tile
+    // count; rows inside one shard (<= RowsPerShard) use 32-bit counters and a 64-bit row pointer.
+    // reductionWorkGrid() limits every work extent to 2^31 - 1, so 32-bit work coordinates never wrap.
+    const uint32_t outer_count = static_cast<uint32_t>(outer_size);
+    const uint32_t tile_count = static_cast<uint32_t>(component_tiles);
+    const uint32_t shard_count = static_cast<uint32_t>(shards_per_output);
+    for (uint32_t outer_index = blockIdx.z; outer_index < outer_count; outer_index += gridDim.z)
+    for (uint32_t component_tile = blockIdx.y; component_tile < tile_count; component_tile += gridDim.y)
+    for (uint32_t shard = blockIdx.x; shard < shard_count; shard += gridDim.x) {
         const uint64_t tile_begin = component_tile * static_cast<uint64_t>(LogicalTileElements);
         const uint64_t valid_components =
             minU64(static_cast<uint64_t>(LogicalTileElements), inner_size - tile_begin);
         const uint64_t row_begin = shard * static_cast<uint64_t>(RowsPerShard);
-        const uint64_t row_end = minU64(row_begin + static_cast<uint64_t>(RowsPerShard), reduction_size);
-        const uint64_t first_row = row_begin + static_cast<uint64_t>(warp);
+        const uint32_t shard_rows = row_begin < reduction_size
+            ? static_cast<uint32_t>(minU64(static_cast<uint64_t>(RowsPerShard), reduction_size - row_begin))
+            : 0U;
+        const uint32_t first_row = static_cast<uint32_t>(warp);
 
         float local[ItemsPerLane];
 #pragma unroll
@@ -160,16 +172,16 @@ __global__ void awkwardAlignmentRotatedShardedFirstStageKernel(const InputT* inp
         float exact_tail_local[4] = {Init, Init, Init, Init};
         uint32_t exact_tail_elements = 0;
         uint32_t prefix_elements = 0;
-        if (first_row < row_end) {
+        if (first_row < shard_rows) {
             const InputT* logical_row_tile =
-                input + (outer_index * reduction_size + first_row) * inner_size + tile_begin;
+                input + (outer_index * reduction_size + row_begin + first_row) * inner_size + tile_begin;
             const uintptr_t logical_address = reinterpret_cast<uintptr_t>(logical_row_tile);
             prefix_elements =
                 static_cast<uint32_t>((logical_address & uintptr_t{PacketBytes - 1}) / sizeof(InputT));
             const InputT* aligned_row_window = alignPacketWindowDown<PacketBytes>(logical_row_tile);
 
-            constexpr uint64_t WarpRows = static_cast<uint64_t>(CooperativeWarps);
-            const uint64_t row_stride_elements = WarpRows * inner_size;
+            constexpr uint32_t WarpRows = static_cast<uint32_t>(CooperativeWarps);
+            const uint64_t row_stride_elements = static_cast<uint64_t>(WarpRows) * inner_size;
             if constexpr (sizeof(InputT) == 1 && ExactFp8Tile) {
                 // Compute tail demand before per-lane packet bounds so it remains warp-uniform. Tail owners are always
                 // low lanes, but the synchronization used for shared-memory overwrite must be reached by the full warp.
@@ -201,7 +213,7 @@ __global__ void awkwardAlignmentRotatedShardedFirstStageKernel(const InputT* inp
 
                     if (exact_tail_elements == 0) {
                         // Established rotated fast path: one packet per lane, no exact-tail bookkeeping in the R loop.
-                        for (uint64_t row = first_row; row < row_end; row += WarpRows) {
+                        for (uint32_t row = first_row; row < shard_rows; row += WarpRows) {
                             const PackedInputValues<InputT, ItemsPerLane> values =
                                 loadVectorizedInputPacket<InputT, ItemsPerLane>(lane_packet);
                             reducePackedFp8ValuesToFp32<InputT>(local, values, reduction_op, input_transform);
@@ -209,7 +221,7 @@ __global__ void awkwardAlignmentRotatedShardedFirstStageKernel(const InputT* inp
                         }
                     } else {
                         const InputT* extra_tail_packet = aligned_row_window + PacketSpanElements;
-                        for (uint64_t row = first_row; row < row_end; row += WarpRows) {
+                        for (uint32_t row = first_row; row < shard_rows; row += WarpRows) {
                             const PackedInputValues<InputT, ItemsPerLane> values =
                                 loadVectorizedInputPacket<InputT, ItemsPerLane>(lane_packet);
                             reducePackedFp8ValuesToFp32<InputT>(local, values, reduction_op, input_transform);
@@ -244,7 +256,7 @@ __global__ void awkwardAlignmentRotatedShardedFirstStageKernel(const InputT* inp
                 } else if constexpr (sizeof(InputT) == 1) {
                     // PrefixReserved FP8 keeps the same rotated ownership and register accumulation, but decodes each
                     // loaded p4/p8/p16 packet in native fp8x2 pairs before applying the input transform.
-                    for (uint64_t row = first_row; row < row_end; row += WarpRows) {
+                    for (uint32_t row = first_row; row < shard_rows; row += WarpRows) {
                         const PackedInputValues<InputT, ItemsPerLane> values =
                             loadVectorizedInputPacket<InputT, ItemsPerLane>(lane_packet);
                         reducePackedFp8ValuesToFp32<InputT>(local, values, reduction_op, input_transform);
@@ -253,7 +265,7 @@ __global__ void awkwardAlignmentRotatedShardedFirstStageKernel(const InputT* inp
                 } else {
                     // Preserve the established FP16/BF16/FP32 rotated kernel exactly: one aligned packet per lane and
                     // the prefix-reserved logical tile width.
-                    for (uint64_t row = first_row; row < row_end; row += WarpRows) {
+                    for (uint32_t row = first_row; row < shard_rows; row += WarpRows) {
                         const PackedInputValues<InputT, ItemsPerLane> values =
                             loadVectorizedInputPacket<InputT, ItemsPerLane>(lane_packet);
 #pragma unroll
@@ -331,16 +343,11 @@ void launchAwkwardFirstStageForTransformPacket(const Tensor& input,
     constexpr int LogicalTileElements = awkwardLogicalTileElementsForPacket<InputT, PacketBytes, ExactFp8Tile>;
     const uint64_t component_tiles =
         ceilDivideU64(geometry.inner_size, static_cast<uint64_t>(LogicalTileElements));
-    if (geometry.outer_size > std::numeric_limits<uint64_t>::max() / component_tiles
-        || geometry.outer_size * component_tiles > std::numeric_limits<uint64_t>::max() / shards_per_output) {
-        throw std::overflow_error("Awkward rotated sharded first-stage work count overflows uint64_t.");
-    }
-    const uint64_t total_work = geometry.outer_size * component_tiles * shards_per_output;
-    const unsigned int grid_blocks = static_cast<unsigned int>(
-        std::min<uint64_t>(total_work, AWKWARD_ROTATED_MAX_GRID_BLOCKS));
-    if (grid_blocks == 0) {
+    if (geometry.outer_size == 0 || component_tiles == 0 || shards_per_output == 0) {
         throw std::logic_error("Awkward rotated sharded first stage requires non-zero work.");
     }
+    // Division-free launch: x = shard, y = component tile, z = outer.
+    const dim3 grid_blocks = reductionWorkGrid(shards_per_output, component_tiles, geometry.outer_size);
 
     awkwardAlignmentRotatedShardedFirstStageKernel<InputT,
                                                      ReductionOpT,
@@ -354,7 +361,8 @@ void launchAwkwardFirstStageForTransformPacket(const Tensor& input,
                                                                       geometry.outer_size,
                                                                       geometry.reduction_size,
                                                                       geometry.inner_size,
-                                                                      shards_per_output);
+                                                                      shards_per_output,
+                                                                      component_tiles);
     CUDA_CHECK(cudaGetLastError());
 }
 
