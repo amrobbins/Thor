@@ -552,6 +552,66 @@ TEST(CubReduction, Fp8DeepRSmallKRetainedTypedOperationsAndTransforms) {
     }
 }
 
+// P5-C: every retained DeepRSmallK depth now launches the same kernel with a runtime
+// rows-per-shard operand. Run all five depths back to back on one input shape per
+// ownership kind, with five shards per output (a short last shard), so a wrong shard
+// origin or clamp at any depth shows up, and reject depths outside the retained set.
+TEST(CubReduction, Fp8DeepRSmallKRuntimeRowDepthPlacesEveryShard) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    using CubReductionInternal::CubReductionStageCombine;
+    constexpr uint64_t outer_size = 3;
+    for (const DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        SCOPED_TRACE(static_cast<int>(dtype));
+        for (const uint64_t k : {uint64_t{3}, uint64_t{7}, uint64_t{17}, uint64_t{95}}) {
+            SCOPED_TRACE(k);
+            for (const uint32_t rows : {64u, 128u, 256u, 512u, 1024u}) {
+                SCOPED_TRACE(rows);
+                const uint64_t r = 4 * static_cast<uint64_t>(rows) + 5;
+                const uint64_t shards = 5;
+                // Each value encodes its row so a misplaced shard changes the sum.
+                std::vector<float> values(outer_size * r * k);
+                for (uint64_t outer = 0; outer < outer_size; ++outer)
+                    for (uint64_t row = 0; row < r; ++row)
+                        for (uint64_t component = 0; component < k; ++component)
+                            values[(outer * r + row) * k + component] =
+                                static_cast<float>((row + outer + component) % 8) * 0.125f;
+                Tensor input = makeGpuTensor(values, {outer_size, r, k}, stream, dtype);
+                const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
+                Tensor partials(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size, shards, k}));
+                CubReductionInternal::CubReductionStageSemantics semantics{};
+                semantics.combine = CubReductionStageCombine::Sum;
+                CubReductionInternal::launchFp8DeepRSmallKRetainedFirstStage(
+                    semantics, input, partials, geometry, rows, shards, stream);
+                std::vector<float> expected;
+                expected.reserve(outer_size * shards * k);
+                for (uint64_t outer = 0; outer < outer_size; ++outer)
+                    for (uint64_t shard = 0; shard < shards; ++shard)
+                        for (uint64_t component = 0; component < k; ++component) {
+                            float acc = 0.0f;  // Multiples of 1/8 below 2^21: exact in FP32 in any order.
+                            for (uint64_t row = shard * rows; row < std::min<uint64_t>((shard + 1) * rows, r); ++row)
+                                acc += values[(outer * r + row) * k + component];
+                            expected.push_back(acc);
+                        }
+                expectFloatVectorNear(copyGpuTensorAsFloat(partials, stream), expected, 0.0f);
+            }
+        }
+        // Depths outside the retained set are rejected before any launch.
+        Tensor input = makeGpuTensor(std::vector<float>(2 * 200 * 3, 1.0f), {2, 200, 3}, stream, dtype);
+        const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
+        Tensor partials(gpuPlacement, TensorDescriptor(DataType::FP32, {2, 3, 3}));
+        CubReductionInternal::CubReductionStageSemantics semantics{};
+        for (const uint64_t bad_rows : {uint64_t{96}, uint64_t{2048}}) {
+            EXPECT_THROW(CubReductionInternal::launchFp8DeepRSmallKRetainedFirstStage(
+                             semantics, input, partials, geometry, bad_rows, 3, stream),
+                         std::logic_error);
+            EXPECT_THROW((void)CubReductionInternal::queryFp8DeepRSmallKRetainedOccupancy(
+                             dtype, bad_rows, 3, semantics),
+                         std::logic_error);
+        }
+    }
+}
+
 // The retained AlignedK Staged P2/P8 x CTA32/64/128 physical inventory shares one
 // launch-uniform SUM/PRODUCT/MIN/MAX kernel. Test the production dispatch rather
 // than comparing two entry points that now resolve to that same kernel.

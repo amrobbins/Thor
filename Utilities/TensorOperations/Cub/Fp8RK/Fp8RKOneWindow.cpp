@@ -8,10 +8,11 @@ uint32_t oneWindowResidency(DataType input_dtype, uint64_t k,
                             CubReductionStageCombine combine,
                             uint32_t outputs_per_warp, uint32_t warps_per_output,
                             uint32_t packet_bytes) {
-    // The query references the exact retained compiled operation, dtype, K,
-    // packet-width and outputs-per-warp specialization; a pair outside
-    // Fp8OneWindowPolicy::candidates is not compiled and reports absent.
-    // Transform is a runtime operand and does not multiply the inventory.
+    // The query references the exact bucketed OneWindow unit this variant runs
+    // at K (outputs per warp, packet bytes, components-per-lane bucket; P5-J2).
+    // A variant without a unit throws std::logic_error, which the selector
+    // treats as absent. Transform is a runtime operand and does not multiply
+    // the inventory.
     const auto occupancy = queryFp8GeneralRParallelRCooperativeCalibrationOccupancy(
         input_dtype, k, outputs_per_warp, warps_per_output, packet_bytes, combine);
     return occupancy.max_active_blocks_per_sm > 0

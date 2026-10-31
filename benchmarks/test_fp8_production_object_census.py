@@ -18,7 +18,7 @@ from benchmarks.fp8_production_object_census import (
 class ProductionObjectClassificationTest(unittest.TestCase):
     def test_retained_family_names(self):
         samples = {
-            'fp8GeneralRParallelPackedCompleteKernel': 'OneWindow',
+            'fp8OneWindowRuntimeKCompleteKernel': 'OneWindow',
             'narrowFp8PackedFlatRCooperativeFirstStageKernel': 'DeepRSmallK',
             'kParallelFp8PacketKernel': 'AlignedK',
             'fp8GeneralRParallelKTileP16CompleteKernel': 'RuntimeK',
@@ -30,7 +30,7 @@ class ProductionObjectClassificationTest(unittest.TestCase):
 
     def test_retained_mangled_cuda_kernel_is_classified_without_demangling(self):
         for kernel, family in {
-            'fp8GeneralRParallelPackedCompleteKernel': 'OneWindow',
+            'fp8OneWindowRuntimeKCompleteKernel': 'OneWindow',
             'narrowFp8PackedFlatRCooperativeFirstStageKernel': 'DeepRSmallK',
             'kParallelFp8PacketKernel': 'AlignedK',
             'awkwardAlignmentRotatedShardedFirstStageKernel': 'RuntimeK',
@@ -148,8 +148,8 @@ class ProductionObjectIdentityComparisonTest(unittest.TestCase):
         # A generated isolated CUDA TU has a different _GLOBAL__N__ hash from
         # the production TU.  The complete demangled signature is identical.
         signature = ('void ThorImplementation::CubReductionInternal::'
-                     '(anonymous namespace)::fp8GeneralRParallelPackedCompleteKernel'
-                     '<__nv_fp8_e4m3, 16, 16, 1, -1, 0>()')
+                     '(anonymous namespace)::fp8OneWindowRuntimeKCompleteKernel'
+                     '<__nv_fp8_e4m3, 1, 16, 1, false, 0>()')
         production = [self._prod('OneWindow', '_Zproduction_salt', name=signature)]
         isolated = [self._selected('OneWindow', '_Zisolated_salt', name=signature)]
         rows, states = compare_selected_kernel_identities(production, isolated)

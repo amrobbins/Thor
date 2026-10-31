@@ -90,10 +90,17 @@ struct AwkwardReductionIdentityFp32<PropagatingMaximumFp32> {
 // Occupancy contract for the rotated first stage. FP8 PrefixReserved (16 warps, 512 threads, 33,856 B static shared
 // including the 1 KiB per-block reserve) fits three blocks = 48 warps per SM only at <= 40 registers/thread; at 41..64
 // it drops to two. Thor1067 compiled it at 36 registers; P5-B's loop rework moved it to 43 and cost 15-23% on
-// one-tile shapes, so the 40-register budget is pinned here. FP8 Exact (46+ registers, distributed tail state) and
-// the 8-warp FP16/BF16/FP32 kernels keep their natural allocation; maxThreads is their exact launch block size.
-template <typename InputT, bool ExactFp8Tile>
-inline constexpr int awkwardRotatedMinBlocksPerSm = sizeof(InputT) == 1 && !ExactFp8Tile ? 3 : 1;
+// one-tile shapes, so the 40-register budget is pinned here. FP8 Exact compiles at exactly 64 registers (two blocks
+// per SM; 65+ leaves one). Its MIN/MAX kernels, which carry the P5-F transform fold, are pinned to two blocks: an
+// unpinned fold went to 67 registers and 1.47x slower (1084). FP8 Exact SUM/PRODUCT and the 8-warp FP16/BF16/FP32
+// kernels keep their natural allocation; maxThreads is their exact launch block size.
+template <typename InputT, bool ExactFp8Tile, typename ReductionOpT = cuda::std::plus<float>>
+inline constexpr int awkwardRotatedMinBlocksPerSm =
+    sizeof(InputT) != 1 ? 1
+    : !ExactFp8Tile     ? 3
+    : (std::is_same_v<ReductionOpT, PropagatingMinimumFp32> || std::is_same_v<ReductionOpT, PropagatingMaximumFp32>)
+        ? 2
+        : 1;
 
 template <typename InputT,
           typename ReductionOpT,
@@ -103,14 +110,25 @@ template <typename InputT,
           int CooperativeWarps,
           bool ExactFp8Tile = true>
 __global__ __launch_bounds__(CooperativeWarps * TILED_REDUCTION_WARP_THREADS,
-                             (awkwardRotatedMinBlocksPerSm<InputT, ExactFp8Tile>))
+                             (awkwardRotatedMinBlocksPerSm<InputT, ExactFp8Tile, ReductionOpT>))
 void awkwardAlignmentRotatedShardedFirstStageKernel(const InputT* input,
                                                                 float* fp32_partials,
                                                                 uint64_t outer_size,
                                                                 uint64_t reduction_size,
                                                                 uint64_t inner_size,
                                                                 uint64_t shards_per_output,
-                                                                uint64_t component_tiles) {
+                                                                uint64_t component_tiles,
+                                                                Fp8ExtremumFold extremum_fold) {
+    // P5-F (see Fp8ExtremumFold): FP8 MIN/MAX fold the ABS/SQUARE transform into the FP8 bytes. PrefixReserved also
+    // folds the MAX sign (its MIN kernel serves MAX); Exact keeps separate MIN and MAX kernels and folds only the
+    // transform (no XOR operand, see awkwardRotatedMinBlocksPerSm). The stored FP32 partial is unfolded, so staged
+    // partials are those of the requested operation.
+    constexpr bool Fp8MinimumOp = sizeof(InputT) == 1 && std::is_same_v<ReductionOpT, PropagatingMinimumFp32>;
+    constexpr bool Fp8MaximumOp = sizeof(InputT) == 1 && std::is_same_v<ReductionOpT, PropagatingMaximumFp32>;
+    constexpr bool FoldExtremum = Fp8MinimumOp || (ExactFp8Tile && Fp8MaximumOp);
+    constexpr bool SignFold = !ExactFp8Tile;
+    static_assert(!FoldExtremum || std::is_same_v<InputTransformT, IdentityFp32>);
+    static_assert(!Fp8MaximumOp || ExactFp8Tile, "FP8 PrefixReserved MAX launches the folded MIN kernel.");
     static_assert(RowsPerShard == 8 || RowsPerShard == 16 || RowsPerShard == 32 || RowsPerShard == 64
                   || RowsPerShard == 128 || RowsPerShard == 256 || RowsPerShard == 512 || RowsPerShard == 1024
                   || RowsPerShard == 2048 || RowsPerShard == 4096 || RowsPerShard == 8192
@@ -214,22 +232,24 @@ void awkwardAlignmentRotatedShardedFirstStageKernel(const InputT* input,
                     if (exact_tail_elements == 0) {
                         // Established rotated fast path: one packet per lane, no exact-tail bookkeeping in the R loop.
                         for (uint32_t row = first_row; row < shard_rows; row += WarpRows) {
-                            const PackedInputValues<InputT, ItemsPerLane> values =
-                                loadVectorizedInputPacket<InputT, ItemsPerLane>(lane_packet);
+                            const PackedInputValues<InputT, ItemsPerLane> values = foldFp8ExtremumPacket<FoldExtremum, SignFold>(
+                                loadVectorizedInputPacket<InputT, ItemsPerLane>(lane_packet), extremum_fold);
                             reducePackedFp8ValuesToFp32<InputT>(local, values, reduction_op, input_transform);
                             lane_packet += row_stride_elements;
                         }
                     } else {
                         const InputT* extra_tail_packet = aligned_row_window + PacketSpanElements;
                         for (uint32_t row = first_row; row < shard_rows; row += WarpRows) {
-                            const PackedInputValues<InputT, ItemsPerLane> values =
-                                loadVectorizedInputPacket<InputT, ItemsPerLane>(lane_packet);
+                            const PackedInputValues<InputT, ItemsPerLane> values = foldFp8ExtremumPacket<FoldExtremum, SignFold>(
+                                loadVectorizedInputPacket<InputT, ItemsPerLane>(lane_packet), extremum_fold);
                             reducePackedFp8ValuesToFp32<InputT>(local, values, reduction_op, input_transform);
 
                             if (lane < TailOwnerLanes) {
                                 const PackedInputValues<InputT, TailItemsPerOwnerLane> tail_values =
-                                    loadVectorizedInputPacket<InputT, TailItemsPerOwnerLane>(
-                                        extra_tail_packet + lane * TailItemsPerOwnerLane);
+                                    foldFp8ExtremumPacket<FoldExtremum, SignFold>(
+                                        loadVectorizedInputPacket<InputT, TailItemsPerOwnerLane>(
+                                            extra_tail_packet + lane * TailItemsPerOwnerLane),
+                                        extremum_fold);
 #pragma unroll
                                 for (int item = 0; item < TailItemsPerOwnerLane; item += 2) {
                                     const uint16_t packed = static_cast<uint16_t>(tail_values.values[item].__x)
@@ -257,8 +277,8 @@ void awkwardAlignmentRotatedShardedFirstStageKernel(const InputT* input,
                     // PrefixReserved FP8 keeps the same rotated ownership and register accumulation, but decodes each
                     // loaded p4/p8/p16 packet in native fp8x2 pairs before applying the input transform.
                     for (uint32_t row = first_row; row < shard_rows; row += WarpRows) {
-                        const PackedInputValues<InputT, ItemsPerLane> values =
-                            loadVectorizedInputPacket<InputT, ItemsPerLane>(lane_packet);
+                        const PackedInputValues<InputT, ItemsPerLane> values = foldFp8ExtremumPacket<FoldExtremum, SignFold>(
+                            loadVectorizedInputPacket<InputT, ItemsPerLane>(lane_packet), extremum_fold);
                         reducePackedFp8ValuesToFp32<InputT>(local, values, reduction_op, input_transform);
                         lane_packet += row_stride_elements;
                     }
@@ -322,7 +342,7 @@ void awkwardAlignmentRotatedShardedFirstStageKernel(const InputT* input,
                 reduced = reduction_op(reduced, warp_partials[source_warp][physical_component]);
             }
             fp32_partials[(outer_index * shards_per_output + shard) * inner_size + tile_begin + logical_component] =
-                reduced;
+                unfoldFp8ExtremumPartial<FoldExtremum, SignFold>(reduced, extremum_fold);
         }
         __syncthreads();
     }
@@ -339,7 +359,8 @@ void launchAwkwardFirstStageForTransformPacket(const Tensor& input,
                                                Tensor& fp32_partials,
                                                const CubReductionGeometry& geometry,
                                                uint64_t shards_per_output,
-                                               cudaStream_t stream) {
+                                               cudaStream_t stream,
+                                               Fp8ExtremumFold extremum_fold = FP8_EXTREMUM_FOLD_NONE) {
     constexpr int LogicalTileElements = awkwardLogicalTileElementsForPacket<InputT, PacketBytes, ExactFp8Tile>;
     const uint64_t component_tiles =
         ceilDivideU64(geometry.inner_size, static_cast<uint64_t>(LogicalTileElements));
@@ -362,7 +383,8 @@ void launchAwkwardFirstStageForTransformPacket(const Tensor& input,
                                                                       geometry.reduction_size,
                                                                       geometry.inner_size,
                                                                       shards_per_output,
-                                                                      component_tiles);
+                                                                      component_tiles,
+                                                                      extremum_fold);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -561,7 +583,8 @@ template <int RowsPerShard>
 
 // Invokes callback.template operator()<InputT, InputTransformT, RowsPerShard, ExactTile>() for the
 // retained compiled rotated specialization matching the runtime request; returns false otherwise.
-template <typename Callback>
+// IdentityOnly (folded FP8 MIN/MAX, P5-F) instantiates only the identity transform.
+template <bool IdentityOnly = false, typename Callback>
 [[nodiscard]] bool dispatchRetainedFp8RuntimeKRotated(DataType input_dtype,
                                                       bool exact_tile,
                                                       uint64_t rows_per_shard,
@@ -593,13 +616,19 @@ template <typename Callback>
         }
     };
     const auto for_transform = [&]<typename InputT>() {
-        switch (transform) {
-            case CubReductionStageInputTransform::Identity:
-                for_tile.template operator()<InputT, IdentityFp32>(); return;
-            case CubReductionStageInputTransform::AbsoluteValue:
-                for_tile.template operator()<InputT, AbsoluteValueFp32>(); return;
-            case CubReductionStageInputTransform::Square:
-                for_tile.template operator()<InputT, SquareFp32>(); return;
+        if constexpr (IdentityOnly) {
+            if (transform == CubReductionStageInputTransform::Identity) {
+                for_tile.template operator()<InputT, IdentityFp32>();
+            }
+        } else {
+            switch (transform) {
+                case CubReductionStageInputTransform::Identity:
+                    for_tile.template operator()<InputT, IdentityFp32>(); return;
+                case CubReductionStageInputTransform::AbsoluteValue:
+                    for_tile.template operator()<InputT, AbsoluteValueFp32>(); return;
+                case CubReductionStageInputTransform::Square:
+                    for_tile.template operator()<InputT, SquareFp32>(); return;
+            }
         }
     };
     switch (input_dtype) {
@@ -613,6 +642,27 @@ template <typename Callback>
 #endif  // THOR_CUB_ENABLE_FP8_TYPES
 
 }  // namespace
+
+// P5-F: FP8 MIN and MAX launch identity-transform kernels with the transform folded into the bytes. PrefixReserved
+// MAX also folds its sign and launches the MIN kernel; Exact keeps its MAX kernel (transform-only fold).
+template <typename ReductionOpT>
+inline constexpr bool fp8RotatedFoldedExtremum =
+    std::is_same_v<ReductionOpT, PropagatingMinimumFp32> || std::is_same_v<ReductionOpT, PropagatingMaximumFp32>;
+
+template <typename ReductionOpT, bool ExactTile>
+using Fp8RotatedPhysicalReductionOp =
+    std::conditional_t<fp8RotatedFoldedExtremum<ReductionOpT> && !ExactTile, PropagatingMinimumFp32, ReductionOpT>;
+
+template <typename ReductionOpT>
+[[nodiscard]] Fp8ExtremumFold fp8RotatedExtremumFold(bool exact_tile, CubReductionStageInputTransform transform) {
+    if constexpr (!fp8RotatedFoldedExtremum<ReductionOpT>) {
+        static_cast<void>(exact_tile);
+        static_cast<void>(transform);
+        return FP8_EXTREMUM_FOLD_NONE;
+    } else {
+        return fp8ExtremumFold(!exact_tile && std::is_same_v<ReductionOpT, PropagatingMaximumFp32>, transform);
+    }
+}
 
 template <typename ReductionOpT>
 void launchFp8RuntimeKRotatedFirstStageTyped(const Tensor& input,
@@ -631,13 +681,16 @@ void launchFp8RuntimeKRotatedFirstStageTyped(const Tensor& input,
                != std::vector<uint64_t>{geometry.outer_size, shards_per_output, geometry.inner_size}) {
         throw std::logic_error("FP8 RuntimeK rotated first stage received invalid staged geometry.");
     }
-    const bool launched = dispatchRetainedFp8RuntimeKRotated(
-        input.getDataType(), exact_tile, rows_per_shard, transform,
+    constexpr bool Fold = fp8RotatedFoldedExtremum<ReductionOpT>;
+    const Fp8ExtremumFold fold = fp8RotatedExtremumFold<ReductionOpT>(exact_tile, transform);
+    const bool launched = dispatchRetainedFp8RuntimeKRotated<Fold>(
+        input.getDataType(), exact_tile, rows_per_shard, Fold ? CubReductionStageInputTransform::Identity : transform,
         [&]<typename InputT, typename InputTransformT, int RowsPerShard, bool ExactTile>() {
-            launchAwkwardFirstStageForTransformPacket<InputT, ReductionOpT, InputTransformT, RowsPerShard,
+            launchAwkwardFirstStageForTransformPacket<InputT, Fp8RotatedPhysicalReductionOp<ReductionOpT, ExactTile>,
+                                                       InputTransformT, RowsPerShard,
                                                        FP8_RUNTIME_K_ROTATED_PACKET_BYTES,
                                                        AWKWARD_ROTATED_FP8_SHARDED_WARPS, ExactTile>(
-                input, fp32_partials, geometry, shards_per_output, stream.getStream());
+                input, fp32_partials, geometry, shards_per_output, stream.getStream(), fold);
         });
     if (!launched) {
         throw std::logic_error("FP8 RuntimeK rotated first stage requires a retained compiled specialization.");
@@ -661,14 +714,17 @@ CubKernelOccupancyInfo queryFp8RuntimeKRotatedOccupancyTyped(DataType input_dtyp
                                                              uint64_t rows_per_shard,
                                                              CubReductionStageInputTransform transform) {
 #if THOR_CUB_ENABLE_FP8_TYPES
+    constexpr bool Fold = fp8RotatedFoldedExtremum<ReductionOpT>;
+    static_cast<void>(fp8RotatedExtremumFold<ReductionOpT>(exact_tile, transform));  // validates the transform
     CubKernelOccupancyInfo occupancy{};
-    const bool queried = dispatchRetainedFp8RuntimeKRotated(
-        input_dtype, exact_tile, rows_per_shard, transform,
+    const bool queried = dispatchRetainedFp8RuntimeKRotated<Fold>(
+        input_dtype, exact_tile, rows_per_shard, Fold ? CubReductionStageInputTransform::Identity : transform,
         [&]<typename InputT, typename InputTransformT, int RowsPerShard, bool ExactTile>() {
             occupancy = queryRotatedRCooperativePacketOccupancyForRows<InputT, RowsPerShard,
                                                                         FP8_RUNTIME_K_ROTATED_PACKET_BYTES,
                                                                         AWKWARD_ROTATED_FP8_SHARDED_WARPS,
-                                                                        ExactTile, InputTransformT, ReductionOpT>();
+                                                                        ExactTile, InputTransformT,
+                                                                        Fp8RotatedPhysicalReductionOp<ReductionOpT, ExactTile>>();
         });
     if (!queried) {
         // Not a retained compiled specialization; the selector treats this as an absent candidate.

@@ -1,14 +1,17 @@
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 #include "Utilities/TensorOperations/Cub/CubReductionOperation.cuh"
-#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8OneWindowSelector.h"
+#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8DeepRSmallKSelector.h"
 
 #include "Utilities/Exceptions.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace ThorImplementation::CubReductionInternal {
@@ -178,69 +181,10 @@ template <typename InputT>
 }
 
 // Retained shallow-R FP8 Complete families (OneWindow and RuntimeK packet-complete) launch eight-warp CTAs.
-// Their compiled physical inventory is owned by the Fp8RK selector policy headers; the dispatchers below
-// instantiate only those retained variants.
+// OneWindow is the bucketed runtime-K kernel (ONE_WINDOW_RUNTIME_K_UNITS); RuntimeK packet-complete is runtime-K tiled.
 constexpr int SHALLOW_FP8_WARPS = 8;
 constexpr int SHALLOW_FP8_THREADS = SHALLOW_FP8_WARPS * TILED_REDUCTION_WARP_THREADS;
-constexpr int RPARALLEL_FP8_MAX_K = 512;
 static_assert(SHALLOW_FP8_THREADS == 256);
-
-[[nodiscard]] inline bool shallowFp8SupportedCalibrationK(uint64_t inner_size) {
-    switch (inner_size) {
-        case 2:
-        case 3:
-        case 4:
-        case 5:
-        case 7:
-        case 8:
-        case 9:
-        case 11:
-        case 13:
-        case 15:
-        case 16:
-        case 17:
-        case 19:
-        case 31:
-        case 32:
-            return true;
-        default:
-            return false;
-    }
-}
-
-[[nodiscard]] inline bool rParallelFp8SupportedCalibrationK(uint64_t inner_size) {
-    if (inner_size == 1 || shallowFp8SupportedCalibrationK(inner_size)) {
-        return true;
-    }
-    switch (inner_size) {
-        case 63:
-        case 64:
-        case 127:
-        case 128:
-        case 129:
-        case 255:
-        case 256:
-        case 497:
-        case 512:
-            return true;
-        default:
-            return false;
-    }
-}
-
-[[nodiscard]] inline bool rParallelFp8PacketSupportsOwnership(
-    uint64_t inner_size, uint32_t outputs_per_warp, uint32_t packet_bytes) {
-    if ((outputs_per_warp != 1 && outputs_per_warp != 2 && outputs_per_warp != 4 && outputs_per_warp != 8) ||
-        inner_size == 0 || inner_size > RPARALLEL_FP8_MAX_K ||
-        (packet_bytes != 4 && packet_bytes != 8 && packet_bytes != 16)) {
-        return false;
-    }
-    const uint64_t lanes_per_output = TILED_REDUCTION_WARP_THREADS / outputs_per_warp;
-    const uint64_t packet_window = lanes_per_output * packet_bytes;
-    const bool row_aligned = (inner_size % packet_bytes) == 0;
-    const uint64_t logical_capacity = row_aligned ? packet_window : packet_window - (packet_bytes - 1);
-    return inner_size <= logical_capacity;
-}
 
 [[nodiscard]] inline bool shallowFp8FitsUint32Indexing(const CubReductionGeometry& geometry) {
     constexpr uint64_t MaxIndex = std::numeric_limits<uint32_t>::max();
@@ -341,13 +285,23 @@ __device__ __forceinline__ float4 transformFp8CompleteDecodedPacket(
 
 // The Complete families share a uniform runtime-dtype store. Finalization and
 // scaling happen once, on the final mathematical reduction pass only.
+// AdditiveFinalize is FixedOp == 0: fp8CompleteFinalizerFromSemantics() only
+// hands PRODUCT/MIN/MAX the identity finalizer, so their kernels compile none.
+// SUM keeps the identity test inline and calls the shared out-of-line divide /
+// square-root finalizer only for MEAN and the square-root operations (P5-A).
+template <bool AdditiveFinalize>
 __device__ __forceinline__ void storeFp8CompleteResult(void* output,
                                                         DataType output_dtype,
                                                         uint64_t index,
                                                         float value,
                                                         AdditiveFinalizeFp32 finalizer,
                                                         float output_scale) {
-    storeFp32AsRuntimeDType(output, output_dtype, index, finalizer(value) * output_scale);
+    if constexpr (AdditiveFinalize) {
+        value = finalizeFp32Epilogue(finalizer, value);
+    } else {
+        static_cast<void>(finalizer);
+    }
+    storeFp32AsRuntimeDType(output, output_dtype, index, value * output_scale);
 }
 
 // Apply the selected compile-time FP32 combine over one decoded packet.
@@ -363,77 +317,360 @@ __device__ __forceinline__ float reduceOneWindowDecoded4(float acc, float4 value
     return acc;
 }
 
-// General Complete RParallel spans both output and R ownership with one packed FP8 physical family. O1 may use
-// a 1/2/4/8-warp subgroup per output. O2/O4/O8 instead partition one warp into independent output subgroups and
-// therefore require W1. Within each output subgroup, K<=lanes-per-output spends spare lanes as independent R
-// workers/component; larger K assigns multiple components/lane. Every subgroup gets its own p4/p8/p16 packet slice
-// in the warp-wide plane-major shared staging buffer and streams runtime R through that slice. This subsumes the
-// ownership mechanics of the earlier MultiOutput path while extending them through the current one-window K range; output multiplicity,
-// warps/output, and packet width are axes of one family rather than distinct physical kernel families.
-template <typename InputT, int K, int PacketBytes, int OutputsPerWarp,
-          int FixedInputTransform = -1, int FixedOp = 0>
-__global__ void fp8GeneralRParallelPackedCompleteKernel(const InputT* input,
-                                                        void* output,
-                                                        DataType output_dtype,
-                                                        uint32_t outer_size,
-                                                        uint32_t reduction_size,
-                                                        uint32_t warps_per_output,
-                                                        AdditiveFinalizeFp32 output_finalize,
-                                                        CubReductionStageInputTransform input_transform,
-                                                        float output_scale) {
+// One OneWindow R group: group_rows logical rows starting at a row, staged as packet_count packets beginning
+// prefix_bytes before the group's first byte.
+struct OneWindowGroupWindow {
+    uint32_t rows;
+    uint32_t prefix_bytes;
+    uint32_t packet_count;
+    uint32_t aligned_byte_begin;
+};
+
+// Loads one packet; a packet that would cross the end of the input tensor is assembled bytewise.
+template <int PacketBytes>
+__device__ __forceinline__ RawVectorPacket<PacketBytes> loadOneWindowPacket(const uint8_t* input_bytes,
+                                                                            uint32_t packet_byte_begin,
+                                                                            uint32_t total_input_bytes) {
+    RawVectorPacket<PacketBytes> packet{};
+    if (total_input_bytes >= static_cast<uint32_t>(PacketBytes) &&
+        packet_byte_begin <= total_input_bytes - static_cast<uint32_t>(PacketBytes)) {
+        packet = *reinterpret_cast<const RawVectorPacket<PacketBytes>*>(input_bytes + packet_byte_begin);
+    } else {
+        auto* packet_bytes = reinterpret_cast<uint8_t*>(&packet.value);
+#pragma unroll
+        for (uint32_t byte = 0; byte < PacketBytes; ++byte) {
+            const uint32_t byte_index = packet_byte_begin + byte;
+            if (byte_index < total_input_bytes) {
+                packet_bytes[byte] = input_bytes[byte_index];
+            }
+        }
+    }
+    return packet;
+}
+
+// Plane-major staging: word w of lane's packet goes to warp_words[w * 32 + lane].
+template <int PacketBytes>
+__device__ __forceinline__ void stageOneWindowPacket(uint32_t* warp_words,
+                                                     uint32_t lane,
+                                                     const RawVectorPacket<PacketBytes>& packet) {
+    if constexpr (PacketBytes == 4) {
+        warp_words[lane] = packet.value;
+    } else if constexpr (PacketBytes == 8) {
+        warp_words[0 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.x;
+        warp_words[1 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.y;
+    } else {
+        warp_words[0 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.x;
+        warp_words[1 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.y;
+        warp_words[2 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.z;
+        warp_words[3 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.w;
+    }
+}
+
+// OneWindow (P5-I bucketed, the only OneWindow kernel since P5-J2): the former compile-time-K OneWindow algorithm
+// with K as a runtime operand. Packet width and ownership (outputs per warp) stay compile-time axes, and K is
+// bucketed by the maximum number of components per lane (1, 2, 4, 8, 16), so local[] and the slot loop stay
+// compile-time (unused slots are skipped by the owned_component < K guard). Everything compile-time K provided is
+// computed once on the host (Fp8OneWindowRuntimeKGeometry): rows per staged group, R workers per component and the
+// accumulating lane count. The group loop is either plain or load-ahead (LoadAhead), fixed per unit. Decode packing
+// differs by bucket (decodeOneWindowRuntimeKGroup); everything is force-inlined functions, no lambdas holding
+// local[] (P5-I2).
+struct Fp8OneWindowRuntimeKGeometry {
+    uint32_t k;                      // components per output
+    uint32_t rows_per_group;         // logical rows staged per packet window
+    uint32_t workers_per_component;  // R workers per component (1 when a lane owns several components)
+    uint32_t task_count;             // accumulating lanes per output
+};
+
+template <uint32_t PacketBytes>
+__device__ __forceinline__ OneWindowGroupWindow oneWindowRuntimeKGroupWindow(bool valid_output,
+                                                                             uint32_t outer_byte_begin,
+                                                                             uint32_t group_row,
+                                                                             uint32_t reduction_size,
+                                                                             uint32_t k,
+                                                                             uint32_t rows_per_group) {
+    const uint32_t remaining_rows = reduction_size - group_row;
+    OneWindowGroupWindow window{remaining_rows < rows_per_group ? remaining_rows : rows_per_group, 0U, 0U, 0U};
+    if (valid_output) {
+        const uint32_t group_byte_begin = outer_byte_begin + group_row * k;
+        constexpr uint32_t PacketShift = PacketBytes == 4 ? 2U : (PacketBytes == 8 ? 3U : 4U);
+        window.prefix_bytes = group_byte_begin & (PacketBytes - 1U);
+        window.aligned_byte_begin = group_byte_begin - window.prefix_bytes;
+        window.packet_count = (window.prefix_bytes + window.rows * k + PacketBytes - 1U) >> PacketShift;
+    }
+    return window;
+}
+
+// One staged FP8 byte of a subgroup slice (plane-major: word w of the subgroup's packet p at w * 32 + base + p).
+template <uint32_t PacketBytes>
+__device__ __forceinline__ uint32_t oneWindowStagedByte(const uint32_t* warp_words,
+                                                        uint32_t subgroup_lane_base,
+                                                        uint32_t staged_byte) {
+    constexpr uint32_t PacketShift = PacketBytes == 4 ? 2U : (PacketBytes == 8 ? 3U : 4U);
+    const uint32_t packet_byte = staged_byte & (PacketBytes - 1U);
+    const uint32_t word = warp_words[(packet_byte >> 2) * TILED_REDUCTION_WARP_THREADS + subgroup_lane_base +
+                                     (staged_byte >> PacketShift)];
+    return (word >> ((packet_byte & 3U) * 8U)) & 0xffU;
+}
+
+template <typename InputT, int FixedOp>
+__device__ __forceinline__ float4 decodeOneWindowRuntimeKPacked(uint32_t packed,
+                                                                CubReductionStageInputTransform input_transform,
+                                                                const Fp8ExtremumFold& extremum_fold) {
+    return transformFp8CompleteDecodedPacket<FixedOp == 2 ? 0 : -1>(
+        decodeFp8x4ToFp32<InputT>(foldFp8ExtremumBytes<FixedOp == 2>(packed, extremum_fold)), input_transform);
+}
+
+// Decodes one staged group into local[]. Rows of each component are accumulated in increasing order, exactly as in
+// the former compile-time-K kernel (1092-1097 checked bit identity against it).
+//  - Buckets 1 and 2 pack four rows of one component per FP8x4 decode (the compile-time-K scheme), with
+//    unpredicated full steps and one predicated tail.
+//  - Buckets 4..16 pack four of the lane's components of one row per decode. Large K leaves few rows per group
+//    (one row at K 497), where packing rows would decode one valid value per conversion; this packs four, with the
+//    same byte reads.
+template <typename InputT, int FixedOp, int MaxComponentsPerLane, uint32_t LanesPerOutput, uint32_t PacketBytes>
+__device__ __forceinline__ void decodeOneWindowRuntimeKGroup(float (&local)[MaxComponentsPerLane],
+                                                             const uint32_t* warp_words,
+                                                             uint32_t subgroup_lane,
+                                                             uint32_t subgroup_lane_base,
+                                                             uint32_t component,
+                                                             uint32_t worker,
+                                                             uint32_t k,
+                                                             uint32_t workers,
+                                                             uint32_t group_rows,
+                                                             uint32_t prefix_bytes,
+                                                             CubReductionStageInputTransform input_transform,
+                                                             const Fp8ExtremumFold& extremum_fold) {
+    if constexpr (MaxComponentsPerLane <= 2) {
+        constexpr bool MultipleComponentsPerLane = MaxComponentsPerLane > 1;
+        const uint32_t row_stride = workers * k;  // bytes between a worker's consecutive rows
+#pragma unroll
+        for (uint32_t slot = 0; slot < static_cast<uint32_t>(MaxComponentsPerLane); ++slot) {
+            const uint32_t owned_component =
+                MultipleComponentsPerLane ? subgroup_lane + slot * LanesPerOutput : component;
+            if (owned_component >= k) {
+                continue;
+            }
+            uint32_t row = worker;
+            uint32_t byte = prefix_bytes + worker * k + owned_component;
+            for (; row + 3U * workers < group_rows; row += 4U * workers, byte += 4U * row_stride) {
+                const auto staged = [&](uint32_t staged_byte) {
+                    return oneWindowStagedByte<PacketBytes>(warp_words, subgroup_lane_base, staged_byte);
+                };
+                const uint32_t packed = staged(byte) | (staged(byte + row_stride) << 8) |
+                                        (staged(byte + 2U * row_stride) << 16) |
+                                        (staged(byte + 3U * row_stride) << 24);
+                local[slot] = reduceOneWindowDecoded4<FixedOp>(
+                    local[slot], decodeOneWindowRuntimeKPacked<InputT, FixedOp>(packed, input_transform, extremum_fold),
+                    4U);
+            }
+            if (row < group_rows) {
+                uint32_t packed = 0;
+                uint32_t valid_values = 0;
+#pragma unroll
+                for (uint32_t item = 0; item < 4U; ++item) {
+                    if (row + item * workers < group_rows) {
+                        packed |= oneWindowStagedByte<PacketBytes>(warp_words, subgroup_lane_base,
+                                                                   byte + item * row_stride)
+                                  << (item * 8U);
+                        ++valid_values;
+                    }
+                }
+                local[slot] = reduceOneWindowDecoded4<FixedOp>(
+                    local[slot], decodeOneWindowRuntimeKPacked<InputT, FixedOp>(packed, input_transform, extremum_fold),
+                    valid_values);
+            }
+        }
+    } else {
+        static_cast<void>(component);
+        static_cast<void>(worker);
+        static_cast<void>(workers);
+        const Fp8TypedReductionOp<FixedOp> combine{};
+        for (uint32_t row = 0; row < group_rows; ++row) {
+            const uint32_t row_byte = prefix_bytes + row * k + subgroup_lane;
+#pragma unroll
+            for (uint32_t slot_base = 0; slot_base < static_cast<uint32_t>(MaxComponentsPerLane); slot_base += 4U) {
+                if (subgroup_lane + slot_base * LanesPerOutput >= k) {
+                    continue;
+                }
+                uint32_t packed = 0;
+                uint32_t valid_slots = 0;
+#pragma unroll
+                for (uint32_t j = 0; j < 4U; ++j) {
+                    if (subgroup_lane + (slot_base + j) * LanesPerOutput < k) {
+                        packed |= oneWindowStagedByte<PacketBytes>(warp_words, subgroup_lane_base,
+                                                      row_byte + (slot_base + j) * LanesPerOutput)
+                                  << (j * 8U);
+                        ++valid_slots;
+                    }
+                }
+                const float4 decoded =
+                    decodeOneWindowRuntimeKPacked<InputT, FixedOp>(packed, input_transform, extremum_fold);
+                // Valid slots are a prefix: owned components increase with j.
+                local[slot_base] = combine(local[slot_base], decoded.x);
+                if (valid_slots > 1) local[slot_base + 1] = combine(local[slot_base + 1], decoded.y);
+                if (valid_slots > 2) local[slot_base + 2] = combine(local[slot_base + 2], decoded.z);
+                if (valid_slots > 3) local[slot_base + 3] = combine(local[slot_base + 3], decoded.w);
+            }
+        }
+    }
+}
+
+// Streams one output's R through packet windows first_row, first_row + row_step, ... and decodes them into local[].
+template <typename InputT, int FixedOp, int MaxComponentsPerLane, uint32_t LanesPerOutput, uint32_t PacketBytes,
+          bool LoadAhead>
+__device__ __forceinline__ void streamOneWindowRuntimeKOutput(float (&local)[MaxComponentsPerLane],
+                                                              uint32_t* warp_words,
+                                                              const uint8_t* input_bytes,
+                                                              uint32_t total_input_bytes,
+                                                              bool valid_output,
+                                                              uint32_t outer_byte_begin,
+                                                              uint32_t first_row,
+                                                              uint32_t row_step,
+                                                              uint32_t reduction_size,
+                                                              const Fp8OneWindowRuntimeKGeometry& geometry,
+                                                              uint32_t lane,
+                                                              uint32_t subgroup_lane,
+                                                              uint32_t subgroup_lane_base,
+                                                              uint32_t component,
+                                                              uint32_t worker,
+                                                              CubReductionStageInputTransform input_transform,
+                                                              const Fp8ExtremumFold& extremum_fold) {
+    const bool decodes = valid_output && subgroup_lane < geometry.task_count;
+    const auto window_at = [&](uint32_t group_row) {
+        return oneWindowRuntimeKGroupWindow<PacketBytes>(valid_output, outer_byte_begin, group_row, reduction_size,
+                                                         geometry.k, geometry.rows_per_group);
+    };
+    if constexpr (LoadAhead) {
+        uint32_t group_row = first_row;
+        OneWindowGroupWindow current{};
+        RawVectorPacket<PacketBytes> current_packet{};
+        if (group_row < reduction_size) {
+            current = window_at(group_row);
+            if (valid_output && subgroup_lane < current.packet_count) {
+                current_packet = loadOneWindowPacket<PacketBytes>(
+                    input_bytes, current.aligned_byte_begin + subgroup_lane * PacketBytes, total_input_bytes);
+            }
+        }
+        while (group_row < reduction_size) {
+            const uint32_t next_row = group_row + row_step;
+            OneWindowGroupWindow next{};
+            RawVectorPacket<PacketBytes> next_packet{};
+            if (next_row < reduction_size) {
+                next = window_at(next_row);
+                if (valid_output && subgroup_lane < next.packet_count) {
+                    next_packet = loadOneWindowPacket<PacketBytes>(
+                        input_bytes, next.aligned_byte_begin + subgroup_lane * PacketBytes, total_input_bytes);
+                }
+            }
+            if (valid_output && subgroup_lane < current.packet_count) {
+                stageOneWindowPacket<PacketBytes>(warp_words, lane, current_packet);
+            }
+            __syncwarp();
+            if (decodes) {
+                decodeOneWindowRuntimeKGroup<InputT, FixedOp, MaxComponentsPerLane, LanesPerOutput, PacketBytes>(
+                    local, warp_words, subgroup_lane, subgroup_lane_base, component, worker, geometry.k,
+                    geometry.workers_per_component, current.rows, current.prefix_bytes, input_transform,
+                    extremum_fold);
+            }
+            __syncwarp();
+            current = next;
+            current_packet = next_packet;
+            group_row = next_row;
+        }
+    } else {
+        for (uint32_t group_row = first_row; group_row < reduction_size; group_row += row_step) {
+            const OneWindowGroupWindow window = window_at(group_row);
+            if (valid_output && subgroup_lane < window.packet_count) {
+                stageOneWindowPacket<PacketBytes>(
+                    warp_words, lane,
+                    loadOneWindowPacket<PacketBytes>(
+                        input_bytes, window.aligned_byte_begin + subgroup_lane * PacketBytes,
+                        total_input_bytes));
+            }
+            __syncwarp();
+            if (decodes) {
+                decodeOneWindowRuntimeKGroup<InputT, FixedOp, MaxComponentsPerLane, LanesPerOutput, PacketBytes>(
+                    local, warp_words, subgroup_lane, subgroup_lane_base, component, worker, geometry.k,
+                    geometry.workers_per_component, window.rows, window.prefix_bytes, input_transform, extremum_fold);
+            }
+            __syncwarp();
+        }
+    }
+}
+
+// One-component buckets: the R workers of a component sit in consecutive lanes (component * workers + worker).
+// P5-K1: a power-of-two worker count (always at O4/O8; at O1/O2 when lanes / K is a power of two, including one
+// worker) folds with butterfly shuffles inside the aligned worker group, with no shared memory and no warp barrier;
+// every lane of the group ends with the total. Other counts keep the shared lane_partials fold. Warp-uniform: every
+// lane calls it with the same workers.
+template <int FixedOp, uint32_t LanesPerOutput>
+__device__ __forceinline__ float shuffleFoldOneWindowWorkers(float partial, uint32_t workers) {
     const Fp8TypedReductionOp<FixedOp> combine{};
+#pragma unroll
+    for (uint32_t offset = 1; offset < LanesPerOutput; offset <<= 1) {
+        if (offset < workers) {
+            partial = combine(partial, __shfl_xor_sync(0xffffffffU, partial, offset));
+        }
+    }
+    return partial;
+}
+
+template <typename InputT, int OutputsPerWarp, int PacketBytes, int MaxComponentsPerLane, bool LoadAhead,
+          int FixedOp = 0>
+__global__ void fp8OneWindowRuntimeKCompleteKernel(const InputT* input,
+                                                   void* output,
+                                                   DataType output_dtype,
+                                                   uint32_t outer_size,
+                                                   uint32_t reduction_size,
+                                                   uint32_t warps_per_output,
+                                                   Fp8OneWindowRuntimeKGeometry geometry,
+                                                   AdditiveFinalizeFp32 output_finalize,
+                                                   CubReductionStageInputTransform input_transform,
+                                                   float output_scale,
+                                                   Fp8ExtremumFold extremum_fold) {
     static_assert(sizeof(InputT) == 1);
-    static_assert(K >= 1 && K <= RPARALLEL_FP8_MAX_K);
-    static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
+    static_assert(FixedOp == 0 || FixedOp == 1 || FixedOp == 2);
     static_assert(OutputsPerWarp == 1 || OutputsPerWarp == 2 || OutputsPerWarp == 4 || OutputsPerWarp == 8);
-    constexpr uint32_t PacketWords = PacketBytes / static_cast<int>(sizeof(uint32_t));
-    constexpr uint32_t PacketShift = PacketBytes == 4 ? 2 : (PacketBytes == 8 ? 3 : 4);
-    constexpr uint32_t PacketMask = PacketBytes - 1;
+    static_assert(MaxComponentsPerLane == 1 || MaxComponentsPerLane == 2 || MaxComponentsPerLane == 4 ||
+                  MaxComponentsPerLane == 8 || MaxComponentsPerLane == 16);
+    static_assert(MaxComponentsPerLane > 1 || !LoadAhead, "One-component buckets use the plain group loop.");
+    static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
+    constexpr uint32_t PacketWords = PacketBytes / 4;
     constexpr uint32_t LanesPerOutput = TILED_REDUCTION_WARP_THREADS / OutputsPerWarp;
-    constexpr bool MultipleComponentsPerLane = K > static_cast<int>(LanesPerOutput);
-    constexpr uint32_t WorkersPerComponent = MultipleComponentsPerLane ? 1U : LanesPerOutput / K;
-    constexpr uint32_t TaskCountPerOutput =
-        MultipleComponentsPerLane ? LanesPerOutput : K * WorkersPerComponent;
-    constexpr uint32_t ComponentsPerLane =
-        MultipleComponentsPerLane ? (K + LanesPerOutput - 1) / LanesPerOutput : 1U;
-    constexpr uint32_t StagingBytesPerOutput = LanesPerOutput * PacketBytes;
-    constexpr bool PacketAlignedRows = (K % PacketBytes) == 0;
-    constexpr uint32_t MaxLogicalBytesPerGroup =
-        PacketAlignedRows ? StagingBytesPerOutput : StagingBytesPerOutput - (PacketBytes - 1);
-    constexpr uint32_t RowsPerGroup = MaxLogicalBytesPerGroup / K;
+    constexpr bool MultipleComponentsPerLane = MaxComponentsPerLane > 1;
+    constexpr uint32_t MaxK = LanesPerOutput * static_cast<uint32_t>(MaxComponentsPerLane);
     constexpr uint32_t LanePartialColumns = MultipleComponentsPerLane ? 1U : TILED_REDUCTION_WARP_THREADS;
     constexpr uint32_t WarpPartialRows = OutputsPerWarp == 1 ? SHALLOW_FP8_WARPS : 1U;
-    constexpr uint32_t WarpPartialColumns = OutputsPerWarp == 1 ? K : 1U;
-    static_assert(LanesPerOutput * OutputsPerWarp == TILED_REDUCTION_WARP_THREADS);
-    static_assert(PacketWords == 1 || PacketWords == 2 || PacketWords == 4);
-    static_assert(WorkersPerComponent >= 1);
-    static_assert(TaskCountPerOutput <= LanesPerOutput);
-    static_assert(ComponentsPerLane >= 1 && ComponentsPerLane <= 16);
-    static_assert(RowsPerGroup >= 1, "RParallel packet slice cannot hold one logical K row.");
+    constexpr uint32_t WarpPartialColumns = OutputsPerWarp == 1 ? MaxK : 1U;
+    const Fp8TypedReductionOp<FixedOp> combine{};
 
-    __shared__ uint32_t staged_packet_words[SHALLOW_FP8_WARPS]
-                                            [PacketWords * TILED_REDUCTION_WARP_THREADS];
+    __shared__ uint32_t staged_packet_words[SHALLOW_FP8_WARPS][PacketWords * TILED_REDUCTION_WARP_THREADS];
     __shared__ float lane_partials[SHALLOW_FP8_WARPS][LanePartialColumns];
     __shared__ float warp_partials[WarpPartialRows][WarpPartialColumns];
 
+    const uint32_t k = geometry.k;
+    const uint32_t workers = geometry.workers_per_component;
     const uint32_t warp = threadIdx.x / TILED_REDUCTION_WARP_THREADS;
     const uint32_t lane = threadIdx.x % TILED_REDUCTION_WARP_THREADS;
-    const uint32_t outer_input_stride = reduction_size * K;
+    const uint32_t outer_input_stride = reduction_size * k;
     const uint32_t total_input_bytes = outer_size * outer_input_stride;
+    const uint8_t* const input_bytes = reinterpret_cast<const uint8_t*>(input);
+
+    // O2/O4/O8: each lane subgroup owns one output (warp-local). O1: the subgroup is the whole warp.
+    const uint32_t output_slot = lane / LanesPerOutput;
+    const uint32_t subgroup_lane = lane % LanesPerOutput;
+    const uint32_t subgroup_lane_base = output_slot * LanesPerOutput;
+    // One component per lane: component and R worker, one runtime division per thread.
+    const uint32_t component = MultipleComponentsPerLane ? subgroup_lane : subgroup_lane / workers;
+    const uint32_t worker = MultipleComponentsPerLane ? 0U : subgroup_lane - component * workers;
+
+    float local[MaxComponentsPerLane];
 
     if constexpr (OutputsPerWarp > 1) {
         static_cast<void>(warps_per_output);
-        // Multi-output ownership is warp-local. Each subgroup owns one output and one independent packet slice in
-        // shared memory. The subgroup may either spend lanes across R workers/component or assign several K
-        // components to each lane. Runtime R is streamed through RowsPerGroup just like O1.
-        const uint32_t output_slot = lane / LanesPerOutput;
-        const uint32_t subgroup_lane = lane % LanesPerOutput;
-        const uint32_t subgroup_lane_base = output_slot * LanesPerOutput;
-        const uint32_t component = MultipleComponentsPerLane ? subgroup_lane : subgroup_lane / WorkersPerComponent;
-        const uint32_t worker = MultipleComponentsPerLane ? 0U : subgroup_lane % WorkersPerComponent;
+        static_cast<void>(warp_partials);
         const uint32_t global_warp = blockIdx.x * SHALLOW_FP8_WARPS + warp;
         const uint32_t grid_warps = gridDim.x * SHALLOW_FP8_WARPS;
-
         for (uint32_t warp_group = global_warp;; warp_group += grid_warps) {
             const uint64_t outer_begin = static_cast<uint64_t>(warp_group) * OutputsPerWarp;
             if (outer_begin >= outer_size) {
@@ -441,331 +678,170 @@ __global__ void fp8GeneralRParallelPackedCompleteKernel(const InputT* input,
             }
             const uint64_t outer_index = outer_begin + output_slot;
             const bool valid_output = outer_index < outer_size;
-            float local[ComponentsPerLane];
 #pragma unroll
-            for (uint32_t slot = 0; slot < ComponentsPerLane; ++slot) {
+            for (uint32_t slot = 0; slot < static_cast<uint32_t>(MaxComponentsPerLane); ++slot) {
                 local[slot] = combine.identity();
             }
             const uint32_t outer_byte_begin =
                 valid_output ? static_cast<uint32_t>(outer_index) * outer_input_stride : 0;
-
-            for (uint32_t group_row = 0; group_row < reduction_size; group_row += RowsPerGroup) {
-                const uint32_t remaining_rows = reduction_size - group_row;
-                const uint32_t group_rows = remaining_rows < RowsPerGroup ? remaining_rows : RowsPerGroup;
-                uint32_t prefix_bytes = 0;
-                uint32_t packet_count = 0;
-                uint32_t aligned_byte_begin = 0;
-                if (valid_output) {
-                    const uint32_t group_byte_begin = outer_byte_begin + group_row * K;
-                    if constexpr (PacketAlignedRows) {
-                        aligned_byte_begin = group_byte_begin;
-                        packet_count = (group_rows * K) >> PacketShift;
-                    } else {
-                        prefix_bytes = group_byte_begin & PacketMask;
-                        aligned_byte_begin = group_byte_begin - prefix_bytes;
-                        const uint32_t logical_bytes = group_rows * K;
-                        packet_count = (prefix_bytes + logical_bytes + PacketBytes - 1) >> PacketShift;
-                    }
-                }
-
-                if (valid_output && subgroup_lane < packet_count) {
-                    const uint32_t packet_byte_begin = aligned_byte_begin + subgroup_lane * PacketBytes;
-                    RawVectorPacket<PacketBytes> packet{};
-                    if (total_input_bytes >= static_cast<uint32_t>(PacketBytes) &&
-                        packet_byte_begin <= total_input_bytes - static_cast<uint32_t>(PacketBytes)) {
-                        packet = *reinterpret_cast<const RawVectorPacket<PacketBytes>*>(
-                            reinterpret_cast<const uint8_t*>(input) + packet_byte_begin);
-                    } else {
-                        auto* packet_bytes = reinterpret_cast<uint8_t*>(&packet.value);
-#pragma unroll
-                        for (uint32_t byte = 0; byte < PacketBytes; ++byte) {
-                            const uint32_t byte_index = packet_byte_begin + byte;
-                            if (byte_index < total_input_bytes) {
-                                packet_bytes[byte] = reinterpret_cast<const uint8_t*>(input)[byte_index];
-                            }
-                        }
-                    }
-
-                    if constexpr (PacketBytes == 4) {
-                        staged_packet_words[warp][lane] = packet.value;
-                    } else if constexpr (PacketBytes == 8) {
-                        staged_packet_words[warp][0 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.x;
-                        staged_packet_words[warp][1 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.y;
-                    } else {
-                        staged_packet_words[warp][0 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.x;
-                        staged_packet_words[warp][1 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.y;
-                        staged_packet_words[warp][2 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.z;
-                        staged_packet_words[warp][3 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.w;
-                    }
-                }
-                __syncwarp();
-
-                if (valid_output && subgroup_lane < TaskCountPerOutput) {
-                    constexpr uint32_t RowsPerDecode = 4;
-#pragma unroll
-                    for (uint32_t slot = 0; slot < ComponentsPerLane; ++slot) {
-                        const uint32_t owned_component =
-                            MultipleComponentsPerLane ? subgroup_lane + slot * LanesPerOutput : component;
-                        if constexpr (!MultipleComponentsPerLane) {
-                            if (slot != 0) {
-                                continue;
-                            }
-                        }
-                        if (owned_component >= K) {
-                            continue;
-                        }
-                        for (uint32_t row = worker; row < group_rows;
-                             row += WorkersPerComponent * RowsPerDecode) {
-                            uint32_t packed_component_values = 0;
-                            uint32_t valid_values = 0;
-#pragma unroll
-                            for (uint32_t item = 0; item < RowsPerDecode; ++item) {
-                                const uint32_t source_row = row + item * WorkersPerComponent;
-                                if (source_row < group_rows) {
-                                    const uint32_t logical_byte = source_row * K + owned_component;
-                                    const uint32_t staged_byte = prefix_bytes + logical_byte;
-                                    const uint32_t source_packet = staged_byte >> PacketShift;
-                                    const uint32_t packet_byte = staged_byte & PacketMask;
-                                    const uint32_t source_lane = subgroup_lane_base + source_packet;
-                                    const uint32_t source_word =
-                                        staged_packet_words[warp]
-                                                           [(packet_byte >> 2) * TILED_REDUCTION_WARP_THREADS +
-                                                            source_lane];
-                                    const uint32_t source_value =
-                                        (source_word >> ((packet_byte & 3U) * 8U)) & 0xffU;
-                                    packed_component_values |= source_value << (item * 8U);
-                                    ++valid_values;
-                                }
-                            }
-                            const float4 decoded = transformFp8CompleteDecodedPacket<FixedInputTransform>(
-                                decodeFp8x4ToFp32<InputT>(packed_component_values), input_transform);
-                            local[slot] = reduceOneWindowDecoded4<FixedOp>(
-                                local[slot], decoded, valid_values);
-                        }
-                    }
-                }
-                __syncwarp();
-            }
+            streamOneWindowRuntimeKOutput<InputT, FixedOp, MaxComponentsPerLane, LanesPerOutput, PacketBytes,
+                                          LoadAhead>(
+                local, staged_packet_words[warp], input_bytes, total_input_bytes, valid_output, outer_byte_begin, 0U,
+                geometry.rows_per_group, reduction_size, geometry, lane, subgroup_lane, subgroup_lane_base, component,
+                worker, input_transform, extremum_fold);
 
             if constexpr (MultipleComponentsPerLane) {
 #pragma unroll
-                for (uint32_t slot = 0; slot < ComponentsPerLane; ++slot) {
+                for (uint32_t slot = 0; slot < static_cast<uint32_t>(MaxComponentsPerLane); ++slot) {
                     const uint32_t owned_component = subgroup_lane + slot * LanesPerOutput;
-                    if (valid_output && owned_component < K) {
-                        storeFp8CompleteResult(output, output_dtype, outer_index * static_cast<uint64_t>(K) + owned_component, local[slot], output_finalize, output_scale);
+                    if (valid_output && owned_component < k) {
+                        storeFp8CompleteResult<FixedOp == 0>(
+                            output, output_dtype, outer_index * static_cast<uint64_t>(k) + owned_component,
+                            unfoldFp8ExtremumResult<FixedOp == 2>(local[slot], extremum_fold), output_finalize,
+                            output_scale);
                     }
+                }
+            } else if ((workers & (workers - 1U)) == 0U) {
+                const float reduced = shuffleFoldOneWindowWorkers<FixedOp, LanesPerOutput>(
+                    (valid_output && subgroup_lane < geometry.task_count) ? local[0] : combine.identity(), workers);
+                if (valid_output && worker == 0U && component < k) {
+                    storeFp8CompleteResult<FixedOp == 0>(
+                        output, output_dtype, outer_index * static_cast<uint64_t>(k) + component,
+                        unfoldFp8ExtremumResult<FixedOp == 2>(reduced, extremum_fold), output_finalize, output_scale);
                 }
             } else {
                 lane_partials[warp][lane] =
-                    (valid_output && subgroup_lane < TaskCountPerOutput) ? local[0] : combine.identity();
+                    (valid_output && subgroup_lane < geometry.task_count) ? local[0] : combine.identity();
                 __syncwarp();
-                if (valid_output && subgroup_lane < K) {
+                if (valid_output && subgroup_lane < k) {
                     float reduced = combine.identity();
-                    const uint32_t partial_base =
-                        output_slot * LanesPerOutput + subgroup_lane * WorkersPerComponent;
-#pragma unroll
-                    for (uint32_t source_worker = 0; source_worker < WorkersPerComponent; ++source_worker) {
+                    const uint32_t partial_base = subgroup_lane_base + subgroup_lane * workers;
+                    for (uint32_t source_worker = 0; source_worker < workers; ++source_worker) {
                         reduced = combine(reduced, lane_partials[warp][partial_base + source_worker]);
                     }
-                    storeFp8CompleteResult(output, output_dtype, outer_index * static_cast<uint64_t>(K) + subgroup_lane, reduced, output_finalize, output_scale);
+                    storeFp8CompleteResult<FixedOp == 0>(
+                        output, output_dtype, outer_index * static_cast<uint64_t>(k) + subgroup_lane,
+                        unfoldFp8ExtremumResult<FixedOp == 2>(reduced, extremum_fold), output_finalize, output_scale);
                 }
                 __syncwarp();
             }
         }
     } else {
+        // O1 owns one output with one or more complete warps. W1 remains warp-local; W2/W4/W8 consume disjoint R
+        // groups and fold K FP32 warp partials in CTA shared memory.
+        const uint32_t outputs_per_block = SHALLOW_FP8_WARPS / warps_per_output;
+        const uint32_t output_group = warp / warps_per_output;
+        const uint32_t warp_in_output = warp - output_group * warps_per_output;
+        const uint32_t first_warp_in_output = output_group * warps_per_output;
+        const uint32_t rows_per_output_round = geometry.rows_per_group * warps_per_output;
+        const uint64_t block_output_stride = static_cast<uint64_t>(gridDim.x) * outputs_per_block;
 
-    // O1 owns one output with one or more complete warps. W1 remains warp-local; W2/W4/W8 consume disjoint R
-    // groups and fold K FP32 warp partials in CTA shared memory.
-    const uint32_t outputs_per_block = SHALLOW_FP8_WARPS / warps_per_output;
-    const uint32_t output_group = warp / warps_per_output;
-    const uint32_t warp_in_output = warp - output_group * warps_per_output;
-    const uint32_t first_warp_in_output = output_group * warps_per_output;
-    const uint32_t component = MultipleComponentsPerLane ? lane : lane / WorkersPerComponent;
-    const uint32_t worker = MultipleComponentsPerLane ? 0U : lane % WorkersPerComponent;
-    const uint32_t rows_per_output_round = RowsPerGroup * warps_per_output;
-    const uint64_t block_output_stride = static_cast<uint64_t>(gridDim.x) * outputs_per_block;
-
-    for (uint64_t block_outer_begin = static_cast<uint64_t>(blockIdx.x) * outputs_per_block;
-         block_outer_begin < outer_size;
-         block_outer_begin += block_output_stride) {
-        const uint64_t outer_index = block_outer_begin + output_group;
-        const bool valid_output = outer_index < outer_size;
-        float local[ComponentsPerLane];
+        for (uint64_t block_outer_begin = static_cast<uint64_t>(blockIdx.x) * outputs_per_block;
+             block_outer_begin < outer_size;
+             block_outer_begin += block_output_stride) {
+            const uint64_t outer_index = block_outer_begin + output_group;
+            const bool valid_output = outer_index < outer_size;
 #pragma unroll
-        for (uint32_t slot = 0; slot < ComponentsPerLane; ++slot) {
-            local[slot] = combine.identity();
-        }
-        const uint32_t outer_byte_begin =
-            valid_output ? static_cast<uint32_t>(outer_index) * outer_input_stride : 0;
-
-        for (uint32_t group_row = warp_in_output * RowsPerGroup;
-             group_row < reduction_size;
-             group_row += rows_per_output_round) {
-            const uint32_t remaining_rows = reduction_size - group_row;
-            const uint32_t group_rows = remaining_rows < RowsPerGroup ? remaining_rows : RowsPerGroup;
-            uint32_t prefix_bytes = 0;
-            uint32_t packet_count = 0;
-            uint32_t aligned_byte_begin = 0;
-            if (valid_output) {
-                const uint32_t group_byte_begin = outer_byte_begin + group_row * K;
-                if constexpr (PacketAlignedRows) {
-                    aligned_byte_begin = group_byte_begin;
-                    packet_count = (group_rows * K) >> PacketShift;
-                } else {
-                    prefix_bytes = group_byte_begin & PacketMask;
-                    aligned_byte_begin = group_byte_begin - prefix_bytes;
-                    const uint32_t logical_bytes = group_rows * K;
-                    packet_count = (prefix_bytes + logical_bytes + PacketBytes - 1) >> PacketShift;
-                }
+            for (uint32_t slot = 0; slot < static_cast<uint32_t>(MaxComponentsPerLane); ++slot) {
+                local[slot] = combine.identity();
             }
+            const uint32_t outer_byte_begin =
+                valid_output ? static_cast<uint32_t>(outer_index) * outer_input_stride : 0;
+            streamOneWindowRuntimeKOutput<InputT, FixedOp, MaxComponentsPerLane, LanesPerOutput, PacketBytes,
+                                          LoadAhead>(
+                local, staged_packet_words[warp], input_bytes, total_input_bytes, valid_output, outer_byte_begin,
+                warp_in_output * geometry.rows_per_group, rows_per_output_round, reduction_size, geometry, lane,
+                subgroup_lane, subgroup_lane_base, component, worker, input_transform, extremum_fold);
 
-            if (valid_output && lane < packet_count) {
-                const uint32_t packet_byte_begin = aligned_byte_begin + lane * PacketBytes;
-                RawVectorPacket<PacketBytes> packet{};
-                if (total_input_bytes >= static_cast<uint32_t>(PacketBytes) &&
-                    packet_byte_begin <= total_input_bytes - static_cast<uint32_t>(PacketBytes)) {
-                    packet = *reinterpret_cast<const RawVectorPacket<PacketBytes>*>(
-                        reinterpret_cast<const uint8_t*>(input) + packet_byte_begin);
-                } else {
-                    auto* packet_bytes = reinterpret_cast<uint8_t*>(&packet.value);
+            if (warps_per_output == 1) {
+                if constexpr (MultipleComponentsPerLane) {
 #pragma unroll
-                    for (uint32_t byte = 0; byte < PacketBytes; ++byte) {
-                        const uint32_t byte_index = packet_byte_begin + byte;
-                        if (byte_index < total_input_bytes) {
-                            packet_bytes[byte] = reinterpret_cast<const uint8_t*>(input)[byte_index];
+                    for (uint32_t slot = 0; slot < static_cast<uint32_t>(MaxComponentsPerLane); ++slot) {
+                        const uint32_t owned_component = lane + slot * TILED_REDUCTION_WARP_THREADS;
+                        if (valid_output && owned_component < k) {
+                            storeFp8CompleteResult<FixedOp == 0>(
+                                output, output_dtype, outer_index * static_cast<uint64_t>(k) + owned_component,
+                                unfoldFp8ExtremumResult<FixedOp == 2>(local[slot], extremum_fold), output_finalize,
+                                output_scale);
                         }
                     }
-                }
-
-                if constexpr (PacketBytes == 4) {
-                    staged_packet_words[warp][lane] = packet.value;
-                } else if constexpr (PacketBytes == 8) {
-                    staged_packet_words[warp][0 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.x;
-                    staged_packet_words[warp][1 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.y;
+                } else if ((workers & (workers - 1U)) == 0U) {
+                    const float reduced = shuffleFoldOneWindowWorkers<FixedOp, LanesPerOutput>(
+                        (valid_output && lane < geometry.task_count) ? local[0] : combine.identity(), workers);
+                    if (valid_output && worker == 0U && component < k) {
+                        storeFp8CompleteResult<FixedOp == 0>(
+                            output, output_dtype, outer_index * static_cast<uint64_t>(k) + component,
+                            unfoldFp8ExtremumResult<FixedOp == 2>(reduced, extremum_fold), output_finalize,
+                            output_scale);
+                    }
                 } else {
-                    staged_packet_words[warp][0 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.x;
-                    staged_packet_words[warp][1 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.y;
-                    staged_packet_words[warp][2 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.z;
-                    staged_packet_words[warp][3 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.w;
-                }
-            }
-            __syncwarp();
-
-            if (valid_output && lane < TaskCountPerOutput) {
-                constexpr uint32_t RowsPerDecode = 4;
-#pragma unroll
-                for (uint32_t slot = 0; slot < ComponentsPerLane; ++slot) {
-                    const uint32_t owned_component =
-                        MultipleComponentsPerLane ? lane + slot * TILED_REDUCTION_WARP_THREADS : component;
-                    if constexpr (!MultipleComponentsPerLane) {
-                        if (slot != 0) {
-                            continue;
+                    lane_partials[warp][lane] =
+                        (valid_output && lane < geometry.task_count) ? local[0] : combine.identity();
+                    __syncwarp();
+                    if (valid_output && lane < k) {
+                        float reduced = combine.identity();
+                        const uint32_t partial_base = lane * workers;
+                        for (uint32_t source_worker = 0; source_worker < workers; ++source_worker) {
+                            reduced = combine(reduced, lane_partials[warp][partial_base + source_worker]);
                         }
+                        storeFp8CompleteResult<FixedOp == 0>(
+                            output, output_dtype, outer_index * static_cast<uint64_t>(k) + lane,
+                            unfoldFp8ExtremumResult<FixedOp == 2>(reduced, extremum_fold), output_finalize,
+                            output_scale);
                     }
-                    if (owned_component >= K) {
-                        continue;
-                    }
-                    for (uint32_t row = worker; row < group_rows;
-                         row += WorkersPerComponent * RowsPerDecode) {
-                        uint32_t packed_component_values = 0;
-                        uint32_t valid_values = 0;
-#pragma unroll
-                        for (uint32_t item = 0; item < RowsPerDecode; ++item) {
-                            const uint32_t source_row = row + item * WorkersPerComponent;
-                            if (source_row < group_rows) {
-                                const uint32_t logical_byte = source_row * K + owned_component;
-                                const uint32_t staged_byte = prefix_bytes + logical_byte;
-                                const uint32_t source_packet = staged_byte >> PacketShift;
-                                const uint32_t packet_byte = staged_byte & PacketMask;
-                                const uint32_t source_word =
-                                    staged_packet_words[warp]
-                                                       [(packet_byte >> 2) * TILED_REDUCTION_WARP_THREADS +
-                                                        source_packet];
-                                const uint32_t source_value = (source_word >> ((packet_byte & 3U) * 8U)) & 0xffU;
-                                packed_component_values |= source_value << (item * 8U);
-                                ++valid_values;
-                            }
-                        }
-                        const float4 decoded = transformFp8CompleteDecodedPacket<FixedInputTransform>(
-                            decodeFp8x4ToFp32<InputT>(packed_component_values), input_transform);
-                        local[slot] = reduceOneWindowDecoded4<FixedOp>(
-                            local[slot], decoded, valid_values);
-                    }
+                    __syncwarp();
                 }
+                continue;
             }
-            __syncwarp();
-        }
 
-        if (warps_per_output == 1) {
             if constexpr (MultipleComponentsPerLane) {
 #pragma unroll
-                for (uint32_t slot = 0; slot < ComponentsPerLane; ++slot) {
+                for (uint32_t slot = 0; slot < static_cast<uint32_t>(MaxComponentsPerLane); ++slot) {
                     const uint32_t owned_component = lane + slot * TILED_REDUCTION_WARP_THREADS;
-                    if (valid_output && owned_component < K) {
-                        storeFp8CompleteResult(output, output_dtype, outer_index * static_cast<uint64_t>(K) + owned_component, local[slot], output_finalize, output_scale);
+                    if (owned_component < k) {
+                        warp_partials[warp][owned_component] = valid_output ? local[slot] : combine.identity();
                     }
+                }
+            } else if ((workers & (workers - 1U)) == 0U) {
+                const float warp_reduced = shuffleFoldOneWindowWorkers<FixedOp, LanesPerOutput>(
+                    (valid_output && lane < geometry.task_count) ? local[0] : combine.identity(), workers);
+                if (worker == 0U && component < k) {
+                    warp_partials[warp][component] = valid_output ? warp_reduced : combine.identity();
                 }
             } else {
-                lane_partials[warp][lane] = (valid_output && lane < TaskCountPerOutput) ? local[0] : combine.identity();
+                lane_partials[warp][lane] =
+                    (valid_output && lane < geometry.task_count) ? local[0] : combine.identity();
                 __syncwarp();
-                if (valid_output && lane < K) {
-                    float reduced = combine.identity();
-                    const uint32_t partial_base = lane * WorkersPerComponent;
-#pragma unroll
-                    for (uint32_t source_worker = 0; source_worker < WorkersPerComponent; ++source_worker) {
-                        reduced = combine(reduced, lane_partials[warp][partial_base + source_worker]);
+                if (lane < k) {
+                    float warp_reduced = combine.identity();
+                    const uint32_t partial_base = lane * workers;
+                    for (uint32_t source_worker = 0; source_worker < workers; ++source_worker) {
+                        warp_reduced = combine(warp_reduced, lane_partials[warp][partial_base + source_worker]);
                     }
-                    storeFp8CompleteResult(output, output_dtype, outer_index * static_cast<uint64_t>(K) + lane, reduced, output_finalize, output_scale);
+                    warp_partials[warp][lane] = valid_output ? warp_reduced : combine.identity();
                 }
-                __syncwarp();
             }
-            continue;
-        }
+            __syncthreads();
 
-        if constexpr (MultipleComponentsPerLane) {
+            if (warp_in_output == 0) {
 #pragma unroll
-            for (uint32_t slot = 0; slot < ComponentsPerLane; ++slot) {
-                const uint32_t owned_component = lane + slot * TILED_REDUCTION_WARP_THREADS;
-                if (owned_component < K) {
-                    warp_partials[warp][owned_component] = valid_output ? local[slot] : combine.identity();
-                }
-            }
-        } else {
-            lane_partials[warp][lane] = (valid_output && lane < TaskCountPerOutput) ? local[0] : combine.identity();
-            __syncwarp();
-            if (lane < K) {
-                float warp_reduced = combine.identity();
-                const uint32_t partial_base = lane * WorkersPerComponent;
-#pragma unroll
-                for (uint32_t source_worker = 0; source_worker < WorkersPerComponent; ++source_worker) {
-                    warp_reduced = combine(warp_reduced, lane_partials[warp][partial_base + source_worker]);
-                }
-                warp_partials[warp][lane] = valid_output ? warp_reduced : combine.identity();
-            }
-        }
-        __syncthreads();
-
-        if (warp_in_output == 0) {
-#pragma unroll
-            for (uint32_t slot = 0; slot < ComponentsPerLane; ++slot) {
-                const uint32_t owned_component =
-                    MultipleComponentsPerLane ? lane + slot * TILED_REDUCTION_WARP_THREADS : lane;
-                if constexpr (!MultipleComponentsPerLane) {
-                    if (slot != 0) {
-                        continue;
+                for (uint32_t slot = 0; slot < static_cast<uint32_t>(MaxComponentsPerLane); ++slot) {
+                    const uint32_t owned_component = lane + slot * TILED_REDUCTION_WARP_THREADS;
+                    if (valid_output && owned_component < k) {
+                        float reduced = combine.identity();
+                        for (uint32_t source_warp = 0; source_warp < warps_per_output; ++source_warp) {
+                            reduced = combine(reduced,
+                                              warp_partials[first_warp_in_output + source_warp][owned_component]);
+                        }
+                        storeFp8CompleteResult<FixedOp == 0>(
+                            output, output_dtype, outer_index * static_cast<uint64_t>(k) + owned_component,
+                            unfoldFp8ExtremumResult<FixedOp == 2>(reduced, extremum_fold), output_finalize,
+                            output_scale);
                     }
                 }
-                if (valid_output && owned_component < K) {
-                    float reduced = combine.identity();
-                    for (uint32_t source_warp = 0; source_warp < warps_per_output; ++source_warp) {
-                        reduced = combine(reduced, warp_partials[first_warp_in_output + source_warp][owned_component]);
-                    }
-                    storeFp8CompleteResult(output, output_dtype, outer_index * static_cast<uint64_t>(K) + owned_component, reduced, output_finalize, output_scale);
-                }
             }
+            __syncthreads();
         }
-        __syncthreads();
-    }
     }
 }
 
@@ -774,8 +850,11 @@ __global__ void fp8GeneralRParallelPackedCompleteKernel(const InputT* input,
 // one work item owns [outer, k_tile], K tiles are mathematically independent, and W1/W2/W4/W8 cooperate only over R.
 // Total K and tile width are runtime values; only the p16 physical packet shape is specialized. A tile is capped at
 // 496 logical bytes so an arbitrary per-row prefix (0..15 bytes) still fits in one 32-lane p16 packet window.
+// P5-H: pinned to four 256-thread blocks per SM (<= 64 registers). SUM compiled at 62 registers before the row
+// load-ahead; 65+ would lose a block, and 1077 showed RuntimeK SUM losing up to 1.9x at 80 registers. With the
+// load-ahead it compiles at 56 or fewer, no spills, and runs 0.79x (1089).
 template <typename InputT, int FixedInputTransform = 0, int FixedOp = 0>
-__global__ void fp8GeneralRParallelKTileP16CompleteKernel(const InputT* input,
+__global__ __launch_bounds__(SHALLOW_FP8_THREADS, 4) void fp8GeneralRParallelKTileP16CompleteKernel(const InputT* input,
                                                           void* output,
                                                           DataType output_dtype,
                                                           uint32_t outer_size,
@@ -837,30 +916,8 @@ __global__ void fp8GeneralRParallelKTileP16CompleteKernel(const InputT* input,
             local[slot] = initial;
         }
 
-        for (uint32_t row = warp_in_output; valid_work && row < reduction_size; row += warps_per_output) {
-            const uint64_t logical_begin =
-                static_cast<uint64_t>(outer_index) * outer_input_stride +
-                static_cast<uint64_t>(row) * inner_size + tile_begin;
-            const uint32_t prefix_bytes = static_cast<uint32_t>(logical_begin & PacketMask);
-            const uint64_t aligned_begin = logical_begin - prefix_bytes;
-            const uint32_t packet_count =
-                (prefix_bytes + tile_width + PacketBytes - 1) >> PacketShift;
-
-            if (lane < packet_count) {
-                const uint64_t packet_byte_begin = aligned_begin + static_cast<uint64_t>(lane) * PacketBytes;
-                // A p16 load extends at most 15 bytes past the logical tensor end.
-                // Tensor/view allocation provides >=128 trailing bytes; component masks
-                // below still prevent out-of-range values from entering the reduction.
-                const RawVectorPacket<PacketBytes> packet =
-                    *reinterpret_cast<const RawVectorPacket<PacketBytes>*>(
-                        reinterpret_cast<const uint8_t*>(input) + packet_byte_begin);
-                staged_packet_words[warp][0 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.x;
-                staged_packet_words[warp][1 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.y;
-                staged_packet_words[warp][2 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.z;
-                staged_packet_words[warp][3 * TILED_REDUCTION_WARP_THREADS + lane] = packet.value.w;
-            }
-            __syncwarp();
-
+        // Decodes the staged row (tile_width components after prefix_bytes alignment bytes) into local[].
+        const auto decode_row = [&](uint32_t prefix_bytes) {
             // Packet loading is lane-contiguous, while accumulation is component-owned across the warp. Gather four
             // component bytes from the staged packet transpose, repack them into one FP8x4 value, and let CUDA use
             // the packed conversion path instead of issuing four independent scalar FP8 conversions.
@@ -900,7 +957,52 @@ __global__ void fp8GeneralRParallelKTileP16CompleteKernel(const InputT* input,
                     }
                 }
             }
+        };
+        // Computes a row's alignment prefix and packet count and loads this lane's packet. A p16 load extends at
+        // most 15 bytes past the logical tensor end; Tensor/view allocation provides >=128 trailing bytes, and
+        // component masks prevent out-of-range values from entering the reduction.
+        const auto load_row = [&](uint32_t row_index, uint32_t& prefix_bytes, uint32_t& packet_count,
+                                  RawVectorPacket<PacketBytes>& packet) {
+            const uint64_t logical_begin = static_cast<uint64_t>(outer_index) * outer_input_stride +
+                                           static_cast<uint64_t>(row_index) * inner_size + tile_begin;
+            prefix_bytes = static_cast<uint32_t>(logical_begin & PacketMask);
+            packet_count = (prefix_bytes + tile_width + PacketBytes - 1) >> PacketShift;
+            if (lane < packet_count) {
+                packet = *reinterpret_cast<const RawVectorPacket<PacketBytes>*>(
+                    reinterpret_cast<const uint8_t*>(input) + (logical_begin - prefix_bytes) +
+                    static_cast<uint64_t>(lane) * PacketBytes);
+            }
+        };
+        // P5-H load-ahead: the next row's packet is loaded into registers before the current row is staged and decoded,
+        // so one global load per lane is always in flight while the warp decodes. Row order is unchanged.
+        uint32_t row = warp_in_output;
+        uint32_t current_prefix = 0;
+        uint32_t current_packet_count = 0;
+        RawVectorPacket<PacketBytes> current_packet{};
+        if (valid_work && row < reduction_size) {
+            load_row(row, current_prefix, current_packet_count, current_packet);
+        }
+        while (valid_work && row < reduction_size) {
+            const uint32_t next_row = row + warps_per_output;
+            uint32_t next_prefix = 0;
+            uint32_t next_packet_count = 0;
+            RawVectorPacket<PacketBytes> next_packet{};
+            if (next_row < reduction_size) {
+                load_row(next_row, next_prefix, next_packet_count, next_packet);
+            }
+            if (lane < current_packet_count) {
+                staged_packet_words[warp][0 * TILED_REDUCTION_WARP_THREADS + lane] = current_packet.value.x;
+                staged_packet_words[warp][1 * TILED_REDUCTION_WARP_THREADS + lane] = current_packet.value.y;
+                staged_packet_words[warp][2 * TILED_REDUCTION_WARP_THREADS + lane] = current_packet.value.z;
+                staged_packet_words[warp][3 * TILED_REDUCTION_WARP_THREADS + lane] = current_packet.value.w;
+            }
             __syncwarp();
+            decode_row(current_prefix);
+            __syncwarp();
+            current_prefix = next_prefix;
+            current_packet_count = next_packet_count;
+            current_packet = next_packet;
+            row = next_row;
         }
 
         if (warps_per_output == 1) {
@@ -908,7 +1010,7 @@ __global__ void fp8GeneralRParallelKTileP16CompleteKernel(const InputT* input,
             for (uint32_t slot = 0; slot < MaxComponentsPerLane; ++slot) {
                 const uint32_t component = lane + slot * TILED_REDUCTION_WARP_THREADS;
                 if (valid_work && component < tile_width) {
-                    storeFp8CompleteResult(output, output_dtype, static_cast<uint64_t>(outer_index) * inner_size + tile_begin + component, local[slot], output_finalize, output_scale);
+                    storeFp8CompleteResult<FixedOp == 0>(output, output_dtype, static_cast<uint64_t>(outer_index) * inner_size + tile_begin + component, local[slot], output_finalize, output_scale);
                 }
             }
             continue;
@@ -932,7 +1034,7 @@ __global__ void fp8GeneralRParallelKTileP16CompleteKernel(const InputT* input,
                     for (uint32_t source_warp = 0; source_warp < warps_per_output; ++source_warp) {
                         reduced = combine(reduced, warp_partials[first_warp_in_output + source_warp][component]);
                     }
-                    storeFp8CompleteResult(output, output_dtype, static_cast<uint64_t>(outer_index) * inner_size + tile_begin + component, reduced, output_finalize, output_scale);
+                    storeFp8CompleteResult<FixedOp == 0>(output, output_dtype, static_cast<uint64_t>(outer_index) * inner_size + tile_begin + component, reduced, output_finalize, output_scale);
                 }
             }
         }
@@ -940,52 +1042,6 @@ __global__ void fp8GeneralRParallelKTileP16CompleteKernel(const InputT* input,
     }
 }
 
-
-
-template <typename InputT, int K, int PacketBytes, int OutputsPerWarp,
-          int FixedInputTransform = -1, int FixedOp = 0>
-void launchFp8GeneralRParallelPacked(const Tensor& input,
-                                     Tensor& output,
-                                     const CubReductionGeometry& geometry,
-                                     uint32_t warps_per_output,
-                                     cudaStream_t stream,
-                                     AdditiveFinalizeFp32 output_finalize = {1.0f, false},
-                                     CubReductionStageInputTransform input_transform = CubReductionStageInputTransform::Identity,
-                                     float output_scale = 1.0f) {
-    static_assert(sizeof(InputT) == 1);
-    static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
-    static_assert(OutputsPerWarp == 1 || OutputsPerWarp == 2 || OutputsPerWarp == 4 || OutputsPerWarp == 8);
-    constexpr uint32_t LanesPerOutput = TILED_REDUCTION_WARP_THREADS / OutputsPerWarp;
-    constexpr uint32_t PacketWindow = LanesPerOutput * PacketBytes;
-    constexpr uint32_t LogicalCapacity =
-        (K % PacketBytes) == 0 ? PacketWindow : PacketWindow - (PacketBytes - 1);
-    static_assert(K <= static_cast<int>(LogicalCapacity));
-    if constexpr (OutputsPerWarp > 1) {
-        if (warps_per_output != 1) {
-            throw std::logic_error("FP8 general RParallel output-parallel ownership requires W1.");
-        }
-    }
-    const uint32_t outputs_per_block =
-        (SHALLOW_FP8_WARPS / warps_per_output) * static_cast<uint32_t>(OutputsPerWarp);
-    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<InputT>()) & uintptr_t{PacketBytes - 1}) != 0) {
-        throw std::logic_error("FP8 general RParallel calibration requires packet-aligned input base.");
-    }
-    const uint64_t block_count = std::min<uint64_t>(
-        ceilDivideU64(geometry.outer_size, static_cast<uint64_t>(outputs_per_block)),
-        NARROW_FLAT_MAX_GRID_BLOCKS);
-    fp8GeneralRParallelPackedCompleteKernel<InputT, K, PacketBytes, OutputsPerWarp, FixedInputTransform, FixedOp>
-        <<<static_cast<unsigned int>(block_count), SHALLOW_FP8_THREADS, 0, stream>>>(
-            input.getMemPtr<InputT>(),
-            output.getMemPtr<void>(),
-            output.getDataType(),
-            static_cast<uint32_t>(geometry.outer_size),
-            static_cast<uint32_t>(geometry.reduction_size),
-            warps_per_output,
-            output_finalize,
-            input_transform,
-            output_scale);
-    CUDA_CHECK(cudaGetLastError());
-}
 
 
 template <typename InputT, int FixedInputTransform = 0, int FixedOp = 0>
@@ -1032,21 +1088,6 @@ void launchFp8GeneralRParallelKTileP16Complete(const Tensor& input,
 }
 
 
-template <typename InputT, int K, int PacketBytes, int OutputsPerWarp, int FixedOp = 0>
-void launchFp8GeneralRParallelPackedForOwnership(const Tensor& input,
-                                                  Tensor& output,
-                                                  const CubReductionGeometry& geometry,
-                                                  uint32_t warps_per_output,
-                                                  cudaStream_t stream,
-                                                  AdditiveFinalizeFp32 output_finalize = {1.0f, false},
-                                                  CubReductionStageInputTransform input_transform = CubReductionStageInputTransform::Identity,
-                                                  float output_scale = 1.0f) {
-    static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
-    launchFp8GeneralRParallelPacked<InputT, K, PacketBytes, OutputsPerWarp, -1, FixedOp>(
-        input, output, geometry, warps_per_output, stream, output_finalize, input_transform, output_scale);
-}
-
-
 template <typename KernelT>
 [[nodiscard]] CubKernelOccupancyInfo queryShallowFp8Occupancy(KernelT kernel) {
     cudaFuncAttributes attributes{};
@@ -1057,35 +1098,6 @@ template <typename KernelT>
 }
 
 
-template <typename InputT, int K, int PacketBytes, int OutputsPerWarp, int FixedOp = 0>
-[[nodiscard]] CubKernelOccupancyInfo queryFp8GeneralRParallelPackedOccupancy() {
-    static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
-    static_assert(OutputsPerWarp == 1 || OutputsPerWarp == 2 || OutputsPerWarp == 4 || OutputsPerWarp == 8);
-    constexpr uint32_t LanesPerOutput = TILED_REDUCTION_WARP_THREADS / OutputsPerWarp;
-    constexpr uint32_t PacketWindow = LanesPerOutput * PacketBytes;
-    constexpr uint32_t LogicalCapacity =
-        (K % PacketBytes) == 0 ? PacketWindow : PacketWindow - (PacketBytes - 1);
-    static_assert(K <= static_cast<int>(LogicalCapacity));
-    return queryShallowFp8Occupancy(
-        fp8GeneralRParallelPackedCompleteKernel<InputT, K, PacketBytes, OutputsPerWarp, -1, FixedOp>);
-}
-
-template <typename InputT, int K, int PacketBytes, int OutputsPerWarp, int FixedOp = 0>
-[[nodiscard]] CubKernelOccupancyInfo queryFp8GeneralRParallelPackedOccupancyForOwnership(
-    uint32_t warps_per_output) {
-    static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
-    if (warps_per_output != 1 && warps_per_output != 2 && warps_per_output != 4 && warps_per_output != 8) {
-        throw std::logic_error("FP8 general RParallel occupancy received invalid warps-per-output.");
-    }
-    if constexpr (OutputsPerWarp > 1) {
-        if (warps_per_output != 1) {
-            throw std::logic_error("FP8 general RParallel output-parallel occupancy requires W1.");
-        }
-    }
-    return queryFp8GeneralRParallelPackedOccupancy<InputT, K, PacketBytes, OutputsPerWarp, FixedOp>();
-}
-
-
 template <typename InputT>
 struct NarrowFp8TypedFormatDecoder {
     __device__ float operator()(uint8_t bits) const {
@@ -1093,27 +1105,64 @@ struct NarrowFp8TypedFormatDecoder {
     }
 };
 
-template <typename InputT, typename ReductionOpT, typename InputTransformT, int RowsPerShard, int PacketBytes, int MaxComponentsPerLane,
-          typename DecoderT = NarrowFp8TypedFormatDecoder<InputT>>
+// P5-E: DeepRSmallK warp-group window. Each warp stages one group of whole rows (group_rows * K bytes plus an
+// alignment prefix < PacketBytes) as one packet per lane. The group loops below are software-pipelined: the packet of
+// the warp's next group is loaded into a register before the current group is decoded from shared memory, so one
+// group's global load is always in flight while the warp works. Row order per component is unchanged.
+template <int PacketBytes>
+struct NarrowFp8GroupWindow {
+    const RawVectorPacket<PacketBytes>* aligned_begin;
+    uint32_t prefix_elements;
+    uint32_t group_rows;
+    uint32_t packet_count;
+};
+
+template <int PacketBytes, typename InputT>
+[[nodiscard]] __device__ __forceinline__ NarrowFp8GroupWindow<PacketBytes> narrowFp8GroupWindow(
+    const InputT* shard_input, uint32_t group_row, uint32_t shard_rows, uint32_t rows_per_warp_group,
+    uint32_t inner_size_32) {
+    static_assert(sizeof(InputT) == 1);
+    NarrowFp8GroupWindow<PacketBytes> window;
+    window.group_rows = rows_per_warp_group < shard_rows - group_row ? rows_per_warp_group : shard_rows - group_row;
+    const uintptr_t group_address = reinterpret_cast<uintptr_t>(shard_input + group_row * inner_size_32);
+    window.prefix_elements = static_cast<uint32_t>(group_address & uintptr_t{PacketBytes - 1});
+    window.aligned_begin =
+        reinterpret_cast<const RawVectorPacket<PacketBytes>*>(group_address & ~uintptr_t{PacketBytes - 1});
+    window.packet_count =
+        (window.prefix_elements + window.group_rows * inner_size_32 + PacketBytes - 1) / PacketBytes;
+    return window;
+}
+
+// P5-C: the shard depth is a runtime operand. It only places and clamps each shard; the row loops already ran on the
+// runtime rows_per_warp_group / shard_rows, and the five compiled depths produced identical SASS apart from that
+// constant (sass-1069). Retained depths are powers of two and the kernel receives log2(depth): a runtime 64-bit
+// multiply for the shard origin (1079) cost 2-4% on shards of 4 KB or less, where the per-shard latency before the
+// first load dominates; a shift keeps the compiled kernels' instruction shape. The launcher validates the depth
+// against Fp8DeepRSmallKPolicy::compiled_rows.
+// FixedRowsPerShardLog2 >= 0 compiles the depth back in (rows_per_shard_log2 is then ignored). Only the one-component
+// kernel (K 9..32) uses it, at every retained depth: with the runtime depth it lost 4.8% at rows64 and 1.9% at
+// rows128 (1080), the only ownership whose loss survived the shift. Every other ownership kind keeps one kernel.
+template <typename InputT, typename ReductionOpT, typename InputTransformT, int PacketBytes, int MaxComponentsPerLane,
+          int FixedRowsPerShardLog2 = -1, typename DecoderT = NarrowFp8TypedFormatDecoder<InputT>>
 __global__ void narrowFp8PackedFlatRCooperativeFirstStageKernel(const InputT* input,
                                                                 float* fp32_partials,
                                                                 uint64_t outer_size,
                                                                 uint64_t reduction_size,
                                                                 uint64_t inner_size,
                                                                 uint64_t shards_per_output,
+                                                                uint32_t rows_per_shard_log2,
                                                                 uint32_t rows_per_warp_group,
                                                                 InputTransformT input_transform, DecoderT decoder = DecoderT{}) {
     static_assert(sizeof(InputT) == 1);
     static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
-    static_assert(RowsPerShard == 8 || RowsPerShard == 16 || RowsPerShard == 32 || RowsPerShard == 64 || RowsPerShard == 128 ||
-                  RowsPerShard == 256 || RowsPerShard == 512 || RowsPerShard == 1024 || RowsPerShard == 2048 || RowsPerShard == 4096 ||
-                  RowsPerShard == 8192 || RowsPerShard == 16384);
     static_assert(MaxComponentsPerLane == 1 || MaxComponentsPerLane == 2 || MaxComponentsPerLane == 4 || MaxComponentsPerLane == 5 ||
                   MaxComponentsPerLane == 8);
     constexpr int MaxSupportedK = TILED_REDUCTION_WARP_THREADS * MaxComponentsPerLane;
     constexpr float Init = NarrowFlatReductionIdentityFp32<ReductionOpT>::value;
     static_assert(MaxSupportedK <= NARROW_FP8_CALIBRATION_MAX_K);
-    static_assert(RowsPerShard / NARROW_FLAT_WARPS >= 1);
+    static_assert(FixedRowsPerShardLog2 == -1 || (FixedRowsPerShardLog2 >= 3 && FixedRowsPerShardLog2 <= 14));
+    const uint32_t shard_log2 =
+        FixedRowsPerShardLog2 >= 0 ? static_cast<uint32_t>(FixedRowsPerShardLog2) : rows_per_shard_log2;
 
     __shared__ RawVectorPacket<PacketBytes> staged_packets[NARROW_FLAT_WARPS][NARROW_FP8_PACKETS_PER_WARP];
     __shared__ float warp_partials[NARROW_FLAT_WARPS][MaxSupportedK];
@@ -1122,13 +1171,13 @@ __global__ void narrowFp8PackedFlatRCooperativeFirstStageKernel(const InputT* in
     const int warp = static_cast<int>(threadIdx.x) / TILED_REDUCTION_WARP_THREADS;
     const int lane = static_cast<int>(threadIdx.x) % TILED_REDUCTION_WARP_THREADS;
 
-    // DeepRSmallK's retained launcher guarantees 1 <= inner_size <= 256, and RowsPerShard <= 16384, so every offset inside
+    // DeepRSmallK's retained launcher guarantees 1 <= inner_size <= 256, and rows_per_shard <= 16384, so every offset inside
     // one shard (< 2^22 bytes) is 32-bit. One warp stages at most 32 * PacketBytes <= 512 bytes, including an alignment
     // prefix < PacketBytes. The shard base pointer is formed once per work item in 64 bits.
     const uint32_t inner_size_32 = static_cast<uint32_t>(inner_size);
 
     // rows_per_warp_group is computed by the launcher: fill toward the packet window, but never choose a group so deep
-    // that fewer than eight warps can participate in a full RowsPerShard shard.
+    // that fewer than eight warps can participate in a full rows_per_shard shard.
     const uint32_t rows_per_block_round = rows_per_warp_group * NARROW_FLAT_WARPS;
 
     // Grid: x = shard, z = outer (see reductionWorkGrid); this family has one component tile.
@@ -1137,9 +1186,9 @@ __global__ void narrowFp8PackedFlatRCooperativeFirstStageKernel(const InputT* in
     const uint32_t shard_count = static_cast<uint32_t>(shards_per_output);
     for (uint32_t outer_index = blockIdx.z; outer_index < outer_count; outer_index += gridDim.z)
     for (uint32_t shard = blockIdx.x; shard < shard_count; shard += gridDim.x) {
-        const uint64_t row_begin = shard * static_cast<uint64_t>(RowsPerShard);
+        const uint64_t row_begin = static_cast<uint64_t>(shard) << shard_log2;
         const uint32_t shard_rows = row_begin < reduction_size
-            ? static_cast<uint32_t>(minU64(static_cast<uint64_t>(RowsPerShard), reduction_size - row_begin))
+            ? static_cast<uint32_t>(minU64(uint64_t{1} << shard_log2, reduction_size - row_begin))
             : 0U;
         const InputT* shard_input = input + (outer_index * reduction_size + row_begin) * inner_size;
 
@@ -1148,34 +1197,81 @@ __global__ void narrowFp8PackedFlatRCooperativeFirstStageKernel(const InputT* in
             local[slot] = Init;
         }
 
-        for (uint32_t group_row = static_cast<uint32_t>(warp) * rows_per_warp_group; group_row < shard_rows;
-             group_row += rows_per_block_round) {
-            const uint32_t group_rows =
-                rows_per_warp_group < shard_rows - group_row ? rows_per_warp_group : shard_rows - group_row;
-            const InputT* group_begin = shard_input + group_row * inner_size_32;
-            const uintptr_t group_address = reinterpret_cast<uintptr_t>(group_begin);
-            const uint32_t prefix_elements = static_cast<uint32_t>(group_address & uintptr_t{PacketBytes - 1});
-            const auto* aligned_begin = reinterpret_cast<const RawVectorPacket<PacketBytes>*>(group_address & ~uintptr_t{PacketBytes - 1});
-            const uint32_t logical_group_elements = group_rows * inner_size_32;
-            const uint32_t packet_count = (prefix_elements + logical_group_elements + PacketBytes - 1) / PacketBytes;
-
-            if (static_cast<uint32_t>(lane) < packet_count) {
-                staged_packets[warp][lane] = aligned_begin[lane];
-            }
-            __syncwarp();
-
-            const auto* staged_bytes = reinterpret_cast<const uint8_t*>(&staged_packets[warp][0]);
-            for (int slot = 0; slot < MaxComponentsPerLane; ++slot) {
-                const uint32_t component = static_cast<uint32_t>(lane + slot * TILED_REDUCTION_WARP_THREADS);
-                if (component < inner_size_32) {
-                    uint32_t staged_index = prefix_elements + component;
-                    for (uint32_t row = 0; row < group_rows; ++row, staged_index += inner_size_32) {
-                        const float value = decoder(staged_bytes[staged_index]);
-                        local[slot] = reduction_op(local[slot], input_transform(value));
-                    }
+        // Prefetch the next group only when lanes own two or more components (K > 32). Measured on RTX 5090 against
+        // the plain loop: 0.98-0.89x time for 2..8 components per lane, but 1.01-1.05x for one component per lane, whose
+        // short per-group decode leaves too little work to hide the next load behind.
+        if constexpr (MaxComponentsPerLane >= 2) {
+            uint32_t group_row = static_cast<uint32_t>(warp) * rows_per_warp_group;
+            NarrowFp8GroupWindow<PacketBytes> window{};
+            RawVectorPacket<PacketBytes> pending{};
+            if (group_row < shard_rows) {
+                window = narrowFp8GroupWindow<PacketBytes>(shard_input, group_row, shard_rows, rows_per_warp_group,
+                                                           inner_size_32);
+                if (static_cast<uint32_t>(lane) < window.packet_count) {
+                    pending = window.aligned_begin[lane];
                 }
             }
-            __syncwarp();
+            for (; group_row < shard_rows; group_row += rows_per_block_round) {
+                const uint32_t group_rows = window.group_rows;
+                const uint32_t prefix_elements = window.prefix_elements;
+                if (static_cast<uint32_t>(lane) < window.packet_count) {
+                    staged_packets[warp][lane] = pending;
+                }
+                __syncwarp();
+
+                // Issue the next group's load before decoding this one.
+                const uint32_t next_group_row = group_row + rows_per_block_round;
+                if (next_group_row < shard_rows) {
+                    window = narrowFp8GroupWindow<PacketBytes>(shard_input, next_group_row, shard_rows,
+                                                               rows_per_warp_group, inner_size_32);
+                    if (static_cast<uint32_t>(lane) < window.packet_count) {
+                        pending = window.aligned_begin[lane];
+                    }
+                }
+
+                const auto* staged_bytes = reinterpret_cast<const uint8_t*>(&staged_packets[warp][0]);
+                for (int slot = 0; slot < MaxComponentsPerLane; ++slot) {
+                    const uint32_t component = static_cast<uint32_t>(lane + slot * TILED_REDUCTION_WARP_THREADS);
+                    if (component < inner_size_32) {
+                        uint32_t staged_index = prefix_elements + component;
+                        for (uint32_t row = 0; row < group_rows; ++row, staged_index += inner_size_32) {
+                            const float value = decoder(staged_bytes[staged_index]);
+                            local[slot] = reduction_op(local[slot], input_transform(value));
+                        }
+                    }
+                }
+                __syncwarp();
+            }
+        } else {
+            for (uint32_t group_row = static_cast<uint32_t>(warp) * rows_per_warp_group; group_row < shard_rows;
+                 group_row += rows_per_block_round) {
+                const uint32_t group_rows =
+                    rows_per_warp_group < shard_rows - group_row ? rows_per_warp_group : shard_rows - group_row;
+                const InputT* group_begin = shard_input + group_row * inner_size_32;
+                const uintptr_t group_address = reinterpret_cast<uintptr_t>(group_begin);
+                const uint32_t prefix_elements = static_cast<uint32_t>(group_address & uintptr_t{PacketBytes - 1});
+                const auto* aligned_begin = reinterpret_cast<const RawVectorPacket<PacketBytes>*>(group_address & ~uintptr_t{PacketBytes - 1});
+                const uint32_t logical_group_elements = group_rows * inner_size_32;
+                const uint32_t packet_count = (prefix_elements + logical_group_elements + PacketBytes - 1) / PacketBytes;
+
+                if (static_cast<uint32_t>(lane) < packet_count) {
+                    staged_packets[warp][lane] = aligned_begin[lane];
+                }
+                __syncwarp();
+
+                const auto* staged_bytes = reinterpret_cast<const uint8_t*>(&staged_packets[warp][0]);
+                for (int slot = 0; slot < MaxComponentsPerLane; ++slot) {
+                    const uint32_t component = static_cast<uint32_t>(lane + slot * TILED_REDUCTION_WARP_THREADS);
+                    if (component < inner_size_32) {
+                        uint32_t staged_index = prefix_elements + component;
+                        for (uint32_t row = 0; row < group_rows; ++row, staged_index += inner_size_32) {
+                            const float value = decoder(staged_bytes[staged_index]);
+                            local[slot] = reduction_op(local[slot], input_transform(value));
+                        }
+                    }
+                }
+                __syncwarp();
+            }
         }
 
         for (int slot = 0; slot < MaxComponentsPerLane; ++slot) {
@@ -1198,7 +1294,8 @@ __global__ void narrowFp8PackedFlatRCooperativeFirstStageKernel(const InputT* in
     }
 }
 
-template <typename InputT, typename ReductionOpT, typename InputTransformT, int RowsPerShard, int PacketBytes, int LanesPerComponent,
+// P5-C: runtime log2(rows per shard), as in narrowFp8PackedFlatRCooperativeFirstStageKernel.
+template <typename InputT, typename ReductionOpT, typename InputTransformT, int PacketBytes, int LanesPerComponent,
           typename DecoderT = NarrowFp8TypedFormatDecoder<InputT>>
 __global__ void narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel(const InputT* input,
                                                                      float* fp32_partials,
@@ -1206,19 +1303,16 @@ __global__ void narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel(const Input
                                                                      uint64_t reduction_size,
                                                                      uint64_t inner_size,
                                                                      uint64_t shards_per_output,
+                                                                     uint32_t rows_per_shard_log2,
                                                                      uint32_t rows_per_warp_group,
                                                                 InputTransformT input_transform, DecoderT decoder = DecoderT{}) {
     static_assert(sizeof(InputT) == 1);
     static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
-    static_assert(RowsPerShard == 8 || RowsPerShard == 16 || RowsPerShard == 32 || RowsPerShard == 64 || RowsPerShard == 128 ||
-                  RowsPerShard == 256 || RowsPerShard == 512 || RowsPerShard == 1024 || RowsPerShard == 2048 || RowsPerShard == 4096 ||
-                  RowsPerShard == 8192 || RowsPerShard == 16384);
     static_assert(LanesPerComponent == 4 || LanesPerComponent == 8);
     static_assert(TILED_REDUCTION_WARP_THREADS % LanesPerComponent == 0);
     constexpr int MaxSupportedK = TILED_REDUCTION_WARP_THREADS / LanesPerComponent;
     constexpr float Init = NarrowFlatReductionIdentityFp32<ReductionOpT>::value;
     static_assert(MaxSupportedK == 4 || MaxSupportedK == 8);
-    static_assert(RowsPerShard / NARROW_FLAT_WARPS >= 1);
 
     __shared__ RawVectorPacket<PacketBytes> staged_packets[NARROW_FLAT_WARPS][NARROW_FP8_PACKETS_PER_WARP];
     __shared__ float cooperative_lane_partials[NARROW_FLAT_WARPS][TILED_REDUCTION_WARP_THREADS];
@@ -1230,7 +1324,7 @@ __global__ void narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel(const Input
     const int component = lane / LanesPerComponent;
     const int component_lane = lane % LanesPerComponent;
 
-    // inner_size <= 8 here and RowsPerShard <= 16384, so every offset inside one shard is 32-bit. One warp stages at most
+    // inner_size <= 8 here and rows_per_shard <= 16384, so every offset inside one shard is 32-bit. One warp stages at most
     // 32 * PacketBytes <= 512 bytes, including an alignment prefix < PacketBytes. The shard base pointer is formed once
     // per work item in 64 bits.
     const uint32_t inner_size_32 = static_cast<uint32_t>(inner_size);
@@ -1244,9 +1338,9 @@ __global__ void narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel(const Input
     const uint32_t shard_count = static_cast<uint32_t>(shards_per_output);
     for (uint32_t outer_index = blockIdx.z; outer_index < outer_count; outer_index += gridDim.z)
     for (uint32_t shard = blockIdx.x; shard < shard_count; shard += gridDim.x) {
-        const uint64_t row_begin = shard * static_cast<uint64_t>(RowsPerShard);
+        const uint64_t row_begin = static_cast<uint64_t>(shard) << rows_per_shard_log2;
         const uint32_t shard_rows = row_begin < reduction_size
-            ? static_cast<uint32_t>(minU64(static_cast<uint64_t>(RowsPerShard), reduction_size - row_begin))
+            ? static_cast<uint32_t>(minU64(uint64_t{1} << rows_per_shard_log2, reduction_size - row_begin))
             : 0U;
         const InputT* shard_input = input + (outer_index * reduction_size + row_begin) * inner_size;
 
@@ -1304,24 +1398,39 @@ __global__ void narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel(const Input
     }
 }
 
+// Packed DeepRSmallK shard depths: a power of two from the eight warps up to 16384 rows (32-bit in-shard offsets).
+[[nodiscard]] uint32_t narrowFp8PackedCheckedRowsPerShard(uint64_t rows_per_shard) {
+    if (rows_per_shard < static_cast<uint64_t>(NARROW_FLAT_WARPS) || rows_per_shard > 16384 ||
+        (rows_per_shard & (rows_per_shard - 1)) != 0) {
+        throw std::logic_error("Packed FP8 narrow-flat launch received an unsupported rows-per-shard depth.");
+    }
+    return static_cast<uint32_t>(rows_per_shard);
+}
+
+[[nodiscard]] uint32_t narrowFp8PackedRowsPerShardLog2(uint32_t rows_per_shard) {
+    uint32_t log2 = 0;
+    while ((uint32_t{1} << log2) < rows_per_shard) ++log2;
+    return log2;
+}
+
 // Rows per warp group for the packed DeepRSmallK kernels, computed once on the host: fill toward the packet window, but
-// never choose a group so deep that fewer than eight warps can participate in a full RowsPerShard shard.
-template <int PacketBytes, int RowsPerShard>
-[[nodiscard]] uint32_t narrowFp8PackedRowsPerWarpGroup(uint64_t inner_size) {
-    constexpr uint32_t MaxRowsPerWarpFromShard = static_cast<uint32_t>(RowsPerShard / NARROW_FLAT_WARPS);
-    static_assert(MaxRowsPerWarpFromShard >= 1);
+// never choose a group so deep that fewer than eight warps can participate in a full rows_per_shard shard.
+template <int PacketBytes>
+[[nodiscard]] uint32_t narrowFp8PackedRowsPerWarpGroup(uint64_t inner_size, uint32_t rows_per_shard) {
+    const uint32_t max_rows_per_warp_from_shard = rows_per_shard / static_cast<uint32_t>(NARROW_FLAT_WARPS);
     if (inner_size == 0 || inner_size > static_cast<uint64_t>(narrowFp8MaxLogicalGroupBytes<PacketBytes>)) {
         throw std::logic_error("Packed FP8 narrow-flat launch received K outside one packet window.");
     }
     const uint32_t rows_from_packet_window =
         static_cast<uint32_t>(narrowFp8MaxLogicalGroupBytes<PacketBytes>) / static_cast<uint32_t>(inner_size);
-    return rows_from_packet_window < MaxRowsPerWarpFromShard ? rows_from_packet_window : MaxRowsPerWarpFromShard;
+    return rows_from_packet_window < max_rows_per_warp_from_shard ? rows_from_packet_window : max_rows_per_warp_from_shard;
 }
 
-template <typename InputT, typename ReductionOpT, typename InputTransformT, int RowsPerShard, int PacketBytes, int LanesPerComponent,
+template <typename InputT, typename ReductionOpT, typename InputTransformT, int PacketBytes, int LanesPerComponent,
           typename DecoderT = NarrowFp8TypedFormatDecoder<InputT>>
 void launchNarrowFp8PackedTinyKForTransform(
-    const Tensor& input, Tensor& fp32_partials, const CubReductionGeometry& geometry, uint64_t shards_per_output, cudaStream_t stream,
+    const Tensor& input, Tensor& fp32_partials, const CubReductionGeometry& geometry, uint64_t rows_per_shard,
+    uint64_t shards_per_output, cudaStream_t stream,
     InputTransformT input_transform = InputTransformT{}, DecoderT decoder = DecoderT{}) {
     static_assert(sizeof(InputT) == 1);
     static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
@@ -1335,17 +1444,17 @@ void launchNarrowFp8PackedTinyKForTransform(
     }
     // Division-free launch: x = shard, z = outer. Shards of <= 256 bytes keep a persistent grid
     // (see REDUCTION_PERSISTENT_MAX_BLOCKS).
+    const uint32_t shard_depth = narrowFp8PackedCheckedRowsPerShard(rows_per_shard);
     const uint64_t bytes_per_work_item =
-        std::min<uint64_t>(RowsPerShard, geometry.reduction_size) * geometry.inner_size * sizeof(InputT);
+        std::min<uint64_t>(shard_depth, geometry.reduction_size) * geometry.inner_size * sizeof(InputT);
     const dim3 grid_blocks = reductionWorkGrid(shards_per_output, 1, geometry.outer_size,
                                                bytes_per_work_item <= 256 ? REDUCTION_PERSISTENT_MAX_BLOCKS : 0);
     const uint32_t rows_per_warp_group =
-        narrowFp8PackedRowsPerWarpGroup<PacketBytes, RowsPerShard>(geometry.inner_size);
+        narrowFp8PackedRowsPerWarpGroup<PacketBytes>(geometry.inner_size, shard_depth);
 
     narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel<InputT,
                                                          ReductionOpT,
                                                          InputTransformT,
-                                                         RowsPerShard,
                                                          PacketBytes,
                                                          LanesPerComponent,
                                                          DecoderT>
@@ -1358,15 +1467,17 @@ void launchNarrowFp8PackedTinyKForTransform(
                                                           geometry.reduction_size,
                                                           geometry.inner_size,
                                                           shards_per_output,
+                                                          narrowFp8PackedRowsPerShardLog2(shard_depth),
                                                           rows_per_warp_group,
                                                           input_transform, decoder);
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <typename InputT, typename ReductionOpT, typename InputTransformT, int RowsPerShard, int PacketBytes, int MaxComponentsPerLane,
-          typename DecoderT = NarrowFp8TypedFormatDecoder<InputT>>
+template <typename InputT, typename ReductionOpT, typename InputTransformT, int PacketBytes, int MaxComponentsPerLane,
+          int FixedRowsPerShardLog2 = -1, typename DecoderT = NarrowFp8TypedFormatDecoder<InputT>>
 void launchNarrowFp8PackedForTransform(
-    const Tensor& input, Tensor& fp32_partials, const CubReductionGeometry& geometry, uint64_t shards_per_output, cudaStream_t stream,
+    const Tensor& input, Tensor& fp32_partials, const CubReductionGeometry& geometry, uint64_t rows_per_shard,
+    uint64_t shards_per_output, cudaStream_t stream,
     InputTransformT input_transform = InputTransformT{}, DecoderT decoder = DecoderT{}) {
     static_assert(sizeof(InputT) == 1);
     static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
@@ -1379,14 +1490,22 @@ void launchNarrowFp8PackedForTransform(
     }
     // Division-free launch: x = shard, z = outer. Shards of <= 256 bytes keep a persistent grid
     // (see REDUCTION_PERSISTENT_MAX_BLOCKS).
+    const uint32_t shard_depth = narrowFp8PackedCheckedRowsPerShard(rows_per_shard);
     const uint64_t bytes_per_work_item =
-        std::min<uint64_t>(RowsPerShard, geometry.reduction_size) * geometry.inner_size * sizeof(InputT);
+        std::min<uint64_t>(shard_depth, geometry.reduction_size) * geometry.inner_size * sizeof(InputT);
     const dim3 grid_blocks = reductionWorkGrid(shards_per_output, 1, geometry.outer_size,
                                                bytes_per_work_item <= 256 ? REDUCTION_PERSISTENT_MAX_BLOCKS : 0);
     const uint32_t rows_per_warp_group =
-        narrowFp8PackedRowsPerWarpGroup<PacketBytes, RowsPerShard>(geometry.inner_size);
+        narrowFp8PackedRowsPerWarpGroup<PacketBytes>(geometry.inner_size, shard_depth);
+    const uint32_t shard_log2 = narrowFp8PackedRowsPerShardLog2(shard_depth);
+    if constexpr (FixedRowsPerShardLog2 >= 0) {
+        if (shard_log2 != static_cast<uint32_t>(FixedRowsPerShardLog2)) {
+            throw std::logic_error("Packed FP8 narrow-flat launch depth does not match its compiled depth.");
+        }
+    }
 
-    narrowFp8PackedFlatRCooperativeFirstStageKernel<InputT, ReductionOpT, InputTransformT, RowsPerShard, PacketBytes, MaxComponentsPerLane, DecoderT>
+    narrowFp8PackedFlatRCooperativeFirstStageKernel<InputT, ReductionOpT, InputTransformT, PacketBytes, MaxComponentsPerLane,
+                                                    FixedRowsPerShardLog2, DecoderT>
         <<<grid_blocks, NARROW_FLAT_THREADS, 0, stream>>>(([](const Tensor& src) -> const InputT* {
             if constexpr (std::is_same_v<InputT, uint8_t>) return reinterpret_cast<const InputT*>(src.getMemPtr<void>());
             else return src.getMemPtr<InputT>();
@@ -1396,6 +1515,7 @@ void launchNarrowFp8PackedForTransform(
                                                           geometry.reduction_size,
                                                           geometry.inner_size,
                                                           shards_per_output,
+                                                          shard_log2,
                                                           rows_per_warp_group,
                                                           input_transform, decoder);
     CUDA_CHECK(cudaGetLastError());
@@ -1506,16 +1626,15 @@ template <typename InputT, int RowsPerShard>
     return CubKernelOccupancyInfo{attributes.numRegs, attributes.sharedSizeBytes, 0, active_blocks, active_blocks * NARROW_FLAT_WARPS};
 }
 
-template <typename InputT, int RowsPerShard, int PacketBytes, int LanesPerComponent, typename InputTransformT = IdentityFp32,
+template <typename InputT, int PacketBytes, int LanesPerComponent, typename InputTransformT = IdentityFp32,
           typename DecoderT = NarrowFp8TypedFormatDecoder<InputT>, typename ReductionOpT = cuda::std::plus<float>>
-[[nodiscard]] CubKernelOccupancyInfo queryNarrowFp8PackedTinyKOccupancyForRows() {
+[[nodiscard]] CubKernelOccupancyInfo queryNarrowFp8PackedTinyKOccupancy() {
     static_assert(sizeof(InputT) == 1);
     static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
     static_assert(LanesPerComponent == 4 || LanesPerComponent == 8);
     const auto kernel = narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel<InputT,
                                                                              ReductionOpT,
                                                                              InputTransformT,
-                                                                             RowsPerShard,
                                                                              PacketBytes,
                                                                              LanesPerComponent,
                                                                          DecoderT>;
@@ -1526,16 +1645,17 @@ template <typename InputT, int RowsPerShard, int PacketBytes, int LanesPerCompon
     return CubKernelOccupancyInfo{attributes.numRegs, attributes.sharedSizeBytes, 0, active_blocks, active_blocks * NARROW_FLAT_WARPS};
 }
 
-template <typename InputT, int RowsPerShard, int PacketBytes, int MaxComponentsPerLane, typename InputTransformT = IdentityFp32,
-          typename DecoderT = NarrowFp8TypedFormatDecoder<InputT>, typename ReductionOpT = cuda::std::plus<float>>
-[[nodiscard]] CubKernelOccupancyInfo queryNarrowFp8PackedOccupancyForRows() {
+template <typename InputT, int PacketBytes, int MaxComponentsPerLane, typename InputTransformT = IdentityFp32,
+          typename DecoderT = NarrowFp8TypedFormatDecoder<InputT>, typename ReductionOpT = cuda::std::plus<float>,
+          int FixedRowsPerShardLog2 = -1>
+[[nodiscard]] CubKernelOccupancyInfo queryNarrowFp8PackedOccupancy() {
     static_assert(sizeof(InputT) == 1);
     const auto kernel = narrowFp8PackedFlatRCooperativeFirstStageKernel<InputT,
                                                                         ReductionOpT,
                                                                         InputTransformT,
-                                                                        RowsPerShard,
                                                                         PacketBytes,
                                                                         MaxComponentsPerLane,
+                                                                        FixedRowsPerShardLog2,
                                                                         DecoderT>;
     cudaFuncAttributes attributes{};
     CUDA_CHECK(cudaFuncGetAttributes(&attributes, kernel));
@@ -1560,75 +1680,83 @@ template <typename InputT>
     }
 }
 
-// Retained DeepRSmallK P16 geometry helpers: five compiled depths and seven K
+// Retained DeepRSmallK P16 geometry helpers: five retained depths (a runtime operand since P5-C, validated
+// against Fp8DeepRSmallKPolicy::compiled_rows, and compiled in for the one-component ownership only) and seven K
 // ownership choices, shared by all four typed FP32 reduction operations.
 #if THOR_CUB_ENABLE_FP8_TYPES
-template <typename InputT, typename TransformT, int Rows, typename ReductionOpT = cuda::std::plus<float>>
-void launchDeepRRetainedRows(const Tensor& input, Tensor& partials,
-                                const CubReductionGeometry& geometry, uint64_t shards,
-                                cudaStream_t stream, TransformT transform) {
-    if (geometry.inner_size <= 4)
-        launchNarrowFp8PackedTinyKForTransform<InputT, ReductionOpT, TransformT, Rows, 16, 8>(
-            input, partials, geometry, shards, stream, transform);
-    else if (geometry.inner_size <= 8)
-        launchNarrowFp8PackedTinyKForTransform<InputT, ReductionOpT, TransformT, Rows, 16, 4>(
-            input, partials, geometry, shards, stream, transform);
-    else if (geometry.inner_size <= 32)
-        launchNarrowFp8PackedForTransform<InputT, ReductionOpT, TransformT, Rows, 16, 1>(
-            input, partials, geometry, shards, stream, transform);
-    else if (geometry.inner_size <= 64)
-        launchNarrowFp8PackedForTransform<InputT, ReductionOpT, TransformT, Rows, 16, 2>(
-            input, partials, geometry, shards, stream, transform);
-    else if (geometry.inner_size <= 128)
-        launchNarrowFp8PackedForTransform<InputT, ReductionOpT, TransformT, Rows, 16, 4>(
-            input, partials, geometry, shards, stream, transform);
-    else if (geometry.inner_size <= 160)
-        launchNarrowFp8PackedForTransform<InputT, ReductionOpT, TransformT, Rows, 16, 5>(
-            input, partials, geometry, shards, stream, transform);
-    else
-        launchNarrowFp8PackedForTransform<InputT, ReductionOpT, TransformT, Rows, 16, 8>(
-            input, partials, geometry, shards, stream, transform);
+[[nodiscard]] uint32_t deepRRetainedRowDepth(uint64_t rows) {
+    const auto& depths = Fp8RK::Fp8DeepRSmallKPolicy::compiled_rows;
+    if (std::find(depths.begin(), depths.end(), rows) == depths.end()) {
+        throw std::logic_error("DeepRSmallK retained kernel requires a retained row depth.");
+    }
+    return static_cast<uint32_t>(rows);
+}
+
+// One-component kernels keep a compiled depth (see narrowFp8PackedFlatRCooperativeFirstStageKernel).
+template <typename Callback>
+void dispatchDeepRRetainedFixedDepth(uint32_t depth, Callback&& callback) {
+    switch (depth) {
+        case 64: callback.template operator()<6>(); return;
+        case 128: callback.template operator()<7>(); return;
+        case 256: callback.template operator()<8>(); return;
+        case 512: callback.template operator()<9>(); return;
+        case 1024: callback.template operator()<10>(); return;
+    }
+    throw std::logic_error("DeepRSmallK one-component kernel requires a retained row depth.");
 }
 
 template <typename InputT, typename TransformT, typename ReductionOpT = cuda::std::plus<float>>
 void dispatchDeepRRetainedRows(const Tensor& input, Tensor& partials,
                                   const CubReductionGeometry& geometry, uint64_t rows,
                                   uint64_t shards, cudaStream_t stream, TransformT transform) {
-    switch (rows) {
-        case 64: launchDeepRRetainedRows<InputT, TransformT, 64, ReductionOpT>(input, partials, geometry, shards, stream, transform); return;
-        case 128: launchDeepRRetainedRows<InputT, TransformT, 128, ReductionOpT>(input, partials, geometry, shards, stream, transform); return;
-        case 256: launchDeepRRetainedRows<InputT, TransformT, 256, ReductionOpT>(input, partials, geometry, shards, stream, transform); return;
-        case 512: launchDeepRRetainedRows<InputT, TransformT, 512, ReductionOpT>(input, partials, geometry, shards, stream, transform); return;
-        case 1024: launchDeepRRetainedRows<InputT, TransformT, 1024, ReductionOpT>(input, partials, geometry, shards, stream, transform); return;
-    }
-    throw std::logic_error("DeepRSmallK transform A/B requires retained row depth.");
+    const uint32_t depth = deepRRetainedRowDepth(rows);
+    if (geometry.inner_size <= 4)
+        launchNarrowFp8PackedTinyKForTransform<InputT, ReductionOpT, TransformT, 16, 8>(
+            input, partials, geometry, depth, shards, stream, transform);
+    else if (geometry.inner_size <= 8)
+        launchNarrowFp8PackedTinyKForTransform<InputT, ReductionOpT, TransformT, 16, 4>(
+            input, partials, geometry, depth, shards, stream, transform);
+    else if (geometry.inner_size <= 32)
+        dispatchDeepRRetainedFixedDepth(depth, [&]<int DepthLog2>() {
+            launchNarrowFp8PackedForTransform<InputT, ReductionOpT, TransformT, 16, 1, DepthLog2>(
+                input, partials, geometry, depth, shards, stream, transform);
+        });
+    else if (geometry.inner_size <= 64)
+        launchNarrowFp8PackedForTransform<InputT, ReductionOpT, TransformT, 16, 2>(
+            input, partials, geometry, depth, shards, stream, transform);
+    else if (geometry.inner_size <= 128)
+        launchNarrowFp8PackedForTransform<InputT, ReductionOpT, TransformT, 16, 4>(
+            input, partials, geometry, depth, shards, stream, transform);
+    else if (geometry.inner_size <= 160)
+        launchNarrowFp8PackedForTransform<InputT, ReductionOpT, TransformT, 16, 5>(
+            input, partials, geometry, depth, shards, stream, transform);
+    else
+        launchNarrowFp8PackedForTransform<InputT, ReductionOpT, TransformT, 16, 8>(
+            input, partials, geometry, depth, shards, stream, transform);
 }
 
-template <typename InputT, typename TransformT, int Rows, typename ReductionOpT = cuda::std::plus<float>>
-CubKernelOccupancyInfo queryDeepRRetainedRows(uint64_t k) {
-    if (k <= 4) return queryNarrowFp8PackedTinyKOccupancyForRows<InputT, Rows, 16, 8, TransformT, NarrowFp8TypedFormatDecoder<InputT>, ReductionOpT>();
-    if (k <= 8) return queryNarrowFp8PackedTinyKOccupancyForRows<InputT, Rows, 16, 4, TransformT, NarrowFp8TypedFormatDecoder<InputT>, ReductionOpT>();
-    if (k <= 32) return queryNarrowFp8PackedOccupancyForRows<InputT, Rows, 16, 1, TransformT, NarrowFp8TypedFormatDecoder<InputT>, ReductionOpT>();
-    if (k <= 64) return queryNarrowFp8PackedOccupancyForRows<InputT, Rows, 16, 2, TransformT, NarrowFp8TypedFormatDecoder<InputT>, ReductionOpT>();
-    if (k <= 128) return queryNarrowFp8PackedOccupancyForRows<InputT, Rows, 16, 4, TransformT, NarrowFp8TypedFormatDecoder<InputT>, ReductionOpT>();
-    if (k <= 160) return queryNarrowFp8PackedOccupancyForRows<InputT, Rows, 16, 5, TransformT, NarrowFp8TypedFormatDecoder<InputT>, ReductionOpT>();
-    return queryNarrowFp8PackedOccupancyForRows<InputT, Rows, 16, 8, TransformT, NarrowFp8TypedFormatDecoder<InputT>, ReductionOpT>();
-}
-
+// The row depth selects a kernel only for the one-component (K 9..32) ownership; it is always validated.
 template <typename InputT, typename TransformT, typename ReductionOpT = cuda::std::plus<float>>
 CubKernelOccupancyInfo queryDeepRRetainedRows(uint64_t rows, uint64_t k) {
-    switch (rows) {
-        case 64: return queryDeepRRetainedRows<InputT, TransformT, 64, ReductionOpT>(k);
-        case 128: return queryDeepRRetainedRows<InputT, TransformT, 128, ReductionOpT>(k);
-        case 256: return queryDeepRRetainedRows<InputT, TransformT, 256, ReductionOpT>(k);
-        case 512: return queryDeepRRetainedRows<InputT, TransformT, 512, ReductionOpT>(k);
-        case 1024: return queryDeepRRetainedRows<InputT, TransformT, 1024, ReductionOpT>(k);
+    static_cast<void>(deepRRetainedRowDepth(rows));
+    if (k <= 4) return queryNarrowFp8PackedTinyKOccupancy<InputT, 16, 8, TransformT, NarrowFp8TypedFormatDecoder<InputT>, ReductionOpT>();
+    if (k <= 8) return queryNarrowFp8PackedTinyKOccupancy<InputT, 16, 4, TransformT, NarrowFp8TypedFormatDecoder<InputT>, ReductionOpT>();
+    if (k <= 32) {
+        CubKernelOccupancyInfo info{};
+        dispatchDeepRRetainedFixedDepth(deepRRetainedRowDepth(rows), [&]<int DepthLog2>() {
+            info = queryNarrowFp8PackedOccupancy<InputT, 16, 1, TransformT, NarrowFp8TypedFormatDecoder<InputT>,
+                                                 ReductionOpT, DepthLog2>();
+        });
+        return info;
     }
-    throw std::logic_error("DeepRSmallK transform A/B occupancy requires retained row depth.");
+    if (k <= 64) return queryNarrowFp8PackedOccupancy<InputT, 16, 2, TransformT, NarrowFp8TypedFormatDecoder<InputT>, ReductionOpT>();
+    if (k <= 128) return queryNarrowFp8PackedOccupancy<InputT, 16, 4, TransformT, NarrowFp8TypedFormatDecoder<InputT>, ReductionOpT>();
+    if (k <= 160) return queryNarrowFp8PackedOccupancy<InputT, 16, 5, TransformT, NarrowFp8TypedFormatDecoder<InputT>, ReductionOpT>();
+    return queryNarrowFp8PackedOccupancy<InputT, 16, 8, TransformT, NarrowFp8TypedFormatDecoder<InputT>, ReductionOpT>();
 }
 
 // Retained DeepRSmallK P16 kernels. The only compile-time axes are dtype,
-// input transform, reduction combine, depth and the existing K ownership.
+// input transform, reduction combine and the existing K ownership; depth is a runtime operand.
 // These wrappers deliberately share the benchmark-proven device kernels with
 // the earlier SUM calibration; no new geometry or runtime operation switch.
 template <typename InputT, typename ReductionOpT, typename TransformT>
@@ -1676,30 +1804,7 @@ auto dispatchDeepRRetainedCombine(const CubReductionStageSemantics& semantics, C
     throw std::logic_error("DeepRSmallK retained kernel received invalid reduction combine.");
 }
 
-// Retained OneWindow physical inventory. Warps per output is a runtime operand;
-// (outputs per warp, packet bytes) and K are compile-time kernel axes. The selector
-// policy table Fp8OneWindowPolicy::candidates is the single source of truth: the
-// launcher and occupancy query instantiate exactly those pairs, at each compiled K
-// whose packet window covers K, and nothing else.
-template <int OutputsPerWarp, int PacketBytes>
-[[nodiscard]] constexpr bool oneWindowRetainedOwnership() {
-    for (const auto& variant : Fp8RK::Fp8OneWindowPolicy::candidates) {
-        if (variant.outputs_per_warp == static_cast<uint32_t>(OutputsPerWarp) &&
-            variant.packet_bytes == static_cast<uint32_t>(PacketBytes)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-template <int K, int OutputsPerWarp, int PacketBytes>
-[[nodiscard]] constexpr bool oneWindowCompiledSpecialization() {
-    constexpr uint32_t PacketWindow =
-        (TILED_REDUCTION_WARP_THREADS / static_cast<uint32_t>(OutputsPerWarp)) * static_cast<uint32_t>(PacketBytes);
-    constexpr uint32_t Capacity =
-        (K % PacketBytes) == 0 ? PacketWindow : PacketWindow - static_cast<uint32_t>(PacketBytes - 1);
-    return oneWindowRetainedOwnership<OutputsPerWarp, PacketBytes>() && K <= static_cast<int>(Capacity);
-}
+#endif
 
 [[nodiscard]] inline bool oneWindowValidWarpsPerOutput(uint32_t outputs_per_warp, uint32_t warps_per_output) {
     const bool valid_warps =
@@ -1708,78 +1813,209 @@ template <int K, int OutputsPerWarp, int PacketBytes>
     return valid_warps && (outputs_per_warp == 1 || warps_per_output == 1);
 }
 
-// Invokes callback.template operator()<InputT, K, OutputsPerWarp, PacketBytes>() for the one
-// retained compiled OneWindow specialization matching the runtime request. Returns false,
-// without invoking the callback, when that specialization is not part of the retained inventory.
+// OneWindow host plan. Mirrors the former compile-time-K kernel's constexpr geometry for a runtime K: the packet
+// window of a lane subgroup, rows per staged group, R workers per component, accumulating lanes, and the
+// components-per-lane bucket (next power of two, at most 16).
+struct OneWindowRuntimeKPlan {
+    Fp8OneWindowRuntimeKGeometry geometry;
+    uint32_t max_components_per_lane;
+};
+
+[[nodiscard]] inline std::optional<OneWindowRuntimeKPlan> oneWindowRuntimeKPlan(uint64_t k,
+                                                                                uint32_t outputs_per_warp,
+                                                                                uint32_t packet_bytes) {
+    if (k == 0 || (outputs_per_warp != 1 && outputs_per_warp != 2 && outputs_per_warp != 4 && outputs_per_warp != 8) ||
+        (packet_bytes != 4 && packet_bytes != 8 && packet_bytes != 16)) {
+        return std::nullopt;
+    }
+    const uint32_t lanes = TILED_REDUCTION_WARP_THREADS / outputs_per_warp;
+    const uint64_t window = static_cast<uint64_t>(lanes) * packet_bytes;
+    const uint64_t capacity = k % packet_bytes == 0 ? window : window - (packet_bytes - 1);
+    if (k > capacity) {
+        return std::nullopt;
+    }
+    const bool multiple = k > lanes;
+    const uint64_t components = multiple ? (k + lanes - 1) / lanes : 1;
+    uint32_t bucket = 1;
+    while (bucket < components) {
+        bucket *= 2;
+    }
+    if (bucket > 16) {
+        return std::nullopt;
+    }
+    const uint32_t k32 = static_cast<uint32_t>(k);
+    const uint32_t workers = multiple ? 1U : lanes / k32;
+    return OneWindowRuntimeKPlan{{k32, static_cast<uint32_t>(capacity / k), workers, multiple ? lanes : k32 * workers},
+                                 bucket};
+}
+
+// The OneWindow inventory (P5-J2): 15 compiled units, each (outputs per warp, packet bytes, bucket) with exactly one
+// group loop form, so a selector OneWindow variant (O, W, P16) maps to at most one kernel at a given K. Chosen by
+// oracle pruning over the 1094 focused and 1095 uncovered-K sweeps with no compiled-K OneWindow present; 1097
+// measured the 8-byte packet (every ownership x bucket 1-8, both loops) at a geometric mean of 1.0005 and dropped it.
+// Every K <= 497, and K = 512, has a unit (oneWindowCoversK).
+inline constexpr std::array<Fp8OneWindowRuntimeKUnit, 15> ONE_WINDOW_RUNTIME_K_UNITS{{
+    {1, 16, 1, false}, {1, 16, 2, true}, {1, 16, 4, false}, {1, 16, 8, true}, {1, 16, 16, true},
+    {2, 16, 1, false}, {2, 16, 2, false}, {2, 16, 4, false}, {2, 16, 8, true},
+    {4, 16, 2, false}, {4, 16, 4, false}, {4, 16, 8, true},
+    {8, 16, 1, false}, {8, 16, 2, false}, {8, 16, 4, false},
+}};
+
+[[nodiscard]] constexpr bool oneWindowRuntimeKUnitCompiled(const Fp8OneWindowRuntimeKUnit& unit) {
+    for (const Fp8OneWindowRuntimeKUnit& compiled : ONE_WINDOW_RUNTIME_K_UNITS) {
+        if (compiled == unit) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Invokes callback.template operator()<InputT, OutputsPerWarp, PacketBytes, MaxComponentsPerLane, LoadAhead>() for
+// the compiled unit equal to `unit`. Returns false when that unit is not compiled.
 template <typename Callback>
-[[nodiscard]] bool dispatchRetainedOneWindow(DataType input_dtype,
-                                             uint64_t inner_size,
-                                             uint32_t outputs_per_warp,
-                                             uint32_t packet_bytes,
+[[nodiscard]] bool dispatchOneWindowRuntimeK(DataType input_dtype,
+                                             const Fp8OneWindowRuntimeKUnit& unit,
                                              Callback&& callback) {
     bool dispatched = false;
-    const auto for_k = [&]<typename InputT, int K>() {
-        const auto for_packet = [&]<int OutputsPerWarp, int PacketBytes>() {
-            if constexpr (oneWindowCompiledSpecialization<K, OutputsPerWarp, PacketBytes>()) {
-                callback.template operator()<InputT, K, OutputsPerWarp, PacketBytes>();
-                dispatched = true;
-            }
-        };
-        const auto for_outputs = [&]<int OutputsPerWarp>() {
-            switch (packet_bytes) {
-                case 4: for_packet.template operator()<OutputsPerWarp, 4>(); return;
-                case 8: for_packet.template operator()<OutputsPerWarp, 8>(); return;
-                case 16: for_packet.template operator()<OutputsPerWarp, 16>(); return;
-                default: return;
-            }
-        };
-        switch (outputs_per_warp) {
-            case 1: for_outputs.template operator()<1>(); return;
-            case 2: for_outputs.template operator()<2>(); return;
-            case 4: for_outputs.template operator()<4>(); return;
-            case 8: for_outputs.template operator()<8>(); return;
-            default: return;
-        }
-    };
     const auto for_type = [&]<typename InputT>() {
-        switch (inner_size) {
-            case 1: for_k.template operator()<InputT, 1>(); return;
-            case 2: for_k.template operator()<InputT, 2>(); return;
-            case 3: for_k.template operator()<InputT, 3>(); return;
-            case 4: for_k.template operator()<InputT, 4>(); return;
-            case 5: for_k.template operator()<InputT, 5>(); return;
-            case 7: for_k.template operator()<InputT, 7>(); return;
-            case 8: for_k.template operator()<InputT, 8>(); return;
-            case 9: for_k.template operator()<InputT, 9>(); return;
-            case 11: for_k.template operator()<InputT, 11>(); return;
-            case 13: for_k.template operator()<InputT, 13>(); return;
-            case 15: for_k.template operator()<InputT, 15>(); return;
-            case 16: for_k.template operator()<InputT, 16>(); return;
-            case 17: for_k.template operator()<InputT, 17>(); return;
-            case 19: for_k.template operator()<InputT, 19>(); return;
-            case 31: for_k.template operator()<InputT, 31>(); return;
-            case 32: for_k.template operator()<InputT, 32>(); return;
-            case 63: for_k.template operator()<InputT, 63>(); return;
-            case 64: for_k.template operator()<InputT, 64>(); return;
-            case 127: for_k.template operator()<InputT, 127>(); return;
-            case 128: for_k.template operator()<InputT, 128>(); return;
-            case 129: for_k.template operator()<InputT, 129>(); return;
-            case 255: for_k.template operator()<InputT, 255>(); return;
-            case 256: for_k.template operator()<InputT, 256>(); return;
-            case 497: for_k.template operator()<InputT, 497>(); return;
-            case 512: for_k.template operator()<InputT, 512>(); return;
-            default: return;
-        }
+        [&]<size_t... I>(std::index_sequence<I...>) {
+            static_cast<void>(((ONE_WINDOW_RUNTIME_K_UNITS[I] == unit &&
+                                (callback.template operator()<
+                                     InputT,
+                                     static_cast<int>(ONE_WINDOW_RUNTIME_K_UNITS[I].outputs_per_warp),
+                                     static_cast<int>(ONE_WINDOW_RUNTIME_K_UNITS[I].packet_bytes),
+                                     static_cast<int>(ONE_WINDOW_RUNTIME_K_UNITS[I].max_components_per_lane),
+                                     ONE_WINDOW_RUNTIME_K_UNITS[I].load_ahead>(),
+                                 dispatched = true)) ||
+                               ...));
+        }(std::make_index_sequence<ONE_WINDOW_RUNTIME_K_UNITS.size()>{});
     };
+#if THOR_CUB_ENABLE_FP8_TYPES
     switch (input_dtype) {
         case DataType::FP8_E4M3: for_type.template operator()<__nv_fp8_e4m3>(); break;
         case DataType::FP8_E5M2: for_type.template operator()<__nv_fp8_e5m2>(); break;
         default: break;
     }
+#else
+    static_cast<void>(input_dtype);
+    static_cast<void>(for_type);
+#endif
     return dispatched;
 }
 
+// The plan for `unit` at K, when the unit is compiled and K falls in its bucket.
+[[nodiscard]] std::optional<OneWindowRuntimeKPlan> oneWindowRuntimeKUnitPlan(uint64_t k,
+                                                                             const Fp8OneWindowRuntimeKUnit& unit) {
+    const auto plan = oneWindowRuntimeKPlan(k, unit.outputs_per_warp, unit.packet_bytes);
+    if (!plan || plan->max_components_per_lane != unit.max_components_per_lane ||
+        !oneWindowRuntimeKUnitCompiled(unit)) {
+        return std::nullopt;
+    }
+    return plan;
+}
+
+// The compiled unit a selector OneWindow variant (outputs per warp, packet bytes) runs at K: the one unit with that
+// ownership, packet width and K's bucket (each such triple has exactly one loop form).
+[[nodiscard]] std::optional<Fp8OneWindowRuntimeKUnit> oneWindowUnitForVariant(uint64_t k,
+                                                                              uint32_t outputs_per_warp,
+                                                                              uint32_t packet_bytes) {
+    const auto plan = oneWindowRuntimeKPlan(k, outputs_per_warp, packet_bytes);
+    if (!plan) {
+        return std::nullopt;
+    }
+    for (const Fp8OneWindowRuntimeKUnit& unit : ONE_WINDOW_RUNTIME_K_UNITS) {
+        if (unit.outputs_per_warp == outputs_per_warp && unit.packet_bytes == packet_bytes &&
+            unit.max_components_per_lane == plan->max_components_per_lane) {
+            return unit;
+        }
+    }
+    return std::nullopt;
+}
+
+template <int FixedOp>
+void launchFp8OneWindowRuntimeKCompleteTyped(const Tensor& input,
+                                             Tensor& output,
+                                             const CubReductionGeometry& geometry,
+                                             const Fp8OneWindowRuntimeKUnit& unit,
+                                             uint32_t warps_per_output,
+                                             Stream& stream,
+                                             const CubReductionStageSemantics& semantics,
+                                             float output_scale) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    const AdditiveFinalizeFp32 output_finalize = fp8CompleteFinalizerFromSemantics(semantics);
+    const auto plan = oneWindowRuntimeKUnitPlan(geometry.inner_size, unit);
+    if (!plan || geometry.outer_size == 0 || geometry.reduction_size == 0 ||
+        !oneWindowValidWarpsPerOutput(unit.outputs_per_warp, warps_per_output) ||
+        !shallowFp8FitsUint32Indexing(geometry) || !fp8CompleteSupportsOutputStorage(output.getDataType()) ||
+        output.getTotalNumElements() != geometry.outer_size * geometry.inner_size) {
+        throw std::logic_error("FP8 bucketed OneWindow received unsupported complete geometry.");
+    }
+    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{15}) != 0) {
+        throw std::logic_error("FP8 bucketed OneWindow requires a 16-byte aligned input base.");
+    }
+    float folded_scale = output_scale;
+    const Fp8ExtremumFold extremum_fold =
+        fp8CompleteExtremumFold(FixedOp, semantics.input_transform, folded_scale);
+    const uint64_t outputs_per_block = (SHALLOW_FP8_WARPS / warps_per_output) * unit.outputs_per_warp;
+    const uint64_t block_count = std::min<uint64_t>(ceilDivideU64(geometry.outer_size, outputs_per_block),
+                                                    NARROW_FLAT_MAX_GRID_BLOCKS);
+    const bool launched = dispatchOneWindowRuntimeK(
+        input.getDataType(), unit,
+        [&]<typename InputT, int OutputsPerWarp, int PacketBytes, int MaxComponentsPerLane, bool LoadAhead>() {
+            fp8OneWindowRuntimeKCompleteKernel<InputT, OutputsPerWarp, PacketBytes, MaxComponentsPerLane, LoadAhead,
+                                               fp8PhysicalExtremumOp(FixedOp)>
+                <<<static_cast<unsigned int>(block_count), SHALLOW_FP8_THREADS, 0, stream.getStream()>>>(
+                    input.getMemPtr<InputT>(),
+                    output.getMemPtr<void>(),
+                    output.getDataType(),
+                    static_cast<uint32_t>(geometry.outer_size),
+                    static_cast<uint32_t>(geometry.reduction_size),
+                    warps_per_output,
+                    plan->geometry,
+                    output_finalize,
+                    semantics.input_transform,
+                    folded_scale,
+                    extremum_fold);
+            CUDA_CHECK(cudaGetLastError());
+        });
+    if (!launched) {
+        throw std::logic_error("FP8 bucketed OneWindow has no kernel for this request.");
+    }
+#else
+    static_cast<void>(input);
+    static_cast<void>(output);
+    static_cast<void>(geometry);
+    static_cast<void>(unit);
+    static_cast<void>(warps_per_output);
+    static_cast<void>(stream);
+    static_cast<void>(semantics);
+    static_cast<void>(output_scale);
+    throw std::logic_error("FP8 bucketed OneWindow requires THOR_CUB_ENABLE_FP8_TYPES.");
 #endif
+}
+
+template <int FixedOp>
+CubKernelOccupancyInfo queryFp8OneWindowRuntimeKOccupancyTyped(DataType input_dtype,
+                                                               uint64_t inner_size,
+                                                               const Fp8OneWindowRuntimeKUnit& unit,
+                                                               uint32_t warps_per_output) {
+    const auto plan = oneWindowRuntimeKUnitPlan(inner_size, unit);
+    if (!plan || !oneWindowValidWarpsPerOutput(unit.outputs_per_warp, warps_per_output)) {
+        throw std::logic_error("FP8 bucketed OneWindow occupancy received unsupported ownership.");
+    }
+    CubKernelOccupancyInfo occupancy{};
+    const bool queried = dispatchOneWindowRuntimeK(
+        input_dtype, unit,
+        [&]<typename InputT, int OutputsPerWarp, int PacketBytes, int MaxComponentsPerLane, bool LoadAhead>() {
+            occupancy = queryShallowFp8Occupancy(
+                fp8OneWindowRuntimeKCompleteKernel<InputT, OutputsPerWarp, PacketBytes, MaxComponentsPerLane,
+                                                   LoadAhead, fp8PhysicalExtremumOp(FixedOp)>);
+        });
+    if (!queried) {
+        throw std::logic_error("FP8 bucketed OneWindow occupancy has no kernel for this request.");
+    }
+    return occupancy;
+}
 
 }  // namespace
 
@@ -1788,7 +2024,8 @@ void launchFp8DeepRSmallKRetainedFirstStage(const CubReductionStageSemantics& se
                                             const CubReductionGeometry& geometry, uint64_t rows,
                                             uint64_t shards, Stream& stream) {
 #if THOR_CUB_ENABLE_FP8_TYPES
-    if (rows != 64 && rows != 128 && rows != 256 && rows != 512 && rows != 1024)
+    const auto& depths = Fp8RK::Fp8DeepRSmallKPolicy::compiled_rows;
+    if (std::find(depths.begin(), depths.end(), rows) == depths.end())
         throw std::logic_error("DeepRSmallK retained first stage requires a selected depth.");
     if (geometry.outer_size == 0 || geometry.reduction_size <= rows ||
         geometry.inner_size == 0 || geometry.inner_size > 256 ||
@@ -1829,7 +2066,8 @@ void launchFp8DeepRSmallKRetainedFirstStage(const CubReductionStageSemantics& se
 CubKernelOccupancyInfo queryFp8DeepRSmallKRetainedOccupancy(
     DataType dtype, uint64_t rows, uint64_t k, const CubReductionStageSemantics& semantics) {
 #if THOR_CUB_ENABLE_FP8_TYPES
-    if (k == 0 || k > 256 || (rows != 64 && rows != 128 && rows != 256 && rows != 512 && rows != 1024))
+    const auto& depths = Fp8RK::Fp8DeepRSmallKPolicy::compiled_rows;
+    if (k == 0 || k > 256 || std::find(depths.begin(), depths.end(), rows) == depths.end())
         throw std::logic_error("DeepRSmallK retained occupancy requires selected P16 depth and K <= 256.");
     const auto query = [&]<typename InputT, typename ReductionOpT, typename TransformT>() -> CubKernelOccupancyInfo {
         return queryDeepRRetainedTyped<InputT, ReductionOpT, TransformT>(rows, k);
@@ -1981,52 +2219,9 @@ CubKernelOccupancyInfo queryFp8GeneralRParallelKTileRCooperativeCalibrationOccup
     throw std::logic_error("Invalid RuntimeK Complete occupancy combine operation.");
 }
 
-template <int FixedOp>
-void launchFp8GeneralRParallelRCooperativeCalibrationCompleteTyped(
-    const Tensor& input,
-    Tensor& output,
-    const CubReductionGeometry& geometry,
-    uint32_t outputs_per_warp,
-    uint32_t warps_per_output,
-    uint32_t packet_bytes,
-    Stream& stream,
-    const CubReductionStageSemantics& semantics,
-    float output_scale) {
-#if THOR_CUB_ENABLE_FP8_TYPES
-    const AdditiveFinalizeFp32 output_finalize = fp8CompleteFinalizerFromSemantics(semantics);
-    if (geometry.outer_size == 0 || geometry.reduction_size == 0 ||
-        !rParallelFp8SupportedCalibrationK(geometry.inner_size) ||
-        !rParallelFp8PacketSupportsOwnership(geometry.inner_size, outputs_per_warp, packet_bytes) ||
-        !oneWindowValidWarpsPerOutput(outputs_per_warp, warps_per_output) ||
-        !shallowFp8FitsUint32Indexing(geometry) ||
-        !fp8CompleteSupportsOutputStorage(output.getDataType()) || output.getDimensions() != geometry.output_dimensions) {
-        throw std::logic_error("FP8 OneWindow received unsupported complete geometry.");
-    }
-    const bool launched = dispatchRetainedOneWindow(
-        input.getDataType(), geometry.inner_size, outputs_per_warp, packet_bytes,
-        [&]<typename InputT, int K, int OutputsPerWarp, int PacketBytes>() {
-            launchFp8GeneralRParallelPackedForOwnership<InputT, K, PacketBytes, OutputsPerWarp, FixedOp>(
-                input, output, geometry, warps_per_output, stream.getStream(), output_finalize,
-                semantics.input_transform, output_scale);
-        });
-    if (!launched) {
-        throw std::logic_error("FP8 OneWindow request is not a retained compiled specialization.");
-    }
-#else
-    static_cast<void>(input);
-    static_cast<void>(output);
-    static_cast<void>(geometry);
-    static_cast<void>(outputs_per_warp);
-    static_cast<void>(warps_per_output);
-    static_cast<void>(packet_bytes);
-    static_cast<void>(stream);
-    static_cast<void>(semantics);
-    static_cast<void>(output_scale);
-    throw std::logic_error("FP8 OneWindow requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
-}
-
-
+// The production OneWindow launcher and occupancy query (P5-J2): the selector's OneWindow variant (O, W, P) runs
+// the bucketed unit for (O, P, bucket(K)). Only P16 variants have units; a request without a unit throws
+// std::logic_error, which the selector treats as an excluded candidate.
 void launchFp8GeneralRParallelRCooperativeCalibrationComplete(
     const Tensor& input,
     Tensor& output,
@@ -2037,55 +2232,16 @@ void launchFp8GeneralRParallelRCooperativeCalibrationComplete(
     Stream& stream,
     const CubReductionStageSemantics& semantics,
     float output_scale) {
-    switch (semantics.combine) {
-        case CubReductionStageCombine::Sum:
-            return launchFp8GeneralRParallelRCooperativeCalibrationCompleteTyped<0>(input, output, geometry, outputs_per_warp, warps_per_output, packet_bytes, stream, semantics, output_scale);
-        case CubReductionStageCombine::Product:
-            return launchFp8GeneralRParallelRCooperativeCalibrationCompleteTyped<1>(input, output, geometry, outputs_per_warp, warps_per_output, packet_bytes, stream, semantics, output_scale);
-        case CubReductionStageCombine::Minimum:
-            return launchFp8GeneralRParallelRCooperativeCalibrationCompleteTyped<2>(input, output, geometry, outputs_per_warp, warps_per_output, packet_bytes, stream, semantics, output_scale);
-        case CubReductionStageCombine::Maximum:
-            return launchFp8GeneralRParallelRCooperativeCalibrationCompleteTyped<3>(input, output, geometry, outputs_per_warp, warps_per_output, packet_bytes, stream, semantics, output_scale);
+    const auto unit = oneWindowUnitForVariant(geometry.inner_size, outputs_per_warp, packet_bytes);
+    if (!unit) {
+        throw std::logic_error("FP8 OneWindow has no bucketed kernel for this K, ownership and packet width.");
     }
-    throw std::logic_error("Invalid OneWindow combine operation.");
+    if (output.getDimensions() != geometry.output_dimensions) {
+        throw std::logic_error("FP8 OneWindow received unsupported complete geometry.");
+    }
+    launchFp8OneWindowRuntimeKComplete(input, output, geometry, *unit, warps_per_output, stream, semantics,
+                                       output_scale);
 }
-
-template <int FixedOp>
-CubKernelOccupancyInfo queryFp8GeneralRParallelRCooperativeCalibrationOccupancyTyped(
-    DataType input_dtype,
-    uint64_t inner_size,
-    uint32_t outputs_per_warp,
-    uint32_t warps_per_output,
-    uint32_t packet_bytes) {
-#if THOR_CUB_ENABLE_FP8_TYPES
-    if (!rParallelFp8SupportedCalibrationK(inner_size) ||
-        !rParallelFp8PacketSupportsOwnership(inner_size, outputs_per_warp, packet_bytes) ||
-        !oneWindowValidWarpsPerOutput(outputs_per_warp, warps_per_output)) {
-        throw std::logic_error("FP8 OneWindow occupancy received unsupported ownership.");
-    }
-    CubKernelOccupancyInfo occupancy{};
-    const bool queried = dispatchRetainedOneWindow(
-        input_dtype, inner_size, outputs_per_warp, packet_bytes,
-        [&]<typename InputT, int K, int OutputsPerWarp, int PacketBytes>() {
-            occupancy = queryFp8GeneralRParallelPackedOccupancyForOwnership<InputT, K, PacketBytes, OutputsPerWarp, FixedOp>(
-                warps_per_output);
-        });
-    if (!queried) {
-        // Absent physical specialization: the selector treats this as an excluded candidate.
-        throw std::logic_error("FP8 OneWindow occupancy request is not a retained compiled specialization.");
-    }
-    return occupancy;
-#else
-    static_cast<void>(input_dtype);
-    static_cast<void>(inner_size);
-    static_cast<void>(outputs_per_warp);
-    static_cast<void>(warps_per_output);
-    static_cast<void>(packet_bytes);
-    throw std::logic_error("FP8 OneWindow requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
-}
-
-
 
 CubKernelOccupancyInfo queryFp8GeneralRParallelRCooperativeCalibrationOccupancy(
     DataType input_dtype,
@@ -2094,17 +2250,11 @@ CubKernelOccupancyInfo queryFp8GeneralRParallelRCooperativeCalibrationOccupancy(
     uint32_t warps_per_output,
     uint32_t packet_bytes,
     CubReductionStageCombine combine) {
-    switch (combine) {
-        case CubReductionStageCombine::Sum:
-            return queryFp8GeneralRParallelRCooperativeCalibrationOccupancyTyped<0>(input_dtype, inner_size, outputs_per_warp, warps_per_output, packet_bytes);
-        case CubReductionStageCombine::Product:
-            return queryFp8GeneralRParallelRCooperativeCalibrationOccupancyTyped<1>(input_dtype, inner_size, outputs_per_warp, warps_per_output, packet_bytes);
-        case CubReductionStageCombine::Minimum:
-            return queryFp8GeneralRParallelRCooperativeCalibrationOccupancyTyped<2>(input_dtype, inner_size, outputs_per_warp, warps_per_output, packet_bytes);
-        case CubReductionStageCombine::Maximum:
-            return queryFp8GeneralRParallelRCooperativeCalibrationOccupancyTyped<3>(input_dtype, inner_size, outputs_per_warp, warps_per_output, packet_bytes);
+    const auto unit = oneWindowUnitForVariant(inner_size, outputs_per_warp, packet_bytes);
+    if (!unit) {
+        throw std::logic_error("FP8 OneWindow occupancy: no bucketed kernel for this K, ownership and packet width.");
     }
-    throw std::logic_error("Invalid OneWindow occupancy combine operation.");
+    return queryFp8OneWindowRuntimeKOccupancy(input_dtype, inner_size, *unit, warps_per_output, combine);
 }
 
 CubKernelOccupancyInfo queryNarrowLowPrecisionFlatRCooperativeFirstStageOccupancy(DataType input_dtype, uint64_t rows_per_shard) {
@@ -2176,6 +2326,60 @@ void launchNarrowLowPrecisionFlatRCooperativeFirstStage(const CubReductionStageS
             return;
     }
     throw std::logic_error("Unsupported narrow flat R-cooperative reduction combine.");
+}
+
+
+std::vector<Fp8OneWindowRuntimeKUnit> fp8OneWindowRuntimeKUnits(uint64_t inner_size) {
+    std::vector<Fp8OneWindowRuntimeKUnit> units;
+    for (const Fp8OneWindowRuntimeKUnit& unit : ONE_WINDOW_RUNTIME_K_UNITS) {
+        if (oneWindowRuntimeKUnitPlan(inner_size, unit)) {
+            units.push_back(unit);
+        }
+    }
+    return units;
+}
+
+void launchFp8OneWindowRuntimeKComplete(const Tensor& input,
+                                        Tensor& output,
+                                        const CubReductionGeometry& geometry,
+                                        const Fp8OneWindowRuntimeKUnit& unit,
+                                        uint32_t warps_per_output,
+                                        Stream& stream,
+                                        const CubReductionStageSemantics& semantics,
+                                        float output_scale) {
+    switch (semantics.combine) {
+        case CubReductionStageCombine::Sum:
+            return launchFp8OneWindowRuntimeKCompleteTyped<0>(input, output, geometry, unit, warps_per_output, stream,
+                                                              semantics, output_scale);
+        case CubReductionStageCombine::Product:
+            return launchFp8OneWindowRuntimeKCompleteTyped<1>(input, output, geometry, unit, warps_per_output, stream,
+                                                              semantics, output_scale);
+        case CubReductionStageCombine::Minimum:
+            return launchFp8OneWindowRuntimeKCompleteTyped<2>(input, output, geometry, unit, warps_per_output, stream,
+                                                              semantics, output_scale);
+        case CubReductionStageCombine::Maximum:
+            return launchFp8OneWindowRuntimeKCompleteTyped<3>(input, output, geometry, unit, warps_per_output, stream,
+                                                              semantics, output_scale);
+    }
+    throw std::logic_error("Invalid bucketed OneWindow combine operation.");
+}
+
+CubKernelOccupancyInfo queryFp8OneWindowRuntimeKOccupancy(DataType input_dtype,
+                                                          uint64_t inner_size,
+                                                          const Fp8OneWindowRuntimeKUnit& unit,
+                                                          uint32_t warps_per_output,
+                                                          CubReductionStageCombine combine) {
+    switch (combine) {
+        case CubReductionStageCombine::Sum:
+            return queryFp8OneWindowRuntimeKOccupancyTyped<0>(input_dtype, inner_size, unit, warps_per_output);
+        case CubReductionStageCombine::Product:
+            return queryFp8OneWindowRuntimeKOccupancyTyped<1>(input_dtype, inner_size, unit, warps_per_output);
+        case CubReductionStageCombine::Minimum:
+            return queryFp8OneWindowRuntimeKOccupancyTyped<2>(input_dtype, inner_size, unit, warps_per_output);
+        case CubReductionStageCombine::Maximum:
+            return queryFp8OneWindowRuntimeKOccupancyTyped<3>(input_dtype, inner_size, unit, warps_per_output);
+    }
+    throw std::logic_error("Invalid bucketed OneWindow occupancy combine operation.");
 }
 
 }  // namespace ThorImplementation::CubReductionInternal

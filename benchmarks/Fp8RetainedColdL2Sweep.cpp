@@ -9,6 +9,7 @@
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKSelectedContinuationBenchmark.h"
 #include "Utilities/TensorOperations/Cub/DenseProductionPhysicalSelectionContext.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
+#include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 #include "Utilities/Common/ScopedGpu.h"
 
 #include <cuda_runtime_api.h>
@@ -19,6 +20,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
+#include <optional>
 #include <variant>
 #include <iomanip>
 #include <iostream>
@@ -46,12 +49,52 @@ void check(cudaError_t s, const char* what) {
 }
 constexpr uint64_t MiB = 1ULL << 20;
 constexpr int Passes = 5;
+struct Op {
+    T::CubReductionOp operation;
+    C::CubReductionStageCombine combine;
+    C::CubReductionStageInputTransform transform;
+    const char* name;
+};
+constexpr std::array<Op, 12> ops{{
+    {T::CubReductionOp::Sum,C::CubReductionStageCombine::Sum,C::CubReductionStageInputTransform::Identity,"sum_identity"},
+    {T::CubReductionOp::Sum,C::CubReductionStageCombine::Sum,C::CubReductionStageInputTransform::AbsoluteValue,"sum_abs"},
+    {T::CubReductionOp::Sum,C::CubReductionStageCombine::Sum,C::CubReductionStageInputTransform::Square,"sum_square"},
+    {T::CubReductionOp::Product,C::CubReductionStageCombine::Product,C::CubReductionStageInputTransform::Identity,"product_identity"},
+    {T::CubReductionOp::Product,C::CubReductionStageCombine::Product,C::CubReductionStageInputTransform::AbsoluteValue,"product_abs"},
+    {T::CubReductionOp::Product,C::CubReductionStageCombine::Product,C::CubReductionStageInputTransform::Square,"product_square"},
+    {T::CubReductionOp::Min,C::CubReductionStageCombine::Minimum,C::CubReductionStageInputTransform::Identity,"min_identity"},
+    {T::CubReductionOp::Min,C::CubReductionStageCombine::Minimum,C::CubReductionStageInputTransform::AbsoluteValue,"min_abs"},
+    {T::CubReductionOp::Min,C::CubReductionStageCombine::Minimum,C::CubReductionStageInputTransform::Square,"min_square"},
+    {T::CubReductionOp::Max,C::CubReductionStageCombine::Maximum,C::CubReductionStageInputTransform::Identity,"max_identity"},
+    {T::CubReductionOp::Max,C::CubReductionStageCombine::Maximum,C::CubReductionStageInputTransform::AbsoluteValue,"max_abs"},
+    {T::CubReductionOp::Max,C::CubReductionStageCombine::Maximum,C::CubReductionStageInputTransform::Square,"max_square"}}};
 struct Settings {
     std::string family;
+    // Also time every OneWindow unit directly (family one_window_rk), not only the selector's OneWindow variants. Since
+    // P5-J2 family one_window runs the same bucketed kernels through the selector.
+    bool onewindow_runtime_k = false;
+    // Optional cell filters (empty: everything). --focus=onewindow sets all of them.
+    std::vector<std::string> operations;
+    std::vector<T::DataType> dtypes{T::DataType::FP8_E4M3, T::DataType::FP8_E5M2};
+    std::vector<uint64_t> target_mib{24, 96, 192};
+    bool onewindow_shapes = false;
+    bool uncovered_shapes = false;  // replace the grid with uncoveredKShapes()
+    bool replacement_shapes = false;  // replace the grid with replacementShapes()
     uint64_t arena_bytes = 12ULL << 30;
     uint64_t max_cells = std::numeric_limits<uint64_t>::max();
     bool historical_fp8_output = false;
 };
+std::vector<std::string> splitList(std::string_view text) {
+    std::vector<std::string> items;
+    while (!text.empty()) {
+        const size_t comma = text.find(',');
+        if (comma != 0) items.emplace_back(text.substr(0, comma));
+        if (comma == std::string_view::npos) break;
+        text.remove_prefix(comma + 1);
+    }
+    return items;
+}
+
 Settings parse(int argc, char** argv) {
     Settings s;
     for (int i = 1; i < argc; ++i) {
@@ -61,15 +104,81 @@ Settings parse(int argc, char** argv) {
         else if (a.starts_with("--arena-gib=")) s.arena_bytes = std::stoull(std::string(a.substr(12))) << 30;
         else if (a == "--output=same_fp8") s.historical_fp8_output = true;
         else if (a == "--output=fp32") s.historical_fp8_output = false;
+        else if (a == "--onewindow-runtime-k") s.onewindow_runtime_k = true;
+        else if (a.starts_with("--ops=")) s.operations = splitList(a.substr(6));
+        else if (a.starts_with("--dtypes=")) {
+            s.dtypes.clear();
+            for (const auto& d : splitList(a.substr(9))) {
+                if (d == "e4m3") s.dtypes.push_back(T::DataType::FP8_E4M3);
+                else if (d == "e5m2") s.dtypes.push_back(T::DataType::FP8_E5M2);
+                else throw std::invalid_argument("Unknown FP8 dtype (e4m3|e5m2): " + d);
+            }
+        } else if (a.starts_with("--targets-mib=")) {
+            s.target_mib.clear();
+            for (const auto& t : splitList(a.substr(14))) s.target_mib.push_back(std::stoull(t));
+        } else if (a == "--shapes=onewindow") s.onewindow_shapes = true;
+        else if (a == "--shapes=uncovered") s.uncovered_shapes = true;
+        else if (a == "--shapes=replacement") s.replacement_shapes = true;
+        else if (a == "--focus=replacement") {
+            // P5-J: bucketed OneWindow as the only OneWindow. The OneWindow-relevant grid shapes, the uncovered-K
+            // shapes and K = 2 (absent from the grid), all three working-set sizes, with the --focus=onewindow ops,
+            // format and families. Compare with onewindow_runtime_k_compare.py --replace-all.
+            s.replacement_shapes = true;
+            s.dtypes = {T::DataType::FP8_E4M3};
+            s.operations = {"sum_identity", "product_identity", "max_identity", "sum_square"};
+            s.target_mib = {24, 96, 192};
+            s.onewindow_runtime_k = true;
+        }
+        else if (a == "--focus=uncovered") {
+            // Bucketed OneWindow validation at K outside the compiled OneWindow set: the uncovered-K shape list
+            // (instead of the grid) with the --focus=onewindow ops, format, sizes and families.
+            s.uncovered_shapes = true;
+            s.dtypes = {T::DataType::FP8_E4M3};
+            s.operations = {"sum_identity", "product_identity", "max_identity", "sum_square"};
+            s.target_mib = {96, 192};
+            s.onewindow_runtime_k = true;
+        }
+        else if (a == "--focus=onewindow") {
+            // OneWindow work: the OneWindow-relevant shapes, one FP8 format (both formats measured identically in
+            // every P5 comparison), one kernel per physical operation plus the runtime-transform path, the two
+            // larger working-set sizes (24 MiB cells are ~15 us and noise-bound), all families (the K-coverage
+            // comparison needs the best production candidate), and the bucketed OneWindow configurations.
+            s.onewindow_shapes = true;
+            s.dtypes = {T::DataType::FP8_E4M3};
+            s.operations = {"sum_identity", "product_identity", "max_identity", "sum_square"};
+            s.target_mib = {96, 192};
+            s.onewindow_runtime_k = true;
+        }
         else if (a == "--help") {
-            std::cout << "Usage: thor_fp8_retained_cold_l2_sweep [--family=one_window|deep_r_small_k|aligned_k|runtime_k]"
-                      << " [--output=fp32|same_fp8] [--max-cells=N] [--arena-gib=12]\n";
+            std::cout << "Usage: thor_fp8_retained_cold_l2_sweep"
+                      << " [--family=one_window|deep_r_small_k|aligned_k|runtime_k|one_window_rk]"
+                      << " [--output=fp32|same_fp8] [--max-cells=N] [--arena-gib=12] [--onewindow-runtime-k]\n"
+                      << "  --onewindow-runtime-k also times every OneWindow unit directly (one_window runs the same\n"
+                      << "  bucketed kernels through the selector since P5-J2)\n"
+                      << "  (family one_window_rk, configuration oO_wW_pP_cB[_la]); --family=one_window_rk times\n"
+                      << "  only those.\n"
+                      << "  Cell filters: --ops=sum_identity,max_abs,... --dtypes=e4m3,e5m2 --targets-mib=24,96,192\n"
+                      << "  --shapes=onewindow (the OneWindow-relevant grid shapes), --shapes=uncovered (K outside the\n"
+                      << "  compiled OneWindow set, R*K <= 64 Ki, instead of the grid).\n"
+                      << "  --focus=onewindow = --shapes=onewindow --dtypes=e4m3 --targets-mib=96,192\n"
+                      << "  --ops=sum_identity,product_identity,max_identity,sum_square --onewindow-runtime-k\n"
+                      << "  --focus=uncovered = the same with --shapes=uncovered.\n"
+                      << "  --focus=replacement = OneWindow-relevant grid + uncovered-K + K=2 shapes, 24/96/192 MiB.\n";
             std::exit(0);
         } else throw std::invalid_argument("Unknown benchmark option: " + std::string(a));
     }
     if (!s.family.empty() && s.family != "one_window" && s.family != "deep_r_small_k" &&
-        s.family != "aligned_k" && s.family != "runtime_k")
+        s.family != "aligned_k" && s.family != "runtime_k" && s.family != "one_window_rk")
         throw std::invalid_argument("Unknown retained family filter");
+    if (s.family == "one_window_rk") s.onewindow_runtime_k = true;
+    for (const auto& name : s.operations) {
+        if (std::none_of(ops.begin(), ops.end(), [&](const Op& op) { return name == op.name; }))
+            throw std::invalid_argument("Unknown operation: " + name);
+    }
+    if (s.dtypes.empty() || s.target_mib.empty()) throw std::invalid_argument("Empty dtype or target list");
+    if (static_cast<int>(s.onewindow_shapes) + static_cast<int>(s.uncovered_shapes) +
+            static_cast<int>(s.replacement_shapes) > 1)
+        throw std::invalid_argument("Choose one of --shapes=onewindow, --shapes=uncovered, --shapes=replacement");
     if (s.arena_bytes < (1ULL << 30) || s.arena_bytes > (24ULL << 30))
         throw std::invalid_argument("Arena size must be 1..24 GiB");
     return s;
@@ -109,30 +218,52 @@ std::vector<Shape> shapes() {
     result.erase(std::unique(result.begin(), result.end()), result.end());
     return result;
 }
+// --shapes=uncovered: K values outside the 25 compiled OneWindow K (and up to 384, past which other families win), each
+// at the R values that keep the reduced window R*K <= 64 Ki bytes, where OneWindow-type kernels compete.
+std::vector<Shape> uncoveredKShapes() {
+    constexpr std::array<uint64_t, 25> ks{{6,10,12,14,18,20,21,24,27,28,33,40,48,56,65,80,96,100,111,144,192,200,
+        257,320,384}};
+    constexpr std::array<uint64_t, 7> rs{{4,12,32,96,256,768,2048}};
+    std::vector<Shape> result;
+    for (uint64_t k : ks) for (uint64_t r : rs) if (r * k <= 65536) result.emplace_back(r, k);
+    return result;  // 148 shapes
+}
+// --shapes=onewindow: grid (R, K) shapes where the best compiled or bucketed OneWindow configuration came within 10%
+// of the best configuration for at least one cell of the full 1092 sweep (134 of 247 shapes; compiled and uncovered K).
+bool oneWindowRelevantShape(uint64_t r, uint64_t k) {
+    static constexpr std::array<std::pair<uint16_t, uint16_t>, 134> relevant{{
+        {8,3},{16,3},{24,3},{56,3},{112,3},{896,3},{1024,3},{14336,3},{25600,3},{10,4},{24,4},{224,4},{768,4},
+        {896,4},{1280,4},{18432,4},{24,5},{20,6},{32,7},{288,7},{512,7},{640,7},{2048,7},{8192,7},{49152,7},{48,8},
+        {112,8},{288,8},{448,8},{1280,8},{24576,8},{72,9},{28,10},{96,11},{896,11},{36,12},{128,13},{4608,13},
+        {44,14},{60,15},{16,16},{112,16},{144,16},{176,16},{352,16},{1280,16},{1536,16},{14336,16},{32,17},{64,17},
+        {112,17},{128,17},{176,17},{192,17},{288,17},{84,18},{128,19},{256,19},{104,20},{120,23},{152,29},{64,31},
+        {96,31},{288,31},{640,31},{1024,31},{32,32},{56,32},{112,32},{176,32},{224,32},{352,32},{384,32},{2048,32},
+        {3072,32},{4096,32},{7168,32},{10240,32},{14336,32},{16,33},{184,33},{216,47},{272,49},{336,59},{24,63},
+        {512,63},{768,63},{4,64},{16,64},{224,64},{448,64},{640,64},{768,64},{896,64},{8192,64},{10240,64},{24,65},
+        {80,65},{128,65},{560,95},{672,111},{112,127},{1024,127},{1536,127},{32,128},{288,128},{896,128},{1536,128},
+        {40,129},{64,129},{176,129},{352,129},{2304,129},{224,255},{640,255},{112,256},{128,256},{176,256},
+        {352,256},{640,256},{1280,256},{4096,256},{24,497},{112,497},{128,497},{176,497},{352,497},{512,497},
+        {96,512},{112,512},{224,512},{352,512},{1280,512},{1792,512}}};
+    return std::any_of(relevant.begin(), relevant.end(), [&](const auto& s) { return s.first == r && s.second == k; });
+}
+// --shapes=replacement: everything where OneWindow (compiled or bucketed) can matter: the OneWindow-relevant grid
+// shapes, the uncovered-K shapes, and K = 2, which the grid lacks. K = 1 is not here: a dense trailing reduction is
+// ContiguousFixedSegment, not an RK site.
+std::vector<Shape> replacementShapes() {
+    std::vector<Shape> result;
+    for (const Shape& shape : shapes())
+        if (oneWindowRelevantShape(shape.first, shape.second)) result.push_back(shape);
+    const auto uncovered = uncoveredKShapes();
+    result.insert(result.end(), uncovered.begin(), uncovered.end());
+    for (uint64_t r : {4,8,16,32,64,128,256,512,1024,2048,4096}) result.emplace_back(r, 2);
+    return result;  // 134 + 148 + 11 shapes
+}
+
 uint64_t nearTargetOuter(uint64_t r, uint64_t k, uint64_t bytes) {
     // The historical fast sweep used ceil(target_bytes/(R*K)), not a fixed
     // output cardinality. Retain that choice for geometry/traffic matching.
     return std::max<uint64_t>(1, (bytes + (r*k) / 2) / (r*k));
 }
-struct Op {
-    T::CubReductionOp operation;
-    C::CubReductionStageCombine combine;
-    C::CubReductionStageInputTransform transform;
-    const char* name;
-};
-constexpr std::array<Op, 12> ops{{
-    {T::CubReductionOp::Sum,C::CubReductionStageCombine::Sum,C::CubReductionStageInputTransform::Identity,"sum_identity"},
-    {T::CubReductionOp::Sum,C::CubReductionStageCombine::Sum,C::CubReductionStageInputTransform::AbsoluteValue,"sum_abs"},
-    {T::CubReductionOp::Sum,C::CubReductionStageCombine::Sum,C::CubReductionStageInputTransform::Square,"sum_square"},
-    {T::CubReductionOp::Product,C::CubReductionStageCombine::Product,C::CubReductionStageInputTransform::Identity,"product_identity"},
-    {T::CubReductionOp::Product,C::CubReductionStageCombine::Product,C::CubReductionStageInputTransform::AbsoluteValue,"product_abs"},
-    {T::CubReductionOp::Product,C::CubReductionStageCombine::Product,C::CubReductionStageInputTransform::Square,"product_square"},
-    {T::CubReductionOp::Min,C::CubReductionStageCombine::Minimum,C::CubReductionStageInputTransform::Identity,"min_identity"},
-    {T::CubReductionOp::Min,C::CubReductionStageCombine::Minimum,C::CubReductionStageInputTransform::AbsoluteValue,"min_abs"},
-    {T::CubReductionOp::Min,C::CubReductionStageCombine::Minimum,C::CubReductionStageInputTransform::Square,"min_square"},
-    {T::CubReductionOp::Max,C::CubReductionStageCombine::Maximum,C::CubReductionStageInputTransform::Identity,"max_identity"},
-    {T::CubReductionOp::Max,C::CubReductionStageCombine::Maximum,C::CubReductionStageInputTransform::AbsoluteValue,"max_abs"},
-    {T::CubReductionOp::Max,C::CubReductionStageCombine::Maximum,C::CubReductionStageInputTransform::Square,"max_square"}}};
 const char* dtypeName(T::DataType dtype) { return dtype == T::DataType::FP8_E4M3 ? "fp8_e4m3" : "fp8_e5m2"; }
 const char* familyName(F::PhysicalFamily f) {
     switch (f) {
@@ -230,10 +361,11 @@ struct Event {
     Event& operator=(Event&&)=delete;
 };
 struct Timed {
-    F::PhysicalKernel physical;
-    F::SelectedIsolatedBenchmark executable;
+    std::string family;
+    std::optional<F::SelectedIsolatedBenchmark> executable;  // production retained candidate
+    std::function<void(const T::Tensor&,T::Tensor&,Stream&)> direct;  // bucketed OneWindow (no continuation)
     std::string name;
-    size_t rank = 0;
+    size_t rank = 0;  // 0: not in the learned ranking
     std::array<double,Passes> milliseconds{};
 };
 struct Cell {
@@ -315,18 +447,36 @@ void run(const Settings& settings) {
               << " staged_partials=fp32 continuation=production_selected_FP32 samples=5 interleaved=1"
               << " dataset=fast_cold_ring_pruning";
     if (!settings.family.empty()) std::cout << " family_filter=" << settings.family;
+    if (settings.onewindow_runtime_k) std::cout << " onewindow_runtime_k=1";
+    if (settings.onewindow_shapes) std::cout << " shapes=onewindow";
+    if (settings.uncovered_shapes) std::cout << " shapes=uncovered";
+    if (settings.replacement_shapes) std::cout << " shapes=replacement";
+    if (!settings.operations.empty()) {
+        std::cout << " ops=";
+        for (size_t i=0;i<settings.operations.size();++i) std::cout << (i?",":"") << settings.operations[i];
+    }
+    std::cout << " dtypes=";
+    for (size_t i=0;i<settings.dtypes.size();++i) std::cout << (i?",":"") << dtypeName(settings.dtypes[i]);
+    std::cout << " targets_mib=";
+    for (size_t i=0;i<settings.target_mib.size();++i) std::cout << (i?",":"") << settings.target_mib[i];
     std::cout << '\n';
     std::cout << "family,outer,R,K,dtype,configuration,operation,rank12,rank16,rank20,rank24,rank28,rank32,rank40,rank48,rank128,"
                  "total_median_ms,sample0_ms,sample1_ms,sample2_ms,sample3_ms,sample4_ms\n";
     uint64_t prepared_cells=0;
     uint64_t collected_cells=0;
-    const auto grid=shapes();
-    for (T::DataType dtype : {T::DataType::FP8_E4M3,T::DataType::FP8_E5M2}) {
+    const auto grid=settings.uncovered_shapes?uncoveredKShapes():
+                    settings.replacement_shapes?replacementShapes():shapes();
+    for (T::DataType dtype : settings.dtypes) {
         for (const Op& op : ops) {
+            if (!settings.operations.empty() &&
+                std::find(settings.operations.begin(),settings.operations.end(),op.name)==settings.operations.end())
+                continue;
             C::DenseProductionPhysicalSelectionContext fp32_context(
                 dtype, C::denseRKValueOperation(op.operation), stream);
             for (const auto [r,k] : grid) {
-                for (uint64_t target : {24*MiB,96*MiB,192*MiB}) {
+                if (settings.onewindow_shapes && !oneWindowRelevantShape(r,k)) continue;
+                for (uint64_t target_mib : settings.target_mib) {
+                    const uint64_t target=target_mib*MiB;
                     if (prepared_cells>=settings.max_cells) goto finished;
                     // Inputs and output/scratch workspace have stable backing
                     // buffers. Cells own only alias handles and CUDA events.
@@ -356,13 +506,33 @@ void run(const Settings& settings) {
                             auto executable=F::makeSelectedIsolatedBenchmark(problem,site,std::move(isolated),physical,
                                 fp32_context.context(),1.0f,std::numeric_limits<uint64_t>::max(),stream);
                             max_scratch=std::max<uint64_t>(max_scratch,executable.scratch_bytes);
-                            cell->candidates.push_back({physical,std::move(executable),
+                            cell->candidates.push_back({familyName(physical.family),std::move(executable),{},
                                 physicalName(physical),rank+1,{}});
                         } catch (const F::UnavailableIsolatedCandidate& e) {
                             // Missing candidates silently corrupt the measured oracle
                             // and can falsely validate the learned 28-item prefix.
                             throw std::runtime_error("Retained candidate " + physicalName(physical) +
                                 " cannot construct complete FP32 continuation: " + e.what());
+                        }
+                    }
+                    if (settings.onewindow_runtime_k &&
+                        (settings.family.empty() || settings.family=="one_window" ||
+                         settings.family=="one_window_rk")) {
+                        // OneWindow units directly: every compiled unit whose bucket holds K, at every legal
+                        // warps-per-output. Not part of the learned ranking (rank 0).
+                        const auto geometry=T::CubReduction::analyzeValueGeometry(op.operation,{outer,r,k},{1});
+                        for (const C::Fp8OneWindowRuntimeKUnit unit : C::fp8OneWindowRuntimeKUnits(k)) {
+                            const uint32_t o=unit.outputs_per_warp;
+                            for (uint32_t w : {1u,2u,4u,8u}) {
+                                if ((o>1 && w!=1) || r<w) continue;
+                                const std::string name="o"+std::to_string(o)+"_w"+std::to_string(w)+"_p"+
+                                    std::to_string(unit.packet_bytes)+"_c"+std::to_string(unit.max_components_per_lane)+
+                                    (unit.load_ahead?"_la":"");
+                                cell->candidates.push_back({"one_window_rk",std::nullopt,
+                                    [geometry,unit,w,semantics](const T::Tensor& in,T::Tensor& out,Stream& s) {
+                                        C::launchFp8OneWindowRuntimeKComplete(in,out,geometry,unit,w,s,semantics,1.0f);
+                                    },name,0,{}});
+                            }
                         }
                     }
                     if (cell->candidates.empty()) continue;
@@ -378,7 +548,9 @@ void run(const Settings& settings) {
                     }
                     auto launch=[cell,&stream,&arena](size_t index) {
                         cell->input=arena.input(cell->dtype,cell->outer,cell->r,cell->k);
-                        cell->candidates[index].executable.launch(cell->input,cell->output,cell->scratch,stream);
+                        auto& candidate=cell->candidates[index];
+                        if (candidate.direct) candidate.direct(cell->input,cell->output,stream);
+                        else candidate.executable->launch(cell->input,cell->output,cell->scratch,stream);
                     };
                     auto submit=[cell,launch,&stream](int pass) {
                         const size_t n=cell->candidates.size();
@@ -401,7 +573,7 @@ void run(const Settings& settings) {
                             }
                             auto sorted=item.milliseconds;
                             std::sort(sorted.begin(),sorted.end());
-                            std::cout << familyName(item.physical.family)<<','<<cell->outer<<','<<cell->r<<','<<cell->k
+                            std::cout << item.family<<','<<cell->outer<<','<<cell->r<<','<<cell->k
                                       <<','<<dtypeName(cell->dtype)<<','<<item.name<<','<<cell->operation;
                             for (size_t budget : {12u,16u,20u,24u,28u,32u,40u,48u,128u})
                                 std::cout << ',' << (item.rank<=budget?item.rank:0);

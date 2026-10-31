@@ -4,7 +4,9 @@
 #include "Utilities/TensorOperations/Cub/CubReductionStageSemantics.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
+#include <vector>
 
 namespace ThorImplementation::CubReductionInternal {
 
@@ -182,7 +184,9 @@ void launchFp8DeepRSmallKRetainedFirstStage(
 
 /** Retained OneWindow Complete kernel. O1 supports W1/W2/W4/W8, while O2/O4/O8
  * partition a warp among outputs. Applies the runtime finalizer/scale and converts
- * to the final output dtype. This function name predates the retained cutover. */
+ * to the final output dtype. This function name predates the retained cutover.
+ * Since P5-J2 it runs the bucketed unit for (outputs per warp, packet bytes, K's
+ * bucket): only packet_bytes 16 has units, and a request without one throws. */
 void launchFp8GeneralRParallelRCooperativeCalibrationComplete(
     const Tensor& input,
     Tensor& output,
@@ -200,6 +204,37 @@ void launchFp8GeneralRParallelRCooperativeCalibrationComplete(
     uint32_t outputs_per_warp,
     uint32_t warps_per_output,
     uint32_t packet_bytes,
+    CubReductionStageCombine combine = CubReductionStageCombine::Sum);
+
+/** The OneWindow kernel by unit (P5-I bucketed; the only OneWindow kernel since P5-J2, which the selector reaches
+ * through launchFp8GeneralRParallelRCooperativeCalibrationComplete). A unit is one compiled kernel shape: outputs per
+ * warp (1/2/4/8), packet bytes (16), components-per-lane bucket (1/2/4/8/16) and group loop form.
+ * fp8OneWindowRuntimeKUnits(K) lists the compiled units whose bucket holds K. warps_per_output is 1/2/4/8 for O1
+ * and 1 otherwise. Output must hold outer x K elements (any dims). */
+struct Fp8OneWindowRuntimeKUnit {
+    uint32_t outputs_per_warp;
+    uint32_t packet_bytes;
+    uint32_t max_components_per_lane;
+    bool load_ahead;
+    constexpr bool operator==(const Fp8OneWindowRuntimeKUnit&) const = default;
+};
+
+[[nodiscard]] std::vector<Fp8OneWindowRuntimeKUnit> fp8OneWindowRuntimeKUnits(uint64_t inner_size);
+
+void launchFp8OneWindowRuntimeKComplete(const Tensor& input,
+                                        Tensor& output,
+                                        const CubReductionGeometry& geometry,
+                                        const Fp8OneWindowRuntimeKUnit& unit,
+                                        uint32_t warps_per_output,
+                                        Stream& stream,
+                                        const CubReductionStageSemantics& semantics = {},
+                                        float output_scale = 1.0f);
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp8OneWindowRuntimeKOccupancy(
+    DataType input_dtype,
+    uint64_t inner_size,
+    const Fp8OneWindowRuntimeKUnit& unit,
+    uint32_t warps_per_output,
     CubReductionStageCombine combine = CubReductionStageCombine::Sum);
 
 

@@ -5,6 +5,10 @@
 // were frozen after 891/892 development and the 896 diagnostic comparison.
 // Residency is supplied for the actual compiled kernel specialization; do not use
 // the device-wide maximum CTA count as a surrogate for compiled occupancy.
+// P5-J2: the variants run the bucketed runtime-K OneWindow kernel (the compile-time-K kernels are gone). A variant
+// runs the unit for (outputs per warp, packet bytes, components-per-lane bucket of K); only P16 variants have units,
+// and some (ownership, bucket) pairs have none, so P4/P8 variants and uncovered pairs report no residency and are
+// skipped. The ten variants, their order and the frozen constants are unchanged until the ARG-aware retrain.
 
 #include <algorithm>
 #include <array>
@@ -22,19 +26,15 @@ struct Variant {
     constexpr bool operator==(const Variant&) const = default;
 };
 
-// The ten retained candidates. Demoted oracle controls are not selectable.
+// The ten retained candidates. Demoted oracle controls are not selectable. The P4/P8 entries have no kernel since
+// P5-J2 (residency 0); they stay so the frozen ranker's candidate identities are unchanged.
 inline constexpr std::array<Variant, 10> candidates = {{{1,1,16}, {1,2,16}, {1,4,16},
     {1,8,16}, {2,1,16}, {4,1,16}, {8,1,16}, {8,1,4}, {4,1,8}, {8,1,8}}};
 
-// Benchmark specialization availability is separate from geometry legality.
-constexpr bool compiledK(uint64_t k) {
-    switch (k) {
-        case 1: case 2: case 3: case 4: case 5: case 7: case 8: case 9:
-        case 11: case 13: case 15: case 16: case 17: case 19: case 31: case 32:
-        case 63: case 64: case 127: case 128: case 129: case 255: case 256:
-        case 497: case 512: return true;
-        default: return false;
-    }
+// K values with at least one OneWindow kernel (the bucketed P16 inventory reaches K <= 497 for any K and 512 bytes
+// for K a multiple of 16). Per-variant availability is reported by residency.
+constexpr bool oneWindowCoversK(uint64_t k) {
+    return k >= 1 && (k <= 497 || k == 512);
 }
 
 constexpr bool legal(Variant v, uint64_t r, uint64_t k) {
@@ -142,7 +142,7 @@ inline Variant chooseFirst(const std::array<Score, candidates.size()>& options,
 template <typename ResidentCTAsPerSM>
 std::optional<Variant> select(uint64_t outer, uint64_t r, uint64_t k,
                               uint32_t sm_count, ResidentCTAsPerSM&& residency) {
-    if (outer == 0 || r == 0 || k == 0 || !compiledK(k) || sm_count == 0) return std::nullopt;
+    if (outer == 0 || r == 0 || k == 0 || !oneWindowCoversK(k) || sm_count == 0) return std::nullopt;
     std::array<Detail::Score, candidates.size()> options{};
     size_t count = 0;
     for (const Variant v : candidates) {
@@ -167,7 +167,7 @@ std::vector<Variant> shortlist(uint64_t outer, uint64_t r, uint64_t k,
                                uint32_t sm_count, ResidentCTAsPerSM&& residency,
                                size_t limit = 5) {
     std::vector<Variant> result;
-    if (!limit || !outer || !r || !k || !compiledK(k) || !sm_count) return result;
+    if (!limit || !outer || !r || !k || !oneWindowCoversK(k) || !sm_count) return result;
     // The default remains five; the generalized autotuning path may ask for
     // the complete legal retained OneWindow inventory.
     limit = std::min<size_t>(limit, candidates.size());

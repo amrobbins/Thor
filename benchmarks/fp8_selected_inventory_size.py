@@ -21,31 +21,47 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 DTYPES = (('__nv_fp8_e4m3', 'E4M3'), ('__nv_fp8_e5m2', 'E5M2'))
-K_VALUES = (1,2,3,4,5,7,8,9,11,13,15,16,17,19,31,32,63,64,127,128,129,255,256,497,512)
+# The frozen selector's ten OneWindow variants (Fp8OneWindowPolicy::candidates). Since P5-J2 they run bucketed
+# runtime-K units (ONE_WINDOW_UNITS); the P4/P8 variants have none.
 ONE_WINDOW = ((1,1,16),(1,2,16),(1,4,16),(1,8,16),(2,1,16),(4,1,16),(8,1,16),
               (8,1,4),(4,1,8),(8,1,8))
 # OneWindow reduction operations are compile-time specializations. The final
 # output conversion and additive finalization remain runtime; none of these
-# four kernels multiplies the inventory by input transform or output dtype.
-ONE_WINDOW_OPERATIONS = ((0, 'SUM'), (1, 'PRODUCT'), (2, 'MIN'), (3, 'MAX'))
-# RuntimeK retains four compiled FP32 combines for each of its two Packet and
-# two Rotated first-stage topologies; neither transform nor input FP8 format is
-# selected at runtime. Runtime shard/warp/tile geometry adds no CUDA symbols.
+# kernels multiplies the inventory by input transform or output dtype. Since
+# P5-F MAX launches the MIN kernel (FixedOp 2) on sign-folded FP8 bytes.
+ONE_WINDOW_OPERATIONS = ((0, 'SUM'), (1, 'PRODUCT'), (2, 'MIN-MAX'))
+# RuntimeK retains four compiled FP32 combines for its Packet and two Rotated
+# first-stage topologies; input FP8 format is not selected at runtime. Packet
+# compiles all three transforms for every combine. P5-F: rotated MIN/MAX fold
+# the transform into the FP8 bytes (identity kernels only); PrefixReserved MAX
+# also folds its sign and launches the MIN kernel, Exact keeps MIN and MAX.
+# Runtime shard/warp/tile geometry adds no CUDA symbols.
 RUNTIME_K_OPERATIONS = (
     (0, 'SUM', 'cuda::std::plus<float>'),
     (1, 'PRODUCT', 'cuda::std::multiplies<float>'),
     (2, 'MIN', 'PropagatingMinimumFp32'),
     (3, 'MAX', 'PropagatingMaximumFp32'),
 )
-EXPECTED_COUNTS = {'OneWindow': 1008, 'DeepRSmallK': 840,
-                   'AlignedK': 164, 'RuntimeK': 312}
+# AlignedK keeps separate typed PRODUCT/MIN/MAX transformed kernels.
+ALIGNED_TYPED_OPERATIONS = RUNTIME_K_OPERATIONS[1:]
+EXPECTED_COUNTS = {'OneWindow': 90, 'DeepRSmallK': 264,
+                   'AlignedK': 164, 'RuntimeK': 204}
+# OneWindow units (outputs per warp, packet bytes, components-per-lane bucket, load-ahead); mirrors
+# ONE_WINDOW_RUNTIME_K_UNITS (P5-J2). x 3 physical operations (MIN/MAX folded) x 2 FP8 formats = 90 kernels.
+ONE_WINDOW_UNITS = (
+    (1, 16, 1, False), (1, 16, 2, True), (1, 16, 4, False), (1, 16, 8, True), (1, 16, 16, True),
+    (2, 16, 1, False), (2, 16, 2, False), (2, 16, 4, False), (2, 16, 8, True),
+    (4, 16, 2, False), (4, 16, 4, False), (4, 16, 8, True),
+    (8, 16, 1, False), (8, 16, 2, False), (8, 16, 4, False),
+)
+EXPERIMENTAL_FAMILIES = ()  # families measured but excluded from the selected total (none since P5-J2)
 DEEP_ROWS = (64,128,256,512,1024)
 ROTATED_ROWS = (32,64,128,256,512,1024)
 ALIGNED_STAGED = ((2,32),(2,64),(2,128),(8,32),(8,64),(8,128))
 ALIGNED_COMPLETE = ((2,32),(8,32),(8,64))
 
 FAMILIES = {
-    'fp8GeneralRParallelPackedCompleteKernel': 'OneWindow',
+    'fp8OneWindowRuntimeKCompleteKernel': 'OneWindow',
     'narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel': 'DeepRSmallK',
     'narrowFp8PackedFlatRCooperativeFirstStageKernel': 'DeepRSmallK',
     'kParallelFp8PacketKernel': 'AlignedK',
@@ -83,8 +99,18 @@ def first_party_kernel_names(objects: list[Path], archive: Path) -> set[str]:
 def is_named_kernel_function(name: str, kernel_name: str) -> bool:
     # Match an actual demangled function name (not a template parameter type).
     # Thor kernels are in the CubReductionInternal namespace; the name can
-    # include an anonymous namespace qualifier as well.
+    # include an anonymous namespace qualifier as well. A function nested in a
+    # kernel (an out-of-line lambda: `kernel<...>(...)::{lambda(...)#1}::operator()`)
+    # is a device helper, not the kernel.
+    if re.search(r'\)\s*(?:const\s*)?::', name.replace('(anonymous namespace)', 'anonymous')):
+        return False
     return bool(re.search(r'(?:::|\b)' + re.escape(kernel_name) + r'\s*[<(]', name))
+
+
+def specialization_key(kernel: str, args: str) -> str:
+    """Normalized `kernel<args>` for matching manifest entries against demangled names."""
+    text = re.sub(r'\s+', '', f'{kernel}<{args}>')
+    return re.sub(r'(?<=\d)(?:ul|u|l)\b', '', text)
 
 
 def cut_unique(text: str, marker: str, source: str) -> str:
@@ -107,9 +133,8 @@ def validate_policy_snapshot(source: Path):
     entries = tuple(tuple(map(int, a)) for a in re.findall(r'(\d+),(\d+),(\d+)',variant_line))
     if entries != ONE_WINDOW:
         raise ValueError('OneWindow variants changed')
-    kline = ow.split('constexpr bool compiledK(uint64_t k)',1)[1].split('default:',1)[0]
-    if tuple(int(x) for x in re.findall(r'case (\d+):',kline)) != K_VALUES:
-        raise ValueError('OneWindow compiled K changed')
+    if 'return k >= 1 && (k <= 497 || k == 512);' not in ow:
+        raise ValueError('OneWindow K coverage changed')
     deep = (b/'Fp8DeepRSmallKSelector.h').read_text()
     if f'compiled_rows = {{{", ".join(map(str,DEEP_ROWS))}}}' not in deep:
         raise ValueError('DeepRSmallK rows changed')
@@ -122,6 +147,12 @@ def validate_policy_snapshot(source: Path):
                 '(packet == 8 && (threads == 32 || threads == 64))')
     if any(x not in aligned for x in required):
         raise ValueError('AlignedK inventory changed')
+    narrow = (source / 'Utilities/TensorOperations/Cub/CubReductionNarrowFlatRCooperative.cu').read_text()
+    table = narrow.split('ONE_WINDOW_RUNTIME_K_UNITS{{', 1)[-1].split('}};', 1)[0]
+    units = [(int(o), int(p), int(c), la == 'true')
+             for o, p, c, la in re.findall(r'\{(\d+), (\d+), (\d+), (true|false)\}', table)]
+    if len(units) != len(set(units)) or tuple(sorted(units)) != tuple(sorted(ONE_WINDOW_UNITS)):
+        raise ValueError(f'OneWindow units changed: {sorted(units)}')
 
 
 def read_prune_groups(path: Path | None):
@@ -172,24 +203,18 @@ def generate(source: Path, out: Path):
                          'config':config, 'args':args})
 
     for dtype, short in DTYPES:
-        ow_emitted = set()
-        for k in K_VALUES:
-            for o,w,p in ONE_WINDOW:
-                lanes=32//o
-                cap=lanes*p if k%p==0 else lanes*p-(p-1)
-                if k <= cap and (k,p,o) not in ow_emitted:
-                    ow_emitted.add((k,p,o))
-                    # Retain the proven typed operation policy from the
-                    # OneWindow operation A/B. Explicitly name all template
-                    # axes so we do not silently fall back to FixedOp=0 (SUM).
-                    for operation, label in ONE_WINDOW_OPERATIONS:
-                        add('narrow', 'OneWindow', short,
-                            'fp8GeneralRParallelPackedCompleteKernel',
-                            f'{dtype}, {k}, {p}, {o}, -1, {operation}',
-                            f'K{k}/O{o}/P{p}/{label}')
-        # Retained DeepRSmallK: P16 × 5 row depths × 7 ownership variants ×
-        # 3 compiled transforms × 4 compiled FP32 combines. FP8 formats are
-        # instantiated separately. Staged output is always unfinalized FP32.
+        # OneWindow: the bucketed units. Explicitly name all template axes so we do not silently fall back to
+        # FixedOp=0 (SUM).
+        for o, packet, bucket, la in ONE_WINDOW_UNITS:
+            for operation, label in ONE_WINDOW_OPERATIONS:
+                add('narrow', 'OneWindow', short, 'fp8OneWindowRuntimeKCompleteKernel',
+                    f'{dtype}, {o}, {packet}, {bucket}, {str(la).lower()}, {operation}',
+                    f'O{o}/P{packet}/c{bucket}{"/la" if la else ""}/{label}')
+        # Retained DeepRSmallK: P16 × 7 ownership variants × 3 compiled
+        # transforms × 4 compiled FP32 combines. The five row depths are a
+        # runtime operand since P5-C, except for the one-component kernel,
+        # which is compiled at each depth. FP8 formats are instantiated separately.
+        # Staged output is always unfinalized FP32.
         for transform, label in (('IdentityFp32', 'Identity'),
                                  ('AbsoluteValueFp32', 'ABS'),
                                  ('SquareFp32', 'Square')):
@@ -197,17 +222,23 @@ def generate(source: Path, out: Path):
                                            ('cuda::std::multiplies<float>', 'PRODUCT'),
                                            ('PropagatingMinimumFp32', 'MIN'),
                                            ('PropagatingMaximumFp32', 'MAX')):
+                for lanes in (8, 4):
+                    add('narrow', 'DeepRSmallK', short,
+                        'narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel',
+                        f'{dtype}, {combine}, {transform}, 16, {lanes}',
+                        f'P16/tiny-lanes{lanes}/{label}/{combine_label}')
+                # One component per lane (K 9..32) keeps a compiled depth (log2) at every
+                # retained depth; the runtime depth cost it up to 4.8% (1080).
                 for rows in DEEP_ROWS:
-                    for lanes in (8, 4):
-                        add('narrow', 'DeepRSmallK', short,
-                            'narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel',
-                            f'{dtype}, {combine}, {transform}, {rows}, 16, {lanes}',
-                            f'rows{rows}/P16/tiny-lanes{lanes}/{label}/{combine_label}')
-                    for components in (1, 2, 4, 5, 8):
-                        add('narrow', 'DeepRSmallK', short,
-                            'narrowFp8PackedFlatRCooperativeFirstStageKernel',
-                            f'{dtype}, {combine}, {transform}, {rows}, 16, {components}',
-                            f'rows{rows}/P16/components{components}/{label}/{combine_label}')
+                    add('narrow', 'DeepRSmallK', short,
+                        'narrowFp8PackedFlatRCooperativeFirstStageKernel',
+                        f'{dtype}, {combine}, {transform}, 16, 1, {rows.bit_length() - 1}',
+                        f'rows{rows}/P16/components1/{label}/{combine_label}')
+                for components in (2, 4, 5, 8):
+                    add('narrow', 'DeepRSmallK', short,
+                        'narrowFp8PackedFlatRCooperativeFirstStageKernel',
+                        f'{dtype}, {combine}, {transform}, 16, {components}',
+                        f'P16/components{components}/{label}/{combine_label}')
         # AlignedK retains its independently selected mixed operation policy.
         for transform, label in (('IdentityFp32', 'Identity'),
                                  ('AbsoluteValueFp32', 'ABS'),
@@ -243,7 +274,7 @@ def generate(source: Path, out: Path):
         # the shared Identity Hoisted/Unified operation implementations above.
         for transform, label, suffix in (('AbsoluteValueFp32', 'ABS', 'abs'),
                                          ('SquareFp32', 'Square', 'square')):
-            for operation, op_label, reduction in RUNTIME_K_OPERATIONS[1:]:
+            for operation, op_label, reduction in ALIGNED_TYPED_OPERATIONS:
                 opname = op_label.lower()
                 for topology, combos in [('Complete', ALIGNED_COMPLETE), ('Staged', ALIGNED_STAGED)]:
                     for packet, threads in combos:
@@ -265,18 +296,23 @@ def generate(source: Path, out: Path):
         # Packet warp/tile/shard geometry remains runtime, and Rotated retains
         # only the six selected compiled row depths for each layout.
         for operation, op_label, combine in RUNTIME_K_OPERATIONS:
+            folded = op_label in ('MIN', 'MAX')
             for transform, label in ((0, 'Identity'), (1, 'ABS'), (2, 'Square')):
                 add('narrow', 'RuntimeK', short, 'fp8GeneralRParallelKTileP16CompleteKernel',
                     f'{dtype}, {transform}, {operation}',
                     f'PacketP16/Complete/{label}/{op_label}')
             for exact in (False, True):
+                if folded and not exact and op_label == 'MAX':
+                    continue  # PrefixReserved MAX launches the folded MIN kernel
                 for rows in ROTATED_ROWS:
-                    for transform, label in (('IdentityFp32', 'Identity'),
-                                             ('AbsoluteValueFp32', 'ABS'),
-                                             ('SquareFp32', 'Square')):
+                    for transform, label in ((('IdentityFp32', 'Identity'),) if folded else
+                                             (('IdentityFp32', 'Identity'),
+                                              ('AbsoluteValueFp32', 'ABS'),
+                                              ('SquareFp32', 'Square'))):
                         add('rotated', 'RuntimeK', short, 'awkwardAlignmentRotatedShardedFirstStageKernel',
                             f'{dtype}, {combine}, {transform}, {rows}, 16, 16, {str(exact).lower()}',
-                            f'Rotated/{"Exact" if exact else "Prefix"}/P16/rows{rows}/{label}/{op_label}')
+                            f'Rotated/{"Exact" if exact else "Prefix"}/P16/rows{rows}/{label}/'
+                            f'{"MIN-MAX" if folded and not exact else op_label}')
 
     unknown = dropped_aligned - matched
     if unknown:
@@ -303,23 +339,25 @@ def generate(source: Path, out: Path):
     assert modes == expected_counts, (modes, expected_counts)
     ow_ops = Counter((m['dtype'], m['config'].rsplit('/', 1)[-1])
                      for m in manifest if m['mode'] == 'OneWindow')
-    assert ow_ops == Counter({(dtype, label): 126
+    assert ow_ops == Counter({(dtype, label): len(ONE_WINDOW_UNITS)
                              for _, dtype in DTYPES
                              for _, label in ONE_WINDOW_OPERATIONS}), ow_ops
-    # Six Packet and 36 Rotated kernels per input format / operation;
+    # Per input format: SUM/PRODUCT three Packet + 36 Rotated; MIN/MAX three Packet + six Exact each, and six
+    # folded PrefixReserved MIN-MAX kernels;
     # fail if any transform, layout, or row-depth specialization disappears.
     rt_ops = Counter((m['dtype'], m['config'].rsplit('/', 1)[-1])
                      for m in manifest if m['mode'] == 'RuntimeK')
-    assert rt_ops == Counter({(dtype, label): 39
+    assert rt_ops == Counter({(dtype, label): count
                              for _, dtype in DTYPES
-                             for _, label, _ in RUNTIME_K_OPERATIONS}), rt_ops
+                             for label, count in (('SUM', 39), ('PRODUCT', 39), ('MIN', 9),
+                                                  ('MAX', 9), ('MIN-MAX', 6))}), rt_ops
     rt_topologies = Counter((m['dtype'], m['config'].split('/')[0])
                             for m in manifest if m['mode'] == 'RuntimeK')
     assert rt_topologies == Counter({(dtype, topology): expected
                                     for _, dtype in DTYPES
                                     for topology, expected in (
                                         ('PacketP16', 12),
-                                        ('Rotated', 144))}), rt_topologies
+                                        ('Rotated', 90))}), rt_topologies
     print('Generated 3 CUDA source TUs in',out)
     print('Expected selected first-stage specializations:',dict(modes))
 
@@ -337,7 +375,8 @@ def parse_func_symbols(raw):
         parts=line.strip().split(None,7)
         if len(parts)!=8 or not parts[0].endswith(':') or parts[3]!='FUNC' or parts[6] in ('UND','ABS'):
             continue
-        try: size=int(parts[2])
+        # readelf prints sizes above 99999 in hex (`0x249f0`); int(..., 0) reads both forms.
+        try: size=int(parts[2], 0)
         except ValueError: continue
         if not size: continue
         # Some NVCC device ELFs print an extended section-index suffix
@@ -425,16 +464,20 @@ def analyze(objects: list[Path], archive: Path, out: Path):
            f'Extracted cubins: {sum(1 for _ in (out/"cubins").rglob("*.cubin"))}', '']
     for key in ('OneWindow','DeepRSmallK','AlignedK','RuntimeK'):
         lines.append(f'{key:14s} {counts[key]:5d} kernel FUNC symbols; {totals[key]:>12,} SASS text bytes')
+    for key in EXPERIMENTAL_FAMILIES:
+        lines.append(f'{key} (experimental, excluded from the total) {counts[key]:5d} kernel FUNC symbols; '
+                     f'{totals[key]:>12,} SASS text bytes')
     lines.append(f'Non-Thor CUDA/CCCL kernel-like FUNC text: {len(support)} functions, '
                  f'{totals["non-Thor-kernel-like-FUNC"]:,} bytes')
     lines.append(f'Device helper FUNC text (unattributed): {totals["device-helper"]:,} bytes')
-    lines.append(f'Combined selected first-stage SASS text: {sum(totals[m] for m in exp):,} bytes')
+    lines.append(f'Combined selected first-stage SASS text: '
+                 f'{sum(totals[m] for m in exp if m not in EXPERIMENTAL_FAMILIES):,} bytes')
     lines.extend(['', 'Artifact bytes, with metadata and (possibly) compression:'])
     for x in object_rows:
         lines.append(f'  {x["object"]}: object {x["object_bytes"]:,}; extracted cubins {x["cubin_bytes"]:,}')
     lines.extend(['','NOTE: Archive bytes and extracted cubin bytes are NOT incremental libThor.so size.',
                   'This probe contains first-stage kernels only, not the reused production FP32 continuation.',
-                  'OneWindow K templates are specialized; RuntimeK warp and tile decisions are runtime.',
+                  'OneWindow is bucketed by components per lane (runtime K); RuntimeK warp and tile decisions are runtime.',
                   'Inspect device-functions.csv for exact symbol sizes.'])
     bad = bool(extra) or (len(arches)==1 and counts != Counter(exp))
     if support:
@@ -446,7 +489,27 @@ def analyze(objects: list[Path], archive: Path, out: Path):
         lines.append(f'ERROR: {len(extra)} compiled Thor __global__ kernels are outside the selected inventory:')
         for item in extra:
             lines.append(f'  {item["object"]}: {item["bytes"]} bytes: {item["name"]}')
-    if len(arches)==1 and counts != Counter(exp):lines.append(f'ERROR expected {exp}, got {dict(counts)}')
+    if len(arches)==1 and counts != Counter(exp):
+        lines.append(f'ERROR expected {exp}, got {dict(counts)}')
+        manifest = json.loads(manifest_path.read_text())
+        for mode in sorted(m for m in exp if counts[m] != exp[m]):
+            compiled = set()
+            for r in rows:
+                if r['mode'] != mode:
+                    continue
+                for kernel in (k for k, fam in FAMILIES.items() if fam == mode):
+                    m = re.search(re.escape(kernel) + r'\s*<(.+?)>\s*\(', r['name'])
+                    if m:
+                        compiled.add(specialization_key(kernel, m.group(1)))
+            missing = [e for e in manifest if e['mode'] == mode
+                       and specialization_key(e['kernel'], e['args']) not in compiled]
+            lines.append(f'  {mode}: {len(missing)} manifest specializations without a matching kernel symbol'
+                         ' (first 20):')
+            lines.extend(f'    {e["dtype"]} {e["config"]}: {e["kernel"]}<{e["args"]}>' for e in missing[:20])
+            helpers = [r for r in rows if r['mode'] == 'device-helper'
+                       and any(k in r['name'] for k, fam in FAMILIES.items() if fam == mode)]
+            lines.append(f'  {mode}: {len(helpers)} device-helper symbols naming this family (first 10):')
+            lines.extend(f'    {r["bytes"]} bytes: {r["name"][:200]}' for r in helpers[:10])
     (out/'summary.txt').write_text('\n'.join(lines)+'\n')
     print('\n'.join(lines))
     if bad:raise SystemExit('Isolated inventory membership assertion failed: inspect device-functions.csv')

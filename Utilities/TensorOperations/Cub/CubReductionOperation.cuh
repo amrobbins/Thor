@@ -4,6 +4,7 @@
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/TensorOperations/Cub/CubDataTypePolicy.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
+#include "Utilities/TensorOperations/Cub/CubReductionStageSemantics.h"
 
 #include <cub/device/device_reduce.cuh>
 #include <cub/device/device_segmented_reduce.cuh>
@@ -104,6 +105,32 @@ struct AdditiveFinalizeFp32 {
     }
 };
 
+// P5-A: one out-of-line additive finalizer for the retained FP8 Complete epilogues.
+//
+// nvcc hoists the launch-uniform output-dtype switch out of unrolled store loops, so an inline AdditiveFinalizeFp32
+// was copied once per (store slot x output dtype): every copy carried the IEEE divide and sqrt fast paths and its own
+// calls to the __cuda_sm3x_div_rn / __cuda_sm20_sqrt_rn slowpath subroutines, which were in turn duplicated in every
+// kernel (a P8/CTA64 AlignedK Complete kernel had 48 such copies in about 31 KB of its 40 KB of SASS). Identity
+// finalization (SUM, and every nonadditive operation) stays inline as one uniform test; MEAN and the square-root
+// operations call this single noinline copy per translation unit (the Cub objects are not relocatable device code).
+// It runs exactly AdditiveFinalizeFp32's arithmetic, so results are bit-identical.
+inline __device__ __noinline__ float finalizeAdditiveFp32OutOfLine(float value, float divisor, bool square_root) {
+    return AdditiveFinalizeFp32{divisor, square_root}(value);
+}
+
+// Finalize one complete FP32 aggregate before scaling and output conversion. Other finalizer types are applied as is.
+template <typename OutputFinalizeT>
+__device__ __forceinline__ float finalizeFp32Epilogue(const OutputFinalizeT& finalize, float value) {
+    return finalize(value);
+}
+
+__device__ __forceinline__ float finalizeFp32Epilogue(const AdditiveFinalizeFp32& finalize, float value) {
+    if (finalize.divisor == 1.0f && !finalize.square_root) {
+        return value;
+    }
+    return finalizeAdditiveFp32OutOfLine(value, finalize.divisor, finalize.square_root);
+}
+
 struct PropagatingMinimumFp32 {
     __host__ __device__ float operator()(float lhs, float rhs) const {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
@@ -164,6 +191,102 @@ struct Fp8TypedReductionOp {
         else return PropagatingMaximumFp32{}(a, b);
     }
 };
+
+// P5-F: FP8 MIN and MAX share one compiled kernel (PTX min.NaN.f32) in OneWindow and the RuntimeK PrefixReserved rotated
+// first stage. The input transform and the MAX sign are folded into the packed FP8 bytes before decode, one LOP3 per
+// four values:
+//   MIN identity  bytes & 0xff           MAX identity  bytes ^ 0x80          (max x   = -min(-x))
+//   MIN |x|       bytes & 0x7f           MAX |x|       (bytes & 0x7f) ^ 0x80 (max |x| = -min(-|x|))
+//   MIN/MAX x^2   as |x|, then the extremum is squared (x^2 is monotone in |x|, and FP8 squares are exact in FP32,
+//                 so (max |x|)^2 == max(x^2) bit for bit).
+// The fold is undone once per result: Complete kernels square in-kernel and the host negates output_scale for MAX
+// (unfoldFp8ExtremumResult); the RuntimeK rotated first stage negates or squares each FP32 partial before it is stored
+// (unfoldFp8ExtremumPartial), so staged partials and the continuation are unchanged. FP8 sign flips keep NaN as NaN
+// and swap +-Inf and +-0; min.NaN orders -0 < +0, so NaN propagation and signed zeros match a separate MAX kernel.
+// SignFold == false folds only the transform (byte AND mask, no XOR operand) for kernels that keep separate MIN and MAX
+// specializations: the RuntimeK Exact rotated kernel sits at the 64-register cliff, and the sign XOR mask cost it a
+// block per SM (1084, 64 -> 67 registers, 1.47x slower).
+struct Fp8ExtremumFold {
+    uint32_t byte_and_mask;
+    uint32_t byte_xor_mask;
+    bool square_result;
+};
+
+inline constexpr Fp8ExtremumFold FP8_EXTREMUM_FOLD_NONE{0xffffffffU, 0U, false};
+
+// FixedOp vocabulary of Fp8TypedReductionOp: MIN (2) and MAX (3) launch the MIN kernel.
+[[nodiscard]] constexpr bool fp8SharedExtremumOp(int fixed_op) { return fixed_op == 2 || fixed_op == 3; }
+[[nodiscard]] constexpr int fp8PhysicalExtremumOp(int fixed_op) { return fixed_op == 3 ? 2 : fixed_op; }
+
+[[nodiscard]] inline Fp8ExtremumFold fp8ExtremumFold(bool maximum, CubReductionStageInputTransform input_transform) {
+    bool magnitude = false;
+    bool square = false;
+    switch (input_transform) {
+        case CubReductionStageInputTransform::Identity:
+            break;
+        case CubReductionStageInputTransform::AbsoluteValue:
+            magnitude = true;
+            break;
+        case CubReductionStageInputTransform::Square:
+            magnitude = true;
+            square = true;
+            break;
+        default:
+            throw std::logic_error("FP8 MIN/MAX fold received an unsupported input transform.");
+    }
+    return {magnitude ? 0x7f7f7f7fU : 0xffffffffU, maximum ? 0x80808080U : 0U, square};
+}
+
+// Complete kernels: the fold for FixedOp, with the MAX negation moved into output_scale (not needed when squared).
+[[nodiscard]] inline Fp8ExtremumFold fp8CompleteExtremumFold(int fixed_op,
+                                                             CubReductionStageInputTransform input_transform,
+                                                             float& output_scale) {
+    if (!fp8SharedExtremumOp(fixed_op)) {
+        return FP8_EXTREMUM_FOLD_NONE;
+    }
+    const Fp8ExtremumFold fold = fp8ExtremumFold(fixed_op == 3, input_transform);
+    if (fixed_op == 3 && !fold.square_result) {
+        output_scale = -output_scale;
+    }
+    return fold;
+}
+
+template <bool Fold, bool SignFold = true>
+__device__ __forceinline__ uint32_t foldFp8ExtremumBytes(uint32_t packed_fp8, const Fp8ExtremumFold& fold) {
+    if constexpr (Fold && !SignFold) {
+        return packed_fp8 & fold.byte_and_mask;
+    } else if constexpr (Fold) {
+        return (packed_fp8 & fold.byte_and_mask) ^ fold.byte_xor_mask;
+    } else {
+        static_cast<void>(fold);
+        return packed_fp8;
+    }
+}
+
+template <bool Fold>
+__device__ __forceinline__ float unfoldFp8ExtremumResult(float value, const Fp8ExtremumFold& fold) {
+    if constexpr (Fold) {
+        return fold.square_result ? value * value : value;
+    } else {
+        static_cast<void>(fold);
+        return value;
+    }
+}
+
+template <bool Fold, bool SignFold = true>
+__device__ __forceinline__ float unfoldFp8ExtremumPartial(float value, const Fp8ExtremumFold& fold) {
+    if constexpr (Fold && !SignFold) {
+        return fold.square_result ? value * value : value;
+    } else if constexpr (Fold) {
+        if (fold.square_result) {
+            return value * value;
+        }
+        return fold.byte_xor_mask != 0U ? -value : value;
+    } else {
+        static_cast<void>(fold);
+        return value;
+    }
+}
 
 inline __host__ __device__ void storeFp32AsRuntimeDType(void* output,
                                                          DataType output_dtype,
@@ -697,6 +820,25 @@ template <typename InputT, int ItemsPerLane>
     static_assert(sizeof(RawT) == sizeof(ValuesT));
     const RawT raw = *reinterpret_cast<const RawT*>(source);
     return cuda::std::bit_cast<ValuesT>(raw);
+}
+
+// P5-F fold applied to a loaded FP8 packet (see Fp8ExtremumFold), one LOP3 per 32-bit word.
+template <bool Fold, bool SignFold, typename InputT, int ItemsPerLane>
+[[nodiscard]] __device__ __forceinline__ PackedInputValues<InputT, ItemsPerLane> foldFp8ExtremumPacket(
+    const PackedInputValues<InputT, ItemsPerLane>& values, const Fp8ExtremumFold& fold) {
+    if constexpr (Fold) {
+        static_assert(sizeof(InputT) == 1 && ItemsPerLane % 4 == 0);
+        struct Words { uint32_t word[ItemsPerLane / 4]; };
+        Words words = cuda::std::bit_cast<Words>(values);
+#pragma unroll
+        for (int i = 0; i < ItemsPerLane / 4; ++i) {
+            words.word[i] = foldFp8ExtremumBytes<true, SignFold>(words.word[i], fold);
+        }
+        return cuda::std::bit_cast<PackedInputValues<InputT, ItemsPerLane>>(words);
+    } else {
+        static_cast<void>(fold);
+        return values;
+    }
 }
 
 #if THOR_CUB_ENABLE_FP8_TYPES

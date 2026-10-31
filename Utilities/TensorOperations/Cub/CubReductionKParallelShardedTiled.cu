@@ -300,6 +300,14 @@ inline constexpr bool IS_K_PARALLEL_FP8_TYPE =
 template <size_t PacketBytes>
 inline constexpr uint32_t K_PARALLEL_FP8_LOAD_AHEAD_ROWS = PacketBytes >= 8 ? 4U : 8U;
 
+// P5-H: the Staged hoisted (Identity, operation-unified) P8/CTA64 kernel batches 2 rows. With 4 rows it compiled at
+// 72 registers (14 blocks of 64 threads per SM; 40 registers before P5-E) and stayed 1-5% slower than 1067; 2 rows
+// halve the in-flight packet registers and measured 0.944x (1089). The typed ABS/SQUARE Staged P8/CTA64 kernels were
+// 4-5% slower with 2 rows and keep 4.
+template <size_t PacketBytes, int BlockThreads>
+inline constexpr uint32_t K_PARALLEL_FP8_HOISTED_STAGED_LOAD_AHEAD_ROWS =
+    PacketBytes == 8 && BlockThreads == 64 ? 2U : K_PARALLEL_FP8_LOAD_AHEAD_ROWS<PacketBytes>;
+
 template <typename InputT, int ItemsPerLane, uint32_t Rows>
 struct KParallelFp8RowBatch {
     PackedInputValues<InputT, ItemsPerLane> rows[Rows];
@@ -327,7 +335,12 @@ __device__ __forceinline__ void reduceKParallelFp8RowBatch(float (&local)[ItemsP
 }
 
 // Accumulates row_count packets starting at row_input (stride inner_size) into local, which the caller initialized.
-template <typename InputT, int ItemsPerLane, typename ReductionOpT, typename InputTransformT>
+// Rows is the load-ahead batch (K_PARALLEL_FP8_LOAD_AHEAD_ROWS unless a caller sets it).
+template <typename InputT,
+          int ItemsPerLane,
+          uint32_t Rows = K_PARALLEL_FP8_LOAD_AHEAD_ROWS<sizeof(InputT) * ItemsPerLane>,
+          typename ReductionOpT,
+          typename InputTransformT>
 __device__ __forceinline__ void accumulateKParallelFp8Rows(float (&local)[ItemsPerLane],
                                                            const InputT* row_input,
                                                            uint32_t row_count,
@@ -335,7 +348,7 @@ __device__ __forceinline__ void accumulateKParallelFp8Rows(float (&local)[ItemsP
                                                            const ReductionOpT& reduction_op,
                                                            const InputTransformT& input_transform) {
     static_assert(IS_K_PARALLEL_FP8_TYPE<InputT>);
-    constexpr uint32_t Rows = K_PARALLEL_FP8_LOAD_AHEAD_ROWS<sizeof(InputT) * ItemsPerLane>;
+    static_assert(Rows >= 1);
     using BatchT = KParallelFp8RowBatch<InputT, ItemsPerLane, Rows>;
     const uint64_t batch_stride = static_cast<uint64_t>(Rows) * inner_size;
     uint32_t remaining = row_count;
@@ -514,6 +527,7 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
         static_cast<uint64_t>(BlockThreads) * static_cast<uint64_t>(ItemsPerLane);
     constexpr float Init = KParallelReductionIdentityFp32<ReductionOpT>::value;
     const ReductionOpT reduction_op{};
+    static_cast<void>(output_finalize);  // Staged instantiations write unfinalized partials.
 
     extern __shared__ float fp8_writeback_shared[];
     const int warp = static_cast<int>(threadIdx.x) / TILED_REDUCTION_WARP_THREADS;
@@ -596,7 +610,16 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
         }
 
         if constexpr (Topology == TiledRKStageTopology::Complete) {
+            // Complete values are finalized once before storage (P5-A); the stores only scale and convert.
+            const IdentityFp32 store_finalize{};
             if (owns_packet) {
+                // P5-A: finalize once, before the uniform output-dtype switch, instead of inside every dtype's store
+                // (nvcc kept one inline divide/sqrt finalizer per item per dtype). Stores below receive finalized
+                // values and still apply output_scale, as in kParallelFp8CompleteUnifiedKernel.
+#pragma unroll
+                for (int item = 0; item < ItemsPerLane; ++item) {
+                    local[item] = finalizeFp32Epilogue(output_finalize, local[item]);
+                }
                 switch (output_dtype) {
                     case DataType::FP8_E4M3:
                         if constexpr (sizeof(__nv_fp8_e4m3) * static_cast<size_t>(ItemsPerLane) <= 16) {
@@ -605,7 +628,7 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
                                                                packet_component_begin,
                                                                output_outer_stride,
                                                                local,
-                                                               output_finalize,
+                                                               store_finalize,
                                                                output_scale);
                         }
                         break;
@@ -616,7 +639,7 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
                                                                packet_component_begin,
                                                                output_outer_stride,
                                                                local,
-                                                               output_finalize,
+                                                               store_finalize,
                                                                output_scale);
                         }
                         break;
@@ -627,7 +650,7 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
                                                                packet_component_begin,
                                                                output_outer_stride,
                                                                local,
-                                                               output_finalize,
+                                                               store_finalize,
                                                                output_scale);
                         }
                         break;
@@ -638,7 +661,7 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
                                                                packet_component_begin,
                                                                output_outer_stride,
                                                                local,
-                                                               output_finalize,
+                                                               store_finalize,
                                                                output_scale);
                         }
                         break;
@@ -649,7 +672,7 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
                                                                packet_component_begin,
                                                                output_outer_stride,
                                                                local,
-                                                               output_finalize,
+                                                               store_finalize,
                                                                output_scale);
                         }
                         break;
@@ -661,7 +684,7 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
                                                                packet_component_begin,
                                                                output_outer_stride,
                                                                local,
-                                                               output_finalize,
+                                                               store_finalize,
                                                                output_scale);
                         }
                         break;
@@ -688,7 +711,7 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
             for (int item = 0; item < ItemsPerLane; ++item) {
                 const float value = Topology == TiledRKStageTopology::Staged
                                         ? local[item]
-                                        : output_finalize(local[item]) * output_scale;
+                                        : local[item] * output_scale;
                 // Pitch 34 is conflict-free for both producer [item][lane] stores and every 16-byte transposed
                 // consumer packet used by the packet8/packet16 staged paths and wider complete-output conversions.
                 warp_tile[item * K_PARALLEL_FP8_SHARED_STRIPE_PITCH + lane] = value;
@@ -781,7 +804,8 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
 // Input-transformed staged variants continue using typed kernels.
 // Force-inlined: the hoisted staged and unified complete kernels call this from four operation branches. As an
 // out-of-line call, `local` is passed by reference and lives on the stack (1071 showed STACK > 0 for hoisted kernels).
-template <typename InputT, typename ReductionOpT, int PacketBytes>
+template <typename InputT, typename ReductionOpT, int PacketBytes,
+          uint32_t LoadAheadRows = K_PARALLEL_FP8_LOAD_AHEAD_ROWS<static_cast<size_t>(PacketBytes)>>
 __device__ __forceinline__ void kParallelFp8HoistedAccumulateRows(const InputT* row_input,
                                                           uint32_t row_count,
                                                           uint64_t inner_size,
@@ -792,7 +816,8 @@ __device__ __forceinline__ void kParallelFp8HoistedAccumulateRows(const InputT* 
     for (int item = 0; item < PacketBytes; ++item) {
         local[item] = Init;
     }
-    accumulateKParallelFp8Rows<InputT, PacketBytes>(local, row_input, row_count, inner_size, reduction_op, IdentityFp32{});
+    accumulateKParallelFp8Rows<InputT, PacketBytes, LoadAheadRows>(
+        local, row_input, row_count, inner_size, reduction_op, IdentityFp32{});
 }
 
 template <typename InputT, int PacketBytes, int BlockThreads>
@@ -804,6 +829,8 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8StagedHoistedCombine
     static_assert(IS_K_PARALLEL_FP8_TYPE<InputT>);
     static_assert(PacketBytes == 2 || PacketBytes == 8);
     static_assert(BlockThreads == 32 || BlockThreads == 64 || BlockThreads == 128);
+    constexpr uint32_t StagedLoadAheadRows =
+        K_PARALLEL_FP8_HOISTED_STAGED_LOAD_AHEAD_ROWS<static_cast<size_t>(PacketBytes), BlockThreads>;
     constexpr uint64_t ComponentsPerCTA = static_cast<uint64_t>(PacketBytes) * BlockThreads;
     extern __shared__ float fp8_writeback_shared[];
     const int warp = static_cast<int>(threadIdx.x) / TILED_REDUCTION_WARP_THREADS;
@@ -831,19 +858,23 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8StagedHoistedCombine
             // One uniform switch PER shard/tile, not per R row or decoded packet.
             switch (operation) {
                 case CubReductionStageCombine::Sum:
-                    kParallelFp8HoistedAccumulateRows<InputT, cuda::std::plus<float>, PacketBytes>(
+                    kParallelFp8HoistedAccumulateRows<InputT, cuda::std::plus<float>, PacketBytes,
+                                                      StagedLoadAheadRows>(
                         row_input, row_count, inner_size, local);
                     break;
                 case CubReductionStageCombine::Product:
-                    kParallelFp8HoistedAccumulateRows<InputT, cuda::std::multiplies<float>, PacketBytes>(
+                    kParallelFp8HoistedAccumulateRows<InputT, cuda::std::multiplies<float>, PacketBytes,
+                                                      StagedLoadAheadRows>(
                         row_input, row_count, inner_size, local);
                     break;
                 case CubReductionStageCombine::Minimum:
-                    kParallelFp8HoistedAccumulateRows<InputT, PropagatingMinimumFp32, PacketBytes>(
+                    kParallelFp8HoistedAccumulateRows<InputT, PropagatingMinimumFp32, PacketBytes,
+                                                      StagedLoadAheadRows>(
                         row_input, row_count, inner_size, local);
                     break;
                 case CubReductionStageCombine::Maximum:
-                    kParallelFp8HoistedAccumulateRows<InputT, PropagatingMaximumFp32, PacketBytes>(
+                    kParallelFp8HoistedAccumulateRows<InputT, PropagatingMaximumFp32, PacketBytes,
+                                                      StagedLoadAheadRows>(
                         row_input, row_count, inner_size, local);
                     break;
             }
@@ -953,6 +984,9 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8CompleteUnifiedKerne
                     kParallelFp8HoistedAccumulateRows<InputT, cuda::std::plus<float>, ItemsPerLane>(
                         row_input, row_count, inner_size, local);
                     if constexpr (Policy == Fp8CompleteFinalizePolicy::InBranch) {
+                        // Deliberately the inline finalizer, not finalizeFp32Epilogue(): the P5-A split raised the
+                        // P8/CTA32 instance from 79 to 82 registers and slowed identity-transform shapes by up to 48%
+                        // (3511x224x32). Its finalizer is not replicated per output dtype, so little SASS is at stake.
 #pragma unroll
                         for (int item = 0; item < ItemsPerLane; ++item)
                             local[item] = output_finalize(local[item]);
@@ -975,7 +1009,7 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8CompleteUnifiedKerne
                 if (operation == CubReductionStageCombine::Sum) {
 #pragma unroll
                     for (int item = 0; item < ItemsPerLane; ++item)
-                        local[item] = output_finalize(local[item]);
+                        local[item] = finalizeFp32Epilogue(output_finalize, local[item]);
                 }
             }
         }
