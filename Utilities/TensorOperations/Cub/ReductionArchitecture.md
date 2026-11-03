@@ -1,5 +1,9 @@
 # Thor Reduction Architecture
 
+The FP8 dense reduction pattern (planner, retained kernels, rankers, contest, cache, depth), which FP16, BF16 and FP32
+are to follow, is written up in `FP8_REDUCTION_PATTERN.md`. Ranker retraining for a GPU is in
+`benchmarks/FP8_RANKER_RETRAINING.md`.
+
 Thor's central GPU reduction implementation lives in `Utilities/TensorOperations/Cub`.
 Dense expression reductions and ragged offset-segmented reductions use these utilities as the central implementation;
 they do not stage inputs through compatibility tensors and do not call `cudnnReduceTensor`. The central utility is
@@ -32,8 +36,8 @@ run/runOn:   existing stamped physical passes -> GPU launches (no planning/tunin
 Original FP8 E4M3/E5M2 ordinary RK VALUE reductions (SUM, MEAN,
 PRODUCT, MIN, MAX, L1Norm, L2Norm, SumSquares), with the enabled floating
 output storage dtypes, use retained OneWindow, DeepRSmallK, AlignedK and
-RuntimeK through the same selector as normal production. The frozen ranker
-nominates a 28-candidate shortlist.
+RuntimeK through the same selector as normal production. The geometry ranker
+nominates a shortlist of the reduction's tuning depth (Quick 6, Regular 12, Ultra 24).
 A staged retained kernel emits a real FP32 `[O,N,K]` output and reduces **one**
 physical stage; FP32 continuation is selected independently by the global
 planner. During cache-miss *measurement only*, `Fp8RKSelectedContinuation`
@@ -71,7 +75,7 @@ allocation, or kernel selection is permitted within normal `runOn()`.
 | One physical-pass selection for R/KR/RK | `DenseReductionPhysicalSelector.{h,cpp}` |
 | Production GPU occupancy and FP32 policy context | `DenseProductionPhysicalSelectionContext.{h,cpp}` |
 | Retained FP8 first-kernel identity and legal physical candidates | `Fp8RK/Fp8RKPhysicalIdentity.*`, `Fp8RK/Fp8RKBoundSelection.*` |
-| Cache-miss FP8 candidate measurement and immutable recipe cache | `Fp8RK/Fp8RKStampAutotuner.*`, `Fp8RK/Fp8RKSelectionCache.h` |
+| Cache-miss FP8 candidate measurement and immutable recipe cache | `Fp8RK/Fp8RKStampAutotuner.*`, `Fp8KR/Fp8KRStampAutotuner.*`, `DenseReductionSelectionCache.h` (one cache for every selector, 1171) |
 | Benchmark-only hypothetical FP32 completion | `Fp8RK/Fp8RKSelectedContinuation*` |
 | Pass workspace, tensor ownership, and launch order | `CubReduction.{h,cpp}`, `DensePhysicalPassExecution.h` |
 
@@ -82,10 +86,11 @@ FP8 input has no old RK fallback; unrelated non-RK paths retain their own
 selection policies. The full retained FP8 VALUE operation/output surface is
 specified and exercised by `Fp8RK/README.md` and the production cutover tests.
 
-Do not treat implementation extensibility as a mandate to add a universal
-selection cache or shared autotuner framework. FP32/FP16/BF16 autotuning and
-additional policy-injection or execution-lifecycle hardening remain separate
-design decisions; this source ownership map does not implement them.
+1171 (user decision, 2026-11-02): the dense reducer has one stamp-time autotuner policy
+(`ReductionAutotuning::autotune`, shared probe and contest rules) and one selection cache
+(`DenseReductionSelectionCache.h`). Every selector, today FP8 RK and FP8 R / KR, keys its winners there by
+(kind, device identity, tuning depth, site); the cache owns single flight, the LRU bound and the depth rule. The
+FP16/BF16 and FP32 selectors are to add kinds to that cache rather than caches of their own.
 
 ## Compiled kernel inventory boundaries
 
@@ -230,8 +235,12 @@ invariant: canonical dense geometry must resolve to `DeviceTransformReduce`, `Co
 `TiledFixedSegment`, or `ComposedDense`. The structural dense planner must produce a complete all-direct composition for
 every disjoint mask; failure is an internal logic error rather than an invitation to enter a catch-all view reducer.
 For VALUE, `ComposedDense` is now only that structural classification: `planDenseReduction()` chooses the actual
-R/KR/RK pass sequence and globally replans after each pass. ARG still uses the transitional interval-composition
-executor until DENSE-ARG-CUTOVER; it must ultimately move onto the same topology planner and flat pass executor.
+R/KR/RK pass sequence and globally replans after each pass. ARG-P1 (Thor1106) moved original FP8 input ARG onto the
+same planner: `CubArgReduction::stamp()` plans FP8 dense ARG with `planDenseReduction()` (aggregate kind `Arg`,
+carried index width from the whole original domain) and executes the planned passes as direct ARG stages (FP32 value +
+carried original index between passes, `local * original_arg_domain_stride` added per pass, nothing added for a
+reducer-created intermediate run). The public geometry and `getPath()` stay the analyzed dense geometry. FP16/BF16/FP32
+ARG still uses the transitional interval-composition executor until its own cutover.
 
 The ordinary-dense ARG selector obeys the same ownership contract. `CubArgReduction::stamp()` requires a dense-contiguous
 input, and the dense gate exhausts ranks 1-9 and every non-empty reduction mask, with singleton-heavy and disjoint-run

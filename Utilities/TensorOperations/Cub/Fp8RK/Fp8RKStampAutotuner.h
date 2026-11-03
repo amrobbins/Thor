@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Utilities/TensorOperations/Cub/CubReductionTuningDepth.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalSelection.h"
 
 #include <cstddef>
@@ -20,7 +21,8 @@ namespace ThorImplementation::CubReductionInternal::Fp8RK {
     float output_scale,
     const Tensor& representative_input,
     const Stream& stream,
-    uint64_t workspace_budget_bytes);
+    uint64_t workspace_budget_bytes,
+    CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular);
 
 // Production selection: reuse the GEMM-style, bounded process-wide recipe
 // cache and coalesce concurrent misses. This legacy Tensor overload validates
@@ -34,6 +36,20 @@ namespace ThorImplementation::CubReductionInternal::Fp8RK {
     float output_scale,
     const Tensor& representative_input,
     const Stream& stream,
-    uint64_t workspace_budget_bytes);
+    uint64_t workspace_budget_bytes,
+    CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular);
+
+// 1142: FP8 ARG's own ranked, autotuned selection at an original FP8 ARG RK site (benchmarks may call it directly).
+// The recipe's `physical` is the winner's ARG identity (retainedFp8ArgPlanForIdentity rebuilds the pass);
+// candidate_count 0 means no retained ARG pass is legal there.
+[[nodiscard]] Fp8RKSelection autotuneArgRKSite(
+    const DenseReductionProblem& problem,
+    DenseReductionSite site,
+    bool maximum,
+    uint64_t original_reduction_size,
+    const Tensor& representative_input,
+    const Stream& stream,
+    uint64_t workspace_budget_bytes,
+    CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular);
 
 } // namespace ThorImplementation::CubReductionInternal::Fp8RK

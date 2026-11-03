@@ -63,6 +63,13 @@ class PlacedNetwork:
 
     def get_network_input_names(self, stamp_index: int = 0) -> list[str]: ...
 
+class ReductionTuningDepth(enum.Enum):
+    quick = 1
+
+    regular = 0
+
+    ultra = 2
+
 class StatusCode(enum.Enum):
     success = 0
 
@@ -78,6 +85,6 @@ class StatusCode(enum.Enum):
 
     deadlock_cycle = 6
 
-__all__: list = ['PlacedNetwork', 'StatusCode']
+__all__: list = ['PlacedNetwork', 'ReductionTuningDepth', 'StatusCode']
 
 def __dir__() -> list[str]: ...

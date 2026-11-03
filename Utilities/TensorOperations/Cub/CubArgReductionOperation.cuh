@@ -1612,16 +1612,23 @@ void launchArgReductionForInput(const Tensor& temp_storage,
                 stream);
             break;
         case CubReductionPath::TiledFixedSegment:
-            launchTiledFixedSegmentArgReduction<InputT>(input.getMemPtr<InputT>(),
-                                                        value_output == nullptr ? nullptr : value_output->getMemPtr<void>(),
-                                                        value_output == nullptr ? DataType::FP32 : value_output->getDataType(),
-                                                        index_output == nullptr ? nullptr : index_output->getMemPtr<void>(),
-                                                        index_output == nullptr ? DataType::UINT32 : index_output->getDataType(),
-                                                        geometry,
-                                                        reduction_op,
-                                                        init,
-                                                        stream);
-            break;
+            // A5 (1119): original FP8 RK ARG always runs a retained FP8 ARG pass (its twin or
+            // retainedFp8ArgFallbackTwin), so the tiled direct ARG kernels are not compiled for one-byte inputs.
+            if constexpr (sizeof(InputT) == 1) {
+                throw std::logic_error("FP8 RK ARG runs the retained FP8 ARG kernels; the tiled direct ARG path is not "
+                                       "compiled for FP8 input.");
+            } else {
+                launchTiledFixedSegmentArgReduction<InputT>(input.getMemPtr<InputT>(),
+                                                            value_output == nullptr ? nullptr : value_output->getMemPtr<void>(),
+                                                            value_output == nullptr ? DataType::FP32 : value_output->getDataType(),
+                                                            index_output == nullptr ? nullptr : index_output->getMemPtr<void>(),
+                                                            index_output == nullptr ? DataType::UINT32 : index_output->getDataType(),
+                                                            geometry,
+                                                            reduction_op,
+                                                            init,
+                                                            stream);
+                break;
+            }
         case CubReductionPath::OffsetSegmented:
             throw std::logic_error("Dense CUB arg reduction received offset-segmented geometry.");
         case CubReductionPath::ComposedDense:
@@ -1869,19 +1876,24 @@ void launchComposedArgReductionStageForInput(const Tensor& temp_storage,
             }
         }
         case CubReductionPath::TiledFixedSegment:
-            launchComposedTiledFixedSegmentArgReduction<InputT, ReductionOpT, IndexT>(
-                value_input.getMemPtr<InputT>(),
-                carried_index_input == nullptr ? nullptr : carried_index_input->getMemPtr<IndexT>(),
-                domain_stride,
-                value_output == nullptr ? nullptr : value_output->getMemPtr<void>(),
-                value_output == nullptr ? DataType::FP32 : value_output->getDataType(),
-                index_output == nullptr ? nullptr : index_output->getMemPtr<void>(),
-                index_output == nullptr ? DataType::UINT32 : index_output->getDataType(),
-                geometry,
-                reduction_op,
-                init,
-                stream);
-            break;
+            if constexpr (sizeof(InputT) == 1) {  // A5 (1119): see launchArgReductionForInput
+                throw std::logic_error("FP8 RK ARG runs the retained FP8 ARG kernels; the composed tiled direct ARG "
+                                       "path is not compiled for FP8 input.");
+            } else {
+                launchComposedTiledFixedSegmentArgReduction<InputT, ReductionOpT, IndexT>(
+                    value_input.getMemPtr<InputT>(),
+                    carried_index_input == nullptr ? nullptr : carried_index_input->getMemPtr<IndexT>(),
+                    domain_stride,
+                    value_output == nullptr ? nullptr : value_output->getMemPtr<void>(),
+                    value_output == nullptr ? DataType::FP32 : value_output->getDataType(),
+                    index_output == nullptr ? nullptr : index_output->getMemPtr<void>(),
+                    index_output == nullptr ? DataType::UINT32 : index_output->getDataType(),
+                    geometry,
+                    reduction_op,
+                    init,
+                    stream);
+                break;
+            }
         case CubReductionPath::OffsetSegmented:
         case CubReductionPath::ComposedDense:
             throw std::logic_error("Composed dense CUB arg stage must resolve to a direct dense reducer family.");

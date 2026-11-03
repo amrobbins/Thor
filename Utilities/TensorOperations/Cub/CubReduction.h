@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/TensorOperations/Cub/CubReductionPassRole.h"
+#include "Utilities/TensorOperations/Cub/CubReductionTuningDepth.h"
 #include "Utilities/TensorOperations/Cub/DenseReductionFamilies.h"
 
 #include <cstddef>
@@ -305,6 +306,7 @@ struct CubReductionGeometry {
     CubReductionPath path = CubReductionPath::DeviceTransformReduce;
 };
 namespace CubReductionInternal {
+struct DenseRetainedFp8ArgPhysicalPlan;
 
 /**
  * One bound ordinary-dense physical pass.
@@ -384,20 +386,25 @@ class StampedCubSegmentedReduction;
  */
 class CubReduction {
    public:
+    // tuning_depth (1141): stamp-time autotuning depth of retained FP8 sites. 1169: nullopt takes the ambient depth
+    // (resolveCubReductionTuningDepth: this thread's ScopedCubReductionTuningDepth, else the process default).
     CubReduction(CubReductionOp op,
                  uint32_t axis,
                  std::optional<DataType> output_dtype = std::nullopt,
-                 float output_scale = 1.0f);
+                 float output_scale = 1.0f,
+                 std::optional<CubReductionTuningDepth> tuning_depth = std::nullopt);
     CubReduction(CubReductionOp op,
                  std::vector<uint32_t> axes,
                  std::optional<DataType> output_dtype = std::nullopt,
-                 float output_scale = 1.0f);
+                 float output_scale = 1.0f,
+                 std::optional<CubReductionTuningDepth> tuning_depth = std::nullopt);
 
     [[nodiscard]] CubReductionOp getOperation() const { return op; }
     [[nodiscard]] uint32_t getAxis() const { return axes.front(); }
     [[nodiscard]] const std::vector<uint32_t>& getAxes() const { return axes; }
     [[nodiscard]] std::optional<DataType> getConfiguredOutputDataType() const { return output_dtype; }
     [[nodiscard]] float getOutputScale() const { return output_scale; }
+    [[nodiscard]] CubReductionTuningDepth getTuningDepth() const { return tuning_depth; }
     [[nodiscard]] DataType resolveOutputDataType(DataType input_dtype) const;
 
     /**
@@ -486,6 +493,7 @@ class CubReduction {
 
     std::optional<DataType> output_dtype;
     float output_scale;
+    CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular;
 };
 
 /**
@@ -670,15 +678,18 @@ class CubArgReduction {
    public:
     CubArgReduction(CubArgReductionOp op,
                     uint32_t axis,
-                    CubArgReductionOutputOptions outputs = {});
+                    CubArgReductionOutputOptions outputs = {},
+                    std::optional<CubReductionTuningDepth> tuning_depth = std::nullopt);
     CubArgReduction(CubArgReductionOp op,
                     std::vector<uint32_t> axes,
-                    CubArgReductionOutputOptions outputs = {});
+                    CubArgReductionOutputOptions outputs = {},
+                    std::optional<CubReductionTuningDepth> tuning_depth = std::nullopt);
 
     [[nodiscard]] CubArgReductionOp getOperation() const { return op; }
     [[nodiscard]] uint32_t getAxis() const { return axes.front(); }
     [[nodiscard]] const std::vector<uint32_t>& getAxes() const { return axes; }
     [[nodiscard]] const CubArgReductionOutputOptions& getOutputOptions() const { return outputs; }
+    [[nodiscard]] CubReductionTuningDepth getTuningDepth() const { return tuning_depth; }
     [[nodiscard]] DataType resolveValueOutputDataType(DataType input_dtype) const;
     [[nodiscard]] static float getFp32EmptyReductionValue(CubArgReductionOp op);
     [[nodiscard]] static uint64_t getEmptyReductionIndex() { return std::numeric_limits<uint64_t>::max(); }
@@ -762,6 +773,13 @@ class CubArgReduction {
         std::optional<Tensor> index_output,
         const CubReductionGeometry& geometry,
         const Stream& stream) const;
+    // ARG-P1: original FP8 input. planDenseReduction() pass list executed by direct ARG stages.
+    [[nodiscard]] std::shared_ptr<StampedCubArgReduction> stampPlannedDenseValidated(
+        const Tensor& input,
+        std::optional<Tensor> value_output,
+        std::optional<Tensor> index_output,
+        const CubReductionGeometry& geometry,
+        const Stream& stream) const;
     [[nodiscard]] std::shared_ptr<StampedCubArgReduction> stampComposedDenseValidated(
         const Tensor& input,
         std::optional<Tensor> value_output,
@@ -773,6 +791,7 @@ class CubArgReduction {
     CubArgReductionOp op;
     std::vector<uint32_t> axes;
     CubArgReductionOutputOptions outputs;
+    CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular;
 };
 
 /**
@@ -783,6 +802,25 @@ class StampedCubArgReduction {
    public:
     void run();
     void runOn(Stream& run_stream) const;
+
+    /**
+     * Benchmarks only: runs a planned FP8 ARG stamp (ARG-P1) on another input of the same dtype and element count, so
+     * cold-input sweeps can time the stamped production plan without re-stamping. Production binds its input.
+     */
+    void runOnInputForBenchmark(const Tensor& replacement_input, Stream& run_stream) const;
+    /**
+     * Benchmarks only (1174): runs this stamp, planned or direct, on another input and other outputs of the stamp's
+     * dtypes and element counts. Intermediates and scratch stay the stamp's own. Cold-L2 audits time a production
+     * stamp on rotating input and output views without re-stamping. A replacement output must be given exactly when
+     * the stamp has that output. Production binds its tensors.
+     */
+    void runOnTensorsForBenchmark(const Tensor& replacement_input,
+                                  const std::optional<Tensor>& replacement_value_output,
+                                  const std::optional<Tensor>& replacement_index_output,
+                                  Stream& run_stream) const;
+    /** Executed passes in order (e.g. "fp8_arg_one_window:o8_w1_p16_c1", "direct:tiled_generic") for planned FP8 ARG
+     *  and composed stamps; empty for a single direct stamp. Diagnostic only. */
+    [[nodiscard]] std::vector<std::string> getPlannedPassNames() const;
 
     [[nodiscard]] uint32_t gpuNum() const { return input.getPlacement().getDeviceNum(); }
     [[nodiscard]] CubArgReductionOp getOperation() const { return op; }
@@ -845,6 +883,12 @@ class StampedCubArgReduction {
     std::optional<DataType> composed_carried_index_dtype;
     uint64_t composed_domain_stride = 1;
     std::vector<std::shared_ptr<StampedCubArgReduction>> composed_stages;
+    // ARG-A2: a planned stage that launches a retained FP8 ARG physical kernel instead of a direct ARG reducer.
+    std::shared_ptr<const CubReductionInternal::DenseRetainedFp8ArgPhysicalPlan> fp8_arg_plan;
+
+    void launchBoundStage(const Tensor& stage_input, Stream& run_stream) const;
+    void launchBoundStage(const Tensor& stage_input, Tensor* value_output_ptr, Tensor* index_output_ptr,
+                          Stream& run_stream) const;
 
     Stream stream;
 };
@@ -862,6 +906,13 @@ class StampedCubReduction {
     void run(float output_scale);
     void runOn(Stream& run_stream) const;
     void runOn(Stream& run_stream, float output_scale) const;
+    /**
+     * Benchmarks only (1174): runs the stamped plan on another input and output with the stamp's dtypes and element
+     * counts, at the stamp's output scale. Intermediates and scratch stay the stamp's own. Cold-L2 audits time a
+     * production stamp on rotating input and output views without re-stamping. Production binds its tensors.
+     */
+    void runOnTensorsForBenchmark(const Tensor& replacement_input, const Tensor& replacement_output,
+                                  Stream& run_stream) const;
 
     [[nodiscard]] uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
     [[nodiscard]] Tensor getInputTensor() const { return input; }

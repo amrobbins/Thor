@@ -30,7 +30,8 @@ class DenseProductionPhysicalSelectionContext {
                                              uint64_t original_reduction_size = 0,
                                              float output_scale = 1.0f,
                                              std::optional<CubReductionOp> original_value_operation = std::nullopt,
-                                             uint64_t workspace_budget_bytes = std::numeric_limits<uint64_t>::max());
+                                             uint64_t workspace_budget_bytes = std::numeric_limits<uint64_t>::max(),
+                                             CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular);
 
     DenseProductionPhysicalSelectionContext(const DenseProductionPhysicalSelectionContext&) = delete;
     DenseProductionPhysicalSelectionContext& operator=(const DenseProductionPhysicalSelectionContext&) = delete;

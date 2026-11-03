@@ -382,6 +382,67 @@ TEST(CubReduction, KParallelCompleteGridStridesBeyond65535OuterRows) {
                           std::vector<float>(outer_size * inner_size, 32.0f), 1.0e-5f);
 }
 
+// 1136: K-parallel CTAs own consecutive packets of the flat [outer, K / items] packet space, so a CTA spans several
+// outer rows at narrow K. Every packet, outer row and shard must land in its own output, including packets that cross
+// CTA boundaries and outer counts past the 65535-CTA grid cap.
+TEST(CubReduction, KParallelFlatPacketOwnershipCoversNarrowAndWideK) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    struct Case {
+        uint64_t outer, r, k;
+        size_t packet_bytes;
+        uint32_t block_threads;
+        uint64_t shards;  // 1: Complete
+    };
+    const std::vector<Case> cases{
+        {70001, 3, 2, 8, 32, 1},    // K = 2: 16 outer rows per warp; grid-strides past 65535 CTAs
+        {9001, 5, 6, 8, 32, 1},     // 3 packets per row: rows straddle warps
+        {4099, 2, 40, 16, 32, 1},   // 10 packets per row
+        {517, 7, 3, 4, 64, 1},
+        {33, 4, 1000, 16, 256, 1},  // wide K: 250 packets per row, 6 CTAs straddle rows
+        {1000, 50, 3, 4, 32, 5},    // Staged
+        {257, 33, 10, 8, 32, 4},
+        {3, 64, 1024, 16, 32, 2},
+    };
+    for (const Case& c : cases) {
+        SCOPED_TRACE(::testing::Message() << "outer=" << c.outer << " R=" << c.r << " K=" << c.k << " packet="
+                                          << c.packet_bytes << " threads=" << c.block_threads
+                                          << " shards=" << c.shards);
+        std::vector<float> values(c.outer * c.r * c.k);
+        for (uint64_t o = 0; o < c.outer; ++o)
+            for (uint64_t r = 0; r < c.r; ++r)
+                for (uint64_t k = 0; k < c.k; ++k)
+                    values[(o * c.r + r) * c.k + k] = static_cast<float>((o * 7 + r * 3 + k * 5) % 13);
+        Tensor input = makeGpuTensor(values, {c.outer, c.r, c.k}, stream, DataType::FP32);
+        const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
+        ASSERT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
+        const bool complete = c.shards == 1;
+        const CubReductionInternal::KParallelTiledStagePlan plan{
+            complete ? CubReductionInternal::TiledRKStageTopology::Complete
+                     : CubReductionInternal::TiledRKStageTopology::Staged,
+            c.packet_bytes, c.block_threads, c.shards};
+        const auto semantics = CubReductionInternal::makeValueReductionStageSemantics(
+            CubReductionOp::Sum, CubReductionInternal::CubReductionStageRole::Complete, c.r);
+        Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, complete ? std::vector<uint64_t>{c.outer, c.k}
+                                                                              : std::vector<uint64_t>{c.outer, c.shards, c.k}));
+        output.fill(-1.0f, stream);
+        CubReductionInternal::launchKParallelTiledStage(semantics, input, output, geometry, plan, 1.0f, stream);
+        stream.synchronize();
+        std::vector<float> expected(c.outer * c.shards * c.k, 0.0f);
+        const uint64_t base = c.r / c.shards, extra = c.r % c.shards;
+        for (uint64_t o = 0; o < c.outer; ++o) {
+            for (uint64_t s = 0; s < c.shards; ++s) {
+                const uint64_t begin = s * base + std::min(s, extra);
+                const uint64_t end = begin + base + (s < extra ? 1 : 0);
+                for (uint64_t r = begin; r < end; ++r)
+                    for (uint64_t k = 0; k < c.k; ++k)
+                        expected[(o * c.shards + s) * c.k + k] += values[(o * c.r + r) * c.k + k];
+            }
+        }
+        expectFloatVectorNear(copyGpuTensorAsFloat(output, stream), expected, 0.0f);
+    }
+}
+
 TEST(CubReduction, KParallelTiledStagedTopologyDefersFinalizerAndScale) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);

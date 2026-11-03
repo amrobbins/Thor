@@ -46,6 +46,7 @@ def test_top_level_api_is_curated():
         "MaxParameterConstraint",
         "MinMaxParameterConstraint",
         "PlacedNetwork",
+        "ReductionTuningDepth",
         "StatusCode",
         "TensorSpec",
         "_thor",
@@ -77,6 +78,7 @@ def test_parameter_and_constraint_namespaces_export_public_types():
 def test_runtime_namespace_exports_runtime_types():
     assert thor.runtime.StatusCode.success is thor.Network.StatusCode.success
     assert "PlacedNetwork" in dir(thor.runtime)
+    assert thor.runtime.ReductionTuningDepth.regular is thor.Network.ReductionTuningDepth.regular
 
 
 def test_ensembles_namespace_exports_manifest_types():

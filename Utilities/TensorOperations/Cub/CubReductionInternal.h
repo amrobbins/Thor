@@ -2,6 +2,7 @@
 
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Cub/CubReductionStageSemantics.h"
+#include "Utilities/TensorOperations/Cub/Fp8KR/Fp8KRSegments.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -236,6 +237,149 @@ void launchFp8OneWindowRuntimeKComplete(const Tensor& input,
     const Fp8OneWindowRuntimeKUnit& unit,
     uint32_t warps_per_output,
     CubReductionStageCombine combine = CubReductionStageCombine::Sum);
+
+/** ARG-A2: the OneWindow argmin/argmax twin of a OneWindow unit (one kernel per unit; argmin/argmax and E4M3/E5M2 are
+ * runtime). Complete only: writes the winning value (FP8/FP16/BF16/FP32 storage, optional) and the index
+ * row * domain_stride (UINT32/UINT64, optional) for each of outer x K outputs. NaN propagates; the lowest row wins
+ * ties, -0 ties +0. fp8OneWindowArgSupports() is the legality rule shared by selection and launch
+ * (R < 2^23, UINT32 element indexing, a compiled unit whose bucket holds K). */
+[[nodiscard]] bool fp8OneWindowArgSupports(uint64_t outer_size,
+                                           uint64_t reduction_size,
+                                           uint64_t inner_size,
+                                           const Fp8OneWindowRuntimeKUnit& unit,
+                                           uint32_t warps_per_output);
+
+/** ARG-A3: the RuntimeK PacketComplete argmin/argmax twin: VALUE's persistent [outer, K tile] work items with 1/2/4/8
+ * warps per item over R, at most 256 components per tile (8 per lane; fp8PacketCompleteArgTileComponents keeps VALUE's
+ * tile up to 256 unless a 256-component tile needs fewer key words per row). Complete: any supported value storage,
+ * UINT32/UINT64 index. Requires a 16-byte aligned input base (as the VALUE kernel). */
+[[nodiscard]] uint32_t fp8PacketCompleteArgTileComponents(uint64_t inner_size, uint32_t value_tile_components);
+[[nodiscard]] bool fp8PacketCompleteArgSupports(uint64_t outer_size,
+                                                uint64_t reduction_size,
+                                                uint64_t inner_size,
+                                                uint32_t warps_per_output,
+                                                uint32_t tile_components);
+void launchFp8PacketCompleteArg(const Tensor& input,
+                                Tensor* value_output,
+                                Tensor* index_output,
+                                const CubReductionGeometry& geometry,
+                                uint32_t warps_per_output,
+                                uint32_t tile_components,
+                                bool maximum,
+                                uint64_t domain_stride,
+                                Stream& stream);
+
+/** ARG-A3: the AlignedK argmin/argmax twin: one thread owns one aligned 2- or 8-byte packet of components (K a multiple
+ * of the packet; CTA 32/64/128 threads is a launch operand) over its shard's balanced rows. One shard is Complete (any
+ * supported value storage, UINT32/UINT64 index); several write FP32 value + carried index partials. */
+[[nodiscard]] bool fp8AlignedKArgSupports(uint64_t outer_size,
+                                          uint64_t reduction_size,
+                                          uint64_t inner_size,
+                                          uint32_t packet_bytes,
+                                          uint32_t cta_threads,
+                                          uint64_t shards);
+void launchFp8AlignedKArgPass(const Tensor& input,
+                              Tensor* value_output,
+                              Tensor* index_output,
+                              const CubReductionGeometry& geometry,
+                              uint32_t packet_bytes,
+                              uint32_t cta_threads,
+                              uint64_t shards,
+                              bool maximum,
+                              uint64_t domain_stride,
+                              Stream& stream,
+                              uint32_t* packed_partials = nullptr);
+
+/** ARG-A3g (1116): packed staged partials. A staged twin with `packed_partials` writes one shard-relative lane
+ * candidate per partial (key << 24 | shard row << 1 | negative zero, 4 bytes) instead of FP32 value + carried index
+ * (8 bytes); launchFp8ArgPackedContinuation reduces them over shards into the requested outputs. Shard s begins at
+ * s * uniform_rows_per_shard, or at VALUE's balanced split when uniform_rows_per_shard is 0 (AlignedK). */
+void launchFp8DeepRSmallKArgFirstStagePacked(const Tensor& input,
+                                             uint32_t* packed_partials,
+                                             const CubReductionGeometry& geometry,
+                                             uint64_t rows_per_shard,
+                                             uint64_t shards,
+                                             bool maximum,
+                                             Stream& stream);
+/** 1135: the packed continuation splits each output's shards across a block (fp8ArgPackedContinuationSplitKernel)
+ * when there are many shards and too few outputs for one thread per output to hide the shard loop's latency.
+ * 1137 (1135 audit, against the per-output kernel): at 16-31 shards the split wins below 16 Ki outputs (0.5-0.7x)
+ * and loses from there (1.2x at 16-64 Ki, 1.8x at 64-128 Ki); at >= 32 shards it wins below 64 Ki outputs
+ * (0.5-0.9x) and loses above (1.5-1.7x). A layout must also fill a warp (columns x groups >= 32): K = 2 at 16 shards
+ * left 24 of 32 lanes idle. */
+inline constexpr uint64_t FP8_ARG_PACKED_SPLIT_MIN_SHARDS = 16;
+inline constexpr uint64_t FP8_ARG_PACKED_SPLIT_MAX_OUTPUTS = uint64_t{1} << 14;
+inline constexpr uint64_t FP8_ARG_PACKED_SPLIT_WIDE_MIN_SHARDS = 32;
+inline constexpr uint64_t FP8_ARG_PACKED_SPLIT_WIDE_MAX_OUTPUTS = uint64_t{1} << 16;
+[[nodiscard]] bool fp8ArgPackedContinuationSplitsShards(uint64_t outer_size, uint64_t inner_size, uint64_t shards);
+/** Split layout: `columns` components (K below 32, else 32) x `groups` shard groups, `threads` = that rounded up to
+ * whole warps (at most 1024). */
+struct Fp8ArgPackedSplitLayout {
+    uint32_t columns = 0;
+    uint32_t groups = 0;
+    uint32_t threads = 0;
+};
+[[nodiscard]] Fp8ArgPackedSplitLayout fp8ArgPackedSplitLayout(uint64_t inner_size, uint64_t shards);
+void launchFp8ArgPackedContinuation(const uint32_t* packed_partials,
+                                    Tensor* value_output,
+                                    Tensor* index_output,
+                                    DataType input_dtype,
+                                    uint64_t outer_size,
+                                    uint64_t reduction_size,
+                                    uint64_t inner_size,
+                                    uint64_t shards,
+                                    uint64_t uniform_rows_per_shard,
+                                    bool maximum,
+                                    uint64_t domain_stride,
+                                    Stream& stream);
+
+/** ARG-A3: the RuntimeK rotated argmin/argmax twin, one rotated kernel (8-byte packets only since 1112; the logical K
+ * tile is fp8RuntimeKArgTileComponents) at a runtime shard depth. One shard (rows_per_shard >= R) is a Complete pass writing the
+ * requested outputs (value in any supported storage, index UINT32/UINT64); several shards write FP32 value + carried
+ * index partials [outer, ceil(R / rows), K]. index = row * domain_stride. */
+[[nodiscard]] uint32_t fp8RuntimeKArgTileComponents(uint32_t packet_bytes);
+[[nodiscard]] bool fp8RuntimeKArgSupports(uint64_t outer_size,
+                                          uint64_t reduction_size,
+                                          uint64_t inner_size,
+                                          uint64_t rows_per_shard,
+                                          uint32_t packet_bytes);
+void launchFp8RuntimeKArgPass(const Tensor& input,
+                              Tensor* value_output,
+                              Tensor* index_output,
+                              const CubReductionGeometry& geometry,
+                              uint64_t rows_per_shard,
+                              uint32_t packet_bytes,
+                              bool maximum,
+                              uint64_t domain_stride,
+                              Stream& stream,
+                              uint32_t* packed_partials = nullptr);
+
+/** ARG-A3: the DeepRSmallK argmin/argmax twin: staged first stage at a retained depth (Fp8DeepRSmallKPolicy) writing
+ * FP32 value + carried index (UINT32/UINT64) partials [outer, ceil(R / rows), K]; index = row * domain_stride. */
+[[nodiscard]] bool fp8DeepRSmallKArgSupports(uint64_t outer_size,
+                                             uint64_t reduction_size,
+                                             uint64_t inner_size,
+                                             uint64_t rows_per_shard);
+
+void launchFp8DeepRSmallKArgFirstStage(const Tensor& input,
+                                       Tensor& value_partials,
+                                       Tensor& index_partials,
+                                       const CubReductionGeometry& geometry,
+                                       uint64_t rows_per_shard,
+                                       uint64_t shards,
+                                       bool maximum,
+                                       uint64_t domain_stride,
+                                       Stream& stream);
+
+void launchFp8OneWindowArgComplete(const Tensor& input,
+                                   Tensor* value_output,
+                                   Tensor* index_output,
+                                   const CubReductionGeometry& geometry,
+                                   const Fp8OneWindowRuntimeKUnit& unit,
+                                   uint32_t warps_per_output,
+                                   bool maximum,
+                                   uint64_t domain_stride,
+                                   Stream& stream);
 
 
 /** Retained RuntimeK PacketP16 Complete kernel. K tiles and warp ownership are
@@ -540,5 +684,43 @@ void launchComposedArgMaxReductionStage(const Tensor& temp_storage,
                                         uint64_t domain_stride,
                                         DataType carried_index_dtype,
                                         Stream& stream);
+
+/**
+ * 1146-1148: retained FP8 R / KR VALUE pass over [shape.rows, shape.row_bytes] (Fp8KR/Fp8KRSegments.h) writing
+ * `output` ([rows] elements, any FP8 Complete storage dtype; semantics finalize and output_scale apply once). Pack and
+ * Group are one kernel; Split writes chunk partials to `scratch` (fp8KRScratchBytes(shape, false) bytes, 16-byte
+ * aligned, no initialization) and a finishing kernel combines them in chunk order. Any input address works:
+ * loads use the tensor's 4-byte word grid and may read up to 3 bytes on either side of a row (inside the allocation
+ * and its trailing padding).
+ */
+/** 1158: the ranker site of a retained FP8 KR VALUE pass (Fp8KRSegments.h), shared by production and the sweep. */
+[[nodiscard]] Fp8KR::Fp8KRRankerSite fp8KRValueRankerSite(const CubReductionStageSemantics& semantics,
+                                                          DataType input_dtype);
+
+/** 1147: semantics the retained FP8 KR VALUE kernels compile: SUM x {identity, |x|, x^2}, PRODUCT, MIN / MAX x any. */
+[[nodiscard]] bool fp8KRValueSupports(const CubReductionStageSemantics& semantics);
+
+void launchFp8KRValueSegments(const CubReductionStageSemantics& semantics,
+                              const Tensor& input,
+                              Tensor& output,
+                              const Fp8KR::Fp8KRSegmentShape& shape,
+                              void* scratch,
+                              uint64_t scratch_bytes,
+                              float output_scale,
+                              Stream& stream,
+                              Fp8KR::Fp8KRSplitStages stages = Fp8KR::Fp8KRSplitStages::Both);
+
+/** 1146-1148: retained FP8 R / KR argmin/argmax pass (same families; Split partials are 64-bit wide candidates in
+ *  `scratch`, fp8KRScratchBytes(shape, true) bytes). Index = row-local index * domain_stride. */
+void launchFp8KRArgSegments(const Tensor& input,
+                            Tensor* value_output,
+                            Tensor* index_output,
+                            const Fp8KR::Fp8KRSegmentShape& shape,
+                            void* scratch,
+                            uint64_t scratch_bytes,
+                            bool maximum,
+                            uint64_t domain_stride,
+                            Stream& stream,
+                            Fp8KR::Fp8KRSplitStages stages = Fp8KR::Fp8KRSplitStages::Both);
 
 }  // namespace ThorImplementation::CubReductionInternal

@@ -1,5 +1,6 @@
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 #include "Utilities/TensorOperations/Cub/CubReductionOperation.cuh"
+#include "Utilities/TensorOperations/Cub/Fp8ArgKey.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8DeepRSmallKSelector.h"
 
 #include "Utilities/Exceptions.h"
@@ -185,6 +186,9 @@ template <typename InputT>
 constexpr int SHALLOW_FP8_WARPS = 8;
 constexpr int SHALLOW_FP8_THREADS = SHALLOW_FP8_WARPS * TILED_REDUCTION_WARP_THREADS;
 static_assert(SHALLOW_FP8_THREADS == 256);
+
+static_assert(Fp8RK::FP8_RK_MAX_GRID_EXTENT == REDUCTION_WORK_GRID_MAX_EXTENT,
+              "Fp8RKLaunchLimits.h must restate reductionWorkGrid's extent cap");
 
 [[nodiscard]] inline bool shallowFp8FitsUint32Indexing(const CubReductionGeometry& geometry) {
     constexpr uint64_t MaxIndex = std::numeric_limits<uint32_t>::max();
@@ -1133,6 +1137,69 @@ template <int PacketBytes, typename InputT>
     return window;
 }
 
+// VALUE-P1: packed FP8x4 decode in the DeepRSmallK first stage. The scalar loop decoded one staged byte per element;
+// the ARG twin's packed keying (1109) ran 0.93x VALUE's time at eight components per lane. With the typed decoder,
+// lanes owning four or more components decode four components of one row per decodeFp8x4ToFp32 (rows still in
+// increasing order per component: bit-identical). 1120 A/B (MIN/MAX, cold L2): c8 0.83x (rows1024 0.69x), c5 0.96x,
+// c4 0.985x; DeepRSmallK SASS -4%. Packing four rows of one component for one or two components per lane lost
+// (c1 1.034x, c2 1.010x), so those keep the scalar loop (1122). THOR_FP8_DEEP_R_VALUE_SCALAR_DECODE=1 restores it.
+#ifndef THOR_FP8_DEEP_R_VALUE_SCALAR_DECODE
+#define THOR_FP8_DEEP_R_VALUE_SCALAR_DECODE 0
+#endif
+template <typename InputT, int MaxComponentsPerLane, typename ReductionOpT, typename InputTransformT, typename DecoderT>
+__device__ __forceinline__ void decodeNarrowFp8DeepRGroup(float (&local)[MaxComponentsPerLane],
+                                                          const uint8_t* staged_bytes,
+                                                          uint32_t prefix_elements,
+                                                          uint32_t lane,
+                                                          uint32_t group_rows,
+                                                          uint32_t inner_size_32,
+                                                          const ReductionOpT& reduction_op,
+                                                          const InputTransformT& input_transform,
+                                                          const DecoderT& decoder) {
+    constexpr bool Packed = !THOR_FP8_DEEP_R_VALUE_SCALAR_DECODE &&
+                            std::is_same_v<DecoderT, NarrowFp8TypedFormatDecoder<InputT>>;
+    static_cast<void>(decoder);
+    if constexpr (Packed && MaxComponentsPerLane >= 4) {
+#pragma unroll
+        for (int slot_base = 0; slot_base < MaxComponentsPerLane; slot_base += 4) {
+            const uint32_t first_component = lane + static_cast<uint32_t>(slot_base) * TILED_REDUCTION_WARP_THREADS;
+            if (first_component >= inner_size_32) continue;
+            uint32_t staged_index = prefix_elements + first_component;
+            for (uint32_t row = 0; row < group_rows; ++row, staged_index += inner_size_32) {
+                uint32_t packed = 0;
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    if (slot_base + j < MaxComponentsPerLane &&
+                        first_component + static_cast<uint32_t>(j) * TILED_REDUCTION_WARP_THREADS < inner_size_32) {
+                        packed |= static_cast<uint32_t>(staged_bytes[staged_index + j * TILED_REDUCTION_WARP_THREADS])
+                                  << (8 * j);
+                    }
+                }
+                const float4 decoded = decodeFp8x4ToFp32<InputT>(packed);
+                const float values[4] = {decoded.x, decoded.y, decoded.z, decoded.w};
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    if (slot_base + j < MaxComponentsPerLane &&
+                        first_component + static_cast<uint32_t>(j) * TILED_REDUCTION_WARP_THREADS < inner_size_32) {
+                        local[slot_base + j] = reduction_op(local[slot_base + j], input_transform(values[j]));
+                    }
+                }
+            }
+        }
+    } else {
+        for (int slot = 0; slot < MaxComponentsPerLane; ++slot) {
+            const uint32_t component = lane + static_cast<uint32_t>(slot) * TILED_REDUCTION_WARP_THREADS;
+            if (component < inner_size_32) {
+                uint32_t staged_index = prefix_elements + component;
+                for (uint32_t row = 0; row < group_rows; ++row, staged_index += inner_size_32) {
+                    const float value = decoder(staged_bytes[staged_index]);
+                    local[slot] = reduction_op(local[slot], input_transform(value));
+                }
+            }
+        }
+    }
+}
+
 // P5-C: the shard depth is a runtime operand. It only places and clamps each shard; the row loops already ran on the
 // runtime rows_per_warp_group / shard_rows, and the five compiled depths produced identical SASS apart from that
 // constant (sass-1069). Retained depths are powers of two and the kernel receives log2(depth): a runtime 64-bit
@@ -1230,16 +1297,10 @@ __global__ void narrowFp8PackedFlatRCooperativeFirstStageKernel(const InputT* in
                 }
 
                 const auto* staged_bytes = reinterpret_cast<const uint8_t*>(&staged_packets[warp][0]);
-                for (int slot = 0; slot < MaxComponentsPerLane; ++slot) {
-                    const uint32_t component = static_cast<uint32_t>(lane + slot * TILED_REDUCTION_WARP_THREADS);
-                    if (component < inner_size_32) {
-                        uint32_t staged_index = prefix_elements + component;
-                        for (uint32_t row = 0; row < group_rows; ++row, staged_index += inner_size_32) {
-                            const float value = decoder(staged_bytes[staged_index]);
-                            local[slot] = reduction_op(local[slot], input_transform(value));
-                        }
-                    }
-                }
+                decodeNarrowFp8DeepRGroup<InputT, MaxComponentsPerLane>(local, staged_bytes, prefix_elements,
+                                                                        static_cast<uint32_t>(lane), group_rows,
+                                                                        inner_size_32, reduction_op, input_transform,
+                                                                        decoder);
                 __syncwarp();
             }
         } else {
@@ -1260,16 +1321,10 @@ __global__ void narrowFp8PackedFlatRCooperativeFirstStageKernel(const InputT* in
                 __syncwarp();
 
                 const auto* staged_bytes = reinterpret_cast<const uint8_t*>(&staged_packets[warp][0]);
-                for (int slot = 0; slot < MaxComponentsPerLane; ++slot) {
-                    const uint32_t component = static_cast<uint32_t>(lane + slot * TILED_REDUCTION_WARP_THREADS);
-                    if (component < inner_size_32) {
-                        uint32_t staged_index = prefix_elements + component;
-                        for (uint32_t row = 0; row < group_rows; ++row, staged_index += inner_size_32) {
-                            const float value = decoder(staged_bytes[staged_index]);
-                            local[slot] = reduction_op(local[slot], input_transform(value));
-                        }
-                    }
-                }
+                decodeNarrowFp8DeepRGroup<InputT, MaxComponentsPerLane>(local, staged_bytes, prefix_elements,
+                                                                        static_cast<uint32_t>(lane), group_rows,
+                                                                        inner_size_32, reduction_op, input_transform,
+                                                                        decoder);
                 __syncwarp();
             }
         }
@@ -2017,6 +2072,1518 @@ CubKernelOccupancyInfo queryFp8OneWindowRuntimeKOccupancyTyped(DataType input_dt
     return occupancy;
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// ARG-A2: OneWindow argmin/argmax twins (one kernel per OneWindow unit; the runtime Fp8ArgFold covers argmin/argmax x
+// E4M3/E5M2). Same packet windows, staging, lane ownership, R workers and merge topology as
+// fp8OneWindowRuntimeKCompleteKernel, with one uint32 lane candidate per owned component (Fp8ArgKey.h) in place of an
+// FP32 accumulator. Candidates carry the absolute row, so lanes, workers and warps merge with a plain unsigned min;
+// the launcher requires R < FP8_ARG_MAX_LANE_ROWS. Templates only: kernels are instantiated by the exported launcher
+// after this anonymous namespace (the FP8 VALUE inventory TU compiles this prefix and must not gain ARG kernels).
+
+__device__ __forceinline__ float decodeFp8ArgByte(uint32_t byte, bool e5m2) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    if (e5m2) {
+        __nv_fp8_e5m2 value;
+        value.__x = static_cast<__nv_fp8_storage_t>(byte);
+        return static_cast<float>(value);
+    }
+    __nv_fp8_e4m3 value;
+    value.__x = static_cast<__nv_fp8_storage_t>(byte);
+    return static_cast<float>(value);
+#else
+    static_cast<void>(byte);
+    static_cast<void>(e5m2);
+    return 0.0f;
+#endif
+}
+
+struct Fp8ArgOutputs {
+    void* value;  // null: no value output
+    DataType value_dtype;
+    void* index;  // null: no index output
+    DataType index_dtype;
+    uint64_t domain_stride;  // the reduced run's original ARG-domain stride: index = row * domain_stride
+    Fp8ArgFold fold;
+    bool e5m2;
+    // ARG-A3g (1116): staged passes may instead write the raw shard-relative lane candidate, 4 bytes per partial
+    // (key << 24 | shard row << 1 | negative zero); fp8ArgPackedContinuationKernel finishes the reduction.
+    uint32_t* packed = nullptr;
+};
+
+// MayPack: only the staged kernels (DeepRSmallK, rotated RuntimeK) test `packed`; Complete kernels (OneWindow,
+// PacketComplete) compile without the branch (1116 measured the OneWindow O1 c16 twin 1.12x slower with it, 63 -> 64
+// registers).
+template <bool MayPack = false>
+__device__ __forceinline__ void storeFp8ArgResult(const Fp8ArgOutputs& outputs, uint64_t output_index,
+                                                  uint32_t candidate, uint64_t row_base = 0) {
+    if constexpr (MayPack) {
+        if (outputs.packed != nullptr) {
+            outputs.packed[output_index] = candidate;
+            return;
+        }
+    }
+    if (outputs.value != nullptr) {
+        const uint32_t byte = fp8ArgValueByte(candidate >> 24, candidate & 1u, outputs.fold);
+        storeFp32AsRuntimeDType(outputs.value, outputs.value_dtype, output_index,
+                                decodeFp8ArgByte(byte, outputs.e5m2));
+    }
+    if (outputs.index != nullptr) {
+        const uint64_t index =
+            (row_base + ((candidate >> 1) & (FP8_ARG_MAX_LANE_ROWS - 1u))) * outputs.domain_stride;
+        if (outputs.index_dtype == DataType::UINT32) {
+            static_cast<uint32_t*>(outputs.index)[output_index] = static_cast<uint32_t>(index);
+        } else {
+            static_cast<uint64_t*>(outputs.index)[output_index] = index;
+        }
+    }
+}
+
+// ARG-A3i (1126): linear staging for the O1 ARG units with one or two components per lane. The O1 subgroup is the
+// whole warp, so lane's packet goes to bytes [lane * PacketBytes, +PacketBytes) of the warp's slice (one vector store)
+// and staged byte b is simply byte b (one LDS.U8, no plane arithmetic). Plane-major staging cost ~10 SASS
+// instructions per gathered byte (shift, mask, plane index, word load, extract), ~41 of the 72 per four rows; the
+// O1 reads stay conflict-free (lanes read at most 32 contiguous bytes per row step).
+// 1128: every c1/c2 unit stages linearly. Subgroup s's slice starts at s * SliceBytes; O2/O4/O8 pad each slice by
+// LanesPerOutput words, so consecutive slices start 16/8/4 banks apart (5 * LanesPerOutput words mod 32) and the
+// subgroups' reads (at most LanesPerOutput contiguous bytes per row step) never share a bank. O1 c4/c8 also stage
+// linearly and own quads of adjacent components (ONE_WINDOW_ARG_QUAD_OWNERSHIP); their two-word reads may touch one
+// word past the window, so O1 slices carry a 4-word pad.
+// 1129: also O2/O4/O8 c4 (one quad of 4 * LanesPerOutput components). O2/O4 c8 (47 registers, next to the 49 cliff)
+// and O1 c16 (63, next to 64) keep lane + slot * LanesPerOutput ownership.
+template <uint32_t LanesPerOutput, int MaxComponentsPerLane>
+inline constexpr bool ONE_WINDOW_ARG_QUAD_OWNERSHIP =
+    MaxComponentsPerLane == 4 || (LanesPerOutput == TILED_REDUCTION_WARP_THREADS && MaxComponentsPerLane == 8);
+
+template <uint32_t LanesPerOutput, int MaxComponentsPerLane>
+inline constexpr bool ONE_WINDOW_ARG_LINEAR_STAGE =
+    MaxComponentsPerLane <= 2 || ONE_WINDOW_ARG_QUAD_OWNERSHIP<LanesPerOutput, MaxComponentsPerLane>;
+
+template <uint32_t LanesPerOutput>
+inline constexpr uint32_t ONE_WINDOW_ARG_SLICE_PAD_WORDS =
+    LanesPerOutput == TILED_REDUCTION_WARP_THREADS ? 4U : LanesPerOutput;
+
+template <uint32_t LanesPerOutput, uint32_t PacketBytes>
+inline constexpr uint32_t ONE_WINDOW_ARG_SLICE_BYTES =
+    LanesPerOutput * PacketBytes + 4U * ONE_WINDOW_ARG_SLICE_PAD_WORDS<LanesPerOutput>;
+
+// Words per warp of the ARG staging buffer (both layouts fit).
+template <uint32_t LanesPerOutput, uint32_t PacketBytes>
+inline constexpr uint32_t ONE_WINDOW_ARG_STAGE_WORDS =
+    TILED_REDUCTION_WARP_THREADS / LanesPerOutput * ONE_WINDOW_ARG_SLICE_BYTES<LanesPerOutput, PacketBytes> / 4U;
+
+// The component a lane's slot owns: lane + slot * LanesPerOutput, or with quad ownership (c4, O1 c8) the four
+// adjacent components q * 4 * LanesPerOutput + 4 * lane .. +3 for slots 4q .. 4q + 3.
+template <uint32_t LanesPerOutput, int MaxComponentsPerLane>
+__device__ __forceinline__ uint32_t oneWindowArgOwnedComponent(uint32_t subgroup_lane, uint32_t slot) {
+    if constexpr (ONE_WINDOW_ARG_QUAD_OWNERSHIP<LanesPerOutput, MaxComponentsPerLane>) {
+        return (slot / 4U) * (4U * LanesPerOutput) + 4U * subgroup_lane + slot % 4U;
+    } else {
+        return subgroup_lane + slot * LanesPerOutput;
+    }
+}
+
+template <uint32_t LanesPerOutput, uint32_t PacketBytes>
+__device__ __forceinline__ void stageOneWindowPacketLinear(uint32_t* warp_words,
+                                                           uint32_t lane,
+                                                           const RawVectorPacket<PacketBytes>& packet) {
+    static_assert(PacketBytes == 16 || LanesPerOutput == TILED_REDUCTION_WARP_THREADS);
+    constexpr uint32_t SlicePackets = ONE_WINDOW_ARG_SLICE_BYTES<LanesPerOutput, PacketBytes> / PacketBytes;
+    static_assert(ONE_WINDOW_ARG_SLICE_BYTES<LanesPerOutput, PacketBytes> % PacketBytes == 0);
+    const uint32_t index = (lane / LanesPerOutput) * SlicePackets + lane % LanesPerOutput;
+    if constexpr (PacketBytes == 4) {
+        warp_words[index] = packet.value;
+    } else if constexpr (PacketBytes == 8) {
+        reinterpret_cast<uint2*>(warp_words)[index] = packet.value;
+    } else {
+        reinterpret_cast<uint4*>(warp_words)[index] = packet.value;
+    }
+}
+
+// One staged byte of the subgroup whose first lane is subgroup_lane_base, in either layout.
+template <bool Linear, uint32_t LanesPerOutput, uint32_t PacketBytes>
+__device__ __forceinline__ uint32_t oneWindowArgStagedByte(const uint32_t* warp_words,
+                                                           uint32_t subgroup_lane_base,
+                                                           uint32_t staged_byte) {
+    if constexpr (Linear) {
+        const uint32_t slice =
+            (subgroup_lane_base / LanesPerOutput) * ONE_WINDOW_ARG_SLICE_BYTES<LanesPerOutput, PacketBytes>;
+        return reinterpret_cast<const uint8_t*>(warp_words)[slice + staged_byte];
+    } else {
+        return oneWindowStagedByte<PacketBytes>(warp_words, subgroup_lane_base, staged_byte);
+    }
+}
+
+// decodeOneWindowRuntimeKGroup with keys: the same byte reads and packing; group_row is the group's first row.
+// RowsCandidate (1125): reduce each four-row word with fp8ArgRowsCandidate4 before building the lane candidate. 1124
+// measured it 0.96x at O1 c2 load-ahead and 0.99x at c1, but 1.02-1.04x (up to 1.17x at large R) for the O2/O4/O8 c2
+// units without load-ahead, so those keep the per-byte candidates.
+template <int MaxComponentsPerLane, uint32_t LanesPerOutput, uint32_t PacketBytes, bool RowsCandidate>
+__device__ __forceinline__ void keyOneWindowArgGroup(uint32_t (&local)[MaxComponentsPerLane],
+                                                     const uint32_t* warp_words,
+                                                     uint32_t subgroup_lane,
+                                                     uint32_t subgroup_lane_base,
+                                                     uint32_t component,
+                                                     uint32_t worker,
+                                                     uint32_t k,
+                                                     uint32_t workers,
+                                                     uint32_t group_row,
+                                                     uint32_t group_rows,
+                                                     uint32_t prefix_bytes,
+                                                     const Fp8ArgFold& fold) {
+    if constexpr (MaxComponentsPerLane <= 2) {
+        constexpr bool MultipleComponentsPerLane = MaxComponentsPerLane > 1;
+        constexpr bool Linear = ONE_WINDOW_ARG_LINEAR_STAGE<LanesPerOutput, MaxComponentsPerLane>;
+        const uint32_t row_stride = workers * k;
+#pragma unroll
+        for (uint32_t slot = 0; slot < static_cast<uint32_t>(MaxComponentsPerLane); ++slot) {
+            const uint32_t owned_component =
+                MultipleComponentsPerLane ? subgroup_lane + slot * LanesPerOutput : component;
+            if (owned_component >= k) {
+                continue;
+            }
+            uint32_t row = worker;
+            uint32_t byte = prefix_bytes + worker * k + owned_component;
+            for (; row + 3U * workers < group_rows; row += 4U * workers, byte += 4U * row_stride) {
+                uint32_t packed;
+                if constexpr (Linear) {
+                    const auto* staged = reinterpret_cast<const uint8_t*>(warp_words) +
+                                         (subgroup_lane_base / LanesPerOutput) *
+                                             ONE_WINDOW_ARG_SLICE_BYTES<LanesPerOutput, PacketBytes> +
+                                         byte;
+                    const uint32_t b0 = staged[0];
+                    const uint32_t b1 = staged[row_stride];
+                    const uint32_t b2 = staged[2U * row_stride];
+                    const uint32_t b3 = staged[3U * row_stride];
+                    packed = fp8ArgBytePerm(fp8ArgBytePerm(b0, b1, 0x0040u), fp8ArgBytePerm(b2, b3, 0x0040u),
+                                            0x5410u);  // b0 | b1 << 8 | b2 << 16 | b3 << 24
+                } else {
+                    packed = oneWindowStagedByte<PacketBytes>(warp_words, subgroup_lane_base, byte) |
+                             (oneWindowStagedByte<PacketBytes>(warp_words, subgroup_lane_base, byte + row_stride)
+                              << 8) |
+                             (oneWindowStagedByte<PacketBytes>(warp_words, subgroup_lane_base,
+                                                               byte + 2U * row_stride) << 16) |
+                             (oneWindowStagedByte<PacketBytes>(warp_words, subgroup_lane_base,
+                                                               byte + 3U * row_stride) << 24);
+                }
+                const Fp8ArgKeys4 keys = fp8ArgKeys4(packed, fold);
+                if constexpr (RowsCandidate) {
+                    // Four rows of this component: reduce the word first (fp8ArgRowsCandidate4, 1124).
+                    local[slot] = fp8ArgMin(local[slot], fp8ArgRowsCandidate4(keys, group_row + row, workers));
+                } else {
+                    const uint32_t first = group_row + row;
+#pragma unroll
+                    for (uint32_t j = 0; j < 4U; ++j) {
+                        local[slot] = fp8ArgMin(local[slot], fp8ArgLaneCandidate(keys, j, first + j * workers));
+                    }
+                }
+            }
+            if (row < group_rows) {
+                uint32_t packed = 0;
+#pragma unroll
+                for (uint32_t item = 0; item < 4U; ++item) {
+                    if (row + item * workers < group_rows) {
+                        packed |= oneWindowArgStagedByte<Linear, LanesPerOutput, PacketBytes>(
+                                      warp_words, subgroup_lane_base, byte + item * row_stride)
+                                  << (item * 8U);
+                    }
+                }
+                const Fp8ArgKeys4 keys = fp8ArgKeys4(packed, fold);
+                const uint32_t first = group_row + row;
+#pragma unroll
+                for (uint32_t item = 0; item < 4U; ++item) {
+                    if (row + item * workers < group_rows) {
+                        local[slot] = fp8ArgMin(local[slot], fp8ArgLaneCandidate(keys, item, first + item * workers));
+                    }
+                }
+            }
+        }
+    } else if constexpr (ONE_WINDOW_ARG_QUAD_OWNERSHIP<LanesPerOutput, MaxComponentsPerLane>) {
+        // 1128: O1 c4/c8 (1129: and O2/O4/O8 c4), linear staging. Lane owns components q * 4 * LanesPerOutput +
+        // 4 * lane .. +3: one key word is two LDS.32 and a funnel shift by the row's byte offset (subgroup-uniform).
+        // The second word stays inside the slice's pad.
+        static_cast<void>(component);
+        static_cast<void>(worker);
+        static_cast<void>(workers);
+        constexpr uint32_t Quads = static_cast<uint32_t>(MaxComponentsPerLane) / 4U;
+        const uint32_t slice_word = (subgroup_lane_base / LanesPerOutput) *
+                                    (ONE_WINDOW_ARG_SLICE_BYTES<LanesPerOutput, PacketBytes> / 4U);
+        for (uint32_t row = 0; row < group_rows; ++row) {
+            const uint32_t row_byte = prefix_bytes + row * k;
+            const uint32_t shift = (row_byte & 3U) * 8U;
+            const uint32_t absolute_row = group_row + row;
+#pragma unroll
+            for (uint32_t quad = 0; quad < Quads; ++quad) {
+                const uint32_t first = quad * 4U * LanesPerOutput + 4U * subgroup_lane;
+                if (first < k) {
+                    const uint32_t word = slice_word + ((row_byte + first) >> 2);
+                    const uint32_t packed = __funnelshift_r(warp_words[word], warp_words[word + 1], shift);
+                    const Fp8ArgKeys4 keys = fp8ArgKeys4(packed, fold);
+#pragma unroll
+                    for (uint32_t j = 0; j < 4U; ++j) {
+                        if (first + j < k) {
+                            local[quad * 4U + j] =
+                                fp8ArgMin(local[quad * 4U + j], fp8ArgLaneCandidate(keys, j, absolute_row));
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        static_cast<void>(component);
+        static_cast<void>(worker);
+        static_cast<void>(workers);
+        for (uint32_t row = 0; row < group_rows; ++row) {
+            const uint32_t row_byte = prefix_bytes + row * k + subgroup_lane;
+            const uint32_t absolute_row = group_row + row;
+#pragma unroll
+            for (uint32_t slot_base = 0; slot_base < static_cast<uint32_t>(MaxComponentsPerLane); slot_base += 4U) {
+                if (subgroup_lane + slot_base * LanesPerOutput >= k) {
+                    continue;
+                }
+                uint32_t packed = 0;
+#pragma unroll
+                for (uint32_t j = 0; j < 4U; ++j) {
+                    if (subgroup_lane + (slot_base + j) * LanesPerOutput < k) {
+                        packed |= oneWindowStagedByte<PacketBytes>(warp_words, subgroup_lane_base,
+                                                                   row_byte + (slot_base + j) * LanesPerOutput)
+                                  << (j * 8U);
+                    }
+                }
+                const Fp8ArgKeys4 keys = fp8ArgKeys4(packed, fold);
+#pragma unroll
+                for (uint32_t j = 0; j < 4U; ++j) {
+                    if (subgroup_lane + (slot_base + j) * LanesPerOutput < k) {
+                        local[slot_base + j] =
+                            fp8ArgMin(local[slot_base + j], fp8ArgLaneCandidate(keys, j, absolute_row));
+                    }
+                }
+            }
+        }
+    }
+}
+
+// streamOneWindowRuntimeKOutput with keyOneWindowArgGroup (kept separate so the VALUE kernel's code is untouched).
+template <int MaxComponentsPerLane, uint32_t LanesPerOutput, uint32_t PacketBytes, bool LoadAhead>
+__device__ __forceinline__ void streamOneWindowArgOutput(uint32_t (&local)[MaxComponentsPerLane],
+                                                         uint32_t* warp_words,
+                                                         const uint8_t* input_bytes,
+                                                         uint32_t total_input_bytes,
+                                                         bool valid_output,
+                                                         uint32_t outer_byte_begin,
+                                                         uint32_t first_row,
+                                                         uint32_t row_step,
+                                                         uint32_t reduction_size,
+                                                         const Fp8OneWindowRuntimeKGeometry& geometry,
+                                                         uint32_t lane,
+                                                         uint32_t subgroup_lane,
+                                                         uint32_t subgroup_lane_base,
+                                                         uint32_t component,
+                                                         uint32_t worker,
+                                                         const Fp8ArgFold& fold) {
+    const bool keys = valid_output && subgroup_lane < geometry.task_count;
+    const auto window_at = [&](uint32_t group_row) {
+        return oneWindowRuntimeKGroupWindow<PacketBytes>(valid_output, outer_byte_begin, group_row, reduction_size,
+                                                         geometry.k, geometry.rows_per_group);
+    };
+    if constexpr (LoadAhead) {
+        uint32_t group_row = first_row;
+        OneWindowGroupWindow current{};
+        RawVectorPacket<PacketBytes> current_packet{};
+        if (group_row < reduction_size) {
+            current = window_at(group_row);
+            if (valid_output && subgroup_lane < current.packet_count) {
+                current_packet = loadOneWindowPacket<PacketBytes>(
+                    input_bytes, current.aligned_byte_begin + subgroup_lane * PacketBytes, total_input_bytes);
+            }
+        }
+        while (group_row < reduction_size) {
+            const uint32_t next_row = group_row + row_step;
+            OneWindowGroupWindow next{};
+            RawVectorPacket<PacketBytes> next_packet{};
+            if (next_row < reduction_size) {
+                next = window_at(next_row);
+                if (valid_output && subgroup_lane < next.packet_count) {
+                    next_packet = loadOneWindowPacket<PacketBytes>(
+                        input_bytes, next.aligned_byte_begin + subgroup_lane * PacketBytes, total_input_bytes);
+                }
+            }
+            if (valid_output && subgroup_lane < current.packet_count) {
+                if constexpr (ONE_WINDOW_ARG_LINEAR_STAGE<LanesPerOutput, MaxComponentsPerLane>) {
+                    stageOneWindowPacketLinear<LanesPerOutput, PacketBytes>(warp_words, lane, current_packet);
+                } else {
+                    stageOneWindowPacket<PacketBytes>(warp_words, lane, current_packet);
+                }
+            }
+            __syncwarp();
+            if (keys) {
+                keyOneWindowArgGroup<MaxComponentsPerLane, LanesPerOutput, PacketBytes, true>(
+                    local, warp_words, subgroup_lane, subgroup_lane_base, component, worker, geometry.k,
+                    geometry.workers_per_component, group_row, current.rows, current.prefix_bytes, fold);
+            }
+            __syncwarp();
+            current = next;
+            current_packet = next_packet;
+            group_row = next_row;
+        }
+    } else {
+        for (uint32_t group_row = first_row; group_row < reduction_size; group_row += row_step) {
+            const OneWindowGroupWindow window = window_at(group_row);
+            if (valid_output && subgroup_lane < window.packet_count) {
+                const RawVectorPacket<PacketBytes> packet = loadOneWindowPacket<PacketBytes>(
+                    input_bytes, window.aligned_byte_begin + subgroup_lane * PacketBytes, total_input_bytes);
+                if constexpr (ONE_WINDOW_ARG_LINEAR_STAGE<LanesPerOutput, MaxComponentsPerLane>) {
+                    stageOneWindowPacketLinear<LanesPerOutput, PacketBytes>(warp_words, lane, packet);
+                } else {
+                    stageOneWindowPacket<PacketBytes>(warp_words, lane, packet);
+                }
+            }
+            __syncwarp();
+            if (keys) {
+                keyOneWindowArgGroup<MaxComponentsPerLane, LanesPerOutput, PacketBytes, MaxComponentsPerLane == 1>(
+                    local, warp_words, subgroup_lane, subgroup_lane_base, component, worker, geometry.k,
+                    geometry.workers_per_component, group_row, window.rows, window.prefix_bytes, fold);
+            }
+            __syncwarp();
+        }
+    }
+}
+
+template <uint32_t LanesPerOutput>
+__device__ __forceinline__ uint32_t shuffleFoldOneWindowArgWorkers(uint32_t partial, uint32_t workers) {
+#pragma unroll
+    for (uint32_t offset = 1; offset < LanesPerOutput; offset <<= 1) {
+        if (offset < workers) {
+            partial = fp8ArgMin(partial, __shfl_xor_sync(0xffffffffU, partial, offset));
+        }
+    }
+    return partial;
+}
+
+template <int OutputsPerWarp, int PacketBytes, int MaxComponentsPerLane, bool LoadAhead>
+__global__ void fp8OneWindowArgCompleteKernel(const uint8_t* input,
+                                              Fp8ArgOutputs outputs,
+                                              uint32_t outer_size,
+                                              uint32_t reduction_size,
+                                              uint32_t warps_per_output,
+                                              Fp8OneWindowRuntimeKGeometry geometry) {
+    static_assert(OutputsPerWarp == 1 || OutputsPerWarp == 2 || OutputsPerWarp == 4 || OutputsPerWarp == 8);
+    static_assert(MaxComponentsPerLane == 1 || MaxComponentsPerLane == 2 || MaxComponentsPerLane == 4 ||
+                  MaxComponentsPerLane == 8 || MaxComponentsPerLane == 16);
+    static_assert(MaxComponentsPerLane > 1 || !LoadAhead, "One-component buckets use the plain group loop.");
+    static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
+    constexpr uint32_t PacketWords = PacketBytes / 4;
+    constexpr uint32_t LanesPerOutput = TILED_REDUCTION_WARP_THREADS / OutputsPerWarp;
+    constexpr bool MultipleComponentsPerLane = MaxComponentsPerLane > 1;
+    constexpr uint32_t MaxK = LanesPerOutput * static_cast<uint32_t>(MaxComponentsPerLane);
+    constexpr uint32_t LanePartialColumns = MultipleComponentsPerLane ? 1U : TILED_REDUCTION_WARP_THREADS;
+    constexpr uint32_t WarpPartialRows = OutputsPerWarp == 1 ? SHALLOW_FP8_WARPS : 1U;
+    constexpr uint32_t WarpPartialColumns = OutputsPerWarp == 1 ? MaxK : 1U;
+    constexpr uint32_t Identity = FP8_ARG_LANE_IDENTITY;
+
+    constexpr uint32_t StageWords = ONE_WINDOW_ARG_LINEAR_STAGE<LanesPerOutput, MaxComponentsPerLane>
+                                        ? ONE_WINDOW_ARG_STAGE_WORDS<LanesPerOutput, PacketBytes>
+                                        : PacketWords * TILED_REDUCTION_WARP_THREADS;
+    __shared__ __align__(16) uint32_t staged_packet_words[SHALLOW_FP8_WARPS][StageWords];
+    __shared__ uint32_t lane_partials[SHALLOW_FP8_WARPS][LanePartialColumns];
+    __shared__ uint32_t warp_partials[WarpPartialRows][WarpPartialColumns];
+
+    const uint32_t k = geometry.k;
+    const uint32_t workers = geometry.workers_per_component;
+    const uint32_t warp = threadIdx.x / TILED_REDUCTION_WARP_THREADS;
+    const uint32_t lane = threadIdx.x % TILED_REDUCTION_WARP_THREADS;
+    const uint32_t outer_input_stride = reduction_size * k;
+    const uint32_t total_input_bytes = outer_size * outer_input_stride;
+
+    const uint32_t output_slot = lane / LanesPerOutput;
+    const uint32_t subgroup_lane = lane % LanesPerOutput;
+    const uint32_t subgroup_lane_base = output_slot * LanesPerOutput;
+    const uint32_t component = MultipleComponentsPerLane ? subgroup_lane : subgroup_lane / workers;
+    const uint32_t worker = MultipleComponentsPerLane ? 0U : subgroup_lane - component * workers;
+
+    uint32_t local[MaxComponentsPerLane];
+
+    if constexpr (OutputsPerWarp > 1) {
+        static_cast<void>(warps_per_output);
+        static_cast<void>(warp_partials);
+        const uint32_t global_warp = blockIdx.x * SHALLOW_FP8_WARPS + warp;
+        const uint32_t grid_warps = gridDim.x * SHALLOW_FP8_WARPS;
+        for (uint32_t warp_group = global_warp;; warp_group += grid_warps) {
+            const uint64_t outer_begin = static_cast<uint64_t>(warp_group) * OutputsPerWarp;
+            if (outer_begin >= outer_size) {
+                return;
+            }
+            const uint64_t outer_index = outer_begin + output_slot;
+            const bool valid_output = outer_index < outer_size;
+#pragma unroll
+            for (uint32_t slot = 0; slot < static_cast<uint32_t>(MaxComponentsPerLane); ++slot) {
+                local[slot] = Identity;
+            }
+            const uint32_t outer_byte_begin = valid_output ? static_cast<uint32_t>(outer_index) * outer_input_stride : 0;
+            streamOneWindowArgOutput<MaxComponentsPerLane, LanesPerOutput, PacketBytes, LoadAhead>(
+                local, staged_packet_words[warp], input, total_input_bytes, valid_output, outer_byte_begin, 0U,
+                geometry.rows_per_group, reduction_size, geometry, lane, subgroup_lane, subgroup_lane_base, component,
+                worker, outputs.fold);
+
+            if constexpr (MultipleComponentsPerLane) {
+#pragma unroll
+                for (uint32_t slot = 0; slot < static_cast<uint32_t>(MaxComponentsPerLane); ++slot) {
+                    const uint32_t owned_component =
+                        oneWindowArgOwnedComponent<LanesPerOutput, MaxComponentsPerLane>(subgroup_lane, slot);
+                    if (valid_output && owned_component < k) {
+                        storeFp8ArgResult(outputs, outer_index * static_cast<uint64_t>(k) + owned_component,
+                                          local[slot]);
+                    }
+                }
+            } else if ((workers & (workers - 1U)) == 0U) {
+                const uint32_t reduced = shuffleFoldOneWindowArgWorkers<LanesPerOutput>(
+                    (valid_output && subgroup_lane < geometry.task_count) ? local[0] : Identity, workers);
+                if (valid_output && worker == 0U && component < k) {
+                    storeFp8ArgResult(outputs, outer_index * static_cast<uint64_t>(k) + component, reduced);
+                }
+            } else {
+                lane_partials[warp][lane] = (valid_output && subgroup_lane < geometry.task_count) ? local[0] : Identity;
+                __syncwarp();
+                if (valid_output && subgroup_lane < k) {
+                    uint32_t reduced = Identity;
+                    const uint32_t partial_base = subgroup_lane_base + subgroup_lane * workers;
+                    for (uint32_t source_worker = 0; source_worker < workers; ++source_worker) {
+                        reduced = fp8ArgMin(reduced, lane_partials[warp][partial_base + source_worker]);
+                    }
+                    storeFp8ArgResult(outputs, outer_index * static_cast<uint64_t>(k) + subgroup_lane, reduced);
+                }
+                __syncwarp();
+            }
+        }
+    } else {
+        const uint32_t outputs_per_block = SHALLOW_FP8_WARPS / warps_per_output;
+        const uint32_t output_group = warp / warps_per_output;
+        const uint32_t warp_in_output = warp - output_group * warps_per_output;
+        const uint32_t first_warp_in_output = output_group * warps_per_output;
+        const uint32_t rows_per_output_round = geometry.rows_per_group * warps_per_output;
+        const uint64_t block_output_stride = static_cast<uint64_t>(gridDim.x) * outputs_per_block;
+
+        for (uint64_t block_outer_begin = static_cast<uint64_t>(blockIdx.x) * outputs_per_block;
+             block_outer_begin < outer_size;
+             block_outer_begin += block_output_stride) {
+            const uint64_t outer_index = block_outer_begin + output_group;
+            const bool valid_output = outer_index < outer_size;
+#pragma unroll
+            for (uint32_t slot = 0; slot < static_cast<uint32_t>(MaxComponentsPerLane); ++slot) {
+                local[slot] = Identity;
+            }
+            const uint32_t outer_byte_begin = valid_output ? static_cast<uint32_t>(outer_index) * outer_input_stride : 0;
+            streamOneWindowArgOutput<MaxComponentsPerLane, LanesPerOutput, PacketBytes, LoadAhead>(
+                local, staged_packet_words[warp], input, total_input_bytes, valid_output, outer_byte_begin,
+                warp_in_output * geometry.rows_per_group, rows_per_output_round, reduction_size, geometry, lane,
+                subgroup_lane, subgroup_lane_base, component, worker, outputs.fold);
+
+            if (warps_per_output == 1) {
+                if constexpr (MultipleComponentsPerLane) {
+#pragma unroll
+                    for (uint32_t slot = 0; slot < static_cast<uint32_t>(MaxComponentsPerLane); ++slot) {
+                        const uint32_t owned_component =
+                            oneWindowArgOwnedComponent<LanesPerOutput, MaxComponentsPerLane>(lane, slot);
+                        if (valid_output && owned_component < k) {
+                            storeFp8ArgResult(outputs, outer_index * static_cast<uint64_t>(k) + owned_component,
+                                              local[slot]);
+                        }
+                    }
+                } else if ((workers & (workers - 1U)) == 0U) {
+                    const uint32_t reduced = shuffleFoldOneWindowArgWorkers<LanesPerOutput>(
+                        (valid_output && lane < geometry.task_count) ? local[0] : Identity, workers);
+                    if (valid_output && worker == 0U && component < k) {
+                        storeFp8ArgResult(outputs, outer_index * static_cast<uint64_t>(k) + component, reduced);
+                    }
+                } else {
+                    lane_partials[warp][lane] = (valid_output && lane < geometry.task_count) ? local[0] : Identity;
+                    __syncwarp();
+                    if (valid_output && lane < k) {
+                        uint32_t reduced = Identity;
+                        const uint32_t partial_base = lane * workers;
+                        for (uint32_t source_worker = 0; source_worker < workers; ++source_worker) {
+                            reduced = fp8ArgMin(reduced, lane_partials[warp][partial_base + source_worker]);
+                        }
+                        storeFp8ArgResult(outputs, outer_index * static_cast<uint64_t>(k) + lane, reduced);
+                    }
+                    __syncwarp();
+                }
+                continue;
+            }
+
+            if constexpr (MultipleComponentsPerLane) {
+#pragma unroll
+                for (uint32_t slot = 0; slot < static_cast<uint32_t>(MaxComponentsPerLane); ++slot) {
+                    const uint32_t owned_component =
+                        oneWindowArgOwnedComponent<LanesPerOutput, MaxComponentsPerLane>(lane, slot);
+                    if (owned_component < k) {
+                        warp_partials[warp][owned_component] = valid_output ? local[slot] : Identity;
+                    }
+                }
+            } else if ((workers & (workers - 1U)) == 0U) {
+                const uint32_t warp_reduced = shuffleFoldOneWindowArgWorkers<LanesPerOutput>(
+                    (valid_output && lane < geometry.task_count) ? local[0] : Identity, workers);
+                if (worker == 0U && component < k) {
+                    warp_partials[warp][component] = valid_output ? warp_reduced : Identity;
+                }
+            } else {
+                lane_partials[warp][lane] = (valid_output && lane < geometry.task_count) ? local[0] : Identity;
+                __syncwarp();
+                if (lane < k) {
+                    uint32_t warp_reduced = Identity;
+                    const uint32_t partial_base = lane * workers;
+                    for (uint32_t source_worker = 0; source_worker < workers; ++source_worker) {
+                        warp_reduced = fp8ArgMin(warp_reduced, lane_partials[warp][partial_base + source_worker]);
+                    }
+                    warp_partials[warp][lane] = valid_output ? warp_reduced : Identity;
+                }
+            }
+            __syncthreads();
+
+            if (warp_in_output == 0) {
+#pragma unroll
+                for (uint32_t slot = 0; slot < static_cast<uint32_t>(MaxComponentsPerLane); ++slot) {
+                    const uint32_t owned_component =
+                        oneWindowArgOwnedComponent<LanesPerOutput, MaxComponentsPerLane>(lane, slot);
+                    if (valid_output && owned_component < k) {
+                        uint32_t reduced = Identity;
+                        for (uint32_t source_warp = 0; source_warp < warps_per_output; ++source_warp) {
+                            reduced = fp8ArgMin(reduced, warp_partials[first_warp_in_output + source_warp][owned_component]);
+                        }
+                        storeFp8ArgResult(outputs, outer_index * static_cast<uint64_t>(k) + owned_component, reduced);
+                    }
+                }
+            }
+            __syncthreads();
+        }
+    }
+}
+
+// ARG-A3: DeepRSmallK argmin/argmax twins: the staged first stages of narrowFp8PackedFlatRCooperative{,TinyK}
+// FirstStageKernel (P16, grid x = shard, z = outer, eight warps staging whole-row groups, the same rows per warp group
+// and the same load-ahead rule) with uint32 candidates. They write FP32 value + carried index partials
+// [outer, shards, K]; the index is (shard row base + row) * domain_stride. The planner reduces the shard axis with the
+// carried-index ARG reducer. Rows of one component are packed four per key word (fp8ArgKeys4), the OneWindow
+// small-bucket scheme. The shard depth is a runtime operand for every ownership (VALUE compiles it in for one
+// component per lane; measure before copying that).
+
+// Up to four rows of one component, `row_step_bytes` apart in the staged window, reduced into `local`. Rows are
+// first_row, first_row + row_stride, ... (shard-local).
+__device__ __forceinline__ uint32_t deepRArgRows4(uint32_t local, const uint8_t* staged_bytes, uint32_t staged_index,
+                                                  uint32_t row_step_bytes, uint32_t first_row, uint32_t row_stride,
+                                                  uint32_t count, const Fp8ArgFold& fold) {
+    uint32_t packed = 0;
+#pragma unroll
+    for (uint32_t j = 0; j < 4U; ++j) {
+        if (j < count) packed |= static_cast<uint32_t>(staged_bytes[staged_index + j * row_step_bytes]) << (8U * j);
+    }
+    const Fp8ArgKeys4 keys = fp8ArgKeys4(packed, fold);
+    if (count == 4U) return fp8ArgMin(local, fp8ArgRowsCandidate4(keys, first_row, row_stride));  // 1124
+#pragma unroll
+    for (uint32_t j = 0; j < 4U; ++j) {
+        if (j < count) local = fp8ArgMin(local, fp8ArgLaneCandidate(keys, j, first_row + j * row_stride));
+    }
+    return local;
+}
+
+// Packing (1109): one and two components per lane pack four rows of a component per key word (groups hold 15+ rows
+// at K <= 32 and 7+ at K <= 64). Four or more components per lane pack four of the lane's components of one row, as
+// OneWindow's large buckets do: at K 161..256 a 497-byte group holds one to three rows, so row packing filled one to
+// three bytes of every key word (1108: c8 twin 1.92x its VALUE kernel).
+// 1129: one component per lane at K 9..16 used only K of 32 lanes (ARG/VALUE 1.24, worst 1.41); `workers` =
+// floor(32 / K) lanes now share a component, worker w keying rows w, w + workers, ... (the tiny-K scheme with a
+// runtime lane count). workers = 1 at K 17..32 is the former loop.
+template <int MaxComponentsPerLane>
+__device__ __forceinline__ void deepRArgGroup(uint32_t (&local)[MaxComponentsPerLane], const uint8_t* staged_bytes,
+                                              uint32_t lane, uint32_t prefix_elements, uint32_t inner_size_32,
+                                              uint32_t group_row, uint32_t group_rows, const Fp8ArgFold& fold,
+                                              uint32_t component = 0, uint32_t worker = 0, uint32_t workers = 1) {
+    if constexpr (MaxComponentsPerLane == 1) {
+        static_cast<void>(lane);
+        if (component < inner_size_32) {
+            const uint32_t row_step_bytes = workers * inner_size_32;
+            uint32_t row = worker;
+            uint32_t staged_index = prefix_elements + worker * inner_size_32 + component;
+            for (; row + 3U * workers < group_rows; row += 4U * workers, staged_index += 4U * row_step_bytes) {
+                local[0] = deepRArgRows4(local[0], staged_bytes, staged_index, row_step_bytes, group_row + row,
+                                         workers, 4U, fold);
+            }
+            if (row < group_rows) {
+                const uint32_t count = (group_rows - row + workers - 1U) / workers;
+                local[0] = deepRArgRows4(local[0], staged_bytes, staged_index, row_step_bytes, group_row + row,
+                                         workers, count, fold);
+            }
+        }
+    } else if constexpr (MaxComponentsPerLane >= 4) {
+        static_cast<void>(component);
+        static_cast<void>(worker);
+        static_cast<void>(workers);
+        for (uint32_t row = 0; row < group_rows; ++row) {
+            const uint32_t row_index = prefix_elements + row * inner_size_32 + lane;
+#pragma unroll
+            for (uint32_t slot_base = 0; slot_base < static_cast<uint32_t>(MaxComponentsPerLane); slot_base += 4U) {
+                if (lane + slot_base * TILED_REDUCTION_WARP_THREADS >= inner_size_32) continue;
+                uint32_t packed = 0;
+#pragma unroll
+                for (uint32_t j = 0; j < 4U; ++j) {
+                    if (slot_base + j < static_cast<uint32_t>(MaxComponentsPerLane) &&
+                        lane + (slot_base + j) * TILED_REDUCTION_WARP_THREADS < inner_size_32) {
+                        packed |= static_cast<uint32_t>(
+                                      staged_bytes[row_index + (slot_base + j) * TILED_REDUCTION_WARP_THREADS])
+                                  << (8U * j);
+                    }
+                }
+                const Fp8ArgKeys4 keys = fp8ArgKeys4(packed, fold);
+#pragma unroll
+                for (uint32_t j = 0; j < 4U; ++j) {
+                    if (slot_base + j < static_cast<uint32_t>(MaxComponentsPerLane) &&
+                        lane + (slot_base + j) * TILED_REDUCTION_WARP_THREADS < inner_size_32) {
+                        // The guard is compile-time after unrolling; the clamp keeps every index in bounds.
+                        const uint32_t slot = slot_base + j < static_cast<uint32_t>(MaxComponentsPerLane) ? slot_base + j : 0U;
+                        local[slot] = fp8ArgMin(local[slot], fp8ArgLaneCandidate(keys, j, group_row + row));
+                    }
+                }
+            }
+        }
+    } else {
+        static_cast<void>(component);
+        static_cast<void>(worker);
+        static_cast<void>(workers);
+#pragma unroll
+        for (int slot = 0; slot < MaxComponentsPerLane; ++slot) {
+            const uint32_t owned = lane + static_cast<uint32_t>(slot) * TILED_REDUCTION_WARP_THREADS;
+            if (owned < inner_size_32) {
+                uint32_t staged_index = prefix_elements + owned;
+                uint32_t row = 0;
+                for (; row + 4U <= group_rows; row += 4U, staged_index += 4U * inner_size_32) {
+                    local[slot] = deepRArgRows4(local[slot], staged_bytes, staged_index, inner_size_32,
+                                                group_row + row, 1U, 4U, fold);
+                }
+                if (row < group_rows) {
+                    local[slot] = deepRArgRows4(local[slot], staged_bytes, staged_index, inner_size_32,
+                                                group_row + row, 1U, group_rows - row, fold);
+                }
+            }
+        }
+    }
+}
+
+template <int MaxComponentsPerLane>
+__global__ void fp8DeepRArgFirstStageKernel(const uint8_t* input,
+                                            Fp8ArgOutputs outputs,
+                                            uint64_t outer_size,
+                                            uint64_t reduction_size,
+                                            uint64_t inner_size,
+                                            uint64_t shards_per_output,
+                                            uint32_t rows_per_shard_log2,
+                                            uint32_t rows_per_warp_group) {
+    constexpr int PacketBytes = 16;
+    static_assert(MaxComponentsPerLane == 1 || MaxComponentsPerLane == 2 || MaxComponentsPerLane == 4 ||
+                  MaxComponentsPerLane == 5 || MaxComponentsPerLane == 8);
+    constexpr int MaxSupportedK = TILED_REDUCTION_WARP_THREADS * MaxComponentsPerLane;
+    constexpr uint32_t Identity = FP8_ARG_LANE_IDENTITY;
+
+    __shared__ RawVectorPacket<PacketBytes> staged_packets[NARROW_FLAT_WARPS][NARROW_FP8_PACKETS_PER_WARP];
+    __shared__ uint32_t warp_partials[NARROW_FLAT_WARPS][MaxSupportedK];
+
+    const uint32_t warp = threadIdx.x / TILED_REDUCTION_WARP_THREADS;
+    const uint32_t lane = threadIdx.x % TILED_REDUCTION_WARP_THREADS;
+    const uint32_t inner_size_32 = static_cast<uint32_t>(inner_size);
+    const uint32_t rows_per_block_round = rows_per_warp_group * NARROW_FLAT_WARPS;
+    const uint32_t outer_count = static_cast<uint32_t>(outer_size);
+    const uint32_t shard_count = static_cast<uint32_t>(shards_per_output);
+    // One component per lane: floor(32 / K) workers per component (1129).
+    const uint32_t workers =
+        MaxComponentsPerLane == 1 && inner_size_32 <= TILED_REDUCTION_WARP_THREADS / 2 && inner_size_32 != 0
+            ? TILED_REDUCTION_WARP_THREADS / inner_size_32
+            : 1U;
+    const uint32_t c1_component = lane / workers;
+    const uint32_t c1_worker = lane - c1_component * workers;
+    for (uint32_t outer_index = blockIdx.z; outer_index < outer_count; outer_index += gridDim.z)
+    for (uint32_t shard = blockIdx.x; shard < shard_count; shard += gridDim.x) {
+        const uint64_t row_begin = static_cast<uint64_t>(shard) << rows_per_shard_log2;
+        const uint32_t shard_rows = row_begin < reduction_size
+            ? static_cast<uint32_t>(minU64(uint64_t{1} << rows_per_shard_log2, reduction_size - row_begin))
+            : 0U;
+        const uint8_t* shard_input = input + (outer_index * reduction_size + row_begin) * inner_size;
+
+        uint32_t local[MaxComponentsPerLane];
+#pragma unroll
+        for (int slot = 0; slot < MaxComponentsPerLane; ++slot) local[slot] = Identity;
+
+        // The VALUE kernel's rule: prefetch the next group only when lanes own two or more components.
+        if constexpr (MaxComponentsPerLane >= 2) {
+            uint32_t group_row = warp * rows_per_warp_group;
+            NarrowFp8GroupWindow<PacketBytes> window{};
+            RawVectorPacket<PacketBytes> pending{};
+            if (group_row < shard_rows) {
+                window = narrowFp8GroupWindow<PacketBytes>(shard_input, group_row, shard_rows, rows_per_warp_group,
+                                                           inner_size_32);
+                if (lane < window.packet_count) pending = window.aligned_begin[lane];
+            }
+            for (; group_row < shard_rows; group_row += rows_per_block_round) {
+                const uint32_t group_rows = window.group_rows;
+                const uint32_t prefix_elements = window.prefix_elements;
+                if (lane < window.packet_count) staged_packets[warp][lane] = pending;
+                __syncwarp();
+                const uint32_t next_group_row = group_row + rows_per_block_round;
+                if (next_group_row < shard_rows) {
+                    window = narrowFp8GroupWindow<PacketBytes>(shard_input, next_group_row, shard_rows,
+                                                               rows_per_warp_group, inner_size_32);
+                    if (lane < window.packet_count) pending = window.aligned_begin[lane];
+                }
+                deepRArgGroup<MaxComponentsPerLane>(local, reinterpret_cast<const uint8_t*>(&staged_packets[warp][0]),
+                                                    lane, prefix_elements, inner_size_32, group_row, group_rows,
+                                                    outputs.fold);
+                __syncwarp();
+            }
+        } else {
+            for (uint32_t group_row = warp * rows_per_warp_group; group_row < shard_rows;
+                 group_row += rows_per_block_round) {
+                const NarrowFp8GroupWindow<PacketBytes> window = narrowFp8GroupWindow<PacketBytes>(
+                    shard_input, group_row, shard_rows, rows_per_warp_group, inner_size_32);
+                if (lane < window.packet_count) staged_packets[warp][lane] = window.aligned_begin[lane];
+                __syncwarp();
+                deepRArgGroup<MaxComponentsPerLane>(local, reinterpret_cast<const uint8_t*>(&staged_packets[warp][0]),
+                                                    lane, window.prefix_elements, inner_size_32, group_row,
+                                                    window.group_rows, outputs.fold, c1_component, c1_worker, workers);
+                __syncwarp();
+            }
+        }
+
+        if constexpr (MaxComponentsPerLane == 1) {
+            // Fold each component's workers (lanes c * workers .. + workers - 1) into its worker 0.
+            uint32_t folded = local[0];
+            for (uint32_t offset = 1; offset < workers; ++offset) {
+                const uint32_t other = __shfl_down_sync(0xffffffffU, local[0], offset);
+                if (c1_worker == 0U) folded = fp8ArgMin(folded, other);
+            }
+            if (c1_worker == 0U && c1_component < inner_size_32) warp_partials[warp][c1_component] = folded;
+        } else {
+            static_cast<void>(c1_component);
+            static_cast<void>(c1_worker);
+            static_cast<void>(workers);
+#pragma unroll
+            for (int slot = 0; slot < MaxComponentsPerLane; ++slot) {
+                const uint32_t component = lane + static_cast<uint32_t>(slot) * TILED_REDUCTION_WARP_THREADS;
+                if (component < inner_size_32) warp_partials[warp][component] = local[slot];
+            }
+        }
+        __syncthreads();
+        if (threadIdx.x < inner_size_32) {
+            uint32_t reduced = Identity;
+#pragma unroll
+            for (int source_warp = 0; source_warp < NARROW_FLAT_WARPS; ++source_warp) {
+                reduced = fp8ArgMin(reduced, warp_partials[source_warp][threadIdx.x]);
+            }
+            storeFp8ArgResult<true>(outputs, (static_cast<uint64_t>(outer_index) * shards_per_output + shard) * inner_size +
+                                           threadIdx.x,
+                              reduced, row_begin);
+        }
+        __syncthreads();
+    }
+}
+
+template <int LanesPerComponent>
+__global__ void fp8DeepRArgTinyKFirstStageKernel(const uint8_t* input,
+                                                 Fp8ArgOutputs outputs,
+                                                 uint64_t outer_size,
+                                                 uint64_t reduction_size,
+                                                 uint64_t inner_size,
+                                                 uint64_t shards_per_output,
+                                                 uint32_t rows_per_shard_log2,
+                                                 uint32_t rows_per_warp_group) {
+    constexpr int PacketBytes = 16;
+    static_assert(LanesPerComponent == 4 || LanesPerComponent == 8);
+    constexpr int MaxSupportedK = TILED_REDUCTION_WARP_THREADS / LanesPerComponent;
+    constexpr uint32_t Identity = FP8_ARG_LANE_IDENTITY;
+
+    __shared__ RawVectorPacket<PacketBytes> staged_packets[NARROW_FLAT_WARPS][NARROW_FP8_PACKETS_PER_WARP];
+    __shared__ uint32_t warp_partials[NARROW_FLAT_WARPS][MaxSupportedK];
+
+    const uint32_t warp = threadIdx.x / TILED_REDUCTION_WARP_THREADS;
+    const uint32_t lane = threadIdx.x % TILED_REDUCTION_WARP_THREADS;
+    const uint32_t component = lane / LanesPerComponent;
+    const uint32_t component_lane = lane % LanesPerComponent;
+    const uint32_t inner_size_32 = static_cast<uint32_t>(inner_size);
+    const uint32_t rows_per_block_round = rows_per_warp_group * NARROW_FLAT_WARPS;
+    const uint32_t outer_count = static_cast<uint32_t>(outer_size);
+    const uint32_t shard_count = static_cast<uint32_t>(shards_per_output);
+    for (uint32_t outer_index = blockIdx.z; outer_index < outer_count; outer_index += gridDim.z)
+    for (uint32_t shard = blockIdx.x; shard < shard_count; shard += gridDim.x) {
+        const uint64_t row_begin = static_cast<uint64_t>(shard) << rows_per_shard_log2;
+        const uint32_t shard_rows = row_begin < reduction_size
+            ? static_cast<uint32_t>(minU64(uint64_t{1} << rows_per_shard_log2, reduction_size - row_begin))
+            : 0U;
+        const uint8_t* shard_input = input + (outer_index * reduction_size + row_begin) * inner_size;
+
+        uint32_t local = Identity;
+        for (uint32_t group_row = warp * rows_per_warp_group; group_row < shard_rows;
+             group_row += rows_per_block_round) {
+            const NarrowFp8GroupWindow<PacketBytes> window = narrowFp8GroupWindow<PacketBytes>(
+                shard_input, group_row, shard_rows, rows_per_warp_group, inner_size_32);
+            if (lane < window.packet_count) staged_packets[warp][lane] = window.aligned_begin[lane];
+            __syncwarp();
+            if (component < inner_size_32) {
+                const auto* staged_bytes = reinterpret_cast<const uint8_t*>(&staged_packets[warp][0]);
+                const uint32_t row_step_bytes = LanesPerComponent * inner_size_32;
+                uint32_t row = component_lane;
+                uint32_t staged_index = window.prefix_elements + component_lane * inner_size_32 + component;
+                // This lane's rows are component_lane, + L, + 2L, ...: four per key word.
+                for (; row + 3U * LanesPerComponent < window.group_rows;
+                     row += 4U * LanesPerComponent, staged_index += 4U * row_step_bytes) {
+                    local = deepRArgRows4(local, staged_bytes, staged_index, row_step_bytes, group_row + row,
+                                          LanesPerComponent, 4U, outputs.fold);
+                }
+                if (row < window.group_rows) {
+                    const uint32_t count = (window.group_rows - row + LanesPerComponent - 1U) / LanesPerComponent;
+                    local = deepRArgRows4(local, staged_bytes, staged_index, row_step_bytes, group_row + row,
+                                          LanesPerComponent, count, outputs.fold);
+                }
+            }
+            __syncwarp();
+        }
+
+        // Fold the component's lanes (aligned groups of LanesPerComponent) with butterfly shuffles.
+#pragma unroll
+        for (uint32_t offset = 1; offset < static_cast<uint32_t>(LanesPerComponent); offset <<= 1) {
+            local = fp8ArgMin(local, __shfl_xor_sync(0xffffffffU, local, offset));
+        }
+        if (component_lane == 0 && component < inner_size_32) warp_partials[warp][component] = local;
+        __syncthreads();
+        if (threadIdx.x < inner_size_32) {
+            uint32_t reduced = Identity;
+#pragma unroll
+            for (int source_warp = 0; source_warp < NARROW_FLAT_WARPS; ++source_warp) {
+                reduced = fp8ArgMin(reduced, warp_partials[source_warp][threadIdx.x]);
+            }
+            storeFp8ArgResult<true>(outputs, (static_cast<uint64_t>(outer_index) * shards_per_output + shard) * inner_size +
+                                           threadIdx.x,
+                              reduced, row_begin);
+        }
+        __syncthreads();
+    }
+}
+
+// ARG-A3: RuntimeK argmin/argmax twin: the rotated sharded layout of awkwardAlignmentRotatedShardedFirstStageKernel
+// (16 cooperative warps; grid x = shard, y = component tile, z = outer; each warp aligns its first row's tile window
+// once and every revisited row, 16 rows later, stays packet-aligned) with uint32 candidates and a runtime shard depth.
+// The logical tile is the warp's packet span less the alignment reserve (PacketBytes 16: 497 components, 8: 249), so
+// one kernel serves both VALUE tile layouts. One shard (depth >= R) is a Complete pass; several shards write FP32 value
+// + carried index partials. The index is (row base + row) * stride. Only the 8-byte packet is compiled: 1110 measured
+// the 16-byte packet 1.56x slower (best p16 / best p8 over 2408 cells; p16 faster on 78).
+constexpr int FP8_ARG_ROTATED_WARPS = 16;
+constexpr int FP8_ARG_ROTATED_THREADS = FP8_ARG_ROTATED_WARPS * TILED_REDUCTION_WARP_THREADS;
+
+template <int PacketBytes>
+inline constexpr uint32_t fp8ArgRotatedTileComponents =
+    static_cast<uint32_t>(TILED_REDUCTION_WARP_THREADS * PacketBytes - (PacketBytes - 1));
+
+template <int PacketBytes>
+__global__ __launch_bounds__(FP8_ARG_ROTATED_THREADS) void fp8RotatedArgKernel(const uint8_t* input,
+                                                                              Fp8ArgOutputs outputs,
+                                                                              uint64_t outer_size,
+                                                                              uint64_t reduction_size,
+                                                                              uint64_t inner_size,
+                                                                              uint64_t shards_per_output,
+                                                                              uint64_t component_tiles,
+                                                                              uint32_t rows_per_shard) {
+    static_assert(PacketBytes == 8 || PacketBytes == 16);
+    constexpr int Words = PacketBytes / 4;
+    constexpr uint32_t SpanComponents = TILED_REDUCTION_WARP_THREADS * PacketBytes;
+    constexpr uint32_t TileComponents = fp8ArgRotatedTileComponents<PacketBytes>;
+    constexpr uint32_t Identity = FP8_ARG_LANE_IDENTITY;
+    // Revisited rows are FP8_ARG_ROTATED_WARPS * K bytes apart: a multiple of the packet for every K.
+    static_assert(FP8_ARG_ROTATED_WARPS % PacketBytes == 0);
+
+    __shared__ uint32_t warp_partials[FP8_ARG_ROTATED_WARPS][SpanComponents];
+    __shared__ uint32_t warp_prefix[FP8_ARG_ROTATED_WARPS];
+
+    const uint32_t warp = threadIdx.x / TILED_REDUCTION_WARP_THREADS;
+    const uint32_t lane = threadIdx.x % TILED_REDUCTION_WARP_THREADS;
+    const uint32_t outer_count = static_cast<uint32_t>(outer_size);
+    const uint32_t tile_count = static_cast<uint32_t>(component_tiles);
+    const uint32_t shard_count = static_cast<uint32_t>(shards_per_output);
+    for (uint32_t outer_index = blockIdx.z; outer_index < outer_count; outer_index += gridDim.z)
+    for (uint32_t component_tile = blockIdx.y; component_tile < tile_count; component_tile += gridDim.y)
+    for (uint32_t shard = blockIdx.x; shard < shard_count; shard += gridDim.x) {
+        const uint64_t tile_begin = static_cast<uint64_t>(component_tile) * TileComponents;
+        const uint32_t valid_components =
+            static_cast<uint32_t>(minU64(TileComponents, inner_size - tile_begin));
+        const uint64_t row_begin = static_cast<uint64_t>(shard) * rows_per_shard;
+        const uint32_t shard_rows = row_begin < reduction_size
+            ? static_cast<uint32_t>(minU64(rows_per_shard, reduction_size - row_begin))
+            : 0U;
+
+        uint32_t local[PacketBytes];
+#pragma unroll
+        for (int item = 0; item < PacketBytes; ++item) local[item] = Identity;
+        uint32_t prefix = 0;
+        if (warp < shard_rows) {
+            const uint8_t* logical = input + (outer_index * reduction_size + row_begin + warp) * inner_size + tile_begin;
+            const uintptr_t address = reinterpret_cast<uintptr_t>(logical);
+            prefix = static_cast<uint32_t>(address & uintptr_t{PacketBytes - 1});
+            const uint8_t* lane_packet =
+                reinterpret_cast<const uint8_t*>(address & ~uintptr_t{PacketBytes - 1}) + lane * PacketBytes;
+            const int64_t lane_component = static_cast<int64_t>(tile_begin) - static_cast<int64_t>(prefix) +
+                                           static_cast<int64_t>(lane * PacketBytes);
+            if (lane_component < static_cast<int64_t>(inner_size)) {
+                const uint64_t row_stride = static_cast<uint64_t>(FP8_ARG_ROTATED_WARPS) * inner_size;
+                for (uint32_t row = warp; row < shard_rows; row += FP8_ARG_ROTATED_WARPS) {
+                    const RawVectorPacket<PacketBytes> packet = *reinterpret_cast<const RawVectorPacket<PacketBytes>*>(lane_packet);
+                    uint32_t words[Words];
+                    if constexpr (PacketBytes == 16) {
+                        words[0] = packet.value.x; words[1] = packet.value.y;
+                        words[2] = packet.value.z; words[3] = packet.value.w;
+                    } else {
+                        words[0] = packet.value.x; words[1] = packet.value.y;
+                    }
+#pragma unroll
+                    for (int w = 0; w < Words; ++w) {
+                        const Fp8ArgKeys4 keys = fp8ArgKeys4(words[w], outputs.fold);
+#pragma unroll
+                        for (int b = 0; b < 4; ++b) {
+                            local[4 * w + b] = fp8ArgMin(local[4 * w + b], fp8ArgLaneCandidate(keys, b, row));
+                        }
+                    }
+                    lane_packet += row_stride;
+                }
+            }
+        }
+        if (lane == 0) warp_prefix[warp] = prefix;
+#pragma unroll
+        for (int item = 0; item < PacketBytes; ++item) warp_partials[warp][lane * PacketBytes + item] = local[item];
+        __syncthreads();
+        for (uint32_t component = threadIdx.x; component < valid_components; component += FP8_ARG_ROTATED_THREADS) {
+            uint32_t reduced = Identity;
+#pragma unroll
+            for (int source_warp = 0; source_warp < FP8_ARG_ROTATED_WARPS; ++source_warp) {
+                // Warps whose first row is beyond the shard published identities at prefix 0.
+                reduced = fp8ArgMin(reduced, warp_partials[source_warp][component + warp_prefix[source_warp]]);
+            }
+            storeFp8ArgResult<true>(outputs,
+                              (static_cast<uint64_t>(outer_index) * shards_per_output + shard) * inner_size +
+                                  tile_begin + component,
+                              reduced, row_begin);
+        }
+        __syncthreads();
+    }
+}
+
+// ARG-A3: RuntimeK PacketComplete argmin/argmax twin: fp8GeneralRParallelKTileP16CompleteKernel's topology (persistent
+// 256-thread blocks; one work item = [outer, K tile]; W1/W2/W4/W8 warps per item split R round-robin; a warp loads one
+// row's tile window with an alignment prefix and stages it through shared memory) with uint32 candidates.
+// Complete: writes the requested outputs, index = row * stride.
+//
+// ARG-A3j (1127): 16-byte packets (32 lanes cover 512 bytes, prefix <= 15), so a tile holds up to 256 components (8
+// per lane, the 1105 rule). The window is staged linearly (one vector store per loading lane) and lane L owns four
+// adjacent components per quad q (components q * 128 + 4L .. +3): one word of keys is two LDS.32 and a funnel shift by
+// the row's prefix (prefix & 3 is uniform across the warp), instead of four plane-major byte gathers of ~10
+// instructions each. The tile is the fewest 128-component quads per row (fp8PacketCompleteArgTileComponents).
+constexpr uint32_t FP8_ARG_PACKET_COMPLETE_MAX_TILE = 256;
+
+template <int PacketBytes>
+__global__ __launch_bounds__(SHALLOW_FP8_THREADS, 4) void fp8PacketCompleteArgKernel(const uint8_t* input,
+                                                                                   Fp8ArgOutputs outputs,
+                                                                                   uint32_t outer_size,
+                                                                                   uint32_t reduction_size,
+                                                                                   uint32_t inner_size,
+                                                                                   uint32_t tile_components,
+                                                                                   uint32_t tile_count,
+                                                                                   uint32_t warps_per_output) {
+    static_assert(PacketBytes == 16);
+    constexpr uint32_t PacketShift = 4;
+    constexpr uint32_t PacketMask = PacketBytes - 1;
+    constexpr uint32_t Quads = 2;
+    constexpr uint32_t Slots = 4 * Quads;
+    constexpr uint32_t QuadComponents = 4 * TILED_REDUCTION_WARP_THREADS;
+    constexpr uint32_t MaxTile = FP8_ARG_PACKET_COMPLETE_MAX_TILE;
+    constexpr uint32_t WindowWords = PacketBytes / 4 * TILED_REDUCTION_WARP_THREADS;
+    static_assert(Quads * QuadComponents == MaxTile);
+    static_assert(PacketMask + MaxTile <= PacketBytes * TILED_REDUCTION_WARP_THREADS);
+    // The highest word read: (prefix + last quad's last lane base) / 4 + 1.
+    static_assert((PacketMask + (Quads - 1) * QuadComponents + 4 * (TILED_REDUCTION_WARP_THREADS - 1)) / 4 + 1 <
+                  WindowWords);
+    constexpr uint32_t Identity = FP8_ARG_LANE_IDENTITY;
+
+    __shared__ __align__(16) uint32_t staged_packet_words[SHALLOW_FP8_WARPS][WindowWords];
+    __shared__ uint32_t warp_partials[SHALLOW_FP8_WARPS][MaxTile];
+
+    const uint32_t warp = threadIdx.x / TILED_REDUCTION_WARP_THREADS;
+    const uint32_t lane = threadIdx.x % TILED_REDUCTION_WARP_THREADS;
+    const uint32_t lane_component = 4U * lane;
+    const uint32_t outputs_per_block = SHALLOW_FP8_WARPS / warps_per_output;
+    const uint32_t output_group = warp / warps_per_output;
+    const uint32_t warp_in_output = warp - output_group * warps_per_output;
+    const uint32_t first_warp_in_output = output_group * warps_per_output;
+    const uint64_t work_count = static_cast<uint64_t>(outer_size) * tile_count;
+    const uint64_t block_work_stride = static_cast<uint64_t>(gridDim.x) * outputs_per_block;
+    const uint64_t outer_input_stride = static_cast<uint64_t>(reduction_size) * inner_size;
+
+    for (uint64_t block_work_begin = static_cast<uint64_t>(blockIdx.x) * outputs_per_block; block_work_begin < work_count;
+         block_work_begin += block_work_stride) {
+        const uint64_t work_index = block_work_begin + output_group;
+        const bool valid_work = work_index < work_count;
+        uint32_t outer_index = 0;
+        uint32_t tile_begin = 0;
+        uint32_t tile_width = 0;
+        if (valid_work) {
+            outer_index = static_cast<uint32_t>(work_index / tile_count);
+            const uint32_t tile_index = static_cast<uint32_t>(work_index - static_cast<uint64_t>(outer_index) * tile_count);
+            tile_begin = tile_index * tile_components;
+            tile_width = tile_components < (inner_size - tile_begin) ? tile_components : (inner_size - tile_begin);
+        }
+
+        uint32_t local[Slots];
+#pragma unroll
+        for (uint32_t slot = 0; slot < Slots; ++slot) local[slot] = Identity;
+
+        // Keys the lane's four adjacent components of each quad in one word.
+        const auto key_row = [&](uint32_t prefix_bytes, uint32_t row_index) {
+            const uint32_t* words = staged_packet_words[warp];
+            const uint32_t shift = (prefix_bytes & 3U) * 8U;
+#pragma unroll
+            for (uint32_t quad = 0; quad < Quads; ++quad) {
+                const uint32_t first = quad * QuadComponents + lane_component;
+                if (first < tile_width) {
+                    const uint32_t word = (prefix_bytes + first) >> 2;
+                    const uint32_t packed = __funnelshift_r(words[word], words[word + 1], shift);
+                    const Fp8ArgKeys4 keys = fp8ArgKeys4(packed, outputs.fold);
+#pragma unroll
+                    for (uint32_t j = 0; j < 4; ++j) {
+                        if (first + j < tile_width) {
+                            local[quad * 4 + j] =
+                                fp8ArgMin(local[quad * 4 + j], fp8ArgLaneCandidate(keys, j, row_index));
+                        }
+                    }
+                }
+            }
+        };
+        // A p16 load extends at most 15 bytes past the logical tensor end (Tensor allocations keep >= 128 trailing
+        // bytes); component masks keep those bytes out of the reduction.
+        const auto load_row = [&](uint32_t row_index, uint32_t& prefix_bytes, uint32_t& packet_count,
+                                  RawVectorPacket<PacketBytes>& packet) {
+            const uint64_t logical_begin = static_cast<uint64_t>(outer_index) * outer_input_stride +
+                                           static_cast<uint64_t>(row_index) * inner_size + tile_begin;
+            prefix_bytes = static_cast<uint32_t>(logical_begin & PacketMask);
+            packet_count = (prefix_bytes + tile_width + PacketMask) >> PacketShift;
+            if (lane < packet_count) {
+                packet = *reinterpret_cast<const RawVectorPacket<PacketBytes>*>(
+                    input + (logical_begin - prefix_bytes) + static_cast<uint64_t>(lane) * PacketBytes);
+            }
+        };
+        // Load-ahead as in the VALUE kernel: the next row's packet is in flight while this row is keyed.
+        uint32_t row = warp_in_output;
+        uint32_t current_prefix = 0;
+        uint32_t current_packet_count = 0;
+        RawVectorPacket<PacketBytes> current_packet{};
+        if (valid_work && row < reduction_size) load_row(row, current_prefix, current_packet_count, current_packet);
+        while (valid_work && row < reduction_size) {
+            const uint32_t next_row = row + warps_per_output;
+            uint32_t next_prefix = 0;
+            uint32_t next_packet_count = 0;
+            RawVectorPacket<PacketBytes> next_packet{};
+            if (next_row < reduction_size) load_row(next_row, next_prefix, next_packet_count, next_packet);
+            if (lane < current_packet_count) {
+                reinterpret_cast<uint4*>(staged_packet_words[warp])[lane] = current_packet.value;
+            }
+            __syncwarp();
+            key_row(current_prefix, row);
+            __syncwarp();
+            current_prefix = next_prefix;
+            current_packet_count = next_packet_count;
+            current_packet = next_packet;
+            row = next_row;
+        }
+
+        if (warps_per_output == 1) {
+#pragma unroll
+            for (uint32_t slot = 0; slot < Slots; ++slot) {
+                const uint32_t component = (slot / 4U) * QuadComponents + lane_component + slot % 4U;
+                if (valid_work && component < tile_width) {
+                    storeFp8ArgResult(outputs, static_cast<uint64_t>(outer_index) * inner_size + tile_begin + component,
+                                      local[slot]);
+                }
+            }
+            continue;
+        }
+
+#pragma unroll
+        for (uint32_t slot = 0; slot < Slots; ++slot) {
+            const uint32_t component = (slot / 4U) * QuadComponents + lane_component + slot % 4U;
+            if (component < tile_width) warp_partials[warp][component] = valid_work ? local[slot] : Identity;
+        }
+        __syncthreads();
+        if (warp_in_output == 0) {
+#pragma unroll
+            for (uint32_t slot = 0; slot < Slots; ++slot) {
+                const uint32_t component = (slot / 4U) * QuadComponents + lane_component + slot % 4U;
+                if (valid_work && component < tile_width) {
+                    uint32_t reduced = Identity;
+                    for (uint32_t source_warp = 0; source_warp < warps_per_output; ++source_warp) {
+                        reduced = fp8ArgMin(reduced, warp_partials[first_warp_in_output + source_warp][component]);
+                    }
+                    storeFp8ArgResult(outputs, static_cast<uint64_t>(outer_index) * inner_size + tile_begin + component,
+                                      reduced);
+                }
+            }
+        }
+        __syncthreads();
+    }
+}
+
+// Writes one reduced packed candidate (widened, 55-bit index) to the requested outputs at `output`.
+__device__ __forceinline__ void storeFp8ArgPackedResult(const Fp8ArgOutputs& outputs, uint64_t output, uint64_t best) {
+    if (outputs.value != nullptr) {
+        const uint32_t byte = fp8ArgValueByte(fp8ArgWideKey(best), fp8ArgWideNegativeZero(best), outputs.fold);
+        storeFp32AsRuntimeDType(outputs.value, outputs.value_dtype, output, decodeFp8ArgByte(byte, outputs.e5m2));
+    }
+    if (outputs.index != nullptr) {
+        const uint64_t index = fp8ArgWideIndex(best) * outputs.domain_stride;
+        if (outputs.index_dtype == DataType::UINT32) {
+            static_cast<uint32_t*>(outputs.index)[output] = static_cast<uint32_t>(index);
+        } else {
+            static_cast<uint64_t*>(outputs.index)[output] = index;
+        }
+    }
+}
+
+// ARG-A3g (1116): reduces packed staged partials [outer, shards, K] (shard-relative lane candidates) over shards and
+// writes the requested outputs. Shard s begins at s * base_rows + min(s, extra_rows) (uniform depths: extra_rows = 0).
+// One thread per output component, consecutive threads on consecutive components (coalesced 4-byte reads per shard).
+// 1135: used while there are enough outputs to cover the shard loop's latency (fp8ArgPackedContinuationSplitsShards).
+template <int Unused>
+__global__ __launch_bounds__(256) void fp8ArgPackedContinuationKernel(const uint32_t* packed,
+                                                                     Fp8ArgOutputs outputs,
+                                                                     uint64_t outer_size,
+                                                                     uint64_t shards,
+                                                                     uint64_t inner_size,
+                                                                     ReductionShardRows shard_rows) {
+    const uint64_t outputs_count = outer_size * inner_size;
+    for (uint64_t output = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x; output < outputs_count;
+         output += static_cast<uint64_t>(gridDim.x) * blockDim.x) {
+        const uint64_t outer_index = output / inner_size;
+        const uint64_t component = output - outer_index * inner_size;
+        const uint32_t* column = packed + outer_index * shards * inner_size + component;
+        uint64_t best = FP8_ARG_WIDE_IDENTITY;
+        for (uint32_t shard = 0; shard < static_cast<uint32_t>(shards); ++shard) {
+            const uint32_t candidate = column[static_cast<uint64_t>(shard) * inner_size];
+            best = fp8ArgMin(best, fp8ArgWiden(candidate, reductionShardRowBegin(shard_rows, shard)));
+        }
+        storeFp8ArgPackedResult(outputs, output, best);
+    }
+}
+
+// 1135: the shard-split packed continuation, for few outputs with many shards (1134 audit: the per-output kernel ran
+// 6-16x a copy of its partials at >= 256 shards and < 64 Ki outputs, up to half of the ARG time). A block owns one
+// (outer, column tile) work item: `columns` consecutive components (K when K < 32, else 32) times `groups` shard
+// groups; group g walks shards g, g + groups, ... with four independent loads in flight. For K < 32 a block's
+// threads cover a contiguous [shards, K] slab, so reads stay coalesced. The groups combine in shared memory with the
+// same order-free wide minimum (key, then index, then -0), so the result equals the per-output kernel's.
+constexpr uint32_t FP8_ARG_PACKED_SPLIT_MAX_THREADS = 1024;
+template <int Unused>
+__global__ __launch_bounds__(FP8_ARG_PACKED_SPLIT_MAX_THREADS) void fp8ArgPackedContinuationSplitKernel(
+    const uint32_t* packed,
+    Fp8ArgOutputs outputs,
+    uint64_t outer_size,
+    uint64_t shards,
+    uint64_t inner_size,
+    ReductionShardRows shard_rows,
+    uint32_t columns,
+    uint32_t groups) {
+    __shared__ uint64_t partial[FP8_ARG_PACKED_SPLIT_MAX_THREADS];
+    const uint32_t lane_column = threadIdx.x % columns;
+    const uint32_t group = threadIdx.x / columns;
+    const uint32_t shard_count = static_cast<uint32_t>(shards);
+    const uint64_t tiles = (inner_size + columns - 1) / columns;
+    const uint64_t items = outer_size * tiles;
+    for (uint64_t item = blockIdx.x; item < items; item += gridDim.x) {
+        const uint64_t outer_index = item / tiles;
+        const uint64_t component = (item - outer_index * tiles) * columns + lane_column;
+        uint64_t best = FP8_ARG_WIDE_IDENTITY;
+        if (group < groups && component < inner_size) {
+            const uint32_t* column = packed + outer_index * shards * inner_size + component;
+            uint64_t other = FP8_ARG_WIDE_IDENTITY;
+            uint32_t shard = group;
+            for (; shard + 3 * groups < shard_count; shard += 4 * groups) {
+                const uint32_t s1 = shard + groups, s2 = s1 + groups, s3 = s2 + groups;
+                const uint32_t c0 = column[static_cast<uint64_t>(shard) * inner_size];
+                const uint32_t c1 = column[static_cast<uint64_t>(s1) * inner_size];
+                const uint32_t c2 = column[static_cast<uint64_t>(s2) * inner_size];
+                const uint32_t c3 = column[static_cast<uint64_t>(s3) * inner_size];
+                best = fp8ArgMin(best, fp8ArgWiden(c0, reductionShardRowBegin(shard_rows, shard)));
+                other = fp8ArgMin(other, fp8ArgWiden(c1, reductionShardRowBegin(shard_rows, s1)));
+                best = fp8ArgMin(best, fp8ArgWiden(c2, reductionShardRowBegin(shard_rows, s2)));
+                other = fp8ArgMin(other, fp8ArgWiden(c3, reductionShardRowBegin(shard_rows, s3)));
+            }
+            for (; shard < shard_count; shard += groups) {
+                best = fp8ArgMin(best, fp8ArgWiden(column[static_cast<uint64_t>(shard) * inner_size],
+                                                   reductionShardRowBegin(shard_rows, shard)));
+            }
+            best = fp8ArgMin(best, other);
+        }
+        partial[threadIdx.x] = best;
+        __syncthreads();
+        for (uint32_t active = groups; active > 1;) {
+            const uint32_t half = (active + 1) / 2;
+            if (group < active - half)
+                partial[threadIdx.x] = fp8ArgMin(partial[threadIdx.x], partial[threadIdx.x + half * columns]);
+            __syncthreads();
+            active = half;
+        }
+        if (group == 0 && component < inner_size)
+            storeFp8ArgPackedResult(outputs, outer_index * inner_size + component, partial[threadIdx.x]);
+        __syncthreads();  // partial[] is rewritten by the next item
+    }
+}
+
+// ARG-A3: AlignedK argmin/argmax twin: the K-parallel ownership of kParallelFp8{Packet,StagedHoistedCombine,
+// CompleteUnified}Kernel (one thread owns one aligned 2- or 8-byte packet of components and walks its shard's rows; no
+// cross-thread reduction; grid x = shard, y = K tile, z = outer; balanced shard rows). The CTA size is a launch
+// operand, so two kernels serve VALUE's six packet/CTA pairs. One shard is Complete (requested outputs); several write
+// FP32 value + carried index partials. The index is (shard row base + row) * stride.
+// ARG-A3e (1113): VALUE's R loop and writeback. Rows are loaded in batches one batch ahead (P8: 4 rows, P2: 8 rows,
+// K_PARALLEL_FP8_LOAD_AHEAD_ROWS); eight-byte packets key two words per row, two-byte packets pack two rows per key
+// word. Results leave as 16-byte (P8, through a per-warp shared transpose, as VALUE's P8 writeback) or 8-byte (P2)
+// lane-contiguous stores; 1111 stored one scalar per component, 8 bytes apart per lane (1.5x VALUE, 4.4x at R = 4).
+constexpr int FP8_ARG_ALIGNED_MAX_THREADS = 128;
+// VALUE's AlignedK load-ahead depth (K_PARALLEL_FP8_LOAD_AHEAD_ROWS lives in the K-parallel TU).
+template <int PacketBytes>
+inline constexpr uint32_t K_PARALLEL_FP8_ARG_LOAD_AHEAD_ROWS = PacketBytes >= 8 ? 4U : 8U;
+constexpr int FP8_ARG_ALIGNED_STRIPE_PITCH = 33;
+
+// Stores N (2 or 4) consecutive results starting at output_index: one vector store per output when the storage is
+// FP32 values / UINT32 or UINT64 indices and the address is aligned, element stores otherwise.
+template <int N>
+__device__ __forceinline__ void storeFp8ArgResults(const Fp8ArgOutputs& outputs,
+                                                   uint64_t output_index,
+                                                   const uint32_t (&candidates)[N],
+                                                   uint64_t row_base) {
+    static_assert(N == 2 || N == 4);
+    if (outputs.packed != nullptr) {
+        uint32_t* destination = outputs.packed + output_index;
+        if ((reinterpret_cast<uintptr_t>(destination) & uintptr_t{N * sizeof(uint32_t) - 1}) == 0) {
+            if constexpr (N == 4) {
+                *reinterpret_cast<uint4*>(destination) =
+                    make_uint4(candidates[0], candidates[1], candidates[2], candidates[3]);
+            } else {
+                *reinterpret_cast<uint2*>(destination) = make_uint2(candidates[0], candidates[1]);
+            }
+        } else {
+#pragma unroll
+            for (int i = 0; i < N; ++i) destination[i] = candidates[i];
+        }
+        return;
+    }
+    if (outputs.value != nullptr) {
+        float values[N];
+#pragma unroll
+        for (int i = 0; i < N; ++i) {
+            values[i] = decodeFp8ArgByte(fp8ArgValueByte(candidates[i] >> 24, candidates[i] & 1u, outputs.fold),
+                                         outputs.e5m2);
+        }
+        float* destination = static_cast<float*>(outputs.value) + output_index;
+        if (outputs.value_dtype == DataType::FP32 &&
+            (reinterpret_cast<uintptr_t>(destination) & uintptr_t{N * sizeof(float) - 1}) == 0) {
+            if constexpr (N == 4) {
+                *reinterpret_cast<float4*>(destination) = make_float4(values[0], values[1], values[2], values[3]);
+            } else {
+                *reinterpret_cast<float2*>(destination) = make_float2(values[0], values[1]);
+            }
+        } else {
+#pragma unroll
+            for (int i = 0; i < N; ++i) {
+                storeFp32AsRuntimeDType(outputs.value, outputs.value_dtype, output_index + i, values[i]);
+            }
+        }
+    }
+    if (outputs.index != nullptr) {
+        uint64_t indices[N];
+#pragma unroll
+        for (int i = 0; i < N; ++i) {
+            indices[i] = (row_base + ((candidates[i] >> 1) & (FP8_ARG_MAX_LANE_ROWS - 1u))) * outputs.domain_stride;
+        }
+        if (outputs.index_dtype == DataType::UINT32) {
+            uint32_t* destination = static_cast<uint32_t*>(outputs.index) + output_index;
+            if ((reinterpret_cast<uintptr_t>(destination) & uintptr_t{N * sizeof(uint32_t) - 1}) == 0) {
+                if constexpr (N == 4) {
+                    *reinterpret_cast<uint4*>(destination) =
+                        make_uint4(static_cast<uint32_t>(indices[0]), static_cast<uint32_t>(indices[1]),
+                                   static_cast<uint32_t>(indices[2]), static_cast<uint32_t>(indices[3]));
+                } else {
+                    *reinterpret_cast<uint2*>(destination) =
+                        make_uint2(static_cast<uint32_t>(indices[0]), static_cast<uint32_t>(indices[1]));
+                }
+            } else {
+#pragma unroll
+                for (int i = 0; i < N; ++i) destination[i] = static_cast<uint32_t>(indices[i]);
+            }
+        } else {
+            uint64_t* destination = static_cast<uint64_t*>(outputs.index) + output_index;
+            if ((reinterpret_cast<uintptr_t>(destination) & uintptr_t{15}) == 0) {
+#pragma unroll
+                for (int i = 0; i < N; i += 2) {
+                    *reinterpret_cast<uint4*>(destination + i) =
+                        make_uint4(static_cast<uint32_t>(indices[i]), static_cast<uint32_t>(indices[i] >> 32),
+                                   static_cast<uint32_t>(indices[i + 1]), static_cast<uint32_t>(indices[i + 1] >> 32));
+                }
+            } else {
+#pragma unroll
+                for (int i = 0; i < N; ++i) destination[i] = indices[i];
+            }
+        }
+    }
+}
+
+template <int PacketBytes>
+__global__ __launch_bounds__(FP8_ARG_ALIGNED_MAX_THREADS) void fp8AlignedKArgKernel(const uint8_t* input,
+                                                                                   Fp8ArgOutputs outputs,
+                                                                                   uint64_t outer_size,
+                                                                                   uint64_t reduction_size,
+                                                                                   uint64_t inner_size,
+                                                                                   uint64_t shards_per_output,
+                                                                                   uint64_t component_tiles,
+                                                                                   ReductionShardRows shard_rows) {
+    static_assert(PacketBytes == 2 || PacketBytes == 8);
+    constexpr uint32_t Identity = FP8_ARG_LANE_IDENTITY;
+    // VALUE's load-ahead depth; a P2 batch is an even number of rows (two rows per key word).
+    constexpr uint32_t Rows = K_PARALLEL_FP8_ARG_LOAD_AHEAD_ROWS<PacketBytes>;
+    static_assert(PacketBytes == 8 || Rows % 2 == 0);
+    using Word = std::conditional_t<PacketBytes == 8, uint2, uint32_t>;
+    // P8 writeback transpose: warp_tiles[warp][item][lane] holds lane's candidate for component lane * 8 + item.
+    __shared__ uint32_t warp_tiles[FP8_ARG_ALIGNED_MAX_THREADS / TILED_REDUCTION_WARP_THREADS][PacketBytes]
+                                  [FP8_ARG_ALIGNED_STRIPE_PITCH];
+    const uint32_t warp = threadIdx.x / TILED_REDUCTION_WARP_THREADS;
+    const uint32_t lane = threadIdx.x % TILED_REDUCTION_WARP_THREADS;
+    const uint64_t components_per_cta = static_cast<uint64_t>(blockDim.x) * PacketBytes;
+    const uint32_t outer_count = static_cast<uint32_t>(outer_size);
+    const uint32_t tile_count = static_cast<uint32_t>(component_tiles);
+    const uint32_t shard_count = static_cast<uint32_t>(shards_per_output);
+    for (uint32_t outer_index = blockIdx.z; outer_index < outer_count; outer_index += gridDim.z)
+    for (uint32_t component_tile = blockIdx.y; component_tile < tile_count; component_tile += gridDim.y)
+    for (uint32_t shard = blockIdx.x; shard < shard_count; shard += gridDim.x) {
+        const uint64_t tile_begin = component_tile * components_per_cta;
+        const uint64_t component = tile_begin + static_cast<uint64_t>(threadIdx.x) * PacketBytes;
+        const bool owns_packet = component < inner_size;
+        const uint64_t row_begin = reductionShardRowBegin(shard_rows, shard);
+        const uint32_t row_count = reductionShardRowCount(shard_rows, shard);
+        uint32_t local[PacketBytes];
+#pragma unroll
+        for (int item = 0; item < PacketBytes; ++item) local[item] = Identity;
+        if (owns_packet) {
+            const uint8_t* packet = input + (outer_index * reduction_size + row_begin) * inner_size + component;
+            const auto load = [&](const uint8_t* at) -> Word {
+                if constexpr (PacketBytes == 8) {
+                    return reinterpret_cast<const RawVectorPacket<8>*>(at)->value;
+                } else {
+                    return reinterpret_cast<const RawVectorPacket<2>*>(at)->value;
+                }
+            };
+            const auto key_batch = [&](const Word (&batch)[Rows], uint32_t first_row) {
+                if constexpr (PacketBytes == 8) {
+#pragma unroll
+                    for (uint32_t r = 0; r < Rows; ++r) {
+                        const Fp8ArgKeys4 low = fp8ArgKeys4(batch[r].x, outputs.fold);
+                        const Fp8ArgKeys4 high = fp8ArgKeys4(batch[r].y, outputs.fold);
+#pragma unroll
+                        for (uint32_t b = 0; b < 4U; ++b) {
+                            local[b] = fp8ArgMin(local[b], fp8ArgLaneCandidate(low, b, first_row + r));
+                            local[4 + b] = fp8ArgMin(local[4 + b], fp8ArgLaneCandidate(high, b, first_row + r));
+                        }
+                    }
+                } else {
+#pragma unroll
+                    for (uint32_t r = 0; r < Rows; r += 2) {
+                        const Fp8ArgKeys4 keys = fp8ArgKeys4(batch[r] | (batch[r + 1] << 16), outputs.fold);
+                        local[0] = fp8ArgMin(local[0], fp8ArgLaneCandidate(keys, 0, first_row + r));
+                        local[1] = fp8ArgMin(local[1], fp8ArgLaneCandidate(keys, 1, first_row + r));
+                        local[0] = fp8ArgMin(local[0], fp8ArgLaneCandidate(keys, 2, first_row + r + 1));
+                        local[1] = fp8ArgMin(local[1], fp8ArgLaneCandidate(keys, 3, first_row + r + 1));
+                    }
+                }
+            };
+            const auto load_batch = [&](Word (&batch)[Rows]) {
+#pragma unroll
+                for (uint32_t r = 0; r < Rows; ++r) batch[r] = load(packet + r * inner_size);
+                packet += Rows * inner_size;
+            };
+            // Load-ahead as accumulateKParallelFp8Rows: the next batch is in flight while the current one is keyed.
+            uint32_t row = 0;
+            if (row_count >= Rows) {
+                Word current[Rows];
+                load_batch(current);
+                for (row = Rows; row + Rows <= row_count; row += Rows) {
+                    Word next[Rows];
+                    load_batch(next);
+                    key_batch(current, row - Rows);
+#pragma unroll
+                    for (uint32_t r = 0; r < Rows; ++r) current[r] = next[r];
+                }
+                key_batch(current, row - Rows);
+            }
+            for (; row < row_count; ++row) {
+                const Word word = load(packet);
+                packet += inner_size;
+                if constexpr (PacketBytes == 8) {
+                    const Fp8ArgKeys4 low = fp8ArgKeys4(word.x, outputs.fold);
+                    const Fp8ArgKeys4 high = fp8ArgKeys4(word.y, outputs.fold);
+#pragma unroll
+                    for (uint32_t b = 0; b < 4U; ++b) {
+                        local[b] = fp8ArgMin(local[b], fp8ArgLaneCandidate(low, b, row));
+                        local[4 + b] = fp8ArgMin(local[4 + b], fp8ArgLaneCandidate(high, b, row));
+                    }
+                } else {
+                    const Fp8ArgKeys4 keys = fp8ArgKeys4(word, outputs.fold);
+                    local[0] = fp8ArgMin(local[0], fp8ArgLaneCandidate(keys, 0, row));
+                    local[1] = fp8ArgMin(local[1], fp8ArgLaneCandidate(keys, 1, row));
+                }
+            }
+        }
+        const uint64_t output_row = (static_cast<uint64_t>(outer_index) * shards_per_output + shard) * inner_size;
+        if constexpr (PacketBytes == 2) {
+            if (owns_packet) storeFp8ArgResults<2>(outputs, output_row + component, local, row_begin);
+        } else {
+            // K is a multiple of 8, so a warp's valid components are whole packets and whole 4-component chunks.
+#pragma unroll
+            for (int item = 0; item < PacketBytes; ++item) warp_tiles[warp][item][lane] = local[item];
+            __syncwarp();
+            const uint64_t warp_begin = tile_begin + static_cast<uint64_t>(warp) * TILED_REDUCTION_WARP_THREADS *
+                                                         PacketBytes;
+#pragma unroll
+            for (uint32_t round = 0; round < 2U; ++round) {
+                const uint32_t offset = round * TILED_REDUCTION_WARP_THREADS * 4U + lane * 4U;
+                if (warp_begin + offset < inner_size) {
+                    uint32_t chunk[4];
+#pragma unroll
+                    for (uint32_t i = 0; i < 4U; ++i) {
+                        const uint32_t c = offset + i;
+                        chunk[i] = warp_tiles[warp][c % PacketBytes][c / PacketBytes];
+                    }
+                    storeFp8ArgResults<4>(outputs, output_row + warp_begin + offset, chunk, row_begin);
+                }
+            }
+            __syncwarp();
+        }
+    }
+}
+
+// Invokes callback.template operator()<OutputsPerWarp, PacketBytes, MaxComponentsPerLane, LoadAhead>() for the
+// OneWindow unit equal to `unit` (the ARG twins exist for exactly the compiled VALUE units).
+template <typename Callback>
+[[nodiscard]] bool dispatchOneWindowArg(const Fp8OneWindowRuntimeKUnit& unit, Callback&& callback) {
+    bool dispatched = false;
+    [&]<size_t... I>(std::index_sequence<I...>) {
+        static_cast<void>(((ONE_WINDOW_RUNTIME_K_UNITS[I] == unit &&
+                            (callback.template operator()<
+                                 static_cast<int>(ONE_WINDOW_RUNTIME_K_UNITS[I].outputs_per_warp),
+                                 static_cast<int>(ONE_WINDOW_RUNTIME_K_UNITS[I].packet_bytes),
+                                 static_cast<int>(ONE_WINDOW_RUNTIME_K_UNITS[I].max_components_per_lane),
+                                 ONE_WINDOW_RUNTIME_K_UNITS[I].load_ahead>(),
+                             dispatched = true)) ||
+                           ...));
+    }(std::make_index_sequence<ONE_WINDOW_RUNTIME_K_UNITS.size()>{});
+    return dispatched;
+}
+
 }  // namespace
 
 void launchFp8DeepRSmallKRetainedFirstStage(const CubReductionStageSemantics& semantics,
@@ -2099,8 +3666,11 @@ void launchFp8GeneralRParallelKTileRCooperativeCalibrationCompleteTyped(
 #if THOR_CUB_ENABLE_FP8_TYPES
     const AdditiveFinalizeFp32 output_finalize = fp8CompleteFinalizerFromSemantics(semantics);
     if (geometry.outer_size == 0 || geometry.reduction_size == 0 || geometry.inner_size == 0 ||
-        geometry.inner_size > std::numeric_limits<uint32_t>::max() ||
-        !shallowFp8FitsUint32Indexing(geometry) ||
+        geometry.inner_size > Fp8RK::FP8_RK_MAX_UINT32 ||
+        // 1131: the kernel's input and output offsets are 64-bit; only outer, R and K are 32-bit operands, and the
+        // 32-bit row counter steps by W <= 8 (formerly shallowFp8FitsUint32Indexing: outer * R * K <= 2^32 - 1).
+        geometry.outer_size > Fp8RK::FP8_RK_MAX_UINT32 ||
+        geometry.reduction_size > Fp8RK::FP8_RK_PACKET_COMPLETE_MAX_ROWS ||
         !fp8CompleteSupportsOutputStorage(output.getDataType()) || output.getDimensions() != geometry.output_dimensions ||
         tile_components == 0 || tile_components > 496) {
         throw std::logic_error("FP8 tiled general RParallel calibration received unsupported Complete geometry.");
@@ -2380,6 +3950,1576 @@ CubKernelOccupancyInfo queryFp8OneWindowRuntimeKOccupancy(DataType input_dtype,
             return queryFp8OneWindowRuntimeKOccupancyTyped<3>(input_dtype, inner_size, unit, warps_per_output);
     }
     throw std::logic_error("Invalid bucketed OneWindow occupancy combine operation.");
+}
+
+bool fp8OneWindowArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                             const Fp8OneWindowRuntimeKUnit& unit, uint32_t warps_per_output) {
+    if (outer_size == 0 || reduction_size == 0 || reduction_size >= FP8_ARG_MAX_LANE_ROWS ||
+        !oneWindowRuntimeKUnitPlan(inner_size, unit) ||
+        !oneWindowValidWarpsPerOutput(unit.outputs_per_warp, warps_per_output)) {
+        return false;
+    }
+    constexpr uint64_t MaxIndex = std::numeric_limits<uint32_t>::max();
+    return outer_size <= MaxIndex && outer_size * reduction_size * inner_size <= MaxIndex;
+}
+
+void launchFp8OneWindowArgComplete(const Tensor& input,
+                                   Tensor* value_output,
+                                   Tensor* index_output,
+                                   const CubReductionGeometry& geometry,
+                                   const Fp8OneWindowRuntimeKUnit& unit,
+                                   uint32_t warps_per_output,
+                                   bool maximum,
+                                   uint64_t domain_stride,
+                                   Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    const DataType input_dtype = input.getDataType();
+    const uint64_t outputs = geometry.outer_size * geometry.inner_size;
+    const auto plan = oneWindowRuntimeKUnitPlan(geometry.inner_size, unit);
+    if ((input_dtype != DataType::FP8_E4M3 && input_dtype != DataType::FP8_E5M2) || !plan ||
+        !fp8OneWindowArgSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size, unit,
+                                 warps_per_output) ||
+        input.getTotalNumElements() != geometry.outer_size * geometry.reduction_size * geometry.inner_size ||
+        (value_output == nullptr && index_output == nullptr) ||
+        (value_output != nullptr && (value_output->getTotalNumElements() != outputs ||
+                                     !fp8CompleteSupportsOutputStorage(value_output->getDataType()))) ||
+        (index_output != nullptr && (index_output->getTotalNumElements() != outputs ||
+                                     (index_output->getDataType() != DataType::UINT32 &&
+                                      index_output->getDataType() != DataType::UINT64)))) {
+        throw std::logic_error("FP8 OneWindow ARG received unsupported complete geometry or outputs.");
+    }
+    if (index_output != nullptr && index_output->getDataType() == DataType::UINT32 &&
+        (geometry.reduction_size - 1) * domain_stride > std::numeric_limits<uint32_t>::max()) {
+        throw std::logic_error("FP8 OneWindow ARG UINT32 index output cannot hold the original-domain index.");
+    }
+    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{15}) != 0) {
+        throw std::logic_error("FP8 OneWindow ARG requires a 16-byte aligned input base.");
+    }
+    const Fp8ArgOutputs arg_outputs{
+        value_output == nullptr ? nullptr : value_output->getMemPtr<void>(),
+        value_output == nullptr ? DataType::FP32 : value_output->getDataType(),
+        index_output == nullptr ? nullptr : index_output->getMemPtr<void>(),
+        index_output == nullptr ? DataType::UINT32 : index_output->getDataType(),
+        domain_stride,
+        fp8ArgFold(maximum, input_dtype == DataType::FP8_E5M2),
+        input_dtype == DataType::FP8_E5M2};
+    const uint64_t outputs_per_block = (SHALLOW_FP8_WARPS / warps_per_output) * unit.outputs_per_warp;
+    const uint64_t block_count = std::min<uint64_t>(ceilDivideU64(geometry.outer_size, outputs_per_block),
+                                                    NARROW_FLAT_MAX_GRID_BLOCKS);
+    const bool launched = dispatchOneWindowArg(
+        unit, [&]<int OutputsPerWarp, int PacketBytes, int MaxComponentsPerLane, bool LoadAhead>() {
+            fp8OneWindowArgCompleteKernel<OutputsPerWarp, PacketBytes, MaxComponentsPerLane, LoadAhead>
+                <<<static_cast<unsigned int>(block_count), SHALLOW_FP8_THREADS, 0, stream.getStream()>>>(
+                    static_cast<const uint8_t*>(input.getMemPtr<void>()),
+                    arg_outputs,
+                    static_cast<uint32_t>(geometry.outer_size),
+                    static_cast<uint32_t>(geometry.reduction_size),
+                    warps_per_output,
+                    plan->geometry);
+            CUDA_CHECK(cudaGetLastError());
+        });
+    if (!launched) {
+        throw std::logic_error("FP8 OneWindow ARG has no kernel for this unit.");
+    }
+#else
+    static_cast<void>(input);
+    static_cast<void>(value_output);
+    static_cast<void>(index_output);
+    static_cast<void>(geometry);
+    static_cast<void>(unit);
+    static_cast<void>(warps_per_output);
+    static_cast<void>(maximum);
+    static_cast<void>(domain_stride);
+    static_cast<void>(stream);
+    throw std::logic_error("FP8 OneWindow ARG requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+
+bool fp8DeepRSmallKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                               uint64_t rows_per_shard) {
+    return Fp8RK::Fp8DeepRSmallKPolicy::legal({static_cast<uint32_t>(rows_per_shard)}, outer_size, reduction_size,
+                                              inner_size) &&
+           rows_per_shard < FP8_ARG_MAX_LANE_ROWS;
+}
+
+#if THOR_CUB_ENABLE_FP8_TYPES
+namespace {
+void dispatchFp8DeepRSmallKArgFirstStage(const Tensor& input,
+                                         const Fp8ArgOutputs& arg_outputs,
+                                         const CubReductionGeometry& geometry,
+                                         uint64_t rows_per_shard,
+                                         uint64_t shards,
+                                         Stream& stream);
+}  // namespace
+#endif
+
+void launchFp8DeepRSmallKArgFirstStage(const Tensor& input,
+                                       Tensor& value_partials,
+                                       Tensor& index_partials,
+                                       const CubReductionGeometry& geometry,
+                                       uint64_t rows_per_shard,
+                                       uint64_t shards,
+                                       bool maximum,
+                                       uint64_t domain_stride,
+                                       Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    const DataType input_dtype = input.getDataType();
+    const uint64_t partials = geometry.outer_size * shards * geometry.inner_size;
+    if ((input_dtype != DataType::FP8_E4M3 && input_dtype != DataType::FP8_E5M2) ||
+        !fp8DeepRSmallKArgSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size,
+                                   rows_per_shard) ||
+        shards != ceilDivideU64(geometry.reduction_size, rows_per_shard) ||
+        input.getTotalNumElements() != geometry.outer_size * geometry.reduction_size * geometry.inner_size ||
+        value_partials.getDataType() != DataType::FP32 || value_partials.getTotalNumElements() != partials ||
+        (index_partials.getDataType() != DataType::UINT32 && index_partials.getDataType() != DataType::UINT64) ||
+        index_partials.getTotalNumElements() != partials) {
+        throw std::logic_error("FP8 DeepRSmallK ARG first stage received illegal geometry or partials.");
+    }
+    if (index_partials.getDataType() == DataType::UINT32 &&
+        (geometry.reduction_size - 1) * domain_stride > std::numeric_limits<uint32_t>::max()) {
+        throw std::logic_error("FP8 DeepRSmallK ARG UINT32 partial index cannot hold the original-domain index.");
+    }
+    const Fp8ArgOutputs arg_outputs{value_partials.getMemPtr<void>(), DataType::FP32,
+                                    index_partials.getMemPtr<void>(), index_partials.getDataType(), domain_stride,
+                                    fp8ArgFold(maximum, input_dtype == DataType::FP8_E5M2),
+                                    input_dtype == DataType::FP8_E5M2};
+    dispatchFp8DeepRSmallKArgFirstStage(input, arg_outputs, geometry, rows_per_shard, shards, stream);
+#else
+    static_cast<void>(input);
+    static_cast<void>(value_partials);
+    static_cast<void>(index_partials);
+    static_cast<void>(geometry);
+    static_cast<void>(rows_per_shard);
+    static_cast<void>(shards);
+    static_cast<void>(maximum);
+    static_cast<void>(domain_stride);
+    static_cast<void>(stream);
+    throw std::logic_error("FP8 DeepRSmallK ARG requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+void launchFp8DeepRSmallKArgFirstStagePacked(const Tensor& input,
+                                             uint32_t* packed_partials,
+                                             const CubReductionGeometry& geometry,
+                                             uint64_t rows_per_shard,
+                                             uint64_t shards,
+                                             bool maximum,
+                                             Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    const DataType input_dtype = input.getDataType();
+    if ((input_dtype != DataType::FP8_E4M3 && input_dtype != DataType::FP8_E5M2) || packed_partials == nullptr ||
+        !fp8DeepRSmallKArgSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size,
+                                   rows_per_shard) ||
+        shards != ceilDivideU64(geometry.reduction_size, rows_per_shard) ||
+        input.getTotalNumElements() != geometry.outer_size * geometry.reduction_size * geometry.inner_size) {
+        throw std::logic_error("FP8 DeepRSmallK packed ARG first stage received illegal geometry or partials.");
+    }
+    Fp8ArgOutputs arg_outputs{nullptr, DataType::FP32, nullptr, DataType::UINT32, 1,
+                              fp8ArgFold(maximum, input_dtype == DataType::FP8_E5M2),
+                              input_dtype == DataType::FP8_E5M2};
+    arg_outputs.packed = packed_partials;
+    dispatchFp8DeepRSmallKArgFirstStage(input, arg_outputs, geometry, rows_per_shard, shards, stream);
+#else
+    static_cast<void>(input);
+    static_cast<void>(packed_partials);
+    static_cast<void>(geometry);
+    static_cast<void>(rows_per_shard);
+    static_cast<void>(shards);
+    static_cast<void>(maximum);
+    static_cast<void>(stream);
+    throw std::logic_error("FP8 DeepRSmallK ARG requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+#if THOR_CUB_ENABLE_FP8_TYPES
+namespace {
+void dispatchFp8DeepRSmallKArgFirstStage(const Tensor& input,
+                                         const Fp8ArgOutputs& arg_outputs,
+                                         const CubReductionGeometry& geometry,
+                                         uint64_t rows_per_shard,
+                                         uint64_t shards,
+                                         Stream& stream) {
+    const uint32_t depth = narrowFp8PackedCheckedRowsPerShard(rows_per_shard);
+    const uint64_t bytes_per_work_item = std::min<uint64_t>(depth, geometry.reduction_size) * geometry.inner_size;
+    const dim3 grid_blocks = reductionWorkGrid(shards, 1, geometry.outer_size,
+                                               bytes_per_work_item <= 256 ? REDUCTION_PERSISTENT_MAX_BLOCKS : 0);
+    const uint32_t rows_per_warp_group = narrowFp8PackedRowsPerWarpGroup<16>(geometry.inner_size, depth);
+    const uint32_t depth_log2 = narrowFp8PackedRowsPerShardLog2(depth);
+    const auto* bytes = static_cast<const uint8_t*>(input.getMemPtr<void>());
+    const uint64_t k = geometry.inner_size;
+    const auto packed = [&]<int Components>() {
+        fp8DeepRArgFirstStageKernel<Components><<<grid_blocks, NARROW_FLAT_THREADS, 0, stream.getStream()>>>(
+            bytes, arg_outputs, geometry.outer_size, geometry.reduction_size, k, shards, depth_log2,
+            rows_per_warp_group);
+    };
+    const auto tiny = [&]<int Lanes>() {
+        fp8DeepRArgTinyKFirstStageKernel<Lanes><<<grid_blocks, NARROW_FLAT_THREADS, 0, stream.getStream()>>>(
+            bytes, arg_outputs, geometry.outer_size, geometry.reduction_size, k, shards, depth_log2,
+            rows_per_warp_group);
+    };
+    // The VALUE DeepRSmallK ownership by K (dispatchDeepRRetainedRows).
+    if (k <= 4) tiny.template operator()<8>();
+    else if (k <= 8) tiny.template operator()<4>();
+    else if (k <= 32) packed.template operator()<1>();
+    else if (k <= 64) packed.template operator()<2>();
+    else if (k <= 128) packed.template operator()<4>();
+    else if (k <= 160) packed.template operator()<5>();
+    else packed.template operator()<8>();
+    CUDA_CHECK(cudaGetLastError());
+}
+}  // namespace
+#endif
+
+
+uint32_t fp8RuntimeKArgTileComponents(uint32_t packet_bytes) {
+    if (packet_bytes == 8) return fp8ArgRotatedTileComponents<8>;
+    throw std::logic_error("FP8 RuntimeK ARG compiles only the 8-byte packet.");
+}
+
+bool fp8RuntimeKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                            uint64_t rows_per_shard, uint32_t packet_bytes) {
+    if (outer_size == 0 || reduction_size == 0 || inner_size == 0 || rows_per_shard == 0 ||
+        rows_per_shard >= FP8_ARG_MAX_LANE_ROWS || rows_per_shard > std::numeric_limits<uint32_t>::max() ||
+        packet_bytes != 8) {
+        return false;
+    }
+    const uint64_t shards = ceilDivideU64(reduction_size, rows_per_shard);
+    const uint64_t tiles = ceilDivideU64(inner_size, fp8RuntimeKArgTileComponents(packet_bytes));
+    constexpr uint64_t MaxExtent = (uint64_t{1} << 31) - 1;  // reductionWorkGrid
+    return shards <= MaxExtent && tiles <= MaxExtent && outer_size <= MaxExtent;
+}
+
+void launchFp8RuntimeKArgPass(const Tensor& input,
+                              Tensor* value_output,
+                              Tensor* index_output,
+                              const CubReductionGeometry& geometry,
+                              uint64_t rows_per_shard,
+                              uint32_t packet_bytes,
+                              bool maximum,
+                              uint64_t domain_stride,
+                              Stream& stream,
+                              uint32_t* packed_partials) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    const DataType input_dtype = input.getDataType();
+    const uint64_t shards = rows_per_shard == 0 ? 0 : ceilDivideU64(geometry.reduction_size, rows_per_shard);
+    const uint64_t outputs = geometry.outer_size * shards * geometry.inner_size;
+    const bool packed = packed_partials != nullptr;
+    if ((input_dtype != DataType::FP8_E4M3 && input_dtype != DataType::FP8_E5M2) ||
+        !fp8RuntimeKArgSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size, rows_per_shard,
+                                packet_bytes) ||
+        input.getTotalNumElements() != geometry.outer_size * geometry.reduction_size * geometry.inner_size ||
+        (packed && (value_output != nullptr || index_output != nullptr || shards < 2)) ||
+        (!packed && value_output == nullptr && index_output == nullptr) ||
+        (value_output != nullptr && (value_output->getTotalNumElements() != outputs ||
+                                     !fp8CompleteSupportsOutputStorage(value_output->getDataType()))) ||
+        (index_output != nullptr && (index_output->getTotalNumElements() != outputs ||
+                                     (index_output->getDataType() != DataType::UINT32 &&
+                                      index_output->getDataType() != DataType::UINT64))) ||
+        (!packed && shards > 1 && (value_output == nullptr || value_output->getDataType() != DataType::FP32 ||
+                                   index_output == nullptr))) {
+        throw std::logic_error("FP8 RuntimeK ARG received unsupported geometry or outputs.");
+    }
+    if (index_output != nullptr && index_output->getDataType() == DataType::UINT32 &&
+        (geometry.reduction_size - 1) * domain_stride > std::numeric_limits<uint32_t>::max()) {
+        throw std::logic_error("FP8 RuntimeK ARG UINT32 index cannot hold the original-domain index.");
+    }
+    Fp8ArgOutputs arg_outputs{
+        value_output == nullptr ? nullptr : value_output->getMemPtr<void>(),
+        value_output == nullptr ? DataType::FP32 : value_output->getDataType(),
+        index_output == nullptr ? nullptr : index_output->getMemPtr<void>(),
+        index_output == nullptr ? DataType::UINT32 : index_output->getDataType(),
+        domain_stride,
+        fp8ArgFold(maximum, input_dtype == DataType::FP8_E5M2),
+        input_dtype == DataType::FP8_E5M2};
+    arg_outputs.packed = packed_partials;
+    const uint64_t tiles = ceilDivideU64(geometry.inner_size, fp8RuntimeKArgTileComponents(packet_bytes));
+    const dim3 grid = reductionWorkGrid(shards, tiles, geometry.outer_size);
+    const auto* bytes = static_cast<const uint8_t*>(input.getMemPtr<void>());
+    fp8RotatedArgKernel<8><<<grid, FP8_ARG_ROTATED_THREADS, 0, stream.getStream()>>>(
+        bytes, arg_outputs, geometry.outer_size, geometry.reduction_size, geometry.inner_size, shards, tiles,
+        static_cast<uint32_t>(rows_per_shard));
+    CUDA_CHECK(cudaGetLastError());
+#else
+    static_cast<void>(input);
+    static_cast<void>(value_output);
+    static_cast<void>(index_output);
+    static_cast<void>(geometry);
+    static_cast<void>(rows_per_shard);
+    static_cast<void>(packet_bytes);
+    static_cast<void>(maximum);
+    static_cast<void>(domain_stride);
+    static_cast<void>(stream);
+    static_cast<void>(packed_partials);
+    throw std::logic_error("FP8 RuntimeK ARG requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+
+uint32_t fp8PacketCompleteArgTileComponents(uint64_t inner_size, uint32_t value_tile_components) {
+    // 1127: a lane keys four adjacent components per word, so a row of a tile costs ceil(tile / 128) key words and a
+    // row of the whole K costs sum over tiles. A 256-component tile reaches the minimum ceil(K / 128); VALUE's tile
+    // (capped at 256) is kept when it is as cheap (it may carry the planner's parallelism choice for small outer).
+    if (inner_size == 0 || value_tile_components == 0) return 0;
+    const auto quads_per_row = [inner_size](uint64_t tile) {
+        return (inner_size / tile) * ceilDivideU64(tile, 128) + ceilDivideU64(inner_size % tile, 128);
+    };
+    const uint64_t value_tile =
+        std::min<uint64_t>({value_tile_components, FP8_ARG_PACKET_COMPLETE_MAX_TILE, inner_size});
+    const uint64_t widest_tile = std::min<uint64_t>(FP8_ARG_PACKET_COMPLETE_MAX_TILE, inner_size);
+    return static_cast<uint32_t>(quads_per_row(widest_tile) < quads_per_row(value_tile) ? widest_tile : value_tile);
+}
+
+bool fp8PacketCompleteArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                                  uint32_t warps_per_output, uint32_t tile_components) {
+    if (outer_size == 0 || reduction_size == 0 || inner_size == 0 || tile_components == 0 ||
+        tile_components > FP8_ARG_PACKET_COMPLETE_MAX_TILE ||
+        (warps_per_output != 1 && warps_per_output != 2 && warps_per_output != 4 && warps_per_output != 8)) {
+        return false;
+    }
+    constexpr uint64_t U32 = std::numeric_limits<uint32_t>::max();
+    return reduction_size < FP8_ARG_MAX_LANE_ROWS && outer_size <= U32 && inner_size <= U32 &&
+           outer_size * ceilDivideU64(inner_size, tile_components) <= U32;
+}
+
+void launchFp8PacketCompleteArg(const Tensor& input,
+                                Tensor* value_output,
+                                Tensor* index_output,
+                                const CubReductionGeometry& geometry,
+                                uint32_t warps_per_output,
+                                uint32_t tile_components,
+                                bool maximum,
+                                uint64_t domain_stride,
+                                Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    const DataType input_dtype = input.getDataType();
+    const uint64_t outputs = geometry.outer_size * geometry.inner_size;
+    if ((input_dtype != DataType::FP8_E4M3 && input_dtype != DataType::FP8_E5M2) ||
+        !fp8PacketCompleteArgSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size,
+                                      warps_per_output, tile_components) ||
+        input.getTotalNumElements() != geometry.outer_size * geometry.reduction_size * geometry.inner_size ||
+        (value_output == nullptr && index_output == nullptr) ||
+        (value_output != nullptr && (value_output->getTotalNumElements() != outputs ||
+                                     !fp8CompleteSupportsOutputStorage(value_output->getDataType()))) ||
+        (index_output != nullptr && (index_output->getTotalNumElements() != outputs ||
+                                     (index_output->getDataType() != DataType::UINT32 &&
+                                      index_output->getDataType() != DataType::UINT64)))) {
+        throw std::logic_error("FP8 PacketComplete ARG received unsupported geometry or outputs.");
+    }
+    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{15}) != 0) {
+        throw std::logic_error("FP8 PacketComplete ARG requires a 16-byte aligned input base.");
+    }
+    if (index_output != nullptr && index_output->getDataType() == DataType::UINT32 &&
+        (geometry.reduction_size - 1) * domain_stride > std::numeric_limits<uint32_t>::max()) {
+        throw std::logic_error("FP8 PacketComplete ARG UINT32 index cannot hold the original-domain index.");
+    }
+    const Fp8ArgOutputs arg_outputs{
+        value_output == nullptr ? nullptr : value_output->getMemPtr<void>(),
+        value_output == nullptr ? DataType::FP32 : value_output->getDataType(),
+        index_output == nullptr ? nullptr : index_output->getMemPtr<void>(),
+        index_output == nullptr ? DataType::UINT32 : index_output->getDataType(),
+        domain_stride,
+        fp8ArgFold(maximum, input_dtype == DataType::FP8_E5M2),
+        input_dtype == DataType::FP8_E5M2};
+    const uint32_t tile_count = static_cast<uint32_t>(ceilDivideU64(geometry.inner_size, tile_components));
+    const uint32_t outputs_per_block = SHALLOW_FP8_WARPS / warps_per_output;
+    const uint64_t work_count = geometry.outer_size * static_cast<uint64_t>(tile_count);
+    const uint64_t block_count =
+        std::min<uint64_t>(ceilDivideU64(work_count, static_cast<uint64_t>(outputs_per_block)),
+                           NARROW_FLAT_MAX_GRID_BLOCKS);
+    fp8PacketCompleteArgKernel<16><<<static_cast<unsigned int>(block_count), SHALLOW_FP8_THREADS, 0,
+                                     stream.getStream()>>>(
+        static_cast<const uint8_t*>(input.getMemPtr<void>()), arg_outputs,
+        static_cast<uint32_t>(geometry.outer_size), static_cast<uint32_t>(geometry.reduction_size),
+        static_cast<uint32_t>(geometry.inner_size), tile_components, tile_count, warps_per_output);
+    CUDA_CHECK(cudaGetLastError());
+#else
+    static_cast<void>(input);
+    static_cast<void>(value_output);
+    static_cast<void>(index_output);
+    static_cast<void>(geometry);
+    static_cast<void>(warps_per_output);
+    static_cast<void>(tile_components);
+    static_cast<void>(maximum);
+    static_cast<void>(domain_stride);
+    static_cast<void>(stream);
+    throw std::logic_error("FP8 PacketComplete ARG requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+bool fp8AlignedKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                            uint32_t packet_bytes, uint32_t cta_threads, uint64_t shards) {
+    if (outer_size == 0 || reduction_size == 0 || inner_size == 0 || shards == 0 || shards > reduction_size ||
+        (packet_bytes != 2 && packet_bytes != 8) || inner_size % packet_bytes != 0 ||
+        (cta_threads != 32 && cta_threads != 64 && cta_threads != 128)) {
+        return false;
+    }
+    // Rows of one shard carry 23-bit candidate rows.
+    if (ceilDivideU64(reduction_size, shards) >= FP8_ARG_MAX_LANE_ROWS) return false;
+    const uint64_t tiles = ceilDivideU64(inner_size, static_cast<uint64_t>(cta_threads) * packet_bytes);
+    constexpr uint64_t MaxExtent = (uint64_t{1} << 31) - 1;  // reductionWorkGrid
+    return shards <= MaxExtent && tiles <= MaxExtent && outer_size <= MaxExtent;
+}
+
+void launchFp8AlignedKArgPass(const Tensor& input,
+                              Tensor* value_output,
+                              Tensor* index_output,
+                              const CubReductionGeometry& geometry,
+                              uint32_t packet_bytes,
+                              uint32_t cta_threads,
+                              uint64_t shards,
+                              bool maximum,
+                              uint64_t domain_stride,
+                              Stream& stream,
+                              uint32_t* packed_partials) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    const DataType input_dtype = input.getDataType();
+    const uint64_t outputs = geometry.outer_size * shards * geometry.inner_size;
+    const bool packed = packed_partials != nullptr;
+    if ((input_dtype != DataType::FP8_E4M3 && input_dtype != DataType::FP8_E5M2) ||
+        !fp8AlignedKArgSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size, packet_bytes,
+                                cta_threads, shards) ||
+        input.getTotalNumElements() != geometry.outer_size * geometry.reduction_size * geometry.inner_size ||
+        (packed && (value_output != nullptr || index_output != nullptr || shards < 2)) ||
+        (!packed && value_output == nullptr && index_output == nullptr) ||
+        (value_output != nullptr && (value_output->getTotalNumElements() != outputs ||
+                                     !fp8CompleteSupportsOutputStorage(value_output->getDataType()))) ||
+        (index_output != nullptr && (index_output->getTotalNumElements() != outputs ||
+                                     (index_output->getDataType() != DataType::UINT32 &&
+                                      index_output->getDataType() != DataType::UINT64))) ||
+        (!packed && shards > 1 && (value_output == nullptr || value_output->getDataType() != DataType::FP32 ||
+                                   index_output == nullptr))) {
+        throw std::logic_error("FP8 AlignedK ARG received unsupported geometry or outputs.");
+    }
+    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{packet_bytes - 1}) != 0) {
+        throw std::logic_error("FP8 AlignedK ARG requires a packet-aligned input base.");
+    }
+    if (index_output != nullptr && index_output->getDataType() == DataType::UINT32 &&
+        (geometry.reduction_size - 1) * domain_stride > std::numeric_limits<uint32_t>::max()) {
+        throw std::logic_error("FP8 AlignedK ARG UINT32 index cannot hold the original-domain index.");
+    }
+    Fp8ArgOutputs arg_outputs{
+        value_output == nullptr ? nullptr : value_output->getMemPtr<void>(),
+        value_output == nullptr ? DataType::FP32 : value_output->getDataType(),
+        index_output == nullptr ? nullptr : index_output->getMemPtr<void>(),
+        index_output == nullptr ? DataType::UINT32 : index_output->getDataType(),
+        domain_stride,
+        fp8ArgFold(maximum, input_dtype == DataType::FP8_E5M2),
+        input_dtype == DataType::FP8_E5M2};
+    arg_outputs.packed = packed_partials;
+    const uint64_t tiles = ceilDivideU64(geometry.inner_size, static_cast<uint64_t>(cta_threads) * packet_bytes);
+    const ReductionShardRows rows = balancedReductionShardRows(geometry.reduction_size, shards);
+    // VALUE's persistent-grid rule for tiny Complete work items (REDUCTION_PERSISTENT_MAX_BLOCKS).
+    const uint64_t item_rows = static_cast<uint64_t>(rows.base_rows) + static_cast<uint64_t>(rows.extra_rows != 0);
+    const uint64_t item_bytes =
+        item_rows * std::min<uint64_t>(geometry.inner_size, static_cast<uint64_t>(cta_threads) * packet_bytes);
+    const bool persistent = shards == 1 && item_rows <= 8 && item_bytes <= 512;
+    const dim3 grid = reductionWorkGrid(shards, tiles, geometry.outer_size,
+                                        persistent ? REDUCTION_PERSISTENT_MAX_BLOCKS : 0);
+    const auto* bytes = static_cast<const uint8_t*>(input.getMemPtr<void>());
+    if (packet_bytes == 8) {
+        fp8AlignedKArgKernel<8><<<grid, cta_threads, 0, stream.getStream()>>>(
+            bytes, arg_outputs, geometry.outer_size, geometry.reduction_size, geometry.inner_size, shards, tiles, rows);
+    } else {
+        fp8AlignedKArgKernel<2><<<grid, cta_threads, 0, stream.getStream()>>>(
+            bytes, arg_outputs, geometry.outer_size, geometry.reduction_size, geometry.inner_size, shards, tiles, rows);
+    }
+    CUDA_CHECK(cudaGetLastError());
+#else
+    static_cast<void>(input);
+    static_cast<void>(value_output);
+    static_cast<void>(index_output);
+    static_cast<void>(geometry);
+    static_cast<void>(packet_bytes);
+    static_cast<void>(cta_threads);
+    static_cast<void>(shards);
+    static_cast<void>(maximum);
+    static_cast<void>(domain_stride);
+    static_cast<void>(stream);
+    static_cast<void>(packed_partials);
+    throw std::logic_error("FP8 AlignedK ARG requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+
+bool fp8ArgPackedContinuationSplitsShards(uint64_t outer_size, uint64_t inner_size, uint64_t shards) {
+    if (shards < FP8_ARG_PACKED_SPLIT_MIN_SHARDS || inner_size == 0 ||
+        outer_size > std::numeric_limits<uint64_t>::max() / inner_size) {
+        return false;
+    }
+    const uint64_t outputs = outer_size * inner_size;
+    if (outputs >= FP8_ARG_PACKED_SPLIT_MAX_OUTPUTS &&
+        (shards < FP8_ARG_PACKED_SPLIT_WIDE_MIN_SHARDS || outputs >= FP8_ARG_PACKED_SPLIT_WIDE_MAX_OUTPUTS)) {
+        return false;
+    }
+    const Fp8ArgPackedSplitLayout layout = fp8ArgPackedSplitLayout(inner_size, shards);
+    return uint64_t{layout.columns} * layout.groups >= 32;
+}
+
+Fp8ArgPackedSplitLayout fp8ArgPackedSplitLayout(uint64_t inner_size, uint64_t shards) {
+    Fp8ArgPackedSplitLayout layout;
+    layout.columns = inner_size < 32 ? static_cast<uint32_t>(inner_size) : 32U;
+    // At least four shards per group (one batch of loads in flight), at most 1024 threads.
+    const uint64_t by_shards = std::max<uint64_t>(1, ceilDivideU64(shards, 4));
+    layout.groups = static_cast<uint32_t>(std::min<uint64_t>(1024U / layout.columns, by_shards));
+    layout.threads = static_cast<uint32_t>(ceilDivideU64(uint64_t{layout.columns} * layout.groups, 32) * 32);
+    return layout;
+}
+
+void launchFp8ArgPackedContinuation(const uint32_t* packed_partials,
+                                    Tensor* value_output,
+                                    Tensor* index_output,
+                                    DataType input_dtype,
+                                    uint64_t outer_size,
+                                    uint64_t reduction_size,
+                                    uint64_t inner_size,
+                                    uint64_t shards,
+                                    uint64_t uniform_rows_per_shard,
+                                    bool maximum,
+                                    uint64_t domain_stride,
+                                    Stream& stream) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    const uint64_t outputs = outer_size * inner_size;
+    if ((input_dtype != DataType::FP8_E4M3 && input_dtype != DataType::FP8_E5M2) || packed_partials == nullptr ||
+        // 1132: 55-bit widened indices (formerly R <= 2^32 - 1); 32-bit shard loop.
+        outputs == 0 || shards < 2 || shards > reduction_size || shards > REDUCTION_WORK_GRID_MAX_EXTENT ||
+        reduction_size - 1 > FP8_ARG_MAX_WIDE_INDEX ||
+        (uniform_rows_per_shard != 0 && shards != ceilDivideU64(reduction_size, uniform_rows_per_shard)) ||
+        (value_output == nullptr && index_output == nullptr) ||
+        (value_output != nullptr && (value_output->getTotalNumElements() != outputs ||
+                                     !fp8CompleteSupportsOutputStorage(value_output->getDataType()))) ||
+        (index_output != nullptr && (index_output->getTotalNumElements() != outputs ||
+                                     (index_output->getDataType() != DataType::UINT32 &&
+                                      index_output->getDataType() != DataType::UINT64)))) {
+        throw std::logic_error("FP8 packed ARG continuation received unsupported geometry or outputs.");
+    }
+    if (index_output != nullptr && index_output->getDataType() == DataType::UINT32 &&
+        (reduction_size - 1) * domain_stride > std::numeric_limits<uint32_t>::max()) {
+        throw std::logic_error("FP8 packed ARG continuation UINT32 index cannot hold the original-domain index.");
+    }
+    const Fp8ArgOutputs arg_outputs{
+        value_output == nullptr ? nullptr : value_output->getMemPtr<void>(),
+        value_output == nullptr ? DataType::FP32 : value_output->getDataType(),
+        index_output == nullptr ? nullptr : index_output->getMemPtr<void>(),
+        index_output == nullptr ? DataType::UINT32 : index_output->getDataType(),
+        domain_stride,
+        fp8ArgFold(maximum, input_dtype == DataType::FP8_E5M2),
+        input_dtype == DataType::FP8_E5M2};
+    // Uniform depths (DeepRSmallK, rotated RuntimeK): shard s begins at s * depth. Balanced (AlignedK): VALUE's split.
+    const ReductionShardRows rows = uniform_rows_per_shard != 0
+                                        ? ReductionShardRows{static_cast<uint32_t>(uniform_rows_per_shard), 0U}
+                                        : balancedReductionShardRows(reduction_size, shards);
+    if (fp8ArgPackedContinuationSplitsShards(outer_size, inner_size, shards)) {
+        const Fp8ArgPackedSplitLayout layout = fp8ArgPackedSplitLayout(inner_size, shards);
+        const uint64_t items = outer_size * ceilDivideU64(inner_size, layout.columns);
+        const uint64_t blocks = std::min<uint64_t>(items, NARROW_FLAT_MAX_GRID_BLOCKS);
+        fp8ArgPackedContinuationSplitKernel<0><<<static_cast<unsigned int>(blocks), layout.threads, 0,
+                                                 stream.getStream()>>>(packed_partials, arg_outputs, outer_size,
+                                                                       shards, inner_size, rows, layout.columns,
+                                                                       layout.groups);
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+    constexpr uint32_t Threads = 256;
+    const uint64_t blocks = std::min<uint64_t>(ceilDivideU64(outputs, Threads), NARROW_FLAT_MAX_GRID_BLOCKS);
+    fp8ArgPackedContinuationKernel<0><<<static_cast<unsigned int>(blocks), Threads, 0, stream.getStream()>>>(
+        packed_partials, arg_outputs, outer_size, shards, inner_size, rows);
+    CUDA_CHECK(cudaGetLastError());
+#else
+    static_cast<void>(packed_partials);
+    static_cast<void>(value_output);
+    static_cast<void>(index_output);
+    static_cast<void>(input_dtype);
+    static_cast<void>(outer_size);
+    static_cast<void>(reduction_size);
+    static_cast<void>(inner_size);
+    static_cast<void>(shards);
+    static_cast<void>(uniform_rows_per_shard);
+    static_cast<void>(maximum);
+    static_cast<void>(domain_stride);
+    static_cast<void>(stream);
+    throw std::logic_error("FP8 packed ARG continuation requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// 1146-1148: retained FP8 R / KR reductions (Fp8KR/Fp8KRSegments.h): Pack (one thread, several short rows), Group (G lanes
+// per row) and Split (one CTA per row chunk writing a partial, then a finishing kernel, one CTA per row). Every
+// family reads 4-byte words on the tensor's word grid (FP8_KR_UNROLL loads in flight) and masks bytes outside its work.
+// VALUE compiles only the reachable semantics: SUM x {identity, |x|, x^2}, PRODUCT, and MIN / MAX through RK's shared
+// MIN kernel with the P5-F byte fold (MAX negates through output_scale; |x| / x^2 fold into the bytes).
+#if THOR_CUB_ENABLE_FP8_TYPES
+namespace {
+
+constexpr uint32_t FP8_KR_UNROLL = 4;
+constexpr uint32_t FP8_KR_WARP_LANES = 32;
+constexpr uint32_t FP8_KR_WARPS = Fp8KR::FP8_KR_THREADS / FP8_KR_WARP_LANES;
+constexpr uint64_t FP8_KR_MAX_GRID_BLOCKS = 2147483647ULL;
+static_assert(Fp8KR::FP8_KR_THREADS == 256 && FP8_KR_WARPS == 8);
+
+// Byte offsets on the word grid (the input's misalignment `head` included).
+struct Fp8KRSegmentBounds {
+    uint64_t begin;
+    uint64_t end;
+    uint64_t row_begin;
+};
+
+__device__ __forceinline__ Fp8KRSegmentBounds fp8KRSegmentBounds(uint64_t segment,
+                                                                 uint64_t chunks,
+                                                                 uint64_t row_bytes,
+                                                                 uint64_t chunk_bytes,
+                                                                 uint32_t head) {
+    const uint64_t row = chunks == 1 ? segment : segment / chunks;
+    const uint64_t offset = (segment - row * chunks) * chunk_bytes;
+    const uint64_t remaining = row_bytes - offset;
+    const uint64_t length = remaining < chunk_bytes ? remaining : chunk_bytes;
+    const uint64_t row_begin = static_cast<uint64_t>(head) + row * row_bytes;
+    return {row_begin + offset, row_begin + offset + length, row_begin};
+}
+
+__device__ __forceinline__ bool fp8KRByteInside(uint64_t byte, const Fp8KRSegmentBounds& bounds) {
+    return byte >= bounds.begin && byte < bounds.end;
+}
+
+// One folded, decoded and transformed word.
+template <typename InputT, int FixedOp, int FixedInputTransform>
+__device__ __forceinline__ float4 fp8KRDecodeWord(uint32_t packed, const Fp8ExtremumFold& fold) {
+    return transformFp8CompleteDecodedPacket<FixedInputTransform>(
+        decodeFp8x4ToFp32<InputT>(foldFp8ExtremumBytes<FixedOp == 2>(packed, fold)),
+        CubReductionStageInputTransform::Identity);
+}
+
+template <int FixedOp>
+__device__ __forceinline__ void fp8KRStoreValue(void* output, DataType output_dtype, uint64_t index, float value,
+                                                const Fp8ExtremumFold& fold, AdditiveFinalizeFp32 output_finalize,
+                                                float output_scale) {
+    storeFp8CompleteResult<FixedOp == 0>(output, output_dtype, index,
+                                         unfoldFp8ExtremumResult<FixedOp == 2>(value, fold), output_finalize,
+                                         output_scale);
+}
+
+// Accumulates the words [first_word, word_end) a lane visits with stride `step`, masking bytes outside `bounds`.
+template <typename InputT, int FixedOp, int FixedInputTransform>
+__device__ __forceinline__ void fp8KRAccumulateWords(const uint32_t* __restrict__ words, uint64_t first_word,
+                                                     uint64_t word_end, uint64_t step, const Fp8KRSegmentBounds& bounds,
+                                                     const Fp8ExtremumFold& fold, float& even, float& odd) {
+    const Fp8TypedReductionOp<FixedOp> combine{};
+    for (uint64_t word = first_word; word < word_end; word += static_cast<uint64_t>(FP8_KR_UNROLL) * step) {
+        uint32_t packed[FP8_KR_UNROLL];
+#pragma unroll
+        for (uint32_t u = 0; u < FP8_KR_UNROLL; ++u) {
+            const uint64_t w = word + static_cast<uint64_t>(u) * step;
+            packed[u] = w < word_end ? __ldg(words + w) : 0U;
+        }
+#pragma unroll
+        for (uint32_t u = 0; u < FP8_KR_UNROLL; ++u) {
+            const uint64_t w = word + static_cast<uint64_t>(u) * step;
+            if (w < word_end) {
+                const float4 v = fp8KRDecodeWord<InputT, FixedOp, FixedInputTransform>(packed[u], fold);
+                const uint64_t first = w << 2;
+                if (first >= bounds.begin && first + 4 <= bounds.end) {
+                    even = combine(even, v.x);
+                    odd = combine(odd, v.y);
+                    even = combine(even, v.z);
+                    odd = combine(odd, v.w);
+                } else {
+                    if (fp8KRByteInside(first, bounds)) even = combine(even, v.x);
+                    if (fp8KRByteInside(first + 1, bounds)) odd = combine(odd, v.y);
+                    if (fp8KRByteInside(first + 2, bounds)) even = combine(even, v.z);
+                    if (fp8KRByteInside(first + 3, bounds)) odd = combine(odd, v.w);
+                }
+            }
+        }
+    }
+}
+
+// ARG counterpart: the four bytes of a word are four consecutive indices of one row, so a word's best is
+// fp8ArgRowsCandidate4 with row stride 1. Bytes outside the bounds get key 0xFF, which no FP8 byte has (Fp8ArgKey.h)
+// and so never wins; every visited word holds at least one byte inside. The index is row-local.
+__device__ __forceinline__ void fp8KRArgAccumulateWords(const uint32_t* __restrict__ words, uint64_t first_word,
+                                                        uint64_t word_end, uint64_t step,
+                                                        const Fp8KRSegmentBounds& bounds, Fp8ArgFold fold,
+                                                        uint64_t& best) {
+    for (uint64_t word = first_word; word < word_end; word += static_cast<uint64_t>(FP8_KR_UNROLL) * step) {
+        uint32_t packed[FP8_KR_UNROLL];
+#pragma unroll
+        for (uint32_t u = 0; u < FP8_KR_UNROLL; ++u) {
+            const uint64_t w = word + static_cast<uint64_t>(u) * step;
+            packed[u] = w < word_end ? __ldg(words + w) : 0U;
+        }
+#pragma unroll
+        for (uint32_t u = 0; u < FP8_KR_UNROLL; ++u) {
+            const uint64_t w = word + static_cast<uint64_t>(u) * step;
+            if (w < word_end) {
+                Fp8ArgKeys4 keys = fp8ArgKeys4(packed[u], fold);
+                const uint64_t first = w << 2;
+                if (first < bounds.begin || first + 4 > bounds.end) {
+                    uint32_t outside = 0;
+#pragma unroll
+                    for (uint32_t j = 0; j < 4; ++j) {
+                        if (!fp8KRByteInside(first + j, bounds)) outside |= 0xFFU << (8U * j);
+                    }
+                    keys.keys |= outside;
+                }
+                const uint32_t word_best = fp8ArgRowsCandidate4(keys, 0U, 1U);
+                const uint64_t index = first + ((word_best >> 1) & 3U) - bounds.row_begin;
+                const uint64_t wide = (static_cast<uint64_t>(word_best >> 24) << (FP8_ARG_WIDE_INDEX_BITS + 1)) |
+                                      (index << 1) | static_cast<uint64_t>(word_best & 1U);
+                best = fp8ArgMin(best, wide);
+            }
+        }
+    }
+}
+
+// ---- Group: G lanes per row. The loop bound is block-uniform, so every lane reaches the group shuffles.
+template <typename InputT, int FixedOp, int FixedInputTransform>
+__global__ __launch_bounds__(Fp8KR::FP8_KR_THREADS) void fp8KRValueGroupKernel(const uint32_t* __restrict__ words,
+                                                                                uint32_t head,
+                                                                                uint64_t rows,
+                                                                                uint64_t row_bytes,
+                                                                                uint32_t group_shift,
+                                                                                Fp8ExtremumFold fold,
+                                                                                void* output,
+                                                                                DataType output_dtype,
+                                                                                AdditiveFinalizeFp32 output_finalize,
+                                                                                float output_scale) {
+    static_assert(sizeof(InputT) == 1);
+    const Fp8TypedReductionOp<FixedOp> combine{};
+    const uint32_t group_lanes = 1U << group_shift;
+    const uint32_t lane = threadIdx.x & (group_lanes - 1U);
+    const uint64_t group = threadIdx.x >> group_shift;
+    const uint64_t groups_per_block = Fp8KR::FP8_KR_THREADS >> group_shift;
+    const uint64_t block_stride = static_cast<uint64_t>(gridDim.x) * groups_per_block;
+    for (uint64_t base = static_cast<uint64_t>(blockIdx.x) * groups_per_block; base < rows; base += block_stride) {
+        const uint64_t row = base + group;
+        float even = combine.identity();
+        float odd = combine.identity();
+        if (row < rows) {
+            const Fp8KRSegmentBounds bounds = fp8KRSegmentBounds(row, 1, row_bytes, row_bytes, head);
+            fp8KRAccumulateWords<InputT, FixedOp, FixedInputTransform>(words, (bounds.begin >> 2) + lane,
+                                                                       (bounds.end + 3) >> 2, group_lanes, bounds,
+                                                                       fold, even, odd);
+        }
+        float total = combine(even, odd);
+        for (uint32_t offset = group_lanes >> 1; offset != 0; offset >>= 1) {
+            total = combine(total, __shfl_xor_sync(0xffffffffU, total, static_cast<int>(offset)));
+        }
+        if (lane == 0 && row < rows) {
+            fp8KRStoreValue<FixedOp>(output, output_dtype, row, total, fold, output_finalize, output_scale);
+        }
+    }
+}
+
+// ---- Pack family output staging (1150). The 1149 SASS showed every scalar result store expanding into the runtime
+// output-dtype switch (FP8 / FP16 / BF16 / FP32 / FP64 stores and their branches) at every unrolled store site: the ARG
+// Pack kernel had 416 STG and 1023 branches in 6612 instructions, a 16-row VALUE vector kernel 172 STG and 390 branches.
+// Pack kernels now stage each block's results in shared memory (one word per row; pad one word per 32 so the
+// row-strided per-thread writes do not bank-conflict) and write them from ONE store site in a block-strided loop, which
+// also makes consecutive threads store consecutive rows.
+constexpr uint32_t FP8_KR_PACK_MAX_ROWS = 16;  // Fp8KRSegments.h legality: rows_per_thread <= 16
+constexpr uint32_t FP8_KR_PACK_STAGE_WORDS =
+    Fp8KR::FP8_KR_THREADS * FP8_KR_PACK_MAX_ROWS + Fp8KR::FP8_KR_THREADS * FP8_KR_PACK_MAX_ROWS / 32;
+
+__device__ __forceinline__ uint32_t fp8KRStageSlot(uint32_t index) { return index + (index >> 5); }
+
+// Finalize (SUM family), unfold (MIN / MAX fold) and scale one result before its storage conversion.
+template <int FixedOp>
+__device__ __forceinline__ float fp8KRFinalValue(float value, const Fp8ExtremumFold& fold,
+                                                 AdditiveFinalizeFp32 output_finalize, float output_scale) {
+    value = unfoldFp8ExtremumResult<FixedOp == 2>(value, fold);
+    if constexpr (FixedOp == 0) value = finalizeFp32Epilogue(output_finalize, value);
+    return value * output_scale;
+}
+
+template <int FixedOp>
+__device__ __forceinline__ void fp8KRWriteStagedValues(const float* staged, uint64_t first_row, uint32_t count,
+                                                       const Fp8ExtremumFold& fold, void* output,
+                                                       DataType output_dtype, AdditiveFinalizeFp32 output_finalize,
+                                                       float output_scale) {
+#pragma unroll 1
+    for (uint32_t i = threadIdx.x; i < count; i += Fp8KR::FP8_KR_THREADS) {
+        storeFp32AsRuntimeDType(output, output_dtype, first_row + i,
+                                fp8KRFinalValue<FixedOp>(staged[fp8KRStageSlot(i)], fold, output_finalize,
+                                                         output_scale));
+    }
+}
+
+__device__ __forceinline__ void fp8KRWriteStagedArgs(const uint32_t* staged, uint64_t first_row, uint32_t count,
+                                                     const Fp8ArgOutputs& outputs) {
+#pragma unroll 1
+    for (uint32_t i = threadIdx.x; i < count; i += Fp8KR::FP8_KR_THREADS) {
+        storeFp8ArgPackedResult(outputs, first_row + i, fp8ArgWiden(staged[fp8KRStageSlot(i)], 0));
+    }
+}
+
+// ---- Pack: one thread owns rows_per_thread (<= 16) consecutive short rows (row_bytes <= 32) and walks their bytes in
+// order; each completed row goes to the block's staging buffer. The block loop is uniform, so every thread reaches the
+// barriers.
+template <typename InputT, int FixedOp, int FixedInputTransform>
+__global__ __launch_bounds__(Fp8KR::FP8_KR_THREADS) void fp8KRValuePackKernel(const uint32_t* __restrict__ words,
+                                                                               uint32_t head,
+                                                                               uint64_t rows,
+                                                                               uint32_t row_bytes,
+                                                                               uint32_t rows_per_thread,
+                                                                               Fp8ExtremumFold fold,
+                                                                               void* output,
+                                                                               DataType output_dtype,
+                                                                               AdditiveFinalizeFp32 output_finalize,
+                                                                               float output_scale) {
+    static_assert(sizeof(InputT) == 1);
+    __shared__ float staged[FP8_KR_PACK_STAGE_WORDS];
+    const Fp8TypedReductionOp<FixedOp> combine{};
+    const float identity = combine.identity();
+    const uint64_t owners = (rows + rows_per_thread - 1) / rows_per_thread;
+    const uint64_t block_stride = static_cast<uint64_t>(gridDim.x) * Fp8KR::FP8_KR_THREADS;
+    for (uint64_t block_owner = static_cast<uint64_t>(blockIdx.x) * Fp8KR::FP8_KR_THREADS; block_owner < owners;
+         block_owner += block_stride) {
+        const uint64_t block_first_row = block_owner * rows_per_thread;
+        const uint64_t owner = block_owner + threadIdx.x;
+        if (owner < owners) {
+            uint64_t row = owner * rows_per_thread;
+            uint32_t local = threadIdx.x * rows_per_thread;  // row - block_first_row
+            const uint64_t count = rows - row < rows_per_thread ? rows - row : rows_per_thread;
+            const uint64_t begin = static_cast<uint64_t>(head) + row * row_bytes;
+            const uint64_t end = begin + count * row_bytes;
+            const uint64_t word_end = (end + 3) >> 2;
+            float acc = identity;
+            uint32_t position = 0;
+            for (uint64_t word = begin >> 2; word < word_end; word += FP8_KR_UNROLL) {
+                uint32_t packed[FP8_KR_UNROLL];
+#pragma unroll
+                for (uint32_t u = 0; u < FP8_KR_UNROLL; ++u) {
+                    packed[u] = word + u < word_end ? __ldg(words + word + u) : 0U;
+                }
+#pragma unroll
+                for (uint32_t u = 0; u < FP8_KR_UNROLL; ++u) {
+                    if (word + u < word_end) {
+                        const float4 v = fp8KRDecodeWord<InputT, FixedOp, FixedInputTransform>(packed[u], fold);
+                        const float values[4] = {v.x, v.y, v.z, v.w};
+                        const uint64_t first = (word + u) << 2;
+#pragma unroll
+                        for (uint32_t j = 0; j < 4; ++j) {
+                            if (first + j >= begin && first + j < end) {
+                                acc = combine(acc, values[j]);
+                                if (++position == row_bytes) {
+                                    staged[fp8KRStageSlot(local)] = acc;
+                                    acc = identity;
+                                    position = 0;
+                                    ++local;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        __syncthreads();
+        const uint64_t block_rows = rows - block_first_row;
+        const uint32_t count = static_cast<uint32_t>(
+            block_rows < uint64_t{Fp8KR::FP8_KR_THREADS} * rows_per_thread ? block_rows
+                                                                            : uint64_t{Fp8KR::FP8_KR_THREADS} *
+                                                                                  rows_per_thread);
+        fp8KRWriteStagedValues<FixedOp>(staged, block_first_row, count, fold, output, output_dtype, output_finalize,
+                                        output_scale);
+        __syncthreads();
+    }
+}
+
+// ---- Vector Pack (1148): one thread owns fp8KRVectorRows(RowBytes) rows, a whole number of 16-byte vectors, loaded
+// with 16-byte loads (the input is 16-byte aligned; the launcher otherwise runs the generic Pack kernel). Row boundaries
+// are compile-time, so the accumulation is straight-line; results leave through the block's staging buffer (1150). The
+// last rows % per-thread rows run byte by byte in the final block iteration.
+template <int RowBytes>
+inline constexpr int FP8_KR_VECTOR_ROWS = static_cast<int>(Fp8KR::fp8KRVectorRows(RowBytes));
+
+template <typename InputT, int FixedOp, int FixedInputTransform, int RowBytes>
+__global__ __launch_bounds__(Fp8KR::FP8_KR_THREADS) void fp8KRValueVectorKernel(const uint4* __restrict__ vectors,
+                                                                                 uint64_t rows,
+                                                                                 Fp8ExtremumFold fold,
+                                                                                 void* output,
+                                                                                 DataType output_dtype,
+                                                                                 AdditiveFinalizeFp32 output_finalize,
+                                                                                 float output_scale) {
+    static_assert(sizeof(InputT) == 1);
+    constexpr int Rows = FP8_KR_VECTOR_ROWS<RowBytes>;
+    constexpr int Vectors = Rows * RowBytes / 16;
+    constexpr int Words = 4 * Vectors;
+    static_assert(Rows * RowBytes == 16 * Vectors && Rows <= static_cast<int>(FP8_KR_PACK_MAX_ROWS));
+    __shared__ float staged[FP8_KR_PACK_STAGE_WORDS];
+    const Fp8TypedReductionOp<FixedOp> combine{};
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(vectors);
+    const uint64_t owners = (rows + Rows - 1) / Rows;  // the last owner may be partial (byte path)
+    const uint64_t full_owners = rows / Rows;
+    const uint64_t block_stride = static_cast<uint64_t>(gridDim.x) * Fp8KR::FP8_KR_THREADS;
+    for (uint64_t block_owner = static_cast<uint64_t>(blockIdx.x) * Fp8KR::FP8_KR_THREADS; block_owner < owners;
+         block_owner += block_stride) {
+        const uint64_t block_first_row = block_owner * Rows;
+        const uint64_t owner = block_owner + threadIdx.x;
+        if (owner < full_owners) {
+            uint32_t words[Words];
+#pragma unroll
+            for (int v = 0; v < Vectors; ++v) {
+                const uint4 packet = __ldg(vectors + owner * Vectors + v);
+                words[4 * v] = packet.x;
+                words[4 * v + 1] = packet.y;
+                words[4 * v + 2] = packet.z;
+                words[4 * v + 3] = packet.w;
+            }
+            float acc[Rows];
+#pragma unroll
+            for (int r = 0; r < Rows; ++r) acc[r] = combine.identity();
+#pragma unroll
+            for (int w = 0; w < Words; ++w) {
+                const float4 v = fp8KRDecodeWord<InputT, FixedOp, FixedInputTransform>(words[w], fold);
+                acc[(4 * w) / RowBytes] = combine(acc[(4 * w) / RowBytes], v.x);
+                acc[(4 * w + 1) / RowBytes] = combine(acc[(4 * w + 1) / RowBytes], v.y);
+                acc[(4 * w + 2) / RowBytes] = combine(acc[(4 * w + 2) / RowBytes], v.z);
+                acc[(4 * w + 3) / RowBytes] = combine(acc[(4 * w + 3) / RowBytes], v.w);
+            }
+#pragma unroll
+            for (int r = 0; r < Rows; ++r) staged[fp8KRStageSlot(threadIdx.x * Rows + r)] = acc[r];
+        } else if (owner < owners) {
+            // The partial last owner: its rows byte by byte.
+            for (uint64_t row = owner * Rows; row < rows; ++row) {
+                float acc = combine.identity();
+                for (int i = 0; i < RowBytes; ++i) {
+                    const uint32_t byte = __ldg(bytes + row * RowBytes + i);
+                    acc = combine(acc, fp8KRDecodeWord<InputT, FixedOp, FixedInputTransform>(byte, fold).x);
+                }
+                staged[fp8KRStageSlot(static_cast<uint32_t>(row - block_first_row))] = acc;
+            }
+        }
+        __syncthreads();
+        const uint64_t block_rows = rows - block_first_row;
+        const uint32_t count = static_cast<uint32_t>(
+            block_rows < uint64_t{Fp8KR::FP8_KR_THREADS} * Rows ? block_rows : uint64_t{Fp8KR::FP8_KR_THREADS} * Rows);
+        fp8KRWriteStagedValues<FixedOp>(staged, block_first_row, count, fold, output, output_dtype, output_finalize,
+                                        output_scale);
+        __syncthreads();
+    }
+}
+
+template <int RowBytes>
+__global__ __launch_bounds__(Fp8KR::FP8_KR_THREADS) void fp8KRArgVectorKernel(const uint4* __restrict__ vectors,
+                                                                               uint64_t rows,
+                                                                               Fp8ArgFold fold,
+                                                                               Fp8ArgOutputs outputs) {
+    constexpr int Rows = FP8_KR_VECTOR_ROWS<RowBytes>;
+    constexpr int Vectors = Rows * RowBytes / 16;
+    constexpr int Words = 4 * Vectors;
+    static_assert(Rows * RowBytes == 16 * Vectors && Rows <= static_cast<int>(FP8_KR_PACK_MAX_ROWS));
+    __shared__ uint32_t staged[FP8_KR_PACK_STAGE_WORDS];
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(vectors);
+    const uint64_t owners = (rows + Rows - 1) / Rows;
+    const uint64_t full_owners = rows / Rows;
+    const uint64_t block_stride = static_cast<uint64_t>(gridDim.x) * Fp8KR::FP8_KR_THREADS;
+    for (uint64_t block_owner = static_cast<uint64_t>(blockIdx.x) * Fp8KR::FP8_KR_THREADS; block_owner < owners;
+         block_owner += block_stride) {
+        const uint64_t block_first_row = block_owner * Rows;
+        const uint64_t owner = block_owner + threadIdx.x;
+        if (owner < full_owners) {
+            Fp8ArgKeys4 keys[Words];
+#pragma unroll
+            for (int v = 0; v < Vectors; ++v) {
+                const uint4 packet = __ldg(vectors + owner * Vectors + v);
+                keys[4 * v] = fp8ArgKeys4(packet.x, fold);
+                keys[4 * v + 1] = fp8ArgKeys4(packet.y, fold);
+                keys[4 * v + 2] = fp8ArgKeys4(packet.z, fold);
+                keys[4 * v + 3] = fp8ArgKeys4(packet.w, fold);
+            }
+            uint32_t best[Rows];
+#pragma unroll
+            for (int r = 0; r < Rows; ++r) best[r] = FP8_ARG_LANE_IDENTITY;
+#pragma unroll
+            for (int b = 0; b < Rows * RowBytes; ++b) {
+                best[b / RowBytes] = fp8ArgMin(best[b / RowBytes],
+                                               fp8ArgLaneCandidate(keys[b / 4], static_cast<uint32_t>(b % 4),
+                                                                   static_cast<uint32_t>(b % RowBytes)));
+            }
+#pragma unroll
+            for (int r = 0; r < Rows; ++r) staged[fp8KRStageSlot(threadIdx.x * Rows + r)] = best[r];
+        } else if (owner < owners) {
+            for (uint64_t row = owner * Rows; row < rows; ++row) {
+                uint32_t best = FP8_ARG_LANE_IDENTITY;
+                for (int i = 0; i < RowBytes; ++i) {
+                    const Fp8ArgKeys4 keys = fp8ArgKeys4(__ldg(bytes + row * RowBytes + i), fold);
+                    best = fp8ArgMin(best, fp8ArgLaneCandidate(keys, 0U, static_cast<uint32_t>(i)));
+                }
+                staged[fp8KRStageSlot(static_cast<uint32_t>(row - block_first_row))] = best;
+            }
+        }
+        __syncthreads();
+        const uint64_t block_rows = rows - block_first_row;
+        const uint32_t count = static_cast<uint32_t>(
+            block_rows < uint64_t{Fp8KR::FP8_KR_THREADS} * Rows ? block_rows : uint64_t{Fp8KR::FP8_KR_THREADS} * Rows);
+        fp8KRWriteStagedArgs(staged, block_first_row, count, outputs);
+        __syncthreads();
+    }
+}
+
+// The compiled vector row lengths (Fp8KR::FP8_KR_VECTOR_ROW_BYTES); false when RowBytes has no kernel.
+template <typename LaunchT>
+bool dispatchFp8KRVectorRowBytes(uint64_t row_bytes, const LaunchT& launch) {
+    switch (row_bytes) {
+        case 2: launch.template operator()<2>(); return true;
+        case 3: launch.template operator()<3>(); return true;
+        case 5: launch.template operator()<5>(); return true;
+        case 6: launch.template operator()<6>(); return true;
+        default: return false;
+    }
+}
+
+// Block-wide combine of one value per thread (warp shuffles, then warp 0 over the warp totals). Thread 0 gets the
+// total. Every thread of the block must call it; `scratch` is reused only after a __syncthreads.
+template <int FixedOp>
+__device__ __forceinline__ float fp8KRBlockCombine(float value, float (&scratch)[FP8_KR_WARPS]) {
+    const Fp8TypedReductionOp<FixedOp> combine{};
+    for (uint32_t offset = FP8_KR_WARP_LANES / 2; offset != 0; offset >>= 1) {
+        value = combine(value, __shfl_xor_sync(0xffffffffU, value, static_cast<int>(offset)));
+    }
+    const uint32_t warp = threadIdx.x / FP8_KR_WARP_LANES;
+    if ((threadIdx.x % FP8_KR_WARP_LANES) == 0) scratch[warp] = value;
+    __syncthreads();
+    float total = combine.identity();
+    if (threadIdx.x == 0) {
+#pragma unroll
+        for (uint32_t w = 0; w < FP8_KR_WARPS; ++w) total = combine(total, scratch[w]);
+    }
+    return total;
+}
+
+__device__ __forceinline__ uint64_t fp8KRBlockArgMin(uint64_t value, uint64_t (&scratch)[FP8_KR_WARPS]) {
+    for (uint32_t offset = FP8_KR_WARP_LANES / 2; offset != 0; offset >>= 1) {
+        const uint64_t other =
+            __shfl_xor_sync(0xffffffffU, static_cast<unsigned long long>(value), static_cast<int>(offset));
+        value = fp8ArgMin(value, other);
+    }
+    const uint32_t warp = threadIdx.x / FP8_KR_WARP_LANES;
+    if ((threadIdx.x % FP8_KR_WARP_LANES) == 0) scratch[warp] = value;
+    __syncthreads();
+    uint64_t total = FP8_ARG_WIDE_IDENTITY;
+    if (threadIdx.x == 0) {
+#pragma unroll
+        for (uint32_t w = 0; w < FP8_KR_WARPS; ++w) total = fp8ArgMin(total, scratch[w]);
+    }
+    return total;
+}
+
+// ---- Split: one CTA per (row, chunk) writes the chunk's partial (MIN / MAX in the folded MIN domain); the finishing
+// kernel gives each row one CTA, which combines the row's partials in chunk order (thread t takes chunks t, t + 256, ...,
+// then the fixed block combine), unfolds, finalizes and stores once. No atomics; the result is deterministic.
+template <typename InputT, int FixedOp, int FixedInputTransform>
+__global__ __launch_bounds__(Fp8KR::FP8_KR_THREADS) void fp8KRValueSplitKernel(const uint32_t* __restrict__ words,
+                                                                                uint32_t head,
+                                                                                uint64_t rows,
+                                                                                uint64_t row_bytes,
+                                                                                uint64_t chunk_bytes,
+                                                                                uint64_t chunks,
+                                                                                Fp8ExtremumFold fold,
+                                                                                float* __restrict__ partials) {
+    static_assert(sizeof(InputT) == 1);
+    __shared__ float warp_totals[FP8_KR_WARPS];
+    const Fp8TypedReductionOp<FixedOp> combine{};
+    const uint64_t segments = rows * chunks;
+    for (uint64_t segment = blockIdx.x; segment < segments; segment += gridDim.x) {
+        const Fp8KRSegmentBounds bounds = fp8KRSegmentBounds(segment, chunks, row_bytes, chunk_bytes, head);
+        float even = combine.identity();
+        float odd = combine.identity();
+        fp8KRAccumulateWords<InputT, FixedOp, FixedInputTransform>(words, (bounds.begin >> 2) + threadIdx.x,
+                                                                   (bounds.end + 3) >> 2, Fp8KR::FP8_KR_THREADS,
+                                                                   bounds, fold, even, odd);
+        const float chunk_total = fp8KRBlockCombine<FixedOp>(combine(even, odd), warp_totals);
+        if (threadIdx.x == 0) partials[segment] = chunk_total;
+        __syncthreads();  // warp_totals is rewritten by the next segment
+    }
+}
+
+template <int FixedOp>
+__global__ __launch_bounds__(Fp8KR::FP8_KR_THREADS) void fp8KRValueFinishKernel(const float* __restrict__ partials,
+                                                                                 uint64_t rows,
+                                                                                 uint64_t chunks,
+                                                                                 Fp8ExtremumFold fold,
+                                                                                 void* output,
+                                                                                 DataType output_dtype,
+                                                                                 AdditiveFinalizeFp32 output_finalize,
+                                                                                 float output_scale) {
+    __shared__ float warp_totals[FP8_KR_WARPS];
+    const Fp8TypedReductionOp<FixedOp> combine{};
+    constexpr uint64_t Threads = Fp8KR::FP8_KR_THREADS;
+    for (uint64_t row = blockIdx.x; row < rows; row += gridDim.x) {
+        const float* row_partials = partials + row * chunks;
+        float a = combine.identity();
+        float b = combine.identity();
+        uint64_t chunk = threadIdx.x;
+        for (; chunk + 3 * Threads < chunks; chunk += 4 * Threads) {
+            const float x0 = row_partials[chunk];
+            const float x1 = row_partials[chunk + Threads];
+            const float x2 = row_partials[chunk + 2 * Threads];
+            const float x3 = row_partials[chunk + 3 * Threads];
+            a = combine(combine(a, x0), x2);
+            b = combine(combine(b, x1), x3);
+        }
+        for (; chunk < chunks; chunk += Threads) a = combine(a, row_partials[chunk]);
+        const float row_total = fp8KRBlockCombine<FixedOp>(combine(a, b), warp_totals);
+        if (threadIdx.x == 0) {
+            fp8KRStoreValue<FixedOp>(output, output_dtype, row, row_total, fold, output_finalize, output_scale);
+        }
+        __syncthreads();
+    }
+}
+
+// ---- Block (1156): one CTA per whole row, stored directly (the Split partial kernel's mapping with one chunk, no
+// scratch, no finishing launch).
+template <typename InputT, int FixedOp, int FixedInputTransform>
+__global__ __launch_bounds__(Fp8KR::FP8_KR_THREADS) void fp8KRValueBlockKernel(const uint32_t* __restrict__ words,
+                                                                                uint32_t head,
+                                                                                uint64_t rows,
+                                                                                uint64_t row_bytes,
+                                                                                Fp8ExtremumFold fold,
+                                                                                void* output,
+                                                                                DataType output_dtype,
+                                                                                AdditiveFinalizeFp32 output_finalize,
+                                                                                float output_scale) {
+    static_assert(sizeof(InputT) == 1);
+    __shared__ float warp_totals[FP8_KR_WARPS];
+    const Fp8TypedReductionOp<FixedOp> combine{};
+    for (uint64_t row = blockIdx.x; row < rows; row += gridDim.x) {
+        const Fp8KRSegmentBounds bounds = fp8KRSegmentBounds(row, 1, row_bytes, row_bytes, head);
+        float even = combine.identity();
+        float odd = combine.identity();
+        fp8KRAccumulateWords<InputT, FixedOp, FixedInputTransform>(words, (bounds.begin >> 2) + threadIdx.x,
+                                                                   (bounds.end + 3) >> 2, Fp8KR::FP8_KR_THREADS,
+                                                                   bounds, fold, even, odd);
+        const float row_total = fp8KRBlockCombine<FixedOp>(combine(even, odd), warp_totals);
+        if (threadIdx.x == 0) {
+            fp8KRStoreValue<FixedOp>(output, output_dtype, row, row_total, fold, output_finalize, output_scale);
+        }
+        __syncthreads();  // warp_totals is rewritten by the next row
+    }
+}
+
+__global__ __launch_bounds__(Fp8KR::FP8_KR_THREADS) void fp8KRArgBlockKernel(const uint32_t* __restrict__ words,
+                                                                              uint32_t head,
+                                                                              uint64_t rows,
+                                                                              uint64_t row_bytes,
+                                                                              Fp8ArgFold fold,
+                                                                              Fp8ArgOutputs outputs) {
+    __shared__ uint64_t warp_bests[FP8_KR_WARPS];
+    for (uint64_t row = blockIdx.x; row < rows; row += gridDim.x) {
+        const Fp8KRSegmentBounds bounds = fp8KRSegmentBounds(row, 1, row_bytes, row_bytes, head);
+        uint64_t best = FP8_ARG_WIDE_IDENTITY;
+        fp8KRArgAccumulateWords(words, (bounds.begin >> 2) + threadIdx.x, (bounds.end + 3) >> 2,
+                                Fp8KR::FP8_KR_THREADS, bounds, fold, best);
+        const uint64_t row_best = fp8KRBlockArgMin(best, warp_bests);
+        if (threadIdx.x == 0) storeFp8ArgPackedResult(outputs, row, row_best);
+        __syncthreads();
+    }
+}
+
+// ---- ARG Group: G lanes per row.
+__global__ __launch_bounds__(Fp8KR::FP8_KR_THREADS) void fp8KRArgGroupKernel(const uint32_t* __restrict__ words,
+                                                                              uint32_t head,
+                                                                              uint64_t rows,
+                                                                              uint64_t row_bytes,
+                                                                              uint32_t group_shift,
+                                                                              Fp8ArgFold fold,
+                                                                              Fp8ArgOutputs outputs) {
+    const uint32_t group_lanes = 1U << group_shift;
+    const uint32_t lane = threadIdx.x & (group_lanes - 1U);
+    const uint64_t group = threadIdx.x >> group_shift;
+    const uint64_t groups_per_block = Fp8KR::FP8_KR_THREADS >> group_shift;
+    const uint64_t block_stride = static_cast<uint64_t>(gridDim.x) * groups_per_block;
+    for (uint64_t base = static_cast<uint64_t>(blockIdx.x) * groups_per_block; base < rows; base += block_stride) {
+        const uint64_t row = base + group;
+        uint64_t best = FP8_ARG_WIDE_IDENTITY;
+        if (row < rows) {
+            const Fp8KRSegmentBounds bounds = fp8KRSegmentBounds(row, 1, row_bytes, row_bytes, head);
+            fp8KRArgAccumulateWords(words, (bounds.begin >> 2) + lane, (bounds.end + 3) >> 2, group_lanes, bounds,
+                                    fold, best);
+        }
+        for (uint32_t offset = group_lanes >> 1; offset != 0; offset >>= 1) {
+            const uint64_t other =
+                __shfl_xor_sync(0xffffffffU, static_cast<unsigned long long>(best), static_cast<int>(offset));
+            best = fp8ArgMin(best, other);
+        }
+        if (lane == 0 && row < rows) storeFp8ArgPackedResult(outputs, row, best);
+    }
+}
+
+// ---- ARG Pack: per row, the 32-bit lane candidate (key << 24 | row-local index << 1 | -0) of each byte; row_bytes
+// <= 32 keeps the index far below FP8_ARG_MAX_LANE_ROWS. Completed rows go to the block's staging buffer (1150).
+__global__ __launch_bounds__(Fp8KR::FP8_KR_THREADS) void fp8KRArgPackKernel(const uint32_t* __restrict__ words,
+                                                                             uint32_t head,
+                                                                             uint64_t rows,
+                                                                             uint32_t row_bytes,
+                                                                             uint32_t rows_per_thread,
+                                                                             Fp8ArgFold fold,
+                                                                             Fp8ArgOutputs outputs) {
+    __shared__ uint32_t staged[FP8_KR_PACK_STAGE_WORDS];
+    const uint64_t owners = (rows + rows_per_thread - 1) / rows_per_thread;
+    const uint64_t block_stride = static_cast<uint64_t>(gridDim.x) * Fp8KR::FP8_KR_THREADS;
+    for (uint64_t block_owner = static_cast<uint64_t>(blockIdx.x) * Fp8KR::FP8_KR_THREADS; block_owner < owners;
+         block_owner += block_stride) {
+        const uint64_t block_first_row = block_owner * rows_per_thread;
+        const uint64_t owner = block_owner + threadIdx.x;
+        if (owner < owners) {
+            const uint64_t row = owner * rows_per_thread;
+            uint32_t local = threadIdx.x * rows_per_thread;
+            const uint64_t count = rows - row < rows_per_thread ? rows - row : rows_per_thread;
+            const uint64_t begin = static_cast<uint64_t>(head) + row * row_bytes;
+            const uint64_t end = begin + count * row_bytes;
+            const uint64_t word_end = (end + 3) >> 2;
+            uint32_t best = FP8_ARG_LANE_IDENTITY;
+            uint32_t position = 0;
+            for (uint64_t word = begin >> 2; word < word_end; word += FP8_KR_UNROLL) {
+                uint32_t packed[FP8_KR_UNROLL];
+#pragma unroll
+                for (uint32_t u = 0; u < FP8_KR_UNROLL; ++u) {
+                    packed[u] = word + u < word_end ? __ldg(words + word + u) : 0U;
+                }
+#pragma unroll
+                for (uint32_t u = 0; u < FP8_KR_UNROLL; ++u) {
+                    if (word + u < word_end) {
+                        const Fp8ArgKeys4 keys = fp8ArgKeys4(packed[u], fold);
+                        const uint64_t first = (word + u) << 2;
+#pragma unroll
+                        for (uint32_t j = 0; j < 4; ++j) {
+                            if (first + j >= begin && first + j < end) {
+                                best = fp8ArgMin(best, fp8ArgLaneCandidate(keys, j, position));
+                                if (++position == row_bytes) {
+                                    staged[fp8KRStageSlot(local)] = best;
+                                    best = FP8_ARG_LANE_IDENTITY;
+                                    position = 0;
+                                    ++local;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        __syncthreads();
+        const uint64_t block_rows = rows - block_first_row;
+        const uint32_t count = static_cast<uint32_t>(
+            block_rows < uint64_t{Fp8KR::FP8_KR_THREADS} * rows_per_thread ? block_rows
+                                                                            : uint64_t{Fp8KR::FP8_KR_THREADS} *
+                                                                                  rows_per_thread);
+        fp8KRWriteStagedArgs(staged, block_first_row, count, outputs);
+        __syncthreads();
+    }
+}
+
+// ---- ARG Split: as VALUE Split, with 64-bit wide candidates and the order-free wide minimum.
+__global__ __launch_bounds__(Fp8KR::FP8_KR_THREADS) void fp8KRArgSplitKernel(const uint32_t* __restrict__ words,
+                                                                              uint32_t head,
+                                                                              uint64_t rows,
+                                                                              uint64_t row_bytes,
+                                                                              uint64_t chunk_bytes,
+                                                                              uint64_t chunks,
+                                                                              Fp8ArgFold fold,
+                                                                              uint64_t* __restrict__ partials) {
+    __shared__ uint64_t warp_bests[FP8_KR_WARPS];
+    const uint64_t segments = rows * chunks;
+    for (uint64_t segment = blockIdx.x; segment < segments; segment += gridDim.x) {
+        const Fp8KRSegmentBounds bounds = fp8KRSegmentBounds(segment, chunks, row_bytes, chunk_bytes, head);
+        uint64_t best = FP8_ARG_WIDE_IDENTITY;
+        fp8KRArgAccumulateWords(words, (bounds.begin >> 2) + threadIdx.x, (bounds.end + 3) >> 2,
+                                Fp8KR::FP8_KR_THREADS, bounds, fold, best);
+        const uint64_t chunk_best = fp8KRBlockArgMin(best, warp_bests);
+        if (threadIdx.x == 0) partials[segment] = chunk_best;
+        __syncthreads();
+    }
+}
+
+__global__ __launch_bounds__(Fp8KR::FP8_KR_THREADS) void fp8KRArgFinishKernel(const uint64_t* __restrict__ partials,
+                                                                               uint64_t rows,
+                                                                               uint64_t chunks,
+                                                                               Fp8ArgOutputs outputs) {
+    __shared__ uint64_t warp_bests[FP8_KR_WARPS];
+    constexpr uint64_t Threads = Fp8KR::FP8_KR_THREADS;
+    for (uint64_t row = blockIdx.x; row < rows; row += gridDim.x) {
+        const uint64_t* row_partials = partials + row * chunks;
+        uint64_t a = FP8_ARG_WIDE_IDENTITY;
+        uint64_t b = FP8_ARG_WIDE_IDENTITY;
+        uint64_t chunk = threadIdx.x;
+        for (; chunk + 3 * Threads < chunks; chunk += 4 * Threads) {
+            const uint64_t x0 = row_partials[chunk];
+            const uint64_t x1 = row_partials[chunk + Threads];
+            const uint64_t x2 = row_partials[chunk + 2 * Threads];
+            const uint64_t x3 = row_partials[chunk + 3 * Threads];
+            a = fp8ArgMin(fp8ArgMin(a, x0), x2);
+            b = fp8ArgMin(fp8ArgMin(b, x1), x3);
+        }
+        for (; chunk < chunks; chunk += Threads) a = fp8ArgMin(a, row_partials[chunk]);
+        const uint64_t row_best = fp8KRBlockArgMin(fp8ArgMin(a, b), warp_bests);
+        if (threadIdx.x == 0) storeFp8ArgPackedResult(outputs, row, row_best);
+        __syncthreads();
+    }
+}
+
+struct Fp8KRLaunchGeometry {
+    const uint32_t* words;
+    uint32_t head;
+    uint32_t group_shift;
+    unsigned int blocks;
+};
+
+Fp8KRLaunchGeometry fp8KRLaunchGeometry(const Tensor& input, const Fp8KR::Fp8KRSegmentShape& shape) {
+    const uintptr_t address = reinterpret_cast<uintptr_t>(input.getMemPtr<void>());
+    uint32_t shift = 0;
+    uint64_t blocks = 0;
+    switch (shape.family()) {
+        case Fp8KR::Fp8KRFamily::Pack:
+            blocks = ceilDivideU64(ceilDivideU64(shape.rows, shape.rows_per_thread), Fp8KR::FP8_KR_THREADS);
+            break;
+        case Fp8KR::Fp8KRFamily::Group:
+            while ((1U << shift) < shape.group_lanes) ++shift;
+            blocks = ceilDivideU64(shape.rows, Fp8KR::FP8_KR_THREADS >> shift);
+            break;
+        case Fp8KR::Fp8KRFamily::Split:
+            blocks = shape.segments();
+            break;
+        case Fp8KR::Fp8KRFamily::Block:
+            blocks = shape.rows;
+            break;
+    }
+    return {reinterpret_cast<const uint32_t*>(address & ~uintptr_t{3}), static_cast<uint32_t>(address & uintptr_t{3}),
+            shift, static_cast<unsigned int>(std::min<uint64_t>(blocks, FP8_KR_MAX_GRID_BLOCKS))};
+}
+
+unsigned int fp8KRFinishBlocks(uint64_t rows) {
+    return static_cast<unsigned int>(std::min<uint64_t>(rows, FP8_KR_MAX_GRID_BLOCKS));
+}
+
+void requireFp8KRInput(const Tensor& input, const Fp8KR::Fp8KRSegmentShape& shape, void* scratch,
+                       uint64_t scratch_bytes, bool arg) {
+    const DataType dtype = input.getDataType();
+    if ((dtype != DataType::FP8_E4M3 && dtype != DataType::FP8_E5M2) || !Fp8KR::fp8KRSegmentShapeLegal(shape) ||
+        input.getTotalNumElements() != shape.rows * shape.row_bytes) {
+        throw std::logic_error("Retained FP8 KR pass received an unsupported input or segment shape.");
+    }
+    if (shape.family() == Fp8KR::Fp8KRFamily::Split &&
+        (scratch == nullptr || scratch_bytes < Fp8KR::fp8KRScratchBytes(shape, arg) ||
+         (reinterpret_cast<uintptr_t>(scratch) & uintptr_t{15}) != 0)) {
+        throw std::logic_error("Retained FP8 KR Split pass requires its 16-byte aligned partial scratch.");
+    }
+}
+
+}  // namespace
+#endif  // THOR_CUB_ENABLE_FP8_TYPES
+
+bool fp8KRValueSupports(const CubReductionStageSemantics& semantics) {
+    switch (semantics.combine) {
+        case CubReductionStageCombine::Sum:
+        case CubReductionStageCombine::Minimum:
+        case CubReductionStageCombine::Maximum:
+            return semantics.input_transform == CubReductionStageInputTransform::Identity ||
+                   semantics.input_transform == CubReductionStageInputTransform::AbsoluteValue ||
+                   semantics.input_transform == CubReductionStageInputTransform::Square;
+        case CubReductionStageCombine::Product:
+            return semantics.input_transform == CubReductionStageInputTransform::Identity;
+    }
+    return false;
+}
+
+void launchFp8KRValueSegments(const CubReductionStageSemantics& semantics,
+                              const Tensor& input,
+                              Tensor& output,
+                              const Fp8KR::Fp8KRSegmentShape& shape,
+                              void* scratch,
+                              uint64_t scratch_bytes,
+                              float output_scale,
+                              Stream& stream,
+                              Fp8KR::Fp8KRSplitStages stages) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    requireFp8KRInput(input, shape, scratch, scratch_bytes, false);
+    if (output.getTotalNumElements() != shape.rows || !fp8CompleteSupportsOutputStorage(output.getDataType()) ||
+        !fp8KRValueSupports(semantics)) {
+        throw std::logic_error("Retained FP8 KR VALUE pass received an unsupported output or semantics.");
+    }
+    const AdditiveFinalizeFp32 output_finalize = fp8CompleteFinalizerFromSemantics(semantics);
+    const Fp8KRLaunchGeometry launch = fp8KRLaunchGeometry(input, shape);
+    const auto run = [&]<typename InputT, int FixedOp, int FixedInputTransform>(Fp8ExtremumFold fold, float scale) {
+        void* out = output.getMemPtr<void>();
+        const DataType out_dtype = output.getDataType();
+        switch (shape.family()) {
+            case Fp8KR::Fp8KRFamily::Pack:
+                if (shape.vector && (reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{15}) == 0) {
+                    const bool launched = dispatchFp8KRVectorRowBytes(shape.row_bytes, [&]<int RowBytes>() {
+                        fp8KRValueVectorKernel<InputT, FixedOp, FixedInputTransform, RowBytes>
+                            <<<launch.blocks, Fp8KR::FP8_KR_THREADS, 0, stream.getStream()>>>(
+                                static_cast<const uint4*>(input.getMemPtr<void>()), shape.rows, fold, out, out_dtype,
+                                output_finalize, scale);
+                    });
+                    if (!launched) throw std::logic_error("Retained FP8 KR vector Pack has no kernel for this row length.");
+                    break;
+                }
+                fp8KRValuePackKernel<InputT, FixedOp, FixedInputTransform>
+                    <<<launch.blocks, Fp8KR::FP8_KR_THREADS, 0, stream.getStream()>>>(
+                        launch.words, launch.head, shape.rows, static_cast<uint32_t>(shape.row_bytes),
+                        shape.rows_per_thread, fold, out, out_dtype, output_finalize, scale);
+                break;
+            case Fp8KR::Fp8KRFamily::Group:
+                fp8KRValueGroupKernel<InputT, FixedOp, FixedInputTransform>
+                    <<<launch.blocks, Fp8KR::FP8_KR_THREADS, 0, stream.getStream()>>>(
+                        launch.words, launch.head, shape.rows, shape.row_bytes, launch.group_shift, fold, out,
+                        out_dtype, output_finalize, scale);
+                break;
+            case Fp8KR::Fp8KRFamily::Block:
+                fp8KRValueBlockKernel<InputT, FixedOp, FixedInputTransform>
+                    <<<launch.blocks, Fp8KR::FP8_KR_THREADS, 0, stream.getStream()>>>(
+                        launch.words, launch.head, shape.rows, shape.row_bytes, fold, out, out_dtype,
+                        output_finalize, scale);
+                break;
+            case Fp8KR::Fp8KRFamily::Split: {
+                auto* partials = static_cast<float*>(scratch);
+                fp8KRValueSplitKernel<InputT, FixedOp, FixedInputTransform>
+                    <<<launch.blocks, Fp8KR::FP8_KR_THREADS, 0, stream.getStream()>>>(
+                        launch.words, launch.head, shape.rows, shape.row_bytes, shape.chunk_bytes, shape.chunks(),
+                        fold, partials);
+                CUDA_CHECK(cudaGetLastError());
+                if (stages == Fp8KR::Fp8KRSplitStages::PartialsOnly) break;
+                fp8KRValueFinishKernel<FixedOp><<<fp8KRFinishBlocks(shape.rows), Fp8KR::FP8_KR_THREADS, 0,
+                                                  stream.getStream()>>>(partials, shape.rows, shape.chunks(), fold,
+                                                                        out, out_dtype, output_finalize, scale);
+                break;
+            }
+        }
+        CUDA_CHECK(cudaGetLastError());
+    };
+    const auto by_semantics = [&]<typename InputT>() {
+        switch (semantics.combine) {
+            case CubReductionStageCombine::Sum:
+                switch (semantics.input_transform) {
+                    case CubReductionStageInputTransform::Identity:
+                        run.template operator()<InputT, 0, 0>(FP8_EXTREMUM_FOLD_NONE, output_scale);
+                        return;
+                    case CubReductionStageInputTransform::AbsoluteValue:
+                        run.template operator()<InputT, 0, 1>(FP8_EXTREMUM_FOLD_NONE, output_scale);
+                        return;
+                    case CubReductionStageInputTransform::Square:
+                        run.template operator()<InputT, 0, 2>(FP8_EXTREMUM_FOLD_NONE, output_scale);
+                        return;
+                }
+                break;
+            case CubReductionStageCombine::Product:
+                run.template operator()<InputT, 1, 0>(FP8_EXTREMUM_FOLD_NONE, output_scale);
+                return;
+            case CubReductionStageCombine::Minimum:
+            case CubReductionStageCombine::Maximum: {
+                // RK's shared MIN kernel: the transform and MAX's sign fold into the bytes, MAX negates the scale.
+                float scale = output_scale;
+                const Fp8ExtremumFold fold = fp8CompleteExtremumFold(
+                    semantics.combine == CubReductionStageCombine::Maximum ? 3 : 2, semantics.input_transform, scale);
+                run.template operator()<InputT, 2, 0>(fold, scale);
+                return;
+            }
+        }
+        throw std::logic_error("Retained FP8 KR VALUE pass received unsupported semantics.");
+    };
+    if (input.getDataType() == DataType::FP8_E4M3) {
+        by_semantics.template operator()<__nv_fp8_e4m3>();
+    } else {
+        by_semantics.template operator()<__nv_fp8_e5m2>();
+    }
+#else
+    static_cast<void>(semantics);
+    static_cast<void>(input);
+    static_cast<void>(output);
+    static_cast<void>(shape);
+    static_cast<void>(scratch);
+    static_cast<void>(scratch_bytes);
+    static_cast<void>(output_scale);
+    static_cast<void>(stream);
+    static_cast<void>(stages);
+    throw std::logic_error("Retained FP8 KR VALUE requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
+}
+
+void launchFp8KRArgSegments(const Tensor& input,
+                            Tensor* value_output,
+                            Tensor* index_output,
+                            const Fp8KR::Fp8KRSegmentShape& shape,
+                            void* scratch,
+                            uint64_t scratch_bytes,
+                            bool maximum,
+                            uint64_t domain_stride,
+                            Stream& stream,
+                            Fp8KR::Fp8KRSplitStages stages) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+    requireFp8KRInput(input, shape, scratch, scratch_bytes, true);
+    const uint64_t outputs = shape.rows;
+    if (shape.row_bytes - 1 > FP8_ARG_MAX_WIDE_INDEX || (value_output == nullptr && index_output == nullptr) ||
+        (value_output != nullptr && (value_output->getTotalNumElements() != outputs ||
+                                     !fp8CompleteSupportsOutputStorage(value_output->getDataType()))) ||
+        (index_output != nullptr && (index_output->getTotalNumElements() != outputs ||
+                                     (index_output->getDataType() != DataType::UINT32 &&
+                                      index_output->getDataType() != DataType::UINT64)))) {
+        throw std::logic_error("Retained FP8 KR ARG pass received unsupported geometry or outputs.");
+    }
+    if (index_output != nullptr && index_output->getDataType() == DataType::UINT32 && domain_stride != 0 &&
+        shape.row_bytes - 1 > std::numeric_limits<uint32_t>::max() / domain_stride) {
+        throw std::logic_error("Retained FP8 KR ARG UINT32 index output cannot hold the original-domain index.");
+    }
+    const DataType dtype = input.getDataType();
+    const Fp8ArgFold fold = fp8ArgFold(maximum, dtype == DataType::FP8_E5M2);
+    const Fp8ArgOutputs arg_outputs{
+        value_output == nullptr ? nullptr : value_output->getMemPtr<void>(),
+        value_output == nullptr ? DataType::FP32 : value_output->getDataType(),
+        index_output == nullptr ? nullptr : index_output->getMemPtr<void>(),
+        index_output == nullptr ? DataType::UINT32 : index_output->getDataType(),
+        domain_stride,
+        fold,
+        dtype == DataType::FP8_E5M2};
+    const Fp8KRLaunchGeometry launch = fp8KRLaunchGeometry(input, shape);
+    switch (shape.family()) {
+        case Fp8KR::Fp8KRFamily::Pack:
+            if (shape.vector && (reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{15}) == 0) {
+                const bool launched = dispatchFp8KRVectorRowBytes(shape.row_bytes, [&]<int RowBytes>() {
+                    fp8KRArgVectorKernel<RowBytes><<<launch.blocks, Fp8KR::FP8_KR_THREADS, 0, stream.getStream()>>>(
+                        static_cast<const uint4*>(input.getMemPtr<void>()), shape.rows, fold, arg_outputs);
+                });
+                if (!launched) throw std::logic_error("Retained FP8 KR vector Pack has no kernel for this row length.");
+                break;
+            }
+            fp8KRArgPackKernel<<<launch.blocks, Fp8KR::FP8_KR_THREADS, 0, stream.getStream()>>>(
+                launch.words, launch.head, shape.rows, static_cast<uint32_t>(shape.row_bytes), shape.rows_per_thread,
+                fold, arg_outputs);
+            break;
+        case Fp8KR::Fp8KRFamily::Group:
+            fp8KRArgGroupKernel<<<launch.blocks, Fp8KR::FP8_KR_THREADS, 0, stream.getStream()>>>(
+                launch.words, launch.head, shape.rows, shape.row_bytes, launch.group_shift, fold, arg_outputs);
+            break;
+        case Fp8KR::Fp8KRFamily::Block:
+            fp8KRArgBlockKernel<<<launch.blocks, Fp8KR::FP8_KR_THREADS, 0, stream.getStream()>>>(
+                launch.words, launch.head, shape.rows, shape.row_bytes, fold, arg_outputs);
+            break;
+        case Fp8KR::Fp8KRFamily::Split: {
+            auto* partials = static_cast<uint64_t*>(scratch);
+            fp8KRArgSplitKernel<<<launch.blocks, Fp8KR::FP8_KR_THREADS, 0, stream.getStream()>>>(
+                launch.words, launch.head, shape.rows, shape.row_bytes, shape.chunk_bytes, shape.chunks(), fold,
+                partials);
+            CUDA_CHECK(cudaGetLastError());
+            if (stages == Fp8KR::Fp8KRSplitStages::PartialsOnly) break;
+            fp8KRArgFinishKernel<<<fp8KRFinishBlocks(shape.rows), Fp8KR::FP8_KR_THREADS, 0, stream.getStream()>>>(
+                partials, shape.rows, shape.chunks(), arg_outputs);
+            break;
+        }
+    }
+    CUDA_CHECK(cudaGetLastError());
+#else
+    static_cast<void>(input);
+    static_cast<void>(value_output);
+    static_cast<void>(index_output);
+    static_cast<void>(shape);
+    static_cast<void>(scratch);
+    static_cast<void>(scratch_bytes);
+    static_cast<void>(maximum);
+    static_cast<void>(domain_stride);
+    static_cast<void>(stream);
+    static_cast<void>(stages);
+    throw std::logic_error("Retained FP8 KR ARG requires THOR_CUB_ENABLE_FP8_TYPES.");
+#endif
 }
 
 }  // namespace ThorImplementation::CubReductionInternal

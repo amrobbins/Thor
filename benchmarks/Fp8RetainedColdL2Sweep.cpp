@@ -2,17 +2,22 @@
 // This is deliberately separate from production stamping and from the older
 // calibration benchmark that was deleted in the cleanup.
 #include "benchmarks/Fp8BenchmarkArenaCursor.h"
+#include "benchmarks/ColdTiming.h"
 #include "benchmarks/Fp8OracleBatchQueue.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKBoundSelection.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8GeneralRParallelSelector.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKRuntimeProposals.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKSelectedContinuationBenchmark.h"
+#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKStampAutotuner.h"
 #include "Utilities/TensorOperations/Cub/DenseProductionPhysicalSelectionContext.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
+#include "Utilities/TensorOperations/Cub/DenseRetainedFp8ArgPhysicalPlan.h"
+#include "Utilities/TensorOperations/Cub/DenseReductionFamilies.h"
 #include "Utilities/Common/ScopedGpu.h"
 
 #include <cuda_runtime_api.h>
+#include <cxxabi.h>
 
 #include <algorithm>
 #include <array>
@@ -26,10 +31,14 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <typeinfo>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -68,6 +77,22 @@ constexpr std::array<Op, 12> ops{{
     {T::CubReductionOp::Max,C::CubReductionStageCombine::Maximum,C::CubReductionStageInputTransform::Identity,"max_identity"},
     {T::CubReductionOp::Max,C::CubReductionStageCombine::Maximum,C::CubReductionStageInputTransform::AbsoluteValue,"max_abs"},
     {T::CubReductionOp::Max,C::CubReductionStageCombine::Maximum,C::CubReductionStageInputTransform::Square,"max_square"}}};
+// ARG: production FP8 RK argmin/argmax (family arg_production): since ARG-A2 the stamped production plan
+// (planDenseReduction + the retained ARG selection), timed with StampedCubArgReduction::runOnInputForBenchmark so every
+// measurement reads a fresh cold input view without re-stamping; configuration = the planned passes. With
+// --onewindow-runtime-k every OneWindow ARG twin is also timed directly (family one_window_arg). Compare with VALUE
+// min_identity/max_identity (arg_value_compare.py).
+struct ArgOp {
+    T::CubArgReductionOp operation;
+    const char* name;
+};
+constexpr std::array<ArgOp, 2> arg_ops{{
+    {T::CubArgReductionOp::ArgMin,"argmin"},
+    {T::CubArgReductionOp::ArgMax,"argmax"}}};
+bool knownOperation(std::string_view name) {
+    return std::any_of(ops.begin(), ops.end(), [&](const Op& op) { return name == op.name; }) ||
+           std::any_of(arg_ops.begin(), arg_ops.end(), [&](const ArgOp& op) { return name == op.name; });
+}
 struct Settings {
     std::string family;
     // Also time every OneWindow unit directly (family one_window_rk), not only the selector's OneWindow variants. Since
@@ -80,9 +105,26 @@ struct Settings {
     bool onewindow_shapes = false;
     bool uncovered_shapes = false;  // replace the grid with uncoveredKShapes()
     bool replacement_shapes = false;  // replace the grid with replacementShapes()
+    bool all_shapes = false;  // replace the grid with allShapes() (grid + uncovered K + K = 2)
+    bool arg_produce_value = true;  // --arg-outputs=index: ARG writes only the UINT32 index
     uint64_t arena_bytes = 12ULL << 30;
     uint64_t max_cells = std::numeric_limits<uint64_t>::max();
     bool historical_fp8_output = false;
+    bool targets_given = false;  // --targets-mib was passed
+    // 1133 --training: the ranker training dataset (runTraining).
+    bool training = false;
+    bool continuation_audit = false;  // 1133b --continuation-audit
+    bool dtypes_given = false;  // --dtypes was passed
+    uint64_t training_seed = 1133;
+    uint64_t training_random = 400;  // log-uniform random geometries on top of allShapes()
+    uint32_t training_semantics_per_geometry = 2;  // even: VALUE, odd: ARG
+    uint32_t training_heldout_percent = 10;  // of (R, K) shapes
+    bool training_stamp = false;  // 1162 --stamp: time production's own contest at every --training cell
+    // 1164 --training timing (benchmarks/ColdTiming.h, the KR sweep's method): per-candidate launches per sample
+    // from a probe (about interval_us each, at most max_launches) and rotating output views.
+    double interval_us = 1000.0;
+    uint64_t max_launches = 256;
+    uint64_t output_ring_bytes = 3ULL << 30;
 };
 std::vector<std::string> splitList(std::string_view text) {
     std::vector<std::string> items;
@@ -108,6 +150,7 @@ Settings parse(int argc, char** argv) {
         else if (a.starts_with("--ops=")) s.operations = splitList(a.substr(6));
         else if (a.starts_with("--dtypes=")) {
             s.dtypes.clear();
+            s.dtypes_given = true;
             for (const auto& d : splitList(a.substr(9))) {
                 if (d == "e4m3") s.dtypes.push_back(T::DataType::FP8_E4M3);
                 else if (d == "e5m2") s.dtypes.push_back(T::DataType::FP8_E5M2);
@@ -115,10 +158,39 @@ Settings parse(int argc, char** argv) {
             }
         } else if (a.starts_with("--targets-mib=")) {
             s.target_mib.clear();
+            s.targets_given = true;
             for (const auto& t : splitList(a.substr(14))) s.target_mib.push_back(std::stoull(t));
         } else if (a == "--shapes=onewindow") s.onewindow_shapes = true;
         else if (a == "--shapes=uncovered") s.uncovered_shapes = true;
         else if (a == "--shapes=replacement") s.replacement_shapes = true;
+        else if (a == "--shapes=all") s.all_shapes = true;
+        else if (a == "--training") s.training = true;
+        else if (a == "--continuation-audit") s.continuation_audit = true;
+        else if (a.starts_with("--training-seed=")) s.training_seed = std::stoull(std::string(a.substr(16)));
+        else if (a.starts_with("--training-random=")) s.training_random = std::stoull(std::string(a.substr(18)));
+        else if (a.starts_with("--training-semantics=")) {
+            s.training_semantics_per_geometry = static_cast<uint32_t>(std::stoul(std::string(a.substr(21))));
+            if (s.training_semantics_per_geometry == 0) throw std::invalid_argument("--training-semantics must be >= 1");
+        } else if (a.starts_with("--training-heldout-percent=")) {
+            s.training_heldout_percent = static_cast<uint32_t>(std::stoul(std::string(a.substr(27))));
+            if (s.training_heldout_percent > 100) throw std::invalid_argument("--training-heldout-percent must be <= 100");
+        }
+        else if (a == "--stamp") s.training_stamp = true;
+        else if (a.starts_with("--interval-us=")) s.interval_us = std::stod(std::string(a.substr(14)));
+        else if (a.starts_with("--max-launches=")) s.max_launches = std::stoull(std::string(a.substr(15)));
+        else if (a.starts_with("--output-ring-gib=")) s.output_ring_bytes = std::stoull(std::string(a.substr(18))) << 30;
+        else if (a == "--arg-outputs=value_index") s.arg_produce_value = true;
+        else if (a == "--arg-outputs=index") s.arg_produce_value = false;
+        else if (a == "--focus=arg") {
+            // ARG-A0 baseline: today's production FP8 argmin/argmax next to VALUE min/max (the line-rate reference)
+            // on every RK shape the sweep knows (the grid, the uncovered-K shapes and K = 2), one format, all
+            // three working-set sizes. Compare with arg_value_compare.py.
+            s.all_shapes = true;
+            s.dtypes = {T::DataType::FP8_E4M3};
+            s.operations = {"argmin", "argmax", "min_identity", "max_identity"};
+            s.target_mib = {24, 96, 192};
+            s.onewindow_runtime_k = true;  // OneWindow ARG twins next to the VALUE OneWindow units
+        }
         else if (a == "--focus=replacement") {
             // P5-J: bucketed OneWindow as the only OneWindow. The OneWindow-relevant grid shapes, the uncovered-K
             // shapes and K = 2 (absent from the grid), all three working-set sizes, with the --focus=onewindow ops,
@@ -163,7 +235,23 @@ Settings parse(int argc, char** argv) {
                       << "  --focus=onewindow = --shapes=onewindow --dtypes=e4m3 --targets-mib=96,192\n"
                       << "  --ops=sum_identity,product_identity,max_identity,sum_square --onewindow-runtime-k\n"
                       << "  --focus=uncovered = the same with --shapes=uncovered.\n"
-                      << "  --focus=replacement = OneWindow-relevant grid + uncovered-K + K=2 shapes, 24/96/192 MiB.\n";
+                      << "  --focus=replacement = OneWindow-relevant grid + uncovered-K + K=2 shapes, 24/96/192 MiB.\n"
+                      << "  --shapes=all = grid + uncovered-K + K=2 shapes.\n"
+                      << "  ARG: --ops=argmin,argmax (family arg_production, production path, UINT32 index;\n"
+                      << "  --arg-outputs=value_index|index, default value_index).\n"
+                      << "  --focus=arg = --shapes=all --dtypes=e4m3 --targets-mib=24,96,192\n"
+                      << "  --ops=argmin,argmax,min_identity,max_identity --onewindow-runtime-k (one_window_arg units)\n"
+                      << "  Ranker training dataset (1133): --training [--training-seed=1133] [--training-random=400]\n"
+                      << "  [--training-semantics=2] [--training-heldout-percent=10]; targets default 96,192 MiB.\n"
+                      << "  --stamp (with --training, 1162): also run production's own RK contest at every cell (Regular\n"
+                      << "  depth) and print '#stamp,cell_id,stamp_ms,candidates,winner'; analyse with fp8_rk_stamp.py.\n"
+                      << "  VALUE cells whose semantics no public operation reaches (product/min/max of |x| or x^2)\n"
+                      << "  are not stamped.\n"
+                      << "  --training timing (1164, the KR sweep's): [--interval-us=1000] [--max-launches=256]\n"
+                      << "  [--output-ring-gib=3]: launches per sample from each candidate's probe, rotating outputs.\n"
+                      << "  --ops/--dtypes/--targets-mib/--max-cells still filter. See FP8_RETAINED_COLD_L2_SWEEP.md.\n"
+                      << "  Continuation audit (1133b): --continuation-audit (default ops sum_identity,max_identity,argmax,\n"
+                      << "  e4m3, 96,192 MiB; analyse with fp8_continuation_audit.py).\n";
             std::exit(0);
         } else throw std::invalid_argument("Unknown benchmark option: " + std::string(a));
     }
@@ -172,13 +260,13 @@ Settings parse(int argc, char** argv) {
         throw std::invalid_argument("Unknown retained family filter");
     if (s.family == "one_window_rk") s.onewindow_runtime_k = true;
     for (const auto& name : s.operations) {
-        if (std::none_of(ops.begin(), ops.end(), [&](const Op& op) { return name == op.name; }))
-            throw std::invalid_argument("Unknown operation: " + name);
+        if (!knownOperation(name)) throw std::invalid_argument("Unknown operation: " + name);
     }
     if (s.dtypes.empty() || s.target_mib.empty()) throw std::invalid_argument("Empty dtype or target list");
     if (static_cast<int>(s.onewindow_shapes) + static_cast<int>(s.uncovered_shapes) +
-            static_cast<int>(s.replacement_shapes) > 1)
-        throw std::invalid_argument("Choose one of --shapes=onewindow, --shapes=uncovered, --shapes=replacement");
+            static_cast<int>(s.replacement_shapes) + static_cast<int>(s.all_shapes) > 1)
+        throw std::invalid_argument(
+            "Choose one of --shapes=onewindow, --shapes=uncovered, --shapes=replacement, --shapes=all");
     if (s.arena_bytes < (1ULL << 30) || s.arena_bytes > (24ULL << 30))
         throw std::invalid_argument("Arena size must be 1..24 GiB");
     return s;
@@ -258,6 +346,16 @@ std::vector<Shape> replacementShapes() {
     for (uint64_t r : {4,8,16,32,64,128,256,512,1024,2048,4096}) result.emplace_back(r, 2);
     return result;  // 134 + 148 + 11 shapes
 }
+// --shapes=all: every RK shape the sweep knows: the grid, the uncovered-K shapes and K = 2, without duplicates.
+std::vector<Shape> allShapes() {
+    std::vector<Shape> result = shapes();
+    const auto uncovered = uncoveredKShapes();
+    result.insert(result.end(), uncovered.begin(), uncovered.end());
+    for (uint64_t r : {4,8,16,32,64,128,256,512,1024,2048,4096}) result.emplace_back(r, 2);
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
 
 uint64_t nearTargetOuter(uint64_t r, uint64_t k, uint64_t bytes) {
     // The historical fast sweep used ceil(target_bytes/(R*K)), not a fixed
@@ -319,7 +417,8 @@ class Arena {
 public:
     Arena(T::TensorPlacement placement, Stream& stream, uint64_t bytes)
        : bytes_(placement, T::TensorDescriptor(T::DataType::UINT8, {bytes})),
-         cursor_(bytes), workspace_(placement, T::TensorDescriptor(T::DataType::UINT8, {2ULL << 30})) {
+         cursor_(bytes), workspace_(placement, T::TensorDescriptor(T::DataType::UINT8, {2ULL << 30})),
+         partials_(placement, T::TensorDescriptor(T::DataType::UINT8, {1ULL << 30})) {
         check(cudaMemsetAsync(bytes_.getMemPtr<void>(), 0x30, bytes, stream.getStream()), "cold arena initialization");
         stream.synchronize();
     }
@@ -333,8 +432,8 @@ public:
         T::DataType output_dtype, uint64_t outer, uint64_t k, uint64_t scratch_bytes) const {
         const std::vector<uint64_t> dims{outer,k};
         const uint64_t output_bytes=T::TensorDescriptor(output_dtype,dims).getArraySizeInBytes();
-        const auto align32=[](uint64_t n){return (n+31ULL)&~31ULL;};
-        const uint64_t scratch_offset=align32(output_bytes+128);
+        const auto align256=[](uint64_t n){return (n+255ULL)&~255ULL;};  // 1163: 256-byte starts
+        const uint64_t scratch_offset=align256(output_bytes+128);
         if (scratch_offset > workspace_.getArraySizeInBytes()-128 ||
             scratch_bytes > workspace_.getArraySizeInBytes()-scratch_offset-128)
             throw std::runtime_error("Retained FP8 cold-L2 output/scratch exceeds 2 GiB workspace");
@@ -344,11 +443,54 @@ public:
             T::DataType::UINT8,{scratch_bytes},scratch_offset);
         return {std::move(out),std::move(scratch)};
     }
+    // ARG outputs: value (when produced) at the start of the workspace, the UINT32 index after it, then scratch, with
+    // the same 256-byte starts (1163; 32 before) and 128-byte gaps as outputAndScratch.
+    struct ArgOutputs {
+        std::optional<T::Tensor> value, index;
+        T::Tensor scratch;
+    };
+    [[nodiscard]] ArgOutputs argOutputs(std::optional<T::DataType> value_dtype, uint64_t outer, uint64_t k,
+                                        uint64_t scratch_bytes) const {
+        const std::vector<uint64_t> dims{outer,k};
+        const auto align256=[](uint64_t n){return (n+255ULL)&~255ULL;};  // 1163: 256-byte starts
+        const uint64_t value_bytes=value_dtype?T::TensorDescriptor(*value_dtype,dims).getArraySizeInBytes():0;
+        const uint64_t index_offset=value_dtype?align256(value_bytes+128):0;
+        const uint64_t index_bytes=T::TensorDescriptor(T::DataType::UINT32,dims).getArraySizeInBytes();
+        const uint64_t scratch_offset=align256(index_offset+index_bytes+128);
+        if (scratch_offset > workspace_.getArraySizeInBytes()-128 ||
+            scratch_bytes > workspace_.getArraySizeInBytes()-scratch_offset-128)
+            throw std::runtime_error("Retained FP8 cold-L2 ARG outputs/scratch exceed 2 GiB workspace");
+        ArgOutputs result;
+        if (value_dtype) result.value=workspace_.aliasByteStorageAs(*value_dtype,dims,0);
+        result.index=workspace_.aliasByteStorageAs(T::DataType::UINT32,dims,index_offset);
+        if (scratch_bytes) result.scratch=workspace_.aliasByteStorageAs(T::DataType::UINT8,{scratch_bytes},scratch_offset);
+        return result;
+    }
+    // ARG staged twins: FP32 value + UINT32 index partials [outer, shards, k] in a separate 1 GiB buffer.
+    [[nodiscard]] std::pair<T::Tensor,T::Tensor> argPartials(uint64_t outer, uint64_t shards, uint64_t k) const {
+        const std::vector<uint64_t> dims{outer,shards,k};
+        const uint64_t value_bytes=T::TensorDescriptor(T::DataType::FP32,dims).getArraySizeInBytes();
+        const uint64_t index_offset=(value_bytes+128+255)&~255ULL;  // 1163: 256-byte starts
+        if (index_offset+value_bytes+128 > partials_.getArraySizeInBytes())
+            throw std::runtime_error("ARG partials exceed the 1 GiB partial buffer");
+        return {partials_.aliasByteStorageAs(T::DataType::FP32,dims,0),
+                partials_.aliasByteStorageAs(T::DataType::UINT32,dims,index_offset)};
+    }
+    // Packed ARG partials (4 bytes per [outer, shards, k] lane candidate) in the 1 GiB partial buffer; null for 0 bytes.
+    [[nodiscard]] void* packedArgScratch(uint64_t bytes) {
+        if (bytes == 0) return nullptr;
+        if (bytes > partials_.getArraySizeInBytes()) throw std::runtime_error("Packed ARG partials exceed 1 GiB");
+        return partials_.getMemPtr<void>();
+    }
+    // Raw bases of the 1 GiB partial buffer and the 2 GiB output/scratch workspace (--continuation-audit copies).
+    [[nodiscard]] uint8_t* rawPartials() { return partials_.getMemPtr<uint8_t>(); }
+    [[nodiscard]] uint8_t* rawWorkspace() { return workspace_.getMemPtr<uint8_t>(); }
     uint64_t wraps() const { return cursor_.wraps(); }
 private:
     T::Tensor bytes_;
     B::Fp8BenchmarkArenaCursor cursor_;
     T::Tensor workspace_;
+    T::Tensor partials_;
 };
 
 struct Event {
@@ -372,6 +514,12 @@ struct Cell {
     T::Tensor input,output,scratch;
     std::vector<Timed> candidates;
     std::vector<Event> starts, stops;
+    // 1164 (--training): rotating output views (empty: the shared `output`) and, per candidate, the launches per sample
+    // and the probe time (empty: one launch per sample, as --continuation-audit still times).
+    std::vector<T::Tensor> outputs;
+    size_t next_output = 0;
+    std::vector<uint64_t> launches;
+    std::vector<double> probe_ms;
     T::DataType dtype;
     uint64_t outer,r,k;
     std::string operation;
@@ -451,6 +599,11 @@ void run(const Settings& settings) {
     if (settings.onewindow_shapes) std::cout << " shapes=onewindow";
     if (settings.uncovered_shapes) std::cout << " shapes=uncovered";
     if (settings.replacement_shapes) std::cout << " shapes=replacement";
+    if (settings.all_shapes) std::cout << " shapes=all";
+    if (std::any_of(settings.operations.begin(),settings.operations.end(),[](const std::string& name) {
+            return std::any_of(arg_ops.begin(),arg_ops.end(),[&](const ArgOp& op) { return name == op.name; });}))
+        std::cout << " arg_path=stamped arg_index=uint32 arg_outputs=" << (settings.arg_produce_value?"value_index":"index")
+                  << " arg_value_output=" << (settings.historical_fp8_output?"same_fp8":"fp32");
     if (!settings.operations.empty()) {
         std::cout << " ops=";
         for (size_t i=0;i<settings.operations.size();++i) std::cout << (i?",":"") << settings.operations[i];
@@ -464,8 +617,62 @@ void run(const Settings& settings) {
                  "total_median_ms,sample0_ms,sample1_ms,sample2_ms,sample3_ms,sample4_ms\n";
     uint64_t prepared_cells=0;
     uint64_t collected_cells=0;
+    // Interleaved event timing of every candidate of one prepared cell (outputs already bound).
+    const auto enqueue=[&](const std::shared_ptr<Cell>& cell) {
+        const size_t count=cell->candidates.size();
+        cell->starts.reserve(Passes*count);cell->stops.reserve(Passes*count);
+        for (size_t i=0;i<Passes*count;++i) {
+            cell->starts.emplace_back();cell->stops.emplace_back();
+        }
+        auto launch=[cell,&stream,&arena](size_t index) {
+            cell->input=arena.input(cell->dtype,cell->outer,cell->r,cell->k);
+            auto& candidate=cell->candidates[index];
+            if (candidate.direct) candidate.direct(cell->input,cell->output,stream);
+            else candidate.executable->launch(cell->input,cell->output,cell->scratch,stream);
+        };
+        auto submit=[cell,launch,&stream](int pass) {
+            const size_t n=cell->candidates.size();
+            for (size_t visit=0;visit<n;++visit) {
+                const size_t index=(visit+static_cast<size_t>(pass))%n;
+                const size_t event=index*Passes+pass;
+                check(cudaEventRecord(cell->starts[event].handle,stream.getStream()),"start event");
+                launch(index);
+                check(cudaEventRecord(cell->stops[event].handle,stream.getStream()),"stop event");
+            }
+        };
+        auto collect=[cell,&collected_cells] {
+            for (size_t index=0;index<cell->candidates.size();++index) {
+                auto& item=cell->candidates[index];
+                for (int pass=0;pass<Passes;++pass) {
+                    float ms=0;
+                    check(cudaEventElapsedTime(&ms,cell->starts[index*Passes+pass].handle,
+                                             cell->stops[index*Passes+pass].handle),"event elapsed");
+                    item.milliseconds[pass]=ms;
+                }
+                auto sorted=item.milliseconds;
+                std::sort(sorted.begin(),sorted.end());
+                std::cout << item.family<<','<<cell->outer<<','<<cell->r<<','<<cell->k
+                          <<','<<dtypeName(cell->dtype)<<','<<item.name<<','<<cell->operation;
+                for (size_t budget : {12u,16u,20u,24u,28u,32u,40u,48u,128u})
+                    std::cout << ',' << (item.rank<=budget?item.rank:0);
+                std::cout << ',' << std::fixed << std::setprecision(7) << sorted[Passes/2];
+                for (double ms:item.milliseconds) std::cout << ','<<ms;
+                std::cout << '\n';
+            }
+            std::cout << "# cross_family_shape_completed,outer="<<cell->outer<<",R="<<cell->r
+                      <<",K="<<cell->k<<",dtype="<<dtypeName(cell->dtype)
+                      <<",operation="<<cell->operation
+                      <<",oracle_candidates="<<cell->candidates.size()<<'\n';
+            if (++collected_cells % 64 == 0)
+                std::cerr << "[fp8-retained-cold-l2] completed " << collected_cells
+                          << " workload cells\n";
+        };
+        queue.add({[launch] {for(int i=0;i<8;++i)launch(0);},submit,collect});
+        ++prepared_cells;
+    };
     const auto grid=settings.uncovered_shapes?uncoveredKShapes():
-                    settings.replacement_shapes?replacementShapes():shapes();
+                    settings.replacement_shapes?replacementShapes():
+                    settings.all_shapes?allShapes():shapes();
     for (T::DataType dtype : settings.dtypes) {
         for (const Op& op : ops) {
             if (!settings.operations.empty() &&
@@ -473,7 +680,7 @@ void run(const Settings& settings) {
                 continue;
             C::DenseProductionPhysicalSelectionContext fp32_context(
                 dtype, C::denseRKValueOperation(op.operation), stream);
-            for (const auto [r,k] : grid) {
+            for (const auto& [r,k] : grid) {
                 if (settings.onewindow_shapes && !oneWindowRelevantShape(r,k)) continue;
                 for (uint64_t target_mib : settings.target_mib) {
                     const uint64_t target=target_mib*MiB;
@@ -541,56 +748,149 @@ void run(const Settings& settings) {
                         outer,k,max_scratch);
                     cell->output=std::move(output);
                     cell->scratch=std::move(scratch);
-                    const size_t count=cell->candidates.size();
-                    cell->starts.reserve(Passes*count);cell->stops.reserve(Passes*count);
-                    for (size_t i=0;i<Passes*count;++i) {
-                        cell->starts.emplace_back();cell->stops.emplace_back();
-                    }
-                    auto launch=[cell,&stream,&arena](size_t index) {
-                        cell->input=arena.input(cell->dtype,cell->outer,cell->r,cell->k);
-                        auto& candidate=cell->candidates[index];
-                        if (candidate.direct) candidate.direct(cell->input,cell->output,stream);
-                        else candidate.executable->launch(cell->input,cell->output,cell->scratch,stream);
-                    };
-                    auto submit=[cell,launch,&stream](int pass) {
-                        const size_t n=cell->candidates.size();
-                        for (size_t visit=0;visit<n;++visit) {
-                            const size_t index=(visit+static_cast<size_t>(pass))%n;
-                            const size_t event=index*Passes+pass;
-                            check(cudaEventRecord(cell->starts[event].handle,stream.getStream()),"start event");
-                            launch(index);
-                            check(cudaEventRecord(cell->stops[event].handle,stream.getStream()),"stop event");
-                        }
-                    };
-                    auto collect=[cell,&collected_cells] {
-                        for (size_t index=0;index<cell->candidates.size();++index) {
-                            auto& item=cell->candidates[index];
-                            for (int pass=0;pass<Passes;++pass) {
-                                float ms=0;
-                                check(cudaEventElapsedTime(&ms,cell->starts[index*Passes+pass].handle,
-                                                         cell->stops[index*Passes+pass].handle),"event elapsed");
-                                item.milliseconds[pass]=ms;
+                    enqueue(cell);
+                }
+            }
+        }
+        // ARG ops run only when requested by name (--ops or --focus=arg), so the default sweep is unchanged.
+        for (const ArgOp& op : arg_ops) {
+            if (std::find(settings.operations.begin(),settings.operations.end(),op.name)==settings.operations.end())
+                continue;
+            if (!settings.family.empty())
+                throw std::invalid_argument("--family filters retained VALUE families; it cannot select ARG ops");
+            T::CubArgReductionOutputOptions outputs;
+            outputs.produce_value=settings.arg_produce_value;
+            // --arg-outputs=index: no value dtype (CubArgReduction rejects a value dtype without a value output).
+            if (settings.arg_produce_value)
+                outputs.value_output_dtype=settings.historical_fp8_output?dtype:T::DataType::FP32;
+            outputs.index_output_dtype=T::DataType::UINT32;
+            const T::CubArgReduction reduction(op.operation,1u,outputs);
+            const std::optional<T::DataType> value_dtype=settings.arg_produce_value?
+                std::optional<T::DataType>(reduction.resolveValueOutputDataType(dtype)):std::nullopt;
+            for (const auto& [r,k] : grid) {
+                if (settings.onewindow_shapes && !oneWindowRelevantShape(r,k)) continue;
+                for (uint64_t target_mib : settings.target_mib) {
+                    if (prepared_cells>=settings.max_cells) goto finished;
+                    const uint64_t outer=outerNear(r,k,MiB*target_mib);
+                    const std::vector<uint64_t> dims{outer,r,k};
+                    const T::CubReductionGeometry geometry=T::CubArgReduction::analyzeDenseGeometry(dims,{1});
+                    auto out=arena.argOutputs(value_dtype,outer,k,0);
+                    auto cell=std::make_shared<Cell>(arena.input(dtype,outer,r,k),dtype,outer,r,k,op.name);
+                    if (out.value) cell->output=*out.value;
+                    // Production: stamp once (selection/autotune happen here, outside timing) on preallocated outputs.
+                    auto stamped=reduction.stamp(cell->input,out.value,out.index,stream);
+                    std::string name;
+                    for (const std::string& pass : stamped->getPlannedPassNames()) name+=(name.empty()?"":"+")+pass;
+                    if (name.empty()) throw std::logic_error("FP8 ARG production stamp has no planned passes");
+                    cell->candidates.push_back({"arg_production",std::nullopt,
+                        [stamped](const T::Tensor& in,T::Tensor&,Stream& s) { stamped->runOnInputForBenchmark(in,s); },
+                        std::move(name),0,{}});
+                    const bool maximum=op.operation==T::CubArgReductionOp::ArgMax;
+                    if (settings.onewindow_runtime_k) {
+                        // Every OneWindow ARG twin directly (not ranked), named like the VALUE one_window_rk units.
+                        for (const C::Fp8OneWindowRuntimeKUnit unit : C::fp8OneWindowRuntimeKUnits(k)) {
+                            for (uint32_t w : {1u,2u,4u,8u}) {
+                                if (r<w || !C::fp8OneWindowArgSupports(outer,r,k,unit,w)) continue;  // as one_window_rk
+                                const std::string unit_name="o"+std::to_string(unit.outputs_per_warp)+"_w"+
+                                    std::to_string(w)+"_p"+std::to_string(unit.packet_bytes)+"_c"+
+                                    std::to_string(unit.max_components_per_lane)+(unit.load_ahead?"_la":"");
+                                cell->candidates.push_back({"one_window_arg",std::nullopt,
+                                    [geometry,unit,w,maximum,value=out.value,index=out.index]
+                                    (const T::Tensor& in,T::Tensor&,Stream& s) mutable {
+                                        C::launchFp8OneWindowArgComplete(in,value?&*value:nullptr,index?&*index:nullptr,
+                                                                         geometry,unit,w,maximum,1,s);
+                                    },unit_name,0,{}});
                             }
-                            auto sorted=item.milliseconds;
-                            std::sort(sorted.begin(),sorted.end());
-                            std::cout << item.family<<','<<cell->outer<<','<<cell->r<<','<<cell->k
-                                      <<','<<dtypeName(cell->dtype)<<','<<item.name<<','<<cell->operation;
-                            for (size_t budget : {12u,16u,20u,24u,28u,32u,40u,48u,128u})
-                                std::cout << ',' << (item.rank<=budget?item.rank:0);
-                            std::cout << ',' << std::fixed << std::setprecision(7) << sorted[Passes/2];
-                            for (double ms:item.milliseconds) std::cout << ','<<ms;
-                            std::cout << '\n';
                         }
-                        std::cout << "# cross_family_shape_completed,outer="<<cell->outer<<",R="<<cell->r
-                                  <<",K="<<cell->k<<",dtype="<<dtypeName(cell->dtype)
-                                  <<",operation="<<cell->operation
-                                  <<",oracle_candidates="<<cell->candidates.size()<<'\n';
-                        if (++collected_cells % 64 == 0)
-                            std::cerr << "[fp8-retained-cold-l2] completed " << collected_cells
-                                      << " workload cells\n";
-                    };
-                    queue.add({[launch] {for(int i=0;i<8;++i)launch(0);},submit,collect});
-                    ++prepared_cells;
+                        // Every DeepRSmallK ARG depth: the first stage into 4-byte packed partials plus the packed
+                        // continuation (what production runs since 1116), named like the VALUE deep_r_small_k candidates.
+                        for (uint64_t rows : F::Fp8DeepRSmallKPolicy::compiled_rows) {
+                            if (!C::fp8DeepRSmallKArgSupports(outer,r,k,rows)) continue;
+                            const uint64_t shards=(r+rows-1)/rows;
+                            uint32_t* packed=static_cast<uint32_t*>(arena.argPartials(outer,shards,k).first.getMemPtr<void>());
+                            cell->candidates.push_back({"deep_r_small_k_arg",std::nullopt,
+                                [geometry,outer,r,k,rows,shards,maximum,packed,
+                                 value=out.value,index=out.index](const T::Tensor& in,T::Tensor&,Stream& s) mutable {
+                                    C::launchFp8DeepRSmallKArgFirstStagePacked(in,packed,geometry,rows,shards,maximum,s);
+                                    C::launchFp8ArgPackedContinuation(packed,value?&*value:nullptr,
+                                        index?&*index:nullptr,in.getDataType(),outer,r,k,shards,rows,maximum,1,s);
+                                },"p16_rows"+std::to_string(rows),0,{}});
+                        }
+                        // RuntimeK ARG: the PacketComplete twin at W 1/2/4/8 (tile: VALUE's fewest-tile width,
+                        // capped at 256, 1127), then the rotated kernel (8-byte packets) at every rotated depth below R
+                        // (staged, plus the carried-index reduction of the shards) and the single-shard Complete pass.
+                        {
+                            const uint32_t value_tile=static_cast<uint32_t>((k+(k+495)/496-1)/((k+495)/496));
+                            const uint32_t tile=C::fp8PacketCompleteArgTileComponents(k,value_tile);
+                            for (uint32_t w : {1u,2u,4u,8u}) {
+                                if (w>r || !C::fp8PacketCompleteArgSupports(outer,r,k,w,tile)) continue;
+                                cell->candidates.push_back({"runtime_k_arg",std::nullopt,
+                                    [geometry,w,tile,maximum,value=out.value,index=out.index]
+                                    (const T::Tensor& in,T::Tensor&,Stream& s) mutable {
+                                        C::launchFp8PacketCompleteArg(in,value?&*value:nullptr,index?&*index:nullptr,
+                                                                      geometry,w,tile,maximum,1,s);
+                                    },"packet_complete_w"+std::to_string(w)+"_tile"+std::to_string(tile),0,{}});
+                            }
+                        }
+                        for (uint32_t packet : {8u}) {
+                            std::vector<uint64_t> depths(F::Fp8RuntimeKPolicy::rotated_row_depths.begin(),
+                                                         F::Fp8RuntimeKPolicy::rotated_row_depths.end());
+                            depths.erase(std::remove_if(depths.begin(),depths.end(),
+                                [r](uint64_t rows) { return rows>=r; }),depths.end());
+                            depths.push_back(r);  // single shard: the Complete pass
+                            for (uint64_t rows : depths) {
+                                if (!C::fp8RuntimeKArgSupports(outer,r,k,rows,packet)) continue;
+                                const uint64_t shards=(r+rows-1)/rows;
+                                const std::string unit_name="p"+std::to_string(packet)+
+                                    (shards==1?std::string("_complete"):"_rows"+std::to_string(rows));
+                                if (shards==1) {
+                                    cell->candidates.push_back({"runtime_k_arg",std::nullopt,
+                                        [geometry,rows,packet,maximum,value=out.value,index=out.index]
+                                        (const T::Tensor& in,T::Tensor&,Stream& s) mutable {
+                                            C::launchFp8RuntimeKArgPass(in,value?&*value:nullptr,index?&*index:nullptr,
+                                                                        geometry,rows,packet,maximum,1,s);
+                                        },unit_name,0,{}});
+                                    continue;
+                                }
+                                uint32_t* packed=static_cast<uint32_t*>(arena.argPartials(outer,shards,k).first.getMemPtr<void>());
+                                cell->candidates.push_back({"runtime_k_arg",std::nullopt,
+                                    [geometry,outer,r,k,rows,shards,packet,maximum,packed,
+                                     value=out.value,index=out.index](const T::Tensor& in,T::Tensor&,Stream& s) mutable {
+                                        C::launchFp8RuntimeKArgPass(in,nullptr,nullptr,geometry,rows,packet,maximum,1,s,
+                                                                    packed);
+                                        C::launchFp8ArgPackedContinuation(packed,value?&*value:nullptr,
+                                            index?&*index:nullptr,in.getDataType(),outer,r,k,shards,rows,maximum,1,s);
+                                    },unit_name,0,{}});
+                            }
+                        }
+                        // AlignedK ARG: every VALUE AlignedK variant (packet, CTA, shards), named like aligned_k.
+                        for (const AK::Variant v : AK::candidates(outer,r,k)) {
+                            if (!C::fp8AlignedKArgSupports(outer,r,k,v.packet,v.threads,v.shards_per_output)) continue;
+                            const uint32_t packet=v.packet, threads=v.threads;
+                            const uint64_t shards=v.shards_per_output;
+                            const std::string unit_name="p"+std::to_string(packet)+"_cta"+std::to_string(threads)+
+                                "_shards"+std::to_string(shards);
+                            if (shards==1) {
+                                cell->candidates.push_back({"aligned_k_arg",std::nullopt,
+                                    [geometry,packet,threads,maximum,value=out.value,index=out.index]
+                                    (const T::Tensor& in,T::Tensor&,Stream& s) mutable {
+                                        C::launchFp8AlignedKArgPass(in,value?&*value:nullptr,index?&*index:nullptr,
+                                                                    geometry,packet,threads,1,maximum,1,s);
+                                    },unit_name,0,{}});
+                                continue;
+                            }
+                            uint32_t* packed=static_cast<uint32_t*>(arena.argPartials(outer,shards,k).first.getMemPtr<void>());
+                            cell->candidates.push_back({"aligned_k_arg",std::nullopt,
+                                [geometry,outer,r,k,packet,threads,shards,maximum,packed,
+                                 value=out.value,index=out.index](const T::Tensor& in,T::Tensor&,Stream& s) mutable {
+                                    C::launchFp8AlignedKArgPass(in,nullptr,nullptr,geometry,packet,threads,shards,
+                                                                maximum,1,s,packed);
+                                    C::launchFp8ArgPackedContinuation(packed,value?&*value:nullptr,
+                                        index?&*index:nullptr,in.getDataType(),outer,r,k,shards,0,maximum,1,s);
+                                },unit_name,0,{}});
+                        }
+                    }
+                    enqueue(cell);
                 }
             }
         }
@@ -606,9 +906,656 @@ finished:
              <<" collect_ms="<<t.collect_ms<<" warmup_ms="<<t.warmup_ms
              <<" arena_wraps="<<arena.wraps()<<'\n';
 }
+// ---------------------------------------------------------------------------------------------------------------
+// 1133 --training: the ranker training dataset. Every legal retained candidate of a cell is timed end to end (VALUE:
+// first stage + its production FP32 continuation; ARG: the single retained pass, packed staged passes including their
+// packed continuation, exactly as launchRetainedFp8ArgPlan runs it in production). Each row carries the C++ ranker
+// features (rankerFeatures of the candidate at its local rank), so training never re-derives features in Python.
+// Semantics are sampled per geometry (not crossed): each geometry gets one VALUE cell and one ARG cell by default.
+namespace Training {
+enum class Kind { Value, ArgIndex, ArgValueIndex };
+const char* kindName(Kind kind) {
+    return kind == Kind::Value ? "value" : kind == Kind::ArgIndex ? "arg_index" : "arg_value_index";
+}
+uint64_t mix(uint64_t x) {  // splitmix64 finalizer: deterministic across platforms
+    x += 0x9E3779B97F4A7C15ULL;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+}
+// Uniform double in [0, 1) from a 64-bit hash.
+double unit(uint64_t h) { return static_cast<double>(h >> 11) * (1.0 / 9007199254740992.0); }
+struct Geometry {
+    uint64_t outer, r, k, target_mib;
+    bool random;
+};
+struct CellSpec {
+    uint64_t id;
+    Geometry geometry;
+    bool heldout;
+    Kind kind;
+    T::DataType dtype;
+    size_t value_op = 0;  // index into ops (Kind::Value)
+    size_t arg_op = 0;    // index into arg_ops (ARG kinds)
+};
+// Held out by (R, K) shape, so every working-set size of a held-out shape is held out together (geometry-separated).
+bool heldOutShape(uint64_t r, uint64_t k, uint64_t seed, uint32_t percent) {
+    return mix(mix(seed ^ 0x48454C44ULL) ^ mix(r * 0x100000001B3ULL + k)) % 100 < percent;
+}
+std::vector<Geometry> geometries(const Settings& s, const std::vector<uint64_t>& targets) {
+    std::vector<Geometry> result;
+    for (const auto& [r, k] : allShapes())
+        for (uint64_t t : targets) result.push_back({outerNear(r, k, t * MiB), r, k, t, false});
+    // Log-uniform (R, K): R in [2, 2^16], K in [2, 2^12]; working set drawn from the target list.
+    for (uint64_t i = 0, drawn = 0; drawn < s.training_random && i < s.training_random * 64; ++i) {
+        const uint64_t h = mix(s.training_seed * 0x2545F4914F6CDD1DULL + i);
+        const uint64_t r = static_cast<uint64_t>(std::llround(std::exp2(1.0 + 15.0 * unit(mix(h ^ 1)))));
+        const uint64_t k = static_cast<uint64_t>(std::llround(std::exp2(1.0 + 11.0 * unit(mix(h ^ 2)))));
+        const uint64_t t = targets[mix(h ^ 3) % targets.size()];
+        if (r < 2 || k < 2 || r * k > t * MiB) continue;
+        result.push_back({outerNear(r, k, t * MiB), r, k, t, true});
+        ++drawn;
+    }
+    std::sort(result.begin(), result.end(), [](const Geometry& a, const Geometry& b) {
+        return std::tie(a.r, a.k, a.outer) < std::tie(b.r, b.k, b.outer);
+    });
+    result.erase(std::unique(result.begin(), result.end(), [](const Geometry& a, const Geometry& b) {
+        return a.r == b.r && a.k == b.k && a.outer == b.outer;
+    }), result.end());
+    return result;
+}
+std::vector<CellSpec> cells(const Settings& s, const std::vector<uint64_t>& targets) {
+    std::vector<CellSpec> result;
+    std::vector<size_t> value_ops;
+    for (size_t i = 0; i < ops.size(); ++i)
+        if (s.operations.empty() || std::find(s.operations.begin(), s.operations.end(), ops[i].name) != s.operations.end())
+            value_ops.push_back(i);
+    const bool arg_allowed = s.operations.empty() ||
+        std::any_of(arg_ops.begin(), arg_ops.end(), [&](const ArgOp& op) {
+            return std::find(s.operations.begin(), s.operations.end(), op.name) != s.operations.end(); });
+    std::vector<size_t> arg_op_indices;
+    for (size_t i = 0; i < arg_ops.size(); ++i)
+        if (s.operations.empty() ||
+            std::find(s.operations.begin(), s.operations.end(), arg_ops[i].name) != s.operations.end())
+            arg_op_indices.push_back(i);
+    uint64_t id = 0;
+    for (const Geometry& g : geometries(s, targets)) {
+        const bool heldout = heldOutShape(g.r, g.k, s.training_seed, s.training_heldout_percent);
+        for (uint32_t j = 0; j < s.training_semantics_per_geometry; ++j) {
+            const uint64_t h = mix(mix(s.training_seed) ^ mix(g.outer * 0x9E3779B1ULL ^ g.r * 0x85EBCA77ULL ^ g.k) ^ j);
+            CellSpec c{id, g, heldout, Kind::Value, s.dtypes[mix(h ^ 11) % s.dtypes.size()]};
+            // Alternate VALUE and ARG per geometry (even j: VALUE, odd j: ARG), so both kinds see every geometry.
+            const bool want_arg = (j % 2) == 1;
+            if ((want_arg && arg_allowed) || value_ops.empty()) {
+                if (!arg_allowed) continue;
+                c.kind = (mix(h ^ 13) & 1) ? Kind::ArgValueIndex : Kind::ArgIndex;
+                c.arg_op = arg_op_indices[mix(h ^ 17) % arg_op_indices.size()];
+            } else {
+                c.value_op = value_ops[mix(h ^ 19) % value_ops.size()];
+            }
+            result.push_back(c);
+            ++id;
+        }
+    }
+    // 1140: a seeded shuffle, so any --max-cells prefix samples the whole grid (in (R, K) order a 200-cell slice
+    // held only R <= 8 and could not size the run). Cell ids keep the grid order.
+    std::stable_sort(result.begin(), result.end(), [&](const CellSpec& a, const CellSpec& b) {
+        return mix(s.training_seed ^ mix(a.id)) < mix(s.training_seed ^ mix(b.id));
+    });
+    return result;
+}
+G::RankerSemantics typedSemantics(T::DataType dtype, C::CubReductionStageCombine combine,
+                                  C::CubReductionStageInputTransform transform) {
+    return {dtype == T::DataType::FP8_E4M3 ? G::Fp8Format::E4M3 : G::Fp8Format::E5M2,
+            combine == C::CubReductionStageCombine::Sum ? G::Combine::Sum :
+            combine == C::CubReductionStageCombine::Product ? G::Combine::Product :
+            combine == C::CubReductionStageCombine::Minimum ? G::Combine::Min : G::Combine::Max,
+            transform == C::CubReductionStageInputTransform::Identity ? G::InputTransform::Identity :
+            transform == C::CubReductionStageInputTransform::AbsoluteValue ? G::InputTransform::Abs :
+                                                                             G::InputTransform::Square};
+}
+// A unique configuration name for an ARG pass (the identity alone can merge OneWindow units that differ only in
+// components-per-lane or load-ahead).
+std::string argPlanName(const C::DenseRetainedFp8ArgPhysicalPlan& plan, const F::PhysicalKernel& identity) {
+    std::string name = physicalName(identity);
+    if (plan.family == F::PhysicalFamily::OneWindow)
+        name += "_c" + std::to_string(plan.unit.max_components_per_lane) + (plan.unit.load_ahead ? "_la" : "");
+    if (plan.family == F::PhysicalFamily::RuntimeK && plan.tile_components == 0)
+        name += "_p" + std::to_string(plan.packet_bytes);
+    return name;
+}
+std::string recordPrefix(const CellSpec& c, const char* op_name, const char* family, const std::string& configuration,
+                         uint32_t local_rank, size_t list_position,
+                         const std::array<float, F::Fp8GeometryRankerModel::FEATURE_COUNT>& features, bool staged) {
+    std::ostringstream line;
+    line << kindName(c.kind) << ',' << c.id << ',' << (c.heldout ? 1 : 0) << ',' << (c.geometry.random ? 1 : 0) << ','
+         << c.geometry.outer << ',' << c.geometry.r << ',' << c.geometry.k << ',' << c.geometry.target_mib << ','
+         << dtypeName(c.dtype) << ',' << op_name << ',' << family << ',' << configuration << ',' << local_rank << ','
+         << list_position << ',' << (staged ? 1 : 0) << ',' << std::setprecision(9)
+         << F::Fp8GeometryRankerModel::margin(features);
+    // f0..f24: the training CSV keeps the 25 geometry/physical features; the aggregate kind (feature 25) is the kind
+    // column (benchmarks/fp8_ranker/dataset.py appends it).
+    for (size_t i = 0; i + 1 < features.size(); ++i) line << ',' << std::setprecision(9) << features[i];
+    return line.str();
+}
+}  // namespace Training
+
+// Interleaved cold-L2 timing of one prepared cell whose candidates' `name` is a complete CSV record prefix: prints
+// "<name>,median,samples..." per candidate and progress/ETA to stderr (--training, --continuation-audit).
+struct RecordQueue {
+    Stream& stream;
+    Arena& arena;
+    B::Fp8OracleBatchQueue& queue;
+    uint64_t total;
+    std::chrono::steady_clock::time_point start;
+    const char* tag;
+    uint64_t collected = 0, candidates = 0;
+    // 1164: >0 (--training): probe() sets each candidate's launches per sample, about interval_us each, and the rows
+    // carry launches_per_sample and probe_ms.
+    double interval_us = 0.0;
+    uint64_t max_launches = 1;
+    // One launch: a fresh cold input view and the cell's next output view.
+    void launchOnce(Cell& cell, size_t index) {
+        cell.input=arena.input(cell.dtype,cell.outer,cell.r,cell.k);
+        T::Tensor& out=cell.outputs.empty()?cell.output:cell.outputs[cell.next_output++%cell.outputs.size()];
+        auto& candidate=cell.candidates[index];
+        if (candidate.direct) candidate.direct(cell.input,out,stream);
+        else candidate.executable->launch(cell.input,out,cell.scratch,stream);
+    }
+    // 1164: per candidate an untimed launch (loads the kernel) and a timed probe launch, as the KR sweep.
+    void probe(Cell& cell) {
+        const size_t n=cell.candidates.size();
+        std::vector<Event> events(2*n);
+        for (size_t i=0;i<n;++i) {
+            launchOnce(cell,i);
+            check(cudaEventRecord(events[2*i].handle,stream.getStream()),"probe start");
+            launchOnce(cell,i);
+            check(cudaEventRecord(events[2*i+1].handle,stream.getStream()),"probe stop");
+        }
+        stream.synchronize();
+        cell.launches.assign(n,1);
+        cell.probe_ms.assign(n,0.0);
+        for (size_t i=0;i<n;++i) {
+            float ms=0;
+            check(cudaEventElapsedTime(&ms,events[2*i].handle,events[2*i+1].handle),"probe elapsed");
+            cell.probe_ms[i]=ms;
+            cell.launches[i]=B::ColdTiming::launchesPerSample(1000.0*ms,interval_us,max_launches);
+        }
+    }
+    void enqueue(const std::shared_ptr<Cell>& cell) {
+        const size_t count=cell->candidates.size();
+        candidates+=count;
+        for (size_t i=0;i<Passes*count;++i) { cell->starts.emplace_back(); cell->stops.emplace_back(); }
+        auto launch=[cell,this](size_t index) { launchOnce(*cell,index); };
+        auto submit=[cell,launch,this](int pass) {
+            const size_t n=cell->candidates.size();
+            for (size_t visit=0;visit<n;++visit) {
+                const size_t index=(visit+static_cast<size_t>(pass))%n;
+                const size_t event=index*Passes+pass;
+                const uint64_t launches=cell->launches.empty()?1:cell->launches[index];
+                check(cudaEventRecord(cell->starts[event].handle,stream.getStream()),"start event");
+                for (uint64_t l=0;l<launches;++l) launch(index);
+                check(cudaEventRecord(cell->stops[event].handle,stream.getStream()),"stop event");
+            }
+        };
+        auto collect=[cell,this] {
+            for (size_t index=0;index<cell->candidates.size();++index) {
+                auto& item=cell->candidates[index];
+                for (int pass=0;pass<Passes;++pass) {
+                    float ms=0;
+                    check(cudaEventElapsedTime(&ms,cell->starts[index*Passes+pass].handle,
+                                               cell->stops[index*Passes+pass].handle),"event elapsed");
+                    const uint64_t launches=cell->launches.empty()?1:cell->launches[index];
+                    item.milliseconds[pass]=ms/static_cast<double>(launches);  // per launch
+                }
+                auto sorted=item.milliseconds;
+                std::sort(sorted.begin(),sorted.end());
+                std::cout << item.name << ',' << std::fixed << std::setprecision(7) << sorted[Passes/2];
+                for (double ms:item.milliseconds) std::cout << ',' << ms;
+                if (interval_us>0.0)
+                    std::cout << ',' << (cell->launches.empty()?1:cell->launches[index]) << ','
+                              << (cell->probe_ms.empty()?0.0:cell->probe_ms[index]);
+                std::cout << std::defaultfloat << '\n';
+            }
+            ++collected;
+            if (collected % 25 == 0 || collected == total) {
+                const double elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+                const double eta=elapsed/static_cast<double>(collected)*static_cast<double>(total-collected);
+                std::cerr << '[' << tag << "] " << collected << '/' << total << " cells, elapsed "
+                          << std::fixed << std::setprecision(0) << elapsed << " s, eta " << eta << " s\n"
+                          << std::defaultfloat;
+            }
+        };
+        queue.add({[launch]{for(int i=0;i<8;++i)launch(0);},submit,collect});
+    }
+};
+
+void runTraining(const Settings& settings) {
+    const T::TensorPlacement placement(T::TensorPlacement::MemDevices::GPU,0);
+    ScopedGpu gpu(0);
+    Stream stream(placement);
+    int sm=0;
+    check(cudaDeviceGetAttribute(&sm,cudaDevAttrMultiProcessorCount,0),"get SM count");
+    if (sm<=0) throw std::runtime_error("No CUDA SMs");
+    if (!settings.family.empty()) throw std::invalid_argument("--training times every family; --family is not allowed");
+    const std::vector<uint64_t> targets=settings.targets_given?settings.target_mib:std::vector<uint64_t>{96,192};
+    const auto specs=Training::cells(settings,targets);
+    const uint64_t total=std::min<uint64_t>(specs.size(),settings.max_cells);
+    Arena arena(placement,stream,settings.arena_bytes);
+    // 1164: rotating output views, as the KR sweep (a shared output stays in L2 between launches).
+    namespace CT=B::ColdTiming;
+    CT::Ring outputs(placement,settings.output_ring_bytes);
+    check(cudaMemsetAsync(outputs.storage().getMemPtr<void>(),0,settings.output_ring_bytes,stream.getStream()),
+          "output ring initialization");
+    stream.synchronize();
+    const auto outputViews=[&](Cell& cell,T::DataType dtype,const std::vector<uint64_t>& dims) {
+        const uint64_t bytes=T::TensorDescriptor(dtype,dims).getArraySizeInBytes();
+        for (uint64_t v=0,count=CT::viewCount(bytes,CT::OutputReuseBytes,outputs.bytes());v<count;++v)
+            cell.outputs.push_back(outputs.view(dtype,dims,outputs.take(bytes)));
+    };
+    B::Fp8OracleBatchQueue queue(128,Passes,[&]{stream.synchronize();});
+    const auto start=std::chrono::steady_clock::now();
+    std::cout << "# fp8_ranker_training=1 version=1164 method=ring_batched_probe interval_us=" << settings.interval_us
+              << " max_launches=" << settings.max_launches << " output_ring_bytes=" << settings.output_ring_bytes
+              << " output_reuse_bytes=" << CT::OutputReuseBytes << " seed=" << settings.training_seed
+              << " random_geometries=" << settings.training_random
+              << " semantics_per_geometry=" << settings.training_semantics_per_geometry
+              << " heldout_percent=" << settings.training_heldout_percent << " cells=" << total
+              << " cells_available=" << specs.size()
+              << " samples=" << Passes << " interleaved=1 cold_l2=1 value_output=fp32"
+              << " value_continuation=production_selected_FP32 arg_index=uint32 arg_value=fp32 sm_count=" << sm
+              << " targets_mib=";
+    for (size_t i=0;i<targets.size();++i) std::cout << (i?",":"") << targets[i];
+    std::cout << "\nkind,cell_id,heldout,random_geometry,outer,R,K,target_mib,dtype,operation,family,configuration,"
+                 "local_rank,list_position,staged,frozen_margin";
+    for (int f=0;f<25;++f) std::cout << ",f" << f;
+    std::cout << ",total_median_ms,sample0_ms,sample1_ms,sample2_ms,sample3_ms,sample4_ms,launches_per_sample,"
+                 "probe_ms\n";
+
+    if (settings.training_stamp) std::cout << "#stamp,cell_id,stamp_ms,candidates,winner\n";
+    // 1162 --stamp: production's own contest at this cell (the cache-bypassing RK entry points CubReduction stamps
+    // through, Regular depth, unlimited workspace like the timed candidates), on a cold arena view of the same constant
+    // input. The winner is named like the CSV configuration, so the analysis reads its timed median as the pick.
+    const auto stampRow=[&](uint64_t cell_id,const std::function<F::Fp8RKSelection()>& contest,
+                            const std::function<std::string(const F::Fp8RKSelection&)>& name) {
+        stream.synchronize();
+        const auto t0=std::chrono::steady_clock::now();
+        const F::Fp8RKSelection selection=contest();
+        stream.synchronize();
+        const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-t0).count();
+        std::cout << "#stamp," << cell_id << ',' << std::fixed << std::setprecision(3) << ms << std::defaultfloat
+                  << ',' << selection.candidate_count << ','
+                  << (selection.candidate_count ? name(selection) : std::string("none")) << '\n';
+    };
+
+    RecordQueue records(stream,arena,queue,total,start,"fp8-ranker-training");
+    records.interval_us=settings.interval_us;
+    records.max_launches=settings.max_launches;
+    // 1164: each candidate's launches per sample from its probe (samples are ms per launch).
+    const auto enqueue=[&](const std::shared_ptr<Cell>& cell) {
+        records.probe(*cell);
+        records.enqueue(cell);
+    };
+
+    // One FP32 continuation context per (dtype, VALUE op), as the ordinary sweep builds per op.
+    std::map<std::pair<int,size_t>,std::unique_ptr<C::DenseProductionPhysicalSelectionContext>> contexts;
+    const auto context=[&](T::DataType dtype,size_t op)->const C::DensePhysicalSelectionContext& {
+        auto& slot=contexts[{static_cast<int>(dtype),op}];
+        if (!slot) slot=std::make_unique<C::DenseProductionPhysicalSelectionContext>(
+            dtype,C::denseRKValueOperation(ops[op].operation),stream);
+        return slot->context();
+    };
+    for (uint64_t n=0;n<total;++n) {
+        const Training::CellSpec& spec=specs[n];
+        const uint64_t outer=spec.geometry.outer, r=spec.geometry.r, k=spec.geometry.k;
+        const T::DataType dtype=spec.dtype;
+        if (spec.kind==Training::Kind::Value) {
+            const Op& op=ops[spec.value_op];
+            const auto problem=[&]{
+                C::DenseReductionOutputSpec out;
+                out.value_dtype=T::DataType::FP32;
+                return C::makeInitialDenseReductionProblem({outer,r,k},{1},C::DenseReductionAggregateKind::Value,out);
+            }();
+            const auto site=C::enumerateDenseReductionSites(problem).front();
+            auto semantics=C::makeValueReductionStageSemantics(op.operation,C::DensePassRole::Complete,r);
+            semantics.combine=op.combine;
+            semantics.input_transform=op.transform;
+            const auto typed=Training::typedSemantics(dtype,op.combine,op.transform);
+            // 1166: the public operation whose original-input stage is exactly this cell's semantics (sum of |x| is
+            // L1Norm, sum of x^2 SumSquares). 1162-1165 passed op.operation, so 8 of the 12 VALUE combinations were
+            // stamped as their identity form (e.g. min_square as MIN). Product, MIN and MAX of |x| or x^2 have no
+            // public operation, so no production stamp reaches them: those cells get no '#stamp' line.
+            std::optional<T::CubReductionOp> public_op;
+            if (op.transform==C::CubReductionStageInputTransform::Identity) public_op=op.operation;
+            else if (op.operation==T::CubReductionOp::Sum)
+                public_op=op.transform==C::CubReductionStageInputTransform::AbsoluteValue?T::CubReductionOp::L1Norm
+                                                                                         :T::CubReductionOp::SumSquares;
+            if (settings.training_stamp && public_op) {
+                const auto stamped=C::makeValueReductionStageSemantics(*public_op,C::DensePassRole::Complete,r);
+                if (stamped.combine!=semantics.combine || stamped.input_transform!=semantics.input_transform)
+                    throw std::logic_error(std::string("--stamp operation does not match the cell's semantics: ")+op.name);
+                stampRow(spec.id,[&]{
+                    return F::autotuneIsolatedRKSite(problem,site,*public_op,r,1.0f,arena.input(dtype,outer,r,k),
+                                                     stream,std::numeric_limits<uint64_t>::max(),
+                                                     T::CubReductionTuningDepth::Regular);
+                },[](const F::Fp8RKSelection& selection){ return physicalName(selection.physical); });
+            }
+            const auto plans=retainedChoices(outer,r,k,static_cast<uint32_t>(sm),dtype,T::DataType::FP32,semantics,"");
+            auto cell=std::make_shared<Cell>(arena.input(dtype,outer,r,k),dtype,outer,r,k,op.name);
+            uint64_t max_scratch=0;
+            for (size_t position=0;position<plans.size();++position) {
+                const auto& plan=plans[position];
+                const auto physical=bind(plan);
+                if (!F::structurallyValid(physical,outer,r,k))
+                    throw std::logic_error("Invalid retained physical identity in training sweep");
+                const auto features=G::Detail::rankerFeatures(plan,outer,r,k,typed,plan.local_rank,
+                                                              G::RankerAggregate::Value);
+                auto isolated=F::planIsolatedRKSite(problem,site,physical,semantics);
+                try {
+                    auto executable=F::makeSelectedIsolatedBenchmark(problem,site,std::move(isolated),physical,
+                        context(dtype,spec.value_op),1.0f,std::numeric_limits<uint64_t>::max(),stream);
+                    max_scratch=std::max<uint64_t>(max_scratch,executable.scratch_bytes);
+                    Timed timed{familyName(physical.family),std::move(executable),{},
+                        Training::recordPrefix(spec,op.name,familyName(physical.family),physicalName(physical),
+                                               plan.local_rank,position+1,features,plan.staged()),
+                        position+1,{}};
+                    cell->candidates.push_back(std::move(timed));
+                } catch (const F::UnavailableIsolatedCandidate& e) {
+                    // A missing candidate would silently corrupt the oracle the labels are measured against.
+                    throw std::runtime_error("Retained candidate " + physicalName(physical) +
+                        " cannot construct complete FP32 continuation: " + e.what());
+                }
+            }
+            if (cell->candidates.empty()) throw std::logic_error("FP8 training cell has no retained VALUE candidate");
+            auto [output,scratch]=arena.outputAndScratch(T::DataType::FP32,outer,k,max_scratch);
+            cell->output=std::move(output);
+            cell->scratch=std::move(scratch);
+            outputViews(*cell,T::DataType::FP32,{outer,k});
+            enqueue(cell);
+            continue;
+        }
+        // ARG: the candidate generator production will rank (1135): raw twins of the VALUE MIN/MAX candidates (with
+        // their local ranks), the single-shard rotated pass and the fallback depth.
+        const ArgOp& op=arg_ops[spec.arg_op];
+        const bool maximum=op.operation==T::CubArgReductionOp::ArgMax;
+        const T::CubReductionOp value_op=maximum?T::CubReductionOp::Max:T::CubReductionOp::Min;
+        auto semantics=C::makeValueReductionStageSemantics(value_op,C::DensePassRole::Complete,r);
+        semantics.combine=maximum?C::CubReductionStageCombine::Maximum:C::CubReductionStageCombine::Minimum;
+        semantics.input_transform=C::CubReductionStageInputTransform::Identity;
+        const auto typed=Training::typedSemantics(dtype,semantics.combine,semantics.input_transform);
+        const auto value_plans=retainedChoices(outer,r,k,static_cast<uint32_t>(sm),dtype,T::DataType::FP32,semantics,"");
+        std::vector<C::RetainedFp8ValueSource> sources;
+        sources.reserve(value_plans.size());
+        for (const auto& plan : value_plans) sources.push_back({bind(plan),plan.local_rank});
+        const auto args=C::retainedFp8ArgCandidates(sources,dtype,outer,r,k);
+        if (args.empty()) throw std::logic_error("FP8 training cell has no retained ARG candidate");
+        const bool produce_value=spec.kind==Training::Kind::ArgValueIndex;
+        if (settings.training_stamp) {
+            C::DenseReductionOutputSpec out_spec;
+            out_spec.produce_value=produce_value;
+            out_spec.value_dtype=T::DataType::FP32;
+            out_spec.produce_index=true;
+            out_spec.index_dtype=T::DataType::UINT32;
+            const auto problem=C::makeInitialDenseReductionProblem({outer,r,k},{1},C::DenseReductionAggregateKind::Arg,
+                                                                   out_spec);
+            const auto site=C::enumerateDenseReductionSites(problem).front();
+            stampRow(spec.id,[&]{
+                return F::autotuneArgRKSite(problem,site,maximum,r,arena.input(dtype,outer,r,k),stream,
+                                            std::numeric_limits<uint64_t>::max(),T::CubReductionTuningDepth::Regular);
+            },[&](const F::Fp8RKSelection& selection){
+                const auto plan=C::retainedFp8ArgPlanForIdentity(selection.physical,dtype,outer,r,k);
+                return plan ? Training::argPlanName(*plan,selection.physical) : physicalName(selection.physical);
+            });
+        }
+        const std::vector<uint64_t> dims{outer,r,k};
+        const T::CubReductionGeometry geometry=T::CubArgReduction::analyzeDenseGeometry(dims,{1});
+        // 1164: one rotating UINT8 output view per launch holds the FP32 value (when produced) and, 256-byte aligned
+        // after it, the UINT32 index, as production's ARG contest lays them out.
+        const std::vector<uint64_t> out_dims{outer,k};
+        const uint64_t value_bytes=produce_value?T::TensorDescriptor(T::DataType::FP32,out_dims).getArraySizeInBytes():0;
+        const uint64_t index_offset=CT::align256(value_bytes);
+        const uint64_t index_bytes=T::TensorDescriptor(T::DataType::UINT32,out_dims).getArraySizeInBytes();
+        auto cell=std::make_shared<Cell>(arena.input(dtype,outer,r,k),dtype,outer,r,k,op.name);
+        outputViews(*cell,T::DataType::UINT8,{index_offset+index_bytes});
+        for (size_t position=0;position<args.size();++position) {
+            const auto& candidate=args[position];
+            const auto features=G::Detail::rankerFeatures(F::rankerPlanForKernel(candidate.identity,candidate.local_rank),
+                                                  outer,r,k,typed,candidate.local_rank,
+                                                  produce_value?G::RankerAggregate::ArgValueIndex:
+                                                                G::RankerAggregate::ArgIndex);
+            uint32_t* packed=static_cast<uint32_t*>(arena.packedArgScratch(C::retainedFp8ArgScratchBytes(candidate.plan)));
+            auto plan=std::make_shared<const C::DenseRetainedFp8ArgPhysicalPlan>(candidate.plan);
+            cell->candidates.push_back({familyName(candidate.plan.family),std::nullopt,
+                [plan,geometry,packed,maximum,produce_value,out_dims,index_offset]
+                (const T::Tensor& in,T::Tensor& out,Stream& s) {
+                    std::optional<T::Tensor> value;
+                    if (produce_value) value=out.aliasByteStorageAs(T::DataType::FP32,out_dims,0);
+                    T::Tensor index=out.aliasByteStorageAs(T::DataType::UINT32,out_dims,index_offset);
+                    C::launchRetainedFp8ArgPlan(*plan,in,value?&*value:nullptr,&index,geometry,packed,maximum,1,s);
+                },
+                Training::recordPrefix(spec,op.name,familyName(candidate.plan.family),
+                                       Training::argPlanName(candidate.plan,candidate.identity),candidate.local_rank,
+                                       position+1,features,candidate.plan.shards>1),
+                position+1,{}});
+        }
+        enqueue(cell);
+    }
+    queue.flush();
+    const double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+    std::cerr << "[fp8-ranker-training] cells=" << queue.completedCells() << " candidates=" << records.candidates
+              << " wall_s=" << wall << " arena_wraps=" << arena.wraps() << '\n';
+}
+// 1133b --continuation-audit: are the production continuations fast? For every candidate of every cell, Complete
+// candidates are timed once (variant complete); staged candidates three ways, interleaved with the rest of the cell:
+//   first      the first stage alone, writing its partials;
+//   full       first stage + production continuation (what --training times);
+//   first_copy the first stage followed by a device-to-device copy of its partials (reads and writes every partial
+//              byte, so a pessimistic stand-in for a bandwidth-bound continuation over the same, L2-warm, partials).
+// continuation = full - first; copy reference = first_copy - first. fp8_continuation_audit.py reports the
+// continuations against that reference and how much the measured oracle would change if they ran at copy speed.
+std::string continuationName(const F::SelectedIsolatedBenchmark& executable) {
+    std::string name;
+    for (const auto& pass : executable.continuation) {
+        const auto& plan=*pass.selected.physical_plan;
+        const char* mangled=typeid(plan).name();
+        int status=0;
+        std::unique_ptr<char,void(*)(void*)> demangled(abi::__cxa_demangle(mangled,nullptr,nullptr,&status),std::free);
+        std::string type=status==0&&demangled?demangled.get():mangled;
+        const size_t colon=type.rfind("::");
+        if (colon!=std::string::npos) type=type.substr(colon+2);
+        const char* family=pass.selected.family==C::DenseReducerFamily::R?"R":
+                           pass.selected.family==C::DenseReducerFamily::KR?"KR":"RK";
+        // 1136: name the generic RK implementation and launch geometry, so the audit shows what the FP32 selector chose.
+        if (const auto* rk=dynamic_cast<const C::DenseRKFamilyPhysicalPlan*>(&plan)) {
+            const char* implementation=
+                rk->implementation==C::DenseRKProductionImplementation::KParallelPass?"KParallel":
+                rk->implementation==C::DenseRKProductionImplementation::RCooperativeAlignedComplete?"RCoopAlignedComplete":
+                rk->implementation==C::DenseRKProductionImplementation::RCooperativeAlignedStaged?"RCoopAlignedStaged":
+                rk->implementation==C::DenseRKProductionImplementation::RCooperativeRotatedStaged?"RCoopRotatedStaged":
+                rk->implementation==C::DenseRKProductionImplementation::RCooperativeFlatRowsStaged?"RCoopFlatRowsStaged":
+                "other";
+            type=std::string(implementation)+(rk->progress==C::DenseRKProgress::Complete?"_complete":"_staged")+
+                 "_p"+std::to_string(rk->packet_bytes)+"_t"+std::to_string(rk->block_threads)+
+                 "_s"+std::to_string(rk->shards_per_output);
+        }
+        name+=(name.empty()?"":"+")+std::string(family)+":"+type;
+    }
+    return name;
+}
+
+void runContinuationAudit(const Settings& settings) {
+    const T::TensorPlacement placement(T::TensorPlacement::MemDevices::GPU,0);
+    ScopedGpu gpu(0);
+    Stream stream(placement);
+    int sm=0;
+    check(cudaDeviceGetAttribute(&sm,cudaDevAttrMultiProcessorCount,0),"get SM count");
+    if (sm<=0) throw std::runtime_error("No CUDA SMs");
+    if (!settings.family.empty()) throw std::invalid_argument("--continuation-audit times every family; --family is not allowed");
+    const std::vector<uint64_t> targets=settings.targets_given?settings.target_mib:std::vector<uint64_t>{96,192};
+    const std::vector<T::DataType> dtypes=settings.dtypes_given?settings.dtypes:std::vector<T::DataType>{T::DataType::FP8_E4M3};
+    const std::vector<std::string> names=settings.operations.empty()?
+        std::vector<std::string>{"sum_identity","max_identity","argmax"}:settings.operations;
+    struct Spec { uint64_t outer,r,k,target; T::DataType dtype; std::string op; };
+    std::vector<Spec> specs;
+    for (const T::DataType dtype : dtypes)
+        for (const std::string& op : names)
+            for (const auto& [r,k] : allShapes())
+                for (uint64_t t : targets) specs.push_back({outerNear(r,k,t*MiB),r,k,t,dtype,op});
+    const uint64_t total=std::min<uint64_t>(specs.size(),settings.max_cells);
+    Arena arena(placement,stream,settings.arena_bytes);
+    B::Fp8OracleBatchQueue queue(128,Passes,[&]{stream.synchronize();});
+    const auto start=std::chrono::steady_clock::now();
+    std::cout << "# fp8_continuation_audit=1 version=1133b cells=" << total << " samples=" << Passes
+              << " interleaved=1 cold_l2=1 value_output=fp32 arg_index=uint32 arg_outputs="
+              << (settings.arg_produce_value?"value_index":"index") << " sm_count=" << sm << '\n'
+              << "kind,outer,R,K,target_mib,dtype,operation,family,configuration,shards,partial_bytes,continuation,"
+                 "variant,total_median_ms,sample0_ms,sample1_ms,sample2_ms,sample3_ms,sample4_ms\n";
+    RecordQueue records(stream,arena,queue,total,start,"fp8-continuation-audit");
+    std::map<std::pair<int,size_t>,std::unique_ptr<C::DenseProductionPhysicalSelectionContext>> contexts;
+    uint8_t* const partials_base=arena.rawPartials();
+    uint8_t* const copy_target=arena.rawWorkspace()+(1ULL<<30);  // ARG outputs sit at the workspace start
+    for (uint64_t n=0;n<total;++n) {
+        const Spec& spec=specs[n];
+        const uint64_t outer=spec.outer, r=spec.r, k=spec.k;
+        const auto prefix=[&](const char* kind,const char* family,const std::string& configuration,uint64_t shards,
+                              uint64_t partial_bytes,const std::string& continuation,const char* variant) {
+            std::ostringstream line;
+            line << kind << ',' << outer << ',' << r << ',' << k << ',' << spec.target << ',' << dtypeName(spec.dtype)
+                 << ',' << spec.op << ',' << family << ',' << configuration << ',' << shards << ',' << partial_bytes
+                 << ',' << continuation << ',' << variant;
+            return line.str();
+        };
+        auto cell=std::make_shared<Cell>(arena.input(spec.dtype,outer,r,k),spec.dtype,outer,r,k,spec.op);
+        Cell* const raw=cell.get();  // candidate closures must not own their cell
+        const auto value_op=std::find_if(ops.begin(),ops.end(),[&](const Op& op){return spec.op==op.name;});
+        if (value_op!=ops.end()) {
+            const size_t op_index=static_cast<size_t>(value_op-ops.begin());
+            auto& slot=contexts[{static_cast<int>(spec.dtype),op_index}];
+            if (!slot) slot=std::make_unique<C::DenseProductionPhysicalSelectionContext>(
+                spec.dtype,C::denseRKValueOperation(value_op->operation),stream);
+            const auto problem=[&]{
+                C::DenseReductionOutputSpec out;
+                out.value_dtype=T::DataType::FP32;
+                return C::makeInitialDenseReductionProblem({outer,r,k},{1},C::DenseReductionAggregateKind::Value,out);
+            }();
+            const auto site=C::enumerateDenseReductionSites(problem).front();
+            auto semantics=C::makeValueReductionStageSemantics(value_op->operation,C::DensePassRole::Complete,r);
+            semantics.combine=value_op->combine;
+            semantics.input_transform=value_op->transform;
+            uint64_t max_scratch=0;
+            for (const auto& plan : retainedChoices(outer,r,k,static_cast<uint32_t>(sm),spec.dtype,T::DataType::FP32,
+                                                    semantics,"")) {
+                const auto physical=bind(plan);
+                auto executable=F::makeSelectedIsolatedBenchmark(problem,site,F::planIsolatedRKSite(problem,site,physical,
+                    semantics),physical,slot->context(),1.0f,std::numeric_limits<uint64_t>::max(),stream);
+                max_scratch=std::max<uint64_t>(max_scratch,executable.scratch_bytes);
+                const std::string configuration=physicalName(physical);
+                const char* family=familyName(physical.family);
+                if (executable.continuation.empty()) {
+                    cell->candidates.push_back({family,std::move(executable),{},
+                        prefix("value",family,configuration,1,0,"","complete"),0,{}});
+                    continue;
+                }
+                const uint64_t shards=executable.site.layout.shards;
+                const uint64_t partial_bytes=outer*shards*k*sizeof(float);
+                const std::string continuation=continuationName(executable);
+                auto shared=std::make_shared<const F::SelectedIsolatedBenchmark>(executable);
+                const auto first=[shared,raw,shards](const T::Tensor& in,Stream& s) {
+                    T::Tensor first_input=in;
+                    first_input.reshape({shared->site.outer,shared->site.r,shared->site.k});
+                    T::Tensor partials=raw->scratch.aliasByteStorageAs(T::DataType::FP32,
+                        {shared->site.outer,shards,shared->site.k},shared->first_partial_offset);
+                    F::launchPhysicalFirstStage(shared->first_physical,shared->site.first_stage_semantics,first_input,
+                                                partials,shared->first_geometry,1.0f,s);
+                };
+                cell->candidates.push_back({family,std::nullopt,[first](const T::Tensor& in,T::Tensor&,Stream& s){first(in,s);},
+                    prefix("value",family,configuration,shards,partial_bytes,continuation,"first"),0,{}});
+                cell->candidates.push_back({family,std::move(executable),{},
+                    prefix("value",family,configuration,shards,partial_bytes,continuation,"full"),0,{}});
+                if (partial_bytes<=(1ULL<<30))
+                    cell->candidates.push_back({family,std::nullopt,
+                        [first,shared,raw,partial_bytes,partials_base](const T::Tensor& in,T::Tensor&,Stream& s){
+                            first(in,s);
+                            check(cudaMemcpyAsync(partials_base,raw->scratch.getMemPtr<uint8_t>()+shared->first_partial_offset,
+                                                  partial_bytes,cudaMemcpyDeviceToDevice,s.getStream()),"partials copy");
+                        },prefix("value",family,configuration,shards,partial_bytes,continuation,"first_copy"),0,{}});
+            }
+            auto [output,scratch]=arena.outputAndScratch(T::DataType::FP32,outer,k,max_scratch);
+            cell->output=std::move(output);
+            cell->scratch=std::move(scratch);
+        } else {
+            const auto arg_op=std::find_if(arg_ops.begin(),arg_ops.end(),[&](const ArgOp& op){return spec.op==op.name;});
+            if (arg_op==arg_ops.end()) throw std::invalid_argument("Unknown operation: "+spec.op);
+            const bool maximum=arg_op->operation==T::CubArgReductionOp::ArgMax;
+            auto semantics=C::makeValueReductionStageSemantics(maximum?T::CubReductionOp::Max:T::CubReductionOp::Min,
+                                                               C::DensePassRole::Complete,r);
+            semantics.combine=maximum?C::CubReductionStageCombine::Maximum:C::CubReductionStageCombine::Minimum;
+            semantics.input_transform=C::CubReductionStageInputTransform::Identity;
+            std::vector<C::RetainedFp8ValueSource> sources;
+            for (const auto& plan : retainedChoices(outer,r,k,static_cast<uint32_t>(sm),spec.dtype,T::DataType::FP32,
+                                                    semantics,""))
+                sources.push_back({bind(plan),plan.local_rank});
+            const std::vector<uint64_t> dims{outer,r,k};
+            const T::CubReductionGeometry geometry=T::CubArgReduction::analyzeDenseGeometry(dims,{1});
+            auto out=arena.argOutputs(settings.arg_produce_value?std::optional<T::DataType>(T::DataType::FP32):
+                                                                 std::nullopt,outer,k,0);
+            for (const auto& candidate : C::retainedFp8ArgCandidates(sources,spec.dtype,outer,r,k)) {
+                auto plan=std::make_shared<const C::DenseRetainedFp8ArgPhysicalPlan>(candidate.plan);
+                const uint64_t partial_bytes=C::retainedFp8ArgScratchBytes(*plan);
+                uint32_t* packed=static_cast<uint32_t*>(arena.packedArgScratch(partial_bytes));
+                const char* family=familyName(plan->family);
+                const std::string configuration=Training::argPlanName(*plan,candidate.identity);
+                auto full=[plan,geometry,packed,maximum,value=out.value,index=out.index]
+                          (const T::Tensor& in,T::Tensor&,Stream& s) mutable {
+                    C::launchRetainedFp8ArgPlan(*plan,in,value?&*value:nullptr,index?&*index:nullptr,geometry,packed,
+                                                maximum,1,s);
+                };
+                if (!plan->packed_partials) {
+                    cell->candidates.push_back({family,std::nullopt,full,
+                        prefix("arg",family,configuration,1,0,"","complete"),0,{}});
+                    continue;
+                }
+                // The packed first stage alone: launchRetainedFp8ArgPlan's staged branch without the continuation.
+                const auto first=[plan,geometry,packed,maximum](const T::Tensor& in,Stream& s) {
+                    if (plan->family==F::PhysicalFamily::DeepRSmallK)
+                        C::launchFp8DeepRSmallKArgFirstStagePacked(in,packed,geometry,plan->rows_per_shard,plan->shards,
+                                                                   maximum,s);
+                    else if (plan->family==F::PhysicalFamily::RuntimeK)
+                        C::launchFp8RuntimeKArgPass(in,nullptr,nullptr,geometry,plan->rows_per_shard,plan->packet_bytes,
+                                                    maximum,1,s,packed);
+                    else
+                        C::launchFp8AlignedKArgPass(in,nullptr,nullptr,geometry,plan->packet_bytes,plan->cta_threads,
+                                                    plan->shards,maximum,1,s,packed);
+                };
+                cell->candidates.push_back({family,std::nullopt,[first](const T::Tensor& in,T::Tensor&,Stream& s){first(in,s);},
+                    prefix("arg",family,configuration,plan->shards,partial_bytes,"packed","first"),0,{}});
+                cell->candidates.push_back({family,std::nullopt,full,
+                    prefix("arg",family,configuration,plan->shards,partial_bytes,"packed","full"),0,{}});
+                cell->candidates.push_back({family,std::nullopt,
+                    [first,packed,partial_bytes,copy_target](const T::Tensor& in,T::Tensor&,Stream& s){
+                        first(in,s);
+                        check(cudaMemcpyAsync(copy_target,packed,partial_bytes,cudaMemcpyDeviceToDevice,s.getStream()),
+                              "packed partials copy");
+                    },prefix("arg",family,configuration,plan->shards,partial_bytes,"packed","first_copy"),0,{}});
+            }
+        }
+        if (cell->candidates.empty()) throw std::logic_error("Continuation audit cell has no candidate");
+        records.enqueue(cell);
+    }
+    queue.flush();
+    const double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+    std::cerr << "[fp8-continuation-audit] cells=" << queue.completedCells() << " timed=" << records.candidates
+              << " wall_s=" << wall << '\n';
+}
 } // namespace
 
 int main(int argc,char**argv) {
-    try {run(parse(argc,argv));return 0;}
+    try {
+        const Settings settings=parse(argc,argv);
+        if (settings.training) runTraining(settings);
+        else if (settings.continuation_audit) runContinuationAudit(settings);
+        else run(settings);
+        return 0;
+    }
     catch (const std::exception& e) {std::cerr<<"FP8 retained cold-L2 sweep failed: "<<e.what()<<'\n';return 1;}
 }

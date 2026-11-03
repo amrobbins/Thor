@@ -10,6 +10,8 @@
 // partial traffic. The constant input read volume is common to all depths.
 // Keep the original coefficients unchanged for the five-depth holdout.
 
+#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKLaunchLimits.h"
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -43,7 +45,9 @@ constexpr bool legal(Variant v, uint64_t outer, uint64_t r, uint64_t k) {
     if (outer > std::numeric_limits<uint64_t>::max() / r) return false;
     if (outer * r > std::numeric_limits<uint64_t>::max() / k) return false;
     const uint64_t shards = ceilDiv(r, v.rows_per_shard);
-    return outer <= std::numeric_limits<uint64_t>::max() / shards;
+    if (outer > std::numeric_limits<uint64_t>::max() / shards) return false;
+    // 1131: the launcher's reductionWorkGrid (one component tile) throws above 2^31 - 1 shards or outer.
+    return fp8RKWorkGridFits(shards, 1, outer);
 }
 
 struct Cost {
@@ -82,27 +86,7 @@ inline Cost describe(Variant v, uint64_t outer, uint64_t r, uint64_t k,
 // The caller supplies *compiled-kernel* residency for the concrete FP8 dtype,
 // K-ownership variant, P16 and depth, from the existing CUDA occupancy query.
 // Skip nonresident kernels. The policy itself never creates any CUDA context.
-template <typename ResidentCTAsPerSM>
-std::optional<Variant> select(uint64_t outer, uint64_t r, uint64_t k,
-                              uint32_t sm_count, ResidentCTAsPerSM&& residency) {
-    if (sm_count == 0) return std::nullopt;
-    std::optional<Variant> chosen;
-    double best_score = std::numeric_limits<double>::infinity();
-    for (uint32_t depth : compiled_rows) {
-        const Variant v{depth};
-        if (!legal(v, outer, r, k)) continue;
-        const uint32_t resident = residency(v);
-        if (resident == 0) continue;
-        const double score = describe(v, outer, r, k, sm_count, resident).total_score;
-        if (score < best_score) {
-            best_score = score;
-            chosen = v;
-        }
-    }
-    return chosen;
-}
-
-
+// 1172: the single-pick select() had no callers; the ranker orders shortlist().
 // Every retained compiled depth fits in a five-way stamp-time shortlist.
 // Thus for this mode the full legal/resident local oracle is included.
 template <typename ResidentCTAsPerSM>

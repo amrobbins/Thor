@@ -93,16 +93,29 @@ int main() {
         }});
         Options options;
         options.random_seed = 20261023;
-        const RunResult result = autotune(candidates, input, output_type, stream, options);
-        std::cout << "Cold reduction autotune: " << result.input_slot_count
-                  << " rotating slots, winning candidate " << result.winner_index
-                  << " (" << result.winner_name << ")\n";
-        for (size_t i = 0; i < candidates.size(); ++i) {
-            const auto& c = result.candidates[i];
-            std::cout << "  " << candidates[i].name << ": " << std::fixed << std::setprecision(3)
-                      << c.trimmed_mean_us << " us, " << c.trimmed_mean_tb_per_s << " TB/s\n";
-        }
-        if (result.winner_index == 2) throw std::runtime_error("Deliberately slow kernel won the smoke test");
+        // 1162: one contest policy (probe, per-candidate launches, abandonment); run it as shipped and with
+        // abandonment off, which must measure every candidate and still not pick the slow one.
+        auto run = [&](const char* label, const Options& contest) {
+            const RunResult result = autotune(candidates, input, output_type, stream, contest);
+            std::cout << label << ": " << result.input_slot_count << " rotating slots, winning candidate "
+                      << result.winner_index << " (" << result.winner_name << "), " << result.abandoned_count
+                      << " abandoned\n";
+            for (size_t i = 0; i < candidates.size(); ++i) {
+                const auto& c = result.candidates[i];
+                std::cout << "  " << candidates[i].name << ": probe " << std::fixed << std::setprecision(3)
+                          << c.probe_us << " us, " << c.launches_per_measurement << " launches/measurement, ";
+                if (c.abandoned) std::cout << "abandoned\n";
+                else std::cout << c.trimmed_mean_us << " us, " << c.trimmed_mean_tb_per_s << " TB/s\n";
+            }
+            if (result.winner_index == 2 || result.candidates[result.winner_index].abandoned)
+                throw std::runtime_error(std::string(label) + ": the slow or an abandoned candidate won");
+            return result;
+        };
+        (void)run("Cold reduction autotune", options);
+        Options measure_all = options;
+        measure_all.abandon_ratio = 0.0;
+        if (run("Every candidate measured", measure_all).abandoned_count != 0)
+            throw std::runtime_error("abandon_ratio 0 abandoned a candidate");
         std::cout << "Reduction autotuner CUDA smoke passes\n";
     } catch (const std::exception& e) {
         std::cerr << "Reduction autotuner CUDA smoke failed: " << e.what() << '\n';

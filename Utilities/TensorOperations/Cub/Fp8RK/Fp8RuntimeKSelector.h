@@ -6,6 +6,8 @@
 // depths are a retained-inventory decision; benchmark oracle controls are not
 // selectable through this policy.
 
+#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKLaunchLimits.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -62,6 +64,13 @@ inline bool legal(const Candidate& c, uint64_t outer, uint64_t r, uint64_t k,
     // PacketStaged no longer has a retained typed CUDA specialization.
     if (v.layout == Layout::PacketStaged) return false;
     if (ceilDiv(k, v.tile_components) != v.tile_count) return false;
+    // 1131: launch limits. PacketComplete passes outer, R, K and the tile count as 32-bit operands and steps a 32-bit
+    // row counter by W <= 8; the rotated layouts launch through reductionWorkGrid (2^31 - 1 per extent).
+    if (v.layout == Layout::PacketComplete) {
+        if (outer > FP8_RK_MAX_UINT32 || r > FP8_RK_PACKET_COMPLETE_MAX_ROWS || k > FP8_RK_MAX_UINT32) return false;
+    } else if (!fp8RKWorkGridFits(v.shards_per_output, v.tile_count, outer)) {
+        return false;
+    }
     uint64_t blocks = 0, scratch = 0;
     if (v.layout == Layout::RotatedExact || v.layout == Layout::RotatedPrefix) {
         if (v.warps_per_output ||
@@ -157,22 +166,6 @@ inline std::vector<Variant> shortlist(uint64_t outer, uint64_t r, uint64_t k,
         if (result.size() == limit) break;
     }
     return result;
-}
-
-inline std::optional<Variant> select(uint64_t outer, uint64_t r, uint64_t k,
-                                     uint32_t sm_count, std::span<const Candidate> candidates) {
-    if (!outer || !r || !k || !sm_count) return std::nullopt;
-    double best_cost = std::numeric_limits<double>::infinity();
-    std::optional<Variant> best;
-    for (const Candidate& candidate : candidates) {
-        if (!legal(candidate, outer, r, k, sm_count)) continue;
-        const double cost = score(candidate, outer, r, k, sm_count);
-        if (std::isfinite(cost) && cost < best_cost) {
-            best_cost = cost;
-            best = candidate.variant;
-        }
-    }
-    return best;
 }
 
 } // namespace ThorImplementation::CubReductionInternal::Fp8RK::Fp8RuntimeKPolicy

@@ -3,8 +3,9 @@
 // CUDA- and allocation-independent cache-key construction. The exact same
 // request key is used whether the caller has an original Tensor or only a
 // logical FP8 dtype, canonical problem, site and stream/device identity.
+#include "Utilities/TensorOperations/Cub/CubReductionTuningDepth.h"
 #include "Utilities/TensorOperations/Cub/DenseReductionPlanning.h"
-#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKSelectionCache.h"
+#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKSelectionKey.h"
 
 #include <array>
 #include <bit>
@@ -14,19 +15,14 @@ namespace ThorImplementation { enum class CubReductionOp : uint8_t; }
 
 namespace ThorImplementation::CubReductionInternal::Fp8RK {
 
-struct Fp8RKDeviceSelectionIdentity {
-    std::array<uint8_t, 16> uuid{};
-    int32_t ordinal = -1;
-    uint32_t sm_count = 0;
-    uint32_t compute_major = 0;
-    uint32_t compute_minor = 0;
-};
+// 1171: the shared device identity of the dense reduction selection cache.
+using Fp8RKDeviceSelectionIdentity = DenseReductionDeviceIdentity;
 
 [[nodiscard]] inline Fp8RKSelectionKey makeFp8RKDescriptorSelectionKey(
     const DenseReductionProblem& problem, DenseReductionSite site,
     CubReductionOp operation, uint64_t original_reduction_size, float output_scale,
     DataType input_dtype, const Fp8RKDeviceSelectionIdentity& device,
-    uint64_t workspace_budget_bytes) {
+    uint64_t workspace_budget_bytes, CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular) {
     Fp8RKSelectionKey key;
     key.device_uuid = device.uuid;
     key.device_ordinal = device.ordinal;
@@ -47,6 +43,7 @@ struct Fp8RKDeviceSelectionIdentity {
     key.produce_value = problem.final_output.produce_value;
     key.produce_index = problem.final_output.produce_index;
     key.finalizer_pending = problem.finalizer_pending;
+    key.tuning_depth = static_cast<uint8_t>(tuning_depth);
     key.runs.reserve(problem.runs.size());
     for (const auto& run : problem.runs) {
         key.runs.push_back({run.extent, run.original_arg_domain_stride,

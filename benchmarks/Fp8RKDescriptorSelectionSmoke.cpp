@@ -59,13 +59,13 @@ int main() {
                 key.runs[1].kind == static_cast<uint8_t>(C::DenseReductionRunKind::OriginalReduction),
                 "Full descriptor semantics must be preserved in key");
 
-        RK::Fp8RKSelectionCache cache;
+        C::DenseReductionSelectionCache cache;
         unsigned constructed_representatives = 0;
-        auto first = cache.getOrTune(key, [&] {
+        auto first = cache.getOrTune<RK::Fp8RKSelection>(RK::toDenseReductionSelectionKey(key), [&] {
             ++constructed_representatives;
             return recipe();
         });
-        auto cached = cache.getOrTune(equivalent, [&]() -> RK::Fp8RKSelection {
+        auto cached = cache.getOrTune<RK::Fp8RKSelection>(RK::toDenseReductionSelectionKey(equivalent), [&]() -> RK::Fp8RKSelection {
             ++constructed_representatives;
             throw std::logic_error("Cache hit must never construct benchmark input or select continuation");
         });

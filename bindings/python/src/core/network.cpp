@@ -1,5 +1,6 @@
 #include <nanobind/nanobind.h>
 
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
@@ -82,6 +83,14 @@ void bind_network(nb::module_ &m) {
                                         .value("deadlock_cycle", Network::StatusCode::DEADLOCK_CYCLE);
     network_status_code_type.attr("__qualname__") = "Network.StatusCode";
     network.attr("StatusCode") = network_status_code_type;
+
+    auto reduction_tuning_depth_type =
+        nb::enum_<ThorImplementation::CubReductionTuningDepth>(m, "ReductionTuningDepth")
+            .value("quick", ThorImplementation::CubReductionTuningDepth::Quick)
+            .value("regular", ThorImplementation::CubReductionTuningDepth::Regular)
+            .value("ultra", ThorImplementation::CubReductionTuningDepth::Ultra);
+    reduction_tuning_depth_type.attr("__qualname__") = "Network.ReductionTuningDepth";
+    network.attr("ReductionTuningDepth") = reduction_tuning_depth_type;
 
     network.def_static(
         "__new__",
@@ -205,6 +214,25 @@ This does not change configured dropout probabilities and is not serialized. Val
 inference remain deterministic. The setting is copied into subsequently placed physical layers.
 )nbdoc");
     network.def("is_training_dropout_enabled", &Network::isTrainingDropoutEnabled);
+    network.def("set_reduction_tuning_depth",
+                &Network::setReductionTuningDepth,
+                "depth"_a.none(),
+                R"nbdoc(
+Set how much stamp-time autotuning this network's reductions may spend: Network.ReductionTuningDepth.quick (the
+fewest candidates and rounds), .regular (the default) or .ultra (the most). None clears the setting, which means
+regular. A selection tuned at a deeper depth is reused for shallower requests in the same process.
+
+Every reduction stamped when the network is placed uses this depth, including placements made by trainers and
+training runs; a network composed from several networks uses the deepest depth set on any of them. The setting
+applies to future placements and is not serialized.
+)nbdoc");
+    network.def("get_reduction_tuning_depth",
+                &Network::getReductionTuningDepth,
+                R"nbdoc(
+Return the depth this network's next placement tunes its reductions at (regular when no depth is set).
+)nbdoc");
+    network.def("is_reduction_tuning_depth_set",
+                [](const Network& self) { return self.getReductionTuningDepthSetting().has_value(); });
     network.def("get_num_training_dropout_controllable_layers",
                 &Network::getNumTrainingDropoutControllableLayers);
     network.def("get_trainable_parameter_references", &Network::getTrainableParameterReferences, "training_enabled_only"_a = true);

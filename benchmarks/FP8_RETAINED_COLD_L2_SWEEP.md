@@ -37,9 +37,10 @@ is the production-relevant `--output=fp32`.
 - 247 historical R/K shapes, 24/96/192 MiB input targets, two FP8 dtypes,
   12 operation/transform combinations: **17,784 cells**.
 - One 12 GiB rotating FP8 input allocation, initialized once; every input
-  view is 32-byte aligned with at least 128 bytes of trailing padding.
+  view is 256-byte aligned (1163; cudaMalloc's alignment, 32 before) with at
+  least 128 bytes of trailing padding.
 - One additional 2 GiB GPU workspace allocation supplies **overlapping,
-  stream-ordered output and scratch views**; 32-byte starts and 128-byte
+  stream-ordered output and scratch views**; 256-byte starts and 128-byte
   trailing gaps are preserved. No per-cell `cudaMalloc` is required.
 - Up to 128 cells enqueued per batch, one stream synchronization at the end
   of each measurement batch; keep each candidate's output/scratch alias,
@@ -95,3 +96,105 @@ python3 ../benchmarks/compare_fp8_retained_cold_l2.py \
 It matches physical candidates, separates high-throughput tiers, and checks
 whether the current ranked top 28 includes the fastest measured full plan.
 The comparator rejects mismatched `output=fp32` versus `output=same_fp8`.
+
+## ARG baseline (ARG-A0, Thor1102+)
+
+`--ops=argmin,argmax` adds production FP8 RK ARG cells (family `arg_production`, one row per cell, rank 0). ARG
+ops run only when named, so the default sweep is unchanged. Each cell is timed through the same direct
+`launchArg{Min,Max}Reduction` call that `StampedCubArgReduction::runOn` makes for a single reduced run (never
+`ComposedDense`), with a fresh cold input view per measurement like every other candidate. The UINT32 index is
+always written; the value is written too unless `--arg-outputs=index`, as FP32 (`--output=fp32`) or the input FP8
+format (`--output=same_fp8`). `configuration` names today's backend: `tiled_narrow_async` (K <= 32) or
+`tiled_generic_rowlanes1` (the conservative generic fallback, K > 32). The CSV header records `arg_outputs=`.
+
+```bash
+./thor_fp8_retained_cold_l2_sweep --output=fp32 --focus=arg | gzip -1 > fp8-arg-NNNN.csv.gz
+python3 ../benchmarks/arg_value_compare.py fp8-arg-NNNN.csv.gz            # ARG vs VALUE min/max
+python3 ../benchmarks/arg_value_compare.py fp8-arg-1102.csv.gz --after fp8-arg-NNNN.csv.gz   # ARG A/B
+```
+
+`--focus=arg` = `--shapes=all` (the 247 grid shapes, the 148 uncovered-K shapes and 11 K = 2 shapes: 403 unique),
+E4M3, 24/96/192 MiB, ops `argmin,argmax,min_identity,max_identity` (4,836 cells). VALUE min/max is the line-rate
+reference: `arg_value_compare.py` pairs argmin with min_identity and argmax with max_identity on the same cell and
+reports ARG time over the fastest VALUE candidate (oracle) and over the fastest learned-top-28 candidate, by backend,
+K class, operation and size, plus the worst cells. Throughput there counts written bytes as well as the FP8 input
+(an ARG output is 8 bytes with value and index, 4 index-only; a VALUE output is 4 bytes in FP32 mode). The A-series
+target is ARG <= ~1.05x VALUE. Use `--min-mib=90` to drop the noise-bound 24 MiB cells.
+
+## Ranker training dataset (1133+)
+
+```
+./build/thor_fp8_retained_cold_l2_sweep --training > fp8_ranker_training.csv 2> fp8_ranker_training.log
+```
+
+`--training` writes the dataset that the FP8 RK geometry ranker is trained on (one model for VALUE and ARG). Each cell
+is one geometry with one sampled semantics. Every legal retained candidate is timed end to end, with five interleaved
+cold-L2 samples (1164: the KR sweep's method, below):
+
+- **VALUE cells** time every candidate of `generalShortlist` (no budget truncation). A staged candidate is timed as
+  its first stage plus the production-selected FP32 continuation. Output is FP32.
+- **ARG cells** time every candidate of `retainedFp8ArgCandidates`, the generator ranked ARG selection uses. It covers
+  the raw twins of the VALUE MIN/MAX candidates (each carrying that candidate's local rank), the single-shard rotated
+  pass and the fallback depth. Each candidate runs through `launchRetainedFp8ArgPlan`, the production launcher, with
+  a UINT32 index and, for `arg_value_index`, an FP32 value.
+
+**Grid.** `allShapes()` at each target working set, plus `--training-random=N` (default 400) log-uniform (R, K)
+geometries: R from 2 to 2^16, K from 2 to 2^12, under `--training-seed` (default 1133). Targets default to 96 and
+192 MiB. Each geometry gets `--training-semantics=S` cells (default 2). Even cells are VALUE, with dtype and one of the
+12 VALUE ops sampled. Odd cells are ARG, with argmin/argmax and index or value+index sampled. `--training-heldout-percent`
+(default 10) marks (R, K) shapes as held out, covering every working set of the shape; training must use them only
+for validation. `--ops`, `--dtypes`, `--targets-mib` and `--max-cells` still filter; `--family` is rejected.
+
+**Columns.** `kind` (`value`, `arg_index` or `arg_value_index`), `cell_id`, `heldout`, `random_geometry`, `outer`,
+`R`, `K`, `target_mib`, `dtype`, `operation`, `family`, `configuration`, `local_rank`, `list_position`, `staged`,
+`frozen_margin`, `f0`–`f24`, then `total_median_ms`, the five samples, `launches_per_sample` and `probe_ms` (1164).
+
+**Timing (1164).** `--training` times as `thor_fp8_kr_training_sweep` does (`benchmarks/ColdTiming.h`, shared by
+both sweeps). Every launch reads a fresh cold input view and writes the cell's next rotating output view (views
+spanning at least 1 GiB of a `--output-ring-gib=3` ring), so outputs pay their write-back. Each candidate first gets an
+untimed launch and a timed probe launch. Each sample then times `launches_per_sample` back-to-back launches, about
+`--interval-us=1000` of GPU time and at most `--max-launches=256`, and the sample is the per-launch time. Before 1164
+a sample was one launch into a shared output: CUDA events resolve about 2 us, so kernels of 5-10 us were timed on a
+20-40% grid (sample spreads of 8-22% below 16 MiB in the 1162/1163 stamp audits), and outputs stayed in L2.
+`--continuation-audit` and the default sweep keep one launch per sample.
+
+- `f0`–`f24` are the exact C++ `rankerFeatures` of the candidate at its local rank. For ARG they come through
+  `rankerPlanForKernel(retainedFp8ArgPhysicalIdentity)`.
+- `list_position` is the frozen model order for VALUE and the generator order for ARG.
+- `frozen_margin` is the current model's score, so the frozen ranker is the baseline.
+
+**Sizing.** Progress and ETA go to stderr every 25 cells. Time a slice with `--max-cells=200` and scale
+`--training-random` or `--training-semantics` to reach about 20 minutes.
+
+## Continuation audit (1134+)
+
+```
+./build/thor_fp8_retained_cold_l2_sweep --continuation-audit | gzip -1 > fp8-continuation-audit.csv.gz
+python3 benchmarks/fp8_continuation_audit.py fp8-continuation-audit.csv.gz
+```
+
+This checks that the production continuations are fast before their times become training labels. Defaults: e4m3,
+`sum_identity`, `max_identity` and `argmax`, `allShapes()` at 96 and 192 MiB. `--ops`, `--dtypes`, `--targets-mib`,
+`--arg-outputs` and `--max-cells` filter as usual.
+
+Each staged candidate is timed in three variants, interleaved with the rest of its cell:
+
+- `first`: the first stage alone.
+- `full`: the first stage plus the production continuation. For VALUE that is the selected FP32 passes; for ARG it is
+  the packed continuation.
+- `first_copy`: the first stage, then a device-to-device copy of its (L2-warm) partials.
+
+Complete candidates are timed once, as `complete`.
+
+`fp8_continuation_audit.py` treats `full − first` as the continuation and `first_copy − first` as the copy reference.
+The copy reads and writes every partial byte, so a bandwidth-bound continuation should not be slower than it. The
+script reports three things:
+
+1. The continuation/copy ratio and the continuation's share of the end-to-end time, by kind, by continuation kernel and
+   by shard count.
+2. The worst candidates.
+3. The ranking impact: how often each cell's winner changes, and the regret of today's winner, if every continuation
+   ran at its copy reference.
+
+Small regret in (3) means the continuations cannot distort the training labels. Large regret means the continuation
+should be made fast before the dataset is taken.

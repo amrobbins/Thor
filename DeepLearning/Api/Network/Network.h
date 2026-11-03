@@ -15,6 +15,7 @@
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "Utilities/Expression/CudaKernelSecurity.h"
+#include "Utilities/TensorOperations/Cub/CubReductionTuningDepth.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
@@ -33,6 +34,7 @@
 #include <deque>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -235,6 +237,21 @@ class Network {
     [[nodiscard]] bool shouldInitializeOptimizerAsNew(uint64_t parameterizableId) const {
         return optimizerResetPending || optimizerResetLayerIds.contains(parameterizableId);
     }
+    // 1170: how much stamp-time autotuning this network's reductions may spend (Quick / Regular / Ultra; see
+    // CubReductionTuningDepth.h). Unset, the usual case, means Regular. place() stamps every layer under this depth
+    // on whichever thread calls it, so placements by training runners and executors follow it too. A network composed
+    // from others (training phases, evaluators, ensembles: cloneSubgraphInto) takes the deepest depth set on any of
+    // them. A placement-time policy like the dropout policy below: used by future placements, not serialized.
+    void setReductionTuningDepth(std::optional<ThorImplementation::CubReductionTuningDepth> depth) {
+        reductionTuningDepth = depth;
+    }
+    [[nodiscard]] std::optional<ThorImplementation::CubReductionTuningDepth> getReductionTuningDepthSetting() const {
+        return reductionTuningDepth;
+    }
+    [[nodiscard]] ThorImplementation::CubReductionTuningDepth getReductionTuningDepth() const {
+        return reductionTuningDepth.value_or(ThorImplementation::CubReductionTuningDepth::Regular);
+    }
+
     // Set transient training-time dropout policy on the logical API graph.
     // The policy is used by future placements and is not serialized.
     void setTrainingDropoutEnabled(bool enabled);
@@ -306,6 +323,8 @@ class Network {
 
    private:
     static const bool DEBUG_STAMP = false;
+
+    std::optional<ThorImplementation::CubReductionTuningDepth> reductionTuningDepth;
 
     friend class Trainer;
     friend class PlacedNetwork;

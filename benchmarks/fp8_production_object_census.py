@@ -333,14 +333,14 @@ def analyze(build: Path, report: Path) -> None:
     lines = [f'Production object root: {build.resolve()}',
              f'Objects: {len(objects)}; device ELFs: {len({(row["object"], row["cubin"]) for row in rows})}',
              'Counts are per compiled object/device ELF, not unique runtime kernels or linked library bytes.', '']
-    for label in ('OneWindow', 'DeepRSmallK', 'AlignedK', 'RuntimeK',
+    for label in ('OneWindow', 'DeepRSmallK', 'AlignedK', 'RuntimeK', 'ARG',
                   'other-fp8-kernel', 'other-device-function'):
         lines.append(f'{label:22} {totals[label]:6} FUNC symbols, {bytes_by_category[label]:>13,} SASS text bytes')
     extra = [row for row in rows if row['category'] == 'other-fp8-kernel']
     retained = sum(totals[family] for family in set(FAMILIES.values()))
-    lines += ['', f'Other-named FP8 kernels (outside four known family names): {len(extra)}',
+    lines += ['', f'Other-named FP8 kernels (outside the known family names): {len(extra)}',
               'Family-name classification does NOT establish selector reachability.',
-              'These other-named kernels are NOT necessarily obsolete: ARG, R/KR and views may be legitimate.']
+              'These other-named kernels are NOT necessarily obsolete: R/KR and views may be legitimate.']
     selected_counts = selected_manifest_counts(build)
     if selected_counts is None:
         lines += ['', 'No generated selector manifest found at fp8-selected-inventory/expected.json.',

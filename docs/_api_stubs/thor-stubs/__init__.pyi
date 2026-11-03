@@ -20,7 +20,10 @@ from . import (
     training as training
 )
 from .ensembles._manifest import EnsembleModel as EnsembleModel
-from .runtime import StatusCode as StatusCode
+from .runtime import (
+    ReductionTuningDepth as ReductionTuningDepth,
+    StatusCode as StatusCode
+)
 
 
 BATCH_VALIDITY_MASK_NAME: str = '__thor_batch_validity_mask'
@@ -142,6 +145,24 @@ class Network:
         """
 
     def is_training_dropout_enabled(self) -> bool: ...
+
+    def set_reduction_tuning_depth(self, depth: runtime.ReductionTuningDepth | None) -> None:
+        """
+        Set how much stamp-time autotuning this network's reductions may spend: Network.ReductionTuningDepth.quick (the
+        fewest candidates and rounds), .regular (the default) or .ultra (the most). None clears the setting, which means
+        regular. A selection tuned at a deeper depth is reused for shallower requests in the same process.
+
+        Every reduction stamped when the network is placed uses this depth, including placements made by trainers and
+        training runs; a network composed from several networks uses the deepest depth set on any of them. The setting
+        applies to future placements and is not serialized.
+        """
+
+    def get_reduction_tuning_depth(self) -> runtime.ReductionTuningDepth:
+        """
+        Return the depth this network's next placement tunes its reductions at (regular when no depth is set).
+        """
+
+    def is_reduction_tuning_depth_set(self) -> bool: ...
 
     def get_num_training_dropout_controllable_layers(self) -> int: ...
 

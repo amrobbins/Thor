@@ -40,7 +40,7 @@ DenseReductionCandidate makeRetainedFp8RKPhysicalCandidate(
 namespace ThorImplementation::CubReductionInternal::Fp8RK {
 Fp8RKSelection selectCachedIsolatedRKSite(
     const DenseReductionProblem&, DenseReductionSite, CubReductionOp, uint64_t,
-    float, DataType, const Stream&, uint64_t) {
+    float, DataType, const Stream&, uint64_t, CubReductionTuningDepth) {
     throw std::logic_error("lookahead host smoke accidentally entered FP8 autotuning");
 }
 }  // namespace ThorImplementation::CubReductionInternal::Fp8RK

@@ -11,26 +11,41 @@ per-candidate timings. It is not a cached executable plan yet.
 
 ## Timing contract
 
-1. Allocate one owning input Tensor as a ring of 32-byte-aligned views with
+1. Allocate one owning input Tensor as a ring of 256-byte-aligned views (1163;
+   cudaMalloc's alignment, so a timed input is aligned as a real tensor's) with
    at least 128 bytes of unused padding after every view, including when the
    logical tensor byte size is already aligned. Output and scratch rings use
-   this same layout. Maintain at least eight times the device-reported L2 capacity between reuse of the
-   *same input view* (override `Options::cold_reuse_bytes` if needed).
-   Clone the representative input into all ring slots in O(log slots)
-   GPU-copy submissions. Allocate separate rotating output and optional
-   scratch Tensor storage, reserving the largest candidate scratch requirement.
+   this same layout and the same slot count. Keep at least eight times the
+   device-reported L2 capacity of traffic between reuses of the same slot,
+   counting each slot's input + output + scratch bytes (1161; override
+   `Options::cold_reuse_bytes` if needed), so every timed launch's first stage
+   reads an L2-cold input. Clone the representative input into all ring slots
+   in O(log slots) GPU-copy submissions.
 2. One throwaway warmup per candidate by default, in input order.
-3. Five rounds: first input order, next four independently reshuffled and
-   distinct from the previous round (unless only one candidate).
-4. Queue every start event, complete callback, and stop event on **one CUDA
-   stream**, with **no CPU synchronization between candidates or rounds**.
-   Synchronize once after all timing submissions; GPU timing events isolate the
-   candidate interval. Neither setup nor input copying is timed.
-5. For each candidate, discard the fastest and slowest elapsed time. Convert
-   the remaining three elapsed times to logical-input throughput and average
-   those three speeds. Select the **highest trimmed-mean throughput**; exact
-   ties select the earlier user candidate. Return all five per-round timings,
-   trimmed mean latency, trimmed mean throughput, index and name of winner.
+3. **Probe** (1161 KR, 1162 every contest): one timed launch per candidate on
+   the next cold slot, then one host synchronization to read them.
+4. From the probes (`planFromProbes`): each candidate's launches per
+   measurement = ceil(`probe_target_us` / probe), 1 to
+   `max_launches_per_measurement` (defaults 200 us and 32), so a short kernel
+   batches enough launches that the ~2 us event resolution is about 1%, and a
+   slow one is not repeated. A candidate whose probe exceeds `abandon_ratio` x
+   max(best probe, `abandon_floor_us`) (defaults 3 and 8 us) is not measured
+   and cannot win; `abandon_ratio = 0` measures every candidate.
+5. `measurement_count` rounds (FP8: 5 Quick, 7 Regular, 11 Ultra): first in
+   input order, then independently reshuffled and distinct from the previous
+   round. Each measurement is one event interval around the candidate's
+   launches, each on the next cold slot, divided by the launch count. All
+   rounds are queued on **one CUDA stream** with no host synchronization until
+   the end. Neither setup nor input copying is timed.
+6. For each measured candidate, discard the `trim_count` fastest and slowest
+   samples and average the rest; the smallest trimmed mean wins, exact ties
+   going to the earlier candidate. Every candidate's probe, launch count,
+   samples and trimmed mean (or `abandoned`) are returned with the winner.
+
+Why (1160/1161, 3258 FP8 KR sites): with one launch count per site, a stamp
+took 4 ms plus its contest's GPU time, and below 16 MiB 92-98% of that went to
+shapes 10-100x slower than the winner (median 200-440 ms per stamp). With this
+policy the median stamp took 11-29 ms by size, with the same pick quality.
 
 A smaller kernel launch latency corresponds to higher throughput for the
 identical logical reduction input, so no implementation gets an artificial

@@ -1,7 +1,7 @@
 // Phase 3: integration regression for the selection-cache/stamp/run boundary.
 // This is a host compilation unit linked to Thor; it instantiates no CUDA kernels.
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
-#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKSelectionCache.h"
+#include "Utilities/TensorOperations/Cub/DenseReductionSelectionCache.h"
 #include "Utilities/TensorOperations/Cub/DenseRetainedFp8RKPhysicalPlan.h"
 
 #include <cuda_runtime_api.h>
@@ -140,16 +140,16 @@ void exercise(DataType dtype) {
     stream_a.synchronize();
     stream_b.synchronize();
 
-    RK::fp8RKSelectionCache().clear();
-    const uint64_t attempts_before = RK::fp8RKSelectionCache().tuningAttempts();
+    ThorImplementation::CubReductionInternal::denseReductionSelectionCache().clear();
+    const uint64_t attempts_before = ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK);
     auto a = CubReduction(CubReductionOp::Sum, {1}, DataType::FP32)
                  .stamp(input_a, output_a, stream_a);
-    require(RK::fp8RKSelectionCache().tuningAttempts() == attempts_before + 1 &&
-            RK::fp8RKSelectionCache().size() == 1,
+    require(ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK) == attempts_before + 1 &&
+            ThorImplementation::CubReductionInternal::denseReductionSelectionCache().size() == 1,
             "First stamp must tune once and cache only a selection recipe");
     auto b = CubReduction(CubReductionOp::Sum, {1}, DataType::FP32)
                  .stamp(input_b, output_b, stream_b);
-    require(RK::fp8RKSelectionCache().tuningAttempts() == attempts_before + 1,
+    require(ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK) == attempts_before + 1,
             "Second independent stamp with identical configuration must be a cache hit");
     requireIndependentExecution(*a, *b);
     requireSameCachedSelection(*a, *b);
@@ -159,9 +159,9 @@ void exercise(DataType dtype) {
 
     // Clear selection recipes while both stamps remain alive. Running these
     // stamps must neither consult nor repopulate the recipe cache.
-    RK::fp8RKSelectionCache().clear();
-    require(RK::fp8RKSelectionCache().size() == 0, "Selection clear must empty the cache");
-    const uint64_t before_runs = RK::fp8RKSelectionCache().tuningAttempts();
+    ThorImplementation::CubReductionInternal::denseReductionSelectionCache().clear();
+    require(ThorImplementation::CubReductionInternal::denseReductionSelectionCache().size() == 0, "Selection clear must empty the cache");
+    const uint64_t before_runs = ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK);
     auto launch_a = std::async(std::launch::async, [&] {
         for (int iteration = 0; iteration < 16; ++iteration) a->runOn(stream_a);
         checkOutput(output_a, stream_a, static_cast<float>(kR));
@@ -175,8 +175,8 @@ void exercise(DataType dtype) {
     try { launch_a.get(); } catch (...) { failure = std::current_exception(); }
     try { launch_b.get(); } catch (...) { if (!failure) failure = std::current_exception(); }
     if (failure) std::rethrow_exception(failure);
-    require(RK::fp8RKSelectionCache().size() == 0 &&
-            RK::fp8RKSelectionCache().tuningAttempts() == before_runs,
+    require(ThorImplementation::CubReductionInternal::denseReductionSelectionCache().size() == 0 &&
+            ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK) == before_runs,
             "Executing existing stamps must not access, populate, or retune selection cache");
 
     // A new stamp after clearing must tune anew, without disturbing the old
@@ -184,8 +184,8 @@ void exercise(DataType dtype) {
     Tensor output_c(placement, TensorDescriptor(DataType::FP32, {kO, kK}));
     auto c = CubReduction(CubReductionOp::Sum, {1}, DataType::FP32)
                  .stamp(input_a, output_c, stream_a);
-    require(RK::fp8RKSelectionCache().tuningAttempts() == before_runs + 1 &&
-            RK::fp8RKSelectionCache().size() == 1,
+    require(ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK) == before_runs + 1 &&
+            ThorImplementation::CubReductionInternal::denseReductionSelectionCache().size() == 1,
             "Fresh stamp after cache clear must retune and retain one recipe");
     // c was tuned after clear(), so it need not match a/b's physical winner.
     requireIndependentExecution(*a, *c);
@@ -194,11 +194,11 @@ void exercise(DataType dtype) {
     c->runOn(stream_a);
     checkOutput(output_b, stream_b, -0.5f * static_cast<float>(kR));
     checkOutput(output_c, stream_a, static_cast<float>(kR));
-    const uint64_t final_attempts = RK::fp8RKSelectionCache().tuningAttempts();
+    const uint64_t final_attempts = ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK);
     b.reset();  // Destruction of one stamped instance must not affect peers.
     a->runOn(stream_a);
     checkOutput(output_a, stream_a, static_cast<float>(kR));
-    require(RK::fp8RKSelectionCache().tuningAttempts() == final_attempts,
+    require(ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK) == final_attempts,
             "Previously stamped reduction unexpectedly retuned after a later cache miss");
 
     std::cout << "FP8 RK lifecycle dtype=" << static_cast<int>(dtype)

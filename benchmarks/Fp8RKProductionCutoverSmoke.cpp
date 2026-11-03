@@ -1,7 +1,7 @@
 // Public-API regression for default ordinary FP8 RK VALUE production.
 // No opt-in flags, hidden continuations, or special stamped executors.
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
-#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKSelectionCache.h"
+#include "Utilities/TensorOperations/Cub/DenseReductionSelectionCache.h"
 
 #include <cuda_runtime_api.h>
 #include <cuda_fp16.h>
@@ -13,7 +13,6 @@
 #include <vector>
 
 using namespace ThorImplementation;
-namespace RK = ThorImplementation::CubReductionInternal::Fp8RK;
 
 namespace {
 void require(bool result, const char* message) {
@@ -115,8 +114,8 @@ void exercise(DataType dtype, bool multi_axis) {
         require(stamp->getDenseExecutablePassCount() >= 2,
                 "Multi-axis reduction should use independently planned physical passes");
 
-    RK::fp8RKSelectionCache().clear();
-    const uint64_t attempts = RK::fp8RKSelectionCache().tuningAttempts();
+    ThorImplementation::CubReductionInternal::denseReductionSelectionCache().clear();
+    const uint64_t attempts = ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK);
     for (int iteration = 0; iteration < 3; ++iteration)
         stamp->runOn(alternate);
     checkOutput(output, result_elements, expected, alternate);
@@ -124,8 +123,8 @@ void exercise(DataType dtype, bool multi_axis) {
     checkOutput(output, result_elements, expected * -0.5f, alternate);
     stamp->runOn(alternate);
     checkOutput(output, result_elements, expected, alternate);
-    require(RK::fp8RKSelectionCache().size() == 0 &&
-            RK::fp8RKSelectionCache().tuningAttempts() == attempts,
+    require(ThorImplementation::CubReductionInternal::denseReductionSelectionCache().size() == 0 &&
+            ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK) == attempts,
             "Stamped run must not consult, populate or retune the FP8 selection cache");
     // A nonunit stamp-time scale also applies only on the final mathematical pass.
     const CubReduction scaled_reduction(CubReductionOp::Sum, axes, DataType::FP32, 2.0f);

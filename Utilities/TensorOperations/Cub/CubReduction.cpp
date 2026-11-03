@@ -9,7 +9,9 @@
 #include "Utilities/TensorOperations/Cub/DenseReductionPlanner.h"
 #include "Utilities/TensorOperations/Cub/DenseProductionPhysicalSelectionContext.h"
 #include "Utilities/TensorOperations/Cub/DensePhysicalPassExecution.h"
+#include "Utilities/TensorOperations/Cub/DenseRetainedFp8ArgPhysicalPlan.h"
 #include "Utilities/TensorOperations/Cub/DenseRetainedFp8RKPhysicalPlan.h"
+#include "Utilities/TensorOperations/Cub/DenseRetainedFp8KRPhysicalPlan.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalKernels.h"
 
 #include <cuda_runtime_api.h>
@@ -101,6 +103,7 @@ using namespace CubReductionInternal;
                                                            DataType output_dtype,
                                                            uint64_t original_reduction_size,
                                                            float output_scale,
+                                                           CubReductionTuningDepth tuning_depth,
                                                            const Stream& stream,
                                                            std::string* strategy_chain = nullptr) {
     DenseReductionOutputSpec output_spec;
@@ -118,7 +121,7 @@ using namespace CubReductionInternal;
     const DenseProductionPhysicalSelectionContext production_context(
         original_input_dtype, denseRKValueOperation(op), stream,
         original_reduction_size, output_scale, op,
-        is_fp8 ? kRetainedFp8RKWorkspaceBudget : std::numeric_limits<uint64_t>::max());
+        is_fp8 ? kRetainedFp8RKWorkspaceBudget : std::numeric_limits<uint64_t>::max(), tuning_depth);
 
     DenseReductionPlan plan = planDenseReduction(problem, production_context.context());
     if (strategy_chain != nullptr) {
@@ -134,6 +137,9 @@ using namespace CubReductionInternal;
                     case Fp8RK::PhysicalFamily::AlignedK: strategy_chain->append("aligned_k"); break;
                     case Fp8RK::PhysicalFamily::RuntimeK: strategy_chain->append("runtime_k"); break;
                 }
+            } else if (const auto kr = std::dynamic_pointer_cast<const DenseRetainedFp8KRPhysicalPlan>(
+                    step.selected_candidate.physical_plan); kr) {
+                strategy_chain->append("retained_fp8_kr:" + Fp8KR::fp8KRShapeName(kr->shape));
             } else if (const auto rk = std::dynamic_pointer_cast<const DenseRKFamilyPhysicalPlan>(
                     step.selected_candidate.physical_plan); rk) {
                 strategy_chain->append(denseRKStrategyName(rk->strategy));
@@ -2806,6 +2812,104 @@ void launchComposedArgReductionStage(CubArgReductionOp op,
     throw std::invalid_argument("Unsupported CUB arg reduction operation.");
 }
 
+// ARG-P1: original FP8 dense ARG is planned by planDenseReduction(), like VALUE, so later FP8 ARG physical passes
+// (including staged [outer, shards, inner] first stages) slot into the same planner. Other input dtypes keep the
+// interval-composition executor until their own cutover.
+[[nodiscard]] bool usesPlannedDenseArg(DataType input_dtype) {
+    return input_dtype == DataType::FP8_E4M3 || input_dtype == DataType::FP8_E5M2;
+}
+
+[[nodiscard]] DataType denseArgCarriedIndexDType(uint64_t original_reduction_size) {
+    return original_reduction_size <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) ? DataType::UINT32
+                                                                                                 : DataType::UINT64;
+}
+
+// One planned ARG pass. geometry is the pass's own direct geometry over the current (normalized) run dimensions;
+// domain_stride is the nominated run's original ARG-domain stride (0 for a reducer-created intermediate run, whose
+// elements already carry their original indices).
+struct PlannedDenseArgPass {
+    CubReductionGeometry geometry;
+    uint64_t domain_stride = 0;
+    std::vector<uint64_t> intermediate_dimensions;
+    bool final_pass = false;
+    // ARG-A2: a retained FP8 ARG physical pass (no scratch); null for a direct ARG pass.
+    std::shared_ptr<const DenseRetainedFp8ArgPhysicalPlan> fp8_arg;
+};
+
+struct PlannedDenseArg {
+    std::vector<PlannedDenseArgPass> passes;
+    DataType carried_index_dtype = DataType::UINT32;
+};
+
+[[nodiscard]] PlannedDenseArg planProductionDenseArg(CubArgReductionOp op,
+                                                     const std::vector<uint64_t>& input_dimensions,
+                                                     const std::vector<uint32_t>& axes,
+                                                     DataType input_dtype,
+                                                     std::optional<DataType> value_output_dtype,
+                                                     std::optional<DataType> index_output_dtype,
+                                                     uint64_t original_reduction_size,
+                                                     CubReductionTuningDepth tuning_depth,
+                                                     const Stream& stream) {
+    DenseReductionOutputSpec output_spec;
+    output_spec.produce_value = value_output_dtype.has_value();
+    output_spec.value_dtype = value_output_dtype.value_or(DataType::FP32);
+    output_spec.produce_index = index_output_dtype.has_value();
+    output_spec.index_dtype = index_output_dtype.value_or(DataType::UINT32);
+
+    PlannedDenseArg planned;
+    planned.carried_index_dtype = denseArgCarriedIndexDType(original_reduction_size);
+    const DenseReductionProblem problem = makeInitialDenseReductionProblem(
+        input_dimensions, axes, DenseReductionAggregateKind::Arg, output_spec, planned.carried_index_dtype);
+    // ARG-A2: the context names the VALUE operation whose retained FP8 selection ARG mirrors (MIN for argmin, MAX for
+    // argmax) and the FP8 VALUE workspace budget used by that selection.
+    constexpr uint64_t kRetainedFp8WorkspaceBudget = uint64_t{256} * 1024 * 1024;
+    const DenseProductionPhysicalSelectionContext production_context(
+        input_dtype,
+        op == CubArgReductionOp::ArgMin ? DenseRKValueOperation::Minimum : DenseRKValueOperation::Maximum,
+        stream,
+        original_reduction_size,
+        1.0f,
+        op == CubArgReductionOp::ArgMin ? CubReductionOp::Min : CubReductionOp::Max,
+        kRetainedFp8WorkspaceBudget,
+        tuning_depth);
+    const DenseReductionPlan plan = planDenseReduction(problem, production_context.context());
+
+    for (const DenseReductionPlanStep& step : plan.steps) {
+        const DenseReductionCandidate& candidate = step.selected_candidate;
+        const auto direct = std::dynamic_pointer_cast<const DenseDirectReductionPhysicalPlan>(candidate.physical_plan);
+        const auto fp8_arg =
+            std::dynamic_pointer_cast<const DenseRetainedFp8ArgPhysicalPlan>(candidate.physical_plan);
+        if (!direct && !fp8_arg) {
+            throw std::logic_error("Dense ARG plan selected a physical pass that has no ARG executor.");
+        }
+        const DensePhysicalPassLayout layout = describeDensePhysicalPass(*candidate.physical_plan);
+        PlannedDenseArgPass pass;
+        pass.fp8_arg = fp8_arg;
+        pass.geometry = layout.geometry;
+        if (!isDirectDenseReductionPath(pass.geometry.path)) {
+            throw std::logic_error("Dense ARG plan pass did not resolve to a direct reducer family.");
+        }
+        requireExecutableFixedSegmentSize(pass.geometry);
+        const DenseReductionRun& site_run = step.input_problem.runs.at(candidate.site.run_index);
+        pass.domain_stride = denseArgOriginalIndexStride(site_run).value_or(0);
+        pass.final_pass = !hasDenseReductionSites(candidate.next_problem);
+        pass.intermediate_dimensions = layout.intermediate_dimensions;
+        if (!pass.final_pass) {
+            const uint64_t elements = TensorDescriptor(DataType::FP32, pass.intermediate_dimensions).getTotalNumElements();
+            const uint64_t bytes = TensorDescriptor::getArraySizeInBytes(elements, DataType::FP32) +
+                                   TensorDescriptor::getArraySizeInBytes(elements, planned.carried_index_dtype);
+            if (bytes != candidate.next_bytes) {
+                throw std::logic_error("Dense ARG pass intermediate differs from the selected next problem.");
+            }
+        }
+        planned.passes.push_back(std::move(pass));
+    }
+    if (planned.passes.empty() || !planned.passes.back().final_pass) {
+        throw std::logic_error("Dense ARG planner produced no final pass.");
+    }
+    return planned;
+}
+
 }  // namespace
 
 namespace CubReductionInternal {
@@ -2853,6 +2957,19 @@ DensePhysicalPassLayout describeDensePhysicalPass(const DenseReductionPhysicalPl
         if (rk->progress == DenseRKProgress::Staged) {
             layout.intermediate_dimensions = {rk->outer_size, rk->shards_per_output, rk->inner_size};
         }
+    } else if (const auto* kr = dynamic_cast<const DenseRetainedFp8KRPhysicalPlan*>(&physical_plan)) {
+        // 1146: one Complete pass over the site's current runs; staged chunk partials are the pass's scratch.
+        layout.input_dimensions = kr->input_dimensions;
+        layout.geometry = CubReduction::analyzeGeometry(layout.input_dimensions,
+                                                        std::vector<uint32_t>{kr->reduction_axis});
+    } else if (const auto* arg = dynamic_cast<const DenseRetainedFp8ArgPhysicalPlan*>(&physical_plan)) {
+        // OneWindow ARG twins are Complete ([O,K]); DeepRSmallK ARG twins and multi-shard RuntimeK/AlignedK twins write
+        // [O,shards,K] partials. 1146: an R / KR pass reduces its last current run.
+        layout.input_dimensions = arg->input_dimensions;
+        const uint32_t axis = arg->kr.group_lanes != 0 ? static_cast<uint32_t>(arg->input_dimensions.size() - 1) : 1U;
+        layout.geometry = CubReduction::analyzeGeometry(layout.input_dimensions, std::vector<uint32_t>{axis});
+        if (arg->shards > 1 && !arg->packed_partials)
+            layout.intermediate_dimensions = {arg->outer_size, arg->shards, arg->inner_size};
     } else if (const auto* fp8 = dynamic_cast<const DenseRetainedFp8RKPhysicalPlan*>(&physical_plan)) {
         // The selected first kernel has its own real [O,N,K] output. A staged
         // output is an ordinary FP32 intermediate, never hidden scratch.
@@ -2881,6 +2998,16 @@ size_t queryDensePhysicalPassScratchBytes(const DenseReductionPhysicalPlan& phys
         return queryReductionBytes(semantics, input_dtype, input, input_elements, output_dtype, output,
                                    geometry, output_scale, stream);
     }
+    if (const auto* kr = dynamic_cast<const DenseRetainedFp8KRPhysicalPlan*>(&physical_plan)) {
+        if (input_dtype != kr->input_dtype || input_elements != kr->shape.rows * kr->shape.row_bytes ||
+            geometry.output_elements != kr->shape.rows || !isSupportedFloatingStorageDType(output_dtype))
+            throw std::invalid_argument("Retained FP8 KR physical query input/output geometry or dtype mismatch");
+        static_cast<void>(input);
+        static_cast<void>(output);
+        static_cast<void>(output_scale);
+        static_cast<void>(stream);
+        return static_cast<size_t>(Fp8KR::fp8KRScratchBytes(kr->shape, false));
+    }
     if (const auto* fp8 = dynamic_cast<const DenseRetainedFp8RKPhysicalPlan*>(&physical_plan)) {
         requireSupportedRetainedFp8PhysicalPass(*fp8, semantics, input_dtype,
                                                input_elements, output_dtype,
@@ -2908,6 +3035,17 @@ void launchDensePhysicalPass(const DenseReductionPhysicalPlan& physical_plan,
                              Stream& stream) {
     if (dynamic_cast<const DenseDirectReductionPhysicalPlan*>(&physical_plan) != nullptr) {
         launchReduction(semantics, temp_storage, temp_storage_bytes, input, output, geometry, output_scale, stream);
+        return;
+    }
+    if (const auto* kr = dynamic_cast<const DenseRetainedFp8KRPhysicalPlan*>(&physical_plan)) {
+        // 1146: one retained R / KR kernel, plus the finishing kernel of a staged shape (partials in this scratch).
+        if (input.getDataType() != kr->input_dtype || geometry.output_elements != kr->shape.rows)
+            throw std::invalid_argument("Retained FP8 KR physical launch binding mismatch");
+        void* scratch = temp_storage_bytes == 0
+                            ? nullptr
+                            : const_cast<void*>(static_cast<const void*>(temp_storage.getMemPtr<void>()));
+        launchFp8KRValueSegments(semantics, input, output, kr->shape, scratch, temp_storage_bytes, output_scale,
+                                 stream);
         return;
     }
     if (const auto* fp8 = dynamic_cast<const DenseRetainedFp8RKPhysicalPlan*>(&physical_plan)) {
@@ -2980,14 +3118,17 @@ DenseExecutablePlan materializeDenseValueExecutablePlan(
 CubReduction::CubReduction(CubReductionOp op,
                            uint32_t axis,
                            std::optional<DataType> output_dtype,
-                           float output_scale)
-    : CubReduction(op, std::vector<uint32_t>{axis}, output_dtype, output_scale) {}
+                           float output_scale,
+                           std::optional<CubReductionTuningDepth> tuning_depth)
+    : CubReduction(op, std::vector<uint32_t>{axis}, output_dtype, output_scale, tuning_depth) {}
 
 CubReduction::CubReduction(CubReductionOp op,
                            std::vector<uint32_t> axes,
                            std::optional<DataType> output_dtype,
-                           float output_scale)
-    : op(op), axes(std::move(axes)), output_dtype(output_dtype), output_scale(output_scale) {
+                           float output_scale,
+                           std::optional<CubReductionTuningDepth> tuning_depth)
+    : op(op), axes(std::move(axes)), output_dtype(output_dtype), output_scale(output_scale),
+      tuning_depth(resolveCubReductionTuningDepth(tuning_depth)) {
     requireSupportedOperation(op);
     if (this->axes.empty()) {
         throw std::invalid_argument("CUB tensor reduction requires at least one reduction axis.");
@@ -3053,6 +3194,7 @@ size_t CubReduction::queryWorkspaceSizeInBytes(const TensorDescriptor& input_des
                                                                  resolved_output_dtype,
                                                                  geometry.reduction_size,
                                                                  output_scale,
+                                                                 tuning_depth,
                                                                  stream);
         return queryDenseValueExecutableWorkspace(op,
                                                   input_descriptor,
@@ -3423,6 +3565,7 @@ std::shared_ptr<StampedCubReduction> CubReduction::stampValidated(const Tensor& 
                                                                  output.getDataType(),
                                                                  geometry.reduction_size,
                                                                  output_scale,
+                                                                 tuning_depth,
                                                                  stream,
                                                                  &strategy_chain);
         DenseExecutablePlan executable_plan = CubReductionInternal::materializeDenseValueExecutablePlan(op,
@@ -3821,13 +3964,15 @@ uint64_t CubArgReduction::composeOriginalArgIndex(uint64_t previous_index,
 
 CubArgReduction::CubArgReduction(CubArgReductionOp op,
                                  uint32_t axis,
-                                 CubArgReductionOutputOptions outputs)
-    : CubArgReduction(op, std::vector<uint32_t>{axis}, std::move(outputs)) {}
+                                 CubArgReductionOutputOptions outputs,
+                                 std::optional<CubReductionTuningDepth> tuning_depth)
+    : CubArgReduction(op, std::vector<uint32_t>{axis}, std::move(outputs), tuning_depth) {}
 
 CubArgReduction::CubArgReduction(CubArgReductionOp op,
                                  std::vector<uint32_t> axes,
-                                 CubArgReductionOutputOptions outputs)
-    : op(op), axes(std::move(axes)), outputs(std::move(outputs)) {
+                                 CubArgReductionOutputOptions outputs,
+                                 std::optional<CubReductionTuningDepth> tuning_depth)
+    : op(op), axes(std::move(axes)), outputs(std::move(outputs)), tuning_depth(resolveCubReductionTuningDepth(tuning_depth)) {
     requireSupportedArgOperation(op);
     if (this->axes.empty()) {
         throw std::invalid_argument("CUB arg reduction requires at least one reduction axis.");
@@ -3879,6 +4024,49 @@ size_t CubArgReduction::queryWorkspaceSizeInBytes(const TensorDescriptor& input_
     const std::optional<DataType> index_output_dtype =
         outputs.produce_index ? std::optional<DataType>(outputs.index_output_dtype) : std::nullopt;
     ScopedGpu scoped_gpu(stream.getGpuNum());
+
+    if (usesPlannedDenseArg(input_descriptor.getDataType())) {
+        // Mirrors stampPlannedDenseValidated(): the same deterministic plan, intermediates and per-pass scratch.
+        const PlannedDenseArg planned = planProductionDenseArg(op,
+                                                               input_descriptor.getDimensions(),
+                                                               axes,
+                                                               input_descriptor.getDataType(),
+                                                               value_output_dtype,
+                                                               index_output_dtype,
+                                                               geometry.reduction_size,
+                                                               tuning_depth,
+                                                               stream);
+        size_t workspace_size_bytes = 0;
+        auto add_bytes = [&](uint64_t bytes) {
+            if (bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max() - workspace_size_bytes)) {
+                throw std::overflow_error("CUB arg reduction workspace size overflows size_t.");
+            }
+            workspace_size_bytes += static_cast<size_t>(bytes);
+        };
+        DataType current_value_dtype = input_descriptor.getDataType();
+        for (size_t pass_index = 0; pass_index < planned.passes.size(); ++pass_index) {
+            const PlannedDenseArgPass& pass = planned.passes[pass_index];
+            if (pass.fp8_arg) add_bytes(retainedFp8ArgScratchBytes(*pass.fp8_arg));
+            if (!pass.fp8_arg) add_bytes(queryComposedArgReductionStageBytes(
+                op,
+                current_value_dtype,
+                pass_index != 0,
+                pass.final_pass ? value_output_dtype : std::optional<DataType>(DataType::FP32),
+                pass.final_pass ? index_output_dtype : std::optional<DataType>(planned.carried_index_dtype),
+                pass.geometry,
+                pass.domain_stride,
+                planned.carried_index_dtype,
+                stream));
+            if (!pass.final_pass) {
+                const uint64_t elements =
+                    TensorDescriptor(DataType::FP32, pass.intermediate_dimensions).getTotalNumElements();
+                add_bytes(TensorDescriptor::getArraySizeInBytes(elements, DataType::FP32));
+                add_bytes(TensorDescriptor::getArraySizeInBytes(elements, planned.carried_index_dtype));
+                current_value_dtype = DataType::FP32;
+            }
+        }
+        return workspace_size_bytes;
+    }
 
     if (geometry.path != CubReductionPath::ComposedDense) {
         requireExecutableFixedSegmentSize(geometry);
@@ -3992,6 +4180,9 @@ std::shared_ptr<StampedCubArgReduction> CubArgReduction::stamp(
     }
 
     requireArgOutputsDoNotOverlap(value_output, index_output);
+    if (usesPlannedDenseArg(input.getDataType())) {
+        return stampPlannedDenseValidated(input, std::move(value_output), std::move(index_output), geometry, stream);
+    }
     if (geometry.path == CubReductionPath::ComposedDense) {
         const std::optional<CubArgReductionDenseCompositionPlan> plan =
             analyzeDenseCompositionPlanForExecution(input.getDimensions(), axes, input.getDataType(), outputs, stream);
@@ -4017,6 +4208,12 @@ std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampComposedDense(
     requireDenseContiguousGpuTensor(input, "input");
     requireCompatibleStream(input, stream);
     requireSupportedFloatingStorageDType(input.getDataType(), "input");
+    // A5 (1119): FP8 ARG runs only through the planned retained FP8 ARG passes; the direct interval executor's tiled
+    // FP8 stages are no longer compiled.
+    if (usesPlannedDenseArg(input.getDataType())) {
+        throw std::invalid_argument("FP8 ARG reductions compose through stamp() (retained FP8 ARG passes); the direct "
+                                    "interval executor does not support FP8 input.");
+    }
 
     const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), axes);
     const std::optional<CubArgReductionDenseCompositionPlan> plan =
@@ -4069,6 +4266,12 @@ std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampComposedDenseWithP
     requireDenseContiguousGpuTensor(input, "input");
     requireCompatibleStream(input, stream);
     requireSupportedFloatingStorageDType(input.getDataType(), "input");
+    // A5 (1119): FP8 ARG runs only through the planned retained FP8 ARG passes; the direct interval executor's tiled
+    // FP8 stages are no longer compiled.
+    if (usesPlannedDenseArg(input.getDataType())) {
+        throw std::invalid_argument("FP8 ARG reductions compose through stamp() (retained FP8 ARG passes); the direct "
+                                    "interval executor does not support FP8 input.");
+    }
 
     const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), axes);
     if (!geometry.dense_run_geometry.has_value() || plan.topology.stages.empty()) {
@@ -4230,6 +4433,102 @@ std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampComposedDenseValid
                                                                              stream));
 }
 
+std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampPlannedDenseValidated(
+    const Tensor& input,
+    std::optional<Tensor> value_output,
+    std::optional<Tensor> index_output,
+    const CubReductionGeometry& geometry,
+    const Stream& stream) const {
+    ScopedGpu scoped_gpu(stream.getGpuNum());
+    const PlannedDenseArg planned = planProductionDenseArg(
+        op,
+        input.getDimensions(),
+        axes,
+        input.getDataType(),
+        value_output.has_value() ? std::optional<DataType>(value_output->getDataType()) : std::nullopt,
+        index_output.has_value() ? std::optional<DataType>(index_output->getDataType()) : std::nullopt,
+        geometry.reduction_size,
+        tuning_depth,
+        stream);
+
+    std::vector<std::shared_ptr<StampedCubArgReduction>> stages;
+    stages.reserve(planned.passes.size());
+    Tensor current_value_input = input;
+    std::optional<Tensor> current_index_input = std::nullopt;
+    size_t workspace_size_bytes = 0;
+    auto add_bytes = [&](uint64_t bytes) {
+        if (bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max() - workspace_size_bytes)) {
+            throw std::overflow_error("CUB arg reduction workspace size overflows size_t.");
+        }
+        workspace_size_bytes += static_cast<size_t>(bytes);
+    };
+
+    for (const PlannedDenseArgPass& pass : planned.passes) {
+        // Tensors are dense; a pass only needs the element count it reads. Its own run dimensions live in geometry.
+        if (current_value_input.getTotalNumElements() != pass.geometry.input_elements) {
+            throw std::logic_error("Planned dense ARG pass input does not match the previous pass output.");
+        }
+        std::optional<Tensor> stage_value_output;
+        std::optional<Tensor> stage_index_output;
+        if (pass.final_pass) {
+            stage_value_output = value_output;
+            stage_index_output = index_output;
+        } else {
+            stage_value_output =
+                Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, pass.intermediate_dimensions));
+            stage_index_output = Tensor(
+                input.getPlacement(), TensorDescriptor(planned.carried_index_dtype, pass.intermediate_dimensions));
+        }
+        Tensor* stage_value_output_ptr = stage_value_output.has_value() ? &stage_value_output.value() : nullptr;
+        Tensor* stage_index_output_ptr = stage_index_output.has_value() ? &stage_index_output.value() : nullptr;
+        const Tensor* carried_index_input_ptr = current_index_input.has_value() ? &current_index_input.value() : nullptr;
+        const size_t temp_storage_bytes = pass.fp8_arg ? static_cast<size_t>(retainedFp8ArgScratchBytes(*pass.fp8_arg))
+                                                       : queryComposedArgReductionStageBytes(op,
+                                                                                             current_value_input,
+                                                                                             carried_index_input_ptr,
+                                                                                             stage_value_output_ptr,
+                                                                                             stage_index_output_ptr,
+                                                                                             pass.geometry,
+                                                                                             pass.domain_stride,
+                                                                                             planned.carried_index_dtype,
+                                                                                             stream);
+        Tensor temp_storage;
+        if (temp_storage_bytes != 0) {
+            temp_storage = Tensor(
+                input.getPlacement(), TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(temp_storage_bytes)}));
+        }
+        stages.push_back(std::shared_ptr<StampedCubArgReduction>(new StampedCubArgReduction(op,
+                                                                                            pass.geometry,
+                                                                                            current_value_input,
+                                                                                            current_index_input,
+                                                                                            stage_value_output,
+                                                                                            stage_index_output,
+                                                                                            temp_storage_bytes,
+                                                                                            temp_storage,
+                                                                                            pass.domain_stride,
+                                                                                            planned.carried_index_dtype,
+                                                                                            stream)));
+        stages.back()->fp8_arg_plan = pass.fp8_arg;
+        add_bytes(temp_storage_bytes);
+        if (!pass.final_pass) {
+            add_bytes(stage_value_output->getArraySizeInBytes());
+            add_bytes(stage_index_output->getArraySizeInBytes());
+            current_value_input = stage_value_output.value();
+            current_index_input = stage_index_output.value();
+        }
+    }
+
+    // The public geometry (and so getPath()) stays the analyzed dense geometry; execution is the planned pass list.
+    return std::shared_ptr<StampedCubArgReduction>(new StampedCubArgReduction(op,
+                                                                             geometry,
+                                                                             input,
+                                                                             std::move(value_output),
+                                                                             std::move(index_output),
+                                                                             workspace_size_bytes,
+                                                                             std::move(stages),
+                                                                             stream));
+}
+
 std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampValidated(
     const Tensor& input,
     std::optional<Tensor> value_output,
@@ -4339,7 +4638,9 @@ StampedCubArgReduction::StampedCubArgReduction(
       temp_storage_bytes(workspace_size_bytes),
       composed_stages(std::move(composed_stages)),
       stream(stream) {
-    THOR_THROW_IF_FALSE(this->geometry.path == CubReductionPath::ComposedDense);
+    // ComposedDense interval executors, and planned dense ARG (ARG-P1), whose public geometry may be any dense path.
+    THOR_THROW_IF_FALSE(this->geometry.path == CubReductionPath::ComposedDense ||
+                        isDirectDenseReductionPath(this->geometry.path));
     THOR_THROW_IF_FALSE(!this->composed_stages.empty());
     for (const auto& stage : this->composed_stages) {
         THOR_THROW_IF_FALSE(stage != nullptr);
@@ -4370,8 +4671,7 @@ void StampedCubArgReduction::runOn(Stream& run_stream) const {
     requireCompatibleStream(input, run_stream);
     ScopedGpu scoped_gpu(run_stream.getGpuNum());
 
-    if (geometry.path == CubReductionPath::ComposedDense) {
-        THOR_THROW_IF_FALSE(!composed_stages.empty());
+    if (!composed_stages.empty()) {
         for (const auto& stage : composed_stages) {
             THOR_THROW_IF_FALSE(stage != nullptr);
             stage->runOn(run_stream);
@@ -4379,15 +4679,36 @@ void StampedCubArgReduction::runOn(Stream& run_stream) const {
         return;
     }
 
-    Tensor* value_output_ptr = value_output.has_value() ? &value_output.value() : nullptr;
-    Tensor* index_output_ptr = index_output.has_value() ? &index_output.value() : nullptr;
+    launchBoundStage(input, run_stream);
+}
+
+void StampedCubArgReduction::launchBoundStage(const Tensor& stage_input, Stream& run_stream) const {
+    launchBoundStage(stage_input, value_output.has_value() ? &value_output.value() : nullptr,
+                     index_output.has_value() ? &index_output.value() : nullptr, run_stream);
+}
+
+void StampedCubArgReduction::launchBoundStage(const Tensor& stage_input, Tensor* value_output_ptr,
+                                              Tensor* index_output_ptr, Stream& run_stream) const {
+    if (fp8_arg_plan) {
+        // Retained FP8 ARG pass (packed staged twins carry their partials in this stage's scratch).
+        THOR_THROW_IF_FALSE(!carried_index_input.has_value());
+        uint32_t* packed = nullptr;
+        if (fp8_arg_plan->packed_partials) {
+            THOR_THROW_IF_FALSE(temp_storage_bytes >= CubReductionInternal::retainedFp8ArgScratchBytes(*fp8_arg_plan));
+            packed = static_cast<uint32_t*>(const_cast<void*>(static_cast<const void*>(temp_storage.getMemPtr<void>())));
+        }
+        CubReductionInternal::launchRetainedFp8ArgPlan(*fp8_arg_plan, stage_input, value_output_ptr, index_output_ptr,
+                                                       geometry, packed, op == CubArgReductionOp::ArgMax,
+                                                       composed_domain_stride, run_stream);
+        return;
+    }
     if (composed_carried_index_dtype.has_value()) {
         const Tensor* carried_index_input_ptr =
             carried_index_input.has_value() ? &carried_index_input.value() : nullptr;
         launchComposedArgReductionStage(op,
                                         temp_storage,
                                         temp_storage_bytes,
-                                        input,
+                                        stage_input,
                                         carried_index_input_ptr,
                                         value_output_ptr,
                                         index_output_ptr,
@@ -4399,7 +4720,139 @@ void StampedCubArgReduction::runOn(Stream& run_stream) const {
     }
 
     launchArgReduction(
-        op, temp_storage, temp_storage_bytes, input, value_output_ptr, index_output_ptr, geometry, run_stream);
+        op, temp_storage, temp_storage_bytes, stage_input, value_output_ptr, index_output_ptr, geometry, run_stream);
+}
+
+void StampedCubArgReduction::runOnInputForBenchmark(const Tensor& replacement_input, Stream& run_stream) const {
+    if (composed_stages.empty() || replacement_input.getDataType() != input.getDataType() ||
+        replacement_input.getTotalNumElements() != input.getTotalNumElements()) {
+        throw std::invalid_argument("runOnInputForBenchmark requires a planned ARG stamp and a matching input.");
+    }
+    requireCompatibleStream(replacement_input, run_stream);
+    ScopedGpu scoped_gpu(run_stream.getGpuNum());
+    composed_stages.front()->launchBoundStage(replacement_input, run_stream);
+    for (size_t stage = 1; stage < composed_stages.size(); ++stage) {
+        composed_stages[stage]->launchBoundStage(composed_stages[stage]->input, run_stream);
+    }
+}
+
+namespace {
+
+void requireBenchmarkReplacement(const Tensor& replacement, const Tensor& bound, const char* what) {
+    if (!replacement.isInitialized() || replacement.getDataType() != bound.getDataType() ||
+        replacement.getTotalNumElements() != bound.getTotalNumElements() ||
+        replacement.getPlacement() != bound.getPlacement() || !replacement.isDenseContiguous()) {
+        throw std::invalid_argument(std::string("runOnTensorsForBenchmark: the replacement ") + what +
+                                    " must be a dense tensor of the stamp's dtype, element count and device.");
+    }
+}
+
+// The replacement with the bound tensor's dimensions: a copy of the handle (same storage), reshaped. Launches read the
+// geometry; the replacement only changes addresses.
+Tensor reshapedForBenchmark(const Tensor& replacement, const std::vector<uint64_t>& dimensions) {
+    Tensor view = replacement;
+    view.reshape(dimensions);
+    return view;
+}
+
+}  // namespace
+
+void StampedCubArgReduction::runOnTensorsForBenchmark(const Tensor& replacement_input,
+                                                      const std::optional<Tensor>& replacement_value_output,
+                                                      const std::optional<Tensor>& replacement_index_output,
+                                                      Stream& run_stream) const {
+    requireBenchmarkReplacement(replacement_input, input, "input");
+    if (replacement_value_output.has_value() != value_output.has_value() ||
+        replacement_index_output.has_value() != index_output.has_value()) {
+        throw std::invalid_argument("runOnTensorsForBenchmark: replacement outputs must match the stamp's outputs.");
+    }
+    if (replacement_value_output) requireBenchmarkReplacement(*replacement_value_output, *value_output, "value output");
+    if (replacement_index_output) requireBenchmarkReplacement(*replacement_index_output, *index_output, "index output");
+    requireCompatibleStream(replacement_input, run_stream);
+    ScopedGpu scoped_gpu(run_stream.getGpuNum());
+
+    // Aliases with the bound outputs' dimensions: launches read the geometry, the aliases only change addresses.
+    std::optional<Tensor> value = replacement_value_output
+        ? std::optional<Tensor>(reshapedForBenchmark(*replacement_value_output, value_output->getDimensions()))
+        : std::nullopt;
+    std::optional<Tensor> index = replacement_index_output
+        ? std::optional<Tensor>(reshapedForBenchmark(*replacement_index_output, index_output->getDimensions()))
+        : std::nullopt;
+    const Tensor first_input = reshapedForBenchmark(replacement_input, input.getDimensions());
+
+    if (composed_stages.empty()) {
+        launchBoundStage(first_input, value ? &*value : nullptr, index ? &*index : nullptr, run_stream);
+        return;
+    }
+    for (size_t stage = 0; stage < composed_stages.size(); ++stage) {
+        const StampedCubArgReduction& executor = *composed_stages[stage];
+        const Tensor& stage_input = stage == 0 ? first_input : executor.input;
+        if (stage + 1 < composed_stages.size()) {
+            executor.launchBoundStage(stage_input, run_stream);
+            continue;
+        }
+        // The last stage writes the public outputs.
+        if (executor.value_output.has_value() != value.has_value() ||
+            executor.index_output.has_value() != index.has_value()) {
+            throw std::logic_error("runOnTensorsForBenchmark: the last ARG stage's outputs differ from the stamp's.");
+        }
+        executor.launchBoundStage(stage_input, value ? &*value : nullptr, index ? &*index : nullptr, run_stream);
+    }
+}
+
+std::vector<std::string> StampedCubArgReduction::getPlannedPassNames() const {
+    std::vector<std::string> names;
+    if (geometry.path != CubReductionPath::ComposedDense && composed_stages.empty()) return names;
+    for (const auto& stage : composed_stages) {
+        if (stage->fp8_arg_plan && stage->fp8_arg_plan->kr.group_lanes != 0) {
+            names.push_back("fp8_arg_kr:" + CubReductionInternal::Fp8KR::fp8KRShapeName(stage->fp8_arg_plan->kr));
+            continue;
+        }
+        if (stage->fp8_arg_plan && stage->fp8_arg_plan->family == CubReductionInternal::Fp8RK::PhysicalFamily::RuntimeK &&
+            stage->fp8_arg_plan->tile_components != 0) {
+            names.push_back("fp8_arg_runtime_k:packet_complete_w" + std::to_string(stage->fp8_arg_plan->warps_per_output) +
+                            "_tile" + std::to_string(stage->fp8_arg_plan->tile_components));
+            if (stage->fp8_arg_plan->packed_partials) names.emplace_back("fp8_arg_packed_continuation");
+            continue;
+        }
+        if (stage->fp8_arg_plan && stage->fp8_arg_plan->family == CubReductionInternal::Fp8RK::PhysicalFamily::RuntimeK) {
+            names.push_back("fp8_arg_runtime_k:p" + std::to_string(stage->fp8_arg_plan->packet_bytes) +
+                            (stage->fp8_arg_plan->shards == 1 ? std::string("_complete")
+                                                              : "_rows" + std::to_string(stage->fp8_arg_plan->rows_per_shard)));
+            if (stage->fp8_arg_plan->packed_partials) names.emplace_back("fp8_arg_packed_continuation");
+            continue;
+        }
+        if (stage->fp8_arg_plan && stage->fp8_arg_plan->family == CubReductionInternal::Fp8RK::PhysicalFamily::AlignedK) {
+            names.push_back("fp8_arg_aligned_k:p" + std::to_string(stage->fp8_arg_plan->packet_bytes) + "_cta" +
+                            std::to_string(stage->fp8_arg_plan->cta_threads) + "_shards" +
+                            std::to_string(stage->fp8_arg_plan->shards));
+            if (stage->fp8_arg_plan->packed_partials) names.emplace_back("fp8_arg_packed_continuation");
+            continue;
+        }
+        if (stage->fp8_arg_plan && stage->fp8_arg_plan->family == CubReductionInternal::Fp8RK::PhysicalFamily::DeepRSmallK) {
+            names.push_back("fp8_arg_deep_r_small_k:p16_rows" + std::to_string(stage->fp8_arg_plan->rows_per_shard));
+            if (stage->fp8_arg_plan->packed_partials) names.emplace_back("fp8_arg_packed_continuation");
+            continue;
+        }
+        if (stage->fp8_arg_plan) {
+            const CubReductionInternal::Fp8OneWindowRuntimeKUnit& unit = stage->fp8_arg_plan->unit;
+            names.push_back("fp8_arg_one_window:o" + std::to_string(unit.outputs_per_warp) + "_w" +
+                            std::to_string(stage->fp8_arg_plan->warps_per_output) + "_p" +
+                            std::to_string(unit.packet_bytes) + "_c" + std::to_string(unit.max_components_per_lane) +
+                            (unit.load_ahead ? "_la" : ""));
+            if (stage->fp8_arg_plan->packed_partials) names.emplace_back("fp8_arg_packed_continuation");
+            continue;
+        }
+        switch (stage->geometry.path) {
+            case CubReductionPath::DeviceTransformReduce: names.emplace_back("direct:device_transform_reduce"); break;
+            case CubReductionPath::ContiguousFixedSegment: names.emplace_back("direct:contiguous_fixed_segment"); break;
+            case CubReductionPath::TiledFixedSegment:
+                names.emplace_back(stage->geometry.inner_size <= 32 ? "direct:tiled_narrow" : "direct:tiled_generic");
+                break;
+            default: names.emplace_back("direct:other"); break;
+        }
+    }
+    return names;
 }
 
 StampedCubReduction::StampedCubReduction(CubReductionOp op,
@@ -4506,6 +4959,11 @@ std::vector<DensePhysicalPassDiagnostic> StampedCubReduction::getDensePhysicalPa
             if (kernel.first_stage_ctas != 0) info.stage_blocks = kernel.first_stage_ctas;
             // The actual next tensor geometry is authoritative for staged N.
             info.shards_per_output = kernel.staged() ? fp8->output_dimensions.at(1) : 1;
+        } else if (const auto* kr = dynamic_cast<const CubReductionInternal::DenseRetainedFp8KRPhysicalPlan*>(
+                       pass.physical_plan.get())) {
+            info.family = "retained_fp8_kr:" + CubReductionInternal::Fp8KR::fp8KRShapeName(kr->shape);
+            info.block_threads = CubReductionInternal::Fp8KR::FP8_KR_THREADS;
+            info.shards_per_output = kr->shape.chunks();
         } else if (const auto* rk = dynamic_cast<const CubReductionInternal::DenseRKFamilyPhysicalPlan*>(
                        pass.physical_plan.get())) {
             info.family = "production_rk";
@@ -4554,6 +5012,51 @@ void StampedCubReduction::run() { runOn(stream, output_scale); }
 void StampedCubReduction::run(float runtime_output_scale) { runOn(stream, runtime_output_scale); }
 
 void StampedCubReduction::runOn(Stream& run_stream) const { runOn(run_stream, output_scale); }
+
+void StampedCubReduction::runOnTensorsForBenchmark(const Tensor& replacement_input, const Tensor& replacement_output,
+                                                   Stream& run_stream) const {
+    requireBenchmarkReplacement(replacement_input, input, "input");
+    requireBenchmarkReplacement(replacement_output, output, "output");
+    requireCompatibleStream(replacement_input, run_stream);
+    ScopedGpu scoped_gpu(run_stream.getGpuNum());
+
+    if (dense_executable_plan.passes.empty()) {
+        const CubReductionInternal::CubReductionStageSemantics semantics =
+            CubReductionInternal::makeValueReductionStageSemantics(
+                op, physicalStageRole(apply_input_transform, apply_output_finalize), semantic_total_reduction_size);
+        const Tensor bound_input = reshapedForBenchmark(replacement_input, input.getDimensions());
+        Tensor bound_output = reshapedForBenchmark(replacement_output, output.getDimensions());
+        launchReduction(semantics, temp_storage, temp_storage_bytes, bound_input, bound_output, geometry, output_scale,
+                        run_stream);
+        return;
+    }
+    const size_t last = dense_executable_plan.passes.size() - 1;
+    for (size_t index = 0; index <= last; ++index) {
+        const CubReductionInternal::DenseExecutablePass& pass = dense_executable_plan.passes[index];
+        CubReductionInternal::CubReductionStageSemantics stage_semantics =
+            CubReductionInternal::makeValueReductionStageSemantics(op, pass.role, semantic_total_reduction_size);
+        if (!apply_input_transform) {
+            stage_semantics.input_transform = CubReductionInternal::CubReductionStageInputTransform::Identity;
+        }
+        if (!apply_output_finalize) {
+            stage_semantics.finalize = CubReductionInternal::CubReductionStageFinalize::Identity;
+            stage_semantics.finalize_divisor = 1;
+        }
+        const float stage_output_scale = pass.role == CubReductionInternal::DensePassRole::Complete ||
+                                                 pass.role == CubReductionInternal::DensePassRole::Final
+                                             ? output_scale
+                                             : 1.0f;
+        // The first pass reads the replacement input, the last writes the replacement output (aliased to the pass's
+        // own dimensions); every other tensor is the stamp's.
+        const Tensor pass_input = index == 0 ? reshapedForBenchmark(replacement_input, pass.input.getDimensions())
+                                             : pass.input;
+        Tensor pass_output = index == last ? reshapedForBenchmark(replacement_output, pass.output.getDimensions())
+                                           : pass.output;
+        CubReductionInternal::launchDensePhysicalPass(*pass.physical_plan, stage_semantics, pass.temp_storage,
+                                                      pass.temp_storage_bytes, pass_input, pass_output, pass.geometry,
+                                                      stage_output_scale, run_stream);
+    }
+}
 
 void StampedCubReduction::runOn(Stream& run_stream, float runtime_output_scale) const {
     THOR_THROW_IF_FALSE(std::isfinite(runtime_output_scale));

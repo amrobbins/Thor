@@ -5,10 +5,12 @@ from __future__ import annotations
 from .. import _thor as _thor
 
 PlacedNetwork = _thor.PlacedNetwork
+ReductionTuningDepth = _thor.ReductionTuningDepth
 StatusCode = _thor.StatusCode
 
 __all__ = [
     "PlacedNetwork",
+    "ReductionTuningDepth",
     "StatusCode",
 ]
 
@@ -23,6 +25,7 @@ def _set_public_name(obj: object, name: str) -> None:
 
 for _obj, _name in (
     (PlacedNetwork, "PlacedNetwork"),
+    (ReductionTuningDepth, "ReductionTuningDepth"),
     (StatusCode, "StatusCode"),
 ):
     _set_public_name(_obj, _name)

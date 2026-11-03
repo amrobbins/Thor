@@ -1,7 +1,7 @@
 // GPU integration smoke: real retained physical FP8 RK candidates, complete
 // FP32 continuations and cached replay. No new CUDA kernels are compiled.
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKStampAutotuner.h"
-#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKSelectionCache.h"
+#include "Utilities/TensorOperations/Cub/DenseReductionSelectionCache.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKSelectedContinuationBenchmark.h"
 #include "Utilities/TensorOperations/Cub/DenseProductionPhysicalSelectionContext.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
@@ -78,17 +78,17 @@ int main() {
                     throw std::logic_error("FP8 RK autotuned result is incorrect");
             // The retained selector is now the ordinary production default.
             // Stamping must put the physical first stage in the normal pass list.
-            RK::fp8RKSelectionCache().clear();
-            const auto attempts_before = RK::fp8RKSelectionCache().tuningAttempts();
+            ThorImplementation::CubReductionInternal::denseReductionSelectionCache().clear();
+            const auto attempts_before = ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK);
             auto stamped = CubReduction(CubReductionOp::Sum, {1}, DataType::FP32)
                                .stamp(input, output, stream);
-            if (RK::fp8RKSelectionCache().tuningAttempts() != attempts_before + 1 ||
-                RK::fp8RKSelectionCache().size() != 1)
+            if (ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK) != attempts_before + 1 ||
+                ThorImplementation::CubReductionInternal::denseReductionSelectionCache().size() != 1)
                 throw std::logic_error("First production FP8 RK stamp must populate exactly one selection recipe");
             Tensor independent_output(placement, TensorDescriptor(DataType::FP32, {O, K}));
             auto independently_stamped = CubReduction(CubReductionOp::Sum, {1}, DataType::FP32)
                                              .stamp(input, independent_output, stream);
-            if (RK::fp8RKSelectionCache().tuningAttempts() != attempts_before + 1 ||
+            if (ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK) != attempts_before + 1 ||
                 !independently_stamped->usesDenseExecutablePlan())
                 throw std::logic_error("Identical independent stamp unexpectedly retuned");
             independently_stamped->runOn(stream);
@@ -103,7 +103,7 @@ int main() {
                     throw std::logic_error("Independent cached-selection stamp produced an incorrect result");
             // Eviction of the *selection recipe* must not invalidate the
             // already materialized stamped executors or their workspaces.
-            RK::fp8RKSelectionCache().clear();
+            ThorImplementation::CubReductionInternal::denseReductionSelectionCache().clear();
             independently_stamped->runOn(stream);
             const auto replay_status = cudaMemcpyAsync(independently_actual.data(),
                 independent_output.getMemPtr<void>(), independently_actual.size() * sizeof(float),
@@ -164,20 +164,20 @@ int main() {
                     throw std::logic_error("FP8 RK FP16-output SUM returned wrong result");
             // Those stamps tuned their own recipes; restore the cleared-cache state
             // that the eviction checks below rely on.
-            RK::fp8RKSelectionCache().clear();
+            ThorImplementation::CubReductionInternal::denseReductionSelectionCache().clear();
             stamped->runOn(stream);
             checkStamped(static_cast<float>(R));
             // The cache was cleared above. Existing stamps must survive that
             // eviction, but the next *new* stamp must tune one fresh physical
             // recipe. A subsequent identical stamp must then be a cache hit.
             // Neither stamp may fall back to the superseded FP8 RK backend.
-            const uint64_t attempts_after_eviction = RK::fp8RKSelectionCache().tuningAttempts();
+            const uint64_t attempts_after_eviction = ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK);
             auto another = CubReduction(CubReductionOp::Sum, {1}, DataType::FP32)
                                .stamp(input, output, stream);
             if (!another->usesDenseExecutablePlan() ||
                 another->getModernRKStrategyChain().find("retained_fp8_rk:") != 0 ||
-                RK::fp8RKSelectionCache().tuningAttempts() != attempts_after_eviction + 1 ||
-                RK::fp8RKSelectionCache().size() != 1)
+                ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK) != attempts_after_eviction + 1 ||
+                ThorImplementation::CubReductionInternal::denseReductionSelectionCache().size() != 1)
                 throw std::logic_error("First FP8 RK stamp after cache eviction did not retune one retained recipe");
             another->runOn(stream);
             checkStamped(static_cast<float>(R));
@@ -185,8 +185,8 @@ int main() {
                                     .stamp(input, output, stream);
             if (!cached_again->usesDenseExecutablePlan() ||
                 cached_again->getModernRKStrategyChain().find("retained_fp8_rk:") != 0 ||
-                RK::fp8RKSelectionCache().tuningAttempts() != attempts_after_eviction + 1 ||
-                RK::fp8RKSelectionCache().size() != 1)
+                ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK) != attempts_after_eviction + 1 ||
+                ThorImplementation::CubReductionInternal::denseReductionSelectionCache().size() != 1)
                 throw std::logic_error("Identical FP8 RK stamp missed the repopulated selection cache");
             cached_again->runOn(stream);
             checkStamped(static_cast<float>(R));

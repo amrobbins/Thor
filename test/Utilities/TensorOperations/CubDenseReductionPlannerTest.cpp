@@ -86,16 +86,21 @@ TEST(CubDenseReductionPlanner, PureRArgUsesTheSameDenseRFastPath) {
     EXPECT_FALSE(hasDenseReductionSites(plan.final_problem));
 }
 
-TEST(CubDenseReductionPlanner, AskAllChoosesSmallestNextAggregateEvenWhenThatIsRK) {
+TEST(CubDenseReductionPlanner, SmallestBoundFirstEvenWhenThatIsRKAndACompletePassEndsTheStep) {
     // Current R=8,K=3,R=5. Eliminating left RK leaves 3*5 values; eliminating trailing KR leaves 8*3 values.
+    // 1167: RK has the smaller bound, so it is selected first; its pass completes the site, so KR is never selected.
     const DenseReductionPlan plan = planDenseReduction(valueProblem({8, 3, 5}, {0, 2}), plannerContext());
 
     ASSERT_EQ(plan.steps.size(), 2U);
-    ASSERT_EQ(plan.steps[0].considered_candidates.size(), 2U);
-    EXPECT_EQ(plan.steps[0].considered_candidates[0].family, DenseReducerFamily::RK);
+    ASSERT_EQ(plan.steps[0].site_bounds.size(), 2U);
+    EXPECT_EQ(plan.steps[0].site_bounds[0].family, DenseReducerFamily::RK);
+    EXPECT_EQ(plan.steps[0].site_bounds[0].complete_next_bytes, 3U * 5U * 4U);
+    EXPECT_TRUE(plan.steps[0].site_bounds[0].selected);
+    EXPECT_EQ(plan.steps[0].site_bounds[1].family, DenseReducerFamily::KR);
+    EXPECT_EQ(plan.steps[0].site_bounds[1].complete_next_bytes, 8U * 3U * 4U);
+    EXPECT_FALSE(plan.steps[0].site_bounds[1].selected);
+    ASSERT_EQ(plan.steps[0].considered_candidates.size(), 1U);
     EXPECT_EQ(plan.steps[0].considered_candidates[0].next_bytes, 3U * 5U * 4U);
-    EXPECT_EQ(plan.steps[0].considered_candidates[1].family, DenseReducerFamily::KR);
-    EXPECT_EQ(plan.steps[0].considered_candidates[1].next_bytes, 8U * 3U * 4U);
     EXPECT_EQ(plan.steps[0].selected_candidate.family, DenseReducerFamily::RK);
     EXPECT_EQ(plan.steps[0].selected_candidate.site.run_index, 0U);
 }
@@ -104,9 +109,10 @@ TEST(CubDenseReductionPlanner, EqualNextBytesPreferKROverRK) {
     const DenseReductionPlan plan = planDenseReduction(valueProblem({5, 3, 5}, {0, 2}), plannerContext());
 
     ASSERT_FALSE(plan.steps.empty());
-    ASSERT_EQ(plan.steps[0].considered_candidates.size(), 2U);
-    EXPECT_EQ(plan.steps[0].considered_candidates[0].next_bytes,
-              plan.steps[0].considered_candidates[1].next_bytes);
+    ASSERT_EQ(plan.steps[0].site_bounds.size(), 2U);
+    EXPECT_EQ(plan.steps[0].site_bounds[0].complete_next_bytes, plan.steps[0].site_bounds[1].complete_next_bytes);
+    EXPECT_EQ(plan.steps[0].site_bounds[0].family, DenseReducerFamily::KR);  // 1167: visited first on a tie
+    ASSERT_EQ(plan.steps[0].considered_candidates.size(), 1U);  // it completes; the tied RK cannot win
     EXPECT_EQ(plan.steps[0].selected_candidate.family, DenseReducerFamily::KR);
     EXPECT_EQ(plan.steps[0].selected_candidate.site.run_index, 2U);
 }
@@ -116,11 +122,12 @@ TEST(CubDenseReductionPlanner, EqualSameFamilyCandidatesUseStableSiteOrder) {
     const DenseReductionPlan plan = planDenseReduction(valueProblem({4, 2, 4, 2}, {0, 2}), plannerContext());
 
     ASSERT_FALSE(plan.steps.empty());
-    ASSERT_EQ(plan.steps[0].considered_candidates.size(), 2U);
-    EXPECT_EQ(plan.steps[0].considered_candidates[0].family, DenseReducerFamily::RK);
-    EXPECT_EQ(plan.steps[0].considered_candidates[1].family, DenseReducerFamily::RK);
-    EXPECT_EQ(plan.steps[0].considered_candidates[0].next_bytes,
-              plan.steps[0].considered_candidates[1].next_bytes);
+    ASSERT_EQ(plan.steps[0].site_bounds.size(), 2U);
+    EXPECT_EQ(plan.steps[0].site_bounds[0].family, DenseReducerFamily::RK);
+    EXPECT_EQ(plan.steps[0].site_bounds[1].family, DenseReducerFamily::RK);
+    EXPECT_EQ(plan.steps[0].site_bounds[0].complete_next_bytes, plan.steps[0].site_bounds[1].complete_next_bytes);
+    EXPECT_EQ(plan.steps[0].site_bounds[0].site.run_index, 0U);  // 1167: the outer site is visited first on a tie
+    ASSERT_EQ(plan.steps[0].considered_candidates.size(), 1U);
     EXPECT_EQ(plan.steps[0].selected_candidate.site.run_index, 0U);
 }
 
@@ -177,7 +184,7 @@ TEST(CubDenseReductionPlanner, SingletonSemanticReductionStillPlansExactlyOnePas
     EXPECT_FALSE(hasDenseReductionSites(plan.final_problem));
 }
 
-TEST(CubDenseReductionPlanner, DiagnosticsReportEveryCandidateAndTheSelectedPass) {
+TEST(CubDenseReductionPlanner, DiagnosticsReportEverySiteBoundAndEverySelectedCandidate) {
     const DenseReductionPlan plan = planDenseReduction(valueProblem({8, 3, 5}, {0, 2}), plannerContext());
     const std::string diagnostics = formatDenseReductionPlanDiagnostics(plan);
 
@@ -187,6 +194,7 @@ TEST(CubDenseReductionPlanner, DiagnosticsReportEveryCandidateAndTheSelectedPass
     EXPECT_NE(diagnostics.find("physical=KParallel/Aligned/Complete"), std::string::npos);
     EXPECT_NE(diagnostics.find("physical=ContiguousFixedSegment"), std::string::npos);
     EXPECT_NE(diagnostics.find("selected=1"), std::string::npos);
+    EXPECT_NE(diagnostics.find("bound site=2 family=KR complete_next_bytes=96 selected=0"), std::string::npos);
     EXPECT_NE(diagnostics.find("dense_plan final="), std::string::npos);
 }
 
@@ -366,7 +374,9 @@ TEST(CubDensePhysicalSelector, ProductionPlannerCallsSharedSelectorIncludingPure
     calls.families.clear();
     const auto two = planDenseReduction(valueProblem({8, 3, 5}, {0, 2}), context);
     ASSERT_EQ(two.steps.size(), 2U);
-    ASSERT_GE(calls.families.size(), 3U);
+    // 1167: one selection per step: step 0 selects only the RK site (its complete pass beats KR's bound), step 1 the
+    // remaining KR site.
+    ASSERT_EQ(calls.families.size(), 2U);
     EXPECT_EQ(calls.families[0], DenseReducerFamily::RK);
     EXPECT_EQ(calls.families[1], DenseReducerFamily::KR);
     EXPECT_EQ(two.steps[0].selected_candidate.family, DenseReducerFamily::RK);

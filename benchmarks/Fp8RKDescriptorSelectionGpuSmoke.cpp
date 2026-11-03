@@ -1,7 +1,7 @@
 // P2-A integration: real descriptor-only miss; Tensor and descriptor hits
 // share exactly one cached first-stage recipe, for both FP8 storage formats.
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKStampAutotuner.h"
-#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKSelectionCache.h"
+#include "Utilities/TensorOperations/Cub/DenseReductionSelectionCache.h"
 #include "Utilities/TensorOperations/Cub/DenseProductionPhysicalSelectionContext.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 
@@ -43,18 +43,18 @@ int main() {
                     context.context().max_workspace_bytes == budget,
                     "Production selector context lost the original VALUE semantics");
 
-            RK::fp8RKSelectionCache().clear();
-            const auto before = RK::fp8RKSelectionCache().tuningAttempts();
+            ThorImplementation::CubReductionInternal::denseReductionSelectionCache().clear();
+            const auto before = ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK);
             const auto descriptor_miss = RK::selectCachedIsolatedRKSite(
                 problem, site, CubReductionOp::Sum, R, 1.0f, dtype, stream, budget);
-            require(RK::fp8RKSelectionCache().tuningAttempts() == before + 1 &&
-                    RK::fp8RKSelectionCache().size() == 1 &&
+            require(ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK) == before + 1 &&
+                    ThorImplementation::CubReductionInternal::denseReductionSelectionCache().size() == 1 &&
                     descriptor_miss.candidate_count > 0 && descriptor_miss.candidate_count <= 28,
                     "Descriptor-only first miss did not tune/cache exactly once");
             const auto descriptor_hit = RK::selectCachedIsolatedRKSite(
                 problem, site, CubReductionOp::Sum, R, 1.0f, dtype, stream, budget);
             require(descriptor_hit.physical == descriptor_miss.physical &&
-                    RK::fp8RKSelectionCache().tuningAttempts() == before + 1,
+                    ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK) == before + 1,
                     "Descriptor cache hit changed physical recipe or retuned");
 
             Tensor real_input(placement, TensorDescriptor(dtype, {O, R, K}));
@@ -63,7 +63,7 @@ int main() {
                 problem, site, CubReductionOp::Sum, R, 1.0f, real_input, stream, budget);
             require(tensor_hit.physical == descriptor_miss.physical &&
                     tensor_hit.winner_index == descriptor_miss.winner_index &&
-                    RK::fp8RKSelectionCache().tuningAttempts() == before + 1,
+                    ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts(ThorImplementation::CubReductionInternal::DenseReductionSelectionKind::Fp8RK) == before + 1,
                     "Tensor and descriptor overloads did not reuse identical cache key");
 
             bool rejected = false;

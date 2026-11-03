@@ -78,7 +78,7 @@ class ProductionObjectManifestComparisonTest(unittest.TestCase):
         production = Counter({'OneWindow': 1876, 'DeepRSmallK': 840,
                               'AlignedK': 436, 'RuntimeK': 528})
         self.assertEqual(family_count_discrepancies(production, selected), {
-            'OneWindow': 868, 'DeepRSmallK': 0, 'AlignedK': 276, 'RuntimeK': 216,
+            'OneWindow': 868, 'DeepRSmallK': 0, 'AlignedK': 276, 'RuntimeK': 216, 'ARG': 0,
         })
 
     def test_reads_generated_selector_manifest_not_hardcoded_baseline(self):

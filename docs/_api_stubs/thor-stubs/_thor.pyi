@@ -33,6 +33,7 @@ from thor.parameters import (
 )
 from thor.runtime import (
     PlacedNetwork as PlacedNetwork,
+    ReductionTuningDepth as ReductionTuningDepth,
     StatusCode as StatusCode
 )
 

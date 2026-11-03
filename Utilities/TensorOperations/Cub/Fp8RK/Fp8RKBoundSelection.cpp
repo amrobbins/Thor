@@ -96,14 +96,16 @@ Fp8RuntimeKPolicy::Layout policyLayout(RuntimeLayout layout) {
 }
 }
 
-std::vector<PhysicalKernel> selectBoundFirstStages(
-    const BoundSelectionRequest& request,
-    std::span<const PhysicalKernel> registered_runtime_k) {
+namespace {
+// The ranked, callback-proven candidate plans of `request`, at most max_candidates.
+std::vector<CandidatePlan> boundCandidatePlans(const BoundSelectionRequest& request,
+                                               std::span<const PhysicalKernel> registered_runtime_k,
+                                               size_t max_candidates) {
     if (!request.outer || !request.r || !request.k || !request.sm_count) return {};
     const RankerSemantics semantics = typedSemantics(request);
     const ProductionSelectionContext context{
         request.outer, request.r, request.k, request.sm_count, semantics,
-        request.first_stage_scratch_budget_bytes};
+        request.first_stage_scratch_budget_bytes, max_candidates};
 
     std::vector<Fp8RuntimeKPolicy::Candidate> runtime;
     runtime.reserve(registered_runtime_k.size());
@@ -150,15 +152,62 @@ std::vector<PhysicalKernel> selectBoundFirstStages(
             });
         },
         runtime);
-    std::vector<PhysicalKernel> physical;
-    physical.reserve(ranked.size());
     for (const auto& candidate : ranked) {
-        auto kernel = bind(candidate);
-        if (!structurallyValid(kernel, request.outer, request.r, request.k))
+        if (!structurallyValid(bind(candidate), request.outer, request.r, request.k))
             throw std::logic_error("Ranked retained FP8 RK kernel has invalid physical binding");
-        physical.push_back(kernel);
     }
+    return ranked;
+}
+}  // namespace
+
+std::vector<PhysicalKernel> selectBoundFirstStages(
+    const BoundSelectionRequest& request,
+    std::span<const PhysicalKernel> registered_runtime_k) {
+    std::vector<PhysicalKernel> physical;
+    for (const auto& candidate : boundCandidatePlans(request, registered_runtime_k, request.max_candidates))
+        physical.push_back(bind(candidate));
     return physical;
+}
+
+std::vector<BoundInventoryEntry> enumerateBoundInventory(
+    const BoundSelectionRequest& request,
+    std::span<const PhysicalKernel> registered_runtime_k) {
+    std::vector<BoundInventoryEntry> inventory;
+    for (const auto& candidate : boundCandidatePlans(request, registered_runtime_k,
+                                                     std::numeric_limits<size_t>::max()))
+        inventory.push_back({bind(candidate), candidate.local_rank});
+    return inventory;
+}
+
+CandidatePlan rankerPlanForKernel(const PhysicalKernel& kernel, uint32_t local_rank) {
+    Configuration configuration;
+    Mode mode{};
+    switch (kernel.family) {
+        case PhysicalFamily::OneWindow:
+            mode = Mode::OneWindow;
+            configuration = OneWindowConfiguration{{static_cast<uint32_t>(kernel.a), static_cast<uint32_t>(kernel.b),
+                                                    static_cast<uint32_t>(kernel.c)}};
+            break;
+        case PhysicalFamily::DeepRSmallK:
+            mode = Mode::DeepRSmallK;
+            configuration = DeepRSmallKConfiguration{{static_cast<uint32_t>(kernel.a)}};
+            break;
+        case PhysicalFamily::AlignedK:
+            mode = Mode::AlignedK;
+            configuration = AlignedKConfiguration{{static_cast<uint32_t>(kernel.a), static_cast<uint32_t>(kernel.b),
+                                                   kernel.c}};
+            break;
+        case PhysicalFamily::RuntimeK:
+            mode = Mode::RuntimeK;
+            configuration = RuntimeKConfiguration{{policyLayout(static_cast<RuntimeLayout>(kernel.a)),
+                                                   static_cast<uint32_t>(kernel.b), static_cast<uint32_t>(kernel.c),
+                                                   static_cast<uint32_t>(kernel.d), kernel.e, kernel.f}};
+            break;
+    }
+    CandidatePlan plan{{mode, std::move(configuration)}, kernel.resident_ctas_per_sm, kernel.first_stage_scratch_bytes,
+                       kernel.first_stage_ctas};
+    plan.local_rank = local_rank;
+    return plan;
 }
 
 }  // namespace ThorImplementation::CubReductionInternal::Fp8RK

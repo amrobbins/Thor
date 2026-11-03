@@ -36,7 +36,7 @@ DenseReductionCandidate ReducersDenseRK::propose(const DenseReductionProblem&, D
 
 namespace ThorImplementation::CubReductionInternal::Fp8RK {
 Fp8RKSelection selectCachedIsolatedRKSite(const DenseReductionProblem&, DenseReductionSite,
-    CubReductionOp, uint64_t, float, DataType, const Stream&, uint64_t) {
+    CubReductionOp, uint64_t, float, DataType, const Stream&, uint64_t, CubReductionTuningDepth) {
     throw std::logic_error("host test unexpectedly invoked FP8 autotuner");
 }
 }

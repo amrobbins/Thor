@@ -334,11 +334,17 @@ void annotateRKOccupancy(DenseRKFamilyPhysicalPlan& plan, const DenseRKPlanningC
         || option.plan->block_threads == 0 || option.plan->component_tiles == 0) {
         return {0, 1};
     }
+    // 1138: since 1136 a K-parallel CTA owns consecutive packets of the flat [outer, K / items] space, so lanes idle
+    // only in the grid's last CTA. Under the former per-(outer, component tile) ownership this fill favoured scalar
+    // packets wherever K left wide-packet CTAs part-empty (1137 audit: K = 8 and K = 32 FP32 continuations chose
+    // 4-byte packets), which now only costs instructions; with equal fill the wider packet wins the tie below.
     const uint64_t element_bytes = dtypeBytes(option.plan->input_dtype);
     const uint64_t items_per_lane = option.plan->packet_bytes / element_bytes;
-    const uint64_t packet_owners = ceilDivide(option.plan->inner_size, items_per_lane);
+    const uint64_t packet_owners = checkedMultiply(
+        option.plan->outer_size, ceilDivide(option.plan->inner_size, items_per_lane),
+        "Dense K-parallel packet owner count overflows uint64_t.");
     const uint64_t lane_slots = checkedMultiply(
-        option.plan->component_tiles,
+        ceilDivide(packet_owners, option.plan->block_threads),
         option.plan->block_threads,
         "Dense K-parallel packet lane-slot count overflows uint64_t.");
     return {packet_owners, lane_slots};
@@ -376,7 +382,9 @@ void annotateRKOccupancy(DenseRKFamilyPhysicalPlan& plan, const DenseRKPlanningC
         const auto [incumbent_owners, incumbent_slots] = kParallelLaneUtilization(incumbent);
         const long double candidate_fill = static_cast<long double>(candidate_owners) / candidate_slots;
         const long double incumbent_fill = static_cast<long double>(incumbent_owners) / incumbent_slots;
-        if (candidate_fill != incumbent_fill) {
+        // 1138: fills within 1% are equal (flat ownership leaves only the last CTA's rounding), so the packet width
+        // decides instead of that rounding.
+        if (candidate_fill > incumbent_fill * 1.01L || incumbent_fill > candidate_fill * 1.01L) {
             return candidate_fill > incumbent_fill;
         }
     }
@@ -1096,8 +1104,8 @@ DenseReductionCandidate ReducersDenseRK::propose(const DenseReductionProblem& pr
         throw std::invalid_argument("Dense RK fallback occupancy requires non-zero device thread/block limits.");
     }
 
-    // DENSE-ARG-CUTOVER is intentionally later. Preserve the already-proven ARG topology adapter rather than creating
-    // a second ARG-specific RK planner inside this patch.
+    // ARG RK sites use the proven direct ARG reducer. Original FP8 ARG reaches this through planDenseReduction()
+    // (ARG-P1); FP8 ARG physical families will be selected in selectDensePhysicalPass() when they exist.
     if (problem.aggregate_kind == DenseReductionAggregateKind::Arg) {
         return proposeDirect(problem, site, DenseReducerFamily::RK);
     }

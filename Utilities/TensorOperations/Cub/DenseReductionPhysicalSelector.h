@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Utilities/TensorOperations/Cub/CubReductionTuningDepth.h"
 #include "Utilities/TensorOperations/Cub/DenseReductionFamilies.h"
 
 #include <limits>
@@ -37,6 +38,8 @@ struct DensePhysicalSelectionContext {
     std::optional<CubReductionOp> original_value_operation;
     uint64_t original_reduction_size = 0;
     float output_scale = 1.0f;
+    // 1141: retained FP8 RK autotuning depth (the reduction's CubReductionTuningDepth).
+    CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular;
     ProposalOverride proposal_override = nullptr;
     void* proposal_override_context = nullptr;
 };

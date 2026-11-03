@@ -2,6 +2,7 @@
 #include "Utilities/TensorOperations/Cub/DenseRetainedFp8RKPhysicalPlan.h"
 
 #include <algorithm>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -172,6 +173,26 @@ void validateCandidateTransition(const DenseReductionProblem& current,
     return candidate.site.run_index < incumbent.site.run_index;
 }
 
+// 1167: the visiting order of the lazy planner and the tie rule of candidateIsBetter on the same keys: smaller bound,
+// then KR before RK, then the outer site.
+[[nodiscard]] bool siteBoundIsBefore(const DenseReductionSiteBound& a, const DenseReductionSiteBound& b) {
+    if (a.complete_next_bytes != b.complete_next_bytes) return a.complete_next_bytes < b.complete_next_bytes;
+    const int a_rank = tieFamilyRank(a.family);
+    const int b_rank = tieFamilyRank(b.family);
+    if (a_rank != b_rank) return a_rank < b_rank;
+    return a.site.run_index < b.site.run_index;
+}
+
+// Whether a site with this bound could still be selected over `incumbent` (its best case: it completes, leaving
+// exactly its bound). Bounds are visited in order, so once one cannot, none of the rest can.
+[[nodiscard]] bool boundCouldBeat(const DenseReductionSiteBound& bound, const DenseReductionCandidate& incumbent) {
+    if (bound.complete_next_bytes != incumbent.next_bytes) return bound.complete_next_bytes < incumbent.next_bytes;
+    const int bound_rank = tieFamilyRank(bound.family);
+    const int incumbent_rank = tieFamilyRank(incumbent.family);
+    if (bound_rank != incumbent_rank) return bound_rank < incumbent_rank;
+    return bound.site.run_index < incumbent.site.run_index;
+}
+
 [[nodiscard]] DensePassRole candidateRole(const DenseReductionProblem& input,
                                           const DenseReductionCandidate& candidate) {
     return deriveDensePassRole(input, candidate.next_problem);
@@ -269,26 +290,41 @@ DenseReductionPlan planDenseReduction(const DenseReductionProblem& initial_probl
             step.considered_candidates.push_back(candidate);
             step.selected_candidate = std::move(candidate);
         } else {
+            // 1167: best-first with a lower bound. Each site's bound is the next problem if one pass reduced it fully
+            // (the bytes a Complete pass on it would leave); a partial pass leaves at least as many. Sites are visited
+            // in (bound, KR before RK, outer before inner) order, and a site is selected (autotuned) only while its
+            // bound could still beat the best actual candidate so far, so the result is what selecting every site
+            // would choose, and a site whose pass completes it ends the step after one selection.
             for (DenseReductionSite site : sites) {
                 const DenseReducerFamily family = classifyDenseReducerFamily(current, site);
                 if (family == DenseReducerFamily::R) {
                     throw std::logic_error("DenseR is only valid for the pure-[R] planner fast path.");
                 }
-                DenseReductionCandidate candidate = selectDensePhysicalPass(current, site, context);
-                validateCandidateTransition(current, site, family, candidate);
-                step.considered_candidates.push_back(std::move(candidate));
+                step.site_bounds.push_back(DenseReductionSiteBound{
+                    site, family, denseReductionProblemBytes(advanceDenseReductionProblem(current, site, 1)), false});
             }
-            if (step.considered_candidates.empty()) {
-                throw std::logic_error("Dense reduction planner received no family candidates.");
-            }
+            std::stable_sort(step.site_bounds.begin(), step.site_bounds.end(), siteBoundIsBefore);
 
-            size_t selected_index = 0;
-            for (size_t index = 1; index < step.considered_candidates.size(); ++index) {
-                if (candidateIsBetter(step.considered_candidates[index], step.considered_candidates[selected_index])) {
+            std::optional<size_t> selected_index;
+            for (DenseReductionSiteBound& bound : step.site_bounds) {
+                if (selected_index && !boundCouldBeat(bound, step.considered_candidates[*selected_index])) break;
+                DenseReductionCandidate candidate = selectDensePhysicalPass(current, bound.site, context);
+                validateCandidateTransition(current, bound.site, bound.family, candidate);
+                if (candidate.next_bytes < bound.complete_next_bytes) {
+                    throw std::logic_error("Dense reduction candidate leaves fewer bytes than reducing its site fully.");
+                }
+                bound.selected = true;
+                step.considered_candidates.push_back(std::move(candidate));
+                const size_t index = step.considered_candidates.size() - 1;
+                if (!selected_index ||
+                    candidateIsBetter(step.considered_candidates[index], step.considered_candidates[*selected_index])) {
                     selected_index = index;
                 }
             }
-            step.selected_candidate = step.considered_candidates[selected_index];
+            if (!selected_index) {
+                throw std::logic_error("Dense reduction planner received no family candidates.");
+            }
+            step.selected_candidate = step.considered_candidates[*selected_index];
         }
 
         const DenseReductionProblem next = step.selected_candidate.next_problem;
@@ -305,6 +341,11 @@ std::string formatDenseReductionPlanDiagnostics(const DenseReductionPlan& plan) 
     for (size_t step_index = 0; step_index < plan.steps.size(); ++step_index) {
         const DenseReductionPlanStep& step = plan.steps[step_index];
         out << "dense_plan step=" << step_index << " input=" << problemString(step.input_problem) << '\n';
+        for (const DenseReductionSiteBound& bound : step.site_bounds) {
+            out << "  bound site=" << bound.site.run_index << " family=" << familyName(bound.family)
+                << " complete_next_bytes=" << bound.complete_next_bytes << " selected=" << (bound.selected ? 1 : 0)
+                << '\n';
+        }
         for (const DenseReductionCandidate& candidate : step.considered_candidates) {
             const bool selected = candidate.family == step.selected_candidate.family
                                   && candidate.site == step.selected_candidate.site

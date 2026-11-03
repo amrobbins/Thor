@@ -8,7 +8,7 @@ using ThorImplementation::CubReductionBenchmarking::Fp8BenchmarkArenaCursor;
 
 int main() {
     using C = Fp8BenchmarkArenaCursor;
-    C arena(1024);
+    C arena(1024, 32);  // the historical 32-byte layout
     auto i0 = arena.getBenchmarkTensorView(33, C::Lifetime::StreamingInput);
     assert(i0.offset == 0 && i0.bytes == 33);
     auto i1 = arena.getBenchmarkTensorView(65, C::Lifetime::StreamingInput);
@@ -49,6 +49,19 @@ int main() {
     threw = false;
     try { (void)arena.getBenchmarkTensorView(1024, C::Lifetime::ReusableStage); }
     catch (const std::runtime_error&) { threw = true; }
+    assert(threw);
+    // 1163 default: 256-byte starts, each view followed by >= 128 bytes before the next.
+    C aligned(8192);
+    auto a0 = aligned.getBenchmarkTensorView(33, C::Lifetime::StreamingInput);
+    auto a1 = aligned.getBenchmarkTensorView(129, C::Lifetime::StreamingInput);
+    auto a2 = aligned.getBenchmarkTensorView(1000, C::Lifetime::StreamingInput);
+    assert(a0.offset == 0 && a1.offset == 256 && a2.offset == 768);
+    assert(a1.offset % 256 == 0 && a2.offset % 256 == 0);
+    assert(a1.offset + a1.bytes + 128 <= a2.offset);
+    auto stage = aligned.getBenchmarkTensorView(300, C::Lifetime::ReusableStage);
+    assert(stage.offset % 256 == 0 && stage.offset + 300 + 128 <= 8192);
+    threw = false;
+    try { C bad(1024, 48); } catch (const std::invalid_argument&) { threw = true; }
     assert(threw);
     return 0;
 }

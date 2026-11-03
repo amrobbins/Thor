@@ -3,11 +3,13 @@
 // Generalized FP8 RParallel candidate assembly for stamp-time autotuning.
 // The typed cross-family shortlist below combines the four accepted local
 // shortlists, with physical legality, occupancy, and explicit scratch gating.
-// With RankerSemantics supplied, a frozen geometry-aware model ranks the
-// executable plans (four family leaders first, score-only thereafter).
-// The untyped legacy entry point retains the deterministic round-robin order.
+// The geometry-aware model (1141: retrained on end-to-end cold-L2 timings,
+// one model for VALUE and ARG; 1165: retrained again) ranks the executable
+// plans by score alone (the family-leader prefix was dropped: it made the first
+// pick up to 240x slower, e.g. OneWindow at outer = 1).
 // This is production-owned host planning policy, not CUDA dispatch.
-// Legacy one-residency select()/shortlist() APIs remain OneWindow-only.
+// 1172: the ranked (typed) shortlist is the only entry point; the untyped
+// round-robin and the one-residency select()/shortlist() wrappers had no callers.
 
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8OneWindowSelector.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8DeepRSmallKSelector.h"
@@ -16,6 +18,7 @@
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8GeometryRankerModel.h"
 #include <algorithm>
 #include <array>
+#include <stdexcept>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -61,6 +64,9 @@ struct CandidatePlan {
     uint32_t resident_ctas_per_sm;
     uint64_t scratch_bytes;           // FP32 partials, zero for Complete
     uint64_t first_stage_work_groups; // logical CTA work, not a launch grid.x limit
+    // 1-based position within its family in the mode-local (pre-model) round-robin order; a ranker feature. Set by
+    // generalShortlist.
+    uint32_t local_rank = 0;
     bool staged() const { return scratch_bytes != 0; }
 };
 
@@ -75,20 +81,19 @@ struct RankerSemantics {
     Combine combine;
     InputTransform transform;
 };
+// 1141: the aggregate the candidate computes, the ranker's 26th feature (benchmarks/fp8_ranker/dataset.py KINDS).
+enum class RankerAggregate : uint8_t { Value = 0, ArgIndex = 1, ArgValueIndex = 2 };
 
 struct GeneralShortlistOptions {
-    // Score-only Thor1012 refit at budget 28 (full-inventory replay exact;
-    // geometry-separated CV has one miss). Older GPU sweeps predate this fit;
-    // independent GPU validation of the refit is still required.
+    // Production passes fp8RKTuningPlan(depth).candidates (Quick 6, Regular 12,
+    // Ultra 24); this default serves benchmark callers.
     size_t max_candidates = 28;
     size_t per_family_limit = 32;
     // A real stamp-time workspace budget can rule out impractical staged plans.
     // Unlimited by default: the planner must supply its actual resource limit.
     uint64_t max_scratch_bytes = std::numeric_limits<uint64_t>::max();
-    // Explicit opt-in because the old untyped API has no format/operation data.
-    // With this provided, rank the complete eligible inventory using the
-    // refitted embedded model, then truncate to max_candidates. No forced probes.
-    std::optional<RankerSemantics> ranker_semantics = std::nullopt;
+    // The aggregate the candidates compute (a ranker feature).
+    RankerAggregate ranker_aggregate = RankerAggregate::Value;
 };
 
 namespace Detail {
@@ -105,13 +110,15 @@ inline bool stagedBytes(uint64_t outer, uint64_t shards, uint64_t k,
            checkedMul(partials, sizeof(float), out);
 }
 
-// Matches benchmarks/experiment_fp8_geometry_ranker.py::candidate_features
-// exactly (including float32 feature quantization). Only geometry/physical
-// metadata, dtype, combine, transform and within-family rank are inputs; no
-// measured timing or learned per-workload feedback reaches the selector.
-inline std::array<float, 25> rankerFeatures(
+// The ranker's input (benchmarks/fp8_ranker/dataset.py FEATURE_NAMES). Only
+// geometry/physical metadata, dtype, combine, transform, within-family rank
+// and the aggregate kind are inputs; no measured timing or learned
+// per-workload feedback reaches the selector. The training sweep writes the
+// first 25 of these from this function, so training never re-derives them.
+inline std::array<float, Fp8GeometryRankerModel::FEATURE_COUNT> rankerFeatures(
     const CandidatePlan& plan, uint64_t outer, uint64_t r, uint64_t k,
-    RankerSemantics semantics, uint32_t local_rank) {
+    RankerSemantics semantics, uint32_t local_rank, RankerAggregate aggregate) {
+    static_assert(Fp8GeometryRankerModel::FEATURE_COUNT == 26);
     double packet = 0, threads = 0, shards = 0, warps = 0, tile = 0;
     double out = 0, rows = 0, mode = 0;
     switch (plan.selection.mode) {
@@ -171,35 +178,28 @@ inline std::array<float, 25> rankerFeatures(
             lg(o*shards+1), lg(o*shards*std::max(tile,1.0)+1),
             lg(o*shards*kk*4+1), lg(o*rr*kk/1048576.0+1),
             lg(rr/std::max(rows,1.0)+1),
-            lg(kk/std::max(packet*std::max(threads,1.0),1.0)+1)};
+            lg(kk/std::max(packet*std::max(threads,1.0),1.0)+1),
+            float(static_cast<unsigned>(aggregate))};
 }
 
-// Retain exactly one primary from each available physical family, preserving
-// their original local-leader order. Sort every other plan by the embedded
-// boosted-tree margin and break ties by pre-existing round-robin position.
-inline void rankByFrozenGeometryModel(std::vector<CandidatePlan>& plans,
-                                      uint64_t outer, uint64_t r, uint64_t k,
-                                      RankerSemantics semantics) {
+// 1141: rank every plan by the geometry model's margin (higher first); ties keep the mode-local round-robin order.
+// No family-leader prefix (out-of-fold: it raised the Regular depth from 6 to 7 and made the first pick 47x slower at
+// p99).
+inline void rankByGeometryModel(std::vector<CandidatePlan>& plans, uint64_t outer, uint64_t r, uint64_t k,
+                                RankerSemantics semantics, RankerAggregate aggregate) {
     std::array<uint32_t, 4> rank_by_family{};
     std::vector<std::pair<CandidatePlan, float>> scored;
     scored.reserve(plans.size());
-    std::vector<CandidatePlan> leaders;
-    leaders.reserve(4);
     for (const auto& plan : plans) {
-        const auto family = static_cast<size_t>(plan.selection.mode);
-        const uint32_t local_rank = ++rank_by_family[family];
-        if (local_rank == 1) {
-            leaders.push_back(plan);
-        } else {
-            const auto features = rankerFeatures(plan,outer,r,k,semantics,local_rank);
-            scored.emplace_back(plan, Fp8GeometryRankerModel::margin(features));
-        }
+        const uint32_t local_rank = ++rank_by_family[static_cast<size_t>(plan.selection.mode)];
+        if (local_rank != plan.local_rank) throw std::logic_error("FP8 RK candidate local rank out of order");
+        scored.emplace_back(plan, Fp8GeometryRankerModel::margin(
+            rankerFeatures(plan, outer, r, k, semantics, local_rank, aggregate)));
     }
     std::stable_sort(scored.begin(), scored.end(), [](const auto& a, const auto& b) {
         return a.second > b.second;
     });
     plans.clear();
-    plans.insert(plans.end(), leaders.begin(), leaders.end());
     for (auto& entry : scored) plans.push_back(std::move(entry.first));
 }
 
@@ -228,11 +228,11 @@ private:
 // path. RuntimeK requires full executable Candidate records, never guessed
 // layouts or guessed occupancy. Empty/malformed inputs fail closed.
 //
-// First construct the COMPLETE eligible local inventory. When supplied with
-// RankerSemantics, use the frozen cross-family score-only model; otherwise
-// retain the legacy untyped round-robin order. Both paths preserve the family
-// leaders and apply the same physical, occupancy, and scratch gating. Never
-// compare incomparable local scores or treat the model margin as microseconds.
+// First construct the COMPLETE eligible local inventory (physical, occupancy
+// and scratch gating), then rank it by the cross-family geometry model alone
+// for the actual format, combine and input transform, and truncate to
+// max_candidates. No forced probes. Never compare incomparable local scores or
+// treat the model margin as microseconds.
 template <typename OneWindowResidency, typename DeepRSmallKResidency,
           typename AlignedKResidency>
 std::vector<CandidatePlan> generalShortlist(
@@ -241,7 +241,7 @@ std::vector<CandidatePlan> generalShortlist(
     DeepRSmallKResidency&& deep_r_small_k_residency,
     AlignedKResidency&& aligned_k_residency,
     std::span<const Fp8RuntimeKPolicy::Candidate> runtime_candidates,
-    GeneralShortlistOptions options = {}) {
+    RankerSemantics semantics, GeneralShortlistOptions options = {}) {
     std::vector<CandidatePlan> result;
     if (!outer || !r || !k || !sm_count || !options.max_candidates ||
         !options.per_family_limit) return result;
@@ -338,267 +338,13 @@ std::vector<CandidatePlan> generalShortlist(
             }
         }
     }
-    if (options.ranker_semantics)
-        Detail::rankByFrozenGeometryModel(result, outer, r, k, *options.ranker_semantics);
+    {
+        std::array<uint32_t, 4> rank_by_family{};
+        for (auto& plan : result) plan.local_rank = ++rank_by_family[static_cast<size_t>(plan.selection.mode)];
+    }
+    Detail::rankByGeometryModel(result, outer, r, k, semantics, options.ranker_aggregate);
     if (result.size() > options.max_candidates) result.resize(options.max_candidates);
     return result;
-}
-
-// Preferred typed entry point: require the actual format, combine and input
-// transform so that the same frozen model validated on GPU is always used.
-// The optional semantics in GeneralShortlistOptions preserves compatibility
-// with older aggregate-initialized untyped clients; production callers should
-// prefer this overload instead of relying on an unset/default context.
-template <typename OneWindowResidency, typename DeepRSmallKResidency,
-          typename AlignedKResidency>
-std::vector<CandidatePlan> generalShortlist(
-    uint64_t outer, uint64_t r, uint64_t k, uint32_t sm_count,
-    OneWindowResidency&& one_window_residency,
-    DeepRSmallKResidency&& deep_r_small_k_residency,
-    AlignedKResidency&& aligned_k_residency,
-    std::span<const Fp8RuntimeKPolicy::Candidate> runtime_candidates,
-    RankerSemantics semantics, GeneralShortlistOptions options = {}) {
-    options.ranker_semantics = semantics;
-    return generalShortlist(outer, r, k, sm_count,
-        std::forward<OneWindowResidency>(one_window_residency),
-        std::forward<DeepRSmallKResidency>(deep_r_small_k_residency),
-        std::forward<AlignedKResidency>(aligned_k_residency),runtime_candidates,options);
-}
-
-// A typed overload of the familiar shortlist() name, available when all three
-// occupancy providers and the RuntimeK physical registry are supplied.
-template <typename OneWindowResidency, typename DeepRSmallKResidency,
-          typename AlignedKResidency>
-std::vector<Selection> shortlist(
-    uint64_t outer, uint64_t r, uint64_t k, uint32_t sm_count,
-    OneWindowResidency&& one_window_residency,
-    DeepRSmallKResidency&& deep_r_small_k_residency,
-    AlignedKResidency&& aligned_k_residency,
-    std::span<const Fp8RuntimeKPolicy::Candidate> runtime_candidates,
-    GeneralShortlistOptions options = {}) {
-    std::vector<Selection> selections;
-    for (auto& candidate : generalShortlist(outer, r, k, sm_count,
-        std::forward<OneWindowResidency>(one_window_residency),
-        std::forward<DeepRSmallKResidency>(deep_r_small_k_residency),
-        std::forward<AlignedKResidency>(aligned_k_residency), runtime_candidates, options))
-        selections.push_back(std::move(candidate.selection));
-    return selections;
-}
-
-// The explicit-semantics Selection-only wrapper uses the same 28-candidate
-// learned prefix, without reconstructing or independently reordering plans.
-template <typename OneWindowResidency, typename DeepRSmallKResidency,
-          typename AlignedKResidency>
-std::vector<Selection> shortlist(
-    uint64_t outer, uint64_t r, uint64_t k, uint32_t sm_count,
-    OneWindowResidency&& one_window_residency,
-    DeepRSmallKResidency&& deep_r_small_k_residency,
-    AlignedKResidency&& aligned_k_residency,
-    std::span<const Fp8RuntimeKPolicy::Candidate> runtime_candidates,
-    RankerSemantics semantics, GeneralShortlistOptions options = {}) {
-    options.ranker_semantics = semantics;
-    return shortlist(outer,r,k,sm_count,
-        std::forward<OneWindowResidency>(one_window_residency),
-        std::forward<DeepRSmallKResidency>(deep_r_small_k_residency),
-        std::forward<AlignedKResidency>(aligned_k_residency),runtime_candidates,options);
-}
-
-template <typename ResidentCTAsPerSM>
-std::optional<Selection> select(uint64_t outer, uint64_t r, uint64_t k,
-                                uint32_t sm_count, ResidentCTAsPerSM&& residency) {
-    const auto v = Fp8OneWindowPolicy::select(outer, r, k, sm_count, residency);
-    if (!v) return std::nullopt; // This compatibility entry point does not select other families.
-    return Selection{Mode::OneWindow, OneWindowConfiguration{*v}};
-}
-
-// The shortlist API is the stamp-time autotuner's entry point. Until a real
-// cross-family model exists, the default remains OneWindow-only (just like
-// select()); mode-local callers use shortlistForMode() explicitly. The first
-// entry is the established deterministic choice for that mode.
-template <typename ResidentCTAsPerSM>
-std::vector<Selection> shortlist(uint64_t outer, uint64_t r, uint64_t k,
-                                 uint32_t sm_count, ResidentCTAsPerSM&& residency,
-                                 size_t limit = 5) {
-    std::vector<Selection> result;
-    for (const auto& v : Fp8OneWindowPolicy::shortlist(
-             outer, r, k, sm_count, residency, limit))
-        result.push_back(Selection{Mode::OneWindow, OneWindowConfiguration{v}});
-    return result;
-}
-
-template <typename OneWindowResidency, typename DeepRSmallKResidency,
-          typename AlignedKResidency>
-std::vector<Selection> shortlistForMode(
-    Mode mode, uint64_t outer, uint64_t r, uint64_t k, uint32_t sm_count,
-    OneWindowResidency&& one_window_residency,
-    DeepRSmallKResidency&& deep_r_small_k_residency,
-    AlignedKResidency&& aligned_k_residency,
-    size_t limit = 5) {
-    std::vector<Selection> result;
-    switch (mode) {
-        case Mode::OneWindow:
-            for (auto v : Fp8OneWindowPolicy::shortlist(
-                     outer, r, k, sm_count, one_window_residency, limit))
-                result.push_back(Selection{mode, OneWindowConfiguration{v}});
-            break;
-        case Mode::DeepRSmallK:
-            for (auto v : Fp8DeepRSmallKPolicy::shortlist(
-                     outer, r, k, sm_count, deep_r_small_k_residency, limit))
-                result.push_back(Selection{mode, DeepRSmallKConfiguration{v}});
-            break;
-        case Mode::AlignedK:
-            for (auto v : Fp8AlignedKPolicy::shortlist(
-                     outer, r, k, sm_count, aligned_k_residency, limit))
-                result.push_back(Selection{mode, AlignedKConfiguration{v}});
-            break;
-        case Mode::RuntimeK:
-            break; // Needs explicitly supplied physical plans, never invent them.
-    }
-    return result;
-}
-
-template <typename OneWindowResidency, typename DeepRSmallKResidency,
-          typename AlignedKResidency>
-std::vector<Selection> shortlistForMode(
-    Mode mode, uint64_t outer, uint64_t r, uint64_t k, uint32_t sm_count,
-    OneWindowResidency&& one_window_residency,
-    DeepRSmallKResidency&& deep_r_small_k_residency,
-    AlignedKResidency&& aligned_k_residency,
-    std::span<const Fp8RuntimeKPolicy::Candidate> runtime_candidates,
-    size_t limit = 5) {
-    if (mode == Mode::RuntimeK) {
-        std::vector<Selection> result;
-        for (auto v : Fp8RuntimeKPolicy::shortlist(
-                 outer, r, k, sm_count, runtime_candidates, limit))
-            result.push_back(Selection{mode, RuntimeKConfiguration{v}});
-        return result;
-    }
-    return shortlistForMode(mode, outer, r, k, sm_count,
-                            std::forward<OneWindowResidency>(one_window_residency),
-                            std::forward<DeepRSmallKResidency>(deep_r_small_k_residency),
-                            std::forward<AlignedKResidency>(aligned_k_residency), limit);
-}
-
-template <typename OneWindowResidency, typename DeepRSmallKResidency>
-std::vector<Selection> shortlistForMode(
-    Mode mode, uint64_t outer, uint64_t r, uint64_t k, uint32_t sm_count,
-    OneWindowResidency&& one_window_residency,
-    DeepRSmallKResidency&& deep_r_small_k_residency,
-    size_t limit = 5) {
-    return shortlistForMode(mode, outer, r, k, sm_count,
-                            std::forward<OneWindowResidency>(one_window_residency),
-                            std::forward<DeepRSmallKResidency>(deep_r_small_k_residency),
-                            [](Fp8AlignedKPolicy::Variant) -> uint32_t { return 0; }, limit);
-}
-
-inline std::vector<Selection> shortlistRuntimeK(
-    uint64_t outer, uint64_t r, uint64_t k, uint32_t sm_count,
-    std::span<const Fp8RuntimeKPolicy::Candidate> physical_candidates,
-    size_t limit = 5) {
-    std::vector<Selection> result;
-    for (auto v : Fp8RuntimeKPolicy::shortlist(
-             outer, r, k, sm_count, physical_candidates, limit))
-        result.push_back(Selection{Mode::RuntimeK, RuntimeKConfiguration{v}});
-    return result;
-}
-
-// Explicit typed mode-local dispatch. Residency providers must query the actual
-// compiled kernels of their respective modes. Unfinished modes fail closed,
-// never silently fall back to OneWindow or another mode.
-template <typename OneWindowResidency, typename DeepRSmallKResidency,
-          typename AlignedKResidency>
-std::optional<Selection> selectForMode(Mode mode, uint64_t outer, uint64_t r, uint64_t k,
-                                      uint32_t sm_count,
-                                      OneWindowResidency&& one_window_residency,
-                                      DeepRSmallKResidency&& deep_r_small_k_residency,
-                                      AlignedKResidency&& aligned_k_residency) {
-    switch (mode) {
-        case Mode::OneWindow: {
-            const auto v = Fp8OneWindowPolicy::select(
-                outer, r, k, sm_count, one_window_residency);
-            if (!v) return std::nullopt;
-            return Selection{Mode::OneWindow, OneWindowConfiguration{*v}};
-        }
-        case Mode::DeepRSmallK: {
-            const auto v = Fp8DeepRSmallKPolicy::select(
-                outer, r, k, sm_count, deep_r_small_k_residency);
-            if (!v) return std::nullopt;
-            return Selection{Mode::DeepRSmallK, DeepRSmallKConfiguration{*v}};
-        }
-        case Mode::AlignedK: {
-            const auto v = Fp8AlignedKPolicy::select(
-                outer, r, k, sm_count, aligned_k_residency);
-            if (!v) return std::nullopt;
-            return Selection{Mode::AlignedK, AlignedKConfiguration{*v}};
-        }
-        case Mode::RuntimeK:
-            return std::nullopt; // RuntimeK requires the explicit compiled-candidate overload.
-    }
-    return std::nullopt;
-}
-
-// RuntimeK is opt-in and needs actual compiled-kernel occupancy, supplied with
-// complete physical plans. The default general select() does not change.
-template <typename OneWindowResidency, typename DeepRSmallKResidency,
-          typename AlignedKResidency>
-std::optional<Selection> selectForMode(
-    Mode mode, uint64_t outer, uint64_t r, uint64_t k, uint32_t sm_count,
-    OneWindowResidency&& one_window_residency,
-    DeepRSmallKResidency&& deep_r_small_k_residency,
-    AlignedKResidency&& aligned_k_residency,
-    std::span<const Fp8RuntimeKPolicy::Candidate> runtime_candidates) {
-    if (mode == Mode::RuntimeK) {
-        const auto v = Fp8RuntimeKPolicy::select(outer, r, k, sm_count, runtime_candidates);
-        if (!v) return std::nullopt;
-        return Selection{Mode::RuntimeK, RuntimeKConfiguration{*v}};
-    }
-    return selectForMode(mode, outer, r, k, sm_count,
-                         std::forward<OneWindowResidency>(one_window_residency),
-                         std::forward<DeepRSmallKResidency>(deep_r_small_k_residency),
-                         std::forward<AlignedKResidency>(aligned_k_residency));
-}
-
-inline std::optional<Selection> selectRuntimeK(
-    uint64_t outer, uint64_t r, uint64_t k, uint32_t sm_count,
-    std::span<const Fp8RuntimeKPolicy::Candidate> physical_candidates) {
-    const auto v = Fp8RuntimeKPolicy::select(outer, r, k, sm_count, physical_candidates);
-    if (!v) return std::nullopt;
-    return Selection{Mode::RuntimeK, RuntimeKConfiguration{*v}};
-}
-
-// Retain the two-residency interface for existing callers. AlignedK needs an
-// explicitly supplied occupancy provider; it remains unavailable here rather
-// than assuming that unqueried specializations can run.
-template <typename OneWindowResidency, typename DeepRSmallKResidency>
-std::optional<Selection> selectForMode(Mode mode, uint64_t outer, uint64_t r, uint64_t k,
-                                      uint32_t sm_count,
-                                      OneWindowResidency&& one_window_residency,
-                                      DeepRSmallKResidency&& deep_r_small_k_residency) {
-    return selectForMode(mode, outer, r, k, sm_count,
-                         std::forward<OneWindowResidency>(one_window_residency),
-                         std::forward<DeepRSmallKResidency>(deep_r_small_k_residency),
-                         [](Fp8AlignedKPolicy::Variant) -> uint32_t { return 0; });
-}
-
-// Explicit local helper for an AlignedK residency query over actual compiled
-// packet/CTA specializations. This chooses only within the AlignedK inventory.
-template <typename ResidentCTAsPerSM>
-std::optional<Selection> selectAlignedK(uint64_t outer, uint64_t r, uint64_t k,
-                                        uint32_t sm_count,
-                                        ResidentCTAsPerSM&& residency) {
-    return selectForMode(Mode::AlignedK, outer, r, k, sm_count,
-                         [](Fp8OneWindowPolicy::Variant) -> uint32_t { return 0; },
-                         [](Fp8DeepRSmallKPolicy::Variant) -> uint32_t { return 0; },
-                         std::forward<ResidentCTAsPerSM>(residency));
-}
-
-// Backwards-compatible explicit local helper for prior benchmark callers.
-template <typename ResidentCTAsPerSM>
-std::optional<Selection> selectDeepRSmallK(uint64_t outer, uint64_t r, uint64_t k,
-                                         uint32_t sm_count, ResidentCTAsPerSM&& residency) {
-    return selectForMode(Mode::DeepRSmallK, outer, r, k, sm_count,
-                         [](Fp8OneWindowPolicy::Variant) -> uint32_t { return 0; },
-                         residency);
 }
 
 } // namespace ThorImplementation::CubReductionInternal::Fp8RK::Fp8GeneralRParallelPolicy

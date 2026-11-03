@@ -45,7 +45,25 @@ RUNTIME_K_OPERATIONS = (
 # AlignedK keeps separate typed PRODUCT/MIN/MAX transformed kernels.
 ALIGNED_TYPED_OPERATIONS = RUNTIME_K_OPERATIONS[1:]
 EXPECTED_COUNTS = {'OneWindow': 90, 'DeepRSmallK': 264,
-                   'AlignedK': 164, 'RuntimeK': 204}
+                   'AlignedK': 164, 'RuntimeK': 204, 'ARG': 27}
+# ARG (argmin/argmax) twins, all in the narrow TU. Operation (argmin/argmax) and FP8 format are the runtime
+# Fp8ArgFold, so there is no dtype or operation axis: 15 OneWindow units + 7 DeepRSmallK ownerships + rotated
+# RuntimeK (P8) + PacketComplete (P16) + 2 AlignedK packets + the packed staged-partial continuation = 27 kernels.
+ARG_KERNELS = (
+    tuple(('fp8OneWindowArgCompleteKernel', f'{o}, {p}, {c}, {str(la).lower()}', f'OneWindow/O{o}/P{p}/c{c}'
+           f'{"/la" if la else ""}') for o, p, c, la in (
+        (1, 16, 1, False), (1, 16, 2, True), (1, 16, 4, False), (1, 16, 8, True), (1, 16, 16, True),
+        (2, 16, 1, False), (2, 16, 2, False), (2, 16, 4, False), (2, 16, 8, True),
+        (4, 16, 2, False), (4, 16, 4, False), (4, 16, 8, True),
+        (8, 16, 1, False), (8, 16, 2, False), (8, 16, 4, False)))
+    + tuple(('fp8DeepRArgFirstStageKernel', str(c), f'DeepRSmallK/components{c}') for c in (1, 2, 4, 5, 8))
+    + tuple(('fp8DeepRArgTinyKFirstStageKernel', str(lanes), f'DeepRSmallK/tiny-lanes{lanes}') for lanes in (8, 4))
+    + (('fp8RotatedArgKernel', '8', 'RuntimeK/Rotated/P8'),
+       ('fp8PacketCompleteArgKernel', '16', 'RuntimeK/PacketComplete/P16'),
+       ('fp8AlignedKArgKernel', '2', 'AlignedK/P2'),
+       ('fp8AlignedKArgKernel', '8', 'AlignedK/P8'),
+       ('fp8ArgPackedContinuationKernel', '0', 'PackedContinuation'))
+)
 # OneWindow units (outputs per warp, packet bytes, components-per-lane bucket, load-ahead); mirrors
 # ONE_WINDOW_RUNTIME_K_UNITS (P5-J2). x 3 physical operations (MIN/MAX folded) x 2 FP8 formats = 90 kernels.
 ONE_WINDOW_UNITS = (
@@ -69,6 +87,13 @@ FAMILIES = {
     'kParallelFp8CompleteUnifiedKernel': 'AlignedK',
     'fp8GeneralRParallelKTileP16CompleteKernel': 'RuntimeK',
     'awkwardAlignmentRotatedShardedFirstStageKernel': 'RuntimeK',
+    'fp8OneWindowArgCompleteKernel': 'ARG',
+    'fp8DeepRArgFirstStageKernel': 'ARG',
+    'fp8DeepRArgTinyKFirstStageKernel': 'ARG',
+    'fp8RotatedArgKernel': 'ARG',
+    'fp8PacketCompleteArgKernel': 'ARG',
+    'fp8AlignedKArgKernel': 'ARG',
+    'fp8ArgPackedContinuationKernel': 'ARG',
 }
 
 
@@ -314,6 +339,10 @@ def generate(source: Path, out: Path):
                             f'Rotated/{"Exact" if exact else "Prefix"}/P16/rows{rows}/{label}/'
                             f'{"MIN-MAX" if folded and not exact else op_label}')
 
+    # ARG twins: argmin/argmax x E4M3/E5M2 are runtime (one kernel per physical shape).
+    for kernel, args, config in ARG_KERNELS:
+        add('narrow', 'ARG', 'E4M3+E5M2', kernel, args, f'ARG/{config}')
+
     unknown = dropped_aligned - matched
     if unknown:
         raise ValueError(f'Accepted pruning contains unrecognized physical kernels: {sorted(unknown)}')
@@ -458,11 +487,11 @@ def analyze(objects: list[Path], archive: Path, out: Path):
     totals=defaultdict(int)
     for x in rows:totals[x['mode']]+=x['bytes']
     lines=[f'Isolated archive: {archive} ({archive.stat().st_size:,} bytes)',
-           'Selected first-stage kernel specializations only; shared FP32 continuation is excluded.',
+           'Selected first-stage kernel specializations only (VALUE families + ARG twins); shared FP32 continuation is excluded.',
            f'GPU architectures: {", ".join(sorted(arches))}',
            f'Compiled CUDA objects: {len(object_rows)}',
            f'Extracted cubins: {sum(1 for _ in (out/"cubins").rglob("*.cubin"))}', '']
-    for key in ('OneWindow','DeepRSmallK','AlignedK','RuntimeK'):
+    for key in ('OneWindow','DeepRSmallK','AlignedK','RuntimeK','ARG'):
         lines.append(f'{key:14s} {counts[key]:5d} kernel FUNC symbols; {totals[key]:>12,} SASS text bytes')
     for key in EXPERIMENTAL_FAMILIES:
         lines.append(f'{key} (experimental, excluded from the total) {counts[key]:5d} kernel FUNC symbols; '

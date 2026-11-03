@@ -2551,7 +2551,9 @@ void runArgCensusCase(const ArgCensusCase& benchmark_case,
                          production_timing,
                          1.0);
 
-    if (forced_reduced_run_count != 0) {
+    // FP8 ARG composes only through the planned retained FP8 ARG passes (A5, 1119): no forced interval orders.
+    const bool fp8_input = dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2;
+    if (forced_reduced_run_count != 0 && !fp8_input) {
         for (const std::vector<uint32_t>& run_order :
              enumerateArgEndEliminationRunOrders(forced_reduced_run_count)) {
             const std::optional<CubArgReductionDenseCompositionPlan> forced_plan =

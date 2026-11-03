@@ -1,5 +1,6 @@
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 #include "Utilities/TensorOperations/Cub/CubReductionOperation.cuh"
+#include "Utilities/TensorOperations/Cub/FastDivU32.h"
 #include "Utilities/TensorOperations/Cub/Fp8RetainedKernelPolicy.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8AlignedKSelector.h"
 
@@ -1217,35 +1218,36 @@ __global__ __launch_bounds__(BlockThreads) void kParallelLeanCompleteKernel(cons
                                                                            uint64_t inner_size,
                                                                            uint64_t output_outer_stride,
                                                                            uint64_t output_inner_stride,
-                                                                           uint64_t component_tiles,
+                                                                           FastDivU32 packets_per_outer_divider,
                                                                            InputTransformT input_transform,
                                                                            OutputFinalizeT output_finalize,
                                                                            float output_scale) {
     constexpr size_t packet_bytes = sizeof(InputT) * ItemsPerLane;
     static_assert(packet_bytes == 4 || packet_bytes == 8 || packet_bytes == 16);
     static_assert(BlockThreads == 32 || BlockThreads == 64 || BlockThreads == 128 || BlockThreads == 256);
-    constexpr uint64_t components_per_cta =
-        static_cast<uint64_t>(BlockThreads) * static_cast<uint64_t>(ItemsPerLane);
     constexpr float Init = KParallelReductionIdentityFp32<ReductionOpT>::value;
     const ReductionOpT reduction_op{};
 
-    // Grid X is deliberately capped at 65535 CTAs. A Complete reduction must
-    // therefore stride over *all* outer/component work, not just process one
-    // tile per CTA. In particular, FP32 continuations of FP8 staged reductions
-    // commonly have more than 65535 outer rows with narrow K.
-    const uint64_t total_work = outer_size * component_tiles;
-    const uint64_t grid_stride = static_cast<uint64_t>(gridDim.x);
-    for (uint64_t outer_component = static_cast<uint64_t>(blockIdx.x);
-         outer_component < total_work;
-         outer_component += grid_stride) {
-        const uint64_t outer_index = outer_component / component_tiles;
-        const uint64_t component_tile = outer_component - outer_index * component_tiles;
+    // 1136: flat packet ownership. Thread t of the grid owns packet t of the [outer, K / ItemsPerLane] output packet
+    // space, so one CTA spans several outer rows when K is narrow. The former (outer, component tile) ownership left a
+    // CTA's lanes idle past K: at K = 2 one lane in 32 did work (1134 audit: FP8 staged continuations into 2-15 FP32
+    // shards ran at 0.1-0.4 TB/s from L2). Coalescing is unchanged for wide K (consecutive packets of one row) and
+    // for narrow K consecutive lanes read consecutive [R, K] slabs, which the R loop consumes in full.
+    // Grid X is capped at 65535 CTAs, so the loop grid-strides over all packets (FP32 continuations of FP8 staged
+    // reductions commonly have more than 65535 outer rows with narrow K).
+    // 1138: packet -> outer row through a precomputed 32-bit divisor while the packet space fits below 2^31 (the
+    // launcher passes divisor 1 otherwise, and the kernel then divides in 64 bits): the 64-bit division per packet
+    // made scalar-packet continuations (odd K, 1137 audit) run at about 0.64 TB/s into 2-3 shards.
+    const uint64_t packets_per_outer = ceilDivideU64(inner_size, static_cast<uint64_t>(ItemsPerLane));
+    const uint64_t total_packets = outer_size * packets_per_outer;
+    const bool fast_divide = packets_per_outer_divider.divisor == packets_per_outer;
+    const uint64_t grid_stride = static_cast<uint64_t>(gridDim.x) * static_cast<uint64_t>(BlockThreads);
+    for (uint64_t packet = static_cast<uint64_t>(blockIdx.x) * BlockThreads + threadIdx.x; packet < total_packets;
+         packet += grid_stride) {
+        const uint64_t outer_index = fast_divide ? packets_per_outer_divider.divide(static_cast<uint32_t>(packet))
+                                                 : packet / packets_per_outer;
         const uint64_t packet_component_begin =
-            component_tile * components_per_cta
-            + static_cast<uint64_t>(threadIdx.x) * static_cast<uint64_t>(ItemsPerLane);
-        if (packet_component_begin >= inner_size) {
-            continue;
-        }
+            (packet - outer_index * packets_per_outer) * static_cast<uint64_t>(ItemsPerLane);
 
         float local[ItemsPerLane];
 #pragma unroll
@@ -1296,31 +1298,35 @@ __global__ __launch_bounds__(BlockThreads) void kParallelTiledStageKernel(const 
                                                                          uint64_t output_outer_stride,
                                                                          uint64_t output_inner_stride,
                                                                          uint64_t shards_per_output,
+                                                                         FastDivU32 packets_per_outer_divider,
                                                                          InputTransformT input_transform,
                                                                          OutputFinalizeT output_finalize,
                                                                          float output_scale) {
     constexpr size_t packet_bytes = sizeof(InputT) * ItemsPerLane;
     static_assert(packet_bytes == 4 || packet_bytes == 8 || packet_bytes == 16);
     static_assert(BlockThreads == 32 || BlockThreads == 64 || BlockThreads == 128 || BlockThreads == 256);
-    constexpr uint64_t components_per_cta =
-        static_cast<uint64_t>(BlockThreads) * static_cast<uint64_t>(ItemsPerLane);
     constexpr float Init = KParallelReductionIdentityFp32<ReductionOpT>::value;
     const ReductionOpT reduction_op{};
 
-    const uint64_t component_tiles = ceilDivideU64(inner_size, components_per_cta);
-    const uint64_t total_work = outer_size * component_tiles * shards_per_output;
+    // 1136: flat packet ownership per shard, as kParallelLeanCompleteKernel: a work item is (BlockThreads consecutive
+    // packets of the [outer, K / ItemsPerLane] packet space, shard), so narrow K no longer idles most lanes.
+    const uint64_t packets_per_outer = ceilDivideU64(inner_size, static_cast<uint64_t>(ItemsPerLane));
+    const uint64_t total_packets = outer_size * packets_per_outer;
+    const bool fast_divide = packets_per_outer_divider.divisor == packets_per_outer;  // 1138, as Complete
+    const uint64_t packet_blocks = ceilDivideU64(total_packets, static_cast<uint64_t>(BlockThreads));
+    const uint64_t total_work = packet_blocks * shards_per_output;
     const uint64_t grid_stride = static_cast<uint64_t>(gridDim.x);
 
     for (uint64_t work_index = static_cast<uint64_t>(blockIdx.x); work_index < total_work; work_index += grid_stride) {
         const uint64_t shard = work_index % shards_per_output;
-        const uint64_t outer_component_work = work_index / shards_per_output;
-        const uint64_t component_tile = outer_component_work % component_tiles;
-        const uint64_t outer_index = outer_component_work / component_tiles;
-
+        const uint64_t packet = (work_index / shards_per_output) * BlockThreads + threadIdx.x;
+        const bool owns_packet = packet < total_packets;
+        const uint64_t outer_index =
+            !owns_packet ? 0
+            : fast_divide ? packets_per_outer_divider.divide(static_cast<uint32_t>(packet))
+                          : packet / packets_per_outer;
         const uint64_t packet_component_begin =
-            component_tile * components_per_cta
-            + static_cast<uint64_t>(threadIdx.x) * static_cast<uint64_t>(ItemsPerLane);
-        const bool owns_packet = packet_component_begin < inner_size;
+            owns_packet ? (packet - outer_index * packets_per_outer) * static_cast<uint64_t>(ItemsPerLane) : 0;
 
         // Split R evenly instead of coupling the physical kernel to a particular rows/shard policy. The planner owns
         // shard depth. Complete topology is the exact same reduction core with one shard and a final-output epilogue.
@@ -1534,15 +1540,25 @@ void launchKParallelForPacketAndBlock(const Tensor& input,
     static_assert(PacketBytes % sizeof(InputT) == 0);
     static_assert(BlockThreads == 32 || BlockThreads == 64 || BlockThreads == 128 || BlockThreads == 256);
     constexpr int items_per_lane = static_cast<int>(PacketBytes / sizeof(InputT));
-    constexpr uint64_t components_per_cta =
-        static_cast<uint64_t>(BlockThreads) * static_cast<uint64_t>(items_per_lane);
 
-    const uint64_t component_tiles = ceilDivideU64(geometry.inner_size, components_per_cta);
-    if (geometry.outer_size > std::numeric_limits<uint64_t>::max() / component_tiles
-        || geometry.outer_size * component_tiles > std::numeric_limits<uint64_t>::max() / shards_per_output) {
+    // 1136: flat packet ownership (see kParallelLeanCompleteKernel): BlockThreads consecutive output packets per CTA
+    // work item, times shards for Staged.
+    const uint64_t packets_per_outer = ceilDivideU64(geometry.inner_size, static_cast<uint64_t>(items_per_lane));
+    if (geometry.outer_size > std::numeric_limits<uint64_t>::max() / packets_per_outer) {
+        throw std::overflow_error("K-parallel tiled stage packet count overflows uint64_t.");
+    }
+    const uint64_t packet_blocks =
+        ceilDivideU64(geometry.outer_size * packets_per_outer, static_cast<uint64_t>(BlockThreads));
+    if (packet_blocks > std::numeric_limits<uint64_t>::max() / shards_per_output) {
         throw std::overflow_error("K-parallel tiled stage work count overflows uint64_t.");
     }
-    const uint64_t total_work = geometry.outer_size * component_tiles * shards_per_output;
+    const uint64_t total_work = packet_blocks * shards_per_output;
+    // 1138: the fast divisor needs every packet index below 2^31; otherwise divisor 1 makes the kernels divide in 64
+    // bits (when packets_per_outer is itself 1 both paths are the identity).
+    const FastDivU32 packets_per_outer_divider =
+        geometry.outer_size * packets_per_outer < FastDivU32::MAX_DIVIDEND
+            ? FastDivU32::make(static_cast<uint32_t>(packets_per_outer))
+            : FastDivU32::make(1);
     const unsigned int grid_blocks = static_cast<unsigned int>(
         std::min<uint64_t>(total_work, TILED_REDUCTION_MAX_GRID_BLOCKS));
     if (grid_blocks == 0) {
@@ -1567,7 +1583,7 @@ void launchKParallelForPacketAndBlock(const Tensor& input,
                                                                    geometry.inner_size,
                                                                    geometry.tiled_output_outer_stride,
                                                                    geometry.tiled_output_inner_stride,
-                                                                   component_tiles,
+                                                                   packets_per_outer_divider,
                                                                    input_transform,
                                                                    output_finalize,
                                                                    output_scale);
@@ -1588,6 +1604,7 @@ void launchKParallelForPacketAndBlock(const Tensor& input,
                                                                    geometry.tiled_output_outer_stride,
                                                                    geometry.tiled_output_inner_stride,
                                                                    shards_per_output,
+                                                                   packets_per_outer_divider,
                                                                    input_transform,
                                                                    output_finalize,
                                                                    output_scale);

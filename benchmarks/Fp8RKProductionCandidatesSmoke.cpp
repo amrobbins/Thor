@@ -16,7 +16,8 @@ namespace B = ThorImplementation::CubReductionBenchmarking;
 namespace G = P::Fp8GeneralRParallelPolicy;
 
 static_assert(std::is_same_v<G::CandidatePlan, B::Fp8GeneralRParallelPolicy::CandidatePlan>);
-static_assert(P::kFp8RKAutotuneCandidateBudget == 28);
+static_assert(P::fp8RKTuningPlan(ThorImplementation::CubReductionTuningDepth::Regular).candidates == 12);
+static_assert(P::fp8RKTuningPlan(ThorImplementation::CubReductionTuningDepth::Quick).candidates == 6);
 
 int main() {
     // The exact same physical input will be used by both entry points; in
@@ -44,7 +45,7 @@ int main() {
             const P::ProductionSelectionContext ctx{128, 2048, 256, 170, semantics, budget};
             auto prod = P::selectProductionCandidates(ctx, ow, dr, ak, runtime);
             G::GeneralShortlistOptions options;
-            options.max_candidates = 28;
+            options.max_candidates = P::fp8RKTuningPlan(ThorImplementation::CubReductionTuningDepth::Regular).candidates;
             options.per_family_limit = 32;
             options.max_scratch_bytes = budget;
             auto bench = B::Fp8GeneralRParallelPolicy::generalShortlist(
@@ -57,7 +58,7 @@ int main() {
                 assert(prod[i].scratch_bytes == bench[i].scratch_bytes);
                 assert(prod[i].first_stage_work_groups == bench[i].first_stage_work_groups);
             }
-            assert(prod.size() <= P::kFp8RKAutotuneCandidateBudget);
+            assert(prod.size() <= P::fp8RKTuningPlan(ThorImplementation::CubReductionTuningDepth::Regular).candidates);
             for (const auto& plan : prod) {
                 assert(plan.resident_ctas_per_sm > 0);
                 assert(plan.scratch_bytes <= budget);
@@ -70,15 +71,12 @@ int main() {
                 for (const auto& plan : prod) assert(!plan.staged());
             }
             if (budget == std::numeric_limits<uint64_t>::max()) {
-                assert(prod.size() > 12);
-                // Exactly one first legal leader per available retained family,
-                // followed by the frozen cross-family score ordering.
-                for (unsigned family = 0; family != 4; ++family)
-                    assert(prod[family].selection.mode == static_cast<G::Mode>(family));
+                // 1141: score order alone (no family-leader prefix), clamped to the Regular depth.
+                assert(prod.size() == 12);
             }
         }
     }
-    // In a dense legal inventory the production facade must clamp to 28,
+    // In a dense legal inventory the production facade must clamp to the Regular depth (12),
     // without silently falling back to a smaller local-family shortlist.
     const auto full_ow = [](P::Fp8OneWindowPolicy::Variant) { return 6u; };
     const auto full_ak = [](P::Fp8AlignedKPolicy::Variant) { return 6u; };
@@ -86,7 +84,7 @@ int main() {
         {16, 512, 16, 170,
          {G::Fp8Format::E4M3, G::Combine::Sum, G::InputTransform::Identity},
          std::numeric_limits<uint64_t>::max()}, full_ow, dr, full_ak, empty_runtime);
-    assert(full.size() == P::kFp8RKAutotuneCandidateBudget);
+    assert(full.size() == P::fp8RKTuningPlan(ThorImplementation::CubReductionTuningDepth::Regular).candidates);
 
     const P::ProductionSelectionContext invalid{0, 2048, 256, 170,
         {G::Fp8Format::E4M3, G::Combine::Sum, G::InputTransform::Identity},

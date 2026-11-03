@@ -1,6 +1,11 @@
 #pragma once
 
 // Reusable single-stream, cache-cold CUDA reduction autotuning utility.
+// L2 contract (1141): every timed launch reads an input slot last touched at least cold_reuse_bytes (8x L2) of
+// traffic earlier, and writes rotating output/scratch slots, so each candidate's FIRST stage starts L2-cold. (1161: the
+// reuse distance counts each slot's input + output + scratch bytes, not the input alone.) Within one
+// launch a staged plan's continuation reads the partials its first stage just wrote, exactly as in a real run, so it
+// keeps whatever L2 hits a real run gets.
 // Deliberately independent of FP8 family selection and production dispatch.
 // Callbacks launch the COMPLETE plan, including any FP32 continuation, and
 // must enqueue work only: no cudaDevice/Stream/Event synchronization inside.
@@ -42,12 +47,35 @@ struct Options {
     // Zero: entropy from random_device. Nonzero: reproducible round orders.
     uint64_t random_seed = 0;
     uint32_t warmups_per_candidate = 1;
+    // Timed rounds per candidate (>= 3) and how many of the fastest and of the slowest are dropped
+    // (measurement_count > 2 * trim_count).
+    size_t measurement_count = DefaultMeasurementCount;
+    size_t trim_count = 1;
+    // The contest policy (1161 for FP8 KR; 1162: the one policy of every reduction contest, RK and KR alike).
+    // After the warmups, one timed cold launch of every candidate (its probe). Each candidate then gets its own
+    // launches per measurement, about probe_target_us of GPU time per measurement and at most
+    // max_launches_per_measurement; every launch takes the next cold ring slot, so each still starts L2-cold, and the
+    // sample is the event interval over the launch count. CUDA events resolve only about 2 us (the 1147 KR audit: every
+    // time below 20 us was a multiple of 2.048 us), so a short kernel batches launches until 2 us is 1% of the
+    // interval, and a slow one is not repeated. A candidate whose probe is over abandon_ratio x max(best probe,
+    // abandon_floor_us) is not measured and never wins (abandon_ratio 0: every candidate is measured); the floor keeps
+    // near-ties of kernels shorter than the event resolution from being dropped on a quantized probe.
+    // Evidence (1160/1161 FP8 KR, 3258 sites): with one fixed launch count per site (32 below about 4 MiB), a stamp's
+    // wall time was 4 ms + its contest's GPU time (r = 0.9998) and below 16 MiB 92-98% of it went to shapes 10-100x
+    // slower than the winner (median 200-440 ms per stamp). With this policy the median stamp took 11-12 ms below
+    // 16 MiB, 19 ms at 16-128 MiB and 29 ms from 128 MiB, and the picks were as good (large cells: mean 0%, p90 1%,
+    // max 4% over the sweep's fastest shape).
+    double probe_target_us = 200.0;
+    size_t max_launches_per_measurement = 32;
+    double abandon_ratio = 3.0;
+    double abandon_floor_us = 8.0;
 };
 
 struct RunResult : TuningResult {
     uint64_t random_seed = 0;
     size_t input_slot_count = 0;
     std::string winner_name;
+    size_t abandoned_count = 0;  // candidates the probe ruled out
 };
 
 namespace detail {
@@ -144,12 +172,15 @@ inline RunResult autotune(const std::vector<Candidate>& candidates,
 
     const uint64_t input_bytes = representative_input.getDescriptor().getArraySizeInBytes();
     const uint64_t input_stride = alignedStride(input_bytes);
-    const size_t slots = coldSlotCount(input_stride, options.cold_reuse_bytes);
+    uint64_t max_scratch_bytes = 0;
+    for (const Candidate& candidate : candidates) max_scratch_bytes = std::max(max_scratch_bytes, candidate.scratch_bytes);
+    // 1161: one slot's bytes are its input, output and scratch views together (coldSlotCount).
+    const uint64_t slot_bytes = input_stride + alignedStride(output_descriptor.getArraySizeInBytes()) +
+                                (max_scratch_bytes != 0 ? alignedStride(max_scratch_bytes) : 0);
+    const size_t slots = coldSlotCount(slot_bytes, options.cold_reuse_bytes);
     if (slots > std::numeric_limits<size_t>::max() / candidates.size() && candidates.size() > 1) {
         throw std::overflow_error("Reduction autotuning slot/candidate overflow");
     }
-    uint64_t max_scratch_bytes = 0;
-    for (const Candidate& candidate : candidates) max_scratch_bytes = std::max(max_scratch_bytes, candidate.scratch_bytes);
 
     // One backing Tensor for each independently rotating region (input/output/
     // optional scratch). All allocations occur before any timed launch.
@@ -165,19 +196,34 @@ inline RunResult autotune(const std::vector<Candidate>& candidates,
     result.random_seed = options.random_seed ? options.random_seed
         : ((static_cast<uint64_t>(std::random_device{}()) << 32) ^ std::random_device{}());
     result.input_slot_count = slots;
-    const auto rounds = makeRoundOrders(candidates.size(), result.random_seed);
+    const size_t measurement_count = options.measurement_count;
+    if (!(options.probe_target_us > 0.0) || options.max_launches_per_measurement == 0 ||
+        !(options.abandon_ratio >= 0.0))
+        throw std::invalid_argument("Reduction autotuning needs a positive probe target and launch cap");
+    // Per-candidate launches per measurement and whether it is measured: set from each candidate's probe.
+    std::vector<size_t> launches(candidates.size(), 0);
+    std::vector<bool> measured(candidates.size(), false);
+    std::vector<double> probe_us(candidates.size(), 0.0);
+    if (options.trim_count == 0 || measurement_count <= 2 * options.trim_count)
+        throw std::invalid_argument("Reduction autotuning trim must drop at least one run per side and keep one");
+    const auto rounds = makeRoundOrders(candidates.size(), result.random_seed, measurement_count);
 
     // Allocate timing events *before* timed execution; each measurement has
     // independent start/stop events, so no event is rerecorded prematurely.
-    if (candidates.size() > std::numeric_limits<size_t>::max() / (MeasurementCount * 2)) {
+    if (candidates.size() > std::numeric_limits<size_t>::max() / (measurement_count * 2)) {
         throw std::overflow_error("Reduction autotuning event count overflow");
     }
     std::vector<detail::TimingEvent> events;
-    events.reserve(candidates.size() * MeasurementCount * 2);
-    for (size_t i = 0; i < candidates.size() * MeasurementCount * 2; ++i) events.emplace_back();
-    std::vector<Measurements> observations(candidates.size());
+    events.reserve(candidates.size() * measurement_count * 2);
+    for (size_t i = 0; i < candidates.size() * measurement_count * 2; ++i) events.emplace_back();
+    std::vector<detail::TimingEvent> probe_events;
+    probe_events.reserve(candidates.size() * 2);
+    for (size_t i = 0; i < candidates.size() * 2; ++i) probe_events.emplace_back();
+    std::vector<Measurements> observations(candidates.size(), Measurements(measurement_count));
     uint64_t cursor = 0;
-    auto enqueue = [&](size_t candidate_index, bool measured, size_t round) {
+    // start/stop: the interval's events (nullptr: an untimed warmup launch); count: launches in the interval.
+    auto enqueue = [&](size_t candidate_index, cudaEvent_t start, cudaEvent_t stop, size_t count) {
+        const bool timed = start != nullptr;
         const size_t slot = static_cast<size_t>(cursor++ % slots);
         const Candidate& candidate = candidates[candidate_index];
         Tensor input_view = inputs.at(slot);
@@ -185,18 +231,27 @@ inline RunResult autotune(const std::vector<Candidate>& candidates,
         // Scratch is an aligned allocation of at least scratch_bytes; a
         // candidate must only access its declared scratch_bytes prefix.
         Tensor scratch_view = candidate.scratch_bytes ? scratch->at(slot) : Tensor();
-        const size_t event_index = (round * candidates.size() + candidate_index) * 2;
-        if (measured) detail::checkCuda(cudaEventRecord(events[event_index].get(), stream.getStream()),
-                                        "cudaEventRecord(start)");
+        if (timed) detail::checkCuda(cudaEventRecord(start, stream.getStream()), "cudaEventRecord(start)");
         candidate.launch(input_view, output_view, scratch_view, stream);
         detail::checkCuda(cudaPeekAtLastError(), "candidate launch");
-        if (measured) detail::checkCuda(cudaEventRecord(events[event_index + 1].get(), stream.getStream()),
-                                        "cudaEventRecord(stop)");
+        for (size_t extra = 1; timed && extra < count; ++extra) {
+            const size_t next = static_cast<size_t>(cursor++ % slots);
+            Tensor next_input = inputs.at(next);
+            Tensor next_output = outputs.at(next);
+            Tensor next_scratch = candidate.scratch_bytes ? scratch->at(next) : Tensor();
+            candidate.launch(next_input, next_output, next_scratch, stream);
+            detail::checkCuda(cudaPeekAtLastError(), "candidate launch");
+        }
+        if (timed) detail::checkCuda(cudaEventRecord(stop, stream.getStream()), "cudaEventRecord(stop)");
+    };
+    auto roundEvent = [&](size_t round, size_t candidate_index, size_t which) {
+        return events[(round * candidates.size() + candidate_index) * 2 + which].get();
     };
 
     // All transfers, warmups and measurements are stream-ordered. A callback
     // must never synchronize. One final host sync follows every one of the
-    // 5*N measured launches; also fence on error to protect Tensor lifetimes.
+    // measured launches (and one after the probes, which set the rounds);
+    // also fence on error to protect Tensor lifetimes.
     try {
         // Initialize one slot, then double the initialized prefix in-place.
         // Copies never overlap, use only O(log slots) enqueue calls, and
@@ -215,10 +270,28 @@ inline RunResult autotune(const std::vector<Candidate>& candidates,
             initialized += copy_slots;
         }
         for (uint32_t warmup = 0; warmup < options.warmups_per_candidate; ++warmup) {
-            for (size_t i = 0; i < candidates.size(); ++i) enqueue(i, false, 0);
+            for (size_t i = 0; i < candidates.size(); ++i) enqueue(i, nullptr, nullptr, 1);
         }
-        for (size_t round = 0; round < MeasurementCount; ++round) {
-            for (size_t index : rounds[round]) enqueue(index, true, round);
+        // One timed cold launch per candidate, read back before the rounds are enqueued.
+        for (size_t i = 0; i < candidates.size(); ++i)
+            enqueue(i, probe_events[2 * i].get(), probe_events[2 * i + 1].get(), 1);
+        detail::checkCuda(cudaStreamSynchronize(stream.getStream()), "probe synchronization");
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            float elapsed_ms = 0.0f;
+            detail::checkCuda(cudaEventElapsedTime(&elapsed_ms, probe_events[2 * i].get(),
+                                                    probe_events[2 * i + 1].get()),
+                              "cudaEventElapsedTime(probe)");
+            probe_us[i] = static_cast<double>(elapsed_ms) * 1000.0;
+        }
+        const ProbePlan plan = planFromProbes(probe_us, options.probe_target_us, options.max_launches_per_measurement,
+                                              options.abandon_ratio, options.abandon_floor_us);
+        launches = plan.launches;
+        measured = plan.measured;
+        for (size_t round = 0; round < measurement_count; ++round) {
+            for (size_t index : rounds[round]) {
+                if (!measured[index]) continue;
+                enqueue(index, roundEvent(round, index, 0), roundEvent(round, index, 1), launches[index]);
+            }
         }
         detail::checkCuda(cudaStreamSynchronize(stream.getStream()), "final stream synchronization");
     } catch (...) {
@@ -226,17 +299,21 @@ inline RunResult autotune(const std::vector<Candidate>& candidates,
         throw;
     }
 
-    for (size_t round = 0; round < MeasurementCount; ++round) {
+    for (size_t round = 0; round < measurement_count; ++round) {
         for (size_t i = 0; i < candidates.size(); ++i) {
-            const size_t event_index = (round * candidates.size() + i) * 2;
+            if (!measured[i]) continue;
             float elapsed_ms = 0.0f;
-            detail::checkCuda(cudaEventElapsedTime(&elapsed_ms, events[event_index].get(),
-                                                    events[event_index + 1].get()),
+            detail::checkCuda(cudaEventElapsedTime(&elapsed_ms, roundEvent(round, i, 0), roundEvent(round, i, 1)),
                               "cudaEventElapsedTime");
-            observations[i][round] = static_cast<double>(elapsed_ms) * 1000.0;
+            observations[i][round] = static_cast<double>(elapsed_ms) * 1000.0 / static_cast<double>(launches[i]);
         }
     }
-    static_cast<TuningResult&>(result) = chooseWinner(observations, input_bytes);
+    static_cast<TuningResult&>(result) = chooseWinner(observations, measured, input_bytes, options.trim_count);
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        result.candidates[i].probe_us = probe_us[i];
+        result.candidates[i].launches_per_measurement = launches[i];
+        if (!measured[i]) ++result.abandoned_count;
+    }
     result.winner_name = candidates[result.winner_index].name;
     return result;
 }

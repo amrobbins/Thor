@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Utilities/TensorOperations/Cub/CubReductionTuningDepth.h"
 #include "Utilities/TensorOperations/Cub/DenseReductionPlanning.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKSelection.h"
 
@@ -21,6 +22,19 @@ namespace ThorImplementation::CubReductionInternal::Fp8RK {
     float output_scale,
     DataType input_dtype,
     const Stream& stream,
-    uint64_t workspace_budget_bytes);
+    uint64_t workspace_budget_bytes,
+    CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular);
+
+// 1142: the cached FP8 ARG selection (Fp8RKStampAutotuner.h autotuneArgRKSite) at an original FP8 ARG RK site:
+// maximum is argmax. Keyed like VALUE (the ARG problem's aggregate, outputs and runs differ) and on the depth.
+[[nodiscard]] Fp8RKSelection selectCachedArgRKSite(
+    const DenseReductionProblem& problem,
+    DenseReductionSite site,
+    bool maximum,
+    uint64_t original_reduction_size,
+    DataType input_dtype,
+    const Stream& stream,
+    uint64_t workspace_budget_bytes,
+    CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular);
 
 }  // namespace ThorImplementation::CubReductionInternal::Fp8RK

@@ -10,6 +10,7 @@
 // for any missing/pruned kernel. The RuntimeK span must similarly contain
 // only executable, validated physical candidates for those semantics.
 
+#include "Utilities/TensorOperations/Cub/CubReductionTuningDepth.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8GeneralRParallelSelector.h"
 
 #include <cstddef>
@@ -21,7 +22,21 @@
 namespace ThorImplementation::CubReductionInternal::Fp8RK {
 
 namespace General = Fp8GeneralRParallelPolicy;
-inline constexpr size_t kFp8RKAutotuneCandidateBudget = 28;
+// 1141: the autotuned shortlist per depth (CubReductionTuningDepth): candidates timed and rounds per candidate.
+// trimmed: how many of the fastest and of the slowest rounds each candidate drops.
+struct Fp8RKTuningPlan {
+    size_t candidates = 0;
+    size_t rounds = 0;
+    size_t trimmed = 1;
+};
+[[nodiscard]] constexpr Fp8RKTuningPlan fp8RKTuningPlan(CubReductionTuningDepth depth) {
+    switch (depth) {
+        case CubReductionTuningDepth::Quick: return {6, 5, 1};
+        case CubReductionTuningDepth::Regular: return {12, 7, 1};
+        case CubReductionTuningDepth::Ultra: return {24, 11, 2};
+    }
+    return {12, 7, 1};
+}
 
 struct ProductionSelectionContext {
     uint64_t outer;
@@ -32,11 +47,11 @@ struct ProductionSelectionContext {
     // Maximum FP32 first-stage partial storage. Candidate measurement also
     // budgets the hypothetical continuation and its physical scratch.
     uint64_t first_stage_scratch_budget_bytes;
+    size_t max_candidates = fp8RKTuningPlan(CubReductionTuningDepth::Regular).candidates;
 };
 
-// Mandatory typed semantics and explicit scratch budget prevent production
-// callers from accidentally taking the legacy untyped round-robin path or
-// silently accepting the unlimited benchmark default.
+// The explicit scratch budget keeps production callers from silently accepting
+// the unlimited benchmark default.
 template <typename OneWindowResidency, typename DeepRSmallKResidency,
           typename AlignedKResidency>
 [[nodiscard]] std::vector<General::CandidatePlan> selectProductionCandidates(
@@ -46,7 +61,7 @@ template <typename OneWindowResidency, typename DeepRSmallKResidency,
     AlignedKResidency&& aligned_k_residency,
     std::span<const Fp8RuntimeKPolicy::Candidate> runtime_candidates) {
     General::GeneralShortlistOptions options;
-    options.max_candidates = kFp8RKAutotuneCandidateBudget;
+    options.max_candidates = context.max_candidates;
     options.per_family_limit = 32;
     options.max_scratch_bytes = context.first_stage_scratch_budget_bytes;
     return General::generalShortlist(

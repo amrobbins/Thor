@@ -6,4 +6,6 @@ Public API metadata source: **python __all__**.
 
 ::: thor.runtime.PlacedNetwork
 
+::: thor.runtime.ReductionTuningDepth
+
 ::: thor.runtime.StatusCode

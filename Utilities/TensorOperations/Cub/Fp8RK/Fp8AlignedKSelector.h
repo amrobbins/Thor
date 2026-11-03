@@ -5,6 +5,8 @@
 // Candidate pruning is a conscious inventory/performance trade-off.
 // Geometry legality is independent of sampling and GPU occupancy.
 
+#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKLaunchLimits.h"
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -54,7 +56,9 @@ inline bool legal(Variant v, uint64_t outer, uint64_t r, uint64_t k) {
     // Staged outputs are FP32 and the intermediate footprint must be representable.
     if (v.shards_per_output > 1 &&
         outer * v.shards_per_output > UINT64_MAX / k / sizeof(float)) return false;
-    return true;
+    // 1131: launch limits. reductionWorkGrid(shards, tiles, outer) throws above 2^31 - 1 per extent, and
+    // balancedReductionShardRows keeps each shard's rows in a 32-bit counter (Complete: R itself).
+    return fp8RKWorkGridFits(v.shards_per_output, tiles, outer) && ceilDiv(r, v.shards_per_output) <= FP8_RK_MAX_UINT32;
 }
 
 inline std::vector<Variant> candidates(uint64_t outer, uint64_t r, uint64_t k) {
@@ -258,14 +262,6 @@ std::vector<Variant> shortlist(uint64_t outer, uint64_t r, uint64_t k,
         if (std::find(result.begin(), result.end(), v) == result.end()) result.push_back(v);
     }
     return result;
-}
-
-// Historical benchmark entry point. Identical to the accepted initial heuristic.
-template <typename ResidentCTAsPerSM>
-std::optional<Variant> experimentalSelect(uint64_t outer, uint64_t r, uint64_t k,
-                                          uint32_t sm_count,
-                                          ResidentCTAsPerSM&& residency) {
-    return select(outer, r, k, sm_count, residency);
 }
 
 } // namespace ThorImplementation::CubReductionInternal::Fp8RK::Fp8AlignedKPolicy

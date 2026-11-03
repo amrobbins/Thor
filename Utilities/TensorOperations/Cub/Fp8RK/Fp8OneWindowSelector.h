@@ -10,6 +10,8 @@
 // and some (ownership, bucket) pairs have none, so P4/P8 variants and uncovered pairs report no residency and are
 // skipped. The ten variants, their order and the frozen constants are unchanged until the ARG-aware retrain.
 
+#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKLaunchLimits.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -36,6 +38,10 @@ inline constexpr std::array<Variant, 10> candidates = {{{1,1,16}, {1,2,16}, {1,4
 constexpr bool oneWindowCoversK(uint64_t k) {
     return k >= 1 && (k <= 497 || k == 512);
 }
+
+// 1131: the kernel keeps 32-bit byte offsets (the launcher throws above 2^32 - 1 input elements); every variant
+// shares the limit, so select() and shortlist() check it once per shape.
+constexpr bool launchable(uint64_t outer, uint64_t r, uint64_t k) { return fp8RKElementsFitUint32(outer, r, k); }
 
 constexpr bool legal(Variant v, uint64_t r, uint64_t k) {
     if (r < v.warps_per_output || k == 0 || v.outputs_per_warp == 0 ||
@@ -143,6 +149,7 @@ template <typename ResidentCTAsPerSM>
 std::optional<Variant> select(uint64_t outer, uint64_t r, uint64_t k,
                               uint32_t sm_count, ResidentCTAsPerSM&& residency) {
     if (outer == 0 || r == 0 || k == 0 || !oneWindowCoversK(k) || sm_count == 0) return std::nullopt;
+    if (!launchable(outer, r, k)) return std::nullopt;
     std::array<Detail::Score, candidates.size()> options{};
     size_t count = 0;
     for (const Variant v : candidates) {
@@ -168,6 +175,7 @@ std::vector<Variant> shortlist(uint64_t outer, uint64_t r, uint64_t k,
                                size_t limit = 5) {
     std::vector<Variant> result;
     if (!limit || !outer || !r || !k || !oneWindowCoversK(k) || !sm_count) return result;
+    if (!launchable(outer, r, k)) return result;
     // The default remains five; the generalized autotuning path may ask for
     // the complete legal retained OneWindow inventory.
     limit = std::min<size_t>(limit, candidates.size());

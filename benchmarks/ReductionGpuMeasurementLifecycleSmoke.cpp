@@ -2,7 +2,8 @@
 // Tests the shared device measurement lock and the FP8 cache lifecycle with
 // deterministic, injectable nested selection/measurement callbacks.
 #include "Utilities/TensorOperations/Cub/ReductionGpuMeasurementLock.h"
-#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKSelectionCache.h"
+#include "Utilities/TensorOperations/Cub/DenseReductionSelectionCache.h"
+#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKSelectionKey.h"
 
 #include <atomic>
 #include <chrono>
@@ -22,12 +23,12 @@ namespace {
 void check(bool okay, const char* message) {
     if (!okay) throw std::logic_error(message);
 }
-Fp8RKSelectionKey keyFor(uint64_t id) {
+DenseReductionSelectionKey keyFor(uint64_t id) {
     Fp8RKSelectionKey key;
     key.device_ordinal = 0;
     key.device_uuid[0] = 5;
     key.runs = {{id, 0, 0}, {512, 0, 1}, {64, 0, 0}};
-    return key;
+    return toDenseReductionSelectionKey(key);
 }
 Fp8RKSelection recipe(size_t winner) {
     Fp8RKSelection answer;
@@ -48,14 +49,14 @@ void ready(std::future<void>& result, const char* message) {
 }
 
 void testNestedDependencyAndCacheHits() {
-    Fp8RKSelectionCache fp8;
-    Fp8RKSelectionCache mock_fp32; // injected callback, not a second production FP32 policy
+    DenseReductionSelectionCache fp8;
+    DenseReductionSelectionCache mock_fp32; // injected callback, not a second production FP32 policy
     int fp32_contests = 0;
     int fp8_contests = 0;
-    const auto result = fp8.getOrTune(keyFor(1), [&] {
+    const auto result = fp8.getOrTune<Fp8RKSelection>(keyFor(1), [&] {
         // A future FP32 selector can itself miss and measure before the FP8
         // GPU contest. The same shared mutex is used for both domains.
-        auto continuation = mock_fp32.getOrTune(keyFor(2), [&] {
+        auto continuation = mock_fp32.getOrTune<Fp8RKSelection>(keyFor(2), [&] {
             ScopedReductionGpuMeasurement fp32_measurement(0);
             ++fp32_contests;
             return recipe(2);
@@ -67,7 +68,7 @@ void testNestedDependencyAndCacheHits() {
     });
     check(result.winner_index == 8 && fp32_contests == 1 && fp8_contests == 1,
           "Nested selection must resolve dependencies before FP8 measurement");
-    auto cached = fp8.getOrTune(keyFor(1), [&]() -> Fp8RKSelection {
+    auto cached = fp8.getOrTune<Fp8RKSelection>(keyFor(1), [&]() -> Fp8RKSelection {
         throw std::logic_error("Cached FP8 request resolved hypothetical continuation");
     });
     check(cached.winner_index == 8 && fp8.tuningAttempts() == 1,
@@ -89,13 +90,13 @@ void testNestedDependencyAndCacheHits() {
 }
 
 void testRecursiveCacheDependencies() {
-    Fp8RKSelectionCache cache;
+    DenseReductionSelectionCache cache;
     auto a = keyFor(31);
     auto b = keyFor(32);
     bool rejected = false;
-    auto selected = cache.getOrTune(a, [&] {
+    auto selected = cache.getOrTune<Fp8RKSelection>(a, [&] {
         try {
-            (void)cache.getOrTune(a, [] { return recipe(3); });
+            (void)cache.getOrTune<Fp8RKSelection>(a, [] { return recipe(3); });
         } catch (const std::logic_error&) {
             rejected = true;
         }
@@ -105,10 +106,10 @@ void testRecursiveCacheDependencies() {
           "Same-thread same-key recursion must fail without creating a second flight");
     cache.clear();
     rejected = false;
-    selected = cache.getOrTune(a, [&] {
-        (void)cache.getOrTune(b, [&] {
+    selected = cache.getOrTune<Fp8RKSelection>(a, [&] {
+        (void)cache.getOrTune<Fp8RKSelection>(b, [&] {
             try {
-                (void)cache.getOrTune(a, [] { return recipe(3); });
+                (void)cache.getOrTune<Fp8RKSelection>(a, [] { return recipe(3); });
             } catch (const std::logic_error&) {
                 rejected = true;
             }
@@ -120,10 +121,10 @@ void testRecursiveCacheDependencies() {
           "Indirect same-thread A-to-B-to-A tuning cycle must fail");
     cache.clear();
     rejected = false;
-    selected = cache.getOrTune(a, [&] {
+    selected = cache.getOrTune<Fp8RKSelection>(a, [&] {
         cache.clear(); // active callback still owns the old generation
         try {
-            (void)cache.getOrTune(a, [] { return recipe(7); });
+            (void)cache.getOrTune<Fp8RKSelection>(a, [] { return recipe(7); });
         } catch (const std::logic_error&) {
             rejected = true;
         }
@@ -131,33 +132,33 @@ void testRecursiveCacheDependencies() {
     });
     check(rejected && selected.winner_index == 8 && cache.size() == 0,
           "Cache clear during tune must not permit recursive self-dependency");
-    check(cache.getOrTune(a, [] { return recipe(9); }).winner_index == 9,
+    check(cache.getOrTune<Fp8RKSelection>(a, [] { return recipe(9); }).winner_index == 9,
           "Old generation must not prevent a later fresh selection");
     bool failed = false;
     cache.clear();
     try {
-        (void)cache.getOrTune(a, []() -> Fp8RKSelection {
+        (void)cache.getOrTune<Fp8RKSelection>(a, []() -> Fp8RKSelection {
             throw std::runtime_error("measurement failed");
         });
     } catch (const std::runtime_error&) {
         failed = true;
     }
     check(failed && cache.size() == 0 &&
-          cache.getOrTune(a, [] { return recipe(11); }).winner_index == 11,
+          cache.getOrTune<Fp8RKSelection>(a, [] { return recipe(11); }).winner_index == 11,
           "Failed tuning must be uncached and retryable");
 }
 
 void testPerDeviceSerializationAndNonblockingHits() {
-    Fp8RKSelectionCache cache;
+    DenseReductionSelectionCache cache;
     auto a = keyFor(51), b = keyFor(52), hit = keyFor(53);
-    (void)cache.getOrTune(hit, [] { return recipe(5); });
+    (void)cache.getOrTune<Fp8RKSelection>(hit, [] { return recipe(5); });
     std::promise<void> first_entered, first_release, second_started, second_entered;
     auto first_entered_f = first_entered.get_future();
     auto first_gate = first_release.get_future().share();
     auto second_started_f = second_started.get_future();
     auto second_entered_f = second_entered.get_future();
     auto first = std::async(std::launch::async, [&] {
-        return cache.getOrTune(a, [&] {
+        return cache.getOrTune<Fp8RKSelection>(a, [&] {
             ScopedReductionGpuMeasurement measurement(0);
             first_entered.set_value();
             first_gate.wait();
@@ -166,7 +167,7 @@ void testPerDeviceSerializationAndNonblockingHits() {
     });
     ready(first_entered_f, "First contest did not enter its GPU timing window");
     auto second = std::async(std::launch::async, [&] {
-        return cache.getOrTune(b, [&] {
+        return cache.getOrTune<Fp8RKSelection>(b, [&] {
             // Dependency-selection/CPU preparation is outside the mutex.
             second_started.set_value();
             ScopedReductionGpuMeasurement measurement(0);
@@ -178,7 +179,7 @@ void testPerDeviceSerializationAndNonblockingHits() {
     check(second_entered_f.wait_for(25ms) == std::future_status::timeout,
           "Same-device measurement contests overlapped");
     // This hit must not wait for the unrelated still-held GPU measurement lock.
-    auto fast_hit = cache.getOrTune(hit, []() -> Fp8RKSelection {
+    auto fast_hit = cache.getOrTune<Fp8RKSelection>(hit, []() -> Fp8RKSelection {
         throw std::logic_error("Cache hit unexpectedly retuned while GPU was busy");
     });
     check(fast_hit.winner_index == 5, "Unrelated cache hit stalled or changed");
@@ -214,14 +215,14 @@ void testIndependentGpus() {
 }
 
 void testSameKeySingleFlight() {
-    Fp8RKSelectionCache cache;
+    DenseReductionSelectionCache cache;
     const auto key = keyFor(71);
     std::promise<void> started, release;
     auto started_f = started.get_future();
     auto gate = release.get_future().share();
     std::atomic<int> calls{0};
     auto leader = std::async(std::launch::async, [&] {
-        return cache.getOrTune(key, [&] {
+        return cache.getOrTune<Fp8RKSelection>(key, [&] {
             ++calls;
             started.set_value();
             gate.wait();
@@ -233,7 +234,7 @@ void testSameKeySingleFlight() {
     std::vector<std::future<Fp8RKSelection>> waiters;
     for (int i = 0; i < 8; ++i) {
         waiters.push_back(std::async(std::launch::async, [&] {
-            return cache.getOrTune(key, [&] {
+            return cache.getOrTune<Fp8RKSelection>(key, [&] {
                 ++calls;
                 return recipe(99);
             });
@@ -241,7 +242,7 @@ void testSameKeySingleFlight() {
     }
     // Independently launched callers may observe either the in-flight tune
     // or the freshly populated cache; neither may run a second tune.
-    // Clear/new-flight races are covered by Fp8RKSelectionCacheSmoke.
+    // Clear/new-flight races are covered by DenseReductionSelectionCacheTest (thor_tests).
     release.set_value();
     check(ready(leader, "Leader did not finish").winner_index == 3, "Wrong leader selection");
     for (auto& waiter : waiters)

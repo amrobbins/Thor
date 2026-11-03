@@ -91,6 +91,27 @@ TEST(CubDenseRKFamily, KParallelOccupancyCreditsUsefulWarpsButChargesIdleWarpsFo
     expectModernOnePass(*plan);
 }
 
+// 1138: with flat packet ownership (1136) a wider packet no longer leaves CTA lanes idle at narrow K, so shallow FP32
+// continuations take the widest legal packet (1137 audit: K = 8 and K = 32 chose scalar packets at 2 shards).
+TEST(CubDenseRKFamily, ShallowNarrowFp32KParallelUsesWidestLegalPacket) {
+    struct Case {
+        uint64_t outer, r, k;
+        size_t packet_bytes;
+    };
+    for (const Case c : {Case{262144, 2, 8, 16}, Case{56174, 2, 32, 16}, Case{163414, 2, 14, 8}, Case{74898, 3, 28, 16},
+                         Case{99864, 2, 21, 4}}) {
+        SCOPED_TRACE(::testing::Message() << "outer=" << c.outer << " R=" << c.r << " K=" << c.k);
+        const DenseReductionProblem problem = valueProblem({c.outer, c.r, c.k}, {1});
+        const DenseReductionCandidate candidate =
+            ReducersDenseRK::propose(problem, {1}, context(DataType::FP32));
+        const auto plan = rkPlan(candidate);
+        ASSERT_NE(plan, nullptr);
+        EXPECT_EQ(plan->strategy, DenseRKStrategy::KParallel);
+        EXPECT_EQ(plan->progress, DenseRKProgress::Complete);
+        EXPECT_EQ(plan->packet_bytes, c.packet_bytes);
+    }
+}
+
 TEST(CubDenseRKFamily, KParallelUsefulResidentCapacityRemainsBoundedByPhysicalCtaOccupancy) {
     // The same three-useful-warps/four-physical-warps CTA repeated over many outputs makes the residency distinction
     // observable. With one SM in the deterministic fallback, 128-thread CTAs admit 12 physical resident blocks:
