@@ -138,6 +138,11 @@ struct DenseRKPlanningContext {
     bool allow_generic_rk_fallback = false;
 };
 
+// 1227 (plans/Thor_FP32_Dense_Reduction_Plan, phase 9): production never asks these ordinary families for a site that
+// reads FP32 (original FP32 input or any FP32 intermediate): selectDensePhysicalPass sends those to the retained FP32
+// selectors. Their FP32 code is not cut out of the kernels they share with FP16 / BF16; it goes with them when FP16 /
+// BF16 convert and these families retire. Host-only tests still reach it through proposal_override.
+
 /** Whole-domain [R] -> scalar direct reducer family. */
 class ReducersDenseR {
    public:

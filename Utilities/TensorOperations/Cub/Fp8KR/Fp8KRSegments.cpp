@@ -227,7 +227,7 @@ std::array<float, FP8_KR_RANKER_FEATURES> fp8KRRankerFeatures(const Fp8KRPoolEnt
     const double threads = static_cast<double>(shapeThreads(shape));
     const double blocks = static_cast<double>(shapeBlocks(shape));
     const double lane_bytes = family == Fp8KRFamily::Pack ? shape.rows_per_thread * row_bytes : chunk / lanes;
-    const double output_bytes = rows * (site.kind == 2 ? 8.0 : 4.0);
+    const double output_bytes = rows * (site.kind == 2 || site.kind == 4 ? 8.0 : 4.0);  // 1215: kind 4 too
     const std::array<double, FP8_KR_RANKER_FEATURES> f{
         log2Of(rows),
         log2Of(row_bytes),
@@ -278,6 +278,58 @@ std::vector<Fp8KRSegmentShape> fp8KRRankedShapes(uint64_t rows, uint64_t row_byt
                      [](const auto& a, const auto& b) { return a.first > b.first; });
     for (size_t i = 0; i < scored.size() && result.size() < count; ++i) result.push_back(pool[scored[i].second].shape);
     return result;
+}
+
+bool retainedKRShapeLegalForElement(const Fp8KRSegmentShape& shape, uint32_t element_bytes) {
+    if (element_bytes != 1 && element_bytes != 4) return false;
+    if (!fp8KRSegmentShapeLegal(shape) || shape.row_bytes % element_bytes != 0) return false;
+    return element_bytes == 1 || !shape.vector;
+}
+
+bool fp32KRArgShapeLegal(const Fp8KRSegmentShape& shape) {
+    return retainedKRShapeLegalForElement(shape, 4) &&
+           (shape.family() != Fp8KRFamily::Split || shape.chunk_bytes <= FP32_KR_ARG_MAX_CHUNK_BYTES);
+}
+
+namespace {
+void requireWholeElements(uint64_t row_bytes, uint32_t element_bytes) {
+    if ((element_bytes != 1 && element_bytes != 4) || row_bytes % element_bytes != 0)
+        throw std::invalid_argument("Retained KR rows must be whole elements of 1 or 4 bytes");
+}
+}  // namespace
+
+std::vector<Fp8KRSegmentShape> retainedKRCandidateShapes(uint64_t rows, uint64_t row_bytes, uint32_t multiprocessors,
+                                                         uint32_t element_bytes) {
+    requireWholeElements(row_bytes, element_bytes);
+    std::vector<Fp8KRSegmentShape> shapes = fp8KRCandidateShapes(rows, row_bytes, multiprocessors);
+    std::erase_if(shapes, [&](const Fp8KRSegmentShape& shape) {
+        return !retainedKRShapeLegalForElement(shape, element_bytes);
+    });
+    if (element_bytes == 4 && !shapes.empty()) {
+        // 1180: FP32 rows of at least 64 KiB with at least one row per SM list Block second. The 1179 sweep: 512 rows
+        // of 64 KiB ran Block at 1.57 TB/s against the list's best 1.47 (Split), 512 rows of 256 KiB 1.65 against
+        // 1.64; FP8's list leads with Block only below 64 KiB and lists none above.
+        const Fp8KRSegmentShape block{rows, row_bytes, row_bytes, FP8_KR_THREADS, 1, false};
+        if (rows >= std::max<uint32_t>(multiprocessors, 1) && row_bytes >= FP32_KR_BLOCK_SECOND_ROW_BYTES &&
+            retainedKRShapeLegalForElement(block, 4) && std::find(shapes.begin(), shapes.end(), block) == shapes.end())
+            shapes.insert(shapes.begin() + 1, block);
+    }
+    return shapes;
+}
+
+std::vector<Fp8KRPoolEntry> retainedKRCandidatePool(uint64_t rows, uint64_t row_bytes, uint32_t multiprocessors,
+                                                    uint32_t element_bytes) {
+    // The element's list (positions 1..n), then FP8's other pool shapes legal for the element, in FP8's pool order.
+    const std::vector<Fp8KRSegmentShape> listed =
+        retainedKRCandidateShapes(rows, row_bytes, multiprocessors, element_bytes);
+    std::vector<Fp8KRPoolEntry> pool;
+    for (size_t i = 0; i < listed.size(); ++i) pool.push_back({listed[i], static_cast<uint32_t>(i + 1)});
+    for (const Fp8KRPoolEntry& entry : fp8KRCandidatePool(rows, row_bytes, multiprocessors)) {
+        if (!retainedKRShapeLegalForElement(entry.shape, element_bytes)) continue;
+        if (std::find(listed.begin(), listed.end(), entry.shape) != listed.end()) continue;
+        pool.push_back({entry.shape, 0});
+    }
+    return pool;
 }
 
 }  // namespace ThorImplementation::CubReductionInternal::Fp8KR

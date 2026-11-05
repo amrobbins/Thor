@@ -10,6 +10,22 @@
 //     (R >= bytes gives a pure R site of that size), so odd rows and odd sizes are covered;
 //   - --semantics cells per geometry alternate VALUE (sum, l1_norm, sum_squares, product, min, max; FP32 output) and
 //     ARG (argmin, argmax; UINT32 index, with or without the FP32 value), with a sampled dtype (E4M3 / E5M2);
+//   - 1179 --dtypes=fp32 (alone or with the FP8 dtypes): FP32 VALUE cells on the same kernels
+//     (launchFp32KRValueSegments, not yet routed in production) and the FP32 pool (retainedKRCandidatePool at element size 4). An FP32 cell takes
+//     its geometry's row length in elements (R = the grid's row length, row bytes 4 R; a pure R site keeps its bytes)
+//     and a quarter of its rows, so it reads about the same bytes as an FP8 cell; the grid's short rows (R = 2..8)
+//     are the generic Pack measurement on short FP32 rows that decides whether vector Pack is ported. 1181: FP32 ARG
+//     cells too (launchFp32KRArgSegments, the FP32 ARG pool: fp32KRArgShapeLegal). Shape names and columns other than
+//     R are in bytes; input_bytes = 4 K R; the ranker features are FP8's (FP32's ranker comes in phase 4);
+//   - 1217 --carried-index=uint32|uint64 (with --dtypes=fp32 and ARG operations only): the ARG cells are carried-index
+//     (intermediate) sites, kinds carried_arg_index / carried_arg_value_index: FP32 values plus a cold carried index
+//     of that width (each launch reads its own view of both), timed through launchFp32KRCarriedArgSegments at row
+//     stride 1 (an original run); the pool is the FP32 ARG pool, the ranker site kind 3 / 4. A carried cell takes an
+//     FP32 cell's geometry with rows (or a pure R site's elements) scaled by 4 / (4 + index bytes), so its working set
+//     (values and index) is the FP32 cell's; input_bytes and moved_tbps count the index. No production stamp (the
+//     planner does not route carried sites to the retained kernels yet).
+//   - 1217: every row carries frozen_margin, the installed ranker's margin for the candidate (FP32's model for FP32
+//     cells, FP8's otherwise), so the installed model's regret on new cells is measured without retraining.
 //   - a seeded shuffle, so any --max-cells prefix samples the whole grid; cell ids keep the grid order;
 //   - heldout marks --heldout-percent of row lengths R (every size and semantics of a held-out R together).
 //
@@ -56,6 +72,8 @@
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 #include "Utilities/TensorOperations/Cub/CubReductionStageSemantics.h"
+#include "Utilities/TensorOperations/Cub/Fp32KR/Fp32KRRankerModel.h"
+#include "Utilities/TensorOperations/Cub/Fp8KR/Fp8KRRankerModel.h"
 #include "Utilities/TensorOperations/Cub/Fp8KR/Fp8KRSegments.h"
 #include "Utilities/Common/ScopedGpu.h"
 
@@ -105,10 +123,19 @@ using B::ColdTiming::Ring;
 using B::ColdTiming::TimingEvent;
 using B::ColdTiming::viewCount;
 
-enum class Kind : uint8_t { Value, ArgIndex, ArgValueIndex };
+enum class Kind : uint8_t { Value, ArgIndex, ArgValueIndex, CarriedArgIndex, CarriedArgValueIndex };
 const char* kindName(Kind kind) {
-    return kind == Kind::Value ? "value" : kind == Kind::ArgIndex ? "arg_index" : "arg_value_index";
+    switch (kind) {
+        case Kind::Value: return "value";
+        case Kind::ArgIndex: return "arg_index";
+        case Kind::ArgValueIndex: return "arg_value_index";
+        case Kind::CarriedArgIndex: return "carried_arg_index";  // 1217
+        case Kind::CarriedArgValueIndex: return "carried_arg_value_index";
+    }
+    return "unknown";
 }
+bool isCarried(Kind kind) { return kind == Kind::CarriedArgIndex || kind == Kind::CarriedArgValueIndex; }
+bool producesValue(Kind kind) { return kind == Kind::ArgValueIndex || kind == Kind::CarriedArgValueIndex; }
 
 struct ValueOp {
     const char* name;
@@ -144,6 +171,7 @@ struct Settings {
     double interval_us = 1000.0;
     uint64_t max_launches = 256;
     size_t queue_cells = 128;
+    std::optional<T::DataType> carried_index;  // 1217 --carried-index=uint32|uint64
 };
 
 std::vector<std::string> splitList(std::string_view text) {
@@ -201,7 +229,8 @@ Settings parse(int argc, char** argv) {
             for (const std::string& d : splitList(*v)) {
                 if (d == "fp8_e4m3") s.dtypes.push_back(T::DataType::FP8_E4M3);
                 else if (d == "fp8_e5m2") s.dtypes.push_back(T::DataType::FP8_E5M2);
-                else throw std::invalid_argument("--dtypes takes fp8_e4m3,fp8_e5m2");
+                else if (d == "fp32") s.dtypes.push_back(T::DataType::FP32);  // 1179
+                else throw std::invalid_argument("--dtypes takes fp8_e4m3,fp8_e5m2,fp32");
             }
         } else if (auto v = value("--ops=")) {
             s.ops = splitList(*v);
@@ -226,19 +255,32 @@ Settings parse(int argc, char** argv) {
             s.max_launches = std::max<uint64_t>(1, std::stoull(*v));
         } else if (auto v = value("--queue-cells=")) {
             s.queue_cells = std::max<size_t>(1, std::stoull(*v));
+        } else if (a == "--carried-index=uint32") {
+            s.carried_index = T::DataType::UINT32;
+        } else if (a == "--carried-index=uint64") {
+            s.carried_index = T::DataType::UINT64;
         } else if (a == "--help") {
             std::cout << "thor_fp8_kr_training_sweep [--max-cells=N] [--seed=1151] [--random=3000] [--semantics=2]\n"
                          "    [--heldout-percent=10] [--targets-mib=8,32,128,512] [--min-kib=4096 | --min-mib=4]\n"
                          "    [--max-mib=512]\n"
-                         "    [--samples=5] [--dtypes=fp8_e4m3,fp8_e5m2] [--ops=sum,...,argmax] [--list-only]\n"
+                         "    [--samples=5] [--dtypes=fp8_e4m3,fp8_e5m2[,fp32]] [--ops=sum,...,argmax] [--list-only]\n"
                          "    [--no-production] [--split-stages] [--floor-us=4] [--arena-gib=8]\n"
-                         "    [--output-ring-gib=3] [--interval-us=1000] [--max-launches=256] [--queue-cells=128]\n";
+                         "    [--output-ring-gib=3] [--interval-us=1000] [--max-launches=256] [--queue-cells=128]\n"
+                         "    [--carried-index=uint32|uint64]  (1217; with --dtypes=fp32 --ops=argmin,argmax)\n";
             std::exit(0);
         } else {
             throw std::invalid_argument("Unknown argument " + std::string(a));
         }
     }
     if (s.dtypes.empty()) throw std::invalid_argument("--dtypes is empty");
+    if (s.carried_index) {
+        const bool fp32_only = s.dtypes.size() == 1 && s.dtypes.front() == T::DataType::FP32;
+        const bool arg_only = !s.ops.empty() && std::all_of(s.ops.begin(), s.ops.end(), [](const std::string& op) {
+            return op == "argmin" || op == "argmax";
+        });
+        if (!fp32_only || !arg_only)
+            throw std::invalid_argument("--carried-index runs with --dtypes=fp32 and --ops=argmin,argmax only");
+    }
     if (s.min_bytes < 4 * KiB || s.min_bytes > s.max_mib * MiB)
         throw std::invalid_argument("need 4 KiB <= --min-kib (or --min-mib) <= --max-mib");
     if (s.arena_bytes < 4 * s.max_mib * MiB)
@@ -246,7 +288,12 @@ Settings parse(int argc, char** argv) {
     return s;
 }
 
-const char* dtypeName(T::DataType dtype) { return dtype == T::DataType::FP8_E5M2 ? "fp8_e5m2" : "fp8_e4m3"; }
+const char* dtypeName(T::DataType dtype) {
+    if (dtype == T::DataType::FP32) return "fp32";
+    return dtype == T::DataType::FP8_E5M2 ? "fp8_e5m2" : "fp8_e4m3";
+}
+uint32_t elementBytes(T::DataType dtype) { return dtype == T::DataType::FP32 ? 4 : 1; }
+uint64_t indexBytes(T::DataType dtype) { return dtype == T::DataType::UINT64 ? 8 : 4; }
 
 uint64_t mix(uint64_t x) {  // splitmix64 finalizer: deterministic across platforms
     x += 0x9E3779B97F4A7C15ULL;
@@ -257,7 +304,7 @@ uint64_t mix(uint64_t x) {  // splitmix64 finalizer: deterministic across platfo
 double unit(uint64_t h) { return static_cast<double>(h >> 11) * (1.0 / 9007199254740992.0); }
 
 struct Geometry {
-    uint64_t rows, r, target_mib;  // target_mib 0: a random geometry
+    uint64_t rows, r, target_mib;  // target_mib 0: a random geometry; r in elements of the cell's dtype (1179)
     bool random;
 };
 
@@ -322,11 +369,27 @@ std::vector<CellSpec> cells(const Settings& s) {
         for (uint32_t j = 0; j < s.semantics_per_geometry; ++j) {
             const uint64_t h = mix(mix(s.seed) ^ mix(g.rows * 0x9E3779B1ULL ^ g.r * 0x85EBCA77ULL) ^ j);
             CellSpec c{id, g, heldout, Kind::Value, s.dtypes[mix(h ^ 11) % s.dtypes.size()], ""};
+            const bool fp32 = c.dtype == T::DataType::FP32;
+            if (fp32) {
+                // 1179: R elements of 4 bytes and a quarter of the rows (a pure R site keeps its bytes).
+                if (g.rows == 1) {
+                    c.geometry.r = std::max<uint64_t>(1, g.r / 4);
+                } else {
+                    c.geometry.rows = std::max<uint64_t>(1, g.rows / 4);
+                }
+            }
             const bool want_arg = (j % 2) == 1;
             if ((want_arg && !arg_ops.empty()) || value_ops.empty()) {
                 if (arg_ops.empty()) continue;
                 c.kind = (mix(h ^ 13) & 1) ? Kind::ArgValueIndex : Kind::ArgIndex;
                 c.operation = arg_ops[mix(h ^ 17) % arg_ops.size()];
+                if (s.carried_index && fp32) {
+                    // 1217: a carried site; the values and index together fill the FP32 cell's working set.
+                    c.kind = c.kind == Kind::ArgValueIndex ? Kind::CarriedArgValueIndex : Kind::CarriedArgIndex;
+                    const uint64_t element = 4 + indexBytes(*s.carried_index);
+                    if (c.geometry.rows == 1) c.geometry.r = std::max<uint64_t>(1, c.geometry.r * 4 / element);
+                    else c.geometry.rows = std::max<uint64_t>(1, c.geometry.rows * 4 / element);
+                }
             } else {
                 c.operation = value_ops[mix(h ^ 19) % value_ops.size()];
             }
@@ -371,12 +434,14 @@ struct Candidate {
     bool partials_only = false;  // 1155 --split-stages: the Split partial kernel alone (variant=partials)
 };
 
-std::vector<Candidate> candidates(uint64_t rows, uint64_t r, uint32_t sms, const Settings& s) {
+std::vector<Candidate> candidates(uint64_t rows, uint64_t row_bytes, uint32_t element_bytes, bool arg, uint32_t sms,
+                                  const Settings& s) {
     // 1158: production's pool (fp8KRCandidatePool: the heuristic list, then the legal shapes around it), so the
     // ranker trains on exactly the candidates it ranks; --list-only keeps the heuristic list.
     std::vector<Candidate> result;
-    for (const KR::Fp8KRPoolEntry& entry : KR::fp8KRCandidatePool(rows, r, sms)) {
+    for (const KR::Fp8KRPoolEntry& entry : KR::retainedKRCandidatePool(rows, row_bytes, sms, element_bytes)) {
         if (s.list_only && entry.list_position == 0) continue;
+        if (arg && element_bytes == 4 && !KR::fp32KRArgShapeLegal(entry.shape)) continue;
         result.push_back({entry.shape, entry.list_position});
     }
     if (s.split_stages) {
@@ -388,7 +453,13 @@ std::vector<Candidate> candidates(uint64_t rows, uint64_t r, uint32_t sms, const
 }
 
 uint64_t outputFootprint(Kind kind, uint64_t rows) {
-    return kind == Kind::ArgValueIndex ? align256(4 * rows) + 4 * rows : 4 * rows;
+    return producesValue(kind) ? align256(4 * rows) + 4 * rows : 4 * rows;
+}
+
+// The Split scratch a shape needs at a cell of this kind (1217: carried shapes write wide partials).
+uint64_t scratchBytes(const KR::Fp8KRSegmentShape& shape, Kind kind) {
+    if (isCarried(kind)) return C::fp32KRCarriedArgScratchBytes(shape);
+    return KR::fp8KRScratchBytes(shape, kind != Kind::Value);
 }
 
 struct Timed {
@@ -402,6 +473,7 @@ struct Timed {
 struct Cell {
     CellSpec spec;
     std::vector<T::Tensor> inputs;
+    std::vector<T::Tensor> carried;  // 1217: one carried index view per input view (carried cells)
     std::vector<std::optional<T::Tensor>> values, indices;
     std::optional<C::CubReductionStageSemantics> semantics;
     bool maximum = false;
@@ -439,8 +511,9 @@ int main(int argc, char** argv) {
         for (uint64_t n = 0; n < total; ++n) {
             const CellSpec& spec = specs[n];
             max_output = std::max(max_output, outputFootprint(spec.kind, spec.geometry.rows));
-            for (const Candidate& c : candidates(spec.geometry.rows, spec.geometry.r, sms, settings))
-                max_scratch = std::max(max_scratch, KR::fp8KRScratchBytes(c.shape, spec.kind != Kind::Value));
+            for (const Candidate& c : candidates(spec.geometry.rows, spec.geometry.r * elementBytes(spec.dtype),
+                                                 elementBytes(spec.dtype), spec.kind != Kind::Value, sms, settings))
+                max_scratch = std::max(max_scratch, scratchBytes(c.shape, spec.kind));
         }
         const uint64_t output_ring_bytes = std::max(settings.output_ring_bytes, Ring::span(max_output) + 256);
         Ring inputs(placement, settings.arena_bytes);
@@ -454,13 +527,16 @@ int main(int argc, char** argv) {
         const uint64_t copy_bytes = 256 * MiB;
         const double bandwidth = copyBandwidth(inputs, outputs, stream, copy_bytes);
         uint64_t max_moved = 4 * MiB;
-        for (uint64_t n = 0; n < total; ++n)
-            max_moved = std::max(max_moved,
-                                 specs[n].geometry.rows * (specs[n].geometry.r +
-                                                           (specs[n].kind == Kind::ArgValueIndex ? 8 : 4)));
+        const uint64_t carried_element_bytes = settings.carried_index ? indexBytes(*settings.carried_index) : 0;
+        for (uint64_t n = 0; n < total; ++n) {
+            const uint64_t element =
+                elementBytes(specs[n].dtype) + (isCarried(specs[n].kind) ? carried_element_bytes : 0);
+            max_moved = std::max(max_moved, specs[n].geometry.rows * (specs[n].geometry.r * element +
+                                                                      (producesValue(specs[n].kind) ? 8 : 4)));
+        }
         const CopyCurve curve = copyCurve(inputs, outputs, stream, max_moved, settings.interval_us);
 
-        std::cout << "# fp8_kr_training=1 version=1158 method=ring_batched seed=" << settings.seed
+        std::cout << "# fp8_kr_training=1 version=1217 method=ring_batched seed=" << settings.seed
                   << " random_geometries=" << settings.random
                   << " semantics_per_geometry=" << settings.semantics_per_geometry
                   << " heldout_percent=" << settings.heldout_percent << " cells=" << total
@@ -477,7 +553,10 @@ int main(int argc, char** argv) {
                   << " l2_bytes=" << l2_bytes << " copy_bandwidth_tbps=" << std::fixed << std::setprecision(4)
                   << bandwidth / 1e6 << " floor_us=" << settings.floor_us
                   << " value_output=fp32 arg_index=uint32 arg_value=fp32 min_kib=" << settings.min_bytes / KiB
-                  << " max_mib=" << settings.max_mib << " targets_mib=";
+                  << " max_mib=" << settings.max_mib << " carried_index="
+                  << (!settings.carried_index ? "none"
+                      : *settings.carried_index == T::DataType::UINT64 ? "uint64" : "uint32")
+                  << " frozen_margin=1 targets_mib=";
         for (size_t i = 0; i < settings.targets_mib.size(); ++i) std::cout << (i ? "," : "") << settings.targets_mib[i];
         std::cout << " copy_curve_moved_mib_us=";
         for (size_t i = 0; i < curve.points.size(); ++i)
@@ -490,7 +569,7 @@ int main(int argc, char** argv) {
                      "abandoned,probe_us,median_us,min_us,reference_us,copy_us,moved_tbps,read_tbps";
         for (int i = 0; i < settings.samples; ++i) std::cout << ",sample" << i << "_us";
         for (size_t i = 0; i < KR::FP8_KR_RANKER_FEATURES; ++i) std::cout << ",f" << i;
-        std::cout << '\n';
+        std::cout << ",frozen_margin\n";
 
         const int passes = settings.samples;
         B::Fp8OracleBatchQueue queue(settings.queue_cells, passes, [&] { stream.synchronize(); });
@@ -503,13 +582,25 @@ int main(int argc, char** argv) {
             const KR::Fp8KRSplitStages stages = cell.candidates[index].candidate.partials_only
                 ? KR::Fp8KRSplitStages::PartialsOnly : KR::Fp8KRSplitStages::Both;
             const bool is_value = cell.spec.kind == Kind::Value;
-            const uint64_t scratch_bytes = KR::fp8KRScratchBytes(shape, !is_value);
+            const uint64_t scratch_bytes = scratchBytes(shape, cell.spec.kind);
             void* partials = scratch_bytes != 0 ? scratch_ptr : nullptr;
-            const T::Tensor& in = cell.inputs[cell.next_input++ % cell.inputs.size()];
+            const size_t view = cell.next_input++ % cell.inputs.size();
+            const T::Tensor& in = cell.inputs[view];
             const size_t out = cell.next_output++ % cell.values.size();
-            if (is_value) {
+            if (isCarried(cell.spec.kind)) {
+                C::launchFp32KRCarriedArgSegments(in, cell.carried[view],
+                                                  cell.values[out] ? &*cell.values[out] : nullptr,
+                                                  &*cell.indices[out], shape, partials, scratch_bytes, cell.maximum, 1,
+                                                  stream, stages);
+            } else if (is_value && cell.spec.dtype == T::DataType::FP32) {
+                C::launchFp32KRValueSegments(*cell.semantics, in, *cell.values[out], shape, partials, scratch_bytes,
+                                             1.0f, stream, stages);
+            } else if (is_value) {
                 C::launchFp8KRValueSegments(*cell.semantics, in, *cell.values[out], shape, partials, scratch_bytes,
                                             1.0f, stream, stages);
+            } else if (cell.spec.dtype == T::DataType::FP32) {
+                C::launchFp32KRArgSegments(in, cell.values[out] ? &*cell.values[out] : nullptr, &*cell.indices[out],
+                                           shape, partials, scratch_bytes, cell.maximum, 1, stream, stages);
             } else {
                 C::launchFp8KRArgSegments(in, cell.values[out] ? &*cell.values[out] : nullptr, &*cell.indices[out],
                                           shape, partials, scratch_bytes, cell.maximum, 1, stream, stages);
@@ -518,7 +609,9 @@ int main(int argc, char** argv) {
 
         const auto print = [&](const Cell& cell) {
             const CellSpec& spec = cell.spec;
-            const uint64_t rows = spec.geometry.rows, r = spec.geometry.r, bytes = rows * r;
+            const uint64_t rows = spec.geometry.rows, r = spec.geometry.r;
+            const uint64_t bytes =
+                rows * r * (elementBytes(spec.dtype) + (isCarried(spec.kind) ? carried_element_bytes : 0));
             const double moved = static_cast<double>(cell.moved_bytes);
             for (size_t index = 0; index < cell.candidates.size(); ++index) {
                 const Timed& t = cell.candidates[index];
@@ -548,7 +641,7 @@ int main(int argc, char** argv) {
                           << cell.production << ','
                           << (!cell.production.empty() && cell.production == name ? 1 : 0) << ','
                           << std::setprecision(1) << cell.stamp_ms << ','
-                          << KR::fp8KRScratchBytes(shape, spec.kind != Kind::Value) << ',' << t.launches << ','
+                          << scratchBytes(shape, spec.kind) << ',' << t.launches << ','
                           << cell.inputs.size() << ',' << cell.values.size() << ',' << (t.abandoned ? 1 : 0) << ','
                           << std::setprecision(3) << t.probe_us << ',' << med << ',' << fastest << ','
                           << cell.reference_us << ',' << cell.copy_us << ',' << std::setprecision(4)
@@ -561,7 +654,10 @@ int main(int argc, char** argv) {
                                                               cell.ranker_site, sms);
                 std::cout << std::defaultfloat << std::setprecision(9);
                 for (float f : features) std::cout << ',' << f;
-                std::cout << std::fixed << std::setprecision(3) << '\n';
+                // 1217: the installed ranker's margin (FP32's model for FP32 cells).
+                const float frozen = spec.dtype == T::DataType::FP32 ? C::Fp32KR::Fp32KRRankerModel::margin(features)
+                                                                     : KR::Fp8KRRankerModel::margin(features);
+                std::cout << ',' << frozen << std::fixed << std::setprecision(3) << '\n';
                 if (t.abandoned) ++abandoned_candidates;
                 else ++timed_candidates;
             }
@@ -580,21 +676,28 @@ int main(int argc, char** argv) {
             auto cell = std::make_shared<Cell>();
             cell->spec = specs[n];
             const CellSpec& spec = cell->spec;
-            const uint64_t rows = spec.geometry.rows, r = spec.geometry.r, bytes = rows * r;
+            const uint64_t rows = spec.geometry.rows, r = spec.geometry.r, bytes = rows * r * elementBytes(spec.dtype);
             const bool is_value = spec.kind == Kind::Value;
+            const bool carried = isCarried(spec.kind);
+            const uint64_t carried_bytes = carried ? rows * r * carried_element_bytes : 0;
             try {
                 // Views: inputs spanning >= 2 GiB, outputs spanning >= 1 GiB (fewer when one alone is that big).
                 const uint64_t footprint = outputFootprint(spec.kind, rows);
-                const uint64_t index_offset = spec.kind == Kind::ArgValueIndex ? align256(4 * rows) : 0;
-                for (uint64_t v = 0, count = viewCount(bytes, INPUT_REUSE_BYTES, inputs.bytes()); v < count; ++v) {
+                const uint64_t index_offset = producesValue(spec.kind) ? align256(4 * rows) : 0;
+                for (uint64_t v = 0, count = viewCount(bytes + carried_bytes, INPUT_REUSE_BYTES, inputs.bytes());
+                     v < count; ++v) {
                     const uint64_t offset = inputs.take(bytes);
                     if (v == 0) cell->first_input = offset;
                     cell->inputs.push_back(inputs.view(spec.dtype, {rows, r}, offset));
+                    // 1217: the view's carried index (any values; the ring's bytes), taken right after the values.
+                    if (carried)
+                        cell->carried.push_back(
+                            inputs.view(*settings.carried_index, {rows, r}, inputs.take(carried_bytes)));
                 }
                 for (uint64_t v = 0, count = viewCount(footprint, OUTPUT_REUSE_BYTES, outputs.bytes()); v < count;
                      ++v) {
                     const uint64_t base = outputs.take(footprint);
-                    cell->values.push_back(spec.kind != Kind::ArgIndex
+                    cell->values.push_back(is_value || producesValue(spec.kind)
                         ? std::optional<T::Tensor>(outputs.view(T::DataType::FP32, {rows}, base)) : std::nullopt);
                     cell->indices.push_back(!is_value
                         ? std::optional<T::Tensor>(outputs.view(T::DataType::UINT32, {rows}, base + index_offset))
@@ -611,17 +714,18 @@ int main(int argc, char** argv) {
                 if (is_value) {
                     cell->ranker_site = C::fp8KRValueRankerSite(*cell->semantics, spec.dtype);
                 } else {
-                    cell->ranker_site.kind = spec.kind == Kind::ArgValueIndex ? 2 : 1;
+                    cell->ranker_site.kind =
+                        static_cast<uint8_t>((producesValue(spec.kind) ? 2 : 1) + (carried ? 2 : 0));
                     cell->ranker_site.combine = cell->maximum ? 3 : 2;
                     cell->ranker_site.e5m2 = spec.dtype == T::DataType::FP8_E5M2;
                 }
-                cell->moved_bytes = bytes + (spec.kind == Kind::ArgValueIndex ? 8 : 4) * rows;
+                cell->moved_bytes = bytes + carried_bytes + (producesValue(spec.kind) ? 8 : 4) * rows;
                 const double moved = static_cast<double>(cell->moved_bytes);
                 cell->reference_us = std::max(settings.floor_us, moved / bandwidth);
                 cell->copy_us = curve.us(moved);
 
                 // Production pick: the stamp a user gets at this site (its own autotune; the stamp is then dropped).
-                if (settings.production) {
+                if (settings.production && !carried) {
                     const bool is_r = rows == 1;
                     const std::vector<uint64_t> dims = is_r ? std::vector<uint64_t>{r} : std::vector<uint64_t>{rows, r};
                     const T::Tensor site = inputs.view(spec.dtype, dims, cell->first_input);
@@ -639,7 +743,7 @@ int main(int argc, char** argv) {
                                     passes_name += (passes_name.empty() ? "" : "+") + pass.family;
                         } else {
                             T::CubArgReductionOutputOptions options;
-                            options.produce_value = spec.kind == Kind::ArgValueIndex;
+                            options.produce_value = producesValue(spec.kind);
                             if (options.produce_value) options.value_output_dtype = T::DataType::FP32;
                             options.produce_index = true;
                             options.index_output_dtype = T::DataType::UINT32;
@@ -665,7 +769,8 @@ int main(int argc, char** argv) {
 
                 // Probe: an untimed launch of every candidate (loads every kernel before anything is timed), then a
                 // timed one, to abandon extra shapes far off line rate.
-                for (const Candidate& c : candidates(rows, r, sms, settings))
+                for (const Candidate& c : candidates(rows, r * elementBytes(spec.dtype), elementBytes(spec.dtype),
+                                                     !is_value, sms, settings))
                     cell->candidates.push_back({c, false, 0, 1, {}, {}});
                 if (cell->candidates.empty()) throw std::logic_error("no retained KR shape");
                 std::vector<std::unique_ptr<TimingEvent>> probe;

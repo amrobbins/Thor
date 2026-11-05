@@ -21,11 +21,17 @@ struct PhysicalKernel {
     uint32_t resident_ctas_per_sm = 0;
     uint64_t first_stage_ctas = 0;
     uint64_t first_stage_scratch_bytes = 0;
+    // 1178: input element width in bytes (FP8 1, FP32 4). The same geometry fields name different kernels at another
+    // width (a 16-byte packet holds 16 FP8 or 4 FP32 components), so identities of different widths never compare
+    // equal. Last, so existing positional initializers keep FP8's 1.
+    uint8_t element_bytes = 1;
 
     [[nodiscard]] bool staged() const { return first_stage_scratch_bytes != 0; }
     bool operator==(const PhysicalKernel&) const = default;
 };
 
+/** 1178: false for any element width without a retained inventory. 1192: FP8 (1) and FP32 (4) have one; the FP32
+ *  rules are in Fp8RKPhysicalIdentity.cpp. */
 [[nodiscard]] bool structurallyValid(const PhysicalKernel& kernel,
                                       uint64_t outer, uint64_t r, uint64_t k);
 

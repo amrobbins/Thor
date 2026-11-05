@@ -16,6 +16,7 @@ namespace ThorImplementation::CubReductionInternal {
  *
  * This descriptor intentionally contains neither Tensor/Stream ownership nor
  * selected FP32 continuation passes. The normal pass materializer owns launch resources.
+ * 1220: input_dtype FP32 (kernel.element_bytes 4) is a retained FP32 RK VALUE first stage at an FP32 site.
  */
 struct DenseRetainedFp8RKPhysicalPlan final : DenseReductionPhysicalPlan {
     Fp8RK::PhysicalKernel kernel{};
@@ -42,5 +43,15 @@ struct DenseRetainedFp8RKPhysicalPlan final : DenseReductionPhysicalPlan {
     const DenseReductionProblem& problem, DenseReductionSite site,
     const Fp8RK::PhysicalKernel& first_stage,
     const DensePhysicalSelectionContext& context);
+
+/**
+ * 1220: the same one-pass candidate for a retained FP32 RK VALUE first stage (element_bytes 4) at an FP32 site: original
+ * FP32 input, or an intermediate aggregate of any dtype's earlier passes (the reduced run original or intermediate).
+ * The plan's input_dtype is FP32; the role is the pass role (Complete / First on original input, Final / Intermediate
+ * on an intermediate).
+ */
+[[nodiscard]] DenseReductionCandidate makeRetainedFp32RKValueCandidate(const DenseReductionProblem& problem,
+                                                                      DenseReductionSite site,
+                                                                      const Fp8RK::PhysicalKernel& first_stage);
 
 }  // namespace ThorImplementation::CubReductionInternal

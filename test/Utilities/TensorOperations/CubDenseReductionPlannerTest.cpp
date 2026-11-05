@@ -1,4 +1,5 @@
 #include "Utilities/TensorOperations/Cub/DenseReductionPlanner.h"
+#include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Cub/DenseProductionPhysicalSelectionContext.h"
 #include "Utilities/Common/Stream.h"
 
@@ -64,10 +65,32 @@ DenseReductionPlannerContext plannerContext(DataType input_dtype = DataType::FP3
     };
 }
 
+DenseReductionCandidate ordinaryProposal(const DenseReductionProblem& problem,
+                                         DenseReductionSite site,
+                                         DenseReducerFamily family,
+                                         const DenseRKPlanningContext& rk,
+                                         void*) {
+    switch (family) {
+        case DenseReducerFamily::R: return ReducersDenseR::propose(problem, site);
+        case DenseReducerFamily::KR: return ReducersDenseKR::propose(problem, site);
+        case DenseReducerFamily::RK: return ReducersDenseRK::propose(problem, site, rk);
+    }
+    throw std::logic_error("Invalid family in the ordinary proposal fixture.");
+}
+
+// 1227: the planner's own logic (bounds, ordering, replanning, diagnostics) on a deterministic host-only fixture: the
+// ordinary families injected through proposal_override, FP32 included. Production sends FP32 sites to the retained
+// FP32 selectors, which time candidates on a GPU; the CubDensePhysicalSelector tests below cover that routing.
+DenseReductionPlannerContext ordinaryPlannerContext() {
+    DenseReductionPlannerContext context = plannerContext();
+    context.proposal_override = ordinaryProposal;
+    return context;
+}
+
 }  // namespace
 
 TEST(CubDenseReductionPlanner, PureRValueFastPathsDenseRAndFinishes) {
-    const DenseReductionPlan plan = planDenseReduction(valueProblem({257}, {0}), plannerContext());
+    const DenseReductionPlan plan = planDenseReduction(valueProblem({257}, {0}), ordinaryPlannerContext());
 
     ASSERT_EQ(plan.steps.size(), 1U);
     ASSERT_EQ(plan.steps[0].considered_candidates.size(), 1U);
@@ -78,7 +101,8 @@ TEST(CubDenseReductionPlanner, PureRValueFastPathsDenseRAndFinishes) {
 }
 
 TEST(CubDenseReductionPlanner, PureRArgUsesTheSameDenseRFastPath) {
-    const DenseReductionPlan plan = planDenseReduction(argProblem({257}, {0}, DataType::UINT64), plannerContext());
+    const DenseReductionPlan plan =
+        planDenseReduction(argProblem({257}, {0}, DataType::UINT64), ordinaryPlannerContext());
 
     ASSERT_EQ(plan.steps.size(), 1U);
     EXPECT_EQ(plan.steps[0].selected_candidate.family, DenseReducerFamily::R);
@@ -89,7 +113,7 @@ TEST(CubDenseReductionPlanner, PureRArgUsesTheSameDenseRFastPath) {
 TEST(CubDenseReductionPlanner, SmallestBoundFirstEvenWhenThatIsRKAndACompletePassEndsTheStep) {
     // Current R=8,K=3,R=5. Eliminating left RK leaves 3*5 values; eliminating trailing KR leaves 8*3 values.
     // 1167: RK has the smaller bound, so it is selected first; its pass completes the site, so KR is never selected.
-    const DenseReductionPlan plan = planDenseReduction(valueProblem({8, 3, 5}, {0, 2}), plannerContext());
+    const DenseReductionPlan plan = planDenseReduction(valueProblem({8, 3, 5}, {0, 2}), ordinaryPlannerContext());
 
     ASSERT_EQ(plan.steps.size(), 2U);
     ASSERT_EQ(plan.steps[0].site_bounds.size(), 2U);
@@ -106,7 +130,7 @@ TEST(CubDenseReductionPlanner, SmallestBoundFirstEvenWhenThatIsRKAndACompletePas
 }
 
 TEST(CubDenseReductionPlanner, EqualNextBytesPreferKROverRK) {
-    const DenseReductionPlan plan = planDenseReduction(valueProblem({5, 3, 5}, {0, 2}), plannerContext());
+    const DenseReductionPlan plan = planDenseReduction(valueProblem({5, 3, 5}, {0, 2}), ordinaryPlannerContext());
 
     ASSERT_FALSE(plan.steps.empty());
     ASSERT_EQ(plan.steps[0].site_bounds.size(), 2U);
@@ -119,7 +143,7 @@ TEST(CubDenseReductionPlanner, EqualNextBytesPreferKROverRK) {
 
 TEST(CubDenseReductionPlanner, EqualSameFamilyCandidatesUseStableSiteOrder) {
     // R=4,K=2,R=4,K=2: both current sites are RK and produce the same next byte count.
-    const DenseReductionPlan plan = planDenseReduction(valueProblem({4, 2, 4, 2}, {0, 2}), plannerContext());
+    const DenseReductionPlan plan = planDenseReduction(valueProblem({4, 2, 4, 2}, {0, 2}), ordinaryPlannerContext());
 
     ASSERT_FALSE(plan.steps.empty());
     ASSERT_EQ(plan.steps[0].site_bounds.size(), 2U);
@@ -133,7 +157,7 @@ TEST(CubDenseReductionPlanner, EqualSameFamilyCandidatesUseStableSiteOrder) {
 
 TEST(CubDenseReductionPlanner, AdjacentOriginalReductionAxesNormalizeBeforeFamilySelection) {
     // K R R K canonicalizes to K R K, therefore there is one RK site rather than competing KR/RK sites.
-    const DenseReductionPlan plan = planDenseReduction(valueProblem({2, 3, 5, 7}, {1, 2}), plannerContext());
+    const DenseReductionPlan plan = planDenseReduction(valueProblem({2, 3, 5, 7}, {1, 2}), ordinaryPlannerContext());
 
     ASSERT_EQ(plan.steps.size(), 1U);
     ASSERT_EQ(plan.steps[0].input_problem.runs.size(), 3U);
@@ -144,7 +168,7 @@ TEST(CubDenseReductionPlanner, AdjacentOriginalReductionAxesNormalizeBeforeFamil
 }
 
 TEST(CubDenseReductionPlanner, SelectedNextProblemIsReplannedFresh) {
-    const DenseReductionPlan plan = planDenseReduction(valueProblem({8, 3, 5}, {0, 2}), plannerContext());
+    const DenseReductionPlan plan = planDenseReduction(valueProblem({8, 3, 5}, {0, 2}), ordinaryPlannerContext());
 
     ASSERT_EQ(plan.steps.size(), 2U);
     EXPECT_EQ(plan.steps[0].selected_candidate.family, DenseReducerFamily::RK);
@@ -157,9 +181,11 @@ TEST(CubDenseReductionPlanner, SelectedNextProblemIsReplannedFresh) {
 }
 
 TEST(CubDenseReductionPlanner, ArgPayloadWidthParticipatesInNextBytesWithoutChangingTopology) {
-    const DenseReductionPlan value = planDenseReduction(valueProblem({8, 3, 5}, {0, 2}), plannerContext());
-    const DenseReductionPlan arg32 = planDenseReduction(argProblem({8, 3, 5}, {0, 2}, DataType::UINT32), plannerContext());
-    const DenseReductionPlan arg64 = planDenseReduction(argProblem({8, 3, 5}, {0, 2}, DataType::UINT64), plannerContext());
+    const DenseReductionPlan value = planDenseReduction(valueProblem({8, 3, 5}, {0, 2}), ordinaryPlannerContext());
+    const DenseReductionPlan arg32 =
+        planDenseReduction(argProblem({8, 3, 5}, {0, 2}, DataType::UINT32), ordinaryPlannerContext());
+    const DenseReductionPlan arg64 =
+        planDenseReduction(argProblem({8, 3, 5}, {0, 2}, DataType::UINT64), ordinaryPlannerContext());
 
     ASSERT_FALSE(value.steps.empty());
     ASSERT_FALSE(arg32.steps.empty());
@@ -185,7 +211,7 @@ TEST(CubDenseReductionPlanner, SingletonSemanticReductionStillPlansExactlyOnePas
 }
 
 TEST(CubDenseReductionPlanner, DiagnosticsReportEverySiteBoundAndEverySelectedCandidate) {
-    const DenseReductionPlan plan = planDenseReduction(valueProblem({8, 3, 5}, {0, 2}), plannerContext());
+    const DenseReductionPlan plan = planDenseReduction(valueProblem({8, 3, 5}, {0, 2}), ordinaryPlannerContext());
     const std::string diagnostics = formatDenseReductionPlanDiagnostics(plan);
 
     EXPECT_NE(diagnostics.find("family=RK"), std::string::npos);
@@ -299,17 +325,26 @@ DenseReductionCandidate recordedProposal(const DenseReductionProblem& problem,
 
 }  // namespace
 
-TEST(CubDensePhysicalSelector, DescriptorOnlyFP32MatchesEachOriginalProductionFamily) {
-    const DensePhysicalSelectionContext context = plannerContext();
-    for (const auto& problem : {
-             valueProblem({257}, {0}),
-             valueProblem({9, 257}, {1}),
-             valueProblem({8, 257, 64}, {1}),
-             valueProblem({2, 65536, 4}, {1}),
-             valueProblem({8, 3, 5}, {0, 2}),
-             valueProblem({8, 257, 64}, {1}, DataType::BF16),
-             argProblem({4, 257, 8}, {1}, DataType::UINT64),
-         }) {
+namespace {
+
+std::vector<DenseReductionProblem> originalSiteFixtures() {
+    return {
+        valueProblem({257}, {0}),
+        valueProblem({9, 257}, {1}),
+        valueProblem({8, 257, 64}, {1}),
+        valueProblem({2, 65536, 4}, {1}),
+        valueProblem({8, 3, 5}, {0, 2}),
+        valueProblem({8, 257, 64}, {1}, DataType::BF16),
+        argProblem({4, 257, 8}, {1}, DataType::UINT64),
+    };
+}
+
+}  // namespace
+
+// 1227: was DescriptorOnlyFP32MatchesEachOriginalProductionFamily; FP32 sites now go to the retained FP32 selectors.
+TEST(CubDensePhysicalSelector, DescriptorOnlyLowPrecisionMatchesEachOriginalProductionFamily) {
+    const DensePhysicalSelectionContext context = plannerContext(DataType::BF16);
+    for (const auto& problem : originalSiteFixtures()) {
         for (DenseReductionSite site : enumerateDenseReductionSites(problem)) {
             const auto selected = selectDensePhysicalPass(problem, site, context);
             const auto direct = directlyPropose(problem, site, context);
@@ -318,8 +353,21 @@ TEST(CubDensePhysicalSelector, DescriptorOnlyFP32MatchesEachOriginalProductionFa
     }
 }
 
-TEST(CubDensePhysicalSelector, StagedFP32UsesActualPhysicalOutputNotCompletedDimension) {
-    DensePhysicalSelectionContext context = plannerContext();
+// 1227: every FP32 site goes to the retained FP32 selectors, never the ordinary families: they time candidates, so a
+// host-only context (no tuning stream, operation or original size) is rejected rather than planned.
+TEST(CubDensePhysicalSelector, DescriptorOnlyFP32SitesGoToTheRetainedFp32Selectors) {
+    const DensePhysicalSelectionContext context = plannerContext();
+    for (const auto& problem : originalSiteFixtures()) {
+        for (DenseReductionSite site : enumerateDenseReductionSites(problem)) {
+            EXPECT_THROW(static_cast<void>(selectDensePhysicalPass(problem, site, context)), std::logic_error);
+        }
+    }
+}
+
+// 1227: was StagedFP32UsesActualPhysicalOutputNotCompletedDimension, on BF16 now; its FP32 continuation is the
+// retained FP32 selectors'.
+TEST(CubDensePhysicalSelector, StagedLowPrecisionUsesActualPhysicalOutputNotCompletedDimension) {
+    DensePhysicalSelectionContext context = plannerContext(DataType::BF16);
     // Exercise difficult deep-R/small-K geometries with the unchanged calibrated family policy.
     bool found_staged = false;
     for (uint64_t r : {4096ULL, 65536ULL, 262144ULL}) {
@@ -333,25 +381,21 @@ TEST(CubDensePhysicalSelector, StagedFP32UsesActualPhysicalOutputNotCompletedDim
                 EXPECT_TRUE(hasDenseReductionSites(selected.next_problem));
                 EXPECT_EQ(selected.next_problem.input_state, DenseReductionInputState::IntermediateAggregate);
                 EXPECT_EQ(selected.next_bytes, denseReductionProblemBytes(selected.next_problem));
-                // P1-C will follow this exact descriptor-only FP32 state. The shared selector works without
-                // allocating an intermediate Tensor or constructing a second production plan.
+                // The FP32 partials are the retained FP32 selectors' (they time on a GPU, so this host-only context
+                // is rejected), never the ordinary families'.
                 for (DenseReductionSite next_site : enumerateDenseReductionSites(selected.next_problem)) {
-                    const auto fp32 = selectDensePhysicalPass(selected.next_problem, next_site, context);
-                    expectSamePhysicalSelection(fp32, directlyPropose(selected.next_problem, next_site, context));
-                    if (const auto fp32_rk =
-                            std::dynamic_pointer_cast<const DenseRKFamilyPhysicalPlan>(fp32.physical_plan)) {
-                        EXPECT_EQ(fp32_rk->input_dtype, DataType::FP32);
-                    }
+                    EXPECT_THROW(static_cast<void>(selectDensePhysicalPass(selected.next_problem, next_site, context)),
+                                 std::logic_error);
                 }
             }
         }
     }
-    EXPECT_TRUE(found_staged) << "Fixture should cover at least one genuine staged FP32 RK selection.";
+    EXPECT_TRUE(found_staged) << "Fixture should cover at least one genuine staged BF16 RK selection.";
 }
 
 TEST(CubDensePhysicalSelector, ProductionOccupancyCallbackRetainsPerRequestUserState) {
     CountingOccupancy state;
-    DensePhysicalSelectionContext context = plannerContext();
+    DensePhysicalSelectionContext context = plannerContext(DataType::BF16);  // 1227: FP32 is the retained selectors'
     context.rk.occupancy_query = countingOccupancy;
     context.rk.occupancy_query_context = &state;
     const auto problem = valueProblem({8, 4096, 32}, {1});
@@ -394,8 +438,10 @@ TEST(CubDensePhysicalSelector, ProductionDeviceContextPreservesExactOccupancyAnd
         GTEST_SKIP() << "Exact production occupancy requires a CUDA GPU.";
     }
     Stream stream(0);
+    // 1227: BF16 (FP32 sites are the retained selectors'), with the original semantics a retained FP32 continuation
+    // of a staged BF16 pass needs.
     const DenseProductionPhysicalSelectionContext production_context(
-        DataType::FP32, DenseRKValueOperation::Sum, stream);
+        DataType::BF16, DenseRKValueOperation::Sum, stream, 4096, 1.0f, CubReductionOp::Sum);
     const auto& context = production_context.context();
     EXPECT_EQ(context.tuning_stream, &stream);
     EXPECT_EQ(context.gpu_ordinal, static_cast<uint32_t>(stream.getGpuNum()));

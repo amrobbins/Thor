@@ -103,8 +103,10 @@ Fp8RKSelection autotuneIsolatedRKSite(
     // A single, owning production context supplies the exact same FP32
     // occupancy and physical policy as ordinary dense planning. It remains
     // alive throughout every dependency selection (outside the GPU lock).
+    // 1220: with the original semantics and the tuning depth, which the retained FP32 routing requires.
     const DenseProductionPhysicalSelectionContext fp32_context(
-        representative_input.getDataType(), denseRKValueOperation(operation), stream);
+        representative_input.getDataType(), denseRKValueOperation(operation), stream, original_reduction_size,
+        output_scale, operation, workspace_budget_bytes, tuning_depth);
     std::vector<SelectedIsolatedBenchmark> executables;
     std::vector<ReductionAutotuning::Candidate> candidates;
     executables.reserve(ranked.size());

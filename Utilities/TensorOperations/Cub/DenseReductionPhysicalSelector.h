@@ -40,6 +40,10 @@ struct DensePhysicalSelectionContext {
     float output_scale = 1.0f;
     // 1141: retained FP8 RK autotuning depth (the reduction's CubReductionTuningDepth).
     CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular;
+    // 1222: the original input's base alignment in bytes (Tensor::alignmentBytes(16)); descriptor-only queries assume
+    // 16. The retained FP32 RK selectors keep only the passes that tolerate it at original-input sites (intermediates
+    // are fresh, aligned allocations).
+    uint64_t original_input_alignment_bytes = 16;
     ProposalOverride proposal_override = nullptr;
     void* proposal_override_context = nullptr;
 };
@@ -56,5 +60,19 @@ struct DensePhysicalSelectionContext {
 [[nodiscard]] DenseReductionCandidate selectDensePhysicalPass(const DenseReductionProblem& problem,
                                                                DenseReductionSite site,
                                                                const DensePhysicalSelectionContext& context);
+
+/**
+ * 1220 (plans/Thor_FP32_Dense_Reduction_Plan, phase 8): the retained FP32 routing. FP32 VALUE sites (original FP32
+ * input, and the FP32 intermediates of every dtype's earlier passes) are selected by the retained FP32 selectors
+ * (Fp32RK::selectCachedValueSite at RK sites, Fp32KR::selectCachedValueSite at R / KR sites) and run their retained
+ * passes, with no fallback: a site they cannot cover is a planning error. The context must carry the tuning stream,
+ * the original operation and the original reduction size. 1221: and FP32 ARG sites: original FP32 input
+ * (Fp32RK / Fp32KR::selectCachedArgSite) and carried-index intermediates of any dtype's earlier ARG passes
+ * (selectCachedCarriedArgSite); the planned dense ARG executor then runs FP32 ARG input too.
+ *
+ * 1225 / 1227 (phase 9): unconditional; the switch that ran the replaced paths is gone. The ordinary families
+ * (ReducersDenseR / KR / RK) are never asked for an FP32 site by selectDensePhysicalPass; only a test's
+ * proposal_override can still reach them with one.
+ */
 
 }  // namespace ThorImplementation::CubReductionInternal

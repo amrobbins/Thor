@@ -30,7 +30,9 @@ int main() {
             const auto semantics = C::makeValueReductionStageSemantics(CubReductionOp::Sum,
                                                                          C::DensePassRole::Complete, R);
             auto site = F::planIsolatedRKSite(problem, nominated, first, semantics);
-            C::DenseProductionPhysicalSelectionContext selector(dtype, C::DenseRKValueOperation::Sum, stream);
+            // 1229: with the original semantics the retained FP32 continuation selectors need (1225 / 1227).
+            C::DenseProductionPhysicalSelectionContext selector(dtype, C::DenseRKValueOperation::Sum, stream, R, 1.0f,
+                                                                CubReductionOp::Sum);
             const auto chain = F::selectIsolatedFp32Continuation(problem, nominated, site, selector.context());
             if (chain.fp32_passes.empty() ||
                 chain.first_stage_output_problem.runs[nominated.run_index].extent != 16 ||

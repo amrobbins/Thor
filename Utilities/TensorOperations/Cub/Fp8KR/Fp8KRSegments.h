@@ -119,8 +119,9 @@ struct Fp8KRPoolEntry {
 [[nodiscard]] std::vector<Fp8KRPoolEntry> fp8KRCandidatePool(uint64_t rows, uint64_t row_bytes,
                                                              uint32_t multiprocessors);
 
-/** The semantics a ranker sees. kind: 0 VALUE, 1 ARG index, 2 ARG value and index. combine: 0 SUM, 1 PRODUCT, 2 MIN,
- *  3 MAX (ARG: 2 argmin, 3 argmax). transform: 0 identity, 1 |x|, 2 x^2. */
+/** The semantics a ranker sees. kind: 0 VALUE, 1 ARG index, 2 ARG value and index (1215: 3 / 4 the same at a
+ *  carried-index FP32 site). combine: 0 SUM, 1 PRODUCT, 2 MIN, 3 MAX (ARG: 2 argmin, 3 argmax). transform: 0 identity,
+ *  1 |x|, 2 x^2. */
 struct Fp8KRRankerSite {
     uint8_t kind = 0;
     uint8_t combine = 0;
@@ -154,6 +155,31 @@ inline constexpr std::array<size_t, 3> FP8_KR_SHORTLIST_DEPTHS{6, 12, 12};
 [[nodiscard]] std::vector<Fp8KRSegmentShape> fp8KRRankedShapes(uint64_t rows, uint64_t row_bytes,
                                                                uint32_t multiprocessors, const Fp8KRRankerSite& site,
                                                                size_t count);
+
+// ---- 1179: element size. The shapes are in bytes for every input dtype; the kernels read the input's 4-byte words.
+// An FP32 shape (element_bytes 4) is an FP8 shape whose rows are whole elements, on a 4-byte aligned input, with no
+// vector Pack (that kernel is FP8-only, ported only if the generic Pack falls short on short FP32 rows). FP32 rows are
+// 4-byte multiples, which no vector row length is, so the FP8 list and pool at row_bytes = 4 R are already FP32-legal;
+// the filtered functions below check it (and with element_bytes 1 return the FP8 ones unchanged).
+
+/** element_bytes 1 (FP8) or 4 (FP32): fp8KRSegmentShapeLegal, rows of whole elements, and no vector Pack above 1. */
+[[nodiscard]] bool retainedKRShapeLegalForElement(const Fp8KRSegmentShape& shape, uint32_t element_bytes);
+
+/** fp8KRCandidateShapes / fp8KRCandidatePool restricted to retainedKRShapeLegalForElement: the element's list
+ *  (positions 1..n), then the pool's other legal shapes. row_bytes must be a multiple of element_bytes. 1180: FP32
+ *  (element 4) lists Block second for rows of at least FP32_KR_BLOCK_SECOND_ROW_BYTES with at least one row per SM
+ *  (the 1179 sweep); FP8 (element 1) is fp8KRCandidateShapes / fp8KRCandidatePool unchanged. */
+inline constexpr uint64_t FP32_KR_BLOCK_SECOND_ROW_BYTES = 64 * 1024;
+/** 1181: an FP32 ARG shape: legal for element size 4, and a Split chunk of at most 2^31 elements (its packed partial
+ *  holds a chunk-local index of 31 bits). */
+inline constexpr uint64_t FP32_KR_ARG_MAX_CHUNK_BYTES = uint64_t{4} << 31;
+[[nodiscard]] bool fp32KRArgShapeLegal(const Fp8KRSegmentShape& shape);
+
+[[nodiscard]] std::vector<Fp8KRSegmentShape> retainedKRCandidateShapes(uint64_t rows, uint64_t row_bytes,
+                                                                       uint32_t multiprocessors,
+                                                                       uint32_t element_bytes);
+[[nodiscard]] std::vector<Fp8KRPoolEntry> retainedKRCandidatePool(uint64_t rows, uint64_t row_bytes,
+                                                                  uint32_t multiprocessors, uint32_t element_bytes);
 
 /** 1155: which kernels a Split launch runs. PartialsOnly (benchmarks only) launches the partial kernel and skips the
  *  finishing kernel, so a sweep can time the finishing kernel's cost as the difference; the output is not written. */

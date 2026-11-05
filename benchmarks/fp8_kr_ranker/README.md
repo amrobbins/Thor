@@ -1,4 +1,7 @@
-# FP8 R / KR shape ranker (1158+)
+# R / KR shape rankers: FP8 (1158+) and FP32 (1182)
+
+1182: the same trainer trains the FP32 KR ranker with `--dtype=fp32` (its own model, `Fp32KR/Fp32KRRankerModel.h`;
+one ranker per dtype). See `benchmarks/FP8_RANKER_RETRAINING.md`, section "FP32 KR ranker".
 
 To retrain both rankers for a GPU, end to end (sweeps, training, install, verification), follow
 `benchmarks/FP8_RANKER_RETRAINING.md`.

@@ -54,8 +54,9 @@ int main() {
                 CubReductionOp::Sum, Cub::DensePassRole::Complete, R);
             auto isolated = RK::planIsolatedRKSite(
                 problem, sites.front(), tuned.physical, semantics);
+            // 1229: with the original semantics the retained FP32 continuation selectors need (1225 / 1227).
             const Cub::DenseProductionPhysicalSelectionContext fp32_context(
-                dtype, Cub::denseRKValueOperation(CubReductionOp::Sum), stream);
+                dtype, Cub::denseRKValueOperation(CubReductionOp::Sum), stream, R, 1.0f, CubReductionOp::Sum);
             auto site_executable = RK::makeSelectedIsolatedBenchmark(
                 problem, sites.front(), std::move(isolated), tuned.physical,
                 fp32_context.context(), 1.0f, uint64_t{256} * 1024 * 1024, stream);

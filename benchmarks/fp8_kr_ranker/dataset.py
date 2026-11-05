@@ -1,5 +1,7 @@
 """Training dataset of `thor_fp8_kr_training_sweep` (1158+). Standard library only.
 
+1217: kinds carried_arg_index / carried_arg_value_index (--carried-index sweeps) and the frozen_margin column.
+
 One cell = one site [K, R] with one sampled semantics; every shape of production's candidate pool
 (fp8KRCandidatePool) was timed with the RK sweep's method. The C++ ranker features f0..f23 (fp8KRRankerFeatures)
 come straight from the sweep, so no feature is re-derived here. Rows with variant=partials (--split-stages) are not
@@ -31,6 +33,7 @@ class Candidate:
     features: list  # FEATURE_COUNT floats (float32-exact values)
     median_ms: float  # microseconds (evaluate only takes ratios); the name keeps fp8_ranker.evaluate working
     abandoned: bool
+    frozen_margin: float = math.nan  # 1217: the installed ranker's margin (sweeps 1217+; NaN before)
 
 
 @dataclass
@@ -100,8 +103,9 @@ def load(path):
             raise ValueError(f"cell {cell_id}: non-finite feature or non-positive time")
         listed = int(row["list_position"])
         position = listed if listed > 0 else UNLISTED + int(row["pool_position"])
+        frozen = row.get("frozen_margin")
         cell.candidates.append(Candidate(row["family"], row["shape"], position, position, features, median,
-                                         row["abandoned"] == "1"))
+                                         row["abandoned"] == "1", float(frozen) if frozen else math.nan))
     result = [cells[i] for i in sorted(cells)]
     if not result:
         raise ValueError(f"{path}: no cells")

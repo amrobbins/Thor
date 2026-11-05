@@ -3,12 +3,99 @@
 #include "Utilities/TensorOperations/Cub/DenseRetainedFp8ArgPhysicalPlan.h"
 #include "Utilities/TensorOperations/Cub/DenseRetainedFp8KRPhysicalPlan.h"
 #include "Utilities/TensorOperations/Cub/DenseRetainedFp8RKPhysicalPlan.h"
+#include "Utilities/TensorOperations/Cub/DenseRetainedFp32ArgPhysicalPlan.h"
+#include "Utilities/TensorOperations/Cub/Fp32KR/Fp32KRStampAutotuner.h"
+#include "Utilities/TensorOperations/Cub/Fp32RK/Fp32RKStampAutotuner.h"
 #include "Utilities/TensorOperations/Cub/Fp8KR/Fp8KRStampAutotuner.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalSelection.h"
 
+#include <iostream>
+#include <mutex>
 #include <stdexcept>
 
 namespace ThorImplementation::CubReductionInternal {
+namespace {
+
+// 1222: the first FP32 RK site whose original input is not 16-byte aligned prints one warning per process: it runs
+// the passes that tolerate the alignment (the rotated RuntimeK pass, AlignedK at an 8-byte packet), which can be
+// slower.
+void warnMisalignedFp32Input(const DenseReductionProblem& problem, const DensePhysicalSelectionContext& context) {
+    if (problem.input_state != DenseReductionInputState::OriginalInput || context.original_input_alignment_bytes >= 16)
+        return;
+    static std::once_flag once;
+    std::call_once(once, [&] {
+        std::cerr << "Thor: an FP32 reduction input starts on a " << context.original_input_alignment_bytes
+                  << "-byte boundary, not a 16-byte one; its RK passes run on alignment-tolerant kernels, which can be "
+                     "slower. Allocate reduction inputs (and views of them) on 16-byte boundaries for the fastest "
+                     "kernels. (Printed once per process.)"
+                  << std::endl;
+    });
+}
+
+// 1220: the site reads FP32: original FP32 input, or any dtype's FP32 intermediate.
+bool siteReadsFp32(const DenseReductionProblem& problem, const DensePhysicalSelectionContext& context) {
+    return problem.input_state == DenseReductionInputState::IntermediateAggregate ||
+           context.rk.original_input_dtype == DataType::FP32;
+}
+
+DenseReductionCandidate selectRetainedFp32ValuePass(const DenseReductionProblem& problem, DenseReductionSite site,
+                                                    DenseReducerFamily family,
+                                                    const DensePhysicalSelectionContext& context) {
+    if (context.tuning_stream == nullptr || !context.original_value_operation || context.original_reduction_size == 0)
+        throw std::logic_error("Retained FP32 VALUE selection requires a tuning stream, the original operation and "
+                               "the original reduction size");
+    if (!problem.final_output.produce_value || problem.final_output.produce_index)
+        throw std::logic_error("Retained FP32 VALUE selection requires VALUE-only output");
+    if (family == DenseReducerFamily::RK) {
+        warnMisalignedFp32Input(problem, context);
+        const auto selected = Fp32RK::selectCachedValueSite(
+            problem, site, *context.original_value_operation, context.original_reduction_size, context.output_scale,
+            *context.tuning_stream, context.max_workspace_bytes, context.tuning_depth,
+            context.original_input_alignment_bytes);
+        return makeRetainedFp32RKValueCandidate(problem, site, selected.physical);
+    }
+    const auto selected = Fp32KR::selectCachedValueSite(
+        problem, site, *context.original_value_operation, context.original_reduction_size, context.output_scale,
+        context.rk.multiprocessors, *context.tuning_stream, context.tuning_depth);
+    if (!selected.shape)
+        throw std::logic_error("Retained FP32 R/KR VALUE kernels do not compile this operation's semantics");
+    return makeRetainedFp32KRValueCandidate(problem, site, *selected.shape);
+}
+
+// 1221: an FP32 ARG site: original FP32 input (the reduced run original) or a carried-index intermediate.
+DenseReductionCandidate selectRetainedFp32ArgPass(const DenseReductionProblem& problem, DenseReductionSite site,
+                                                  DenseReducerFamily family,
+                                                  const DensePhysicalSelectionContext& context) {
+    if (context.tuning_stream == nullptr || !context.original_value_operation || context.original_reduction_size == 0 ||
+        (*context.original_value_operation != CubReductionOp::Min &&
+         *context.original_value_operation != CubReductionOp::Max))
+        throw std::logic_error("Retained FP32 ARG selection requires a tuning stream, MIN (argmin) or MAX (argmax) "
+                               "and the original reduction size");
+    const bool maximum = *context.original_value_operation == CubReductionOp::Max;
+    const bool carried = problem.input_state == DenseReductionInputState::IntermediateAggregate;
+    const Stream& stream = *context.tuning_stream;
+    if (family == DenseReducerFamily::RK) {
+        warnMisalignedFp32Input(problem, context);
+        const auto selected =
+            carried ? Fp32RK::selectCachedCarriedArgSite(problem, site, maximum, context.original_reduction_size,
+                                                         stream, context.max_workspace_bytes, context.tuning_depth)
+                    : Fp32RK::selectCachedArgSite(problem, site, maximum, context.original_reduction_size, stream,
+                                                  context.max_workspace_bytes, context.tuning_depth,
+                                                  context.original_input_alignment_bytes);
+        if (selected.candidate_count == 0)
+            throw std::logic_error("Retained FP32 RK ARG selection found no legal pass for this site");
+        return makeRetainedFp32RKArgCandidate(problem, site, selected.physical, carried);
+    }
+    const auto selected =
+        carried ? Fp32KR::selectCachedCarriedArgSite(problem, site, maximum, context.rk.multiprocessors, stream,
+                                                     context.tuning_depth)
+                : Fp32KR::selectCachedArgSite(problem, site, maximum, context.rk.multiprocessors, stream,
+                                              context.tuning_depth);
+    if (!selected.shape) throw std::logic_error("Retained FP32 R/KR ARG selection returned no shape");
+    return makeRetainedFp32KRArgCandidate(problem, site, *selected.shape, carried);
+}
+
+}  // namespace
 
 DenseReductionCandidate selectDensePhysicalPass(const DenseReductionProblem& problem,
                                                 DenseReductionSite site,
@@ -20,6 +107,13 @@ DenseReductionCandidate selectDensePhysicalPass(const DenseReductionProblem& pro
     }
     if (context.proposal_override != nullptr) {
         return context.proposal_override(problem, site, family, context.rk, context.proposal_override_context);
+    }
+    // 1220 / 1221 / 1227: every site that reads FP32 (original FP32 input, or any dtype's FP32 intermediate), VALUE and
+    // ARG, is selected by the retained FP32 selectors, with no fallback to the ordinary families.
+    if (siteReadsFp32(problem, context)) {
+        return problem.aggregate_kind == DenseReductionAggregateKind::Value
+                   ? selectRetainedFp32ValuePass(problem, site, family, context)
+                   : selectRetainedFp32ArgPass(problem, site, family, context);
     }
     // Original FP8 RK VALUE has exactly one supported production selector:
     // the retained cached physical-first-stage autotuner. Never fall through

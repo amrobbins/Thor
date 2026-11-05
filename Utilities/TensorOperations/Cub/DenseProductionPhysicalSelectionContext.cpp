@@ -31,7 +31,7 @@ DenseProductionPhysicalSelectionContext::DenseProductionPhysicalSelectionContext
     DataType original_input_dtype, DenseRKValueOperation operation, const Stream& stream,
     uint64_t original_reduction_size, float output_scale,
     std::optional<CubReductionOp> original_value_operation, uint64_t workspace_budget_bytes,
-    CubReductionTuningDepth tuning_depth) {
+    CubReductionTuningDepth tuning_depth, uint64_t original_input_alignment_bytes) {
     cudaDeviceProp properties{};
     const cudaError_t status = cudaGetDeviceProperties(&properties, static_cast<int>(stream.getGpuNum()));
     if (status != cudaSuccess || properties.multiProcessorCount <= 0 || properties.warpSize <= 0
@@ -50,6 +50,7 @@ DenseProductionPhysicalSelectionContext::DenseProductionPhysicalSelectionContext
     context_.output_scale = output_scale;
     context_.max_workspace_bytes = workspace_budget_bytes;
     context_.tuning_depth = tuning_depth;
+    context_.original_input_alignment_bytes = original_input_alignment_bytes;
     context_.rk.original_input_dtype = original_input_dtype;
     context_.rk.value_operation = operation;
     context_.rk.multiprocessors = static_cast<uint32_t>(properties.multiProcessorCount);

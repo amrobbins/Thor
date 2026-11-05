@@ -12,6 +12,7 @@
 #include "Utilities/TensorOperations/Cub/DenseRetainedFp8ArgPhysicalPlan.h"
 #include "Utilities/TensorOperations/Cub/DenseRetainedFp8RKPhysicalPlan.h"
 #include "Utilities/TensorOperations/Cub/DenseRetainedFp8KRPhysicalPlan.h"
+#include "Utilities/TensorOperations/Cub/DenseRetainedFp32ArgPhysicalPlan.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalKernels.h"
 
 #include <cuda_runtime_api.h>
@@ -105,7 +106,8 @@ using namespace CubReductionInternal;
                                                            float output_scale,
                                                            CubReductionTuningDepth tuning_depth,
                                                            const Stream& stream,
-                                                           std::string* strategy_chain = nullptr) {
+                                                           std::string* strategy_chain = nullptr,
+                                                           uint64_t input_alignment_bytes = 16) {
     DenseReductionOutputSpec output_spec;
     output_spec.produce_value = true;
     output_spec.value_dtype = output_dtype;
@@ -121,7 +123,8 @@ using namespace CubReductionInternal;
     const DenseProductionPhysicalSelectionContext production_context(
         original_input_dtype, denseRKValueOperation(op), stream,
         original_reduction_size, output_scale, op,
-        is_fp8 ? kRetainedFp8RKWorkspaceBudget : std::numeric_limits<uint64_t>::max(), tuning_depth);
+        is_fp8 ? kRetainedFp8RKWorkspaceBudget : std::numeric_limits<uint64_t>::max(), tuning_depth,
+        input_alignment_bytes);
 
     DenseReductionPlan plan = planDenseReduction(problem, production_context.context());
     if (strategy_chain != nullptr) {
@@ -130,7 +133,8 @@ using namespace CubReductionInternal;
             if (!strategy_chain->empty()) strategy_chain->append(">");
             if (const auto fp8 = std::dynamic_pointer_cast<const DenseRetainedFp8RKPhysicalPlan>(
                     step.selected_candidate.physical_plan); fp8) {
-                strategy_chain->append("retained_fp8_rk:");
+                strategy_chain->append(fp8->input_dtype == DataType::FP32 ? "retained_fp32_rk:"  // 1220
+                                                                          : "retained_fp8_rk:");
                 switch (fp8->kernel.family) {
                     case Fp8RK::PhysicalFamily::OneWindow: strategy_chain->append("one_window"); break;
                     case Fp8RK::PhysicalFamily::DeepRSmallK: strategy_chain->append("deep_r_small_k"); break;
@@ -139,7 +143,9 @@ using namespace CubReductionInternal;
                 }
             } else if (const auto kr = std::dynamic_pointer_cast<const DenseRetainedFp8KRPhysicalPlan>(
                     step.selected_candidate.physical_plan); kr) {
-                strategy_chain->append("retained_fp8_kr:" + Fp8KR::fp8KRShapeName(kr->shape));
+                strategy_chain->append(std::string(kr->input_dtype == DataType::FP32 ? "retained_fp32_kr:"
+                                                                                     : "retained_fp8_kr:") +
+                                       Fp8KR::fp8KRShapeName(kr->shape));
             } else if (const auto rk = std::dynamic_pointer_cast<const DenseRKFamilyPhysicalPlan>(
                     step.selected_candidate.physical_plan); rk) {
                 strategy_chain->append(denseRKStrategyName(rk->strategy));
@@ -2815,8 +2821,13 @@ void launchComposedArgReductionStage(CubArgReductionOp op,
 // ARG-P1: original FP8 dense ARG is planned by planDenseReduction(), like VALUE, so later FP8 ARG physical passes
 // (including staged [outer, shards, inner] first stages) slot into the same planner. Other input dtypes keep the
 // interval-composition executor until their own cutover.
-[[nodiscard]] bool usesPlannedDenseArg(DataType input_dtype) {
+[[nodiscard]] bool isFp8ArgInput(DataType input_dtype) {
     return input_dtype == DataType::FP8_E4M3 || input_dtype == DataType::FP8_E5M2;
+}
+
+// 1221 / 1227: and FP32 input (its retained FP32 ARG passes run in this executor).
+[[nodiscard]] bool usesPlannedDenseArg(DataType input_dtype) {
+    return isFp8ArgInput(input_dtype) || input_dtype == DataType::FP32;
 }
 
 [[nodiscard]] DataType denseArgCarriedIndexDType(uint64_t original_reduction_size) {
@@ -2834,6 +2845,11 @@ struct PlannedDenseArgPass {
     bool final_pass = false;
     // ARG-A2: a retained FP8 ARG physical pass (no scratch); null for a direct ARG pass.
     std::shared_ptr<const DenseRetainedFp8ArgPhysicalPlan> fp8_arg;
+    // 1221: a retained FP32 ARG pass, original or carried; its scratch is plan.scratch_bytes.
+    std::shared_ptr<const DenseRetainedFp32ArgPhysicalPlan> fp32_arg;
+    [[nodiscard]] uint64_t retainedScratchBytes() const {
+        return fp8_arg ? retainedFp8ArgScratchBytes(*fp8_arg) : fp32_arg ? fp32_arg->scratch_bytes : 0;
+    }
 };
 
 struct PlannedDenseArg {
@@ -2849,7 +2865,8 @@ struct PlannedDenseArg {
                                                      std::optional<DataType> index_output_dtype,
                                                      uint64_t original_reduction_size,
                                                      CubReductionTuningDepth tuning_depth,
-                                                     const Stream& stream) {
+                                                     const Stream& stream,
+                                                     uint64_t input_alignment_bytes = 16) {
     DenseReductionOutputSpec output_spec;
     output_spec.produce_value = value_output_dtype.has_value();
     output_spec.value_dtype = value_output_dtype.value_or(DataType::FP32);
@@ -2871,7 +2888,8 @@ struct PlannedDenseArg {
         1.0f,
         op == CubArgReductionOp::ArgMin ? CubReductionOp::Min : CubReductionOp::Max,
         kRetainedFp8WorkspaceBudget,
-        tuning_depth);
+        tuning_depth,
+        input_alignment_bytes);
     const DenseReductionPlan plan = planDenseReduction(problem, production_context.context());
 
     for (const DenseReductionPlanStep& step : plan.steps) {
@@ -2879,12 +2897,15 @@ struct PlannedDenseArg {
         const auto direct = std::dynamic_pointer_cast<const DenseDirectReductionPhysicalPlan>(candidate.physical_plan);
         const auto fp8_arg =
             std::dynamic_pointer_cast<const DenseRetainedFp8ArgPhysicalPlan>(candidate.physical_plan);
-        if (!direct && !fp8_arg) {
+        const auto fp32_arg =
+            std::dynamic_pointer_cast<const DenseRetainedFp32ArgPhysicalPlan>(candidate.physical_plan);
+        if (!direct && !fp8_arg && !fp32_arg) {
             throw std::logic_error("Dense ARG plan selected a physical pass that has no ARG executor.");
         }
         const DensePhysicalPassLayout layout = describeDensePhysicalPass(*candidate.physical_plan);
         PlannedDenseArgPass pass;
         pass.fp8_arg = fp8_arg;
+        pass.fp32_arg = fp32_arg;
         pass.geometry = layout.geometry;
         if (!isDirectDenseReductionPath(pass.geometry.path)) {
             throw std::logic_error("Dense ARG plan pass did not resolve to a direct reducer family.");
@@ -2970,6 +2991,12 @@ DensePhysicalPassLayout describeDensePhysicalPass(const DenseReductionPhysicalPl
         layout.geometry = CubReduction::analyzeGeometry(layout.input_dimensions, std::vector<uint32_t>{axis});
         if (arg->shards > 1 && !arg->packed_partials)
             layout.intermediate_dimensions = {arg->outer_size, arg->shards, arg->inner_size};
+    } else if (const auto* fp32_arg = dynamic_cast<const DenseRetainedFp32ArgPhysicalPlan*>(&physical_plan)) {
+        // 1221: a Complete FP32 ARG pass (RK over {outer, r, inner} at axis 1; R / KR over the current runs, the
+        // nominated run last).
+        layout.input_dimensions = fp32_arg->input_dimensions;
+        layout.geometry = CubReduction::analyzeGeometry(layout.input_dimensions,
+                                                        std::vector<uint32_t>{fp32_arg->reduction_axis});
     } else if (const auto* fp8 = dynamic_cast<const DenseRetainedFp8RKPhysicalPlan*>(&physical_plan)) {
         // The selected first kernel has its own real [O,N,K] output. A staged
         // output is an ordinary FP32 intermediate, never hidden scratch.
@@ -2999,7 +3026,9 @@ size_t queryDensePhysicalPassScratchBytes(const DenseReductionPhysicalPlan& phys
                                    geometry, output_scale, stream);
     }
     if (const auto* kr = dynamic_cast<const DenseRetainedFp8KRPhysicalPlan*>(&physical_plan)) {
-        if (input_dtype != kr->input_dtype || input_elements != kr->shape.rows * kr->shape.row_bytes ||
+        // 1220: an FP32 pass's shape is in bytes, 4 per element.
+        const uint64_t element_bytes = kr->input_dtype == DataType::FP32 ? 4 : 1;
+        if (input_dtype != kr->input_dtype || input_elements * element_bytes != kr->shape.rows * kr->shape.row_bytes ||
             geometry.output_elements != kr->shape.rows || !isSupportedFloatingStorageDType(output_dtype))
             throw std::invalid_argument("Retained FP8 KR physical query input/output geometry or dtype mismatch");
         static_cast<void>(input);
@@ -3044,8 +3073,13 @@ void launchDensePhysicalPass(const DenseReductionPhysicalPlan& physical_plan,
         void* scratch = temp_storage_bytes == 0
                             ? nullptr
                             : const_cast<void*>(static_cast<const void*>(temp_storage.getMemPtr<void>()));
-        launchFp8KRValueSegments(semantics, input, output, kr->shape, scratch, temp_storage_bytes, output_scale,
-                                 stream);
+        if (kr->input_dtype == DataType::FP32) {  // 1220: the retained FP32 R / KR pass
+            launchFp32KRValueSegments(semantics, input, output, kr->shape, scratch, temp_storage_bytes, output_scale,
+                                      stream);
+        } else {
+            launchFp8KRValueSegments(semantics, input, output, kr->shape, scratch, temp_storage_bytes, output_scale,
+                                     stream);
+        }
         return;
     }
     if (const auto* fp8 = dynamic_cast<const DenseRetainedFp8RKPhysicalPlan*>(&physical_plan)) {
@@ -3567,7 +3601,8 @@ std::shared_ptr<StampedCubReduction> CubReduction::stampValidated(const Tensor& 
                                                                  output_scale,
                                                                  tuning_depth,
                                                                  stream,
-                                                                 &strategy_chain);
+                                                                 &strategy_chain,
+                                                                 input.alignmentBytes(16));
         DenseExecutablePlan executable_plan = CubReductionInternal::materializeDenseValueExecutablePlan(op,
                                                                                   input,
                                                                                   output,
@@ -4046,8 +4081,8 @@ size_t CubArgReduction::queryWorkspaceSizeInBytes(const TensorDescriptor& input_
         DataType current_value_dtype = input_descriptor.getDataType();
         for (size_t pass_index = 0; pass_index < planned.passes.size(); ++pass_index) {
             const PlannedDenseArgPass& pass = planned.passes[pass_index];
-            if (pass.fp8_arg) add_bytes(retainedFp8ArgScratchBytes(*pass.fp8_arg));
-            if (!pass.fp8_arg) add_bytes(queryComposedArgReductionStageBytes(
+            if (pass.fp8_arg || pass.fp32_arg) add_bytes(pass.retainedScratchBytes());
+            if (!pass.fp8_arg && !pass.fp32_arg) add_bytes(queryComposedArgReductionStageBytes(
                 op,
                 current_value_dtype,
                 pass_index != 0,
@@ -4210,7 +4245,7 @@ std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampComposedDense(
     requireSupportedFloatingStorageDType(input.getDataType(), "input");
     // A5 (1119): FP8 ARG runs only through the planned retained FP8 ARG passes; the direct interval executor's tiled
     // FP8 stages are no longer compiled.
-    if (usesPlannedDenseArg(input.getDataType())) {
+    if (isFp8ArgInput(input.getDataType())) {
         throw std::invalid_argument("FP8 ARG reductions compose through stamp() (retained FP8 ARG passes); the direct "
                                     "interval executor does not support FP8 input.");
     }
@@ -4268,7 +4303,7 @@ std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampComposedDenseWithP
     requireSupportedFloatingStorageDType(input.getDataType(), "input");
     // A5 (1119): FP8 ARG runs only through the planned retained FP8 ARG passes; the direct interval executor's tiled
     // FP8 stages are no longer compiled.
-    if (usesPlannedDenseArg(input.getDataType())) {
+    if (isFp8ArgInput(input.getDataType())) {
         throw std::invalid_argument("FP8 ARG reductions compose through stamp() (retained FP8 ARG passes); the direct "
                                     "interval executor does not support FP8 input.");
     }
@@ -4449,7 +4484,8 @@ std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampPlannedDenseValida
         index_output.has_value() ? std::optional<DataType>(index_output->getDataType()) : std::nullopt,
         geometry.reduction_size,
         tuning_depth,
-        stream);
+        stream,
+        input.alignmentBytes(16));
 
     std::vector<std::shared_ptr<StampedCubArgReduction>> stages;
     stages.reserve(planned.passes.size());
@@ -4482,8 +4518,9 @@ std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampPlannedDenseValida
         Tensor* stage_value_output_ptr = stage_value_output.has_value() ? &stage_value_output.value() : nullptr;
         Tensor* stage_index_output_ptr = stage_index_output.has_value() ? &stage_index_output.value() : nullptr;
         const Tensor* carried_index_input_ptr = current_index_input.has_value() ? &current_index_input.value() : nullptr;
-        const size_t temp_storage_bytes = pass.fp8_arg ? static_cast<size_t>(retainedFp8ArgScratchBytes(*pass.fp8_arg))
-                                                       : queryComposedArgReductionStageBytes(op,
+        const size_t temp_storage_bytes = pass.fp8_arg || pass.fp32_arg
+                                              ? static_cast<size_t>(pass.retainedScratchBytes())
+                                              : queryComposedArgReductionStageBytes(op,
                                                                                              current_value_input,
                                                                                              carried_index_input_ptr,
                                                                                              stage_value_output_ptr,
@@ -4509,6 +4546,7 @@ std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampPlannedDenseValida
                                                                                             planned.carried_index_dtype,
                                                                                             stream)));
         stages.back()->fp8_arg_plan = pass.fp8_arg;
+        stages.back()->fp32_arg_plan = pass.fp32_arg;
         add_bytes(temp_storage_bytes);
         if (!pass.final_pass) {
             add_bytes(stage_value_output->getArraySizeInBytes());
@@ -4689,6 +4727,22 @@ void StampedCubArgReduction::launchBoundStage(const Tensor& stage_input, Stream&
 
 void StampedCubArgReduction::launchBoundStage(const Tensor& stage_input, Tensor* value_output_ptr,
                                               Tensor* index_output_ptr, Stream& run_stream) const {
+    if (fp32_arg_plan) {
+        // 1221: a retained FP32 ARG pass; a carried pass reads this stage's carried index, and staged / Split partials
+        // live in this stage's scratch.
+        THOR_THROW_IF_FALSE(carried_index_input.has_value() == fp32_arg_plan->carried);
+        THOR_THROW_IF_FALSE(temp_storage_bytes >= fp32_arg_plan->scratch_bytes);
+        void* scratch = fp32_arg_plan->scratch_bytes == 0
+                            ? nullptr
+                            : const_cast<void*>(static_cast<const void*>(temp_storage.getMemPtr<void>()));
+        CubReductionInternal::launchRetainedFp32ArgPlan(*fp32_arg_plan, stage_input,
+                                                        carried_index_input.has_value() ? &*carried_index_input
+                                                                                        : nullptr,
+                                                        value_output_ptr, index_output_ptr, geometry, scratch,
+                                                        op == CubArgReductionOp::ArgMax, composed_domain_stride,
+                                                        run_stream);
+        return;
+    }
     if (fp8_arg_plan) {
         // Retained FP8 ARG pass (packed staged twins carry their partials in this stage's scratch).
         THOR_THROW_IF_FALSE(!carried_index_input.has_value());
@@ -4804,6 +4858,10 @@ std::vector<std::string> StampedCubArgReduction::getPlannedPassNames() const {
     std::vector<std::string> names;
     if (geometry.path != CubReductionPath::ComposedDense && composed_stages.empty()) return names;
     for (const auto& stage : composed_stages) {
+        if (stage->fp32_arg_plan) {  // 1221
+            names.push_back(CubReductionInternal::retainedFp32ArgPassName(*stage->fp32_arg_plan));
+            continue;
+        }
         if (stage->fp8_arg_plan && stage->fp8_arg_plan->kr.group_lanes != 0) {
             names.push_back("fp8_arg_kr:" + CubReductionInternal::Fp8KR::fp8KRShapeName(stage->fp8_arg_plan->kr));
             continue;
@@ -4956,12 +5014,15 @@ std::vector<DensePhysicalPassDiagnostic> StampedCubReduction::getDensePhysicalPa
                     info.family = "retained_fp8_rk:runtime_k";
                     break;
             }
+            // 1220: a retained FP32 RK pass is "retained_fp32_rk:...".
+            if (fp8->input_dtype == DataType::FP32) info.family.replace(0, 15, "retained_fp32_rk");
             if (kernel.first_stage_ctas != 0) info.stage_blocks = kernel.first_stage_ctas;
             // The actual next tensor geometry is authoritative for staged N.
             info.shards_per_output = kernel.staged() ? fp8->output_dimensions.at(1) : 1;
         } else if (const auto* kr = dynamic_cast<const CubReductionInternal::DenseRetainedFp8KRPhysicalPlan*>(
                        pass.physical_plan.get())) {
-            info.family = "retained_fp8_kr:" + CubReductionInternal::Fp8KR::fp8KRShapeName(kr->shape);
+            info.family = std::string(kr->input_dtype == DataType::FP32 ? "retained_fp32_kr:" : "retained_fp8_kr:") +
+                          CubReductionInternal::Fp8KR::fp8KRShapeName(kr->shape);
             info.block_threads = CubReductionInternal::Fp8KR::FP8_KR_THREADS;
             info.shards_per_output = kr->shape.chunks();
         } else if (const auto* rk = dynamic_cast<const CubReductionInternal::DenseRKFamilyPhysicalPlan*>(

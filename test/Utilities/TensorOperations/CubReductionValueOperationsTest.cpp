@@ -1731,7 +1731,9 @@ TEST(CubReduction, PacketAdaptiveCooperativeTiledPathPreservesAdditiveTransforms
     expectOperations(input, 1, expectations, stream);
 }
 
-TEST(CubReduction, ModernDenseRKProductionExposesBothRCooperativeAccessModes) {
+// 1227: was ModernDenseRKProductionExposesBothRCooperativeAccessModes; its aligned and rotated cases were FP32, which
+// the retained FP32 RK passes now run (CubReductionFp32Routing covers them).
+TEST(CubReduction, ModernDenseRKProductionRunsLowPrecisionFlatRows) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -1741,8 +1743,6 @@ TEST(CubReduction, ModernDenseRKProductionExposesBothRCooperativeAccessModes) {
         std::string expected_fragment;
     };
     const std::vector<Case> cases = {
-        {DataType::FP32, {1, 104832, 384}, "r_cooperative:aligned"},
-        {DataType::FP32, {1, 104832, 4095}, "r_cooperative:rotated"},
         {DataType::BF16, {64, 32768, 17}, "r_cooperative:flat_rows"},
     };
 

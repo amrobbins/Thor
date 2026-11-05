@@ -25,8 +25,11 @@ SelectedIsolatedContinuation selectIsolatedFp32Continuation(
     if (shards == 1 && current != site.remaining_problem)
         throw std::logic_error("Complete FP8 kernel did not finish nominated RK site");
 
-    while (shards > 1 && nominated_site.run_index < current.runs.size() &&
-           current.runs[nominated_site.run_index].kind == DenseReductionRunKind::IntermediateReduction) {
+    // 1209: follow the nominated run by its extent, not by what sits at its index: once a pass finishes it, the runs
+    // around it may merge, and on an intermediate problem with another IntermediateReduction run (a second reduced
+    // axis already staged) that run would take the index (1207's non-final intermediate site).
+    uint64_t remaining_extent = shards;
+    while (remaining_extent > 1) {
         const DenseReductionProblem before = current;
         DenseReductionCandidate selected = selectDensePhysicalPass(before, nominated_site, physical_selector);
         if (selected.site != nominated_site ||
@@ -40,8 +43,11 @@ SelectedIsolatedContinuation selectIsolatedFp32Continuation(
             selected.next_bytes != denseReductionProblemBytes(selected.next_problem))
             throw std::logic_error("Official FP32 selector returned an invalid continuation physical pass");
 
+        // The pass either finishes the nominated run or leaves it an IntermediateReduction at the same index (a run
+        // that stays does not merge with its neighbours).
         uint64_t next_extent = 1;
-        if (nominated_site.run_index < selected.next_problem.runs.size() &&
+        if (selected.next_problem != advanceDenseReductionProblem(before, nominated_site, 1) &&
+            nominated_site.run_index < selected.next_problem.runs.size() &&
             selected.next_problem.runs[nominated_site.run_index].kind == DenseReductionRunKind::IntermediateReduction)
             next_extent = selected.next_problem.runs[nominated_site.run_index].extent;
         const uint64_t old_extent = before.runs[nominated_site.run_index].extent;
@@ -51,6 +57,7 @@ SelectedIsolatedContinuation selectIsolatedFp32Continuation(
 
         result.fp32_passes.push_back({before, std::move(selected)});
         current = result.fp32_passes.back().selected.next_problem;
+        remaining_extent = next_extent;
     }
     if (current != site.remaining_problem)
         throw std::logic_error("Hypothetical FP32 chain did not complete the nominated RK site");

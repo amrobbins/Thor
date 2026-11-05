@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Train, validate and export Thor's FP8 R / KR shape ranker (one model for VALUE and ARG). 1158+.
+"""Train, validate and export Thor's R / KR shape rankers: FP8 (1158+) or, with --dtype=fp32, FP32 (1182). One model
+per dtype (user decision 2026-11-02, so a dtype's kernels can change without retraining the others), each for VALUE
+and ARG, trained only on that dtype's cells of the datasets.
 
 The RK ranker's method (benchmarks/fp8_ranker), on the KR pool:
 1. Labels: per cell, regret = time / oracle, graded (dataset.relevance; ties within 1% are equally good). Objective:
@@ -14,15 +16,18 @@ The RK ranker's method (benchmarks/fp8_ranker), on the KR pool:
 5. Export: XGBoost JSON, the generated Fp8KRRankerModel.h (TRAINED = true) and Fp8KRRankerParityFixtures.h (margins
    checked against XGBoost's own), curves.csv, misses.csv and summary.txt.
 
-Cut over: copy Fp8KRRankerModel.h to Utilities/TensorOperations/Cub/Fp8KR/, Fp8KRRankerParityFixtures.h to
+Cut over, FP8: copy Fp8KRRankerModel.h to Utilities/TensorOperations/Cub/Fp8KR/, Fp8KRRankerParityFixtures.h to
 test/Utilities/TensorOperations/, and set FP8_KR_SHORTLIST_DEPTHS in Fp8KRSegments.h to the printed depths.
+Cut over, FP32: copy Fp32KRRankerModel.h to Utilities/TensorOperations/Cub/Fp32KR/, Fp32KRRankerParityFixtures.h to
+test/Utilities/TensorOperations/, and set FP32_KR_SHORTLIST_DEPTHS in Fp32KR/Fp32KRStampAutotuner.h.
 
-Usage: train.py kr-training.csv.gz [more.csv.gz ...] --out-dir=fp8_kr_ranker_out [--seed=0]
+Usage: train.py kr-training.csv.gz [more.csv.gz ...] --out-dir=fp8_kr_ranker_out [--dtype=fp8|fp32] [--seed=0]
 Requires numpy, scikit-learn and xgboost.
 """
 
 import argparse
 import csv
+import math
 import os
 import random
 import sys
@@ -35,13 +40,41 @@ import evaluate  # noqa: E402  (fp8_ranker/evaluate.py)
 import export  # noqa: E402  (fp8_ranker/export.py)
 
 REPORT_DEPTHS = (1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24)
-MODEL_NAMESPACE = "ThorImplementation::CubReductionInternal::Fp8KR::Fp8KRRankerModel"
-PARITY_NAMESPACE = "ThorImplementation::CubReductionInternal::Fp8KR::Fp8KRRankerParity"
 GENERATOR = "benchmarks/fp8_kr_ranker/train.py"
+
+# 1182: per-dtype outputs. `cells` picks the dataset's cells of the dtype (FP8: E4M3 and E5M2 together).
+DTYPES = {
+    "fp8": {
+        "label": "FP8",
+        "cells": lambda dtype: dtype.startswith("fp8"),
+        "model_header": "Fp8KRRankerModel.h",
+        "fixtures_header": "Fp8KRRankerParityFixtures.h",
+        "model_namespace": "ThorImplementation::CubReductionInternal::Fp8KR::Fp8KRRankerModel",
+        "parity_namespace": "ThorImplementation::CubReductionInternal::Fp8KR::Fp8KRRankerParity",
+        "depths": "set in Fp8KRSegments.h: FP8_KR_SHORTLIST_DEPTHS",
+        "json": "fp8_kr_ranker.json",
+    },
+    "fp32": {
+        "label": "FP32",
+        "cells": lambda dtype: dtype == "fp32",
+        "model_header": "Fp32KRRankerModel.h",
+        "fixtures_header": "Fp32KRRankerParityFixtures.h",
+        "model_namespace": "ThorImplementation::CubReductionInternal::Fp32KR::Fp32KRRankerModel",
+        "parity_namespace": "ThorImplementation::CubReductionInternal::Fp32KR::Fp32KRRankerParity",
+        "depths": "set in Fp32KR/Fp32KRStampAutotuner.h: FP32_KR_SHORTLIST_DEPTHS",
+        "json": "fp32_kr_ranker.json",
+    },
+}
+
+
+# 1217: carried-index ARG cells (the sweep's --carried-index) are their own group.
+KIND_GROUPS = ("value", "arg", "carried_arg")
 
 
 def kind_group(cell):
-    return "value" if cell.kind == "value" else "arg"
+    if cell.kind == "value":
+        return "value"
+    return "carried_arg" if cell.kind.startswith("carried_") else "arg"
 
 
 def build_matrix(np, cells):
@@ -77,6 +110,9 @@ def curves_for(cells, scores, max_n, large_bytes):
     curves, orders = {}, []
     for cell, cell_scores in zip(cells, scores):
         cell_orders = {"model": evaluate.order_by_scores(cell, cell_scores), "list": evaluate.list_order(cell)}
+        frozen = [c.frozen_margin for c in cell.candidates]
+        if all(math.isfinite(m) for m in frozen):  # 1217: the installed model's order (sweeps 1217+)
+            cell_orders["frozen"] = evaluate.order_by_scores(cell, frozen)
         orders.append(cell_orders)
         for name, order in cell_orders.items():
             curve = evaluate.regret_curve(cell, order, max_n)
@@ -88,7 +124,7 @@ def curves_for(cells, scores, max_n, large_bytes):
 
 def choose_depths(curves, max_n, args):
     regular, quick = [], []
-    for kind in ("value", "arg"):
+    for kind in KIND_GROUPS:
         series = curves.get(("all", kind, "model"))
         if not series:
             continue
@@ -111,6 +147,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("datasets", nargs="+")
     parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--dtype", choices=sorted(DTYPES), default="fp8",
+                        help="the ranker to train: its dtype's cells only (default fp8)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--n-estimators", type=int, default=300)
@@ -130,12 +168,16 @@ def main():
     except ImportError as exc:
         parser.error(f"{exc}. Install numpy, scikit-learn and xgboost in the benchmark environment.")
 
+    spec = DTYPES[args.dtype]
     cells, provenance = [], []
     for path in args.datasets:
         header, loaded = dataset.load(path)
+        loaded = [c for c in loaded if spec["cells"](c.dtype)]
         cells.extend(loaded)
         provenance.append(f"{os.path.basename(path)} seed={header.get('seed')} sm_count={header.get('sm_count')} "
-                          f"version={header.get('version')}")
+                          f"version={header.get('version')} {args.dtype}_cells={len(loaded)}")
+    if not cells:
+        parser.error(f"no {args.dtype} cells in the datasets (sweep with --dtypes including {args.dtype})")
     train_cells = [c for c in cells if not c.heldout]
     held_cells = [c for c in cells if c.heldout]
     if not train_cells or not held_cells:
@@ -183,16 +225,16 @@ def main():
 
     regular, quick = choose_depths(oof_curves, max_n, args)
     ultra = min(max_n, 2 * regular) if regular else None
-    lines = [f"FP8 KR ranker: {len(cells)} cells ({len(train_cells)} train in {len(shapes)} row lengths, "
+    lines = [f"{spec['label']} KR ranker: {len(cells)} cells ({len(train_cells)} train in {len(shapes)} row lengths, "
              f"{len(held_cells)} held out), {len(X) + len(Xh)} candidates, max {max_n} per cell",
              "datasets: " + "; ".join(provenance), "",
              f"depths (out-of-fold): Quick {quick}, Regular {regular}, Ultra {ultra}",
-             f"set in Fp8KRSegments.h: FP8_KR_SHORTLIST_DEPTHS{{{quick}, {regular}, {ultra}}}", ""]
+             f"{spec['depths']}{{{quick}, {regular}, {ultra}}}", ""]
     for fit, curves, fit_cells, fit_orders in (("out-of-fold", oof_curves, train_cells, oof_orders),
                                                ("held-out", held_curves, held_cells, held_orders)):
         lines.append(f"{fit} regret at depth N (geomean / p95 / p99 / max, exact-oracle fraction):")
         for (subset, kind, name), series in sorted(curves.items()):
-            lines.append(f"  {subset:5} {kind:5} {name}: ({len(series)} cells)")
+            lines.append(f"  {subset:5} {kind:11} {name}: ({len(series)} cells)")
             for n in sorted(set(REPORT_DEPTHS) | {d for d in (regular, quick) if d}):
                 if n > max_n:
                     continue
@@ -200,7 +242,7 @@ def main():
                 mark = " <- Regular" if n == regular else " <- Quick" if n == quick else ""
                 lines.append(f"    N={n:3d}  {s['geomean']:.4f} / {s['p95']:.4f} / {s['p99']:.4f} / {s['max']:.4f}"
                              f"  exact {s['exact']:.3f}{mark}")
-        for kind in ("value", "arg"):
+        for kind in KIND_GROUPS:
             kind_cells = [(c, o) for c, o in zip(fit_cells, fit_orders) if kind_group(c) == kind]
             for label, n in (("Quick", quick), ("Regular", regular), ("Ultra", ultra)):
                 if n and kind_cells:
@@ -222,7 +264,7 @@ def main():
                         writer.writerow([fit, cell.kind, cell.k, cell.r, cell.input_bytes, cell.dtype, cell.operation,
                                          f"{regret:.4f}", cell.candidates[best].configuration, order.index(best) + 1])
 
-    model_path = os.path.join(args.out_dir, "fp8_kr_ranker.json")
+    model_path = os.path.join(args.out_dir, spec["json"])
     final.get_booster().save_model(model_path)
     model_json, model_bytes = export.load_model_json(model_path)
     trees = export.parse_trees(model_json)
@@ -233,12 +275,12 @@ def main():
     worst = max(abs(export.margin(trees, row) - (float(m) - base_score)) for row, m in zip(sample, xgb_margin))
     if worst > 1e-3:
         raise AssertionError(f"exported tree evaluation disagrees with XGBoost by {worst}")
-    sha = export.write_header(os.path.join(args.out_dir, "Fp8KRRankerModel.h"), trees, dataset.FEATURE_COUNT,
-                              model_bytes, f"{len(cells)} cells, seed {args.seed}, Quick {quick}, Regular {regular}, "
-                                           f"Ultra {ultra}", namespace=MODEL_NAMESPACE, generator=GENERATOR,
-                              trained_flag=True)
-    export.write_parity_fixtures(os.path.join(args.out_dir, "Fp8KRRankerParityFixtures.h"), trees, sample,
-                                 dataset.FEATURE_COUNT, sha, namespace=PARITY_NAMESPACE, generator=GENERATOR)
+    sha = export.write_header(os.path.join(args.out_dir, spec["model_header"]), trees, dataset.FEATURE_COUNT,
+                              model_bytes, f"{args.dtype}, {len(cells)} cells, seed {args.seed}, Quick {quick}, "
+                                           f"Regular {regular}, Ultra {ultra}", namespace=spec["model_namespace"],
+                              generator=GENERATOR, trained_flag=True)
+    export.write_parity_fixtures(os.path.join(args.out_dir, spec["fixtures_header"]), trees, sample,
+                                 dataset.FEATURE_COUNT, sha, namespace=spec["parity_namespace"], generator=GENERATOR)
     lines.append(f"exported {len(trees)} trees, model SHA256 {sha}; parity vs XGBoost max |diff| {worst:.2e} "
                  f"over {len(sample)} fixtures")
     text = "\n".join(lines) + "\n"

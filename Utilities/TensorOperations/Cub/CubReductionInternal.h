@@ -106,6 +106,106 @@ void launchKParallelTiledStage(const CubReductionStageSemantics& semantics,
     DataType input_dtype, DataType output_dtype, CubReductionStageInputTransform transform,
     CubReductionStageCombine operation, const KParallelTiledStagePlan& plan);
 
+/** 1188: AlignedK on FP32 input (plans/Thor_FP32_Dense_Reduction_Plan, phase 5). A lane owns one 8- or 16-byte
+ *  packet (2 or 4 components; K a multiple of that), or (1228) one 4-byte packet (one component, any K), and reduces
+ *  its shard's rows in FP32; CTA 32 / 64 / 128.
+ *  shards_per_output > 1 is Staged: unfinalized FP32 [outer, shards, K] partials at the balanced row split.
+ *  shards_per_output == 1 is Complete: finalized, scaled, stored in the output dtype at the geometry's output strides.
+ *  The input base is aligned to the packet. Semantics: SUM / MIN / MAX x {identity, |x|, x^2}, PRODUCT x identity. */
+[[nodiscard]] bool fp32AlignedKSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                                        uint32_t packet_bytes, uint32_t block_threads, uint64_t shards_per_output);
+
+void launchFp32AlignedKStage(const CubReductionStageSemantics& semantics,
+                             const Tensor& input,
+                             Tensor& stage_output,
+                             const CubReductionGeometry& geometry,
+                             uint32_t packet_bytes,
+                             uint32_t block_threads,
+                             uint64_t shards_per_output,
+                             float output_scale,
+                             Stream& stream);
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp32AlignedKOccupancy(uint32_t packet_bytes, uint32_t block_threads,
+                                                                bool staged);
+
+/** 1198: FP32 RK ARG (plans/Thor_FP32_Dense_Reduction_Plan, phase 6). Candidates are Fp32ArgKey.cuh's
+ *  (key, index << 1 | negative zero): NaNs propagate, the lowest index wins ties (-0 / +0 included).
+ *  The AlignedK twin: fp32AlignedKKernel's ownership (8- or 16-byte packets, CTA 32 / 64 / 128, balanced shard rows;
+ *  no 4-byte packet: fp32AlignedKArgSupports rejects it).
+ *  One shard writes the requested outputs; more write packed 64-bit partials [outer, shards, K] to `packed_scratch`
+ *  (fp32ArgPackedScratchBytes) and finish them in the same call. value_output: any float storage (or null);
+ *  index_output: UINT32 / UINT64 (or null), index = row * domain_stride. Rows per shard <= 2^31 - 1. */
+[[nodiscard]] bool fp32AlignedKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                                           uint32_t packet_bytes, uint32_t block_threads, uint64_t shards_per_output);
+
+[[nodiscard]] uint64_t fp32ArgPackedScratchBytes(uint64_t outer_size, uint64_t shards, uint64_t inner_size);
+
+void launchFp32AlignedKArg(const Tensor& input,
+                           Tensor* value_output,
+                           Tensor* index_output,
+                           const CubReductionGeometry& geometry,
+                           uint32_t packet_bytes,
+                           uint32_t block_threads,
+                           uint64_t shards_per_output,
+                           uint64_t* packed_scratch,
+                           bool maximum,
+                           uint64_t domain_stride,
+                           Stream& stream);
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp32AlignedKArgOccupancy(uint32_t packet_bytes, uint32_t block_threads,
+                                                                   bool staged);
+
+/** 1198: reduces packed FP32 ARG partials [outer, shards, K] over shards and writes the requested outputs. Shard s
+ *  begins at s * uniform_rows_per_shard, or with 0 at the balanced split of R into `shards`. FP8's per-output kernel,
+ *  or its shard-split kernel for few outputs with many shards (fp8ArgPackedContinuationSplitsShards). */
+void launchFp32ArgPackedContinuation(const uint64_t* packed_partials,
+                                     Tensor* value_output,
+                                     Tensor* index_output,
+                                     uint64_t outer_size,
+                                     uint64_t reduction_size,
+                                     uint64_t inner_size,
+                                     uint64_t shards,
+                                     uint64_t uniform_rows_per_shard,
+                                     bool maximum,
+                                     uint64_t domain_stride,
+                                     Stream& stream);
+
+/** 1208: carried-index (intermediate) FP32 ARG (plans/Thor_FP32_Dense_Reduction_Plan, phase 8). The
+ *  input is FP32 values [outer, R, K] with a carried index (UINT32 / UINT64, the same shape) from earlier passes; an
+ *  element's composed index is carried + row * row_stride (row_stride: the current run's original-domain stride, 0 for
+ *  an intermediate run). Candidates compare (key, composed index) in full; the index output is the composed index.
+ *  Staged passes write wide partials (a uint32 key and a uint64 tail per partial, fp32ArgWideScratchBytes, 256-byte
+ *  aligned scratch) and finish them with launchFp32ArgWideContinuation in the same call. */
+[[nodiscard]] uint64_t fp32ArgWideScratchBytes(uint64_t outer_size, uint64_t shards, uint64_t inner_size);
+
+void launchFp32ArgWideContinuation(void* wide_scratch,
+                                   Tensor* value_output,
+                                   Tensor* index_output,
+                                   uint64_t outer_size,
+                                   uint64_t shards,
+                                   uint64_t inner_size,
+                                   bool maximum,
+                                   Stream& stream);
+
+/** 1208: the carried-index AlignedK ARG twin: launchFp32AlignedKArg's configurations (fp32AlignedKSupports), the carried
+ *  index aligned like its packets (at most 16 bytes). */
+void launchFp32AlignedKCarriedArg(const Tensor& input,
+                                  const Tensor& carried_index,
+                                  Tensor* value_output,
+                                  Tensor* index_output,
+                                  const CubReductionGeometry& geometry,
+                                  uint32_t packet_bytes,
+                                  uint32_t block_threads,
+                                  uint64_t shards_per_output,
+                                  void* wide_scratch,
+                                  bool maximum,
+                                  uint64_t row_stride,
+                                  Stream& stream);
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp32AlignedKCarriedArgOccupancy(uint32_t packet_bytes,
+                                                                          uint32_t block_threads, bool staged,
+                                                                          DataType index_dtype);
+
 /**
  * Launches exactly one rotated R-cooperative TiledRK stage. The stage applies the input transform and associative
  * combine for the nominated R shard geometry, emitting FP32 [outer,shards,inner] partials. It never applies the final
@@ -146,6 +246,71 @@ void launchFp8GeneralRParallelKTileRotatedCalibrationFirstStage(
     CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity,
     CubReductionStageCombine combine = CubReductionStageCombine::Sum);
 
+/** 1190: the RuntimeK rotated first stage on FP32 input, PrefixReserved only (plans/Thor_FP32_Dense_Reduction_Plan,
+ *  phase 5): p16 packets (4 components per lane), 4 cooperative warps (the fewest whose revisit stride,
+ *  4 rows of K floats, is a whole number of packets), a logical K tile of 125 components (128 less a 0..3 prefix), and
+ *  FP8's retained row depths (Fp8RuntimeKPolicy::rotated_row_depths). shards_per_output = ceil(R / rows) > 1. Emits
+ *  unfinalized FP32 [outer, shards, K] partials; every combine x {identity, |x|, x^2}; the input is 4-byte aligned. */
+inline constexpr uint32_t FP32_RUNTIME_K_ROTATED_TILE_COMPONENTS = 125;
+
+[[nodiscard]] bool fp32RuntimeKRotatedSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                                               uint64_t rows_per_shard);
+
+void launchFp32RuntimeKRotatedFirstStage(const Tensor& input,
+                                         Tensor& fp32_partials,
+                                         const CubReductionGeometry& geometry,
+                                         uint64_t rows_per_shard,
+                                         uint64_t shards_per_output,
+                                         Stream& stream,
+                                         CubReductionStageInputTransform transform =
+                                             CubReductionStageInputTransform::Identity,
+                                         CubReductionStageCombine combine = CubReductionStageCombine::Sum);
+
+/** 1200: the FP32 RK ARG rotated twin (plans/Thor_FP32_Dense_Reduction_Plan, phase 6): FP32 VALUE
+ *  rotated's layout (16-byte packets, 4 warps, the 125-component tile; any 4-byte aligned input) with one ARG
+ *  candidate per component and any shard depth up to 2^31 - 1 rows. rows_per_shard >= R is one Complete pass writing
+ *  the requested outputs; otherwise packed partials go to `packed_scratch` (fp32ArgPackedScratchBytes with
+ *  ceil(R / rows) shards) and launchFp32ArgPackedContinuation finishes them in the same call. Outputs as
+ *  launchFp32AlignedKArg's. */
+[[nodiscard]] bool fp32RuntimeKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                                           uint64_t rows_per_shard);
+
+void launchFp32RuntimeKArg(const Tensor& input,
+                           Tensor* value_output,
+                           Tensor* index_output,
+                           const CubReductionGeometry& geometry,
+                           uint64_t rows_per_shard,
+                           uint64_t* packed_scratch,
+                           bool maximum,
+                           uint64_t domain_stride,
+                           Stream& stream);
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp32RuntimeKArgOccupancy(bool staged);
+
+/** 1210: the carried-index rotated ARG twin (phase 8; inputs, outputs and scratch as launchFp32AlignedKCarriedArg's):
+ *  launchFp32RuntimeKArg's layout and any depth up to 2^32 - 1 rows (depth >= R: one Complete pass). Both the input
+ *  and the carried index are 16-byte aligned. */
+[[nodiscard]] bool fp32RuntimeKCarriedArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                                                  uint64_t rows_per_shard);
+
+void launchFp32RuntimeKCarriedArg(const Tensor& input,
+                                  const Tensor& carried_index,
+                                  Tensor* value_output,
+                                  Tensor* index_output,
+                                  const CubReductionGeometry& geometry,
+                                  uint64_t rows_per_shard,
+                                  void* wide_scratch,
+                                  bool maximum,
+                                  uint64_t row_stride,
+                                  Stream& stream);
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp32RuntimeKCarriedArgOccupancy(bool staged, DataType index_dtype);
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp32RuntimeKRotatedOccupancy(
+    uint64_t rows_per_shard,
+    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity,
+    CubReductionStageCombine combine = CubReductionStageCombine::Sum);
+
 /**
  * Production FP16/BF16 narrow-flat R-cooperative stage for K<=32.
  * Emits unfinalized FP32 [outer,shard,K] partials in one physical pass.
@@ -178,6 +343,21 @@ void launchFp8DeepRSmallKRetainedFirstStage(
 [[nodiscard]] CubKernelOccupancyInfo queryFp8DeepRSmallKRetainedOccupancy(
     DataType input_dtype, uint64_t rows_per_shard, uint64_t inner_size,
     const CubReductionStageSemantics& semantics);
+
+/** 1186: the DeepRSmallK first stage on FP32 input (plans/Thor_FP32_Dense_Reduction_Plan, phase 5).
+ *  FP8's kernels at 4-byte elements: K <= 125 (a P16 window of 128 FP32, less a worst-case prefix), ownerships
+ *  TinyK (K <= 4, <= 8) and one / two / four components per lane, FP8's five depths. Emits unfinalized FP32
+ *  [outer, ceil(R / rows), K] partials. The input is 16-byte aligned. fp32DeepRSmallKSupports is the legality rule. */
+[[nodiscard]] bool fp32DeepRSmallKSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                                           uint64_t rows_per_shard);
+
+void launchFp32DeepRSmallKRetainedFirstStage(
+    const CubReductionStageSemantics& semantics, const Tensor& input, Tensor& fp32_partials,
+    const CubReductionGeometry& geometry, uint64_t rows_per_shard, uint64_t shards_per_output,
+    Stream& stream);
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp32DeepRSmallKRetainedOccupancy(
+    uint64_t rows_per_shard, uint64_t inner_size, const CubReductionStageSemantics& semantics);
 
 
 
@@ -237,6 +417,114 @@ void launchFp8OneWindowRuntimeKComplete(const Tensor& input,
     const Fp8OneWindowRuntimeKUnit& unit,
     uint32_t warps_per_output,
     CubReductionStageCombine combine = CubReductionStageCombine::Sum);
+
+/** 1185: the OneWindow kernel on FP32 input (plans/Thor_FP32_Dense_Reduction_Plan, phase 5). The
+ *  units are FP8's whose components-per-lane bucket FP32 reaches (<= 4: a 16-byte lane packet holds 4 FP32), so K <=
+ *  125 / 61 / 29 / 13 at O1 / O2 / O4 / O8. fp32OneWindowRuntimeKUnits(K) lists the units whose bucket holds K. The
+ *  input is 16-byte aligned and at most 2^32 - 1 bytes; MIN / MAX fold with the FP32 masks. */
+[[nodiscard]] std::vector<Fp8OneWindowRuntimeKUnit> fp32OneWindowRuntimeKUnits(uint64_t inner_size);
+
+void launchFp32OneWindowRuntimeKComplete(const Tensor& input,
+                                         Tensor& output,
+                                         const CubReductionGeometry& geometry,
+                                         const Fp8OneWindowRuntimeKUnit& unit,
+                                         uint32_t warps_per_output,
+                                         Stream& stream,
+                                         const CubReductionStageSemantics& semantics = {},
+                                         float output_scale = 1.0f);
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp32OneWindowRuntimeKOccupancy(
+    uint64_t inner_size,
+    const Fp8OneWindowRuntimeKUnit& unit,
+    uint32_t warps_per_output,
+    CubReductionStageCombine combine = CubReductionStageCombine::Sum);
+
+/** 1203: the FP32 RK ARG DeepRSmallK twins (phase 6): FP32 VALUE DeepRSmallK's kernels and ownership
+ *  (K <= 125: TinyK at K <= 4 / 8, then one / two / four components per lane; a retained depth with R > depth; a
+ *  16-byte aligned input) with one ARG candidate per component. Packed partials [outer, ceil(R / depth), K] go to
+ *  `packed_scratch` (fp32ArgPackedScratchBytes) and launchFp32ArgPackedContinuation finishes them in the same call.
+ *  Outputs as launchFp32AlignedKArg's. */
+[[nodiscard]] bool fp32DeepRSmallKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                                              uint64_t rows_per_shard);
+
+void launchFp32DeepRSmallKArg(const Tensor& input,
+                              Tensor* value_output,
+                              Tensor* index_output,
+                              const CubReductionGeometry& geometry,
+                              uint64_t rows_per_shard,
+                              uint64_t* packed_scratch,
+                              bool maximum,
+                              uint64_t domain_stride,
+                              Stream& stream);
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp32DeepRSmallKArgOccupancy(uint64_t inner_size);
+
+/** 1213: the carried-index DeepRSmallK ARG twins (phase 8; inputs and outputs as launchFp32AlignedKCarriedArg's):
+ *  launchFp32DeepRSmallKArg's kernels, ownership and depths (fp32DeepRSmallKSupports: a retained depth with R > depth),
+ *  the input and the carried index 16-byte aligned. Wide partials go to `wide_scratch` (fp32ArgWideScratchBytes with
+ *  ceil(R / depth) shards, 256-byte aligned) and launchFp32ArgWideContinuation finishes them in the same call. */
+void launchFp32DeepRSmallKCarriedArg(const Tensor& input,
+                                     const Tensor& carried_index,
+                                     Tensor* value_output,
+                                     Tensor* index_output,
+                                     const CubReductionGeometry& geometry,
+                                     uint64_t rows_per_shard,
+                                     void* wide_scratch,
+                                     bool maximum,
+                                     uint64_t row_stride,
+                                     Stream& stream);
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp32DeepRSmallKCarriedArgOccupancy(uint64_t inner_size,
+                                                                             DataType index_dtype);
+
+/** 1202: the FP32 RK ARG OneWindow twin (phase 6): launchFp32OneWindowRuntimeKComplete's units and
+ *  ownership (O1 W1/W2/W4/W8, O2/O4/O8 W1; K <= 125 / 61 / 29 / 13) with one ARG candidate per owned component; Complete
+ *  only, R <= 2^31 - 1, input at most 2^32 - 1 bytes and 16-byte aligned. Outputs as launchFp32AlignedKArg's. Not
+ *  behind THOR_CUB_ENABLE_FP8_TYPES (its kernel is FP32-only). */
+[[nodiscard]] bool fp32OneWindowArgSupports(uint64_t outer_size,
+                                            uint64_t reduction_size,
+                                            uint64_t inner_size,
+                                            const Fp8OneWindowRuntimeKUnit& unit,
+                                            uint32_t warps_per_output);
+
+void launchFp32OneWindowArg(const Tensor& input,
+                            Tensor* value_output,
+                            Tensor* index_output,
+                            const CubReductionGeometry& geometry,
+                            const Fp8OneWindowRuntimeKUnit& unit,
+                            uint32_t warps_per_output,
+                            bool maximum,
+                            uint64_t domain_stride,
+                            Stream& stream);
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp32OneWindowArgOccupancy(uint64_t inner_size,
+                                                                    const Fp8OneWindowRuntimeKUnit& unit,
+                                                                    uint32_t warps_per_output);
+
+/** 1212: the carried-index OneWindow ARG twin (phase 8; inputs and outputs as launchFp32AlignedKCarriedArg's):
+ *  launchFp32OneWindowArg's units and ownership; Complete only, R <= 2^32 - 1, at most 2^32 - 1 value bytes, the input
+ *  and the carried index 16-byte aligned. */
+[[nodiscard]] bool fp32OneWindowCarriedArgSupports(uint64_t outer_size,
+                                                   uint64_t reduction_size,
+                                                   uint64_t inner_size,
+                                                   const Fp8OneWindowRuntimeKUnit& unit,
+                                                   uint32_t warps_per_output);
+
+void launchFp32OneWindowCarriedArg(const Tensor& input,
+                                   const Tensor& carried_index,
+                                   Tensor* value_output,
+                                   Tensor* index_output,
+                                   const CubReductionGeometry& geometry,
+                                   const Fp8OneWindowRuntimeKUnit& unit,
+                                   uint32_t warps_per_output,
+                                   bool maximum,
+                                   uint64_t row_stride,
+                                   Stream& stream);
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp32OneWindowCarriedArgOccupancy(uint64_t inner_size,
+                                                                           const Fp8OneWindowRuntimeKUnit& unit,
+                                                                           uint32_t warps_per_output,
+                                                                           DataType index_dtype);
 
 /** ARG-A2: the OneWindow argmin/argmax twin of a OneWindow unit (one kernel per unit; argmin/argmax and E4M3/E5M2 are
  * runtime). Complete only: writes the winning value (FP8/FP16/BF16/FP32 storage, optional) and the index
@@ -396,6 +684,46 @@ void launchFp8GeneralRParallelKTileRCooperativeCalibrationComplete(
 
 [[nodiscard]] CubKernelOccupancyInfo queryFp8GeneralRParallelKTileRCooperativeCalibrationOccupancy(
     DataType input_dtype,
+    CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity,
+    CubReductionStageCombine combine = CubReductionStageCombine::Sum);
+
+/** 1190: RuntimeK PacketComplete on FP32 input (plans/Thor_FP32_Dense_Reduction_Plan, phase 5). The
+ *  FP8 kernel's topology at 4 components per p16 packet: persistent [outer, K tile] work items, W1/W2/W4/W8 warps per
+ *  item over R, a K tile of at most 124 components (any per-row prefix of 0..3 still fits the 32-packet window). Writes
+ *  the finalized, scaled output. The input base is 16-byte aligned. Every combine x {identity, |x|, x^2}. */
+inline constexpr uint32_t FP32_PACKET_COMPLETE_MAX_TILE_COMPONENTS = 124;
+
+[[nodiscard]] bool fp32PacketCompleteSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                                              uint32_t warps_per_output, uint32_t tile_components);
+
+void launchFp32PacketComplete(const Tensor& input,
+                              Tensor& output,
+                              const CubReductionGeometry& geometry,
+                              uint32_t warps_per_output,
+                              uint32_t tile_components,
+                              Stream& stream,
+                              const CubReductionStageSemantics& semantics = {},
+                              float output_scale = 1.0f);
+
+/** 1201: the FP32 RK ARG PacketComplete twin (phase 6): launchFp32PacketComplete's topology (W1/W2/W4/W8
+ *  warps per [outer, K tile] item, tiles of 1..124 components, a 16-byte aligned input) with one ARG candidate per
+ *  component; Complete only, R <= 2^31 - 1. Outputs as launchFp32AlignedKArg's. */
+[[nodiscard]] bool fp32PacketCompleteArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                                                 uint32_t warps_per_output, uint32_t tile_components);
+
+void launchFp32PacketCompleteArg(const Tensor& input,
+                                 Tensor* value_output,
+                                 Tensor* index_output,
+                                 const CubReductionGeometry& geometry,
+                                 uint32_t warps_per_output,
+                                 uint32_t tile_components,
+                                 bool maximum,
+                                 uint64_t domain_stride,
+                                 Stream& stream);
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp32PacketCompleteArgOccupancy();
+
+[[nodiscard]] CubKernelOccupancyInfo queryFp32PacketCompleteOccupancy(
     CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity,
     CubReductionStageCombine combine = CubReductionStageCombine::Sum);
 
@@ -709,6 +1037,56 @@ void launchFp8KRValueSegments(const CubReductionStageSemantics& semantics,
                               float output_scale,
                               Stream& stream,
                               Fp8KR::Fp8KRSplitStages stages = Fp8KR::Fp8KRSplitStages::Both);
+
+/** 1179: the same retained R / KR VALUE pass on FP32 input (the FP8 Group / Pack / Block / Split kernels at one element
+ *  per word). `shape` is in bytes (row_bytes = 4 * elements per row) and legal for element size 4
+ *  (Fp8KR::retainedKRShapeLegalForElement: no vector Pack); the input must be 4-byte aligned. The FP32 KR
+ *  selector picks the shape (plans/Thor_FP32_Dense_Reduction_Plan). */
+void launchFp32KRValueSegments(const CubReductionStageSemantics& semantics,
+                               const Tensor& input,
+                               Tensor& output,
+                               const Fp8KR::Fp8KRSegmentShape& shape,
+                               void* scratch,
+                               uint64_t scratch_bytes,
+                               float output_scale,
+                               Stream& stream,
+                               Fp8KR::Fp8KRSplitStages stages = Fp8KR::Fp8KRSplitStages::Both);
+
+/** 1181: the retained R / KR argmin/argmax pass on FP32 input (its own kernels: two-word candidates, a 32-bit ordered
+ *  key and a 64-bit row-local index). `shape` is in bytes and legal for it (Fp8KR::fp32KRArgShapeLegal); the input is
+ *  4-byte aligned; Split partials take fp8KRScratchBytes(shape, true) bytes. Index = row-local index * domain_stride.
+ *  (plans/Thor_FP32_Dense_Reduction_Plan). */
+void launchFp32KRArgSegments(const Tensor& input,
+                             Tensor* value_output,
+                             Tensor* index_output,
+                             const Fp8KR::Fp8KRSegmentShape& shape,
+                             void* scratch,
+                             uint64_t scratch_bytes,
+                             bool maximum,
+                             uint64_t domain_stride,
+                             Stream& stream,
+                             Fp8KR::Fp8KRSplitStages stages = Fp8KR::Fp8KRSplitStages::Both);
+
+/** 1214: wide Split scratch of the carried-index FP32 R / KR ARG pass (fp32ArgWideScratchBytes over [rows, chunks]);
+ *  0 for the other families. */
+[[nodiscard]] uint64_t fp32KRCarriedArgScratchBytes(const Fp8KR::Fp8KRSegmentShape& shape);
+
+/** 1214: the carried-index (intermediate) FP32 R / KR ARG pass (phase 8): launchFp32KRArgSegments's
+ *  families and shapes (Fp8KR::fp32KRArgShapeLegal) with a UINT32 / UINT64 carried index per element (the input's
+ *  element count, naturally aligned). The index output holds the composed index carried + row-local position *
+ *  row_stride. A Split pass writes wide partials to `scratch` (fp32KRCarriedArgScratchBytes, 256-byte aligned) and
+ *  finishes them in the same call (unless PartialsOnly). */
+void launchFp32KRCarriedArgSegments(const Tensor& input,
+                                    const Tensor& carried_index,
+                                    Tensor* value_output,
+                                    Tensor* index_output,
+                                    const Fp8KR::Fp8KRSegmentShape& shape,
+                                    void* scratch,
+                                    uint64_t scratch_bytes,
+                                    bool maximum,
+                                    uint64_t row_stride,
+                                    Stream& stream,
+                                    Fp8KR::Fp8KRSplitStages stages = Fp8KR::Fp8KRSplitStages::Both);
 
 /** 1146-1148: retained FP8 R / KR argmin/argmax pass (same families; Split partials are 64-bit wide candidates in
  *  `scratch`, fp8KRScratchBytes(shape, true) bytes). Index = row-local index * domain_stride. */

@@ -54,6 +54,20 @@ class TestKRRankerDataset(unittest.TestCase):
             with self.assertRaises(ValueError):
                 dataset.load(path)
 
+    def test_per_dtype_rankers(self):
+        # 1182: one ranker per dtype; each trains on its dtype's cells and writes its own header and namespace.
+        import train  # noqa: E402  (fp8_kr_ranker/train.py; standard library at import)
+        self.assertEqual(sorted(train.DTYPES), ["fp32", "fp8"])
+        fp8, fp32 = train.DTYPES["fp8"], train.DTYPES["fp32"]
+        self.assertTrue(fp8["cells"]("fp8_e4m3") and fp8["cells"]("fp8_e5m2") and not fp8["cells"]("fp32"))
+        self.assertTrue(fp32["cells"]("fp32") and not fp32["cells"]("fp8_e4m3"))
+        self.assertEqual(fp32["model_header"], "Fp32KRRankerModel.h")
+        self.assertIn("Fp32KR::Fp32KRRankerModel", fp32["model_namespace"])
+        self.assertIn("Fp32KR::Fp32KRRankerParity", fp32["parity_namespace"])
+        self.assertIn("FP32_KR_SHORTLIST_DEPTHS", fp32["depths"])
+        self.assertEqual(fp8["model_header"], "Fp8KRRankerModel.h")
+        self.assertIn("FP8_KR_SHORTLIST_DEPTHS", fp8["depths"])
+
 
 if __name__ == "__main__":
     unittest.main()

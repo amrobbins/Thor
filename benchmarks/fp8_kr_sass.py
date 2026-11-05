@@ -9,10 +9,15 @@ Extracts every device ELF from the built CubReductionNarrowFlatRCooperative.cu.o
                                memory traffic.
 and prints the summary. Zip <out> and attach it. Requires cuobjdump and c++filt on PATH.
 
-Usage: fp8_kr_sass.py --build BUILD_DIR --out OUT_DIR [--filter fp8KR]
+Usage: fp8_kr_sass.py --build BUILD_DIR --out OUT_DIR [--filter fp8KR] [--object NAME.cu.o]
+
+1189: --object picks another translation unit's object (default the NarrowFlat one), e.g.
+CubReductionKParallelShardedTiled.cu.o for the AlignedK kernels; FP32 kernel names (fp32...Kernel) are shortened like
+FP8 ones.
 """
 
 import argparse
+import hashlib
 import collections
 import csv
 import re
@@ -64,12 +69,24 @@ def demangle(names):
 
 def short_name(demangled):
     # "void ns::(anonymous namespace)::fp8KRValueGroupKernel<__nv_fp8_e4m3, 0, 0>(args)" -> "fp8KRValueGroupKernel<e4m3,0,0>"
-    name = demangled
-    match = re.search(r"(fp8KR\w+)(<[^()]*>)?", name)
-    if match:
-        name = match.group(1) + (match.group(2) or "")
-    name = name.replace("__nv_fp8_", "").replace(" ", "")
-    return name
+    # 1185-1186: any retained kernel (fp8KR..., fp8OneWindow..., narrowFp8Packed...), template arguments kept whole
+    # (balanced <>), namespaces dropped, so --filter can select RK kernels and names stay distinct.
+    # 1191: any kernel name (\w+Kernel before its template arguments or parameters), e.g. the rotated
+    # awkwardAlignmentRotatedShardedFirstStageKernel, so no listing is named after the whole signature.
+    match = re.search(r"\w*[Ff]p(?:8|32)\w*Kernel", demangled) or re.search(r"\w+Kernel(?=[<(])", demangled)
+    if not match:
+        return demangled.replace("__nv_fp8_", "").replace(" ", "")
+    name, rest = match.group(0), demangled[match.end():]
+    if rest.startswith("<"):
+        depth = 0
+        for i, ch in enumerate(rest):
+            depth += ch == "<"
+            depth -= ch == ">"
+            if depth == 0:
+                name += rest[:i + 1]
+                break
+    name = re.sub(r"(\w+::|\(anonymous namespace\)::)", "", name)
+    return name.replace("__nv_fp8_", "").replace(" ", "")
 
 
 def parse_resources(text):
@@ -121,13 +138,14 @@ def main():
     parser.add_argument("--build", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--filter", default="fp8KR", help="substring of the demangled kernel names to keep")
+    parser.add_argument("--object", default=OBJECT_NAME, help="object file name to search for under --build")
     args = parser.parse_args()
     for program in ("cuobjdump", "c++filt"):
         if shutil.which(program) is None:
             sys.exit(f"{program} not found on PATH")
-    objects = sorted(args.build.rglob(OBJECT_NAME))
+    objects = sorted(args.build.rglob(args.object))
     if not objects:
-        sys.exit(f"no {OBJECT_NAME} under {args.build} (build Thor first)")
+        sys.exit(f"no {args.object} under {args.build} (build Thor first)")
     obj = objects[0].resolve()
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -149,6 +167,8 @@ def main():
             for mangled, lines in kept.items():
                 name = short_name(names[mangled])
                 safe = re.sub(r"[^A-Za-z0-9_,.-]+", "_", name)
+                if len(safe) > 200:  # 1191: stay under the 255-byte file name limit
+                    safe = safe[:180] + "_" + hashlib.sha1(safe.encode()).hexdigest()[:12]
                 (arch_dir / f"{safe}.sass").write_text(f"// {names[mangled]}\n// {mangled}\n" + "\n".join(lines) + "\n")
                 row = {"arch": arch, "kernel": name}
                 row.update({k: resources.get(mangled, {}).get(k, "") for k in ("reg", "stack", "local", "shared")})

@@ -9,6 +9,18 @@ uint32_t runtimeKResidency(DataType input_dtype,
                             const PhysicalKernel& kernel) {
     if (kernel.family != PhysicalFamily::RuntimeK) return 0;
     CubKernelOccupancyInfo occupancy{};
+    if (input_dtype == DataType::FP32) {  // 1192: PacketComplete and RotatedPrefix (no FP32 Exact)
+        switch (static_cast<RuntimeLayout>(kernel.a)) {
+            case RuntimeLayout::PacketComplete:
+                occupancy = queryFp32PacketCompleteOccupancy(semantics.input_transform, semantics.combine);
+                break;
+            case RuntimeLayout::RotatedPrefix:
+                occupancy = queryFp32RuntimeKRotatedOccupancy(kernel.e, semantics.input_transform, semantics.combine);
+                break;
+            default: return 0;
+        }
+        return occupancy.max_active_blocks_per_sm > 0 ? static_cast<uint32_t>(occupancy.max_active_blocks_per_sm) : 0u;
+    }
     switch (static_cast<RuntimeLayout>(kernel.a)) {
         case RuntimeLayout::PacketComplete:
             occupancy = queryFp8GeneralRParallelKTileRCooperativeCalibrationOccupancy(
@@ -32,6 +44,16 @@ void launchRuntimeK(const PhysicalKernel& kernel, const CubReductionStageSemanti
     if (kernel.family != PhysicalFamily::RuntimeK ||
         !structurallyValid(kernel, geometry.outer_size, geometry.reduction_size, geometry.inner_size))
         throw std::logic_error("Invalid retained RuntimeK physical stage");
+    if (kernel.element_bytes == 4) {
+        if (static_cast<RuntimeLayout>(kernel.a) == RuntimeLayout::PacketComplete) {
+            launchFp32PacketComplete(input, stage_output, geometry, static_cast<uint32_t>(kernel.b),
+                                     static_cast<uint32_t>(kernel.c), stream, semantics, output_scale);
+        } else {
+            launchFp32RuntimeKRotatedFirstStage(input, stage_output, geometry, kernel.e, kernel.f, stream,
+                                                semantics.input_transform, semantics.combine);
+        }
+        return;
+    }
     switch (static_cast<RuntimeLayout>(kernel.a)) {
         case RuntimeLayout::PacketComplete:
             launchFp8GeneralRParallelKTileRCooperativeCalibrationComplete(

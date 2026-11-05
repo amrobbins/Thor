@@ -166,6 +166,30 @@ a sample was one launch into a shared output: CUDA events resolve about 2 us, so
 **Sizing.** Progress and ETA go to stderr every 25 cells. Time a slice with `--max-cells=200` and scale
 `--training-random` or `--training-semantics` to reach about 20 minutes.
 
+**FP32 (1194).** `--training --dtypes=fp32` (FP32 alone: one ranker per dtype) times FP32 VALUE cells. The candidates
+are every entry of the FP32 RK pool (`Fp32RK::fp32RKCandidatePool`, what `Fp32RK::selectCachedValueSite` shortlists),
+each end to end with its production FP32 continuation. The features are `fp32RKRankerFeatures` (FP8's 26 in FP32 units),
+`list_position` is the pool position, `frozen_margin` the installed FP32 model's (0 for the placeholder), and `dtype`
+is `fp32`. The working set stays in bytes, so an FP32 cell has a quarter of FP8's elements at the same target.
+`--stamp` runs `Fp32RK::autotuneValueSite`. The header's `input_dtypes` names the dataset's dtype.
+
+**FP32 ARG (1205).** FP32 cells alternate VALUE and ARG per geometry as FP8's do (1194-1204 were VALUE only). An FP32
+ARG cell times every `Fp32RK::fp32RKArgCandidates` pass (the ARG twins of the VALUE MIN / MAX pool and the ARG-only
+rotated passes: what `Fp32RK::selectCachedArgSite` shortlists) as `launchFp32RKArgPass` runs it, staged passes with
+their packed continuation, writing a UINT32 index and, for `arg_value_index`, an FP32 value. The features are
+`fp32RKRankerFeatures` with the ARG aggregate; `configuration` is the pass identity's name. `--stamp` runs
+`Fp32RK::autotuneArgSite`. `--ops=argmin,argmax` gives ARG cells only (both cells of a geometry), for adding ARG to an
+existing VALUE dataset of the same seed: the geometries and held-out shapes are the same.
+
+**FP32 carried-index ARG (1211).** `--carried-index=uint32|uint64` (with `--training --dtypes=fp32
+--ops=argmin,argmax`) makes the ARG cells carried-index (intermediate) sites: FP32 values plus a cold carried index of
+that width, both streamed from the arena, so the working set counts both (an element is 8 or 12 bytes). The candidates
+are `Fp32RK::fp32RKCarriedArgCandidates` (the carried twins: AlignedK and rotated from 1211, OneWindow from 1212,
+DeepRSmallK from 1213), timed as `launchFp32RKCarriedArgPass` runs them (staged passes with the wide continuation),
+row stride 1. The kinds are `carried_arg_index` and `carried_arg_value_index`; the features carry the carried
+aggregate (3 / 4); the header's `carried_index` names the width (`line_rate.py` adds it to the input bytes). No
+`--stamp` (no carried selector yet).
+
 ## Continuation audit (1134+)
 
 ```

@@ -157,6 +157,11 @@ class Tensor {
                                             uint64_t byte_offset) const;
     [[nodiscard]] bool hasCustomStrides() const { return !customStridesElements.empty(); }
     [[nodiscard]] bool isDenseContiguous() const;
+    /** 1222: true when the visible data (getMemPtr(), the view offset included) starts on a multiple of `bytes`, a
+     *  power of two. A reduction picks its fastest kernels only on 16-byte aligned inputs. */
+    [[nodiscard]] bool isAligned(uint64_t bytes) const;
+    /** 1222: the largest power of two, at most `limit` (a power of two), dividing the visible data's address. */
+    [[nodiscard]] uint64_t alignmentBytes(uint64_t limit = 256) const;
     [[nodiscard]] uint64_t getStorageElementOffset() const { return storageElementOffset; }
     [[nodiscard]] std::vector<uint64_t> getStridesElements() const;
     // void concatenateFrom(std::vector<Tensor> sources);

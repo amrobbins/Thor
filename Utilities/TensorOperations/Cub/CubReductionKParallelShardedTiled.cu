@@ -1,6 +1,7 @@
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 #include "Utilities/TensorOperations/Cub/CubReductionOperation.cuh"
 #include "Utilities/TensorOperations/Cub/FastDivU32.h"
+#include "Utilities/TensorOperations/Cub/Fp32ArgKey.cuh"
 #include "Utilities/TensorOperations/Cub/Fp8RetainedKernelPolicy.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8AlignedKSelector.h"
 
@@ -14,6 +15,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -1203,6 +1205,593 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8CompleteUnifiedKerne
 
 
 #endif  // THOR_CUB_ENABLE_FP8_TYPES
+
+
+// ---- 1188: AlignedK on FP32 input (plans/Thor_FP32_Dense_Reduction_Plan, phase 5). A copy of the FP8 AlignedK
+// mapping rather than a template of its kernels: FP8 lanes own PacketBytes one-byte components and decode pairs,
+// transpose FP32 writeback above 16 bytes and keep typed / unified / pruned kernel splits calibrated on FP8. An FP32
+// lane owns ItemsPerLane = 2 or 4 components (an 8- or 16-byte packet), so every FP32 partial packet is <= 16 bytes
+// and stores directly (no transpose), and one kernel per (items, CTA, topology) selects the operation and transform
+// once per work item, outside the R loop. Grid x = shard, y = component tile, z = outer, the balanced row split and
+// the load-ahead row batches are FP8's; rows accumulate in increasing order per component.
+// 1228: and ItemsPerLane = 1 (a 4-byte packet: any K, any 4-byte aligned base), the scalar-packet AlignedK the retired
+// KParallel had for odd K. Without it, odd K at small R ran only cooperative passes (RuntimeK, OneWindow), 0.2-0.6 us
+// slower than the old KParallel on 2-4 us reductions (the 1225 FP32 and 1227 FP8 audits). Every load-ahead batch is
+// 64 bytes per lane (16 rows of one float); a short tail loads all its rows before reducing any.
+template <int ItemsPerLane>
+inline constexpr uint32_t FP32_ALIGNED_K_LOAD_AHEAD_ROWS = ItemsPerLane >= 4 ? 4U : (ItemsPerLane == 2 ? 8U : 16U);
+
+template <int ItemsPerLane, typename ReductionOpT, typename InputTransformT>
+__device__ __forceinline__ void fp32AlignedKReducePacket(float (&local)[ItemsPerLane],
+                                                         const PackedInputValues<float, ItemsPerLane>& packet,
+                                                         const ReductionOpT& reduction_op,
+                                                         const InputTransformT& input_transform) {
+#pragma unroll
+    for (int item = 0; item < ItemsPerLane; ++item)
+        local[item] = reduction_op(local[item], input_transform(packet.values[item]));
+}
+
+template <int ItemsPerLane, typename ReductionOpT, typename InputTransformT>
+__device__ __forceinline__ void fp32AlignedKAccumulateRows(float (&local)[ItemsPerLane], const float* row_input,
+                                                           uint32_t row_count, uint64_t inner_size) {
+    constexpr uint32_t Rows = FP32_ALIGNED_K_LOAD_AHEAD_ROWS<ItemsPerLane>;
+    using PacketT = PackedInputValues<float, ItemsPerLane>;
+    const ReductionOpT reduction_op{};
+    const InputTransformT input_transform{};
+#pragma unroll
+    for (int item = 0; item < ItemsPerLane; ++item) local[item] = KParallelReductionIdentityFp32<ReductionOpT>::value;
+    uint32_t remaining = row_count;
+    if (remaining >= Rows) {
+        PacketT current[Rows];
+#pragma unroll
+        for (uint32_t row = 0; row < Rows; ++row)
+            current[row] = loadVectorizedInputPacket<float, ItemsPerLane>(row_input + row * inner_size);
+        row_input += static_cast<uint64_t>(Rows) * inner_size;
+        remaining -= Rows;
+        while (remaining >= Rows) {
+            PacketT next[Rows];
+#pragma unroll
+            for (uint32_t row = 0; row < Rows; ++row)
+                next[row] = loadVectorizedInputPacket<float, ItemsPerLane>(row_input + row * inner_size);
+            row_input += static_cast<uint64_t>(Rows) * inner_size;
+            remaining -= Rows;
+#pragma unroll
+            for (uint32_t row = 0; row < Rows; ++row)
+                fp32AlignedKReducePacket(local, current[row], reduction_op, input_transform);
+#pragma unroll
+            for (uint32_t row = 0; row < Rows; ++row) current[row] = next[row];
+        }
+#pragma unroll
+        for (uint32_t row = 0; row < Rows; ++row)
+            fp32AlignedKReducePacket(local, current[row], reduction_op, input_transform);
+    }
+    if constexpr (ItemsPerLane == 1) {
+        // 1228: fewer than Rows rows remain (all of them at the small R the scalar packet serves): load them all, then
+        // reduce in row order, so the loads overlap instead of each waiting for the one before.
+        if (remaining != 0) {
+            PacketT tail[Rows - 1]{};
+#pragma unroll
+            for (uint32_t row = 0; row + 1 < Rows; ++row)
+                if (row < remaining)
+                    tail[row] = loadVectorizedInputPacket<float, ItemsPerLane>(row_input + row * inner_size);
+#pragma unroll
+            for (uint32_t row = 0; row + 1 < Rows; ++row)
+                if (row < remaining) fp32AlignedKReducePacket(local, tail[row], reduction_op, input_transform);
+        }
+    } else {
+        for (; remaining != 0; --remaining, row_input += inner_size)
+            fp32AlignedKReducePacket(local, loadVectorizedInputPacket<float, ItemsPerLane>(row_input), reduction_op,
+                                     input_transform);
+    }
+}
+
+template <int ItemsPerLane, typename ReductionOpT>
+__device__ __forceinline__ void fp32AlignedKAccumulateTransform(float (&local)[ItemsPerLane], const float* row_input,
+                                                                uint32_t row_count, uint64_t inner_size,
+                                                                CubReductionStageInputTransform transform) {
+    switch (transform) {
+        case CubReductionStageInputTransform::Identity:
+            fp32AlignedKAccumulateRows<ItemsPerLane, ReductionOpT, IdentityFp32>(local, row_input, row_count,
+                                                                                inner_size);
+            return;
+        case CubReductionStageInputTransform::AbsoluteValue:
+            fp32AlignedKAccumulateRows<ItemsPerLane, ReductionOpT, AbsoluteValueFp32>(local, row_input, row_count,
+                                                                                     inner_size);
+            return;
+        default:
+            fp32AlignedKAccumulateRows<ItemsPerLane, ReductionOpT, SquareFp32>(local, row_input, row_count,
+                                                                              inner_size);
+            return;
+    }
+}
+
+template <int ItemsPerLane, int BlockThreads, TiledRKStageTopology Topology>
+__global__ __launch_bounds__(BlockThreads) void fp32AlignedKKernel(const float* input,
+                                                                   void* stage_output,
+                                                                   DataType output_dtype,
+                                                                   uint64_t outer_size,
+                                                                   uint64_t reduction_size,
+                                                                   uint64_t inner_size,
+                                                                   uint64_t output_outer_stride,
+                                                                   uint64_t output_inner_stride,
+                                                                   uint64_t shards_per_output,
+                                                                   uint64_t component_tiles,
+                                                                   ReductionShardRows shard_rows,
+                                                                   CubReductionStageCombine operation,
+                                                                   CubReductionStageInputTransform transform,
+                                                                   AdditiveFinalizeFp32 output_finalize,
+                                                                   float output_scale) {
+    static_assert(ItemsPerLane == 1 || ItemsPerLane == 2 || ItemsPerLane == 4);
+    static_assert(BlockThreads == 32 || BlockThreads == 64 || BlockThreads == 128);
+    constexpr uint64_t ComponentsPerCta = static_cast<uint64_t>(BlockThreads) * ItemsPerLane;
+    const uint32_t outer_count = static_cast<uint32_t>(outer_size);
+    const uint32_t tile_count = static_cast<uint32_t>(component_tiles);
+    const uint32_t shard_count = static_cast<uint32_t>(shards_per_output);
+    for (uint32_t outer_index = blockIdx.z; outer_index < outer_count; outer_index += gridDim.z)
+    for (uint32_t component_tile = blockIdx.y; component_tile < tile_count; component_tile += gridDim.y)
+    for (uint32_t shard = blockIdx.x; shard < shard_count; shard += gridDim.x) {
+        const uint64_t packet_component_begin = static_cast<uint64_t>(component_tile) * ComponentsPerCta +
+                                                static_cast<uint64_t>(threadIdx.x) * ItemsPerLane;
+        if (packet_component_begin >= inner_size) continue;  // K % ItemsPerLane == 0: owned packets are whole
+        const uint64_t row_begin = reductionShardRowBegin(shard_rows, shard);
+        const uint32_t row_count = reductionShardRowCount(shard_rows, shard);
+        const float* row_input =
+            input + ((outer_index * reduction_size + row_begin) * inner_size + packet_component_begin);
+        float local[ItemsPerLane];
+        switch (operation) {
+            case CubReductionStageCombine::Sum:
+                fp32AlignedKAccumulateTransform<ItemsPerLane, cuda::std::plus<float>>(local, row_input, row_count,
+                                                                                     inner_size, transform);
+                break;
+            case CubReductionStageCombine::Product:
+                fp32AlignedKAccumulateRows<ItemsPerLane, cuda::std::multiplies<float>, IdentityFp32>(
+                    local, row_input, row_count, inner_size);
+                break;
+            case CubReductionStageCombine::Minimum:
+                fp32AlignedKAccumulateTransform<ItemsPerLane, PropagatingMinimumFp32>(local, row_input, row_count,
+                                                                                     inner_size, transform);
+                break;
+            default:
+                fp32AlignedKAccumulateTransform<ItemsPerLane, PropagatingMaximumFp32>(local, row_input, row_count,
+                                                                                     inner_size, transform);
+                break;
+        }
+        if constexpr (Topology == TiledRKStageTopology::Staged) {
+            static_cast<void>(output_dtype);
+            static_cast<void>(output_outer_stride);
+            static_cast<void>(output_inner_stride);
+            static_cast<void>(output_finalize);
+            static_cast<void>(output_scale);
+            float* partials = static_cast<float*>(stage_output) +
+                              (static_cast<uint64_t>(outer_index) * shards_per_output + shard) * inner_size +
+                              packet_component_begin;
+            storeKParallelFp32Packet<ItemsPerLane>(partials, local, ItemsPerLane);
+        } else {
+            if (operation == CubReductionStageCombine::Sum) {
+#pragma unroll
+                for (int item = 0; item < ItemsPerLane; ++item)
+                    local[item] = finalizeFp32Epilogue(output_finalize, local[item]);
+            }
+            storeKParallelFinalPacket<IdentityFp32, ItemsPerLane>(stage_output, output_dtype, outer_index,
+                                                                  packet_component_begin, output_outer_stride,
+                                                                  output_inner_stride, local, ItemsPerLane,
+                                                                  IdentityFp32{}, output_scale);
+        }
+    }
+}
+
+// ---- 1198: FP32 RK ARG (plans/Thor_FP32_Dense_Reduction_Plan, phase 6), the AlignedK twin: fp32AlignedKKernel's
+// ownership, row split and load-ahead batches, with one FP32 ARG candidate (Fp32ArgKey.cuh) per owned component in
+// place of the accumulator. A lane's rows only increase, so a strictly smaller key replaces its best and ties keep the
+// lower row. Complete (one shard) writes the requested outputs; Staged writes packed partials (key << 32 | shard row
+// << 1 | negative zero) that fp32ArgPackedContinuationKernel finishes in the same pass. Rows per shard are at most
+// FP32_ARG_MAX_SHARD_ROWS.
+template <int ItemsPerLane>
+__device__ __forceinline__ void fp32AlignedKArgKeyPacket(uint32_t (&best_key)[ItemsPerLane],
+                                                         uint32_t (&best_tail)[ItemsPerLane],
+                                                         const PackedInputValues<float, ItemsPerLane>& packet,
+                                                         uint32_t row, uint32_t xor_mask) {
+#pragma unroll
+    for (int item = 0; item < ItemsPerLane; ++item) {
+        uint32_t negative_zero;
+        const uint32_t key = fp32ArgKey(__float_as_uint(packet.values[item]), xor_mask, negative_zero);
+        if (key < best_key[item]) {
+            best_key[item] = key;
+            best_tail[item] = (row << 1) | negative_zero;
+        }
+    }
+}
+
+template <int ItemsPerLane, int BlockThreads, bool Staged>
+__global__ __launch_bounds__(BlockThreads) void fp32AlignedKArgKernel(const float* input,
+                                                                      Fp32ArgOutputs outputs,
+                                                                      uint64_t* packed,
+                                                                      uint64_t outer_size,
+                                                                      uint64_t reduction_size,
+                                                                      uint64_t inner_size,
+                                                                      uint64_t shards_per_output,
+                                                                      uint64_t component_tiles,
+                                                                      ReductionShardRows shard_rows) {
+    static_assert(ItemsPerLane == 2 || ItemsPerLane == 4);
+    static_assert(BlockThreads == 32 || BlockThreads == 64 || BlockThreads == 128);
+    constexpr uint64_t ComponentsPerCta = static_cast<uint64_t>(BlockThreads) * ItemsPerLane;
+    constexpr uint32_t Rows = FP32_ALIGNED_K_LOAD_AHEAD_ROWS<ItemsPerLane>;
+    using PacketT = PackedInputValues<float, ItemsPerLane>;
+    const uint32_t outer_count = static_cast<uint32_t>(outer_size);
+    const uint32_t tile_count = static_cast<uint32_t>(component_tiles);
+    const uint32_t shard_count = static_cast<uint32_t>(shards_per_output);
+    for (uint32_t outer_index = blockIdx.z; outer_index < outer_count; outer_index += gridDim.z)
+    for (uint32_t component_tile = blockIdx.y; component_tile < tile_count; component_tile += gridDim.y)
+    for (uint32_t shard = blockIdx.x; shard < shard_count; shard += gridDim.x) {
+        const uint64_t packet_component_begin = static_cast<uint64_t>(component_tile) * ComponentsPerCta +
+                                                static_cast<uint64_t>(threadIdx.x) * ItemsPerLane;
+        if (packet_component_begin >= inner_size) continue;  // K % ItemsPerLane == 0: owned packets are whole
+        const uint64_t row_begin = reductionShardRowBegin(shard_rows, shard);
+        const uint32_t row_count = reductionShardRowCount(shard_rows, shard);
+        const float* row_input =
+            input + ((outer_index * reduction_size + row_begin) * inner_size + packet_component_begin);
+        uint32_t best_key[ItemsPerLane], best_tail[ItemsPerLane];
+#pragma unroll
+        for (int item = 0; item < ItemsPerLane; ++item) {
+            best_key[item] = FP32_ARG_KEY_IDENTITY;
+            best_tail[item] = 0xFFFFFFFFU;
+        }
+        uint32_t row = 0;
+        if (row_count >= Rows) {
+            PacketT current[Rows];
+#pragma unroll
+            for (uint32_t r = 0; r < Rows; ++r)
+                current[r] = loadVectorizedInputPacket<float, ItemsPerLane>(row_input + r * inner_size);
+            row_input += static_cast<uint64_t>(Rows) * inner_size;
+            while (row + 2 * Rows <= row_count) {
+                PacketT next[Rows];
+#pragma unroll
+                for (uint32_t r = 0; r < Rows; ++r)
+                    next[r] = loadVectorizedInputPacket<float, ItemsPerLane>(row_input + r * inner_size);
+                row_input += static_cast<uint64_t>(Rows) * inner_size;
+#pragma unroll
+                for (uint32_t r = 0; r < Rows; ++r)
+                    fp32AlignedKArgKeyPacket(best_key, best_tail, current[r], row + r, outputs.xor_mask);
+                row += Rows;
+#pragma unroll
+                for (uint32_t r = 0; r < Rows; ++r) current[r] = next[r];
+            }
+#pragma unroll
+            for (uint32_t r = 0; r < Rows; ++r)
+                fp32AlignedKArgKeyPacket(best_key, best_tail, current[r], row + r, outputs.xor_mask);
+            row += Rows;
+        }
+        for (; row < row_count; ++row, row_input += inner_size)
+            fp32AlignedKArgKeyPacket(best_key, best_tail, loadVectorizedInputPacket<float, ItemsPerLane>(row_input),
+                                     row, outputs.xor_mask);
+        if constexpr (Staged) {
+            uint64_t* partial =
+                packed + (static_cast<uint64_t>(outer_index) * shards_per_output + shard) * inner_size +
+                packet_component_begin;
+#pragma unroll
+            for (int item = 0; item < ItemsPerLane; ++item)
+                partial[item] = (static_cast<uint64_t>(best_key[item]) << 32) | best_tail[item];
+        } else {
+            static_cast<void>(packed);
+#pragma unroll
+            for (int item = 0; item < ItemsPerLane; ++item)
+                storeFp32ArgResult(outputs, static_cast<uint64_t>(outer_index) * inner_size + packet_component_begin +
+                                                item,
+                                   Fp32ArgCandidate{best_key[item], best_tail[item]});
+        }
+    }
+}
+
+// Reduces packed partials [outer, shards, K] over shards (shard s begins at reductionShardRowBegin) and writes the
+// requested outputs: FP8's per-output continuation (one thread per output component, coalesced reads per shard).
+template <int Unused>
+__global__ __launch_bounds__(256) void fp32ArgPackedContinuationKernel(const uint64_t* packed, Fp32ArgOutputs outputs,
+                                                                       uint64_t outer_size, uint64_t shards,
+                                                                       uint64_t inner_size,
+                                                                       ReductionShardRows shard_rows) {
+    const uint64_t outputs_count = outer_size * inner_size;
+    for (uint64_t output = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x; output < outputs_count;
+         output += static_cast<uint64_t>(gridDim.x) * blockDim.x) {
+        const uint64_t outer_index = output / inner_size;
+        const uint64_t component = output - outer_index * inner_size;
+        const uint64_t* column = packed + outer_index * shards * inner_size + component;
+        Fp32ArgCandidate best = fp32ArgIdentity();
+        for (uint32_t shard = 0; shard < static_cast<uint32_t>(shards); ++shard)
+            best = fp32ArgMin(best, fp32ArgWiden(column[static_cast<uint64_t>(shard) * inner_size],
+                                                 reductionShardRowBegin(shard_rows, shard)));
+        storeFp32ArgResult(outputs, output, best);
+    }
+}
+
+// FP8's shard-split continuation (fp8ArgPackedSplitLayout: `columns` components x `groups` shard groups per block),
+// for few outputs with many shards; the groups combine in shared memory with the same (key, tail) minimum.
+constexpr uint32_t FP32_ARG_PACKED_SPLIT_MAX_THREADS = 1024;
+template <int Unused>
+__global__ __launch_bounds__(FP32_ARG_PACKED_SPLIT_MAX_THREADS) void fp32ArgPackedContinuationSplitKernel(
+    const uint64_t* packed, Fp32ArgOutputs outputs, uint64_t outer_size, uint64_t shards, uint64_t inner_size,
+    ReductionShardRows shard_rows, uint32_t columns, uint32_t groups) {
+    __shared__ uint32_t partial_keys[FP32_ARG_PACKED_SPLIT_MAX_THREADS];
+    __shared__ uint64_t partial_tails[FP32_ARG_PACKED_SPLIT_MAX_THREADS];
+    const uint32_t lane_column = threadIdx.x % columns;
+    const uint32_t group = threadIdx.x / columns;
+    const uint32_t shard_count = static_cast<uint32_t>(shards);
+    const uint64_t tiles = (inner_size + columns - 1) / columns;
+    const uint64_t items = outer_size * tiles;
+    for (uint64_t item = blockIdx.x; item < items; item += gridDim.x) {
+        const uint64_t outer_index = item / tiles;
+        const uint64_t component = (item - outer_index * tiles) * columns + lane_column;
+        Fp32ArgCandidate best = fp32ArgIdentity();
+        if (group < groups && component < inner_size) {
+            const uint64_t* column = packed + outer_index * shards * inner_size + component;
+            Fp32ArgCandidate other = fp32ArgIdentity();
+            uint32_t shard = group;
+            for (; shard + 3 * groups < shard_count; shard += 4 * groups) {
+                const uint32_t s1 = shard + groups, s2 = s1 + groups, s3 = s2 + groups;
+                const uint64_t c0 = column[static_cast<uint64_t>(shard) * inner_size];
+                const uint64_t c1 = column[static_cast<uint64_t>(s1) * inner_size];
+                const uint64_t c2 = column[static_cast<uint64_t>(s2) * inner_size];
+                const uint64_t c3 = column[static_cast<uint64_t>(s3) * inner_size];
+                best = fp32ArgMin(best, fp32ArgWiden(c0, reductionShardRowBegin(shard_rows, shard)));
+                other = fp32ArgMin(other, fp32ArgWiden(c1, reductionShardRowBegin(shard_rows, s1)));
+                best = fp32ArgMin(best, fp32ArgWiden(c2, reductionShardRowBegin(shard_rows, s2)));
+                other = fp32ArgMin(other, fp32ArgWiden(c3, reductionShardRowBegin(shard_rows, s3)));
+            }
+            for (; shard < shard_count; shard += groups)
+                best = fp32ArgMin(best, fp32ArgWiden(column[static_cast<uint64_t>(shard) * inner_size],
+                                                     reductionShardRowBegin(shard_rows, shard)));
+            best = fp32ArgMin(best, other);
+        }
+        partial_keys[threadIdx.x] = best.key;
+        partial_tails[threadIdx.x] = best.tail;
+        __syncthreads();
+        for (uint32_t active = groups; active > 1;) {
+            const uint32_t half = (active + 1) / 2;
+            if (group < active - half) {
+                const uint32_t other = threadIdx.x + half * columns;
+                const Fp32ArgCandidate merged = fp32ArgMin({partial_keys[threadIdx.x], partial_tails[threadIdx.x]},
+                                                           {partial_keys[other], partial_tails[other]});
+                partial_keys[threadIdx.x] = merged.key;
+                partial_tails[threadIdx.x] = merged.tail;
+            }
+            __syncthreads();
+            active = half;
+        }
+        if (group == 0 && component < inner_size)
+            storeFp32ArgResult(outputs, outer_index * inner_size + component,
+                               Fp32ArgCandidate{partial_keys[threadIdx.x], partial_tails[threadIdx.x]});
+        __syncthreads();  // the partials are rewritten by the next item
+    }
+}
+
+// ---- 1208: the carried-index AlignedK ARG twin (phase 8; see Fp32ArgWidePartials): fp32AlignedKArgKernel's ownership,
+// balanced rows and load-ahead batches, reading the carried index packet alongside each value packet. Complete (one
+// shard) writes the requested outputs (index = the composed index); Staged writes wide partials that
+// fp32ArgWideContinuationKernel finishes in the same pass.
+template <int ItemsPerLane, typename IndexT>
+__device__ __forceinline__ void fp32AlignedKCarriedArgKeyPacket(uint32_t (&best_key)[ItemsPerLane],
+                                                                uint64_t (&best_tail)[ItemsPerLane],
+                                                                const PackedInputValues<float, ItemsPerLane>& packet,
+                                                                const PackedInputValues<IndexT, ItemsPerLane>& carried,
+                                                                uint64_t row_index, uint32_t xor_mask) {
+#pragma unroll
+    for (int item = 0; item < ItemsPerLane; ++item) {
+        uint32_t negative_zero;
+        const uint32_t key = fp32ArgKey(__float_as_uint(packet.values[item]), xor_mask, negative_zero);
+        const uint64_t composed = static_cast<uint64_t>(carried.values[item]) + row_index;
+        fp32ArgKeepMin(best_key[item], best_tail[item], key, (composed << 1) | negative_zero);
+    }
+}
+
+template <int ItemsPerLane, int BlockThreads, bool Staged, typename IndexT>
+__global__ __launch_bounds__(BlockThreads) void fp32AlignedKCarriedArgKernel(const float* input,
+                                                                             const IndexT* carried,
+                                                                             Fp32ArgOutputs outputs,
+                                                                             Fp32ArgWidePartials partials,
+                                                                             uint64_t outer_size,
+                                                                             uint64_t reduction_size,
+                                                                             uint64_t inner_size,
+                                                                             uint64_t shards_per_output,
+                                                                             uint64_t component_tiles,
+                                                                             ReductionShardRows shard_rows,
+                                                                             uint64_t row_stride) {
+    static_assert(ItemsPerLane == 2 || ItemsPerLane == 4);
+    static_assert(BlockThreads == 32 || BlockThreads == 64 || BlockThreads == 128);
+    static_assert(std::is_same_v<IndexT, uint32_t> || std::is_same_v<IndexT, uint64_t>);
+    constexpr uint64_t ComponentsPerCta = static_cast<uint64_t>(BlockThreads) * ItemsPerLane;
+    constexpr uint32_t Rows = FP32_ALIGNED_K_LOAD_AHEAD_ROWS<ItemsPerLane>;
+    using PacketT = PackedInputValues<float, ItemsPerLane>;
+    using IndexPacketT = PackedInputValues<IndexT, ItemsPerLane>;
+    const uint32_t outer_count = static_cast<uint32_t>(outer_size);
+    const uint32_t tile_count = static_cast<uint32_t>(component_tiles);
+    const uint32_t shard_count = static_cast<uint32_t>(shards_per_output);
+    for (uint32_t outer_index = blockIdx.z; outer_index < outer_count; outer_index += gridDim.z)
+    for (uint32_t component_tile = blockIdx.y; component_tile < tile_count; component_tile += gridDim.y)
+    for (uint32_t shard = blockIdx.x; shard < shard_count; shard += gridDim.x) {
+        const uint64_t packet_component_begin = static_cast<uint64_t>(component_tile) * ComponentsPerCta +
+                                                static_cast<uint64_t>(threadIdx.x) * ItemsPerLane;
+        if (packet_component_begin >= inner_size) continue;  // K % ItemsPerLane == 0: owned packets are whole
+        const uint64_t row_begin = reductionShardRowBegin(shard_rows, shard);
+        const uint32_t row_count = reductionShardRowCount(shard_rows, shard);
+        const uint64_t element_begin = (outer_index * reduction_size + row_begin) * inner_size + packet_component_begin;
+        const float* row_input = input + element_begin;
+        const IndexT* row_carried = carried + element_begin;
+        uint64_t row_index = row_begin * row_stride;  // the row's contribution to the composed index
+        uint32_t best_key[ItemsPerLane];
+        uint64_t best_tail[ItemsPerLane];
+#pragma unroll
+        for (int item = 0; item < ItemsPerLane; ++item) {
+            best_key[item] = FP32_ARG_KEY_IDENTITY;
+            best_tail[item] = FP32_ARG_TAIL_IDENTITY;
+        }
+        uint32_t row = 0;
+        if (row_count >= Rows) {
+            PacketT current[Rows];
+            IndexPacketT current_index[Rows];
+#pragma unroll
+            for (uint32_t r = 0; r < Rows; ++r) {
+                current[r] = loadVectorizedInputPacket<float, ItemsPerLane>(row_input + r * inner_size);
+                current_index[r] = loadVectorizedInputPacket<IndexT, ItemsPerLane>(row_carried + r * inner_size);
+            }
+            row_input += static_cast<uint64_t>(Rows) * inner_size;
+            row_carried += static_cast<uint64_t>(Rows) * inner_size;
+            while (row + 2 * Rows <= row_count) {
+                PacketT next[Rows];
+                IndexPacketT next_index[Rows];
+#pragma unroll
+                for (uint32_t r = 0; r < Rows; ++r) {
+                    next[r] = loadVectorizedInputPacket<float, ItemsPerLane>(row_input + r * inner_size);
+                    next_index[r] = loadVectorizedInputPacket<IndexT, ItemsPerLane>(row_carried + r * inner_size);
+                }
+                row_input += static_cast<uint64_t>(Rows) * inner_size;
+                row_carried += static_cast<uint64_t>(Rows) * inner_size;
+#pragma unroll
+                for (uint32_t r = 0; r < Rows; ++r) {
+                    fp32AlignedKCarriedArgKeyPacket(best_key, best_tail, current[r], current_index[r], row_index,
+                                                    outputs.xor_mask);
+                    row_index += row_stride;
+                }
+                row += Rows;
+#pragma unroll
+                for (uint32_t r = 0; r < Rows; ++r) {
+                    current[r] = next[r];
+                    current_index[r] = next_index[r];
+                }
+            }
+#pragma unroll
+            for (uint32_t r = 0; r < Rows; ++r) {
+                fp32AlignedKCarriedArgKeyPacket(best_key, best_tail, current[r], current_index[r], row_index,
+                                                outputs.xor_mask);
+                row_index += row_stride;
+            }
+            row += Rows;
+        }
+        for (; row < row_count; ++row, row_input += inner_size, row_carried += inner_size, row_index += row_stride) {
+            fp32AlignedKCarriedArgKeyPacket(best_key, best_tail,
+                                            loadVectorizedInputPacket<float, ItemsPerLane>(row_input),
+                                            loadVectorizedInputPacket<IndexT, ItemsPerLane>(row_carried), row_index,
+                                            outputs.xor_mask);
+        }
+        if constexpr (Staged) {
+            const uint64_t partial =
+                (static_cast<uint64_t>(outer_index) * shards_per_output + shard) * inner_size + packet_component_begin;
+#pragma unroll
+            for (int item = 0; item < ItemsPerLane; ++item) {
+                partials.keys[partial + item] = best_key[item];
+                partials.tails[partial + item] = best_tail[item];
+            }
+        } else {
+            static_cast<void>(partials);
+#pragma unroll
+            for (int item = 0; item < ItemsPerLane; ++item)
+                storeFp32ArgResult(outputs, static_cast<uint64_t>(outer_index) * inner_size + packet_component_begin +
+                                                item,
+                                   Fp32ArgCandidate{best_key[item], best_tail[item]});
+        }
+    }
+}
+
+// Reduces wide partials [outer, shards, K] over shards and writes the requested outputs (the tails hold the composed
+// index): the packed continuation's per-output form.
+template <int Unused>
+__global__ __launch_bounds__(256) void fp32ArgWideContinuationKernel(Fp32ArgWidePartials partials,
+                                                                     Fp32ArgOutputs outputs, uint64_t outer_size,
+                                                                     uint64_t shards, uint64_t inner_size) {
+    const uint64_t outputs_count = outer_size * inner_size;
+    for (uint64_t output = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x; output < outputs_count;
+         output += static_cast<uint64_t>(gridDim.x) * blockDim.x) {
+        const uint64_t outer_index = output / inner_size;
+        const uint64_t component = output - outer_index * inner_size;
+        const uint64_t column = outer_index * shards * inner_size + component;
+        uint32_t best_key = FP32_ARG_KEY_IDENTITY;
+        uint64_t best_tail = FP32_ARG_TAIL_IDENTITY;
+        for (uint32_t shard = 0; shard < static_cast<uint32_t>(shards); ++shard) {
+            const uint64_t partial = column + static_cast<uint64_t>(shard) * inner_size;
+            fp32ArgKeepMin(best_key, best_tail, partials.keys[partial], partials.tails[partial]);
+        }
+        storeFp32ArgResult(outputs, output, Fp32ArgCandidate{best_key, best_tail});
+    }
+}
+
+// The shard-split form (fp8ArgPackedSplitLayout), for few outputs with many shards.
+template <int Unused>
+__global__ __launch_bounds__(FP32_ARG_PACKED_SPLIT_MAX_THREADS) void fp32ArgWideContinuationSplitKernel(
+    Fp32ArgWidePartials partials, Fp32ArgOutputs outputs, uint64_t outer_size, uint64_t shards, uint64_t inner_size,
+    uint32_t columns, uint32_t groups) {
+    __shared__ uint32_t partial_keys[FP32_ARG_PACKED_SPLIT_MAX_THREADS];
+    __shared__ uint64_t partial_tails[FP32_ARG_PACKED_SPLIT_MAX_THREADS];
+    const uint32_t lane_column = threadIdx.x % columns;
+    const uint32_t group = threadIdx.x / columns;
+    const uint32_t shard_count = static_cast<uint32_t>(shards);
+    const uint64_t tiles = (inner_size + columns - 1) / columns;
+    const uint64_t items = outer_size * tiles;
+    for (uint64_t item = blockIdx.x; item < items; item += gridDim.x) {
+        const uint64_t outer_index = item / tiles;
+        const uint64_t component = (item - outer_index * tiles) * columns + lane_column;
+        uint32_t best_key = FP32_ARG_KEY_IDENTITY, other_key = FP32_ARG_KEY_IDENTITY;
+        uint64_t best_tail = FP32_ARG_TAIL_IDENTITY, other_tail = FP32_ARG_TAIL_IDENTITY;
+        if (group < groups && component < inner_size) {
+            const uint64_t column = outer_index * shards * inner_size + component;
+            uint32_t shard = group;
+            for (; shard + groups < shard_count; shard += 2 * groups) {
+                const uint64_t p0 = column + static_cast<uint64_t>(shard) * inner_size;
+                const uint64_t p1 = p0 + static_cast<uint64_t>(groups) * inner_size;
+                fp32ArgKeepMin(best_key, best_tail, partials.keys[p0], partials.tails[p0]);
+                fp32ArgKeepMin(other_key, other_tail, partials.keys[p1], partials.tails[p1]);
+            }
+            if (shard < shard_count) {
+                const uint64_t p0 = column + static_cast<uint64_t>(shard) * inner_size;
+                fp32ArgKeepMin(best_key, best_tail, partials.keys[p0], partials.tails[p0]);
+            }
+            fp32ArgKeepMin(best_key, best_tail, other_key, other_tail);
+        }
+        partial_keys[threadIdx.x] = best_key;
+        partial_tails[threadIdx.x] = best_tail;
+        __syncthreads();
+        for (uint32_t active = groups; active > 1;) {
+            const uint32_t half = (active + 1) / 2;
+            if (group < active - half) {
+                const uint32_t other = threadIdx.x + half * columns;
+                uint32_t key = partial_keys[threadIdx.x];
+                uint64_t tail = partial_tails[threadIdx.x];
+                fp32ArgKeepMin(key, tail, partial_keys[other], partial_tails[other]);
+                partial_keys[threadIdx.x] = key;
+                partial_tails[threadIdx.x] = tail;
+            }
+            __syncthreads();
+            active = half;
+        }
+        if (group == 0 && component < inner_size)
+            storeFp32ArgResult(outputs, outer_index * inner_size + component,
+                               Fp32ArgCandidate{partial_keys[threadIdx.x], partial_tails[threadIdx.x]});
+        __syncthreads();  // the partials are rewritten by the next item
+    }
+}
+
+// The FP32 AlignedK configurations: 8- and 16-byte packets x CTA 32 / 64 / 128 x Staged / Complete, each one kernel.
+// 1228: ScalarPacket (VALUE only) adds the 4-byte packet; the ARG twins have no scalar form.
+template <TiledRKStageTopology Topology, bool ScalarPacket = false, typename Callback>
+[[nodiscard]] bool dispatchFp32AlignedKConfiguration(uint32_t packet_bytes, uint32_t block_threads,
+                                                     Callback&& callback) {
+    const auto for_items = [&]<int ItemsPerLane>() {
+        switch (block_threads) {
+            case 32: callback.template operator()<ItemsPerLane, 32>(); return true;
+            case 64: callback.template operator()<ItemsPerLane, 64>(); return true;
+            case 128: callback.template operator()<ItemsPerLane, 128>(); return true;
+            default: return false;
+        }
+    };
+    switch (packet_bytes) {
+        case 4:
+            if constexpr (ScalarPacket) {
+                return for_items.template operator()<1>();
+            } else {
+                return false;
+            }
+        case 8: return for_items.template operator()<2>();
+        case 16: return for_items.template operator()<4>();
+        default: return false;
+    }
+}
 
 template <typename InputT,
           typename InputTransformT,
@@ -2596,6 +3185,441 @@ CubKernelOccupancyInfo queryFp8AlignedKStageOccupancy(
     static_cast<void>(operation); static_cast<void>(plan);
     throw std::logic_error("Transformed AlignedK occupancy requires FP8 support.");
 #endif
+}
+
+
+// ---- 1188: FP32 AlignedK (see fp32AlignedKKernel). 1228: and the 4-byte packet (VALUE only).
+bool fp32AlignedKSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size, uint32_t packet_bytes,
+                          uint32_t block_threads, uint64_t shards_per_output) {
+    if ((packet_bytes != 4 && packet_bytes != 8 && packet_bytes != 16) ||
+        (block_threads != 32 && block_threads != 64 && block_threads != 128) || outer_size == 0 ||
+        reduction_size == 0 || inner_size == 0 || shards_per_output == 0 || shards_per_output > reduction_size) {
+        return false;
+    }
+    const uint64_t items = packet_bytes / 4;
+    if (inner_size % items != 0) return false;
+    const uint64_t tiles = ceilDivideU64(inner_size, items * block_threads);
+    return Fp8RK::fp8RKWorkGridFits(shards_per_output, tiles, outer_size) &&
+           ceilDivideU64(reduction_size, shards_per_output) <= std::numeric_limits<uint32_t>::max();
+}
+
+namespace {
+[[nodiscard]] bool fp32AlignedKOutputSupported(DataType dtype) {
+    switch (dtype) {
+#if THOR_CUB_ENABLE_FP8_TYPES
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
+#endif
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
+#if THOR_CUB_ENABLE_64BIT_TYPES
+        case DataType::FP64:
+#endif
+            return true;
+        default:
+            return false;
+    }
+}
+
+[[nodiscard]] bool fp32AlignedKSemanticsSupported(const CubReductionStageSemantics& semantics) {
+    const bool transform_ok = semantics.input_transform == CubReductionStageInputTransform::Identity ||
+                              semantics.input_transform == CubReductionStageInputTransform::AbsoluteValue ||
+                              semantics.input_transform == CubReductionStageInputTransform::Square;
+    if (!transform_ok) return false;
+    if (semantics.combine == CubReductionStageCombine::Product)
+        return semantics.input_transform == CubReductionStageInputTransform::Identity;
+    return true;
+}
+}  // namespace
+
+void launchFp32AlignedKStage(const CubReductionStageSemantics& semantics,
+                             const Tensor& input,
+                             Tensor& stage_output,
+                             const CubReductionGeometry& geometry,
+                             uint32_t packet_bytes,
+                             uint32_t block_threads,
+                             uint64_t shards_per_output,
+                             float output_scale,
+                             Stream& stream) {
+    const bool staged = shards_per_output > 1;
+    if (input.getDataType() != DataType::FP32 || !fp32AlignedKSemanticsSupported(semantics) ||
+        !fp32AlignedKSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size, packet_bytes,
+                              block_threads, shards_per_output) ||
+        input.getTotalNumElements() != geometry.outer_size * geometry.reduction_size * geometry.inner_size ||
+        (reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{packet_bytes - 1}) != 0) {
+        throw std::logic_error("FP32 AlignedK received an unsupported input, geometry or semantics.");
+    }
+    if (staged ? (stage_output.getDataType() != DataType::FP32 ||
+                  stage_output.getTotalNumElements() != geometry.outer_size * shards_per_output * geometry.inner_size)
+               : (!fp32AlignedKOutputSupported(stage_output.getDataType()) ||
+                  stage_output.getTotalNumElements() != geometry.outer_size * geometry.inner_size)) {
+        throw std::logic_error("FP32 AlignedK received an unsupported stage output.");
+    }
+    const uint64_t items = packet_bytes / 4;
+    const uint64_t component_tiles = ceilDivideU64(geometry.inner_size, items * block_threads);
+    const ReductionShardRows shard_rows = balancedReductionShardRows(geometry.reduction_size, shards_per_output);
+    const dim3 grid_blocks = reductionWorkGrid(shards_per_output, component_tiles, geometry.outer_size, 0);
+    // Complete: the semantics' finalizer (SUM family) and the runtime scale apply once; Staged writes raw partials.
+    const AdditiveFinalizeFp32 finalize = staged ? AdditiveFinalizeFp32{1.0f, false}
+                                                 : additiveFinalizeFromSemantics(semantics);
+    // A natural [outer, K] output unless the geometry says otherwise (Staged partials are always natural).
+    const uint64_t outer_stride = geometry.tiled_output_outer_stride != 0 ? geometry.tiled_output_outer_stride
+                                                                          : geometry.inner_size;
+    const uint64_t inner_stride = geometry.tiled_output_inner_stride != 0 ? geometry.tiled_output_inner_stride : 1;
+    const auto launch = [&]<TiledRKStageTopology Topology>() {
+        return dispatchFp32AlignedKConfiguration<Topology, true>(
+            packet_bytes, block_threads, [&]<int ItemsPerLane, int BlockThreads>() {
+                fp32AlignedKKernel<ItemsPerLane, BlockThreads, Topology>
+                    <<<grid_blocks, BlockThreads, 0, stream.getStream()>>>(
+                        input.getMemPtr<float>(), stage_output.getMemPtr<void>(), stage_output.getDataType(),
+                        geometry.outer_size, geometry.reduction_size, geometry.inner_size, outer_stride,
+                        inner_stride, shards_per_output, component_tiles, shard_rows, semantics.combine,
+                        semantics.input_transform, finalize, staged ? 1.0f : output_scale);
+                CUDA_CHECK(cudaGetLastError());
+            });
+    };
+    const bool launched = staged ? launch.template operator()<TiledRKStageTopology::Staged>()
+                                 : launch.template operator()<TiledRKStageTopology::Complete>();
+    if (!launched) throw std::logic_error("FP32 AlignedK has no kernel for this configuration.");
+}
+
+CubKernelOccupancyInfo queryFp32AlignedKOccupancy(uint32_t packet_bytes, uint32_t block_threads, bool staged) {
+    CubKernelOccupancyInfo occupancy{};
+    const auto query = [&]<TiledRKStageTopology Topology>() {
+        return dispatchFp32AlignedKConfiguration<Topology, true>(
+            packet_bytes, block_threads, [&]<int ItemsPerLane, int BlockThreads>() {
+                const auto kernel = fp32AlignedKKernel<ItemsPerLane, BlockThreads, Topology>;
+                cudaFuncAttributes attributes{};
+                CUDA_CHECK(cudaFuncGetAttributes(&attributes, kernel));
+                int active_blocks = 0;
+                CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active_blocks, kernel, BlockThreads, 0));
+                occupancy = CubKernelOccupancyInfo{attributes.numRegs, attributes.sharedSizeBytes, 0, active_blocks,
+                                                   active_blocks * (BlockThreads / TILED_REDUCTION_WARP_THREADS)};
+            });
+    };
+    const bool queried = staged ? query.template operator()<TiledRKStageTopology::Staged>()
+                                : query.template operator()<TiledRKStageTopology::Complete>();
+    if (!queried)
+        throw std::logic_error("FP32 AlignedK occupancy requires a 4-, 8- or 16-byte packet and CTA 32/64/128.");
+    return occupancy;
+}
+
+
+// ---- 1198: FP32 RK ARG, the AlignedK twin and the packed continuation (see fp32AlignedKArgKernel).
+bool fp32AlignedKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size, uint32_t packet_bytes,
+                             uint32_t block_threads, uint64_t shards_per_output) {
+    // 1228: the 4-byte packet is VALUE only.
+    return packet_bytes != 4 &&
+           fp32AlignedKSupports(outer_size, reduction_size, inner_size, packet_bytes, block_threads,
+                                shards_per_output) &&
+           ceilDivideU64(reduction_size, shards_per_output) <= FP32_ARG_MAX_SHARD_ROWS;
+}
+
+uint64_t fp32ArgPackedScratchBytes(uint64_t outer_size, uint64_t shards, uint64_t inner_size) {
+    return shards > 1 ? outer_size * shards * inner_size * sizeof(uint64_t) : 0;
+}
+
+namespace {
+// The outputs of an FP32 ARG pass: value (any float storage) and / or index (UINT32 or UINT64; UINT32 must hold the
+// largest original-domain index).
+[[nodiscard]] Fp32ArgOutputs fp32ArgOutputsFor(Tensor* value_output, Tensor* index_output, uint64_t outputs,
+                                               uint64_t reduction_size, bool maximum, uint64_t domain_stride,
+                                               const char* who) {
+    if ((value_output == nullptr && index_output == nullptr) ||
+        (value_output != nullptr && (value_output->getTotalNumElements() != outputs ||
+                                     !fp32AlignedKOutputSupported(value_output->getDataType()))) ||
+        (index_output != nullptr && (index_output->getTotalNumElements() != outputs ||
+                                     (index_output->getDataType() != DataType::UINT32 &&
+                                      index_output->getDataType() != DataType::UINT64)))) {
+        throw std::logic_error(std::string(who) + " received unsupported outputs.");
+    }
+    if (index_output != nullptr && index_output->getDataType() == DataType::UINT32 &&
+        (reduction_size - 1) * domain_stride > std::numeric_limits<uint32_t>::max()) {
+        throw std::logic_error(std::string(who) + " UINT32 index cannot hold the original-domain index.");
+    }
+    return Fp32ArgOutputs{value_output == nullptr ? nullptr : value_output->getMemPtr<void>(),
+                          value_output == nullptr ? DataType::FP32 : value_output->getDataType(),
+                          index_output == nullptr ? nullptr : index_output->getMemPtr<void>(),
+                          index_output == nullptr ? DataType::UINT32 : index_output->getDataType(),
+                          domain_stride,
+                          maximum ? 0x80000000U : 0U};
+}
+
+void launchFp32ArgPackedContinuationRows(const uint64_t* packed, const Fp32ArgOutputs& outputs, uint64_t outer_size,
+                                         uint64_t shards, uint64_t inner_size, ReductionShardRows rows,
+                                         Stream& stream) {
+    constexpr uint64_t MaxGridBlocks = 65535;
+    if (fp8ArgPackedContinuationSplitsShards(outer_size, inner_size, shards)) {
+        const Fp8ArgPackedSplitLayout layout = fp8ArgPackedSplitLayout(inner_size, shards);
+        const uint64_t items = outer_size * ceilDivideU64(inner_size, layout.columns);
+        fp32ArgPackedContinuationSplitKernel<0>
+            <<<static_cast<unsigned int>(std::min<uint64_t>(items, MaxGridBlocks)), layout.threads, 0,
+               stream.getStream()>>>(packed, outputs, outer_size, shards, inner_size, rows, layout.columns,
+                                     layout.groups);
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+    constexpr uint32_t Threads = 256;
+    const uint64_t blocks = std::min<uint64_t>(ceilDivideU64(outer_size * inner_size, Threads), MaxGridBlocks);
+    fp32ArgPackedContinuationKernel<0><<<static_cast<unsigned int>(blocks), Threads, 0, stream.getStream()>>>(
+        packed, outputs, outer_size, shards, inner_size, rows);
+    CUDA_CHECK(cudaGetLastError());
+}
+}  // namespace
+
+void launchFp32ArgPackedContinuation(const uint64_t* packed_partials,
+                                     Tensor* value_output,
+                                     Tensor* index_output,
+                                     uint64_t outer_size,
+                                     uint64_t reduction_size,
+                                     uint64_t inner_size,
+                                     uint64_t shards,
+                                     uint64_t uniform_rows_per_shard,
+                                     bool maximum,
+                                     uint64_t domain_stride,
+                                     Stream& stream) {
+    const uint64_t outputs = outer_size * inner_size;
+    if (packed_partials == nullptr || outputs == 0 || shards < 2 || shards > reduction_size ||
+        shards > REDUCTION_WORK_GRID_MAX_EXTENT ||
+        (uniform_rows_per_shard != 0 && (shards != ceilDivideU64(reduction_size, uniform_rows_per_shard) ||
+                                         uniform_rows_per_shard > FP32_ARG_MAX_SHARD_ROWS))) {
+        throw std::logic_error("FP32 packed ARG continuation received unsupported geometry.");
+    }
+    const Fp32ArgOutputs outputs_spec = fp32ArgOutputsFor(value_output, index_output, outputs, reduction_size, maximum,
+                                                          domain_stride, "FP32 packed ARG continuation");
+    // Uniform depths: shard s begins at s * depth. Balanced (AlignedK): VALUE's split.
+    const ReductionShardRows rows = uniform_rows_per_shard != 0
+                                        ? ReductionShardRows{static_cast<uint32_t>(uniform_rows_per_shard), 0U}
+                                        : balancedReductionShardRows(reduction_size, shards);
+    launchFp32ArgPackedContinuationRows(packed_partials, outputs_spec, outer_size, shards, inner_size, rows, stream);
+}
+
+void launchFp32AlignedKArg(const Tensor& input,
+                           Tensor* value_output,
+                           Tensor* index_output,
+                           const CubReductionGeometry& geometry,
+                           uint32_t packet_bytes,
+                           uint32_t block_threads,
+                           uint64_t shards_per_output,
+                           uint64_t* packed_scratch,
+                           bool maximum,
+                           uint64_t domain_stride,
+                           Stream& stream) {
+    const bool staged = shards_per_output > 1;
+    if (input.getDataType() != DataType::FP32 ||
+        !fp32AlignedKArgSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size, packet_bytes,
+                                 block_threads, shards_per_output) ||
+        input.getTotalNumElements() != geometry.outer_size * geometry.reduction_size * geometry.inner_size ||
+        (reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{packet_bytes - 1}) != 0 ||
+        (staged && packed_scratch == nullptr)) {
+        throw std::logic_error("FP32 AlignedK ARG received an unsupported input, geometry or scratch.");
+    }
+    const Fp32ArgOutputs outputs =
+        fp32ArgOutputsFor(value_output, index_output, geometry.outer_size * geometry.inner_size,
+                          geometry.reduction_size, maximum, domain_stride, "FP32 AlignedK ARG");
+    const uint64_t items = packet_bytes / 4;
+    const uint64_t component_tiles = ceilDivideU64(geometry.inner_size, items * block_threads);
+    const ReductionShardRows shard_rows = balancedReductionShardRows(geometry.reduction_size, shards_per_output);
+    const dim3 grid_blocks = reductionWorkGrid(shards_per_output, component_tiles, geometry.outer_size, 0);
+    const auto launch = [&]<bool Staged>() {
+        return dispatchFp32AlignedKConfiguration<TiledRKStageTopology::Complete>(
+            packet_bytes, block_threads, [&]<int ItemsPerLane, int BlockThreads>() {
+                fp32AlignedKArgKernel<ItemsPerLane, BlockThreads, Staged>
+                    <<<grid_blocks, BlockThreads, 0, stream.getStream()>>>(
+                        input.getMemPtr<float>(), outputs, packed_scratch, geometry.outer_size,
+                        geometry.reduction_size, geometry.inner_size, shards_per_output, component_tiles,
+                        shard_rows);
+                CUDA_CHECK(cudaGetLastError());
+            });
+    };
+    const bool launched = staged ? launch.template operator()<true>() : launch.template operator()<false>();
+    if (!launched) throw std::logic_error("FP32 AlignedK ARG has no kernel for this configuration.");
+    if (staged) {
+        launchFp32ArgPackedContinuationRows(packed_scratch, outputs, geometry.outer_size, shards_per_output,
+                                            geometry.inner_size, shard_rows, stream);
+    }
+}
+
+// ---- 1208: carried-index FP32 ARG (see Fp32ArgWidePartials).
+uint64_t fp32ArgWideScratchBytes(uint64_t outer_size, uint64_t shards, uint64_t inner_size) {
+    if (shards < 2) return 0;
+    const uint64_t partials = outer_size * shards * inner_size;
+    return ((partials * sizeof(uint32_t) + 255) & ~uint64_t{255}) + partials * sizeof(uint64_t);
+}
+
+namespace {
+[[nodiscard]] Fp32ArgWidePartials fp32ArgWidePartialsAt(void* scratch, uint64_t outer_size, uint64_t shards,
+                                                        uint64_t inner_size) {
+    if (scratch == nullptr) return {nullptr, nullptr};
+    if ((reinterpret_cast<uintptr_t>(scratch) & uintptr_t{255}) != 0)
+        throw std::logic_error("FP32 wide ARG partials require a 256-byte aligned scratch.");
+    const uint64_t partials = outer_size * shards * inner_size;
+    auto* bytes = static_cast<uint8_t*>(scratch);
+    return {reinterpret_cast<uint32_t*>(bytes),
+            reinterpret_cast<uint64_t*>(bytes + ((partials * sizeof(uint32_t) + 255) & ~uint64_t{255}))};
+}
+
+// The outputs of a carried-index pass: the tails hold the composed index, so the index stride is 1. A UINT32 index
+// output is the caller's choice (the planner sizes it from the whole original domain).
+[[nodiscard]] Fp32ArgOutputs fp32CarriedArgOutputsFor(Tensor* value_output, Tensor* index_output, uint64_t outputs,
+                                                      bool maximum, const char* who) {
+    return fp32ArgOutputsFor(value_output, index_output, outputs, 1, maximum, 1, who);
+}
+
+void launchFp32ArgWideContinuationPartials(const Fp32ArgWidePartials& partials, const Fp32ArgOutputs& outputs,
+                                           uint64_t outer_size, uint64_t shards, uint64_t inner_size,
+                                           Stream& stream) {
+    constexpr uint64_t MaxGridBlocks = 65535;
+    if (fp8ArgPackedContinuationSplitsShards(outer_size, inner_size, shards)) {
+        const Fp8ArgPackedSplitLayout layout = fp8ArgPackedSplitLayout(inner_size, shards);
+        const uint64_t items = outer_size * ceilDivideU64(inner_size, layout.columns);
+        fp32ArgWideContinuationSplitKernel<0>
+            <<<static_cast<unsigned int>(std::min<uint64_t>(items, MaxGridBlocks)), layout.threads, 0,
+               stream.getStream()>>>(partials, outputs, outer_size, shards, inner_size, layout.columns,
+                                     layout.groups);
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+    constexpr uint32_t Threads = 256;
+    const uint64_t blocks = std::min<uint64_t>(ceilDivideU64(outer_size * inner_size, Threads), MaxGridBlocks);
+    fp32ArgWideContinuationKernel<0><<<static_cast<unsigned int>(blocks), Threads, 0, stream.getStream()>>>(
+        partials, outputs, outer_size, shards, inner_size);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// A carried index tensor of the input's element count, UINT32 or UINT64, aligned to `alignment` bytes.
+void checkFp32CarriedIndex(const Tensor& carried_index, uint64_t elements, uint64_t alignment, const char* who) {
+    if ((carried_index.getDataType() != DataType::UINT32 && carried_index.getDataType() != DataType::UINT64) ||
+        carried_index.getTotalNumElements() != elements ||
+        (reinterpret_cast<uintptr_t>(carried_index.getMemPtr<void>()) & uintptr_t{alignment - 1}) != 0) {
+        throw std::logic_error(std::string(who) + " received an unsupported carried index.");
+    }
+}
+}  // namespace
+
+void launchFp32ArgWideContinuation(void* wide_scratch,
+                                   Tensor* value_output,
+                                   Tensor* index_output,
+                                   uint64_t outer_size,
+                                   uint64_t shards,
+                                   uint64_t inner_size,
+                                   bool maximum,
+                                   Stream& stream) {
+    if (wide_scratch == nullptr || outer_size == 0 || inner_size == 0 || shards < 2 ||
+        shards > REDUCTION_WORK_GRID_MAX_EXTENT) {
+        throw std::logic_error("FP32 wide ARG continuation received unsupported geometry.");
+    }
+    const Fp32ArgOutputs outputs = fp32CarriedArgOutputsFor(value_output, index_output, outer_size * inner_size,
+                                                            maximum, "FP32 wide ARG continuation");
+    launchFp32ArgWideContinuationPartials(fp32ArgWidePartialsAt(wide_scratch, outer_size, shards, inner_size), outputs,
+                                          outer_size, shards, inner_size, stream);
+}
+
+void launchFp32AlignedKCarriedArg(const Tensor& input,
+                                  const Tensor& carried_index,
+                                  Tensor* value_output,
+                                  Tensor* index_output,
+                                  const CubReductionGeometry& geometry,
+                                  uint32_t packet_bytes,
+                                  uint32_t block_threads,
+                                  uint64_t shards_per_output,
+                                  void* wide_scratch,
+                                  bool maximum,
+                                  uint64_t row_stride,
+                                  Stream& stream) {
+    const bool staged = shards_per_output > 1;
+    const uint64_t elements = geometry.outer_size * geometry.reduction_size * geometry.inner_size;
+    if (input.getDataType() != DataType::FP32 || packet_bytes == 4 ||  // 1228: the 4-byte packet is VALUE only
+        !fp32AlignedKSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size, packet_bytes,
+                              block_threads, shards_per_output) ||
+        input.getTotalNumElements() != elements ||
+        (reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{packet_bytes - 1}) != 0 ||
+        (staged && wide_scratch == nullptr)) {
+        throw std::logic_error("FP32 AlignedK carried ARG received an unsupported input, geometry or scratch.");
+    }
+    const uint64_t items = packet_bytes / 4;
+    const uint64_t index_bytes = carried_index.getDataType() == DataType::UINT64 ? 8 : 4;
+    checkFp32CarriedIndex(carried_index, elements, std::min<uint64_t>(16, items * index_bytes),
+                          "FP32 AlignedK carried ARG");
+    const Fp32ArgOutputs outputs = fp32CarriedArgOutputsFor(value_output, index_output,
+                                                            geometry.outer_size * geometry.inner_size, maximum,
+                                                            "FP32 AlignedK carried ARG");
+    const Fp32ArgWidePartials partials =
+        fp32ArgWidePartialsAt(staged ? wide_scratch : nullptr, geometry.outer_size, shards_per_output,
+                              geometry.inner_size);
+    const uint64_t component_tiles = ceilDivideU64(geometry.inner_size, items * block_threads);
+    const ReductionShardRows shard_rows = balancedReductionShardRows(geometry.reduction_size, shards_per_output);
+    const dim3 grid_blocks = reductionWorkGrid(shards_per_output, component_tiles, geometry.outer_size, 0);
+    const auto launch = [&]<bool Staged, typename IndexT>() {
+        return dispatchFp32AlignedKConfiguration<TiledRKStageTopology::Complete>(
+            packet_bytes, block_threads, [&]<int ItemsPerLane, int BlockThreads>() {
+                fp32AlignedKCarriedArgKernel<ItemsPerLane, BlockThreads, Staged, IndexT>
+                    <<<grid_blocks, BlockThreads, 0, stream.getStream()>>>(
+                        input.getMemPtr<float>(), carried_index.getMemPtr<IndexT>(), outputs, partials,
+                        geometry.outer_size, geometry.reduction_size, geometry.inner_size, shards_per_output,
+                        component_tiles, shard_rows, row_stride);
+                CUDA_CHECK(cudaGetLastError());
+            });
+    };
+    const bool wide = index_bytes == 8;
+    const bool launched = staged ? (wide ? launch.template operator()<true, uint64_t>()
+                                         : launch.template operator()<true, uint32_t>())
+                                 : (wide ? launch.template operator()<false, uint64_t>()
+                                         : launch.template operator()<false, uint32_t>());
+    if (!launched) throw std::logic_error("FP32 AlignedK carried ARG has no kernel for this configuration.");
+    if (staged) {
+        launchFp32ArgWideContinuationPartials(partials, outputs, geometry.outer_size, shards_per_output,
+                                              geometry.inner_size, stream);
+    }
+}
+
+CubKernelOccupancyInfo queryFp32AlignedKCarriedArgOccupancy(uint32_t packet_bytes, uint32_t block_threads,
+                                                            bool staged, DataType index_dtype) {
+    if (index_dtype != DataType::UINT32 && index_dtype != DataType::UINT64)
+        throw std::logic_error("FP32 AlignedK carried ARG occupancy requires a UINT32 or UINT64 carried index.");
+    CubKernelOccupancyInfo occupancy{};
+    const auto query = [&]<bool Staged, typename IndexT>() {
+        return dispatchFp32AlignedKConfiguration<TiledRKStageTopology::Complete>(
+            packet_bytes, block_threads, [&]<int ItemsPerLane, int BlockThreads>() {
+                const auto kernel = fp32AlignedKCarriedArgKernel<ItemsPerLane, BlockThreads, Staged, IndexT>;
+                cudaFuncAttributes attributes{};
+                CUDA_CHECK(cudaFuncGetAttributes(&attributes, kernel));
+                int active_blocks = 0;
+                CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active_blocks, kernel, BlockThreads, 0));
+                occupancy = CubKernelOccupancyInfo{attributes.numRegs, attributes.sharedSizeBytes, 0, active_blocks,
+                                                   active_blocks * (BlockThreads / TILED_REDUCTION_WARP_THREADS)};
+            });
+    };
+    const bool wide = index_dtype == DataType::UINT64;
+    const bool queried = staged ? (wide ? query.template operator()<true, uint64_t>()
+                                        : query.template operator()<true, uint32_t>())
+                                : (wide ? query.template operator()<false, uint64_t>()
+                                        : query.template operator()<false, uint32_t>());
+    if (!queried)
+        throw std::logic_error(
+            "FP32 AlignedK carried ARG occupancy requires an 8- or 16-byte packet and CTA 32/64/128.");
+    return occupancy;
+}
+
+CubKernelOccupancyInfo queryFp32AlignedKArgOccupancy(uint32_t packet_bytes, uint32_t block_threads, bool staged) {
+    CubKernelOccupancyInfo occupancy{};
+    const auto query = [&]<bool Staged>() {
+        return dispatchFp32AlignedKConfiguration<TiledRKStageTopology::Complete>(
+            packet_bytes, block_threads, [&]<int ItemsPerLane, int BlockThreads>() {
+                const auto kernel = fp32AlignedKArgKernel<ItemsPerLane, BlockThreads, Staged>;
+                cudaFuncAttributes attributes{};
+                CUDA_CHECK(cudaFuncGetAttributes(&attributes, kernel));
+                int active_blocks = 0;
+                CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active_blocks, kernel, BlockThreads, 0));
+                occupancy = CubKernelOccupancyInfo{attributes.numRegs, attributes.sharedSizeBytes, 0, active_blocks,
+                                                   active_blocks * (BlockThreads / TILED_REDUCTION_WARP_THREADS)};
+            });
+    };
+    const bool queried = staged ? query.template operator()<true>() : query.template operator()<false>();
+    if (!queried)
+        throw std::logic_error("FP32 AlignedK ARG occupancy requires an 8- or 16-byte packet and CTA 32/64/128.");
+    return occupancy;
 }
 
 }  // namespace ThorImplementation::CubReductionInternal

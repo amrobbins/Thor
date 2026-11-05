@@ -37,8 +37,10 @@ struct PacketGeometry {
 // adaptive-K geometry policy. PacketStaged is not compiled and never proposed.
 PacketGeometry packetForWaves(const RuntimeProposalGeometry& g, uint32_t occupancy, uint32_t waves) {
     const uint64_t target = uint64_t{g.sm_count} * std::max<uint32_t>(1, std::min(waves, occupancy));
-    const uint64_t min_tiles = ceilDiv(g.k, uint64_t{496});
-    const uint64_t max_tiles = std::max(min_tiles, ceilDiv(g.k, uint64_t{16}));
+    // Tiles hold at most 31 packets and at least one (FP8 16..496 components, FP32 4..124).
+    const uint64_t packet_components = g.element_bytes == 4 ? 4 : 16;
+    const uint64_t min_tiles = ceilDiv(g.k, 31 * packet_components);
+    const uint64_t max_tiles = std::max(min_tiles, ceilDiv(g.k, packet_components));
     if (min_tiles > UINT32_MAX || max_tiles > UINT32_MAX)
         throw std::overflow_error("RuntimeK proposal tile count exceeds uint32");
     const auto make = [&](uint32_t warps, uint64_t requested_tiles) {
@@ -87,6 +89,9 @@ std::vector<PhysicalKernel> enumerateRetainedRuntimeK(
     std::vector<PhysicalKernel> out;
     if (!g.outer || !g.r || !g.k || !g.sm_count) return out;
     if (!occupancy) throw std::invalid_argument("RuntimeK proposal requires exact compiled occupancy");
+    if (g.element_bytes != 1 && g.element_bytes != 4)
+        throw std::invalid_argument("RuntimeK proposal element width must be 1 (FP8) or 4 (FP32)");
+    const bool fp32 = g.element_bytes == 4;
     uint64_t elements = 0;
     if (!checkedMultiply(g.outer, g.r, elements) || !checkedMultiply(elements, g.k, elements))
         throw std::overflow_error("RuntimeK proposal input size overflow");
@@ -103,7 +108,8 @@ std::vector<PhysicalKernel> enumerateRetainedRuntimeK(
     PhysicalKernel packet{};
     packet.family = PhysicalFamily::RuntimeK;
     packet.a = static_cast<uint64_t>(RuntimeLayout::PacketComplete);
-    packet.b = 1; packet.c = 16; packet.d = ceilDiv(g.k, 16);
+    packet.element_bytes = g.element_bytes;
+    packet.b = 1; packet.c = fp32 ? 4 : 16; packet.d = ceilDiv(g.k, packet.c);
     packet.e = g.r; packet.f = 1;
     packet.first_stage_ctas = cappedBlocks(g.outer, 1, packet.d, 8);
     const uint32_t packet_residency = queriedResidency(occupancy, packet);
@@ -114,6 +120,7 @@ std::vector<PhysicalKernel> enumerateRetainedRuntimeK(
             PhysicalKernel variant{};
             variant.family = PhysicalFamily::RuntimeK;
             variant.a = static_cast<uint64_t>(RuntimeLayout::PacketComplete);
+            variant.element_bytes = g.element_bytes;
             variant.b = p.warps; variant.c = p.components; variant.d = p.tiles;
             variant.e = g.r; variant.f = 1;
             variant.first_stage_ctas = p.blocks;
@@ -123,7 +130,8 @@ std::vector<PhysicalKernel> enumerateRetainedRuntimeK(
     // All six retained depths are physically compiled. The selector, rather
     // than a hidden runtime heuristic, decides which should make the top 28.
     for (RuntimeLayout layout : {RuntimeLayout::RotatedPrefix, RuntimeLayout::RotatedExact}) {
-        const uint64_t width = layout == RuntimeLayout::RotatedExact ? 512 : 497;
+        if (fp32 && layout == RuntimeLayout::RotatedExact) continue;  // FP8-only
+        const uint64_t width = fp32 ? 125 : layout == RuntimeLayout::RotatedExact ? 512 : 497;
         const uint64_t tiles = ceilDiv(g.k, width);
         if (tiles > UINT32_MAX) continue;
         for (uint64_t rows : Fp8RuntimeKPolicy::rotated_row_depths) {
@@ -136,6 +144,7 @@ std::vector<PhysicalKernel> enumerateRetainedRuntimeK(
             PhysicalKernel variant{};
             variant.family = PhysicalFamily::RuntimeK;
             variant.a = static_cast<uint64_t>(layout);
+            variant.element_bytes = g.element_bytes;
             variant.c = width; variant.d = tiles;
             variant.e = rows; variant.f = shards;
             variant.first_stage_ctas = cappedBlocks(g.outer, shards, tiles, 1);

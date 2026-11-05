@@ -307,6 +307,7 @@ struct CubReductionGeometry {
 };
 namespace CubReductionInternal {
 struct DenseRetainedFp8ArgPhysicalPlan;
+struct DenseRetainedFp32ArgPhysicalPlan;  // 1221
 
 /**
  * One bound ordinary-dense physical pass.
@@ -885,6 +886,8 @@ class StampedCubArgReduction {
     std::vector<std::shared_ptr<StampedCubArgReduction>> composed_stages;
     // ARG-A2: a planned stage that launches a retained FP8 ARG physical kernel instead of a direct ARG reducer.
     std::shared_ptr<const CubReductionInternal::DenseRetainedFp8ArgPhysicalPlan> fp8_arg_plan;
+    // 1221: a planned stage that launches a retained FP32 ARG pass (the retained FP32 routing), original or carried.
+    std::shared_ptr<const CubReductionInternal::DenseRetainedFp32ArgPhysicalPlan> fp32_arg_plan;
 
     void launchBoundStage(const Tensor& stage_input, Stream& run_stream) const;
     void launchBoundStage(const Tensor& stage_input, Tensor* value_output_ptr, Tensor* index_output_ptr,

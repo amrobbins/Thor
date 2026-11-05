@@ -84,17 +84,19 @@ TEST(CubDensePhysicalPassExecution, RejectsUnrecognizedPhysicalGeometry) {
     EXPECT_THROW((void)describeDensePhysicalPass(unregistered), std::logic_error);
 }
 
-TEST(CubDensePhysicalPassExecution, OfficialDirectFP32PhysicalPassQueriesAndExecutesLikeStampedReduction) {
+// 1227: was OfficialDirectFP32PhysicalPassQueriesAndExecutesLikeStampedReduction. FP32 KR sites run the retained FP32
+// KR passes now; BF16 still runs the official direct (CUB) pass. The values are small integers, exact in BF16.
+TEST(CubDensePhysicalPassExecution, OfficialDirectBF16PhysicalPassQueriesAndExecutesLikeStampedReduction) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     const std::vector<uint64_t> dims{2, 3, 5};
     std::vector<float> values(30);
     for (size_t i = 0; i < values.size(); ++i) values[i] = static_cast<float>((i % 7) + 1);
-    Tensor input = makeGpuTensor(values, dims, stream, DataType::FP32);
+    Tensor input = makeGpuTensor(values, dims, stream, DataType::BF16);
     const DenseReductionProblem problem = makeInitialDenseReductionProblem(
         dims, {2}, DenseReductionAggregateKind::Value, valueOutput());
     const DenseProductionPhysicalSelectionContext selection_context(
-        DataType::FP32, DenseRKValueOperation::Sum, stream);
+        DataType::BF16, DenseRKValueOperation::Sum, stream);
     const DenseReductionCandidate candidate = selectDensePhysicalPass(
         problem, enumerateDenseReductionSites(problem).front(), selection_context.context());
     ASSERT_NE(dynamic_cast<const DenseDirectReductionPhysicalPlan*>(candidate.physical_plan.get()), nullptr);

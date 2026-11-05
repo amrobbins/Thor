@@ -89,8 +89,12 @@ SelectedIsolatedBenchmark makeSelectedIsolatedBenchmark(
 
 void SelectedIsolatedBenchmark::launch(const Tensor& input, Tensor& output,
                                        const Tensor& scratch, Stream& stream) const {
-    if ((input.getDataType() != DataType::FP8_E4M3 && input.getDataType() != DataType::FP8_E5M2) ||
-        !input.isDenseContiguous() || !output.isDenseContiguous() ||
+    // 1192: FP32 first stages (element_bytes 4, the FP32 RK selector) time the same program on FP32 input.
+    const bool input_matches = first_physical.element_bytes == 4
+                                   ? input.getDataType() == DataType::FP32
+                                   : (input.getDataType() == DataType::FP8_E4M3 ||
+                                      input.getDataType() == DataType::FP8_E5M2);
+    if (!input_matches || !input.isDenseContiguous() || !output.isDenseContiguous() ||
         input.getTotalNumElements() != first_geometry.input_elements ||
         output.getTotalNumElements() != first_geometry.output_elements ||
         output.getDataType() != site.site_output_dtype)

@@ -251,6 +251,24 @@ inline constexpr Fp8ExtremumFold FP8_EXTREMUM_FOLD_NONE{0xffffffffU, 0U, false};
     return fold;
 }
 
+// 1179: the same fold for FP32 input, one element per word (retained KR kernels shared with FP8): |x| clears the sign
+// bit, MAX flips it, and the MAX negation moves into output_scale unless squared.
+[[nodiscard]] inline Fp8ExtremumFold fp32CompleteExtremumFold(int fixed_op,
+                                                              CubReductionStageInputTransform input_transform,
+                                                              float& output_scale) {
+    if (!fp8SharedExtremumOp(fixed_op)) {
+        return FP8_EXTREMUM_FOLD_NONE;
+    }
+    const Fp8ExtremumFold bytes = fp8ExtremumFold(fixed_op == 3, input_transform);
+    const bool magnitude = bytes.byte_and_mask != 0xffffffffU;
+    const Fp8ExtremumFold fold{magnitude ? 0x7fffffffU : 0xffffffffU, fixed_op == 3 ? 0x80000000U : 0U,
+                               bytes.square_result};
+    if (fixed_op == 3 && !fold.square_result) {
+        output_scale = -output_scale;
+    }
+    return fold;
+}
+
 template <bool Fold, bool SignFold = true>
 __device__ __forceinline__ uint32_t foldFp8ExtremumBytes(uint32_t packed_fp8, const Fp8ExtremumFold& fold) {
     if constexpr (Fold && !SignFold) {

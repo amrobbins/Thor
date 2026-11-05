@@ -694,6 +694,19 @@ bool Tensor::isDenseContiguous() const {
     return getStridesElements() == denseStridesForDims(getDimensions());
 }
 
+bool Tensor::isAligned(uint64_t bytes) const {
+    THOR_THROW_IF_FALSE(isInitialized());
+    THOR_THROW_IF_FALSE(bytes != 0 && (bytes & (bytes - 1)) == 0);
+    return (reinterpret_cast<uintptr_t>(getMemPtr<void>()) & static_cast<uintptr_t>(bytes - 1)) == 0;
+}
+
+uint64_t Tensor::alignmentBytes(uint64_t limit) const {
+    THOR_THROW_IF_FALSE(limit != 0 && (limit & (limit - 1)) == 0);
+    uint64_t alignment = 1;
+    while (alignment < limit && isAligned(alignment * 2)) alignment *= 2;
+    return alignment;
+}
+
 // Stream is on either the source or dest device
 void Tensor::copyFromAsync(Tensor source, Stream stream) {
     THOR_THROW_IF_FALSE(!uninitialized());

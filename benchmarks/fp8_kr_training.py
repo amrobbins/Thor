@@ -445,7 +445,7 @@ def main():
     out = []
     for lost, c, target_us in gaps[:args.worst]:
         depth = c.at_depth(12)
-        out.append([c.kind, c.operation, c.dtype[4:], c.k, c.r, f"{c.bytes / 2**20:.0f}", c.oracle,
+        out.append([c.kind, c.operation, c.dtype.replace("fp8_", ""), c.k, c.r, f"{c.bytes / 2**20:.0f}", c.oracle,
                     fmt(c.tbps(c.oracle)), depth or "-", fmt(c.tbps(depth)), fmt(c.time[c.oracle], 1),
                     fmt(target_us, 1), fmt(lost, 1), fmt(c.copy_us, 1) if c.copy_us else "-",
                     pct(c.copy_us / c.time[c.oracle]) if c.copy_us else "-"])

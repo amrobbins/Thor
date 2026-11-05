@@ -236,7 +236,7 @@ void validateCandidateTransition(const DenseReductionProblem& current,
     if (const auto fp8 = std::dynamic_pointer_cast<const DenseRetainedFp8RKPhysicalPlan>(
             candidate.physical_plan); fp8) {
         std::ostringstream out;
-        out << "retained_fp8_rk/family=" << retainedFp8FamilyName(fp8->kernel.family)
+        out << (fp8->input_dtype == DataType::FP32 ? "retained_fp32_rk" : "retained_fp8_rk") << "/family=" << retainedFp8FamilyName(fp8->kernel.family)
             << "/shards=" << fp8->output_dimensions.at(fp8->reduction_axis)
             << "/dtype=" << static_cast<unsigned>(fp8->output_dtype);
         return out.str();

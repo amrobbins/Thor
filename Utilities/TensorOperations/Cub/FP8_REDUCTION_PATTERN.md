@@ -1,9 +1,10 @@
 # The FP8 dense reduction pattern (template for FP16, BF16 and FP32)
 
 Status: 1172, written when FP8 reached the end of its plan (tests passing, rankers trained, framework integration
-done). This document describes the pattern FP8 settled on, the rules it keeps, and what another dtype needs to follow
-it. The history and measurements behind each choice are in `Fp8RK/README.md`, `../../../benchmarks/*.md` and the
-project's FP8 completion plan. `ReductionArchitecture.md` is the source-ownership map.
+done). 1231: FP32 follows the pattern too (section 8); FP16 / BF16 are next (the project's FP16 / BF16 plan). This
+document describes the pattern FP8 settled on, the rules it keeps, and what another dtype needs to follow it. The
+history and measurements behind each choice are in `Fp8RK/README.md`, `../../../benchmarks/*.md` and the project's FP8
+completion plan. `ReductionArchitecture.md` is the source-ownership map.
 
 ## 1. What the pattern delivers
 
@@ -168,7 +169,8 @@ These are constraints, not preferences. A new dtype keeps all of them.
 7. **Unsupported means an error, not a silent fallback.** Where the retained kernels cannot run a case, the reducer
    throws rather than routing to CUB or a generic kernel unannounced. FP8 meets this everywhere since 1173: every
    original FP8 R, KR and RK site, VALUE and ARG, is planned by a retained selector or rejected
-   (`CubDenseFp8NoFallbackTest`). Sites over FP32 intermediates use the FP32 path.
+   (`CubDenseFp8NoFallbackTest`). Sites over FP32 intermediates use the FP32 path, which meets the rule too since
+   1225 / 1227 (section 8).
 8. **Report bandwidth in TB/s, measured reproducibly** (moved bytes over time). TB/s is the measure (user, 1177). A
    comparison with a device copy of the same bytes is a secondary view, used where it helps (cells near the launch
    floor).
@@ -253,7 +255,8 @@ Decisions for every dtype (user, 2026-11-02):
 - **FP8 depends on the FP32 path.** Staged FP8 RK VALUE passes write FP32 partials that the FP32 planner reduces, and
   the RK ranker was trained on times that include that FP32 continuation. When FP32 is overhauled, re-run the FP8
   audits of `benchmarks/FP8_RANKER_RETRAINING.md` (steps 1 and 6), and retrain the RK ranker if the picks or the
-  top-N coverage got worse.
+  top-N coverage got worse. Closed at 1230: after the FP32 switch the FP8 audit matches its 1176 baseline (per-cell
+  ratio p50 1.000 everywhere; 2 of 600 cells below 0.95, at 0.943 and 0.949), so the FP8 RK ranker was not retrained.
 - **Ping-pong workspace** (two scratch buffers instead of one per pass), after CUB is removed.
 - **Representative tuning input.** Contests time on an input of 1.0 everywhere. The kernels' speed does not depend on
   the values for finite inputs, but a realistic input would also exercise the NaN and special-value paths of ARG.
@@ -277,3 +280,69 @@ Decisions for every dtype (user, 2026-11-02):
 | Audits | `benchmarks/DenseProductionAudit.cpp` + `dense_production_audit.py` (any dtype), `benchmarks/fp8_rk_stamp.py`, `benchmarks/fp8_kr_training.py` |
 | Retraining | `benchmarks/FP8_RANKER_RETRAINING.md` |
 | Tests | `CubReductionFp8MultiStepTest`, `Fp8GeometryRankerTest`, `Fp8KRRankerTest`, `CubReductionTuningDepthTest`, `DenseReductionSelectionCacheTest`, `CubDenseReductionLazyPlannerTest`, `CubArgReductionFp8*Test`, `NetworkReductionTuningDepthTest` |
+| FP32 (section 8) | `Fp32RK/`, `Fp32KR/`, `Fp32ArgKey.cuh`, `Fp32CarriedArgContestInput.*`, `DenseRetainedFp32ArgPhysicalPlan.*`; the FP32 kernels sit beside FP8's in the NarrowFlat, KParallel and AwkwardRotated TUs |
+| FP32 tests | `CubReductionFp32RKTest`, `CubReductionFp32KRTest`, `CubReductionFp32RKSelectorTest`, `CubReductionFp32KRSelectorTest`, `Fp32RKCandidatesTest`, `Fp32KRRankerTest`, `CubReductionFp32RoutingTest`, `CubReductionElementWidthTest` |
+
+## 8. FP32 (1174-1230)
+
+FP32 was the second dtype through the pattern, and the first with work beyond its own sites: every staged pass of
+every dtype finishes in FP32. The plan, its measurements and its decisions are in the project's FP32 plan
+(`plans/Thor_FP32_Dense_Reduction_Plan_2026-11-02.md`).
+
+### 8.1 What FP32 has
+
+- **Every FP32-reading site is retained.** `selectDensePhysicalPass` sends original FP32 input and the FP32
+  intermediates of every dtype's earlier passes, VALUE and ARG, to the FP32 selectors (`Fp32RK::selectCached*Site`,
+  `Fp32KR::selectCached*Site`). Dense FP32 ARG runs the planned ARG executor. There is no fallback: a host-only
+  context (no tuning stream, operation or original size) is rejected, not planned by the old families.
+- **Inventory.** RK: OneWindow and DeepRSmallK (K <= 125: a 16-byte packet holds 4 FP32), AlignedK (4-, 8- and 16-byte
+  packets; the 4-byte packet since 1228, at odd K, VALUE only), RuntimeK PacketComplete (tiles <= 124) and the rotated
+  prefix (tile 125; no Exact layout). R / KR: Pack, Group, Block and Split, sharing FP8's kernels with a one-element
+  word. Vector Pack was not ported: generic Pack reaches line rate on short FP32 rows.
+- **ARG.** A two-word candidate: a 32-bit ordered key and a 64-bit tail (index << 1 | negative zero), compared key
+  first. NaN and +-0 follow the public rules, and ARG runs at VALUE speed. Staged RK ARG writes packed 64-bit
+  partials (key << 32 | shard row << 1 | -0) and finishes in the same pass.
+- **Carried-index ARG.** Intermediates of any dtype's ARG plans carry FP32 values plus a UINT32 / UINT64 index. The
+  composed index is not monotone in the row, so staged passes write wide partials (a key array, then a tail array at a
+  256-byte offset) and merge with the full (key, tail) minimum. Contests time values and index together in one
+  rotating input (`Fp32CarriedArgContestInput`).
+- **Rankers and depths.** RK: model a37fea04 (VALUE and ARG, 1, 4, 96 and 192 MiB), depths {3, 8, 13}. KR: model
+  787279aa (VALUE, ARG and carried ARG), depths {4, 4, 6}. Cache kinds `Fp32RK` and `Fp32KR`.
+- **Misaligned input is not an error** (user, 2026-11-04). At an original-input site, the RK selectors keep only the
+  passes that run at the input's alignment (`Tensor::alignmentBytes`, `fp32RKPassInputAlignment`). The first such
+  input prints one warning per process. Every KR shape reads 4-byte words, so it runs at any FP32 address.
+- **Results against the phase-0 audit (1176 to 1230).** ARG at KR and RK sites is 1.85-8.4x faster at 1-128 MiB
+  (median per cell). VALUE at 16 MiB and up is unchanged or slightly faster. Small RK VALUE is 1.16-1.19x faster.
+  Stamp time went from the old heuristic's 0.01 ms to a median of 5.5-20 ms by size.
+
+### 8.2 What FP32 taught (rules for the next dtype)
+
+- **Identities need their element width.** FP8 and FP32 plans of one geometry compared equal until
+  `PhysicalKernel::element_bytes` (1178). FP16 and BF16 share a width, so their cache keys must carry the input dtype.
+- **A cache key holds everything that changes the answer.** A carried-index final ARG KR site once shared a key
+  across index dtypes (1215 / 1216).
+- **Host references must match the GPU's NaN rules.** VALUE MIN / MAX propagate NaN, and `std::max` does not (1223).
+- **Train where the latency is.** The first FP32 RK ranker saw only 96 and 192 MiB cells, and the audit's slow cells
+  were 0.06-10 MiB. Sweep small working sets too (`--targets-mib=1,4,96,192`).
+- **The old families can cover a regime the FP8 inventory lacks.** Odd K at small R had only cooperative passes until
+  the 4-byte AlignedK packet (the retired KParallel's scalar mode) joined the pool (1228). Break audit regressions
+  down by geometry (here, K parity) before tuning anything.
+- **Continuations are tuned stages.** A staged candidate's continuation is chosen and cached per stage by the official
+  selectors, so the first stamp of a multi-pass shape costs more (FP8 multi-pass: median 47 ms against 18) and later
+  stamps reuse it (user decision 2026-11-04: accepted). Every caller that times staged candidates (sweeps, smokes)
+  must give its selection context the original operation and reduction size (1229).
+- **Route behind a switch, audit, then remove the switch.** The before / after audits ran on one build (1220-1227).
+- **The old families stay until the last dtype that runs them converts** (user, 2026-11-04). FP32 no longer reaches
+  `ReducersDenseR / KR / RK` or the direct ARG adapter, but their FP32 code is deleted with FP16 / BF16's conversion
+  rather than cut out of shared kernels now. Non-dense views (permuted, strided) keep their tiled and CUB paths for
+  every dtype.
+
+### 8.3 Open items left by FP32
+
+- **R / KR VALUE below about 4 MiB.** 31 of 600 audit cells run 0.1-0.6 µs slower than the old CUB path (min 0.833),
+  on Split (16) and Group (15). The FP32 KR ranker's cells already span 64 KiB-512 MiB, so unlike RK this is probably
+  kernel latency (Split's separate finishing launch, Group at few rows), not training range. The next step is to time
+  the FP32 KR pool against the old path at those cells.
+- **Tests.** Phase 9's no-fallback and multi-step tests are `CubReductionFp32Routing.Random*` (randomized multi-pass
+  VALUE and ARG plans on FP32 and FP8 inputs, every operation, the seed printed, every FP32-reading pass checked
+  retained) and `CubDensePhysicalSelector.DescriptorOnlyFP32SitesGoToTheRetainedFp32Selectors`.

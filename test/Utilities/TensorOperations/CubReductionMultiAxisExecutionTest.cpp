@@ -54,17 +54,22 @@ TEST(CubReduction, TiledKernelsHaveNoScratchAndCubScratchIsStampedAheadOfRun) {
     EXPECT_EQ(tiled_stamp->getWorkspaceSizeInBytes(), 0U);
     EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*tiled_stamp), 0U);
 
+    // 1227: the dense ARG and CUB cases are BF16. Dense FP32 runs the retained FP32 passes (the planned ARG executor
+    // and the retained FP32 KR passes), not these direct tiled and CUB paths; the FP32 view above still runs the
+    // tiled one.
+    Tensor bf16_input = makeGpuTensor({1.0f, 3.0f, 5.0f, 7.0f, 9.0f, 11.0f,
+                                       2.0f, 4.0f, 6.0f, 8.0f, 10.0f, 12.0f}, {2, 3, 2}, stream, DataType::BF16);
     CubArgReduction tiled_arg(CubArgReductionOp::ArgMax, 1);
-    const auto tiled_arg_stamp = tiled_arg.stamp(input, stream);
+    const auto tiled_arg_stamp = tiled_arg.stamp(bf16_input, stream);
     ASSERT_EQ(tiled_arg_stamp->getPath(), CubReductionPath::TiledFixedSegment);
-    EXPECT_EQ(tiled_arg.queryWorkspaceSizeInBytes(input.getDescriptor(), stream), 0U);
+    EXPECT_EQ(tiled_arg.queryWorkspaceSizeInBytes(bf16_input.getDescriptor(), stream), 0U);
     EXPECT_EQ(tiled_arg_stamp->getWorkspaceSizeInBytes(), 0U);
     EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*tiled_arg_stamp), 0U);
 
     // A real CUB DeviceReduce must have a non-null execution pointer. Its
     // queried storage, including CUB's one-byte minimum, is allocated at stamp
     // time and remains allocated across run() calls.
-    Tensor vector_input = makeGpuTensor({1.0f, 2.0f, 3.0f}, {3}, stream);
+    Tensor vector_input = makeGpuTensor({1.0f, 2.0f, 3.0f}, {3}, stream, DataType::BF16);
     CubReduction cub_value(CubReductionOp::Sum, 0, DataType::FP32);
     const size_t cub_value_bytes = cub_value.queryWorkspaceSizeInBytes(vector_input.getDescriptor(), stream);
     const auto cub_value_stamp = cub_value.stamp(vector_input, stream);

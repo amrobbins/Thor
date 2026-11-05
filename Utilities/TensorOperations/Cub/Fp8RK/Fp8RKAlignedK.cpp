@@ -14,6 +14,14 @@ uint32_t alignedKResidency(DataType input_dtype, DataType output_dtype,
                            const CubReductionStageSemantics& semantics,
                            uint32_t packet_bytes, uint32_t threads,
                            uint64_t shards_per_output) {
+    if (input_dtype == DataType::FP32) {
+        // 1192: one FP32 kernel per (packet, CTA, Staged / Complete); PRODUCT runs only with the identity transform.
+        static_cast<void>(output_dtype);
+        if (semantics.combine == CubReductionStageCombine::Product &&
+            semantics.input_transform != CubReductionStageInputTransform::Identity) return 0u;
+        const auto occ = queryFp32AlignedKOccupancy(packet_bytes, threads, shards_per_output > 1);
+        return occ.max_active_blocks_per_sm > 0 ? static_cast<uint32_t>(occ.max_active_blocks_per_sm) : 0u;
+    }
     // Unlike the generic KParallel query, this uses the retained transformed
     // and operation-aware physical specialization, including Complete's
     // output-dtype-sensitive shared-memory footprint.
@@ -30,6 +38,11 @@ void launchAlignedK(const PhysicalKernel& kernel, const CubReductionStageSemanti
     if (kernel.family != PhysicalFamily::AlignedK ||
         !structurallyValid(kernel, geometry.outer_size, geometry.reduction_size, geometry.inner_size))
         throw std::logic_error("Invalid retained AlignedK physical stage");
+    if (kernel.element_bytes == 4) {
+        launchFp32AlignedKStage(semantics, input, stage_output, geometry, static_cast<uint32_t>(kernel.a),
+                                static_cast<uint32_t>(kernel.b), kernel.c, output_scale, stream);
+        return;
+    }
     launchKParallelTiledStage(semantics, input, stage_output, geometry,
         makeStagePlan(static_cast<uint32_t>(kernel.a), static_cast<uint32_t>(kernel.b), kernel.c),
         output_scale, stream);

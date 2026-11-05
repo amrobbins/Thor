@@ -43,13 +43,17 @@ namespace ThorImplementation::CubReductionInternal {
 enum class DenseReductionSelectionKind : uint8_t {
     Fp8RK = 1,  // Fp8RK::Fp8RKSelection (VALUE and ARG RK sites)
     Fp8KR = 2,  // Fp8KR::Fp8KRSelection (VALUE and ARG R / KR sites)
+    Fp32RK = 3,  // 1178: reserved for the FP32 RK selector (its recipe type arrives with it)
+    Fp32KR = 4,  // 1178: reserved for the FP32 R / KR selector
 };
-inline constexpr size_t DenseReductionSelectionKindCount = 3;  // kinds are indexed 1..Count-1
+inline constexpr size_t DenseReductionSelectionKindCount = 5;  // kinds are indexed 1..Count-1
 
 [[nodiscard]] constexpr const char* denseReductionSelectionKindName(DenseReductionSelectionKind kind) {
     switch (kind) {
         case DenseReductionSelectionKind::Fp8RK: return "fp8_rk";
         case DenseReductionSelectionKind::Fp8KR: return "fp8_kr";
+        case DenseReductionSelectionKind::Fp32RK: return "fp32_rk";
+        case DenseReductionSelectionKind::Fp32KR: return "fp32_kr";
     }
     return "unknown";
 }

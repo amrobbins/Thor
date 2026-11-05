@@ -10,7 +10,9 @@ import gzip
 import math
 from dataclasses import dataclass, field
 
-KINDS = {"value": 0, "arg_index": 1, "arg_value_index": 2}
+# 1211: the carried kinds are the ARG kinds at a carried-index (intermediate) FP32 site; the aggregate feature tells
+# them apart (the model's one site-kind feature).
+KINDS = {"value": 0, "arg_index": 1, "arg_value_index": 2, "carried_arg_index": 3, "carried_arg_value_index": 4}
 BASE_FEATURES = 25
 FEATURE_NAMES = [
     "log2_outer", "log2_r", "log2_k", "log2_elements", "log2_outputs", "log2_r_over_k", "e4m3", "combine",

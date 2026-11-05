@@ -84,18 +84,20 @@ TEST(CubDenseFp8NoFallback, OriginalFp8RKValueNeedsTheRetainedSelector) {
                    "Retained FP8 RK");
 }
 
-TEST(CubDenseFp8NoFallback, Fp32IntermediatesAndOtherDTypesKeepTheOrdinarySelector) {
-    // A KR site over an FP32 intermediate (an FP8 pass already reduced part of R): the ordinary selector plans it.
+TEST(CubDenseFp8NoFallback, Fp32IntermediatesAndFp32InputGoToTheRetainedFp32Selectors) {
+    // A KR site over an FP32 intermediate (an FP8 pass already reduced part of R), and an original FP32 site.
     const DenseReductionProblem first = valueProblem({64, 512}, {1});
     const DenseReductionProblem staged = advanceDenseReductionProblem(first, DenseReductionSite{1}, 8);
     ASSERT_EQ(staged.input_state, DenseReductionInputState::IntermediateAggregate);
     ASSERT_TRUE(hasDenseReductionSites(staged));
     const auto sites = enumerateDenseReductionSites(staged);
     ASSERT_EQ(sites.size(), 1U);
-    EXPECT_NO_THROW((void)selectDensePhysicalPass(staged, sites.front(), fp8Context(CubReductionOp::Sum, 512)));
-
-    // FP32 input: unchanged.
     DensePhysicalSelectionContext fp32 = fp8Context(CubReductionOp::Sum, 512);
     fp32.rk.original_input_dtype = DataType::FP32;
-    EXPECT_NO_THROW((void)selectDensePhysicalPass(first, DenseReductionSite{1}, fp32));
+
+    // 1226 / 1227: both read FP32, so both go to the retained FP32 selectors, which time their candidates: this
+    // host-only context (no tuning stream) is rejected, never planned by the ordinary families.
+    EXPECT_THROW((void)selectDensePhysicalPass(staged, sites.front(), fp8Context(CubReductionOp::Sum, 512)),
+                 std::logic_error);
+    EXPECT_THROW((void)selectDensePhysicalPass(first, DenseReductionSite{1}, fp32), std::logic_error);
 }

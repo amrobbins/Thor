@@ -158,6 +158,110 @@ python3 ../benchmarks/fp8_kr_training.py kr-confirm-after.csv.gz --compare=kr-co
 Accept when the picks are at least as good as step 1 and the top-N coverage is at least 98% at Regular. Commit the
 two headers, the two fixtures, the test comment and the README paragraph together.
 
+## FP32 KR ranker (1182)
+
+FP32 R / KR sites get their own ranker (one ranker per dtype, so changing one dtype's kernels never forces retraining
+another's). It uses the same trainer, features and rules as the FP8 KR ranker, with `--dtype=fp32`:
+
+| | FP32 KR ranker |
+| --- | --- |
+| Model header | `Utilities/TensorOperations/Cub/Fp32KR/Fp32KRRankerModel.h` |
+| Parity fixtures | `test/Utilities/TensorOperations/Fp32KRRankerParityFixtures.h` |
+| Depths | `FP32_KR_SHORTLIST_DEPTHS` in `Utilities/TensorOperations/Cub/Fp32KR/Fp32KRStampAutotuner.h` |
+| Pool | `fp32KRCandidatePool`: the FP32 list and pool (`retainedKRCandidatePool` at element size 4), without the ARG shapes the FP32 ARG kernels cannot run |
+| Test | `Fp32KRRanker*` |
+
+Installed model (1218): `787279aa…`, 24,512 FP32 cells (64 KiB–512 MiB) on the 170-SM training GPU: 1183's 12,256
+VALUE and ARG cells plus 6,128 UINT32 and 6,128 UINT64 carried-index ARG cells (1217). Out of fold, the ranked top 2
+has p99 regret 1.008 (VALUE) / 1.008 (ARG) / 1.009 (carried ARG), and the top 8 holds the fastest shape in every
+cell; the heuristic list needed 12. (1183's model, `35c2616f…`, trained on the VALUE and ARG cells only, had p99 1.020
+at the top 2 on the carried cells.) Production runs 4 / 4 / 6 (`FP32_KR_SHORTLIST_DEPTHS`; 1184 chose 2 / 4 / 6, one step
+above each printed minimum; 1219 raised Quick to Regular's 4, as four shapes are cheap to autotune). Without a trained header (a
+placeholder with `TRAINED = false`) the FP32 selectors time the FP32 heuristic list's prefix at the RK depths
+(6 / 12 / 24).
+
+```
+./thor_fp8_kr_training_sweep --dtypes=fp32 --random=6000 --min-kib=64 --no-production 2> fp32-kr-ranker.log | gzip -1 > fp32-kr-ranker.csv.gz
+./thor_fp8_kr_training_sweep --dtypes=fp32 --ops=argmin,argmax --carried-index=uint32 --random=6000 --semantics=1 --min-kib=64 --no-production 2> fp32-kr-carried32.log | gzip -1 > fp32-kr-carried32.csv.gz
+./thor_fp8_kr_training_sweep --dtypes=fp32 --ops=argmin,argmax --carried-index=uint64 --random=6000 --semantics=1 --min-kib=64 --no-production 2> fp32-kr-carried64.log | gzip -1 > fp32-kr-carried64.csv.gz
+python3 ../benchmarks/fp8_kr_ranker/train.py fp32-kr-ranker.csv.gz fp32-kr-carried32.csv.gz fp32-kr-carried64.csv.gz --dtype=fp32 --out-dir=fp32_kr_ranker_out
+```
+
+- **The carried sweeps (1217).** `--carried-index` makes every ARG cell a carried-index site (FP32 values plus a cold
+  UINT32 / UINT64 carried index, ranker kind 3 / 4); `train.py` reports them as the `carried_arg` group and, from the
+  sweep's `frozen_margin` column, the installed model's order (`frozen`).
+
+- **The sweep's FP32 cells.** R is in elements (row bytes 4 R) with a quarter of the grid's rows, so a cell reads
+  about the same bytes as an FP8 cell. Cells alternate VALUE and ARG. `--no-production` skips the production stamp,
+  which still runs FP32's pre-retained kernels until the switch.
+- **The trainer keeps only the dtype's cells.** A mixed dataset (`--dtypes=fp8_e4m3,fp8_e5m2,fp32`) trains either
+  ranker, and `--dtype=fp8` (the default) ignores FP32 cells.
+- **Install** as for FP8: copy the two headers from `fp32_kr_ranker_out/` and set `FP32_KR_SHORTLIST_DEPTHS` (the
+  same depth rules; FP8 KR runs 6 / 12 / 12, FP32 KR 4 / 4 / 6).
+- **Verify:**
+  - `./thor_tests --gtest_filter='Fp32KRRanker*:CubReductionFp32KR*'`;
+  - a confirmation sweep with another seed (`--seed=1182 --random=1500 --min-kib=64 --dtypes=fp32`) through
+    `fp8_kr_training.py`.
+
+## FP32 RK ranker (1196)
+
+FP32 RK sites get their own ranker too. It uses the FP8 RK trainer and rules with `--dtype=fp32`, on FP32 cells of
+the RK training sweep:
+
+| | FP32 RK ranker |
+| --- | --- |
+| Model header | `Utilities/TensorOperations/Cub/Fp32RK/Fp32RKRankerModel.h` |
+| Parity fixtures | `test/Utilities/TensorOperations/Fp32RKRankerParityFixtures.h` |
+| Depths | `FP32_RK_SHORTLIST_DEPTHS` in `Utilities/TensorOperations/Cub/Fp32RK/Fp32RKCandidates.h` |
+| Pool | `fp32RKCandidatePool`: every legal, resident FP32 first stage (OneWindow, DeepRSmallK, AlignedK, RuntimeK PacketComplete and rotated Prefix), families interleaved by local rank |
+| Features | `fp32RKRankerFeatures`: FP8's 26 in FP32 units (the E4M3 slot is 0) |
+| Test | `Fp32RKCandidates*` (the parity check skips until a trained model is installed) |
+
+Installed model (1230): `a37fea04…`, 21,255 FP32 cells on the 170-SM training GPU. They are 1228's sweep (14,682
+VALUE and ARG cells at 1, 4, 96 and 192 MiB, after the 4-byte AlignedK packet joined the pool) and 1205's 6,573 ARG
+cells (96 and 192 MiB). Out of fold, ARG / VALUE: the ranked top 3 is within 1.309 / 1.172 of the oracle in every cell
+(p99 1.017 / 1.023), the top 8 within 1.031 / 1.015 and the top 13 within 1.003 / 1.008. Held out, the top 13 is the
+fastest kernel in every cell. Production runs 3 / 8 / 13 (`FP32_RK_SHORTLIST_DEPTHS`, user decision 2026-11-04). The
+1206 model (`aa090137…`, 19,719 cells at 96 and 192 MiB) ran 2 / 6 / 14, and the 1197 model (`8c7e2ec4…`, VALUE only)
+ran 2 / 6 / 13.
+
+The 1 and 4 MiB working sets (`--targets-mib=1,4,96,192`) carry the small, latency-bound sites. There the 4-byte
+AlignedK packet wins about 37% of odd-K VALUE cells, 15% (1 MiB) and 10% (4 MiB) faster at the median than the best
+other kernel. Since 1229 the sweep times every staged candidate with the continuation the retained FP32 selectors
+choose (1225 / 1227). Those tunings are cached per stage, so the sweep takes longer the first time a continuation shape
+appears.
+
+```
+./thor_fp8_retained_cold_l2_sweep --training --dtypes=fp32 --training-random=6000 --targets-mib=1,4,96,192 \
+    | gzip -1 > fp32-rk-training.csv.gz
+python3 ../benchmarks/fp8_ranker/line_rate.py fp32-rk-training.csv.gz
+python3 ../benchmarks/fp8_ranker/train.py fp32-rk-training.csv.gz --dtype=fp32 --out-dir=fp32_rk_ranker_out
+```
+
+The sweep alternates VALUE and ARG cells per geometry by default, so this one file trains both. 1230 also passed
+1205's ARG file, which repeats the 96 and 192 MiB ARG geometries of the same seed.
+
+- **The sweep's FP32 cells** are VALUE and (1205) ARG. Working sets stay in bytes, so an FP32 cell has a quarter of an
+  FP8 cell's elements. To add ARG to the 1197 VALUE dataset, sweep ARG alone with the same seed and train on both files
+  (the trainer groups cells per file, and the same seed keeps the same held-out shapes):
+
+  ```
+  ./thor_fp8_retained_cold_l2_sweep --training --dtypes=fp32 --training-random=6000 --training-semantics=1 \
+      --ops=argmin,argmax | gzip -1 > fp32-rk-arg-training.csv.gz
+  python3 ../benchmarks/fp8_ranker/train.py fp32-rk-training.csv.gz fp32-rk-arg-training.csv.gz --dtype=fp32 \
+      --out-dir=fp32_rk_ranker_out
+  ```
+
+  The printed Ultra depth is the deeper of the VALUE and the ARG depth.
+- **The trainer** keeps only the dtype's cells and orders by the model alone: the FP32 selector has no family-leader
+  prefix. Besides Quick and Regular it prints an Ultra depth, the smallest N with out-of-fold max regret at most
+  `--ultra-max` (default 1.01).
+- **Install:** copy `Fp32RKRankerModel.h` and `Fp32RKRankerParityFixtures.h` from `fp32_rk_ranker_out/`, and set
+  `FP32_RK_SHORTLIST_DEPTHS` (Quick, Regular, Ultra) from the printed depths. Without a trained header the selector
+  times the pool's prefix at 6 / 12 / 24.
+- **Verify:** `./thor_tests --gtest_filter='Fp32RKCandidates*:CubReductionFp32RK*'`, then a confirmation sweep with
+  another seed (`--training-seed=1196 --training-random=1500`).
+
 ## Troubleshooting
 
 - **Large sample spreads (sweep spread over about 2% in section 2b).** The GPU was not idle, clocks were throttling,

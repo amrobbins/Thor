@@ -13,6 +13,8 @@ namespace ThorImplementation::CubReductionInternal {
  * current runs before it and its row is the nominated (last) run. The pass is Complete for the planner: a staged shape
  * keeps its chunk partials in the pass's own scratch and finishes them in the same pass, so its output is the ordinary
  * [rows] result (final storage on the last pass, FP32 otherwise).
+ * 1220: input_dtype FP32 is the retained FP32 R / KR VALUE pass (launchFp32KRValueSegments; the shape in bytes) at an
+ * FP32 site, original or intermediate.
  */
 struct DenseRetainedFp8KRPhysicalPlan final : DenseReductionPhysicalPlan {
     Fp8KR::Fp8KRSegmentShape shape{};
@@ -44,5 +46,12 @@ struct Fp8KRSiteGeometry {
                                                                    DenseReductionSite site,
                                                                    const Fp8KR::Fp8KRSegmentShape& shape,
                                                                    DataType input_dtype);
+
+/** 1220: the one-pass VALUE candidate running the retained FP32 R / KR `shape` (in bytes: row_bytes = 4 x the row's
+ *  elements) at an FP32 site: original FP32 input, or an intermediate aggregate of any dtype's earlier passes (the
+ *  caller, the retained FP32 routing, has established that). The plan's input_dtype is FP32. */
+[[nodiscard]] DenseReductionCandidate makeRetainedFp32KRValueCandidate(const DenseReductionProblem& problem,
+                                                                      DenseReductionSite site,
+                                                                      const Fp8KR::Fp8KRSegmentShape& shape);
 
 }  // namespace ThorImplementation::CubReductionInternal
