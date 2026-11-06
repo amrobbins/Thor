@@ -174,6 +174,13 @@ TEST(ExpressionReductionArchitecture, ArgReductionDoesNotRetainSupersededKernelF
         "struct DeviceArgCandidateInput {",
         "struct CompactContiguousArgCandidateInput {",
         "makeCompactContiguousArgCandidateIterator",
+        // 1261: the CUB dense ARG families and the interval-composition ARG stage are deleted.
+        "alignedContiguousSegmentArgReductionKernel",
+        "alignedAsyncNarrowTiledArgReductionKernel",
+        "alignedCooperativeTiledArgReductionKernel",
+        "directTiledFixedSegmentArgReductionKernel",
+        "ComposedOperationArgReductionStage",
+        "makeComposedDeviceArgCandidateIterator",
     };
 
     for (const std::string& token : forbidden_tokens) {
@@ -181,11 +188,12 @@ TEST(ExpressionReductionArchitecture, ArgReductionDoesNotRetainSupersededKernelF
             << "Superseded/dead ARG reduction implementation must remain deleted: " << token;
     }
 
-    // The three benchmarked production fast families and the one conservative exceptional-domain fallback remain.
-    EXPECT_NE(contents.find("alignedContiguousSegmentArgReductionKernel"), std::string::npos);
-    EXPECT_NE(contents.find("alignedAsyncNarrowTiledArgReductionKernel"), std::string::npos);
-    EXPECT_NE(contents.find("alignedCooperativeTiledArgReductionKernel"), std::string::npos);
-    EXPECT_NE(contents.find("directTiledFixedSegmentArgReductionKernel"), std::string::npos);
+    // The offset-segmented ARG kernels still use the FP32 candidate rules.
+    EXPECT_NE(contents.find("struct ArgMinimumCandidateFp32"), std::string::npos);
+    EXPECT_NE(contents.find("struct ArgMaximumCandidateFp32"), std::string::npos);
+    const std::filesystem::path cub_root = std::filesystem::path(SOURCE_DIR) / "Utilities/TensorOperations/Cub";
+    EXPECT_FALSE(std::filesystem::exists(cub_root / "CubArgReductionMin.cu"));
+    EXPECT_FALSE(std::filesystem::exists(cub_root / "CubArgReductionMax.cu"));
 }
 TEST(ExpressionReductionArchitecture, ValueReductionSharesAdditiveTemplateMatrices) {
     const std::filesystem::path cub_root =

@@ -51,9 +51,6 @@ TEST(CubReduction, RetainedFp8RKProductionOperationAndOutputDTypeMatrix) {
     std::vector<DataType> output_dtypes = {
         DataType::FP8_E4M3, DataType::FP8_E5M2, DataType::FP16,
         DataType::BF16, DataType::FP32};
-#if THOR_CUB_ENABLE_64BIT_TYPES
-    output_dtypes.push_back(DataType::FP64);
-#endif
     // The full operation x output-format matrix runs for a single RK site.
     // Multi-axis cases additionally prove that finalization and conversion
     // occur only after the independent downstream mathematical reduction.
@@ -300,192 +297,6 @@ TEST(CubReduction, ValueStageSemanticsSeparateFirstTransformCombineAndFinalizati
                          CubReductionStageFinalize::Identity);
 }
 
-TEST(CubReduction, KParallelTiledCompleteTopologyAppliesStageSemanticsScaleAndOutputConversion) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    constexpr uint64_t outer_size = 1;
-    constexpr uint64_t reduction_size = 4;
-    constexpr uint64_t inner_size = 8;
-    std::vector<float> values;
-    values.reserve(outer_size * reduction_size * inner_size);
-    for (uint64_t row = 0; row < reduction_size; ++row) {
-        for (uint64_t component = 0; component < inner_size; ++component) {
-            values.push_back(static_cast<float>(row + component + 1));
-        }
-    }
-
-    Tensor input = makeGpuTensor(values, {outer_size, reduction_size, inner_size}, stream, DataType::FP16);
-    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
-    ASSERT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
-
-    const CubReductionInternal::KParallelTiledStagePlan plan{
-        CubReductionInternal::TiledRKStageTopology::Complete, 16, 32, 1};
-    const CubReductionInternal::CubReductionStageSemantics semantics =
-        CubReductionInternal::makeValueReductionStageSemantics(
-            CubReductionOp::Mean, CubReductionInternal::CubReductionStageRole::Complete, reduction_size);
-
-    Tensor output(gpuPlacement, TensorDescriptor(DataType::BF16, {outer_size, inner_size}));
-    constexpr float output_scale = 2.0f;
-    CubReductionInternal::launchKParallelTiledStage(
-        semantics, input, output, geometry, plan, output_scale, stream);
-
-    std::vector<float> expected(inner_size);
-    for (uint64_t component = 0; component < inner_size; ++component) {
-        expected[component] = 2.0f * (static_cast<float>(component) + 2.5f);
-    }
-    expectFloatVectorNear(copyGpuTensorAsFloat(output, stream), expected, 0.03125f);
-
-    // Physical COMPLETE topology means only that this R reduction needs no partial tensor. It must not manufacture
-    // mathematical finalization: a composed First pass applies the input transform but not L2's square-root finalizer.
-    const CubReductionInternal::CubReductionStageSemantics first_semantics =
-        CubReductionInternal::makeValueReductionStageSemantics(
-            CubReductionOp::L2Norm, CubReductionInternal::CubReductionStageRole::First, reduction_size);
-    Tensor first_output(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size, inner_size}));
-    CubReductionInternal::launchKParallelTiledStage(
-        first_semantics, input, first_output, geometry, plan, 1.0f, stream);
-
-    std::vector<float> expected_sum_squares(inner_size, 0.0f);
-    for (uint64_t row = 0; row < reduction_size; ++row) {
-        for (uint64_t component = 0; component < inner_size; ++component) {
-            const float value = static_cast<float>(row + component + 1);
-            expected_sum_squares[component] += value * value;
-        }
-    }
-    expectFloatVectorNear(copyGpuTensorAsFloat(first_output, stream), expected_sum_squares, 1.0e-5f);
-}
-
-// Regression: Complete KParallel previously capped its launch at 65535 CTAs
-// without a grid-stride loop. FP32 continuations with >65535 narrow-K outputs
-// silently left the tail unwritten (observed after the FP8 FlatRows first stage).
-TEST(CubReduction, KParallelCompleteGridStridesBeyond65535OuterRows) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    constexpr uint64_t outer_size = 65537;
-    constexpr uint64_t reduction_size = 32;
-    constexpr uint64_t inner_size = 3;
-    Tensor input(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size, reduction_size, inner_size}));
-    Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size, inner_size}));
-    input.fill(1.0f, stream);
-    output.fill(-1.0f, stream);
-
-    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
-    ASSERT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
-    const CubReductionInternal::KParallelTiledStagePlan plan{
-        CubReductionInternal::TiledRKStageTopology::Complete, 4, 32, 1};
-    const auto semantics = CubReductionInternal::makeValueReductionStageSemantics(
-        CubReductionOp::Sum, CubReductionInternal::CubReductionStageRole::Complete, reduction_size);
-    CubReductionInternal::launchKParallelTiledStage(semantics, input, output, geometry, plan, 1.0f, stream);
-    stream.synchronize();
-    expectFloatVectorNear(copyGpuTensorAsFloat(output, stream),
-                          std::vector<float>(outer_size * inner_size, 32.0f), 1.0e-5f);
-}
-
-// 1136: K-parallel CTAs own consecutive packets of the flat [outer, K / items] packet space, so a CTA spans several
-// outer rows at narrow K. Every packet, outer row and shard must land in its own output, including packets that cross
-// CTA boundaries and outer counts past the 65535-CTA grid cap.
-TEST(CubReduction, KParallelFlatPacketOwnershipCoversNarrowAndWideK) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-    struct Case {
-        uint64_t outer, r, k;
-        size_t packet_bytes;
-        uint32_t block_threads;
-        uint64_t shards;  // 1: Complete
-    };
-    const std::vector<Case> cases{
-        {70001, 3, 2, 8, 32, 1},    // K = 2: 16 outer rows per warp; grid-strides past 65535 CTAs
-        {9001, 5, 6, 8, 32, 1},     // 3 packets per row: rows straddle warps
-        {4099, 2, 40, 16, 32, 1},   // 10 packets per row
-        {517, 7, 3, 4, 64, 1},
-        {33, 4, 1000, 16, 256, 1},  // wide K: 250 packets per row, 6 CTAs straddle rows
-        {1000, 50, 3, 4, 32, 5},    // Staged
-        {257, 33, 10, 8, 32, 4},
-        {3, 64, 1024, 16, 32, 2},
-    };
-    for (const Case& c : cases) {
-        SCOPED_TRACE(::testing::Message() << "outer=" << c.outer << " R=" << c.r << " K=" << c.k << " packet="
-                                          << c.packet_bytes << " threads=" << c.block_threads
-                                          << " shards=" << c.shards);
-        std::vector<float> values(c.outer * c.r * c.k);
-        for (uint64_t o = 0; o < c.outer; ++o)
-            for (uint64_t r = 0; r < c.r; ++r)
-                for (uint64_t k = 0; k < c.k; ++k)
-                    values[(o * c.r + r) * c.k + k] = static_cast<float>((o * 7 + r * 3 + k * 5) % 13);
-        Tensor input = makeGpuTensor(values, {c.outer, c.r, c.k}, stream, DataType::FP32);
-        const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
-        ASSERT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
-        const bool complete = c.shards == 1;
-        const CubReductionInternal::KParallelTiledStagePlan plan{
-            complete ? CubReductionInternal::TiledRKStageTopology::Complete
-                     : CubReductionInternal::TiledRKStageTopology::Staged,
-            c.packet_bytes, c.block_threads, c.shards};
-        const auto semantics = CubReductionInternal::makeValueReductionStageSemantics(
-            CubReductionOp::Sum, CubReductionInternal::CubReductionStageRole::Complete, c.r);
-        Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, complete ? std::vector<uint64_t>{c.outer, c.k}
-                                                                              : std::vector<uint64_t>{c.outer, c.shards, c.k}));
-        output.fill(-1.0f, stream);
-        CubReductionInternal::launchKParallelTiledStage(semantics, input, output, geometry, plan, 1.0f, stream);
-        stream.synchronize();
-        std::vector<float> expected(c.outer * c.shards * c.k, 0.0f);
-        const uint64_t base = c.r / c.shards, extra = c.r % c.shards;
-        for (uint64_t o = 0; o < c.outer; ++o) {
-            for (uint64_t s = 0; s < c.shards; ++s) {
-                const uint64_t begin = s * base + std::min(s, extra);
-                const uint64_t end = begin + base + (s < extra ? 1 : 0);
-                for (uint64_t r = begin; r < end; ++r)
-                    for (uint64_t k = 0; k < c.k; ++k)
-                        expected[(o * c.shards + s) * c.k + k] += values[(o * c.r + r) * c.k + k];
-            }
-        }
-        expectFloatVectorNear(copyGpuTensorAsFloat(output, stream), expected, 0.0f);
-    }
-}
-
-TEST(CubReduction, KParallelTiledStagedTopologyDefersFinalizerAndScale) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    constexpr uint64_t outer_size = 1;
-    constexpr uint64_t reduction_size = 4;
-    constexpr uint64_t inner_size = 8;
-    constexpr uint64_t shards_per_output = 2;
-    std::vector<float> values;
-    values.reserve(outer_size * reduction_size * inner_size);
-    for (uint64_t row = 0; row < reduction_size; ++row) {
-        for (uint64_t component = 0; component < inner_size; ++component) {
-            values.push_back(static_cast<float>(row + 1));
-        }
-    }
-
-    Tensor input = makeGpuTensor(values, {outer_size, reduction_size, inner_size}, stream, DataType::FP16);
-    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
-    ASSERT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
-
-    // Deliberately pass Complete L2 semantics and a non-unit scale. STAGED topology must use L2's Square input
-    // transform but emit raw FP32 shard sums; sqrt and scale belong to the independently planned continuation.
-    const CubReductionInternal::CubReductionStageSemantics semantics =
-        CubReductionInternal::makeValueReductionStageSemantics(
-            CubReductionOp::L2Norm, CubReductionInternal::CubReductionStageRole::Complete, reduction_size);
-    const CubReductionInternal::KParallelTiledStagePlan plan{
-        CubReductionInternal::TiledRKStageTopology::Staged, 16, 32, shards_per_output};
-    Tensor partials(gpuPlacement,
-                    TensorDescriptor(DataType::FP32, {outer_size, shards_per_output, inner_size}));
-    CubReductionInternal::launchKParallelTiledStage(
-        semantics, input, partials, geometry, plan, 7.0f, stream);
-
-    std::vector<float> expected;
-    expected.reserve(shards_per_output * inner_size);
-    for (uint64_t component = 0; component < inner_size; ++component) {
-        expected.push_back(5.0f);  // rows 1 and 2: 1^2 + 2^2
-    }
-    for (uint64_t component = 0; component < inner_size; ++component) {
-        expected.push_back(25.0f);  // rows 3 and 4: 3^2 + 4^2
-    }
-    expectFloatVectorNear(copyGpuTensorAsFloat(partials, stream), expected, 0.0f);
-}
-
 #if THOR_CUB_ENABLE_FP8_TYPES
 // The retained DeepRSmallK P16 kernels now select the reduction operation at
 // compile time. Exercise both tiny-K ownership geometries, all five depths,
@@ -587,12 +398,15 @@ TEST(CubReduction, Fp8DeepRSmallKRetainedTypedOperationsAndTransforms) {
                             const auto continuation_geometry = CubReduction::analyzeGeometry(partials.getDimensions(), 1);
                             Tensor final_output(gpuPlacement, TensorDescriptor(
                                 DataType::FP32, continuation_geometry.output_dimensions));
-                            const CubReductionInternal::KParallelTiledStagePlan plan{
-                                CubReductionInternal::TiledRKStageTopology::Complete, 4, 32, 1};
+                            // 1259: the FP32 continuation is the retained FP32 AlignedK Complete pass (P4 / CTA32).
+                            ASSERT_TRUE(CubReductionInternal::fp32AlignedKSupports(
+                                continuation_geometry.outer_size, continuation_geometry.reduction_size,
+                                continuation_geometry.inner_size, 4, 32, 1));
                             CubReductionInternal::CubReductionStageSemantics final_semantics{};
                             final_semantics.combine = combine;
-                            CubReductionInternal::launchKParallelTiledStage(
-                                final_semantics, partials, final_output, continuation_geometry, plan, 1.0f, stream);
+                            CubReductionInternal::launchFp32AlignedKStage(final_semantics, partials, final_output,
+                                                                          continuation_geometry, 4, 32, 1, 1.0f,
+                                                                          stream);
                             std::vector<float> expected_final;
                             expected_final.reserve(outer_size * k);
                             for (uint64_t outer = 0; outer < outer_size; ++outer) {
@@ -1169,87 +983,6 @@ TEST(CubReduction, Fp8RuntimeKPacketCompleteCoversOuterAndKTilesAcrossPersistent
 }
 #endif
 
-TEST(CubReduction, AwkwardRotatedRCooperativeFirstStageIsAnIndependentPhysicalPass) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    constexpr uint64_t outer_size = 1;
-    constexpr uint64_t reduction_size = 256;
-    constexpr uint64_t inner_size = 37;
-    constexpr uint64_t rows_per_shard = 128;
-    constexpr uint64_t shards_per_output = 2;
-
-    std::vector<float> values;
-    values.reserve(outer_size * reduction_size * inner_size);
-    for (uint64_t row = 0; row < reduction_size; ++row) {
-        const float value = row < rows_per_shard ? -2.0f : 3.0f;
-        for (uint64_t component = 0; component < inner_size; ++component) {
-            values.push_back(value);
-        }
-    }
-
-    Tensor input = makeGpuTensor(values, {outer_size, reduction_size, inner_size}, stream, DataType::FP32);
-    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
-    ASSERT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
-    Tensor partials(gpuPlacement,
-                    TensorDescriptor(DataType::FP32, {outer_size, shards_per_output, inner_size}));
-
-    // Deliberately use Complete L2 semantics. This physical stage must consume only the input-side Square transform
-    // and associative Sum, leaving sqrt/final output handling to whatever reducer the overall planner chooses next.
-    const CubReductionInternal::CubReductionStageSemantics semantics =
-        CubReductionInternal::makeValueReductionStageSemantics(
-            CubReductionOp::L2Norm, CubReductionInternal::CubReductionStageRole::Complete, reduction_size);
-    ASSERT_EQ(semantics.finalize, CubReductionInternal::CubReductionStageFinalize::SquareRoot);
-
-    CubReductionInternal::launchAwkwardAlignmentRotatedShardedFirstStage(
-        semantics, input, partials, geometry, rows_per_shard, shards_per_output, stream);
-
-    std::vector<float> expected;
-    expected.reserve(shards_per_output * inner_size);
-    expected.insert(expected.end(), inner_size, 128.0f * 4.0f);
-    expected.insert(expected.end(), inner_size, 128.0f * 9.0f);
-    expectFloatVectorNear(copyGpuTensorAsFloat(partials, stream), expected, 0.0f);
-}
-
-TEST(CubReduction, KParallelTiledCompleteTopologySupportsProductMinAndMax) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    constexpr uint64_t outer_size = 1;
-    constexpr uint64_t reduction_size = 3;
-    constexpr uint64_t inner_size = 8;
-    std::vector<float> values;
-    values.reserve(outer_size * reduction_size * inner_size);
-    for (uint64_t row = 0; row < reduction_size; ++row) {
-        for (uint64_t component = 0; component < inner_size; ++component) {
-            values.push_back(static_cast<float>(row + 1));
-        }
-    }
-
-    Tensor input = makeGpuTensor(values, {outer_size, reduction_size, inner_size}, stream, DataType::BF16);
-    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
-    ASSERT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
-    const CubReductionInternal::KParallelTiledStagePlan plan{
-        CubReductionInternal::TiledRKStageTopology::Complete, 16, 32, 1};
-
-    struct Case {
-        CubReductionOp op;
-        float expected;
-    };
-    for (const Case c : std::vector<Case>{{CubReductionOp::Product, 6.0f},
-                                          {CubReductionOp::Min, 1.0f},
-                                          {CubReductionOp::Max, 3.0f}}) {
-        SCOPED_TRACE(static_cast<int>(c.op));
-        Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size, inner_size}));
-        const CubReductionInternal::CubReductionStageSemantics semantics =
-            CubReductionInternal::makeValueReductionStageSemantics(
-                c.op, CubReductionInternal::CubReductionStageRole::Complete, reduction_size);
-        CubReductionInternal::launchKParallelTiledStage(
-            semantics, input, output, geometry, plan, 1.0f, stream);
-        expectFloatVectorNear(copyGpuTensorAsFloat(output, stream), std::vector<float>(inner_size, c.expected), 0.0f);
-    }
-}
-
 TEST(CubReduction, DefinesExplicitFp32EmptyReductionValues) {
     EXPECT_FLOAT_EQ(CubReduction::getFp32EmptyReductionValue(CubReductionOp::Sum), 0.0f);
     EXPECT_FLOAT_EQ(CubReduction::getFp32EmptyReductionValue(CubReductionOp::Product), 1.0f);
@@ -1518,9 +1251,6 @@ TEST(CubReduction, SharedTransposePermutedTiledWriterSupportsStorageDTypesAndTai
     input_dtypes.push_back(DataType::FP8_E4M3);
     input_dtypes.push_back(DataType::FP8_E5M2);
 #endif
-#if THOR_CUB_ENABLE_64BIT_TYPES
-    input_dtypes.push_back(DataType::FP64);
-#endif
     for (DataType dtype : input_dtypes) {
         SCOPED_TRACE(static_cast<int>(dtype));
         Tensor storage = makeGpuTensor(values, {outer, reduction, inner}, stream, dtype);
@@ -1675,7 +1405,9 @@ TEST(CubReduction, TiledFixedSegmentCoversWidthPoliciesAndAsyncStaging) {
     }
 }
 
-TEST(CubReduction, ShallowOddLowPrecisionNonAdditiveRKUsesGenericTiledFallback) {
+// 1257: was ShallowOddLowPrecisionNonAdditiveRKUsesGenericTiledFallback; FP16 / BF16 RK sites run the retained FP16 /
+// BF16 RK passes now.
+TEST(CubReduction, ShallowOddLowPrecisionNonAdditiveRKRunsTheRetainedF16Pass) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -1694,11 +1426,14 @@ TEST(CubReduction, ShallowOddLowPrecisionNonAdditiveRKUsesGenericTiledFallback) 
         SCOPED_TRACE(static_cast<int>(dtype));
         Tensor input = makeGpuTensor(values, {outer_size, reduction_size, inner_size}, stream, dtype);
         CubReduction reduction(CubReductionOp::Max, 1, DataType::FP32);
-        EXPECT_EQ(reduction.queryWorkspaceSizeInBytes(input.getDescriptor(), stream), 0U);
         std::shared_ptr<StampedCubReduction> stamped = reduction.stamp(input, stream);
         EXPECT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
-        EXPECT_FALSE(stamped->usesModernRKFamilyPlan());
-        EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 0U);
+        EXPECT_TRUE(stamped->usesModernRKFamilyPlan());
+        const auto passes = stamped->getDensePhysicalPassDiagnostics();
+        ASSERT_FALSE(passes.empty());
+        EXPECT_EQ(passes.front().family.rfind("retained_f16_rk:", 0), 0U) << passes.front().family;
+        EXPECT_EQ(stamped->getWorkspaceSizeInBytes(),
+                  reduction.queryWorkspaceSizeInBytes(input.getDescriptor(), stream));
 
         stamped->run();
         stream.synchronize();
@@ -1729,35 +1464,6 @@ TEST(CubReduction, PacketAdaptiveCooperativeTiledPathPreservesAdditiveTransforms
         {CubReductionOp::SumSquares, std::vector<float>(inner_size, 205.0f), 0.0f},
     };
     expectOperations(input, 1, expectations, stream);
-}
-
-// 1227: was ModernDenseRKProductionExposesBothRCooperativeAccessModes; its aligned and rotated cases were FP32, which
-// the retained FP32 RK passes now run (CubReductionFp32Routing covers them).
-TEST(CubReduction, ModernDenseRKProductionRunsLowPrecisionFlatRows) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    struct Case {
-        DataType dtype;
-        std::vector<uint64_t> dimensions;
-        std::string expected_fragment;
-    };
-    const std::vector<Case> cases = {
-        {DataType::BF16, {64, 32768, 17}, "r_cooperative:flat_rows"},
-    };
-
-    for (const Case& c : cases) {
-        SCOPED_TRACE(c.expected_fragment);
-        Tensor input(TensorPlacement(TensorPlacement::MemDevices::GPU, stream.getGpuNum()),
-                     TensorDescriptor(c.dtype, c.dimensions));
-        std::shared_ptr<StampedCubReduction> stamped =
-            CubReduction(CubReductionOp::Sum, 1, DataType::FP32).stamp(input, stream);
-        ASSERT_TRUE(stamped->usesDenseExecutablePlan());
-        EXPECT_GT(stamped->getDenseExecutablePassCount(), 0U);
-        ASSERT_TRUE(stamped->usesModernRKFamilyPlan());
-        EXPECT_NE(stamped->getModernRKStrategyChain().find(c.expected_fragment), std::string::npos)
-            << stamped->getModernRKStrategyChain();
-    }
 }
 
 TEST(CubReduction, ModernDenseRKProductionOwnsFormerFullRowTransformerRegimes) {
@@ -2019,90 +1725,6 @@ TEST(CubReduction, StampedReductionAcceptsRuntimeOutputScale) {
     reduction->runOn(stream, 2.0f);
     stream.synchronize();
     expectFloatVectorNear(copyGpuTensorAsFloat(reduction->getOutputTensor(), stream), {12.0f});
-}
-
-TEST(CubReduction, NativePropagatingMinMaxPreservesValueNaNSemantics) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    const float nan = std::numeric_limits<float>::quiet_NaN();
-    const std::vector<float> values = {
-        3.0f,  3.0f, -4.0f,  8.0f,
-        nan,   2.0f, -2.0f, -1.0f,
-        2.0f,  5.0f, -8.0f,  4.0f,
-        1.0f,  4.0f, -1.0f,  2.0f,
-    };
-    Tensor input = makeGpuTensor(values, {1, 4, 4}, stream, DataType::FP32);
-    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), 1);
-    ASSERT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
-    const CubReductionInternal::KParallelTiledStagePlan plan{
-        CubReductionInternal::TiledRKStageTopology::Complete, 16, 32, 1};
-
-    for (const auto& [op, expected] : std::vector<std::pair<CubReductionOp, std::vector<float>>>{
-             {CubReductionOp::Min, {nan, 2.0f, -8.0f, -1.0f}},
-             {CubReductionOp::Max, {nan, 5.0f, -1.0f, 8.0f}},
-         }) {
-        Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, {1, 4}));
-        const auto semantics = CubReductionInternal::makeValueReductionStageSemantics(
-            op, CubReductionInternal::CubReductionStageRole::Complete, geometry.reduction_size);
-        CubReductionInternal::launchKParallelTiledStage(semantics, input, output, geometry, plan, 1.0f, stream);
-        const std::vector<float> actual = copyGpuTensorAsFloat(output, stream);
-        ASSERT_EQ(actual.size(), expected.size());
-        EXPECT_TRUE(std::isnan(actual[0]));
-        for (size_t i = 1; i < expected.size(); ++i) {
-            EXPECT_FLOAT_EQ(actual[i], expected[i]);
-        }
-    }
-}
-
-TEST(CubReduction, NarrowLowPrecisionFlatRCooperativeFirstStageReducesK17WithoutFinalization) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    constexpr uint64_t outer_size = 1;
-    constexpr uint64_t reduction_size = 256;
-    constexpr uint64_t inner_size = 17;
-    constexpr uint64_t rows_per_shard = 128;
-    constexpr uint64_t shards_per_output = 2;
-    const std::vector<float> values(outer_size * reduction_size * inner_size, 0.125f);
-
-    for (DataType dtype : {DataType::FP16, DataType::BF16}) {
-        for (bool explicit_outer_dimension : {true, false}) {
-            SCOPED_TRACE(static_cast<int>(dtype));
-            SCOPED_TRACE(explicit_outer_dimension);
-            // The ordinary planner may collapse a leading singleton O axis.
-            // The same contiguous physical stage must accept either rank.
-            const std::vector<uint64_t> input_shape = explicit_outer_dimension
-                ? std::vector<uint64_t>{outer_size, reduction_size, inner_size}
-                : std::vector<uint64_t>{reduction_size, inner_size};
-            const std::vector<uint64_t> partial_shape = explicit_outer_dimension
-                ? std::vector<uint64_t>{outer_size, shards_per_output, inner_size}
-                : std::vector<uint64_t>{shards_per_output, inner_size};
-            Tensor input = makeGpuTensor(values, input_shape, stream, dtype);
-            const CubReductionGeometry geometry = CubReduction::analyzeGeometry(
-                input.getDimensions(), explicit_outer_dimension ? 1U : 0U);
-            ASSERT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
-            Tensor partials(gpuPlacement, TensorDescriptor(DataType::FP32, partial_shape));
-            const auto semantics = CubReductionInternal::makeValueReductionStageSemantics(
-                CubReductionOp::Sum, CubReductionInternal::CubReductionStageRole::First, reduction_size);
-
-            CubReductionInternal::launchNarrowLowPrecisionFlatRCooperativeFirstStage(
-                semantics, input, partials, geometry, rows_per_shard, shards_per_output, stream);
-            const std::vector<float> actual = copyGpuTensorAsFloat(partials, stream);
-            ASSERT_EQ(actual.size(), outer_size * shards_per_output * inner_size);
-            for (float value : actual) {
-                EXPECT_NEAR(value, 16.0f, 1.0e-5f);
-            }
-            // Relaxing logical-rank validation must not allow an undersized
-            // physical FP32 partial buffer into a CUDA launch.
-            Tensor undersized(gpuPlacement, TensorDescriptor(
-                DataType::FP32, {shards_per_output * inner_size - 1}));
-            EXPECT_THROW(
-                CubReductionInternal::launchNarrowLowPrecisionFlatRCooperativeFirstStage(
-                    semantics, input, undersized, geometry, rows_per_shard, shards_per_output, stream),
-                std::logic_error);
-        }
-    }
 }
 
 TEST(CubReduction, OrdinaryDenseValueComposedGeometryExecutesThroughFlatDensePlan) {

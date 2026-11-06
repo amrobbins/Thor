@@ -21,6 +21,19 @@ uint32_t runtimeKResidency(DataType input_dtype,
         }
         return occupancy.max_active_blocks_per_sm > 0 ? static_cast<uint32_t>(occupancy.max_active_blocks_per_sm) : 0u;
     }
+    if (input_dtype == DataType::FP16 || input_dtype == DataType::BF16) {  // 1246: as FP32
+        switch (static_cast<RuntimeLayout>(kernel.a)) {
+            case RuntimeLayout::PacketComplete:
+                occupancy = queryF16PacketCompleteOccupancy(input_dtype, semantics.input_transform, semantics.combine);
+                break;
+            case RuntimeLayout::RotatedPrefix:
+                occupancy = queryF16RuntimeKRotatedOccupancy(input_dtype, kernel.e, semantics.input_transform,
+                                                             semantics.combine);
+                break;
+            default: return 0;
+        }
+        return occupancy.max_active_blocks_per_sm > 0 ? static_cast<uint32_t>(occupancy.max_active_blocks_per_sm) : 0u;
+    }
     switch (static_cast<RuntimeLayout>(kernel.a)) {
         case RuntimeLayout::PacketComplete:
             occupancy = queryFp8GeneralRParallelKTileRCooperativeCalibrationOccupancy(
@@ -51,6 +64,18 @@ void launchRuntimeK(const PhysicalKernel& kernel, const CubReductionStageSemanti
         } else {
             launchFp32RuntimeKRotatedFirstStage(input, stage_output, geometry, kernel.e, kernel.f, stream,
                                                 semantics.input_transform, semantics.combine);
+        }
+        return;
+    }
+    if (kernel.element_bytes == 2) {  // 1246
+        if (static_cast<RuntimeLayout>(kernel.a) == RuntimeLayout::PacketComplete) {
+            launchF16PacketComplete(input, stage_output, geometry, static_cast<uint32_t>(kernel.b),
+                                    static_cast<uint32_t>(kernel.c), stream, semantics, output_scale);
+        } else if (static_cast<RuntimeLayout>(kernel.a) == RuntimeLayout::RotatedPrefix) {
+            launchF16RuntimeKRotatedFirstStage(input, stage_output, geometry, kernel.e, kernel.f, stream,
+                                               semantics.input_transform, semantics.combine);
+        } else {
+            throw std::logic_error("FP16 / BF16 RuntimeK has no rotated Exact layout");
         }
         return;
     }

@@ -50,10 +50,6 @@ decltype(auto) dispatchReductionInputDType(DataType dtype, Fn&& fn) {
             return fn.template operator()<__nv_bfloat16>();
         case DataType::FP32:
             return fn.template operator()<float>();
-#if THOR_CUB_ENABLE_64BIT_TYPES
-        case DataType::FP64:
-            return fn.template operator()<double>();
-#endif
         default:
             throw std::invalid_argument("Unsupported CUB tensor reduction input dtype value "
                                         + std::to_string(static_cast<int>(dtype)) + ".");
@@ -269,6 +265,25 @@ inline constexpr Fp8ExtremumFold FP8_EXTREMUM_FOLD_NONE{0xffffffffU, 0U, false};
     return fold;
 }
 
+// 1233: the same fold for FP16 / BF16 input, two elements per word (retained KR kernels shared with FP8 and FP32):
+// |x| clears each half-word's sign bit, MAX flips it, and the MAX negation moves into output_scale unless squared.
+// Both formats keep the sign in bit 15, so one fold serves both; a sign flip keeps NaN as NaN.
+[[nodiscard]] inline Fp8ExtremumFold fp16CompleteExtremumFold(int fixed_op,
+                                                              CubReductionStageInputTransform input_transform,
+                                                              float& output_scale) {
+    if (!fp8SharedExtremumOp(fixed_op)) {
+        return FP8_EXTREMUM_FOLD_NONE;
+    }
+    const Fp8ExtremumFold bytes = fp8ExtremumFold(fixed_op == 3, input_transform);
+    const bool magnitude = bytes.byte_and_mask != 0xffffffffU;
+    const Fp8ExtremumFold fold{magnitude ? 0x7fff7fffU : 0xffffffffU, fixed_op == 3 ? 0x80008000U : 0U,
+                               bytes.square_result};
+    if (fixed_op == 3 && !fold.square_result) {
+        output_scale = -output_scale;
+    }
+    return fold;
+}
+
 template <bool Fold, bool SignFold = true>
 __device__ __forceinline__ uint32_t foldFp8ExtremumBytes(uint32_t packed_fp8, const Fp8ExtremumFold& fold) {
     if constexpr (Fold && !SignFold) {
@@ -328,11 +343,6 @@ inline __host__ __device__ void storeFp32AsRuntimeDType(void* output,
         case DataType::FP32:
             static_cast<float*>(output)[index] = value;
             return;
-#if THOR_CUB_ENABLE_64BIT_TYPES
-        case DataType::FP64:
-            static_cast<double*>(output)[index] = static_cast<double>(value);
-            return;
-#endif
         default:
             return;
     }
@@ -2426,7 +2436,7 @@ void launchTiledFixedSegmentReduction(const InputT* input,
         return;
     }
 
-    // Ordinary dense RK is stamped through ReducersDenseRK before reaching this function. Keep only the generic
+    // Dense RK runs the retained RK passes and never reaches this function (1258). Keep only the generic
     // component-tiled fallback for ordained view geometries and defensive direct callers. Historical direct/full-row,
     // grouped-full-row, block-sharded, and row-split VALUE kernels are deliberately not referenced here, so they are
     // no longer instantiated into every VALUE-operation translation unit.

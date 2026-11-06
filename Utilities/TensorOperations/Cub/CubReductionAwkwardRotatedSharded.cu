@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -391,134 +392,9 @@ void launchAwkwardFirstStageForTransformPacket(const Tensor& input,
 }
 
 
-template <typename InputT, typename ReductionOpT, typename InputTransformT, int RowsPerShard>
-void launchAwkwardFirstStageForTransform(const Tensor& input,
-                                         Tensor& fp32_partials,
-                                         const CubReductionGeometry& geometry,
-                                         uint64_t shards_per_output,
-                                         cudaStream_t stream) {
-    launchAwkwardFirstStageForTransformPacket<InputT,
-                                               ReductionOpT,
-                                               InputTransformT,
-                                               RowsPerShard,
-                                               16,
-                                               awkwardCooperativeWarps<InputT>>(
-        input, fp32_partials, geometry, shards_per_output, stream);
-}
-
-template <typename ReductionOpT, typename InputTransformT, int RowsPerShard>
-void dispatchAwkwardFirstStageInput(const Tensor& input,
-                                    Tensor& fp32_partials,
-                                    const CubReductionGeometry& geometry,
-                                    uint64_t shards_per_output,
-                                    cudaStream_t stream) {
-    switch (input.getDataType()) {
-        case DataType::FP16:
-            launchAwkwardFirstStageForTransform<__half, ReductionOpT, InputTransformT, RowsPerShard>(
-                input, fp32_partials, geometry, shards_per_output, stream);
-            return;
-        case DataType::BF16:
-            launchAwkwardFirstStageForTransform<__nv_bfloat16, ReductionOpT, InputTransformT, RowsPerShard>(
-                input, fp32_partials, geometry, shards_per_output, stream);
-            return;
-        case DataType::FP32:
-            launchAwkwardFirstStageForTransform<float, ReductionOpT, InputTransformT, RowsPerShard>(
-                input, fp32_partials, geometry, shards_per_output, stream);
-            return;
-        default:
-            // Original FP8 input uses the retained RuntimeK rotated first stage, never this generic RK family.
-            throw std::logic_error("Awkward rotated sharded first stage received an unsupported input dtype.");
-    }
-}
-
-template <typename ReductionOpT, typename InputTransformT>
-void dispatchAwkwardFirstStageRows(const Tensor& input,
-                                   Tensor& fp32_partials,
-                                   const CubReductionGeometry& geometry,
-                                   uint64_t rows_per_shard,
-                                   uint64_t shards_per_output,
-                                   cudaStream_t stream) {
-    switch (rows_per_shard) {
-        case 128:
-            dispatchAwkwardFirstStageInput<ReductionOpT, InputTransformT, 128>(
-                input, fp32_partials, geometry, shards_per_output, stream);
-            return;
-        case 256:
-            dispatchAwkwardFirstStageInput<ReductionOpT, InputTransformT, 256>(
-                input, fp32_partials, geometry, shards_per_output, stream);
-            return;
-        case 512:
-            dispatchAwkwardFirstStageInput<ReductionOpT, InputTransformT, 512>(
-                input, fp32_partials, geometry, shards_per_output, stream);
-            return;
-        case 1024:
-            dispatchAwkwardFirstStageInput<ReductionOpT, InputTransformT, 1024>(
-                input, fp32_partials, geometry, shards_per_output, stream);
-            return;
-        default:
-            throw std::logic_error("Unsupported awkward rotated rows_per_shard production specialization.");
-    }
-}
-
 }  // namespace
 
 namespace {
-
-template <typename ReductionOpT>
-void launchAwkwardAlignmentRotatedFirstStageForCombine(const CubReductionStageSemantics& semantics,
-                                                        const Tensor& input,
-                                                        Tensor& fp32_partials,
-                                                        const CubReductionGeometry& geometry,
-                                                        uint64_t rows_per_shard,
-                                                        uint64_t shards_per_output,
-                                                        Stream& stream) {
-    switch (semantics.input_transform) {
-        case CubReductionStageInputTransform::Identity:
-            dispatchAwkwardFirstStageRows<ReductionOpT, IdentityFp32>(input,
-                                                                      fp32_partials,
-                                                                      geometry,
-                                                                      rows_per_shard,
-                                                                      shards_per_output,
-                                                                      stream.getStream());
-            return;
-        case CubReductionStageInputTransform::AbsoluteValue:
-            dispatchAwkwardFirstStageRows<ReductionOpT, AbsoluteValueFp32>(input,
-                                                                           fp32_partials,
-                                                                           geometry,
-                                                                           rows_per_shard,
-                                                                           shards_per_output,
-                                                                           stream.getStream());
-            return;
-        case CubReductionStageInputTransform::Square:
-            dispatchAwkwardFirstStageRows<ReductionOpT, SquareFp32>(input,
-                                                                    fp32_partials,
-                                                                    geometry,
-                                                                    rows_per_shard,
-                                                                    shards_per_output,
-                                                                    stream.getStream());
-            return;
-    }
-    throw std::logic_error("Unsupported awkward rotated sharded input transform.");
-}
-
-void validateAwkwardAlignmentRotatedShardedFirstStage(const Tensor& fp32_partials,
-                                                       const CubReductionGeometry& geometry,
-                                                       uint64_t rows_per_shard,
-                                                       uint64_t shards_per_output) {
-    if ((rows_per_shard != 128 && rows_per_shard != 256 && rows_per_shard != 512 && rows_per_shard != 1024)
-        || shards_per_output <= 1) {
-        throw std::logic_error(
-            "Awkward rotated sharded first stage requires rows_per_shard in {128,256,512,1024} and >1 shard.");
-    }
-    if (fp32_partials.getDataType() != DataType::FP32) {
-        throw std::logic_error("Awkward rotated sharded first stage requires FP32 partial storage.");
-    }
-    const std::vector<uint64_t> expected_partial_dimensions = {
-        geometry.outer_size, shards_per_output, geometry.inner_size};
-    if (fp32_partials.getDimensions() != expected_partial_dimensions) {
-        throw std::logic_error("Awkward rotated sharded FP32 partial shape does not match stamped geometry.");
-    }
-}
 
 template <typename InputT, int RowsPerShard, int PacketBytes, int CooperativeWarps,
           bool ExactFp8Tile = true, typename InputTransformT = IdentityFp32,
@@ -541,30 +417,6 @@ template <typename InputT, int RowsPerShard, int PacketBytes, int CooperativeWar
                                   0,
                                   active_blocks,
                                   active_blocks * CooperativeWarps};
-}
-
-template <typename InputT, int RowsPerShard>
-[[nodiscard]] CubKernelOccupancyInfo queryRotatedRCooperativeOccupancyForRows() {
-    return queryRotatedRCooperativePacketOccupancyForRows<InputT,
-                                                           RowsPerShard,
-                                                           16,
-                                                           awkwardCooperativeWarps<InputT>>();
-}
-
-template <typename InputT>
-[[nodiscard]] CubKernelOccupancyInfo queryRotatedRCooperativeOccupancy(uint64_t rows_per_shard) {
-    switch (rows_per_shard) {
-        case 128:
-            return queryRotatedRCooperativeOccupancyForRows<InputT, 128>();
-        case 256:
-            return queryRotatedRCooperativeOccupancyForRows<InputT, 256>();
-        case 512:
-            return queryRotatedRCooperativeOccupancyForRows<InputT, 512>();
-        case 1024:
-            return queryRotatedRCooperativeOccupancyForRows<InputT, 1024>();
-        default:
-            throw std::logic_error("Rotated R-cooperative occupancy query received unsupported rows-per-shard.");
-    }
 }
 
 // 1190: the retained RuntimeK rotated first stage on FP32 input, PrefixReserved only (Exact's tail logic is FP8 byte
@@ -657,6 +509,95 @@ CubKernelOccupancyInfo queryFp32RuntimeKRotatedOccupancyTyped(uint64_t rows_per_
     return occupancy;
 }
 
+// 1245: the retained RuntimeK rotated first stage on FP16 / BF16 input (plans/Thor_FP16_BF16_Dense_Reduction_Plan,
+// phase 5): the established 2-byte layout, unchanged (p16 packets of 8 components, 8 cooperative warps, whose revisit
+// stride of 8 rows of K half-words is a whole number of packets for any K, and the 249-component PrefixReserved tile)
+// at FP8's retained row depths. The instantiations are the legacy production pass's (same template arguments,
+// ExactFp8Tile at its default, which only FP8 reads), so depths 128..1024 add no kernels; 32 and 64 are new. Every
+// combine x {identity, |x|, x^2}, no fold, any 2-byte aligned input.
+constexpr int F16_RUNTIME_K_ROTATED_PACKET_BYTES = 16;
+constexpr int F16_RUNTIME_K_ROTATED_WARPS = AWKWARD_ROTATED_SHARDED_WARPS;
+static_assert(F16_RUNTIME_K_ROTATED_WARPS == awkwardCooperativeWarps<__half>);
+static_assert(awkwardLogicalTileElementsForPacket<__half, F16_RUNTIME_K_ROTATED_PACKET_BYTES> ==
+              static_cast<int>(F16_RUNTIME_K_ROTATED_TILE_COMPONENTS));
+
+template <typename InputT, typename ReductionOpT>
+void launchF16RuntimeKRotatedFirstStageTyped(const Tensor& input,
+                                             Tensor& fp32_partials,
+                                             const CubReductionGeometry& geometry,
+                                             uint64_t rows_per_shard,
+                                             uint64_t shards_per_output,
+                                             Stream& stream,
+                                             CubReductionStageInputTransform transform) {
+    if (input.getTotalNumElements() != geometry.input_elements ||
+        !f16RuntimeKRotatedSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size,
+                                    rows_per_shard) ||
+        shards_per_output != ceilDivideU64(geometry.reduction_size, rows_per_shard) ||
+        fp32_partials.getDataType() != DataType::FP32 ||
+        fp32_partials.getDimensions() !=
+            std::vector<uint64_t>{geometry.outer_size, shards_per_output, geometry.inner_size}) {
+        throw std::logic_error("FP16 / BF16 RuntimeK rotated first stage received invalid staged geometry.");
+    }
+    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{1}) != 0) {
+        throw std::logic_error("FP16 / BF16 RuntimeK rotated first stage requires a 2-byte aligned input base.");
+    }
+    const bool launched = dispatchFp32RuntimeKRotated(
+        rows_per_shard, transform, [&]<typename InputTransformT, int RowsPerShard>() {
+            launchAwkwardFirstStageForTransformPacket<InputT, ReductionOpT, InputTransformT, RowsPerShard,
+                                                       F16_RUNTIME_K_ROTATED_PACKET_BYTES,
+                                                       F16_RUNTIME_K_ROTATED_WARPS>(
+                input, fp32_partials, geometry, shards_per_output, stream.getStream());
+        });
+    if (!launched) {
+        throw std::logic_error("FP16 / BF16 RuntimeK rotated first stage requires a retained compiled specialization.");
+    }
+}
+
+template <typename InputT, typename ReductionOpT>
+CubKernelOccupancyInfo queryF16RuntimeKRotatedOccupancyTyped(uint64_t rows_per_shard,
+                                                             CubReductionStageInputTransform transform) {
+    CubKernelOccupancyInfo occupancy{};
+    const bool queried = dispatchFp32RuntimeKRotated(
+        rows_per_shard, transform, [&]<typename InputTransformT, int RowsPerShard>() {
+            occupancy = queryRotatedRCooperativePacketOccupancyForRows<InputT, RowsPerShard,
+                                                                        F16_RUNTIME_K_ROTATED_PACKET_BYTES,
+                                                                        F16_RUNTIME_K_ROTATED_WARPS, true,
+                                                                        InputTransformT, ReductionOpT>();
+        });
+    if (!queried) {
+        throw std::logic_error("FP16 / BF16 RuntimeK rotated occupancy requires a retained compiled specialization.");
+    }
+    return occupancy;
+}
+
+// Invokes callback.template operator()<InputT, ReductionOpT>() for FP16 / BF16 and a combine; false otherwise.
+template <typename Callback>
+[[nodiscard]] bool dispatchF16RuntimeKRotatedTypes(DataType input_dtype, CubReductionStageCombine combine,
+                                                   Callback&& callback) {
+    const auto for_input = [&]<typename InputT>() {
+        switch (combine) {
+            case CubReductionStageCombine::Sum:
+                callback.template operator()<InputT, cuda::std::plus<float>>();
+                return true;
+            case CubReductionStageCombine::Product:
+                callback.template operator()<InputT, cuda::std::multiplies<float>>();
+                return true;
+            case CubReductionStageCombine::Minimum:
+                callback.template operator()<InputT, PropagatingMinimumFp32>();
+                return true;
+            case CubReductionStageCombine::Maximum:
+                callback.template operator()<InputT, PropagatingMaximumFp32>();
+                return true;
+        }
+        return false;
+    };
+    switch (input_dtype) {
+        case DataType::FP16: return for_input.template operator()<__half>();
+        case DataType::BF16: return for_input.template operator()<__nv_bfloat16>();
+        default: return false;
+    }
+}
+
 // 1198-1200: the FP32 RK ARG rotated twin (plans/Thor_FP32_Dense_Reduction_Plan, phase 6): FP8's fp8RotatedArgKernel
 // layout at FP32 VALUE rotated's geometry (16-byte packets of 4 components, 4 cooperative warps, the 125-component
 // logical tile; each warp aligns its first row's window once and every revisited row, 4 rows later, stays aligned)
@@ -669,8 +610,27 @@ constexpr uint32_t FP32_ARG_ROTATED_SPAN = TILED_REDUCTION_WARP_THREADS * 4;
 static_assert(FP32_ARG_ROTATED_SPAN - 3 == FP32_RUNTIME_K_ROTATED_TILE_COMPONENTS);
 static_assert(FP32_ARG_ROTATED_THREADS >= static_cast<int>(FP32_RUNTIME_K_ROTATED_TILE_COMPONENTS));
 
-template <bool Staged>
-__global__ __launch_bounds__(FP32_ARG_ROTATED_THREADS) void fp32RotatedArgKernel(const float* input,
+// 1248 / 1249: and FP16 / BF16 input (plans/Thor_FP16_BF16_Dense_Reduction_Plan, phase 6), at the 2-byte VALUE rotated
+// geometry (16-byte packets of 8 components, 8 cooperative warps, whose revisit stride of 8 rows of K half-words is a
+// whole number of packets, and the 249-component tile): each component widens to FP32 and takes the FP32 key (user
+// decision 2026-11-05), so the lane state, the packed partials and the continuation are FP32's.
+template <typename InputT>
+inline constexpr int ARG_ROTATED_ITEMS = 16 / static_cast<int>(sizeof(InputT));
+template <typename InputT>
+inline constexpr int ARG_ROTATED_WARPS = std::is_same_v<InputT, float> ? FP32_ARG_ROTATED_WARPS : 8;
+template <typename InputT>
+inline constexpr int ARG_ROTATED_THREADS = ARG_ROTATED_WARPS<InputT> * TILED_REDUCTION_WARP_THREADS;
+template <typename InputT>
+inline constexpr uint32_t ARG_ROTATED_SPAN = TILED_REDUCTION_WARP_THREADS * ARG_ROTATED_ITEMS<InputT>;
+template <typename InputT>
+inline constexpr uint32_t ARG_ROTATED_TILE_COMPONENTS = ARG_ROTATED_SPAN<InputT> - (ARG_ROTATED_ITEMS<InputT> - 1);
+static_assert(ARG_ROTATED_TILE_COMPONENTS<float> == FP32_RUNTIME_K_ROTATED_TILE_COMPONENTS);
+static_assert(ARG_ROTATED_TILE_COMPONENTS<__half> == F16_RUNTIME_K_ROTATED_TILE_COMPONENTS);
+static_assert(ARG_ROTATED_THREADS<__half> >= static_cast<int>(F16_RUNTIME_K_ROTATED_TILE_COMPONENTS));
+static_assert((ARG_ROTATED_WARPS<__half> * 2) % 16 == 0 && (ARG_ROTATED_WARPS<float> * 4) % 16 == 0);
+
+template <typename InputT, bool Staged>
+__global__ __launch_bounds__(ARG_ROTATED_THREADS<InputT>) void fp32RotatedArgKernel(const InputT* input,
                                                                                 Fp32ArgOutputs outputs,
                                                                                 uint64_t* packed,
                                                                                 uint64_t outer_size,
@@ -679,10 +639,16 @@ __global__ __launch_bounds__(FP32_ARG_ROTATED_THREADS) void fp32RotatedArgKernel
                                                                                 uint64_t shards_per_output,
                                                                                 uint64_t component_tiles,
                                                                                 uint32_t rows_per_shard) {
-    constexpr uint32_t TileComponents = FP32_RUNTIME_K_ROTATED_TILE_COMPONENTS;
-    __shared__ uint32_t warp_keys[FP32_ARG_ROTATED_WARPS][FP32_ARG_ROTATED_SPAN];
-    __shared__ uint32_t warp_tails[FP32_ARG_ROTATED_WARPS][FP32_ARG_ROTATED_SPAN];
-    __shared__ uint32_t warp_prefix[FP32_ARG_ROTATED_WARPS];
+    static_assert(std::is_same_v<InputT, float> || std::is_same_v<InputT, __half> ||
+                  std::is_same_v<InputT, __nv_bfloat16>);
+    constexpr int Items = ARG_ROTATED_ITEMS<InputT>;
+    constexpr int Warps = ARG_ROTATED_WARPS<InputT>;
+    constexpr int Threads = ARG_ROTATED_THREADS<InputT>;
+    constexpr uint32_t Span = ARG_ROTATED_SPAN<InputT>;
+    constexpr uint32_t TileComponents = ARG_ROTATED_TILE_COMPONENTS<InputT>;
+    __shared__ uint32_t warp_keys[Warps][Span];
+    __shared__ uint32_t warp_tails[Warps][Span];
+    __shared__ uint32_t warp_prefix[Warps];
 
     const uint32_t warp = threadIdx.x / TILED_REDUCTION_WARP_THREADS;
     const uint32_t lane = threadIdx.x % TILED_REDUCTION_WARP_THREADS;
@@ -699,29 +665,31 @@ __global__ __launch_bounds__(FP32_ARG_ROTATED_THREADS) void fp32RotatedArgKernel
             ? static_cast<uint32_t>(minU64(rows_per_shard, reduction_size - row_begin))
             : 0U;
 
-        uint32_t best_key[4], best_tail[4];
+        uint32_t best_key[Items], best_tail[Items];
 #pragma unroll
-        for (int item = 0; item < 4; ++item) {
+        for (int item = 0; item < Items; ++item) {
             best_key[item] = FP32_ARG_KEY_IDENTITY;
             best_tail[item] = 0xFFFFFFFFU;
         }
         uint32_t prefix = 0;
         if (warp < shard_rows) {
-            const float* logical = input + (outer_index * reduction_size + row_begin + warp) * inner_size + tile_begin;
+            const InputT* logical =
+                input + (outer_index * reduction_size + row_begin + warp) * inner_size + tile_begin;
             const uintptr_t address = reinterpret_cast<uintptr_t>(logical);
-            prefix = static_cast<uint32_t>((address & uintptr_t{15}) / sizeof(float));
-            const float* lane_packet = reinterpret_cast<const float*>(address & ~uintptr_t{15}) + lane * 4;
+            prefix = static_cast<uint32_t>((address & uintptr_t{15}) / sizeof(InputT));
+            const InputT* lane_packet = reinterpret_cast<const InputT*>(address & ~uintptr_t{15}) + lane * Items;
             const int64_t lane_component = static_cast<int64_t>(tile_begin) - static_cast<int64_t>(prefix) +
-                                           static_cast<int64_t>(lane * 4);
+                                           static_cast<int64_t>(lane * Items);
             if (lane_component < static_cast<int64_t>(inner_size)) {
-                const uint64_t row_stride = static_cast<uint64_t>(FP32_ARG_ROTATED_WARPS) * inner_size;
-                for (uint32_t row = warp; row < shard_rows; row += FP32_ARG_ROTATED_WARPS) {
-                    const PackedInputValues<float, 4> values = loadVectorizedInputPacket<float, 4>(lane_packet);
+                const uint64_t row_stride = static_cast<uint64_t>(Warps) * inner_size;
+                for (uint32_t row = warp; row < shard_rows; row += Warps) {
+                    const PackedInputValues<InputT, Items> values =
+                        loadVectorizedInputPacket<InputT, Items>(lane_packet);
 #pragma unroll
-                    for (int item = 0; item < 4; ++item) {
+                    for (int item = 0; item < Items; ++item) {
                         uint32_t negative_zero;
-                        const uint32_t key =
-                            fp32ArgKey(__float_as_uint(values.values[item]), outputs.xor_mask, negative_zero);
+                        const uint32_t key = fp32ArgKey(__float_as_uint(ToFp32<InputT>{}(values.values[item])),
+                                                        outputs.xor_mask, negative_zero);
                         if (key < best_key[item]) {
                             best_key[item] = key;
                             best_tail[item] = (row << 1) | negative_zero;
@@ -733,15 +701,15 @@ __global__ __launch_bounds__(FP32_ARG_ROTATED_THREADS) void fp32RotatedArgKernel
         }
         if (lane == 0) warp_prefix[warp] = prefix;
 #pragma unroll
-        for (int item = 0; item < 4; ++item) {
-            warp_keys[warp][lane * 4 + item] = best_key[item];
-            warp_tails[warp][lane * 4 + item] = best_tail[item];
+        for (int item = 0; item < Items; ++item) {
+            warp_keys[warp][lane * Items + item] = best_key[item];
+            warp_tails[warp][lane * Items + item] = best_tail[item];
         }
         __syncthreads();
-        for (uint32_t component = threadIdx.x; component < valid_components; component += FP32_ARG_ROTATED_THREADS) {
+        for (uint32_t component = threadIdx.x; component < valid_components; component += Threads) {
             Fp32ArgCandidate reduced = fp32ArgIdentity();
 #pragma unroll
-            for (int source_warp = 0; source_warp < FP32_ARG_ROTATED_WARPS; ++source_warp) {
+            for (int source_warp = 0; source_warp < Warps; ++source_warp) {
                 // Warps whose first row is beyond the shard published identities at prefix 0.
                 const uint32_t slot = component + warp_prefix[source_warp];
                 const uint32_t key = warp_keys[source_warp][slot];
@@ -1139,6 +1107,46 @@ CubKernelOccupancyInfo queryFp32RuntimeKRotatedOccupancy(uint64_t rows_per_shard
     throw std::logic_error("Invalid FP32 RuntimeK rotated occupancy combine operation.");
 }
 
+bool f16RuntimeKRotatedSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                                uint64_t rows_per_shard) {
+    const auto& depths = Fp8RK::Fp8RuntimeKPolicy::rotated_row_depths;
+    if (outer_size == 0 || inner_size == 0 || rows_per_shard >= reduction_size ||
+        std::find(depths.begin(), depths.end(), rows_per_shard) == depths.end()) {
+        return false;
+    }
+    const uint64_t tiles = ceilDivideU64(inner_size, F16_RUNTIME_K_ROTATED_TILE_COMPONENTS);
+    return Fp8RK::fp8RKWorkGridFits(ceilDivideU64(reduction_size, rows_per_shard), tiles, outer_size);
+}
+
+void launchF16RuntimeKRotatedFirstStage(const Tensor& input,
+                                        Tensor& fp32_partials,
+                                        const CubReductionGeometry& geometry,
+                                        uint64_t rows_per_shard,
+                                        uint64_t shards_per_output,
+                                        Stream& stream,
+                                        CubReductionStageInputTransform transform,
+                                        CubReductionStageCombine combine) {
+    const bool launched = dispatchF16RuntimeKRotatedTypes(
+        input.getDataType(), combine, [&]<typename InputT, typename ReductionOpT>() {
+            launchF16RuntimeKRotatedFirstStageTyped<InputT, ReductionOpT>(input, fp32_partials, geometry,
+                                                                          rows_per_shard, shards_per_output, stream,
+                                                                          transform);
+        });
+    if (!launched) throw std::logic_error("FP16 / BF16 RuntimeK rotated first stage received an unsupported input.");
+}
+
+CubKernelOccupancyInfo queryF16RuntimeKRotatedOccupancy(DataType input_dtype, uint64_t rows_per_shard,
+                                                        CubReductionStageInputTransform transform,
+                                                        CubReductionStageCombine combine) {
+    CubKernelOccupancyInfo occupancy{};
+    const bool queried = dispatchF16RuntimeKRotatedTypes(
+        input_dtype, combine, [&]<typename InputT, typename ReductionOpT>() {
+            occupancy = queryF16RuntimeKRotatedOccupancyTyped<InputT, ReductionOpT>(rows_per_shard, transform);
+        });
+    if (!queried) throw std::logic_error("FP16 / BF16 RuntimeK rotated occupancy requires FP16 / BF16 input.");
+    return occupancy;
+}
+
 namespace {
 // The value dtypes storeFp32AsRuntimeDType writes.
 [[nodiscard]] bool fp32ArgValueStorageSupported(DataType dtype) {
@@ -1150,9 +1158,6 @@ namespace {
         case DataType::FP16:
         case DataType::BF16:
         case DataType::FP32:
-#if THOR_CUB_ENABLE_64BIT_TYPES
-        case DataType::FP64:
-#endif
             return true;
         default:
             return false;
@@ -1160,15 +1165,98 @@ namespace {
 }
 }  // namespace
 
-bool fp32RuntimeKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
-                             uint64_t rows_per_shard) {
+namespace {
+// One input type's rotated ARG pass (FP32, or 1249 FP16 / BF16); `name` labels the errors.
+[[nodiscard]] bool runtimeKArgSupportsTile(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                                           uint64_t rows_per_shard, uint64_t tile_components) {
     if (outer_size == 0 || reduction_size == 0 || inner_size == 0 || rows_per_shard == 0 ||
         std::min(rows_per_shard, reduction_size) > FP32_ARG_MAX_SHARD_ROWS) {
         return false;
     }
     const uint64_t shards = ceilDivideU64(reduction_size, rows_per_shard);
-    return Fp8RK::fp8RKWorkGridFits(shards, ceilDivideU64(inner_size, FP32_RUNTIME_K_ROTATED_TILE_COMPONENTS),
-                                    outer_size);
+    return Fp8RK::fp8RKWorkGridFits(shards, ceilDivideU64(inner_size, tile_components), outer_size);
+}
+
+template <typename InputT>
+void launchRuntimeKArgTyped(const Tensor& input,
+                            Tensor* value_output,
+                            Tensor* index_output,
+                            const CubReductionGeometry& geometry,
+                            uint64_t rows_per_shard,
+                            uint64_t* packed_scratch,
+                            bool maximum,
+                            uint64_t domain_stride,
+                            Stream& stream,
+                            const char* name) {
+    constexpr uint64_t Tile = ARG_ROTATED_TILE_COMPONENTS<InputT>;
+    const uint64_t shards = rows_per_shard == 0 ? 0 : ceilDivideU64(geometry.reduction_size, rows_per_shard);
+    const uint64_t outputs = geometry.outer_size * geometry.inner_size;
+    if (!runtimeKArgSupportsTile(geometry.outer_size, geometry.reduction_size, geometry.inner_size, rows_per_shard,
+                                 Tile) ||
+        input.getTotalNumElements() != geometry.outer_size * geometry.reduction_size * geometry.inner_size ||
+        (reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{sizeof(InputT) - 1}) != 0 ||
+        (shards > 1 && packed_scratch == nullptr) || (value_output == nullptr && index_output == nullptr) ||
+        (value_output != nullptr && (value_output->getTotalNumElements() != outputs ||
+                                     !fp32ArgValueStorageSupported(value_output->getDataType()))) ||
+        (index_output != nullptr && (index_output->getTotalNumElements() != outputs ||
+                                     (index_output->getDataType() != DataType::UINT32 &&
+                                      index_output->getDataType() != DataType::UINT64)))) {
+        throw std::logic_error(std::string(name) + " RuntimeK ARG received unsupported geometry, outputs or scratch.");
+    }
+    if (index_output != nullptr && index_output->getDataType() == DataType::UINT32 &&
+        (geometry.reduction_size - 1) * domain_stride > std::numeric_limits<uint32_t>::max()) {
+        throw std::logic_error(std::string(name) + " RuntimeK ARG UINT32 index cannot hold the original-domain index.");
+    }
+    const uint64_t tiles = ceilDivideU64(geometry.inner_size, Tile);
+    const dim3 grid = reductionWorkGrid(shards, tiles, geometry.outer_size);
+    const uint32_t depth = static_cast<uint32_t>(std::min(rows_per_shard, geometry.reduction_size));
+    const Fp32ArgOutputs arg_outputs{value_output == nullptr ? nullptr : value_output->getMemPtr<void>(),
+                                     value_output == nullptr ? DataType::FP32 : value_output->getDataType(),
+                                     index_output == nullptr ? nullptr : index_output->getMemPtr<void>(),
+                                     index_output == nullptr ? DataType::UINT32 : index_output->getDataType(),
+                                     domain_stride,
+                                     maximum ? 0x80000000U : 0U};
+    if (shards == 1) {
+        fp32RotatedArgKernel<InputT, false><<<grid, ARG_ROTATED_THREADS<InputT>, 0, stream.getStream()>>>(
+            input.getMemPtr<InputT>(), arg_outputs, nullptr, geometry.outer_size, geometry.reduction_size,
+            geometry.inner_size, shards, tiles, depth);
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+    fp32RotatedArgKernel<InputT, true><<<grid, ARG_ROTATED_THREADS<InputT>, 0, stream.getStream()>>>(
+        input.getMemPtr<InputT>(), arg_outputs, packed_scratch, geometry.outer_size, geometry.reduction_size,
+        geometry.inner_size, shards, tiles, depth);
+    CUDA_CHECK(cudaGetLastError());
+    launchFp32ArgPackedContinuation(packed_scratch, value_output, index_output, geometry.outer_size,
+                                    geometry.reduction_size, geometry.inner_size, shards, rows_per_shard, maximum,
+                                    domain_stride, stream);
+}
+
+template <typename InputT>
+[[nodiscard]] CubKernelOccupancyInfo queryRuntimeKArgOccupancyTyped(bool staged) {
+    const auto query = [&](auto kernel) {
+        cudaFuncAttributes attributes{};
+        CUDA_CHECK(cudaFuncGetAttributes(&attributes, kernel));
+        int active_blocks = 0;
+        CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active_blocks, kernel, ARG_ROTATED_THREADS<InputT>,
+                                                                 0));
+        return CubKernelOccupancyInfo{attributes.numRegs, attributes.sharedSizeBytes, 0, active_blocks,
+                                      active_blocks * ARG_ROTATED_WARPS<InputT>};
+    };
+    return staged ? query(fp32RotatedArgKernel<InputT, true>) : query(fp32RotatedArgKernel<InputT, false>);
+}
+}  // namespace
+
+bool fp32RuntimeKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                             uint64_t rows_per_shard) {
+    return runtimeKArgSupportsTile(outer_size, reduction_size, inner_size, rows_per_shard,
+                                   FP32_RUNTIME_K_ROTATED_TILE_COMPONENTS);
+}
+
+bool f16RuntimeKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
+                            uint64_t rows_per_shard) {
+    return runtimeKArgSupportsTile(outer_size, reduction_size, inner_size, rows_per_shard,
+                                   F16_RUNTIME_K_ROTATED_TILE_COMPONENTS);
 }
 
 void launchFp32RuntimeKArg(const Tensor& input,
@@ -1180,47 +1268,39 @@ void launchFp32RuntimeKArg(const Tensor& input,
                            bool maximum,
                            uint64_t domain_stride,
                            Stream& stream) {
-    const uint64_t shards = rows_per_shard == 0 ? 0 : ceilDivideU64(geometry.reduction_size, rows_per_shard);
-    const uint64_t outputs = geometry.outer_size * geometry.inner_size;
-    if (input.getDataType() != DataType::FP32 ||
-        !fp32RuntimeKArgSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size, rows_per_shard) ||
-        input.getTotalNumElements() != geometry.outer_size * geometry.reduction_size * geometry.inner_size ||
-        (reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{3}) != 0 ||
-        (shards > 1 && packed_scratch == nullptr) || (value_output == nullptr && index_output == nullptr) ||
-        (value_output != nullptr && (value_output->getTotalNumElements() != outputs ||
-                                     !fp32ArgValueStorageSupported(value_output->getDataType()))) ||
-        (index_output != nullptr && (index_output->getTotalNumElements() != outputs ||
-                                     (index_output->getDataType() != DataType::UINT32 &&
-                                      index_output->getDataType() != DataType::UINT64)))) {
+    if (input.getDataType() != DataType::FP32)
         throw std::logic_error("FP32 RuntimeK ARG received unsupported geometry, outputs or scratch.");
+    launchRuntimeKArgTyped<float>(input, value_output, index_output, geometry, rows_per_shard, packed_scratch, maximum,
+                                  domain_stride, stream, "FP32");
+}
+
+void launchF16RuntimeKArg(const Tensor& input,
+                          Tensor* value_output,
+                          Tensor* index_output,
+                          const CubReductionGeometry& geometry,
+                          uint64_t rows_per_shard,
+                          uint64_t* packed_scratch,
+                          bool maximum,
+                          uint64_t domain_stride,
+                          Stream& stream) {
+    switch (input.getDataType()) {
+        case DataType::FP16:
+            return launchRuntimeKArgTyped<__half>(input, value_output, index_output, geometry, rows_per_shard,
+                                                  packed_scratch, maximum, domain_stride, stream, "FP16");
+        case DataType::BF16:
+            return launchRuntimeKArgTyped<__nv_bfloat16>(input, value_output, index_output, geometry, rows_per_shard,
+                                                         packed_scratch, maximum, domain_stride, stream, "BF16");
+        default:
+            throw std::logic_error("FP16 / BF16 RuntimeK ARG received a non-FP16 / BF16 input.");
     }
-    if (index_output != nullptr && index_output->getDataType() == DataType::UINT32 &&
-        (geometry.reduction_size - 1) * domain_stride > std::numeric_limits<uint32_t>::max()) {
-        throw std::logic_error("FP32 RuntimeK ARG UINT32 index cannot hold the original-domain index.");
+}
+
+CubKernelOccupancyInfo queryF16RuntimeKArgOccupancy(DataType input_dtype, bool staged) {
+    switch (input_dtype) {
+        case DataType::FP16: return queryRuntimeKArgOccupancyTyped<__half>(staged);
+        case DataType::BF16: return queryRuntimeKArgOccupancyTyped<__nv_bfloat16>(staged);
+        default: throw std::logic_error("FP16 / BF16 RuntimeK ARG occupancy requires FP16 / BF16 input.");
     }
-    const uint64_t tiles = ceilDivideU64(geometry.inner_size, FP32_RUNTIME_K_ROTATED_TILE_COMPONENTS);
-    const dim3 grid = reductionWorkGrid(shards, tiles, geometry.outer_size);
-    const uint32_t depth = static_cast<uint32_t>(std::min(rows_per_shard, geometry.reduction_size));
-    const Fp32ArgOutputs arg_outputs{value_output == nullptr ? nullptr : value_output->getMemPtr<void>(),
-                                     value_output == nullptr ? DataType::FP32 : value_output->getDataType(),
-                                     index_output == nullptr ? nullptr : index_output->getMemPtr<void>(),
-                                     index_output == nullptr ? DataType::UINT32 : index_output->getDataType(),
-                                     domain_stride,
-                                     maximum ? 0x80000000U : 0U};
-    if (shards == 1) {
-        fp32RotatedArgKernel<false><<<grid, FP32_ARG_ROTATED_THREADS, 0, stream.getStream()>>>(
-            input.getMemPtr<float>(), arg_outputs, nullptr, geometry.outer_size, geometry.reduction_size,
-            geometry.inner_size, shards, tiles, depth);
-        CUDA_CHECK(cudaGetLastError());
-        return;
-    }
-    fp32RotatedArgKernel<true><<<grid, FP32_ARG_ROTATED_THREADS, 0, stream.getStream()>>>(
-        input.getMemPtr<float>(), arg_outputs, packed_scratch, geometry.outer_size, geometry.reduction_size,
-        geometry.inner_size, shards, tiles, depth);
-    CUDA_CHECK(cudaGetLastError());
-    launchFp32ArgPackedContinuation(packed_scratch, value_output, index_output, geometry.outer_size,
-                                    geometry.reduction_size, geometry.inner_size, shards, rows_per_shard, maximum,
-                                    domain_stride, stream);
 }
 
 // ---- 1210: the carried-index rotated ARG twin (see fp32RotatedCarriedArgKernel).
@@ -1320,80 +1400,7 @@ CubKernelOccupancyInfo queryFp32RuntimeKCarriedArgOccupancy(bool staged, DataTyp
 }
 
 CubKernelOccupancyInfo queryFp32RuntimeKArgOccupancy(bool staged) {
-    const auto query = [&](auto kernel) {
-        cudaFuncAttributes attributes{};
-        CUDA_CHECK(cudaFuncGetAttributes(&attributes, kernel));
-        int active_blocks = 0;
-        CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active_blocks, kernel, FP32_ARG_ROTATED_THREADS, 0));
-        return CubKernelOccupancyInfo{attributes.numRegs, attributes.sharedSizeBytes, 0, active_blocks,
-                                      active_blocks * FP32_ARG_ROTATED_WARPS};
-    };
-    return staged ? query(fp32RotatedArgKernel<true>) : query(fp32RotatedArgKernel<false>);
-}
-
-CubKernelOccupancyInfo queryAwkwardAlignmentRotatedShardedFirstStageOccupancy(
-    DataType input_dtype, uint64_t rows_per_shard) {
-    switch (input_dtype) {
-        case DataType::FP16:
-            return queryRotatedRCooperativeOccupancy<__half>(rows_per_shard);
-        case DataType::BF16:
-            return queryRotatedRCooperativeOccupancy<__nv_bfloat16>(rows_per_shard);
-        case DataType::FP32:
-            return queryRotatedRCooperativeOccupancy<float>(rows_per_shard);
-        default:
-            throw std::logic_error("Rotated R-cooperative occupancy query received unsupported input dtype.");
-    }
-}
-
-void launchAwkwardAlignmentRotatedShardedFirstStage(const CubReductionStageSemantics& semantics,
-                                                     const Tensor& input,
-                                                     Tensor& fp32_partials,
-                                                     const CubReductionGeometry& geometry,
-                                                     uint64_t rows_per_shard,
-                                                     uint64_t shards_per_output,
-                                                     Stream& stream) {
-    validateAwkwardAlignmentRotatedShardedFirstStage(
-        fp32_partials, geometry, rows_per_shard, shards_per_output);
-
-    switch (semantics.combine) {
-        case CubReductionStageCombine::Sum:
-            launchAwkwardAlignmentRotatedFirstStageForCombine<cuda::std::plus<float>>(semantics,
-                                                                                      input,
-                                                                                      fp32_partials,
-                                                                                      geometry,
-                                                                                      rows_per_shard,
-                                                                                      shards_per_output,
-                                                                                      stream);
-            return;
-        case CubReductionStageCombine::Product:
-            launchAwkwardAlignmentRotatedFirstStageForCombine<cuda::std::multiplies<float>>(semantics,
-                                                                                            input,
-                                                                                            fp32_partials,
-                                                                                            geometry,
-                                                                                            rows_per_shard,
-                                                                                            shards_per_output,
-                                                                                            stream);
-            return;
-        case CubReductionStageCombine::Minimum:
-            launchAwkwardAlignmentRotatedFirstStageForCombine<PropagatingMinimumFp32>(semantics,
-                                                                                      input,
-                                                                                      fp32_partials,
-                                                                                      geometry,
-                                                                                      rows_per_shard,
-                                                                                      shards_per_output,
-                                                                                      stream);
-            return;
-        case CubReductionStageCombine::Maximum:
-            launchAwkwardAlignmentRotatedFirstStageForCombine<PropagatingMaximumFp32>(semantics,
-                                                                                      input,
-                                                                                      fp32_partials,
-                                                                                      geometry,
-                                                                                      rows_per_shard,
-                                                                                      shards_per_output,
-                                                                                      stream);
-            return;
-    }
-    throw std::logic_error("Unsupported awkward rotated sharded reduction combine.");
+    return queryRuntimeKArgOccupancyTyped<float>(staged);
 }
 
 

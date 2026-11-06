@@ -46,7 +46,17 @@ inline constexpr uint32_t FP8_KR_VECTOR_ROW_BYTES[] = {2, 3, 5, 6};
         if (r == row_bytes) return true;
     return false;
 }
-// Rows per thread of the vector Pack kernel: the fewest whole rows filling whole 16-byte vectors (16 / gcd(R, 16)).
+// 1234: FP16 / BF16 rows with a compiled vector Pack kernel: 1 to 8 elements. Ported without a measured gap (the 1233
+// sweep's generic Pack reached the copy rate on short 2-byte rows on GDDR), for GPUs with more bandwidth per SM, where
+// the generic kernel's 4-byte loads at a 8-16 byte lane stride may limit it.
+inline constexpr uint32_t F16_KR_VECTOR_ROW_BYTES[] = {2, 4, 6, 8, 10, 12, 14, 16};
+[[nodiscard]] constexpr bool f16KRVectorRowBytes(uint64_t row_bytes) {
+    for (uint32_t r : F16_KR_VECTOR_ROW_BYTES)
+        if (r == row_bytes) return true;
+    return false;
+}
+// Rows per thread of the vector Pack kernel: the fewest whole rows filling whole 16-byte vectors (16 / gcd(R, 16)),
+// and (1234) at least 2, since a shape with one row per thread is a Group shape (16-byte 2-byte rows: two vectors).
 [[nodiscard]] constexpr uint32_t fp8KRVectorRows(uint64_t row_bytes) {
     uint64_t a = row_bytes, b = 16;
     while (b != 0) {
@@ -54,8 +64,10 @@ inline constexpr uint32_t FP8_KR_VECTOR_ROW_BYTES[] = {2, 3, 5, 6};
         a = b;
         b = t;
     }
-    return static_cast<uint32_t>(16 / a);
+    return static_cast<uint32_t>(16 / a < 2 ? 2 : 16 / a);
 }
+static_assert(fp8KRVectorRows(2) == 8 && fp8KRVectorRows(3) == 16 && fp8KRVectorRows(5) == 16 &&
+              fp8KRVectorRows(6) == 8 && fp8KRVectorRows(16) == 2);
 
 struct Fp8KRSegmentShape {
     uint64_t rows = 0;
@@ -160,10 +172,19 @@ inline constexpr std::array<size_t, 3> FP8_KR_SHORTLIST_DEPTHS{6, 12, 12};
 // An FP32 shape (element_bytes 4) is an FP8 shape whose rows are whole elements, on a 4-byte aligned input, with no
 // vector Pack (that kernel is FP8-only, ported only if the generic Pack falls short on short FP32 rows). FP32 rows are
 // 4-byte multiples, which no vector row length is, so the FP8 list and pool at row_bytes = 4 R are already FP32-legal;
-// the filtered functions below check it (and with element_bytes 1 return the FP8 ones unchanged).
+// the filtered functions below check it (and with element_bytes 1 return the FP8 ones unchanged). 1233: FP16 / BF16
+// (element_bytes 2) the same way, on a 2-byte aligned input. 1234: element size 2 has its own vector Pack lengths
+// (F16_KR_VECTOR_ROW_BYTES): its list is FP8's without FP8's vector shapes, with the 2-byte vector shape second (1235)
+// where one is compiled and the rows fill at least one thread, and its pool adds the vector shape regardless of
+// row count (FP8's pool rule).
 
-/** element_bytes 1 (FP8) or 4 (FP32): fp8KRSegmentShapeLegal, rows of whole elements, and no vector Pack above 1. */
+/** element_bytes 1 (FP8): fp8KRSegmentShapeLegal. 2 (FP16 / BF16): rows of whole elements, fp8KRSegmentShapeLegal
+ *  except that a vector Pack shape is legal at F16_KR_VECTOR_ROW_BYTES (rows_per_thread fp8KRVectorRows). 4 (FP32):
+ *  rows of whole elements, fp8KRSegmentShapeLegal, no vector Pack. */
 [[nodiscard]] bool retainedKRShapeLegalForElement(const Fp8KRSegmentShape& shape, uint32_t element_bytes);
+/** 1234: legal for element size 1, 2 or 4 (the shape-level helpers that serve every dtype: scratch bytes, names,
+ *  ranker features). */
+[[nodiscard]] bool retainedKRShapeLegalForAnyElement(const Fp8KRSegmentShape& shape);
 
 /** fp8KRCandidateShapes / fp8KRCandidatePool restricted to retainedKRShapeLegalForElement: the element's list
  *  (positions 1..n), then the pool's other legal shapes. row_bytes must be a multiple of element_bytes. 1180: FP32
@@ -174,6 +195,9 @@ inline constexpr uint64_t FP32_KR_BLOCK_SECOND_ROW_BYTES = 64 * 1024;
  *  holds a chunk-local index of 31 bits). */
 inline constexpr uint64_t FP32_KR_ARG_MAX_CHUNK_BYTES = uint64_t{4} << 31;
 [[nodiscard]] bool fp32KRArgShapeLegal(const Fp8KRSegmentShape& shape);
+/** 1237: an FP16 / BF16 ARG shape: legal for element size 2, no vector Pack (2-byte vector ARG is not ported), and a
+ *  row of at most 2^47 elements (the candidate's row-local index, F16ArgKey.h). */
+[[nodiscard]] bool f16KRArgShapeLegal(const Fp8KRSegmentShape& shape);
 
 [[nodiscard]] std::vector<Fp8KRSegmentShape> retainedKRCandidateShapes(uint64_t rows, uint64_t row_bytes,
                                                                        uint32_t multiprocessors,

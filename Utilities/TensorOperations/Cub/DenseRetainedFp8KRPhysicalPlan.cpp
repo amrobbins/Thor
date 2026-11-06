@@ -103,6 +103,36 @@ DenseReductionCandidate makeRetainedFp32KRValueCandidate(const DenseReductionPro
     return candidate;
 }
 
+DenseReductionCandidate makeRetainedF16KRValueCandidate(const DenseReductionProblem& problem,
+                                                        DenseReductionSite site,
+                                                        const Fp8KR::Fp8KRSegmentShape& shape,
+                                                        DataType input_dtype) {
+    if ((input_dtype != DataType::FP16 && input_dtype != DataType::BF16) ||
+        problem.aggregate_kind != DenseReductionAggregateKind::Value ||
+        problem.input_state != DenseReductionInputState::OriginalInput)
+        throw std::invalid_argument("Retained FP16 / BF16 KR VALUE pass requires an original FP16 / BF16 VALUE site");
+    const Fp8KRSiteGeometry geometry = fp8KRSiteGeometry(problem, site);  // the row in elements
+    if (!Fp8KR::retainedKRShapeLegalForElement(shape, 2) || shape.rows != geometry.rows ||
+        shape.row_bytes != multiplyChecked(2, geometry.row_bytes))
+        throw std::invalid_argument("Retained FP16 / BF16 KR shape does not match its site geometry");
+
+    DenseReductionCandidate candidate;
+    candidate.family = classifyDenseReducerFamily(problem, site);
+    candidate.site = site;
+    candidate.next_problem = advanceDenseReductionProblem(problem, site, 1);
+    candidate.next_bytes = denseReductionProblemBytes(candidate.next_problem);
+    candidate.scratch_bytes = Fp8KR::fp8KRScratchBytes(shape, false);
+
+    auto plan = std::make_shared<DenseRetainedFp8KRPhysicalPlan>();
+    plan->shape = shape;
+    plan->role = deriveDensePassRole(problem, candidate.next_problem);
+    plan->input_dtype = input_dtype;
+    plan->input_dimensions = runExtents(problem);
+    plan->reduction_axis = site.run_index;
+    candidate.physical_plan = std::move(plan);
+    return candidate;
+}
+
 DenseReductionCandidate makeRetainedFp8KRArgCandidate(const DenseReductionProblem& problem,
                                                      DenseReductionSite site,
                                                      const Fp8KR::Fp8KRSegmentShape& shape,

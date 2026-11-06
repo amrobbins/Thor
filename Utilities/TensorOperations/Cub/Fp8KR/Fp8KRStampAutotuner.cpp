@@ -278,7 +278,8 @@ Fp8KR::Fp8KRRankerSite fp8KRValueRankerSite(const CubReductionStageSemantics& se
         case CubReductionStageInputTransform::AbsoluteValue: site.transform = 1; break;
         case CubReductionStageInputTransform::Square: site.transform = 2; break;
     }
-    site.e5m2 = input_dtype == DataType::FP8_E5M2;
+    // 1233: the slot is the alternate format: E5M2 for FP8, BF16 for the 2-byte formats (FP16 / BF16 plan, decision 1).
+    site.e5m2 = input_dtype == DataType::FP8_E5M2 || input_dtype == DataType::BF16;
     return site;
 }
 

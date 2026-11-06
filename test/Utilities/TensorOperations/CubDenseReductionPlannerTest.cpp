@@ -1,6 +1,8 @@
+#include "Utilities/TensorOperations/Cub/DenseReductionPhysicalSelector.h"
 #include "Utilities/TensorOperations/Cub/DenseReductionPlanner.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Cub/DenseProductionPhysicalSelectionContext.h"
+#include "Utilities/TensorOperations/Cub/DenseRetainedFp8RKPhysicalPlan.h"
 #include "Utilities/Common/Stream.h"
 
 #include <cuda_runtime_api.h>
@@ -58,32 +60,35 @@ DenseReductionPlannerContext plannerContext(DataType input_dtype = DataType::FP3
             .original_input_dtype = input_dtype,
             .value_operation = op,
             .multiprocessors = multiprocessors,
-        .max_threads_per_sm = 1536,
-        .max_blocks_per_sm = 24,
-            .allow_generic_rk_fallback = false,
         },
     };
 }
 
-DenseReductionCandidate ordinaryProposal(const DenseReductionProblem& problem,
+// 1258: the injected fixture's physical pass (the planner only carries it).
+struct CompletePhysicalPlan final : DenseReductionPhysicalPlan {};
+
+// 1258: every proposal is one Complete pass over the nominated site (it was the legacy ordinary families, gone in
+// phase 10; every test here planned Complete passes with them).
+DenseReductionCandidate completeProposal(const DenseReductionProblem& problem,
                                          DenseReductionSite site,
                                          DenseReducerFamily family,
-                                         const DenseRKPlanningContext& rk,
+                                         const DenseRKPlanningContext&,
                                          void*) {
-    switch (family) {
-        case DenseReducerFamily::R: return ReducersDenseR::propose(problem, site);
-        case DenseReducerFamily::KR: return ReducersDenseKR::propose(problem, site);
-        case DenseReducerFamily::RK: return ReducersDenseRK::propose(problem, site, rk);
-    }
-    throw std::logic_error("Invalid family in the ordinary proposal fixture.");
+    DenseReductionCandidate candidate;
+    candidate.family = family;
+    candidate.site = site;
+    candidate.next_problem = advanceDenseReductionProblem(problem, site, 1);
+    candidate.next_bytes = denseReductionProblemBytes(candidate.next_problem);
+    candidate.physical_plan = std::make_shared<CompletePhysicalPlan>();
+    return candidate;
 }
 
-// 1227: the planner's own logic (bounds, ordering, replanning, diagnostics) on a deterministic host-only fixture: the
-// ordinary families injected through proposal_override, FP32 included. Production sends FP32 sites to the retained
-// FP32 selectors, which time candidates on a GPU; the CubDensePhysicalSelector tests below cover that routing.
+// 1227 / 1258: the planner's own logic (bounds, ordering, replanning, diagnostics) on a deterministic host-only
+// fixture: Complete proposals injected through proposal_override. Production sends every site to a retained selector,
+// which times candidates on a GPU; the CubDensePhysicalSelector tests below cover that routing.
 DenseReductionPlannerContext ordinaryPlannerContext() {
     DenseReductionPlannerContext context = plannerContext();
-    context.proposal_override = ordinaryProposal;
+    context.proposal_override = completeProposal;
     return context;
 }
 
@@ -201,7 +206,9 @@ TEST(CubDenseReductionPlanner, ArgPayloadWidthParticipatesInNextBytesWithoutChan
 }
 
 TEST(CubDenseReductionPlanner, SingletonSemanticReductionStillPlansExactlyOnePass) {
-    const DenseReductionPlan plan = planDenseReduction(valueProblem({3, 1, 5, 1, 7}, {1, 3}, DataType::BF16), plannerContext(DataType::BF16));
+    // 1257: on the ordinary fixture (every real dtype's original sites go to retained selectors that time candidates).
+    const DenseReductionPlan plan =
+        planDenseReduction(valueProblem({3, 1, 5, 1, 7}, {1, 3}, DataType::BF16), ordinaryPlannerContext());
 
     ASSERT_EQ(plan.steps.size(), 1U);
     EXPECT_EQ(plan.steps[0].selected_candidate.family, DenseReducerFamily::RK);
@@ -217,92 +224,13 @@ TEST(CubDenseReductionPlanner, DiagnosticsReportEverySiteBoundAndEverySelectedCa
     EXPECT_NE(diagnostics.find("family=RK"), std::string::npos);
     EXPECT_NE(diagnostics.find("family=KR"), std::string::npos);
     EXPECT_NE(diagnostics.find("next_bytes="), std::string::npos);
-    EXPECT_NE(diagnostics.find("physical=KParallel/Aligned/Complete"), std::string::npos);
-    EXPECT_NE(diagnostics.find("physical=ContiguousFixedSegment"), std::string::npos);
+    EXPECT_NE(diagnostics.find("physical=family-local"), std::string::npos);  // 1258: the injected plan
     EXPECT_NE(diagnostics.find("selected=1"), std::string::npos);
     EXPECT_NE(diagnostics.find("bound site=2 family=KR complete_next_bytes=96 selected=0"), std::string::npos);
     EXPECT_NE(diagnostics.find("dense_plan final="), std::string::npos);
 }
 
 namespace {
-
-void expectSamePhysicalSelection(const DenseReductionCandidate& actual, const DenseReductionCandidate& expected) {
-    EXPECT_EQ(actual.family, expected.family);
-    EXPECT_EQ(actual.site, expected.site);
-    EXPECT_EQ(actual.next_problem, expected.next_problem);
-    EXPECT_EQ(actual.next_bytes, expected.next_bytes);
-    EXPECT_EQ(actual.scratch_bytes, expected.scratch_bytes);
-    ASSERT_NE(actual.physical_plan, nullptr);
-    ASSERT_NE(expected.physical_plan, nullptr);
-
-    const auto actual_direct = std::dynamic_pointer_cast<const DenseDirectReductionPhysicalPlan>(actual.physical_plan);
-    const auto expected_direct = std::dynamic_pointer_cast<const DenseDirectReductionPhysicalPlan>(expected.physical_plan);
-    EXPECT_EQ(static_cast<bool>(actual_direct), static_cast<bool>(expected_direct));
-    if (actual_direct && expected_direct) {
-        EXPECT_EQ(actual_direct->implementation, expected_direct->implementation);
-        EXPECT_EQ(actual_direct->role, expected_direct->role);
-        EXPECT_EQ(actual_direct->input_dimensions, expected_direct->input_dimensions);
-        EXPECT_EQ(actual_direct->reduction_axis, expected_direct->reduction_axis);
-        EXPECT_EQ(actual_direct->input_elements, expected_direct->input_elements);
-        EXPECT_EQ(actual_direct->reduction_size, expected_direct->reduction_size);
-        EXPECT_EQ(actual_direct->output_elements, expected_direct->output_elements);
-        EXPECT_EQ(actual_direct->outer_size, expected_direct->outer_size);
-        EXPECT_EQ(actual_direct->inner_size, expected_direct->inner_size);
-        return;
-    }
-    const auto actual_rk = std::dynamic_pointer_cast<const DenseRKFamilyPhysicalPlan>(actual.physical_plan);
-    const auto expected_rk = std::dynamic_pointer_cast<const DenseRKFamilyPhysicalPlan>(expected.physical_plan);
-    ASSERT_TRUE(actual_rk);
-    ASSERT_TRUE(expected_rk);
-    EXPECT_EQ(actual_rk->strategy, expected_rk->strategy);
-    EXPECT_EQ(actual_rk->access, expected_rk->access);
-    EXPECT_EQ(actual_rk->implementation, expected_rk->implementation);
-    EXPECT_EQ(actual_rk->progress, expected_rk->progress);
-    EXPECT_EQ(actual_rk->role, expected_rk->role);
-    EXPECT_EQ(actual_rk->input_dimensions, expected_rk->input_dimensions);
-    EXPECT_EQ(actual_rk->reduction_axis, expected_rk->reduction_axis);
-    EXPECT_EQ(actual_rk->input_dtype, expected_rk->input_dtype);
-    EXPECT_EQ(actual_rk->value_operation, expected_rk->value_operation);
-    EXPECT_EQ(actual_rk->outer_size, expected_rk->outer_size);
-    EXPECT_EQ(actual_rk->reduction_size, expected_rk->reduction_size);
-    EXPECT_EQ(actual_rk->inner_size, expected_rk->inner_size);
-    EXPECT_EQ(actual_rk->packet_bytes, expected_rk->packet_bytes);
-    EXPECT_EQ(actual_rk->block_threads, expected_rk->block_threads);
-    EXPECT_EQ(actual_rk->cooperative_warps_per_tile, expected_rk->cooperative_warps_per_tile);
-    EXPECT_EQ(actual_rk->rows_per_shard, expected_rk->rows_per_shard);
-    EXPECT_EQ(actual_rk->shards_per_output, expected_rk->shards_per_output);
-    EXPECT_EQ(actual_rk->component_tiles, expected_rk->component_tiles);
-    EXPECT_EQ(actual_rk->first_stage_blocks, expected_rk->first_stage_blocks);
-    EXPECT_EQ(actual_rk->useful_stage_warps, expected_rk->useful_stage_warps);
-    EXPECT_EQ(actual_rk->max_active_blocks_per_sm, expected_rk->max_active_blocks_per_sm);
-    EXPECT_EQ(actual_rk->max_active_warps_per_sm, expected_rk->max_active_warps_per_sm);
-    EXPECT_EQ(actual_rk->physical_stage_warps, expected_rk->physical_stage_warps);
-    EXPECT_EQ(actual_rk->resident_device_warps, expected_rk->resident_device_warps);
-    EXPECT_EQ(actual_rk->useful_resident_warp_capacity, expected_rk->useful_resident_warp_capacity);
-    EXPECT_EQ(actual_rk->launch_warp_supply, expected_rk->launch_warp_supply);
-    EXPECT_EQ(actual_rk->wave_capacity_blocks, expected_rk->wave_capacity_blocks);
-}
-
-DenseReductionCandidate directlyPropose(const DenseReductionProblem& problem,
-                                         DenseReductionSite site,
-                                         const DensePhysicalSelectionContext& context) {
-    switch (classifyDenseReducerFamily(problem, site)) {
-        case DenseReducerFamily::R: return ReducersDenseR::propose(problem, site);
-        case DenseReducerFamily::KR: return ReducersDenseKR::propose(problem, site);
-        case DenseReducerFamily::RK: return ReducersDenseRK::propose(problem, site, context.rk);
-    }
-    throw std::logic_error("Invalid family in parity fixture.");
-}
-
-struct CountingOccupancy {
-    uint32_t calls = 0;
-};
-
-DenseRKOccupancyInfo countingOccupancy(const DenseRKFamilyPhysicalPlan& plan, void* data) {
-    auto& state = *static_cast<CountingOccupancy*>(data);
-    ++state.calls;
-    return {static_cast<uint32_t>(plan.block_threads <= 128 ? 8 : 4), 32};
-}
 
 struct OverrideCalls {
     std::vector<DenseReducerFamily> families;
@@ -315,12 +243,7 @@ DenseReductionCandidate recordedProposal(const DenseReductionProblem& problem,
                                          void* data) {
     auto& calls = *static_cast<OverrideCalls*>(data);
     calls.families.push_back(family);
-    switch (family) {
-        case DenseReducerFamily::R: return ReducersDenseR::propose(problem, site);
-        case DenseReducerFamily::KR: return ReducersDenseKR::propose(problem, site);
-        case DenseReducerFamily::RK: return ReducersDenseRK::propose(problem, site, rk);
-    }
-    throw std::logic_error("Invalid injected family.");
+    return completeProposal(problem, site, family, rk, nullptr);
 }
 
 }  // namespace
@@ -341,14 +264,15 @@ std::vector<DenseReductionProblem> originalSiteFixtures() {
 
 }  // namespace
 
-// 1227: was DescriptorOnlyFP32MatchesEachOriginalProductionFamily; FP32 sites now go to the retained FP32 selectors.
-TEST(CubDensePhysicalSelector, DescriptorOnlyLowPrecisionMatchesEachOriginalProductionFamily) {
-    const DensePhysicalSelectionContext context = plannerContext(DataType::BF16);
-    for (const auto& problem : originalSiteFixtures()) {
-        for (DenseReductionSite site : enumerateDenseReductionSites(problem)) {
-            const auto selected = selectDensePhysicalPass(problem, site, context);
-            const auto direct = directlyPropose(problem, site, context);
-            expectSamePhysicalSelection(selected, direct);
+// 1257: was DescriptorOnlyLowPrecisionMatchesEachOriginalProductionFamily; original FP16 / BF16 sites go to the
+// retained FP16 / BF16 selectors, which time candidates on a GPU, so a host-only context is rejected, not planned.
+TEST(CubDensePhysicalSelector, DescriptorOnlyF16SitesGoToTheRetainedF16Selectors) {
+    for (const DataType dtype : {DataType::FP16, DataType::BF16}) {
+        const DensePhysicalSelectionContext context = plannerContext(dtype);
+        for (const auto& problem : originalSiteFixtures()) {
+            for (DenseReductionSite site : enumerateDenseReductionSites(problem)) {
+                EXPECT_THROW(static_cast<void>(selectDensePhysicalPass(problem, site, context)), std::logic_error);
+            }
         }
     }
 }
@@ -362,47 +286,6 @@ TEST(CubDensePhysicalSelector, DescriptorOnlyFP32SitesGoToTheRetainedFp32Selecto
             EXPECT_THROW(static_cast<void>(selectDensePhysicalPass(problem, site, context)), std::logic_error);
         }
     }
-}
-
-// 1227: was StagedFP32UsesActualPhysicalOutputNotCompletedDimension, on BF16 now; its FP32 continuation is the
-// retained FP32 selectors'.
-TEST(CubDensePhysicalSelector, StagedLowPrecisionUsesActualPhysicalOutputNotCompletedDimension) {
-    DensePhysicalSelectionContext context = plannerContext(DataType::BF16);
-    // Exercise difficult deep-R/small-K geometries with the unchanged calibrated family policy.
-    bool found_staged = false;
-    for (uint64_t r : {4096ULL, 65536ULL, 262144ULL}) {
-        for (uint64_t k : {2ULL, 4ULL, 8ULL}) {
-            const auto problem = valueProblem({2, r, k}, {1});
-            const auto selected = selectDensePhysicalPass(problem, DenseReductionSite{1}, context);
-            expectSamePhysicalSelection(selected, directlyPropose(problem, DenseReductionSite{1}, context));
-            const auto physical = std::dynamic_pointer_cast<const DenseRKFamilyPhysicalPlan>(selected.physical_plan);
-            if (physical && physical->progress == DenseRKProgress::Staged) {
-                found_staged = true;
-                EXPECT_TRUE(hasDenseReductionSites(selected.next_problem));
-                EXPECT_EQ(selected.next_problem.input_state, DenseReductionInputState::IntermediateAggregate);
-                EXPECT_EQ(selected.next_bytes, denseReductionProblemBytes(selected.next_problem));
-                // The FP32 partials are the retained FP32 selectors' (they time on a GPU, so this host-only context
-                // is rejected), never the ordinary families'.
-                for (DenseReductionSite next_site : enumerateDenseReductionSites(selected.next_problem)) {
-                    EXPECT_THROW(static_cast<void>(selectDensePhysicalPass(selected.next_problem, next_site, context)),
-                                 std::logic_error);
-                }
-            }
-        }
-    }
-    EXPECT_TRUE(found_staged) << "Fixture should cover at least one genuine staged BF16 RK selection.";
-}
-
-TEST(CubDensePhysicalSelector, ProductionOccupancyCallbackRetainsPerRequestUserState) {
-    CountingOccupancy state;
-    DensePhysicalSelectionContext context = plannerContext(DataType::BF16);  // 1227: FP32 is the retained selectors'
-    context.rk.occupancy_query = countingOccupancy;
-    context.rk.occupancy_query_context = &state;
-    const auto problem = valueProblem({8, 4096, 32}, {1});
-    const auto selected = selectDensePhysicalPass(problem, DenseReductionSite{1}, context);
-    ASSERT_GT(state.calls, 0U);
-    expectSamePhysicalSelection(selected, directlyPropose(problem, DenseReductionSite{1}, context));
-    EXPECT_GT(state.calls, 1U);
 }
 
 TEST(CubDensePhysicalSelector, ProductionPlannerCallsSharedSelectorIncludingPureR) {
@@ -427,33 +310,36 @@ TEST(CubDensePhysicalSelector, ProductionPlannerCallsSharedSelectorIncludingPure
     EXPECT_EQ(two.steps[1].selected_candidate.family, DenseReducerFamily::KR);
     for (const auto& step : two.steps) {
         for (const auto& candidate : step.considered_candidates) {
-            expectSamePhysicalSelection(candidate, directlyPropose(step.input_problem, candidate.site, context));
+            EXPECT_NE(std::dynamic_pointer_cast<const CompletePhysicalPlan>(candidate.physical_plan), nullptr);
         }
     }
 }
 
-TEST(CubDensePhysicalSelector, ProductionDeviceContextPreservesExactOccupancyAndPolicy) {
+TEST(CubDensePhysicalSelector, ProductionDeviceContextSelectsTheRetainedF16Pass) {
     int count = 0;
     if (cudaGetDeviceCount(&count) != cudaSuccess || count <= 0) {
-        GTEST_SKIP() << "Exact production occupancy requires a CUDA GPU.";
+        GTEST_SKIP() << "Retained selection requires a CUDA GPU.";
     }
     Stream stream(0);
-    // 1227: BF16 (FP32 sites are the retained selectors'), with the original semantics a retained FP32 continuation
-    // of a staged BF16 pass needs.
+    // 1257: BF16, with the original semantics the retained FP16 / BF16 selector and the FP32 continuation of a staged
+    // pass need. Its RK site runs a retained 2-byte first stage.
     const DenseProductionPhysicalSelectionContext production_context(
         DataType::BF16, DenseRKValueOperation::Sum, stream, 4096, 1.0f, CubReductionOp::Sum);
     const auto& context = production_context.context();
     EXPECT_EQ(context.tuning_stream, &stream);
     EXPECT_EQ(context.gpu_ordinal, static_cast<uint32_t>(stream.getGpuNum()));
-    EXPECT_TRUE(context.rk.allow_generic_rk_fallback);
-    ASSERT_NE(context.rk.occupancy_query, nullptr);
-    ASSERT_NE(context.rk.occupancy_query_context, nullptr);
+    EXPECT_GT(context.rk.multiprocessors, 0U);
     const auto problem = valueProblem({8, 4096, 32}, {1});
     const DenseReductionSite site{1};
     const auto actual = selectDensePhysicalPass(problem, site, context);
-    const auto expected = directlyPropose(problem, site, context);
-    expectSamePhysicalSelection(actual, expected);
+    const auto retained = std::dynamic_pointer_cast<const DenseRetainedFp8RKPhysicalPlan>(actual.physical_plan);
+    ASSERT_NE(retained, nullptr);
+    EXPECT_EQ(retained->input_dtype, DataType::BF16);
+    EXPECT_EQ(retained->kernel.element_bytes, 2U);
     const auto plan = planDenseReduction(problem, context);
     ASSERT_FALSE(plan.steps.empty());
-    expectSamePhysicalSelection(plan.steps[0].selected_candidate, expected);
+    const auto first =
+        std::dynamic_pointer_cast<const DenseRetainedFp8RKPhysicalPlan>(plan.steps[0].selected_candidate.physical_plan);
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first->kernel, retained->kernel);  // the same cached selection
 }

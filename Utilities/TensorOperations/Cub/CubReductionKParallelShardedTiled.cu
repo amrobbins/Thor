@@ -386,10 +386,6 @@ __device__ __forceinline__ void accumulateKParallelFp8Rows(float (&local)[ItemsP
         case DataType::BF16:
         case DataType::FP32:
             return true;
-#if THOR_CUB_ENABLE_64BIT_TYPES
-        case DataType::FP64:
-            return true;
-#endif
         default:
             return false;
     }
@@ -407,10 +403,6 @@ __device__ inline OutputT convertKParallelFp8Writeback(float value) {
         return __float2bfloat16_rn(value);
     } else if constexpr (std::is_same_v<OutputT, float>) {
         return value;
-#if THOR_CUB_ENABLE_64BIT_TYPES
-    } else if constexpr (std::is_same_v<OutputT, double>) {
-        return static_cast<double>(value);
-#endif
     } else {
         static_assert(!sizeof(OutputT), "Unsupported FP8 KParallel output dtype.");
     }
@@ -446,9 +438,6 @@ __device__ inline void storeKParallelFp8TransposedPackets(OutputT* output,
                                                           uint64_t valid_components,
                                                           const float* warp_tile) {
     static_assert(sizeof(OutputT) == 1 || sizeof(OutputT) == 2 || sizeof(OutputT) == 4
-#if THOR_CUB_ENABLE_64BIT_TYPES
-                  || sizeof(OutputT) == 8
-#endif
     );
     constexpr int items_per_store = 16 / static_cast<int>(sizeof(OutputT));
     constexpr int store_rounds = ItemsPerLane / items_per_store;
@@ -679,19 +668,6 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
                                                                output_scale);
                         }
                         break;
-#if THOR_CUB_ENABLE_64BIT_TYPES
-                    case DataType::FP64:
-                        if constexpr (sizeof(double) * static_cast<size_t>(ItemsPerLane) <= 16) {
-                            storeKParallelFp8DirectFinalPacket(static_cast<double*>(stage_output),
-                                                               outer_index,
-                                                               packet_component_begin,
-                                                               output_outer_stride,
-                                                               local,
-                                                               store_finalize,
-                                                               output_scale);
-                        }
-                        break;
-#endif
                     default:
                         break;
                 }
@@ -701,9 +677,6 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
             if ((output_dtype == DataType::FP8_E4M3 || output_dtype == DataType::FP8_E5M2)
                 || (ItemsPerLane <= 8 && (output_dtype == DataType::FP16 || output_dtype == DataType::BF16))
                 || (ItemsPerLane <= 4 && output_dtype == DataType::FP32)
-#if THOR_CUB_ENABLE_64BIT_TYPES
-                || (ItemsPerLane <= 2 && output_dtype == DataType::FP64)
-#endif
             ) {
                 continue;
             }
@@ -771,18 +744,6 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8PacketKernel(const I
                                 warp_tile);
                         }
                         break;
-#if THOR_CUB_ENABLE_64BIT_TYPES
-                    case DataType::FP64:
-                        if constexpr (sizeof(double) * static_cast<size_t>(ItemsPerLane) > 16) {
-                            storeKParallelFp8TransposedPackets<double, ItemsPerLane>(
-                                static_cast<double*>(stage_output),
-                                output_row_base,
-                                warp_component_begin,
-                                valid_components,
-                                warp_tile);
-                        }
-                        break;
-#endif
                     default:
                         break;
                 }
@@ -1087,19 +1048,6 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8CompleteUnifiedKerne
                                                                output_scale);
                         }
                         break;
-#if THOR_CUB_ENABLE_64BIT_TYPES
-                    case DataType::FP64:
-                        if constexpr (sizeof(double) * static_cast<size_t>(ItemsPerLane) <= 16) {
-                            storeKParallelFp8DirectFinalPacket(static_cast<double*>(stage_output),
-                                                               outer_index,
-                                                               packet_component_begin,
-                                                               output_outer_stride,
-                                                               local,
-                                                               store_finalize,
-                                                               output_scale);
-                        }
-                        break;
-#endif
                     default:
                         break;
                 }
@@ -1109,9 +1057,6 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8CompleteUnifiedKerne
             if ((output_dtype == DataType::FP8_E4M3 || output_dtype == DataType::FP8_E5M2)
                 || (ItemsPerLane <= 8 && (output_dtype == DataType::FP16 || output_dtype == DataType::BF16))
                 || (ItemsPerLane <= 4 && output_dtype == DataType::FP32)
-#if THOR_CUB_ENABLE_64BIT_TYPES
-                || (ItemsPerLane <= 2 && output_dtype == DataType::FP64)
-#endif
             ) {
                 continue;
             }
@@ -1179,18 +1124,6 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8CompleteUnifiedKerne
                                 warp_tile);
                         }
                         break;
-#if THOR_CUB_ENABLE_64BIT_TYPES
-                    case DataType::FP64:
-                        if constexpr (sizeof(double) * static_cast<size_t>(ItemsPerLane) > 16) {
-                            storeKParallelFp8TransposedPackets<double, ItemsPerLane>(
-                                static_cast<double*>(stage_output),
-                                output_row_base,
-                                warp_component_begin,
-                                valid_components,
-                                warp_tile);
-                        }
-                        break;
-#endif
                     default:
                         break;
                 }
@@ -1218,24 +1151,33 @@ __global__ __launch_bounds__(BlockThreads) void kParallelFp8CompleteUnifiedKerne
 // KParallel had for odd K. Without it, odd K at small R ran only cooperative passes (RuntimeK, OneWindow), 0.2-0.6 us
 // slower than the old KParallel on 2-4 us reductions (the 1225 FP32 and 1227 FP8 audits). Every load-ahead batch is
 // 64 bytes per lane (16 rows of one float); a short tail loads all its rows before reducing any.
-template <int ItemsPerLane>
-inline constexpr uint32_t FP32_ALIGNED_K_LOAD_AHEAD_ROWS = ItemsPerLane >= 4 ? 4U : (ItemsPerLane == 2 ? 8U : 16U);
+// 1243: and FP16 / BF16 input (plans/Thor_FP16_BF16_Dense_Reduction_Plan, phase 5), through the InputT parameter: a
+// lane owns a 2-, 4-, 8- or 16-byte packet (ItemsPerLane 1 / 2 / 4 / 8), widens each component to FP32 before the
+// transform and accumulates in FP32 exactly as on FP32 input. The batch depth is set by the packet's bytes (16 rows
+// up to 4 bytes, 8 rows of 8, 4 rows of 16: FP32's depths unchanged), and the load-all tail serves the packets up to
+// 4 bytes (FP32's scalar packet, the 2-byte packets with one or two components).
+template <size_t PacketBytes>
+inline constexpr uint32_t ALIGNED_K_LOAD_AHEAD_ROWS = PacketBytes >= 16 ? 4U : (PacketBytes == 8 ? 8U : 16U);
 
-template <int ItemsPerLane, typename ReductionOpT, typename InputTransformT>
+template <int ItemsPerLane>
+inline constexpr uint32_t FP32_ALIGNED_K_LOAD_AHEAD_ROWS = ALIGNED_K_LOAD_AHEAD_ROWS<sizeof(float) * ItemsPerLane>;
+
+template <typename InputT, int ItemsPerLane, typename ReductionOpT, typename InputTransformT>
 __device__ __forceinline__ void fp32AlignedKReducePacket(float (&local)[ItemsPerLane],
-                                                         const PackedInputValues<float, ItemsPerLane>& packet,
+                                                         const PackedInputValues<InputT, ItemsPerLane>& packet,
                                                          const ReductionOpT& reduction_op,
                                                          const InputTransformT& input_transform) {
 #pragma unroll
     for (int item = 0; item < ItemsPerLane; ++item)
-        local[item] = reduction_op(local[item], input_transform(packet.values[item]));
+        local[item] = reduction_op(local[item], input_transform(ToFp32<InputT>{}(packet.values[item])));
 }
 
-template <int ItemsPerLane, typename ReductionOpT, typename InputTransformT>
-__device__ __forceinline__ void fp32AlignedKAccumulateRows(float (&local)[ItemsPerLane], const float* row_input,
+template <typename InputT, int ItemsPerLane, typename ReductionOpT, typename InputTransformT>
+__device__ __forceinline__ void fp32AlignedKAccumulateRows(float (&local)[ItemsPerLane], const InputT* row_input,
                                                            uint32_t row_count, uint64_t inner_size) {
-    constexpr uint32_t Rows = FP32_ALIGNED_K_LOAD_AHEAD_ROWS<ItemsPerLane>;
-    using PacketT = PackedInputValues<float, ItemsPerLane>;
+    constexpr size_t PacketBytes = sizeof(InputT) * ItemsPerLane;
+    constexpr uint32_t Rows = ALIGNED_K_LOAD_AHEAD_ROWS<PacketBytes>;
+    using PacketT = PackedInputValues<InputT, ItemsPerLane>;
     const ReductionOpT reduction_op{};
     const InputTransformT input_transform{};
 #pragma unroll
@@ -1245,14 +1187,14 @@ __device__ __forceinline__ void fp32AlignedKAccumulateRows(float (&local)[ItemsP
         PacketT current[Rows];
 #pragma unroll
         for (uint32_t row = 0; row < Rows; ++row)
-            current[row] = loadVectorizedInputPacket<float, ItemsPerLane>(row_input + row * inner_size);
+            current[row] = loadVectorizedInputPacket<InputT, ItemsPerLane>(row_input + row * inner_size);
         row_input += static_cast<uint64_t>(Rows) * inner_size;
         remaining -= Rows;
         while (remaining >= Rows) {
             PacketT next[Rows];
 #pragma unroll
             for (uint32_t row = 0; row < Rows; ++row)
-                next[row] = loadVectorizedInputPacket<float, ItemsPerLane>(row_input + row * inner_size);
+                next[row] = loadVectorizedInputPacket<InputT, ItemsPerLane>(row_input + row * inner_size);
             row_input += static_cast<uint64_t>(Rows) * inner_size;
             remaining -= Rows;
 #pragma unroll
@@ -1265,7 +1207,7 @@ __device__ __forceinline__ void fp32AlignedKAccumulateRows(float (&local)[ItemsP
         for (uint32_t row = 0; row < Rows; ++row)
             fp32AlignedKReducePacket(local, current[row], reduction_op, input_transform);
     }
-    if constexpr (ItemsPerLane == 1) {
+    if constexpr (PacketBytes <= 4) {
         // 1228: fewer than Rows rows remain (all of them at the small R the scalar packet serves): load them all, then
         // reduce in row order, so the loads overlap instead of each waiting for the one before.
         if (remaining != 0) {
@@ -1273,40 +1215,40 @@ __device__ __forceinline__ void fp32AlignedKAccumulateRows(float (&local)[ItemsP
 #pragma unroll
             for (uint32_t row = 0; row + 1 < Rows; ++row)
                 if (row < remaining)
-                    tail[row] = loadVectorizedInputPacket<float, ItemsPerLane>(row_input + row * inner_size);
+                    tail[row] = loadVectorizedInputPacket<InputT, ItemsPerLane>(row_input + row * inner_size);
 #pragma unroll
             for (uint32_t row = 0; row + 1 < Rows; ++row)
                 if (row < remaining) fp32AlignedKReducePacket(local, tail[row], reduction_op, input_transform);
         }
     } else {
         for (; remaining != 0; --remaining, row_input += inner_size)
-            fp32AlignedKReducePacket(local, loadVectorizedInputPacket<float, ItemsPerLane>(row_input), reduction_op,
+            fp32AlignedKReducePacket(local, loadVectorizedInputPacket<InputT, ItemsPerLane>(row_input), reduction_op,
                                      input_transform);
     }
 }
 
-template <int ItemsPerLane, typename ReductionOpT>
-__device__ __forceinline__ void fp32AlignedKAccumulateTransform(float (&local)[ItemsPerLane], const float* row_input,
+template <typename InputT, int ItemsPerLane, typename ReductionOpT>
+__device__ __forceinline__ void fp32AlignedKAccumulateTransform(float (&local)[ItemsPerLane], const InputT* row_input,
                                                                 uint32_t row_count, uint64_t inner_size,
                                                                 CubReductionStageInputTransform transform) {
     switch (transform) {
         case CubReductionStageInputTransform::Identity:
-            fp32AlignedKAccumulateRows<ItemsPerLane, ReductionOpT, IdentityFp32>(local, row_input, row_count,
-                                                                                inner_size);
+            fp32AlignedKAccumulateRows<InputT, ItemsPerLane, ReductionOpT, IdentityFp32>(local, row_input, row_count,
+                                                                                        inner_size);
             return;
         case CubReductionStageInputTransform::AbsoluteValue:
-            fp32AlignedKAccumulateRows<ItemsPerLane, ReductionOpT, AbsoluteValueFp32>(local, row_input, row_count,
-                                                                                     inner_size);
+            fp32AlignedKAccumulateRows<InputT, ItemsPerLane, ReductionOpT, AbsoluteValueFp32>(local, row_input,
+                                                                                             row_count, inner_size);
             return;
         default:
-            fp32AlignedKAccumulateRows<ItemsPerLane, ReductionOpT, SquareFp32>(local, row_input, row_count,
-                                                                              inner_size);
+            fp32AlignedKAccumulateRows<InputT, ItemsPerLane, ReductionOpT, SquareFp32>(local, row_input, row_count,
+                                                                                      inner_size);
             return;
     }
 }
 
-template <int ItemsPerLane, int BlockThreads, TiledRKStageTopology Topology>
-__global__ __launch_bounds__(BlockThreads) void fp32AlignedKKernel(const float* input,
+template <typename InputT, int ItemsPerLane, int BlockThreads, TiledRKStageTopology Topology>
+__global__ __launch_bounds__(BlockThreads) void fp32AlignedKKernel(const InputT* input,
                                                                    void* stage_output,
                                                                    DataType output_dtype,
                                                                    uint64_t outer_size,
@@ -1321,7 +1263,10 @@ __global__ __launch_bounds__(BlockThreads) void fp32AlignedKKernel(const float* 
                                                                    CubReductionStageInputTransform transform,
                                                                    AdditiveFinalizeFp32 output_finalize,
                                                                    float output_scale) {
-    static_assert(ItemsPerLane == 1 || ItemsPerLane == 2 || ItemsPerLane == 4);
+    static_assert(std::is_same_v<InputT, float> || std::is_same_v<InputT, __half> ||
+                  std::is_same_v<InputT, __nv_bfloat16>);
+    static_assert(ItemsPerLane == 1 || ItemsPerLane == 2 || ItemsPerLane == 4 ||
+                  (ItemsPerLane == 8 && sizeof(InputT) == 2));
     static_assert(BlockThreads == 32 || BlockThreads == 64 || BlockThreads == 128);
     constexpr uint64_t ComponentsPerCta = static_cast<uint64_t>(BlockThreads) * ItemsPerLane;
     const uint32_t outer_count = static_cast<uint32_t>(outer_size);
@@ -1335,25 +1280,25 @@ __global__ __launch_bounds__(BlockThreads) void fp32AlignedKKernel(const float* 
         if (packet_component_begin >= inner_size) continue;  // K % ItemsPerLane == 0: owned packets are whole
         const uint64_t row_begin = reductionShardRowBegin(shard_rows, shard);
         const uint32_t row_count = reductionShardRowCount(shard_rows, shard);
-        const float* row_input =
+        const InputT* row_input =
             input + ((outer_index * reduction_size + row_begin) * inner_size + packet_component_begin);
         float local[ItemsPerLane];
         switch (operation) {
             case CubReductionStageCombine::Sum:
-                fp32AlignedKAccumulateTransform<ItemsPerLane, cuda::std::plus<float>>(local, row_input, row_count,
-                                                                                     inner_size, transform);
+                fp32AlignedKAccumulateTransform<InputT, ItemsPerLane, cuda::std::plus<float>>(
+                    local, row_input, row_count, inner_size, transform);
                 break;
             case CubReductionStageCombine::Product:
-                fp32AlignedKAccumulateRows<ItemsPerLane, cuda::std::multiplies<float>, IdentityFp32>(
+                fp32AlignedKAccumulateRows<InputT, ItemsPerLane, cuda::std::multiplies<float>, IdentityFp32>(
                     local, row_input, row_count, inner_size);
                 break;
             case CubReductionStageCombine::Minimum:
-                fp32AlignedKAccumulateTransform<ItemsPerLane, PropagatingMinimumFp32>(local, row_input, row_count,
-                                                                                     inner_size, transform);
+                fp32AlignedKAccumulateTransform<InputT, ItemsPerLane, PropagatingMinimumFp32>(
+                    local, row_input, row_count, inner_size, transform);
                 break;
             default:
-                fp32AlignedKAccumulateTransform<ItemsPerLane, PropagatingMaximumFp32>(local, row_input, row_count,
-                                                                                     inner_size, transform);
+                fp32AlignedKAccumulateTransform<InputT, ItemsPerLane, PropagatingMaximumFp32>(
+                    local, row_input, row_count, inner_size, transform);
                 break;
         }
         if constexpr (Topology == TiledRKStageTopology::Staged) {
@@ -1386,15 +1331,20 @@ __global__ __launch_bounds__(BlockThreads) void fp32AlignedKKernel(const float* 
 // lower row. Complete (one shard) writes the requested outputs; Staged writes packed partials (key << 32 | shard row
 // << 1 | negative zero) that fp32ArgPackedContinuationKernel finishes in the same pass. Rows per shard are at most
 // FP32_ARG_MAX_SHARD_ROWS.
-template <int ItemsPerLane>
+// 1248: and FP16 / BF16 input (plans/Thor_FP16_BF16_Dense_Reduction_Plan, phase 6; user decision 2026-11-05): each
+// component widens to FP32 (exact and order-preserving: NaN stays NaN, -0 stays -0) and takes the FP32 key, so the
+// lane state, the packed partials and the continuation are FP32's. 4-, 8- and 16-byte packets (2, 4 or 8 components;
+// no 2-byte packet, as FP32 ARG has no 4-byte one).
+template <typename InputT, int ItemsPerLane>
 __device__ __forceinline__ void fp32AlignedKArgKeyPacket(uint32_t (&best_key)[ItemsPerLane],
                                                          uint32_t (&best_tail)[ItemsPerLane],
-                                                         const PackedInputValues<float, ItemsPerLane>& packet,
+                                                         const PackedInputValues<InputT, ItemsPerLane>& packet,
                                                          uint32_t row, uint32_t xor_mask) {
 #pragma unroll
     for (int item = 0; item < ItemsPerLane; ++item) {
         uint32_t negative_zero;
-        const uint32_t key = fp32ArgKey(__float_as_uint(packet.values[item]), xor_mask, negative_zero);
+        const uint32_t key =
+            fp32ArgKey(__float_as_uint(ToFp32<InputT>{}(packet.values[item])), xor_mask, negative_zero);
         if (key < best_key[item]) {
             best_key[item] = key;
             best_tail[item] = (row << 1) | negative_zero;
@@ -1402,8 +1352,8 @@ __device__ __forceinline__ void fp32AlignedKArgKeyPacket(uint32_t (&best_key)[It
     }
 }
 
-template <int ItemsPerLane, int BlockThreads, bool Staged>
-__global__ __launch_bounds__(BlockThreads) void fp32AlignedKArgKernel(const float* input,
+template <typename InputT, int ItemsPerLane, int BlockThreads, bool Staged>
+__global__ __launch_bounds__(BlockThreads) void fp32AlignedKArgKernel(const InputT* input,
                                                                       Fp32ArgOutputs outputs,
                                                                       uint64_t* packed,
                                                                       uint64_t outer_size,
@@ -1412,11 +1362,13 @@ __global__ __launch_bounds__(BlockThreads) void fp32AlignedKArgKernel(const floa
                                                                       uint64_t shards_per_output,
                                                                       uint64_t component_tiles,
                                                                       ReductionShardRows shard_rows) {
-    static_assert(ItemsPerLane == 2 || ItemsPerLane == 4);
+    static_assert(std::is_same_v<InputT, float> || std::is_same_v<InputT, __half> ||
+                  std::is_same_v<InputT, __nv_bfloat16>);
+    static_assert(ItemsPerLane == 2 || ItemsPerLane == 4 || (ItemsPerLane == 8 && sizeof(InputT) == 2));
     static_assert(BlockThreads == 32 || BlockThreads == 64 || BlockThreads == 128);
     constexpr uint64_t ComponentsPerCta = static_cast<uint64_t>(BlockThreads) * ItemsPerLane;
-    constexpr uint32_t Rows = FP32_ALIGNED_K_LOAD_AHEAD_ROWS<ItemsPerLane>;
-    using PacketT = PackedInputValues<float, ItemsPerLane>;
+    constexpr uint32_t Rows = ALIGNED_K_LOAD_AHEAD_ROWS<sizeof(InputT) * ItemsPerLane>;
+    using PacketT = PackedInputValues<InputT, ItemsPerLane>;
     const uint32_t outer_count = static_cast<uint32_t>(outer_size);
     const uint32_t tile_count = static_cast<uint32_t>(component_tiles);
     const uint32_t shard_count = static_cast<uint32_t>(shards_per_output);
@@ -1428,7 +1380,7 @@ __global__ __launch_bounds__(BlockThreads) void fp32AlignedKArgKernel(const floa
         if (packet_component_begin >= inner_size) continue;  // K % ItemsPerLane == 0: owned packets are whole
         const uint64_t row_begin = reductionShardRowBegin(shard_rows, shard);
         const uint32_t row_count = reductionShardRowCount(shard_rows, shard);
-        const float* row_input =
+        const InputT* row_input =
             input + ((outer_index * reduction_size + row_begin) * inner_size + packet_component_begin);
         uint32_t best_key[ItemsPerLane], best_tail[ItemsPerLane];
 #pragma unroll
@@ -1441,13 +1393,13 @@ __global__ __launch_bounds__(BlockThreads) void fp32AlignedKArgKernel(const floa
             PacketT current[Rows];
 #pragma unroll
             for (uint32_t r = 0; r < Rows; ++r)
-                current[r] = loadVectorizedInputPacket<float, ItemsPerLane>(row_input + r * inner_size);
+                current[r] = loadVectorizedInputPacket<InputT, ItemsPerLane>(row_input + r * inner_size);
             row_input += static_cast<uint64_t>(Rows) * inner_size;
             while (row + 2 * Rows <= row_count) {
                 PacketT next[Rows];
 #pragma unroll
                 for (uint32_t r = 0; r < Rows; ++r)
-                    next[r] = loadVectorizedInputPacket<float, ItemsPerLane>(row_input + r * inner_size);
+                    next[r] = loadVectorizedInputPacket<InputT, ItemsPerLane>(row_input + r * inner_size);
                 row_input += static_cast<uint64_t>(Rows) * inner_size;
 #pragma unroll
                 for (uint32_t r = 0; r < Rows; ++r)
@@ -1462,7 +1414,7 @@ __global__ __launch_bounds__(BlockThreads) void fp32AlignedKArgKernel(const floa
             row += Rows;
         }
         for (; row < row_count; ++row, row_input += inner_size)
-            fp32AlignedKArgKeyPacket(best_key, best_tail, loadVectorizedInputPacket<float, ItemsPerLane>(row_input),
+            fp32AlignedKArgKeyPacket(best_key, best_tail, loadVectorizedInputPacket<InputT, ItemsPerLane>(row_input),
                                      row, outputs.xor_mask);
         if constexpr (Staged) {
             uint64_t* partial =
@@ -1769,9 +1721,12 @@ __global__ __launch_bounds__(FP32_ARG_PACKED_SPLIT_MAX_THREADS) void fp32ArgWide
 
 // The FP32 AlignedK configurations: 8- and 16-byte packets x CTA 32 / 64 / 128 x Staged / Complete, each one kernel.
 // 1228: ScalarPacket (VALUE only) adds the 4-byte packet; the ARG twins have no scalar form.
-template <TiledRKStageTopology Topology, bool ScalarPacket = false, typename Callback>
+// 1243: ElementBytes 2 is the FP16 / BF16 VALUE kernel's: 2- (ScalarPacket), 4-, 8- and 16-byte packets. 1248: and
+// the FP16 / BF16 ARG twin's (no ScalarPacket): 4-, 8- and 16-byte packets.
+template <TiledRKStageTopology Topology, bool ScalarPacket = false, uint32_t ElementBytes = 4, typename Callback>
 [[nodiscard]] bool dispatchFp32AlignedKConfiguration(uint32_t packet_bytes, uint32_t block_threads,
                                                      Callback&& callback) {
+    static_assert(ElementBytes == 4 || ElementBytes == 2);
     const auto for_items = [&]<int ItemsPerLane>() {
         switch (block_threads) {
             case 32: callback.template operator()<ItemsPerLane, 32>(); return true;
@@ -1780,261 +1735,31 @@ template <TiledRKStageTopology Topology, bool ScalarPacket = false, typename Cal
             default: return false;
         }
     };
-    switch (packet_bytes) {
-        case 4:
-            if constexpr (ScalarPacket) {
-                return for_items.template operator()<1>();
-            } else {
-                return false;
-            }
-        case 8: return for_items.template operator()<2>();
-        case 16: return for_items.template operator()<4>();
-        default: return false;
-    }
-}
-
-template <typename InputT,
-          typename InputTransformT,
-          typename ReductionOpT,
-          typename OutputFinalizeT,
-          int ItemsPerLane,
-          int BlockThreads>
-__global__ __launch_bounds__(BlockThreads) void kParallelLeanCompleteKernel(const InputT* input,
-                                                                           void* output,
-                                                                           DataType output_dtype,
-                                                                           uint64_t outer_size,
-                                                                           uint64_t reduction_size,
-                                                                           uint64_t inner_size,
-                                                                           uint64_t output_outer_stride,
-                                                                           uint64_t output_inner_stride,
-                                                                           FastDivU32 packets_per_outer_divider,
-                                                                           InputTransformT input_transform,
-                                                                           OutputFinalizeT output_finalize,
-                                                                           float output_scale) {
-    constexpr size_t packet_bytes = sizeof(InputT) * ItemsPerLane;
-    static_assert(packet_bytes == 4 || packet_bytes == 8 || packet_bytes == 16);
-    static_assert(BlockThreads == 32 || BlockThreads == 64 || BlockThreads == 128 || BlockThreads == 256);
-    constexpr float Init = KParallelReductionIdentityFp32<ReductionOpT>::value;
-    const ReductionOpT reduction_op{};
-
-    // 1136: flat packet ownership. Thread t of the grid owns packet t of the [outer, K / ItemsPerLane] output packet
-    // space, so one CTA spans several outer rows when K is narrow. The former (outer, component tile) ownership left a
-    // CTA's lanes idle past K: at K = 2 one lane in 32 did work (1134 audit: FP8 staged continuations into 2-15 FP32
-    // shards ran at 0.1-0.4 TB/s from L2). Coalescing is unchanged for wide K (consecutive packets of one row) and
-    // for narrow K consecutive lanes read consecutive [R, K] slabs, which the R loop consumes in full.
-    // Grid X is capped at 65535 CTAs, so the loop grid-strides over all packets (FP32 continuations of FP8 staged
-    // reductions commonly have more than 65535 outer rows with narrow K).
-    // 1138: packet -> outer row through a precomputed 32-bit divisor while the packet space fits below 2^31 (the
-    // launcher passes divisor 1 otherwise, and the kernel then divides in 64 bits): the 64-bit division per packet
-    // made scalar-packet continuations (odd K, 1137 audit) run at about 0.64 TB/s into 2-3 shards.
-    const uint64_t packets_per_outer = ceilDivideU64(inner_size, static_cast<uint64_t>(ItemsPerLane));
-    const uint64_t total_packets = outer_size * packets_per_outer;
-    const bool fast_divide = packets_per_outer_divider.divisor == packets_per_outer;
-    const uint64_t grid_stride = static_cast<uint64_t>(gridDim.x) * static_cast<uint64_t>(BlockThreads);
-    for (uint64_t packet = static_cast<uint64_t>(blockIdx.x) * BlockThreads + threadIdx.x; packet < total_packets;
-         packet += grid_stride) {
-        const uint64_t outer_index = fast_divide ? packets_per_outer_divider.divide(static_cast<uint32_t>(packet))
-                                                 : packet / packets_per_outer;
-        const uint64_t packet_component_begin =
-            (packet - outer_index * packets_per_outer) * static_cast<uint64_t>(ItemsPerLane);
-
-        float local[ItemsPerLane];
-#pragma unroll
-        for (int item = 0; item < ItemsPerLane; ++item) {
-            local[item] = Init;
-        }
-
-        uint64_t input_index = outer_index * reduction_size * inner_size + packet_component_begin;
-        for (uint64_t row = 0; row < reduction_size; ++row) {
-            const PackedInputValues<InputT, ItemsPerLane> values =
-                loadVectorizedInputPacket<InputT, ItemsPerLane>(input + input_index);
-#pragma unroll
-            for (int item = 0; item < ItemsPerLane; ++item) {
-                local[item] = reduction_op(local[item], input_transform(ToFp32<InputT>{}(values.values[item])));
-            }
-            input_index += inner_size;
-        }
-
-        const uint64_t remaining = inner_size - packet_component_begin;
-        const uint64_t valid_items =
-            remaining < static_cast<uint64_t>(ItemsPerLane) ? remaining : static_cast<uint64_t>(ItemsPerLane);
-        storeKParallelFinalPacket(output,
-                                  output_dtype,
-                                  outer_index,
-                                  packet_component_begin,
-                                  output_outer_stride,
-                                  output_inner_stride,
-                                  local,
-                                  valid_items,
-                                  output_finalize,
-                                  output_scale);
-    }
-}
-
-template <typename InputT,
-          typename InputTransformT,
-          typename ReductionOpT,
-          typename OutputFinalizeT,
-          int ItemsPerLane,
-          int BlockThreads,
-          TiledRKStageTopology Topology>
-__global__ __launch_bounds__(BlockThreads) void kParallelTiledStageKernel(const InputT* input,
-                                                                         void* stage_output,
-                                                                         DataType output_dtype,
-                                                                         uint64_t outer_size,
-                                                                         uint64_t reduction_size,
-                                                                         uint64_t inner_size,
-                                                                         uint64_t output_outer_stride,
-                                                                         uint64_t output_inner_stride,
-                                                                         uint64_t shards_per_output,
-                                                                         FastDivU32 packets_per_outer_divider,
-                                                                         InputTransformT input_transform,
-                                                                         OutputFinalizeT output_finalize,
-                                                                         float output_scale) {
-    constexpr size_t packet_bytes = sizeof(InputT) * ItemsPerLane;
-    static_assert(packet_bytes == 4 || packet_bytes == 8 || packet_bytes == 16);
-    static_assert(BlockThreads == 32 || BlockThreads == 64 || BlockThreads == 128 || BlockThreads == 256);
-    constexpr float Init = KParallelReductionIdentityFp32<ReductionOpT>::value;
-    const ReductionOpT reduction_op{};
-
-    // 1136: flat packet ownership per shard, as kParallelLeanCompleteKernel: a work item is (BlockThreads consecutive
-    // packets of the [outer, K / ItemsPerLane] packet space, shard), so narrow K no longer idles most lanes.
-    const uint64_t packets_per_outer = ceilDivideU64(inner_size, static_cast<uint64_t>(ItemsPerLane));
-    const uint64_t total_packets = outer_size * packets_per_outer;
-    const bool fast_divide = packets_per_outer_divider.divisor == packets_per_outer;  // 1138, as Complete
-    const uint64_t packet_blocks = ceilDivideU64(total_packets, static_cast<uint64_t>(BlockThreads));
-    const uint64_t total_work = packet_blocks * shards_per_output;
-    const uint64_t grid_stride = static_cast<uint64_t>(gridDim.x);
-
-    for (uint64_t work_index = static_cast<uint64_t>(blockIdx.x); work_index < total_work; work_index += grid_stride) {
-        const uint64_t shard = work_index % shards_per_output;
-        const uint64_t packet = (work_index / shards_per_output) * BlockThreads + threadIdx.x;
-        const bool owns_packet = packet < total_packets;
-        const uint64_t outer_index =
-            !owns_packet ? 0
-            : fast_divide ? packets_per_outer_divider.divide(static_cast<uint32_t>(packet))
-                          : packet / packets_per_outer;
-        const uint64_t packet_component_begin =
-            owns_packet ? (packet - outer_index * packets_per_outer) * static_cast<uint64_t>(ItemsPerLane) : 0;
-
-        // Split R evenly instead of coupling the physical kernel to a particular rows/shard policy. The planner owns
-        // shard depth. Complete topology is the exact same reduction core with one shard and a final-output epilogue.
-        const uint64_t base_rows = reduction_size / shards_per_output;
-        const uint64_t extra_rows = reduction_size % shards_per_output;
-        const uint64_t row_begin = shard * base_rows + (shard < extra_rows ? shard : extra_rows);
-        const uint64_t row_count = base_rows + static_cast<uint64_t>(shard < extra_rows);
-        const uint64_t row_end = row_begin + row_count;
-
-        float local[ItemsPerLane];
-#pragma unroll
-        for (int item = 0; item < ItemsPerLane; ++item) {
-            local[item] = Init;
-        }
-
-        if (owns_packet) {
-            uint64_t input_index =
-                (outer_index * reduction_size + row_begin) * inner_size + packet_component_begin;
-            for (uint64_t row = row_begin; row < row_end; ++row) {
-                const PackedInputValues<InputT, ItemsPerLane> values =
-                    loadVectorizedInputPacket<InputT, ItemsPerLane>(input + input_index);
-#pragma unroll
-                for (int item = 0; item < ItemsPerLane; ++item) {
-                    local[item] = reduction_op(
-                        local[item], input_transform(ToFp32<InputT>{}(values.values[item])));
+    if constexpr (ElementBytes == 2) {
+        switch (packet_bytes) {
+            case 2:
+                if constexpr (ScalarPacket) {
+                    return for_items.template operator()<1>();
+                } else {
+                    return false;
                 }
-                input_index += inner_size;
-            }
-
-            const uint64_t remaining = inner_size - packet_component_begin;
-            const uint64_t valid_items =
-                remaining < static_cast<uint64_t>(ItemsPerLane) ? remaining : static_cast<uint64_t>(ItemsPerLane);
-            if constexpr (Topology == TiledRKStageTopology::Staged) {
-                float* fp32_partials = static_cast<float*>(stage_output);
-                float* destination = fp32_partials
-                                     + (outer_index * shards_per_output + shard) * inner_size
-                                     + packet_component_begin;
-                storeKParallelFp32Packet<ItemsPerLane>(destination, local, valid_items);
-            } else {
-                static_assert(Topology == TiledRKStageTopology::Complete);
-                storeKParallelFinalPacket(stage_output,
-                                          output_dtype,
-                                          outer_index,
-                                          packet_component_begin,
-                                          output_outer_stride,
-                                          output_inner_stride,
-                                          local,
-                                          valid_items,
-                                          output_finalize,
-                                          output_scale);
-            }
+            case 4: return for_items.template operator()<2>();
+            case 8: return for_items.template operator()<4>();
+            case 16: return for_items.template operator()<8>();
+            default: return false;
         }
-    }
-}
-
-template <typename InputT, size_t PacketBytes, int BlockThreads, TiledRKStageTopology Topology>
-[[nodiscard]] CubKernelOccupancyInfo queryKParallelOccupancyForPacketAndBlock() {
-    static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
-    static_assert(PacketBytes % sizeof(InputT) == 0);
-    constexpr int ItemsPerLane = static_cast<int>(PacketBytes / sizeof(InputT));
-    using InputTransformT = IdentityFp32;
-    using ReductionOpT = cuda::std::plus<float>;
-    using OutputFinalizeT = AdditiveFinalizeFp32;
-    const auto kernel = [] {
-        if constexpr (Topology == TiledRKStageTopology::Complete) {
-            return kParallelLeanCompleteKernel<InputT,
-                                               InputTransformT,
-                                               ReductionOpT,
-                                               OutputFinalizeT,
-                                               ItemsPerLane,
-                                               BlockThreads>;
-        } else {
-            return kParallelTiledStageKernel<InputT,
-                                             InputTransformT,
-                                             ReductionOpT,
-                                             OutputFinalizeT,
-                                             ItemsPerLane,
-                                             BlockThreads,
-                                             Topology>;
+    } else {
+        switch (packet_bytes) {
+            case 4:
+                if constexpr (ScalarPacket) {
+                    return for_items.template operator()<1>();
+                } else {
+                    return false;
+                }
+            case 8: return for_items.template operator()<2>();
+            case 16: return for_items.template operator()<4>();
+            default: return false;
         }
-    }();
-    cudaFuncAttributes attributes{};
-    CUDA_CHECK(cudaFuncGetAttributes(&attributes, kernel));
-    int active_blocks = 0;
-    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active_blocks, kernel, BlockThreads, 0));
-    return CubKernelOccupancyInfo{attributes.numRegs,
-                                  attributes.sharedSizeBytes,
-                                  0,
-                                  active_blocks,
-                                  active_blocks * (BlockThreads / TILED_REDUCTION_WARP_THREADS)};
-}
-
-template <typename InputT, size_t PacketBytes, TiledRKStageTopology Topology>
-[[nodiscard]] CubKernelOccupancyInfo queryKParallelOccupancyForPacket(uint32_t block_threads) {
-    switch (block_threads) {
-        case 32:
-            return queryKParallelOccupancyForPacketAndBlock<InputT, PacketBytes, 32, Topology>();
-        case 64:
-            return queryKParallelOccupancyForPacketAndBlock<InputT, PacketBytes, 64, Topology>();
-        case 128:
-            return queryKParallelOccupancyForPacketAndBlock<InputT, PacketBytes, 128, Topology>();
-        case 256:
-            return queryKParallelOccupancyForPacketAndBlock<InputT, PacketBytes, 256, Topology>();
-        default:
-            throw std::logic_error("K-parallel occupancy query requires a supported CTA width.");
-    }
-}
-
-template <typename InputT, TiledRKStageTopology Topology>
-[[nodiscard]] CubKernelOccupancyInfo queryKParallelOccupancyForInput(size_t packet_bytes, uint32_t block_threads) {
-    switch (packet_bytes) {
-        case 4:
-            return queryKParallelOccupancyForPacket<InputT, 4, Topology>(block_threads);
-        case 8:
-            return queryKParallelOccupancyForPacket<InputT, 8, Topology>(block_threads);
-        case 16:
-            return queryKParallelOccupancyForPacket<InputT, 16, Topology>(block_threads);
-        default:
-            throw std::logic_error("K-parallel occupancy query requires a 4-, 8-, or 16-byte packet.");
     }
 }
 
@@ -2109,251 +1834,6 @@ template <typename InputT, TiledRKStageTopology Topology>
 }
 
 #endif  // THOR_CUB_ENABLE_FP8_TYPES
-
-template <typename InputT,
-          typename InputTransformT,
-          typename ReductionOpT,
-          typename OutputFinalizeT,
-          size_t PacketBytes,
-          int BlockThreads,
-          TiledRKStageTopology Topology>
-void launchKParallelForPacketAndBlock(const Tensor& input,
-                                      Tensor& stage_output,
-                                      const CubReductionGeometry& geometry,
-                                      uint64_t shards_per_output,
-                                      InputTransformT input_transform,
-                                      OutputFinalizeT output_finalize,
-                                      float output_scale,
-                                      Stream& stream) {
-    static_assert(PacketBytes == 4 || PacketBytes == 8 || PacketBytes == 16);
-    static_assert(PacketBytes % sizeof(InputT) == 0);
-    static_assert(BlockThreads == 32 || BlockThreads == 64 || BlockThreads == 128 || BlockThreads == 256);
-    constexpr int items_per_lane = static_cast<int>(PacketBytes / sizeof(InputT));
-
-    // 1136: flat packet ownership (see kParallelLeanCompleteKernel): BlockThreads consecutive output packets per CTA
-    // work item, times shards for Staged.
-    const uint64_t packets_per_outer = ceilDivideU64(geometry.inner_size, static_cast<uint64_t>(items_per_lane));
-    if (geometry.outer_size > std::numeric_limits<uint64_t>::max() / packets_per_outer) {
-        throw std::overflow_error("K-parallel tiled stage packet count overflows uint64_t.");
-    }
-    const uint64_t packet_blocks =
-        ceilDivideU64(geometry.outer_size * packets_per_outer, static_cast<uint64_t>(BlockThreads));
-    if (packet_blocks > std::numeric_limits<uint64_t>::max() / shards_per_output) {
-        throw std::overflow_error("K-parallel tiled stage work count overflows uint64_t.");
-    }
-    const uint64_t total_work = packet_blocks * shards_per_output;
-    // 1138: the fast divisor needs every packet index below 2^31; otherwise divisor 1 makes the kernels divide in 64
-    // bits (when packets_per_outer is itself 1 both paths are the identity).
-    const FastDivU32 packets_per_outer_divider =
-        geometry.outer_size * packets_per_outer < FastDivU32::MAX_DIVIDEND
-            ? FastDivU32::make(static_cast<uint32_t>(packets_per_outer))
-            : FastDivU32::make(1);
-    const unsigned int grid_blocks = static_cast<unsigned int>(
-        std::min<uint64_t>(total_work, TILED_REDUCTION_MAX_GRID_BLOCKS));
-    if (grid_blocks == 0) {
-        throw std::logic_error("K-parallel tiled stage requires non-zero work.");
-    }
-
-    if constexpr (Topology == TiledRKStageTopology::Complete) {
-        if (shards_per_output != 1) {
-            throw std::logic_error("Lean K-parallel Complete requires exactly one R shard.");
-        }
-        kParallelLeanCompleteKernel<InputT,
-                                    InputTransformT,
-                                    ReductionOpT,
-                                    OutputFinalizeT,
-                                    items_per_lane,
-                                    BlockThreads>
-            <<<grid_blocks, BlockThreads, 0, stream.getStream()>>>(input.getMemPtr<InputT>(),
-                                                                   stage_output.getMemPtr(),
-                                                                   stage_output.getDataType(),
-                                                                   geometry.outer_size,
-                                                                   geometry.reduction_size,
-                                                                   geometry.inner_size,
-                                                                   geometry.tiled_output_outer_stride,
-                                                                   geometry.tiled_output_inner_stride,
-                                                                   packets_per_outer_divider,
-                                                                   input_transform,
-                                                                   output_finalize,
-                                                                   output_scale);
-    } else {
-        kParallelTiledStageKernel<InputT,
-                                  InputTransformT,
-                                  ReductionOpT,
-                                  OutputFinalizeT,
-                                  items_per_lane,
-                                  BlockThreads,
-                                  Topology>
-            <<<grid_blocks, BlockThreads, 0, stream.getStream()>>>(input.getMemPtr<InputT>(),
-                                                                   stage_output.getMemPtr(),
-                                                                   stage_output.getDataType(),
-                                                                   geometry.outer_size,
-                                                                   geometry.reduction_size,
-                                                                   geometry.inner_size,
-                                                                   geometry.tiled_output_outer_stride,
-                                                                   geometry.tiled_output_inner_stride,
-                                                                   shards_per_output,
-                                                                   packets_per_outer_divider,
-                                                                   input_transform,
-                                                                   output_finalize,
-                                                                   output_scale);
-    }
-    CUDA_CHECK(cudaGetLastError());
-}
-
-template <typename InputT,
-          typename InputTransformT,
-          typename ReductionOpT,
-          typename OutputFinalizeT,
-          size_t PacketBytes,
-          TiledRKStageTopology Topology>
-void launchKParallelForPacket(const Tensor& input,
-                              Tensor& stage_output,
-                              const CubReductionGeometry& geometry,
-                              uint32_t block_threads,
-                              uint64_t shards_per_output,
-                              InputTransformT input_transform,
-                              OutputFinalizeT output_finalize,
-                              float output_scale,
-                              Stream& stream) {
-    switch (block_threads) {
-        case 32:
-            launchKParallelForPacketAndBlock<InputT,
-                                             InputTransformT,
-                                             ReductionOpT,
-                                             OutputFinalizeT,
-                                             PacketBytes,
-                                             32,
-                                             Topology>(input,
-                                                       stage_output,
-                                                       geometry,
-                                                       shards_per_output,
-                                                       input_transform,
-                                                       output_finalize,
-                                                       output_scale,
-                                                       stream);
-            return;
-        case 64:
-            launchKParallelForPacketAndBlock<InputT,
-                                             InputTransformT,
-                                             ReductionOpT,
-                                             OutputFinalizeT,
-                                             PacketBytes,
-                                             64,
-                                             Topology>(input,
-                                                       stage_output,
-                                                       geometry,
-                                                       shards_per_output,
-                                                       input_transform,
-                                                       output_finalize,
-                                                       output_scale,
-                                                       stream);
-            return;
-        case 128:
-            launchKParallelForPacketAndBlock<InputT,
-                                             InputTransformT,
-                                             ReductionOpT,
-                                             OutputFinalizeT,
-                                             PacketBytes,
-                                             128,
-                                             Topology>(input,
-                                                       stage_output,
-                                                       geometry,
-                                                       shards_per_output,
-                                                       input_transform,
-                                                       output_finalize,
-                                                       output_scale,
-                                                       stream);
-            return;
-        case 256:
-            launchKParallelForPacketAndBlock<InputT,
-                                             InputTransformT,
-                                             ReductionOpT,
-                                             OutputFinalizeT,
-                                             PacketBytes,
-                                             256,
-                                             Topology>(input,
-                                                       stage_output,
-                                                       geometry,
-                                                       shards_per_output,
-                                                       input_transform,
-                                                       output_finalize,
-                                                       output_scale,
-                                                       stream);
-            return;
-        default:
-            throw std::logic_error("K-parallel tiled stage selected an unsupported CTA width.");
-    }
-}
-
-template <typename InputT,
-          typename InputTransformT,
-          typename ReductionOpT,
-          typename OutputFinalizeT,
-          TiledRKStageTopology Topology>
-void launchKParallelForInput(const Tensor& input,
-                             Tensor& stage_output,
-                             const CubReductionGeometry& geometry,
-                             size_t packet_bytes,
-                             uint32_t block_threads,
-                             uint64_t shards_per_output,
-                             InputTransformT input_transform,
-                             OutputFinalizeT output_finalize,
-                             float output_scale,
-                             Stream& stream) {
-    switch (packet_bytes) {
-        case 16:
-            launchKParallelForPacket<InputT,
-                                     InputTransformT,
-                                     ReductionOpT,
-                                     OutputFinalizeT,
-                                     16,
-                                     Topology>(input,
-                                               stage_output,
-                                               geometry,
-                                               block_threads,
-                                               shards_per_output,
-                                               input_transform,
-                                               output_finalize,
-                                               output_scale,
-                                               stream);
-            return;
-        case 8:
-            launchKParallelForPacket<InputT,
-                                     InputTransformT,
-                                     ReductionOpT,
-                                     OutputFinalizeT,
-                                     8,
-                                     Topology>(input,
-                                               stage_output,
-                                               geometry,
-                                               block_threads,
-                                               shards_per_output,
-                                               input_transform,
-                                               output_finalize,
-                                               output_scale,
-                                               stream);
-            return;
-        case 4:
-            launchKParallelForPacket<InputT,
-                                     InputTransformT,
-                                     ReductionOpT,
-                                     OutputFinalizeT,
-                                     4,
-                                     Topology>(input,
-                                               stage_output,
-                                               geometry,
-                                               block_threads,
-                                               shards_per_output,
-                                               input_transform,
-                                               output_finalize,
-                                               output_scale,
-                                               stream);
-            return;
-        default:
-            throw std::logic_error("K-parallel tiled stage selected an invalid packet width.");
-    }
-}
 
 #if THOR_CUB_ENABLE_FP8_TYPES
 
@@ -2503,63 +1983,6 @@ void launchKParallelFp8ForBlock(const Tensor& input,
 
 #endif  // THOR_CUB_ENABLE_FP8_TYPES
 
-template <typename InputTransformT,
-          typename ReductionOpT,
-          typename OutputFinalizeT,
-          TiledRKStageTopology Topology>
-void dispatchInputType(const Tensor& input,
-                       Tensor& stage_output,
-                       const CubReductionGeometry& geometry,
-                       size_t packet_bytes,
-                       uint32_t block_threads,
-                       uint64_t shards_per_output,
-                       InputTransformT input_transform,
-                       OutputFinalizeT output_finalize,
-                       float output_scale,
-                       Stream& stream) {
-    // FP8 never reaches this generic grid: dispatchFp8AlignedKStageSemantics owns its retained configurations.
-    switch (input.getDataType()) {
-        case DataType::FP16:
-            launchKParallelForInput<__half, InputTransformT, ReductionOpT, OutputFinalizeT, Topology>(input,
-                                                                                                      stage_output,
-                                                                                                      geometry,
-                                                                                                      packet_bytes,
-                                                                                                      block_threads,
-                                                                                                      shards_per_output,
-                                                                                                      input_transform,
-                                                                                                      output_finalize,
-                                                                                                      output_scale,
-                                                                                                      stream);
-            return;
-        case DataType::BF16:
-            launchKParallelForInput<__nv_bfloat16, InputTransformT, ReductionOpT, OutputFinalizeT, Topology>(input,
-                                                                                                              stage_output,
-                                                                                                              geometry,
-                                                                                                              packet_bytes,
-                                                                                                              block_threads,
-                                                                                                              shards_per_output,
-                                                                                                              input_transform,
-                                                                                                              output_finalize,
-                                                                                                              output_scale,
-                                                                                                              stream);
-            return;
-        case DataType::FP32:
-            launchKParallelForInput<float, InputTransformT, ReductionOpT, OutputFinalizeT, Topology>(input,
-                                                                                                     stage_output,
-                                                                                                     geometry,
-                                                                                                     packet_bytes,
-                                                                                                     block_threads,
-                                                                                                     shards_per_output,
-                                                                                                     input_transform,
-                                                                                                     output_finalize,
-                                                                                                     output_scale,
-                                                                                                     stream);
-            return;
-        default:
-            throw std::logic_error("K-parallel tiled stage received an unsupported input dtype.");
-    }
-}
-
 [[nodiscard]] size_t elementBytes(DataType dtype) {
     switch (dtype) {
 #if THOR_CUB_ENABLE_FP8_TYPES
@@ -2589,32 +2012,11 @@ void dispatchInputType(const Tensor& input,
     throw std::logic_error("Unsupported K-parallel tiled output finalizer.");
 }
 
-template <TiledRKStageTopology Topology, typename InputTransformT, typename ReductionOpT, typename OutputFinalizeT>
-void dispatchStage(const Tensor& input,
-                   Tensor& stage_output,
-                   const CubReductionGeometry& geometry,
-                   const KParallelTiledStagePlan& plan,
-                   InputTransformT input_transform,
-                   OutputFinalizeT output_finalize,
-                   float output_scale,
-                   Stream& stream) {
-    dispatchInputType<InputTransformT, ReductionOpT, OutputFinalizeT, Topology>(input,
-                                                                                stage_output,
-                                                                                geometry,
-                                                                                plan.packet_bytes,
-                                                                                plan.block_threads,
-                                                                                plan.shards_per_output,
-                                                                                input_transform,
-                                                                                output_finalize,
-                                                                                output_scale,
-                                                                                stream);
-}
-
 #if THOR_CUB_ENABLE_FP8_TYPES
 
 // Retained FP8 AlignedK stage dispatch. Every FP8 (transform, combine, finalizer)
 // composition is routed only through the retained packet/CTA configurations; the
-// generic dispatchStage() grid is never instantiated for FP8 input. Within a retained
+// generic grid is gone (1258/1259: FP16 / BF16 / FP32 use their own AlignedK kernels). Within a retained
 // configuration, launchKParallelFp8ForBlock selects the hoisted staged, unified
 // complete or typed packet kernel, and honors the accepted typed pruning.
 template <TiledRKStageTopology Topology, typename TransformT, typename ReductionOpT, typename OutputFinalizeT>
@@ -2708,97 +2110,6 @@ void dispatchFp8AlignedKStageSemantics(const CubReductionStageSemantics& semanti
 
 #endif  // THOR_CUB_ENABLE_FP8_TYPES
 
-template <TiledRKStageTopology Topology>
-void dispatchStageSemantics(const CubReductionStageSemantics& semantics,
-                            const Tensor& input,
-                            Tensor& stage_output,
-                            const CubReductionGeometry& geometry,
-                            const KParallelTiledStagePlan& plan,
-                            float output_scale,
-                            Stream& stream) {
-    switch (semantics.combine) {
-        case CubReductionStageCombine::Sum: {
-            const AdditiveFinalizeFp32 output_finalize = additiveFinalizeFromSemantics(semantics);
-            switch (semantics.input_transform) {
-                case CubReductionStageInputTransform::Identity:
-                    dispatchStage<Topology, IdentityFp32, cuda::std::plus<float>>(input,
-                                                                                  stage_output,
-                                                                                  geometry,
-                                                                                  plan,
-                                                                                  IdentityFp32{},
-                                                                                  output_finalize,
-                                                                                  output_scale,
-                                                                                  stream);
-                    return;
-                case CubReductionStageInputTransform::AbsoluteValue:
-                    dispatchStage<Topology, AbsoluteValueFp32, cuda::std::plus<float>>(input,
-                                                                                       stage_output,
-                                                                                       geometry,
-                                                                                       plan,
-                                                                                       AbsoluteValueFp32{},
-                                                                                       output_finalize,
-                                                                                       output_scale,
-                                                                                       stream);
-                    return;
-                case CubReductionStageInputTransform::Square:
-                    dispatchStage<Topology, SquareFp32, cuda::std::plus<float>>(input,
-                                                                                stage_output,
-                                                                                geometry,
-                                                                                plan,
-                                                                                SquareFp32{},
-                                                                                output_finalize,
-                                                                                output_scale,
-                                                                                stream);
-                    return;
-            }
-            break;
-        }
-        case CubReductionStageCombine::Product:
-            if (semantics.input_transform == CubReductionStageInputTransform::Identity
-                && semantics.finalize == CubReductionStageFinalize::Identity) {
-                dispatchStage<Topology, IdentityFp32, cuda::std::multiplies<float>>(input,
-                                                                                     stage_output,
-                                                                                     geometry,
-                                                                                     plan,
-                                                                                     IdentityFp32{},
-                                                                                     IdentityFp32{},
-                                                                                     output_scale,
-                                                                                     stream);
-                return;
-            }
-            break;
-        case CubReductionStageCombine::Minimum:
-            if (semantics.input_transform == CubReductionStageInputTransform::Identity
-                && semantics.finalize == CubReductionStageFinalize::Identity) {
-                dispatchStage<Topology, IdentityFp32, PropagatingMinimumFp32>(input,
-                                                                              stage_output,
-                                                                              geometry,
-                                                                              plan,
-                                                                              IdentityFp32{},
-                                                                              IdentityFp32{},
-                                                                              output_scale,
-                                                                              stream);
-                return;
-            }
-            break;
-        case CubReductionStageCombine::Maximum:
-            if (semantics.input_transform == CubReductionStageInputTransform::Identity
-                && semantics.finalize == CubReductionStageFinalize::Identity) {
-                dispatchStage<Topology, IdentityFp32, PropagatingMaximumFp32>(input,
-                                                                              stage_output,
-                                                                              geometry,
-                                                                              plan,
-                                                                              IdentityFp32{},
-                                                                              IdentityFp32{},
-                                                                              output_scale,
-                                                                              stream);
-                return;
-            }
-            break;
-    }
-    throw std::logic_error("Unsupported K-parallel tiled stage semantics.");
-}
-
 void validateCompleteOutput(const Tensor& output, const CubReductionGeometry& geometry) {
     if (geometry.outer_size > std::numeric_limits<uint64_t>::max() / geometry.inner_size) {
         throw std::overflow_error("K-parallel complete tiled output element count overflows uint64_t.");
@@ -2839,17 +2150,6 @@ CubKernelOccupancyInfo queryKParallelTiledStageOccupancy(DataType input_dtype,
         && plan.block_threads != 256) {
         throw std::logic_error("K-parallel occupancy query requires a compile-time-specialized CTA width.");
     }
-    const auto query_for = [&]<typename InputT>() -> CubKernelOccupancyInfo {
-        if (plan.packet_bytes < sizeof(InputT) || plan.packet_bytes % sizeof(InputT) != 0) {
-            throw std::logic_error("K-parallel occupancy query packet is incompatible with the input dtype.");
-        }
-        if (plan.topology == TiledRKStageTopology::Complete) {
-            return queryKParallelOccupancyForInput<InputT, TiledRKStageTopology::Complete>(
-                plan.packet_bytes, plan.block_threads);
-        }
-        return queryKParallelOccupancyForInput<InputT, TiledRKStageTopology::Staged>(
-            plan.packet_bytes, plan.block_threads);
-    };
     switch (input_dtype) {
 #if THOR_CUB_ENABLE_FP8_TYPES
         case DataType::FP8_E4M3:
@@ -2867,14 +2167,9 @@ CubKernelOccupancyInfo queryKParallelTiledStageOccupancy(DataType input_dtype,
             return queryKParallelFp8Occupancy<__nv_fp8_e5m2, TiledRKStageTopology::Staged>(
                 plan.packet_bytes, plan.block_threads);
 #endif
-        case DataType::FP16:
-            return query_for.template operator()<__half>();
-        case DataType::BF16:
-            return query_for.template operator()<__nv_bfloat16>();
-        case DataType::FP32:
-            return query_for.template operator()<float>();
         default:
-            throw std::logic_error("K-parallel occupancy query received an unsupported input dtype.");
+            // 1259: the generic FP16 / BF16 / FP32 KParallel grid is deleted; those dtypes use their AlignedK passes.
+            throw std::logic_error("K-parallel occupancy query is FP8 AlignedK only.");
     }
 }
 
@@ -2895,14 +2190,19 @@ void launchKParallelTiledStage(const CubReductionStageSemantics& semantics,
     if (plan.packet_bytes != 2 && plan.packet_bytes != 4 && plan.packet_bytes != 8 && plan.packet_bytes != 16) {
         throw std::logic_error("K-parallel tiled stage requires a 2-, 4-, 8-, or 16-byte input packet.");
     }
-    const size_t input_element_bytes = elementBytes(input.getDataType());
 #if THOR_CUB_ENABLE_FP8_TYPES
     const bool fp8_input =
         input.getDataType() == DataType::FP8_E4M3 || input.getDataType() == DataType::FP8_E5M2;
-    if (!fp8_input && plan.packet_bytes == 2) {
-        throw std::logic_error("Two-byte K-parallel packets are currently specialized only for FP8 input.");
+#else
+    const bool fp8_input = false;
+#endif
+    if (!fp8_input) {
+        // 1259: the generic FP16 / BF16 / FP32 KParallel grid is deleted; those dtypes use their AlignedK passes.
+        throw std::logic_error("K-parallel tiled stage is FP8 AlignedK only.");
     }
-    if (fp8_input && !kParallelFp8OutputDTypeSupported(stage_output.getDataType())) {
+    const size_t input_element_bytes = elementBytes(input.getDataType());
+#if THOR_CUB_ENABLE_FP8_TYPES
+    if (!kParallelFp8OutputDTypeSupported(stage_output.getDataType())) {
         throw std::logic_error("FP8 K-parallel writeback requires a floating-point output dtype.");
     }
     if (fp8_input && plan.packet_bytes < 16
@@ -2945,14 +2245,9 @@ void launchKParallelTiledStage(const CubReductionStageSemantics& semantics,
             partial_semantics.finalize = CubReductionStageFinalize::Identity;
             partial_semantics.finalize_divisor = 1;
 #if THOR_CUB_ENABLE_FP8_TYPES
-            if (fp8_input) {
-                dispatchFp8AlignedKStageSemantics<TiledRKStageTopology::Staged>(
-                    partial_semantics, input, stage_output, geometry, plan, 1.0f, stream);
-                return;
-            }
-#endif
-            dispatchStageSemantics<TiledRKStageTopology::Staged>(
+            dispatchFp8AlignedKStageSemantics<TiledRKStageTopology::Staged>(
                 partial_semantics, input, stage_output, geometry, plan, 1.0f, stream);
+#endif
             return;
         }
         case TiledRKStageTopology::Complete:
@@ -2979,14 +2274,9 @@ void launchKParallelTiledStage(const CubReductionStageSemantics& semantics,
 #endif
             validateCompleteOutput(stage_output, geometry);
 #if THOR_CUB_ENABLE_FP8_TYPES
-            if (fp8_input) {
-                dispatchFp8AlignedKStageSemantics<TiledRKStageTopology::Complete>(
-                    semantics, input, stage_output, geometry, plan, output_scale, stream);
-                return;
-            }
-#endif
-            dispatchStageSemantics<TiledRKStageTopology::Complete>(
+            dispatchFp8AlignedKStageSemantics<TiledRKStageTopology::Complete>(
                 semantics, input, stage_output, geometry, plan, output_scale, stream);
+#endif
             return;
     }
     throw std::logic_error("K-parallel tiled stage selected an invalid topology.");
@@ -3188,19 +2478,34 @@ CubKernelOccupancyInfo queryFp8AlignedKStageOccupancy(
 }
 
 
-// ---- 1188: FP32 AlignedK (see fp32AlignedKKernel). 1228: and the 4-byte packet (VALUE only).
-bool fp32AlignedKSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size, uint32_t packet_bytes,
-                          uint32_t block_threads, uint64_t shards_per_output) {
-    if ((packet_bytes != 4 && packet_bytes != 8 && packet_bytes != 16) ||
+// ---- 1188: FP32 AlignedK (see fp32AlignedKKernel). 1228: and the 4-byte packet (VALUE only). 1243: and FP16 / BF16.
+namespace {
+[[nodiscard]] bool alignedKSupportsElement(uint32_t element_bytes, uint64_t outer_size, uint64_t reduction_size,
+                                           uint64_t inner_size, uint32_t packet_bytes, uint32_t block_threads,
+                                           uint64_t shards_per_output) {
+    if (packet_bytes < element_bytes || packet_bytes > 16 || (packet_bytes & (packet_bytes - 1)) != 0 ||
         (block_threads != 32 && block_threads != 64 && block_threads != 128) || outer_size == 0 ||
         reduction_size == 0 || inner_size == 0 || shards_per_output == 0 || shards_per_output > reduction_size) {
         return false;
     }
-    const uint64_t items = packet_bytes / 4;
+    const uint64_t items = packet_bytes / element_bytes;
     if (inner_size % items != 0) return false;
     const uint64_t tiles = ceilDivideU64(inner_size, items * block_threads);
     return Fp8RK::fp8RKWorkGridFits(shards_per_output, tiles, outer_size) &&
            ceilDivideU64(reduction_size, shards_per_output) <= std::numeric_limits<uint32_t>::max();
+}
+}  // namespace
+
+bool fp32AlignedKSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size, uint32_t packet_bytes,
+                          uint32_t block_threads, uint64_t shards_per_output) {
+    return alignedKSupportsElement(4, outer_size, reduction_size, inner_size, packet_bytes, block_threads,
+                                   shards_per_output);
+}
+
+bool f16AlignedKSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size, uint32_t packet_bytes,
+                         uint32_t block_threads, uint64_t shards_per_output) {
+    return alignedKSupportsElement(2, outer_size, reduction_size, inner_size, packet_bytes, block_threads,
+                                   shards_per_output);
 }
 
 namespace {
@@ -3213,9 +2518,6 @@ namespace {
         case DataType::FP16:
         case DataType::BF16:
         case DataType::FP32:
-#if THOR_CUB_ENABLE_64BIT_TYPES
-        case DataType::FP64:
-#endif
             return true;
         default:
             return false;
@@ -3231,32 +2533,36 @@ namespace {
         return semantics.input_transform == CubReductionStageInputTransform::Identity;
     return true;
 }
-}  // namespace
 
-void launchFp32AlignedKStage(const CubReductionStageSemantics& semantics,
-                             const Tensor& input,
-                             Tensor& stage_output,
-                             const CubReductionGeometry& geometry,
-                             uint32_t packet_bytes,
-                             uint32_t block_threads,
-                             uint64_t shards_per_output,
-                             float output_scale,
-                             Stream& stream) {
+// One input type's AlignedK stage: FP32 (packets 4 / 8 / 16) or FP16 / BF16 (packets 2 / 4 / 8 / 16). The FP16 / BF16
+// launcher checks the input dtype and picks InputT; `name` labels the errors.
+template <typename InputT>
+void launchAlignedKStageTyped(const CubReductionStageSemantics& semantics,
+                              const Tensor& input,
+                              Tensor& stage_output,
+                              const CubReductionGeometry& geometry,
+                              uint32_t packet_bytes,
+                              uint32_t block_threads,
+                              uint64_t shards_per_output,
+                              float output_scale,
+                              Stream& stream,
+                              const char* name) {
+    constexpr uint32_t ElementBytes = sizeof(InputT);
     const bool staged = shards_per_output > 1;
-    if (input.getDataType() != DataType::FP32 || !fp32AlignedKSemanticsSupported(semantics) ||
-        !fp32AlignedKSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size, packet_bytes,
-                              block_threads, shards_per_output) ||
+    if (!fp32AlignedKSemanticsSupported(semantics) ||
+        !alignedKSupportsElement(ElementBytes, geometry.outer_size, geometry.reduction_size, geometry.inner_size,
+                                 packet_bytes, block_threads, shards_per_output) ||
         input.getTotalNumElements() != geometry.outer_size * geometry.reduction_size * geometry.inner_size ||
         (reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{packet_bytes - 1}) != 0) {
-        throw std::logic_error("FP32 AlignedK received an unsupported input, geometry or semantics.");
+        throw std::logic_error(std::string(name) + " AlignedK received an unsupported input, geometry or semantics.");
     }
     if (staged ? (stage_output.getDataType() != DataType::FP32 ||
                   stage_output.getTotalNumElements() != geometry.outer_size * shards_per_output * geometry.inner_size)
                : (!fp32AlignedKOutputSupported(stage_output.getDataType()) ||
                   stage_output.getTotalNumElements() != geometry.outer_size * geometry.inner_size)) {
-        throw std::logic_error("FP32 AlignedK received an unsupported stage output.");
+        throw std::logic_error(std::string(name) + " AlignedK received an unsupported stage output.");
     }
-    const uint64_t items = packet_bytes / 4;
+    const uint64_t items = packet_bytes / ElementBytes;
     const uint64_t component_tiles = ceilDivideU64(geometry.inner_size, items * block_threads);
     const ReductionShardRows shard_rows = balancedReductionShardRows(geometry.reduction_size, shards_per_output);
     const dim3 grid_blocks = reductionWorkGrid(shards_per_output, component_tiles, geometry.outer_size, 0);
@@ -3268,11 +2574,11 @@ void launchFp32AlignedKStage(const CubReductionStageSemantics& semantics,
                                                                           : geometry.inner_size;
     const uint64_t inner_stride = geometry.tiled_output_inner_stride != 0 ? geometry.tiled_output_inner_stride : 1;
     const auto launch = [&]<TiledRKStageTopology Topology>() {
-        return dispatchFp32AlignedKConfiguration<Topology, true>(
+        return dispatchFp32AlignedKConfiguration<Topology, true, ElementBytes>(
             packet_bytes, block_threads, [&]<int ItemsPerLane, int BlockThreads>() {
-                fp32AlignedKKernel<ItemsPerLane, BlockThreads, Topology>
+                fp32AlignedKKernel<InputT, ItemsPerLane, BlockThreads, Topology>
                     <<<grid_blocks, BlockThreads, 0, stream.getStream()>>>(
-                        input.getMemPtr<float>(), stage_output.getMemPtr<void>(), stage_output.getDataType(),
+                        input.getMemPtr<InputT>(), stage_output.getMemPtr<void>(), stage_output.getDataType(),
                         geometry.outer_size, geometry.reduction_size, geometry.inner_size, outer_stride,
                         inner_stride, shards_per_output, component_tiles, shard_rows, semantics.combine,
                         semantics.input_transform, finalize, staged ? 1.0f : output_scale);
@@ -3281,15 +2587,16 @@ void launchFp32AlignedKStage(const CubReductionStageSemantics& semantics,
     };
     const bool launched = staged ? launch.template operator()<TiledRKStageTopology::Staged>()
                                  : launch.template operator()<TiledRKStageTopology::Complete>();
-    if (!launched) throw std::logic_error("FP32 AlignedK has no kernel for this configuration.");
+    if (!launched) throw std::logic_error(std::string(name) + " AlignedK has no kernel for this configuration.");
 }
 
-CubKernelOccupancyInfo queryFp32AlignedKOccupancy(uint32_t packet_bytes, uint32_t block_threads, bool staged) {
-    CubKernelOccupancyInfo occupancy{};
+template <typename InputT>
+[[nodiscard]] bool queryAlignedKOccupancyTyped(uint32_t packet_bytes, uint32_t block_threads, bool staged,
+                                               CubKernelOccupancyInfo& occupancy) {
     const auto query = [&]<TiledRKStageTopology Topology>() {
-        return dispatchFp32AlignedKConfiguration<Topology, true>(
+        return dispatchFp32AlignedKConfiguration<Topology, true, sizeof(InputT)>(
             packet_bytes, block_threads, [&]<int ItemsPerLane, int BlockThreads>() {
-                const auto kernel = fp32AlignedKKernel<ItemsPerLane, BlockThreads, Topology>;
+                const auto kernel = fp32AlignedKKernel<InputT, ItemsPerLane, BlockThreads, Topology>;
                 cudaFuncAttributes attributes{};
                 CUDA_CHECK(cudaFuncGetAttributes(&attributes, kernel));
                 int active_blocks = 0;
@@ -3298,10 +2605,68 @@ CubKernelOccupancyInfo queryFp32AlignedKOccupancy(uint32_t packet_bytes, uint32_
                                                    active_blocks * (BlockThreads / TILED_REDUCTION_WARP_THREADS)};
             });
     };
-    const bool queried = staged ? query.template operator()<TiledRKStageTopology::Staged>()
-                                : query.template operator()<TiledRKStageTopology::Complete>();
-    if (!queried)
+    return staged ? query.template operator()<TiledRKStageTopology::Staged>()
+                  : query.template operator()<TiledRKStageTopology::Complete>();
+}
+}  // namespace
+
+void launchFp32AlignedKStage(const CubReductionStageSemantics& semantics,
+                             const Tensor& input,
+                             Tensor& stage_output,
+                             const CubReductionGeometry& geometry,
+                             uint32_t packet_bytes,
+                             uint32_t block_threads,
+                             uint64_t shards_per_output,
+                             float output_scale,
+                             Stream& stream) {
+    if (input.getDataType() != DataType::FP32)
+        throw std::logic_error("FP32 AlignedK received an unsupported input, geometry or semantics.");
+    launchAlignedKStageTyped<float>(semantics, input, stage_output, geometry, packet_bytes, block_threads,
+                                    shards_per_output, output_scale, stream, "FP32");
+}
+
+CubKernelOccupancyInfo queryFp32AlignedKOccupancy(uint32_t packet_bytes, uint32_t block_threads, bool staged) {
+    CubKernelOccupancyInfo occupancy{};
+    if (!queryAlignedKOccupancyTyped<float>(packet_bytes, block_threads, staged, occupancy))
         throw std::logic_error("FP32 AlignedK occupancy requires a 4-, 8- or 16-byte packet and CTA 32/64/128.");
+    return occupancy;
+}
+
+void launchF16AlignedKStage(const CubReductionStageSemantics& semantics,
+                            const Tensor& input,
+                            Tensor& stage_output,
+                            const CubReductionGeometry& geometry,
+                            uint32_t packet_bytes,
+                            uint32_t block_threads,
+                            uint64_t shards_per_output,
+                            float output_scale,
+                            Stream& stream) {
+    switch (input.getDataType()) {
+        case DataType::FP16:
+            launchAlignedKStageTyped<__half>(semantics, input, stage_output, geometry, packet_bytes, block_threads,
+                                             shards_per_output, output_scale, stream, "FP16");
+            return;
+        case DataType::BF16:
+            launchAlignedKStageTyped<__nv_bfloat16>(semantics, input, stage_output, geometry, packet_bytes,
+                                                    block_threads, shards_per_output, output_scale, stream, "BF16");
+            return;
+        default:
+            throw std::logic_error("FP16 / BF16 AlignedK received a non-FP16 / BF16 input.");
+    }
+}
+
+CubKernelOccupancyInfo queryF16AlignedKOccupancy(DataType input_dtype, uint32_t packet_bytes, uint32_t block_threads,
+                                                 bool staged) {
+    CubKernelOccupancyInfo occupancy{};
+    bool queried = false;
+    if (input_dtype == DataType::FP16)
+        queried = queryAlignedKOccupancyTyped<__half>(packet_bytes, block_threads, staged, occupancy);
+    else if (input_dtype == DataType::BF16)
+        queried = queryAlignedKOccupancyTyped<__nv_bfloat16>(packet_bytes, block_threads, staged, occupancy);
+    if (!queried) {
+        throw std::logic_error(
+            "FP16 / BF16 AlignedK occupancy requires FP16 / BF16, a 2-, 4-, 8- or 16-byte packet and CTA 32/64/128.");
+    }
     return occupancy;
 }
 
@@ -3313,6 +2678,15 @@ bool fp32AlignedKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint6
     return packet_bytes != 4 &&
            fp32AlignedKSupports(outer_size, reduction_size, inner_size, packet_bytes, block_threads,
                                 shards_per_output) &&
+           ceilDivideU64(reduction_size, shards_per_output) <= FP32_ARG_MAX_SHARD_ROWS;
+}
+
+// 1248: the FP16 / BF16 twin: 4-, 8- and 16-byte packets (the 2-byte packet is VALUE only).
+bool f16AlignedKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size, uint32_t packet_bytes,
+                            uint32_t block_threads, uint64_t shards_per_output) {
+    return packet_bytes != 2 &&
+           f16AlignedKSupports(outer_size, reduction_size, inner_size, packet_bytes, block_threads,
+                               shards_per_output) &&
            ceilDivideU64(reduction_size, shards_per_output) <= FP32_ARG_MAX_SHARD_ROWS;
 }
 
@@ -3395,6 +2769,81 @@ void launchFp32ArgPackedContinuation(const uint64_t* packed_partials,
     launchFp32ArgPackedContinuationRows(packed_partials, outputs_spec, outer_size, shards, inner_size, rows, stream);
 }
 
+namespace {
+// One input type's AlignedK ARG pass (FP32, or 1248 FP16 / BF16 widened to the FP32 key); `name` labels the errors.
+template <typename InputT>
+void launchAlignedKArgTyped(const Tensor& input,
+                            Tensor* value_output,
+                            Tensor* index_output,
+                            const CubReductionGeometry& geometry,
+                            uint32_t packet_bytes,
+                            uint32_t block_threads,
+                            uint64_t shards_per_output,
+                            uint64_t* packed_scratch,
+                            bool maximum,
+                            uint64_t domain_stride,
+                            Stream& stream,
+                            const char* name) {
+    constexpr uint32_t ElementBytes = sizeof(InputT);
+    const bool staged = shards_per_output > 1;
+    const bool supported =
+        ElementBytes == 4 ? fp32AlignedKArgSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size,
+                                                    packet_bytes, block_threads, shards_per_output)
+                          : f16AlignedKArgSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size,
+                                                   packet_bytes, block_threads, shards_per_output);
+    if (!supported ||
+        input.getTotalNumElements() != geometry.outer_size * geometry.reduction_size * geometry.inner_size ||
+        (reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{packet_bytes - 1}) != 0 ||
+        (staged && packed_scratch == nullptr)) {
+        throw std::logic_error(std::string(name) +
+                               " AlignedK ARG received an unsupported input, geometry or scratch.");
+    }
+    const std::string who = std::string(name) + " AlignedK ARG";
+    const Fp32ArgOutputs outputs =
+        fp32ArgOutputsFor(value_output, index_output, geometry.outer_size * geometry.inner_size,
+                          geometry.reduction_size, maximum, domain_stride, who.c_str());
+    const uint64_t items = packet_bytes / ElementBytes;
+    const uint64_t component_tiles = ceilDivideU64(geometry.inner_size, items * block_threads);
+    const ReductionShardRows shard_rows = balancedReductionShardRows(geometry.reduction_size, shards_per_output);
+    const dim3 grid_blocks = reductionWorkGrid(shards_per_output, component_tiles, geometry.outer_size, 0);
+    const auto launch = [&]<bool Staged>() {
+        return dispatchFp32AlignedKConfiguration<TiledRKStageTopology::Complete, false, ElementBytes>(
+            packet_bytes, block_threads, [&]<int ItemsPerLane, int BlockThreads>() {
+                fp32AlignedKArgKernel<InputT, ItemsPerLane, BlockThreads, Staged>
+                    <<<grid_blocks, BlockThreads, 0, stream.getStream()>>>(
+                        input.getMemPtr<InputT>(), outputs, packed_scratch, geometry.outer_size,
+                        geometry.reduction_size, geometry.inner_size, shards_per_output, component_tiles,
+                        shard_rows);
+                CUDA_CHECK(cudaGetLastError());
+            });
+    };
+    const bool launched = staged ? launch.template operator()<true>() : launch.template operator()<false>();
+    if (!launched) throw std::logic_error(std::string(name) + " AlignedK ARG has no kernel for this configuration.");
+    if (staged) {
+        launchFp32ArgPackedContinuationRows(packed_scratch, outputs, geometry.outer_size, shards_per_output,
+                                            geometry.inner_size, shard_rows, stream);
+    }
+}
+
+template <typename InputT>
+[[nodiscard]] bool queryAlignedKArgOccupancyTyped(uint32_t packet_bytes, uint32_t block_threads, bool staged,
+                                                  CubKernelOccupancyInfo& occupancy) {
+    const auto query = [&]<bool Staged>() {
+        return dispatchFp32AlignedKConfiguration<TiledRKStageTopology::Complete, false, sizeof(InputT)>(
+            packet_bytes, block_threads, [&]<int ItemsPerLane, int BlockThreads>() {
+                const auto kernel = fp32AlignedKArgKernel<InputT, ItemsPerLane, BlockThreads, Staged>;
+                cudaFuncAttributes attributes{};
+                CUDA_CHECK(cudaFuncGetAttributes(&attributes, kernel));
+                int active_blocks = 0;
+                CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active_blocks, kernel, BlockThreads, 0));
+                occupancy = CubKernelOccupancyInfo{attributes.numRegs, attributes.sharedSizeBytes, 0, active_blocks,
+                                                   active_blocks * (BlockThreads / TILED_REDUCTION_WARP_THREADS)};
+            });
+    };
+    return staged ? query.template operator()<true>() : query.template operator()<false>();
+}
+}  // namespace
+
 void launchFp32AlignedKArg(const Tensor& input,
                            Tensor* value_output,
                            Tensor* index_output,
@@ -3406,39 +2855,50 @@ void launchFp32AlignedKArg(const Tensor& input,
                            bool maximum,
                            uint64_t domain_stride,
                            Stream& stream) {
-    const bool staged = shards_per_output > 1;
-    if (input.getDataType() != DataType::FP32 ||
-        !fp32AlignedKArgSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size, packet_bytes,
-                                 block_threads, shards_per_output) ||
-        input.getTotalNumElements() != geometry.outer_size * geometry.reduction_size * geometry.inner_size ||
-        (reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{packet_bytes - 1}) != 0 ||
-        (staged && packed_scratch == nullptr)) {
+    if (input.getDataType() != DataType::FP32)
         throw std::logic_error("FP32 AlignedK ARG received an unsupported input, geometry or scratch.");
+    launchAlignedKArgTyped<float>(input, value_output, index_output, geometry, packet_bytes, block_threads,
+                                  shards_per_output, packed_scratch, maximum, domain_stride, stream, "FP32");
+}
+
+void launchF16AlignedKArg(const Tensor& input,
+                          Tensor* value_output,
+                          Tensor* index_output,
+                          const CubReductionGeometry& geometry,
+                          uint32_t packet_bytes,
+                          uint32_t block_threads,
+                          uint64_t shards_per_output,
+                          uint64_t* packed_scratch,
+                          bool maximum,
+                          uint64_t domain_stride,
+                          Stream& stream) {
+    switch (input.getDataType()) {
+        case DataType::FP16:
+            return launchAlignedKArgTyped<__half>(input, value_output, index_output, geometry, packet_bytes,
+                                                  block_threads, shards_per_output, packed_scratch, maximum,
+                                                  domain_stride, stream, "FP16");
+        case DataType::BF16:
+            return launchAlignedKArgTyped<__nv_bfloat16>(input, value_output, index_output, geometry, packet_bytes,
+                                                         block_threads, shards_per_output, packed_scratch, maximum,
+                                                         domain_stride, stream, "BF16");
+        default:
+            throw std::logic_error("FP16 / BF16 AlignedK ARG received a non-FP16 / BF16 input.");
     }
-    const Fp32ArgOutputs outputs =
-        fp32ArgOutputsFor(value_output, index_output, geometry.outer_size * geometry.inner_size,
-                          geometry.reduction_size, maximum, domain_stride, "FP32 AlignedK ARG");
-    const uint64_t items = packet_bytes / 4;
-    const uint64_t component_tiles = ceilDivideU64(geometry.inner_size, items * block_threads);
-    const ReductionShardRows shard_rows = balancedReductionShardRows(geometry.reduction_size, shards_per_output);
-    const dim3 grid_blocks = reductionWorkGrid(shards_per_output, component_tiles, geometry.outer_size, 0);
-    const auto launch = [&]<bool Staged>() {
-        return dispatchFp32AlignedKConfiguration<TiledRKStageTopology::Complete>(
-            packet_bytes, block_threads, [&]<int ItemsPerLane, int BlockThreads>() {
-                fp32AlignedKArgKernel<ItemsPerLane, BlockThreads, Staged>
-                    <<<grid_blocks, BlockThreads, 0, stream.getStream()>>>(
-                        input.getMemPtr<float>(), outputs, packed_scratch, geometry.outer_size,
-                        geometry.reduction_size, geometry.inner_size, shards_per_output, component_tiles,
-                        shard_rows);
-                CUDA_CHECK(cudaGetLastError());
-            });
-    };
-    const bool launched = staged ? launch.template operator()<true>() : launch.template operator()<false>();
-    if (!launched) throw std::logic_error("FP32 AlignedK ARG has no kernel for this configuration.");
-    if (staged) {
-        launchFp32ArgPackedContinuationRows(packed_scratch, outputs, geometry.outer_size, shards_per_output,
-                                            geometry.inner_size, shard_rows, stream);
+}
+
+CubKernelOccupancyInfo queryF16AlignedKArgOccupancy(DataType input_dtype, uint32_t packet_bytes,
+                                                    uint32_t block_threads, bool staged) {
+    CubKernelOccupancyInfo occupancy{};
+    bool queried = false;
+    if (input_dtype == DataType::FP16)
+        queried = queryAlignedKArgOccupancyTyped<__half>(packet_bytes, block_threads, staged, occupancy);
+    else if (input_dtype == DataType::BF16)
+        queried = queryAlignedKArgOccupancyTyped<__nv_bfloat16>(packet_bytes, block_threads, staged, occupancy);
+    if (!queried) {
+        throw std::logic_error(
+            "FP16 / BF16 AlignedK ARG occupancy requires FP16 / BF16, a 4-, 8- or 16-byte packet and CTA 32/64/128.");
     }
+    return occupancy;
 }
 
 // ---- 1208: carried-index FP32 ARG (see Fp32ArgWidePartials).
@@ -3604,19 +3064,7 @@ CubKernelOccupancyInfo queryFp32AlignedKCarriedArgOccupancy(uint32_t packet_byte
 
 CubKernelOccupancyInfo queryFp32AlignedKArgOccupancy(uint32_t packet_bytes, uint32_t block_threads, bool staged) {
     CubKernelOccupancyInfo occupancy{};
-    const auto query = [&]<bool Staged>() {
-        return dispatchFp32AlignedKConfiguration<TiledRKStageTopology::Complete>(
-            packet_bytes, block_threads, [&]<int ItemsPerLane, int BlockThreads>() {
-                const auto kernel = fp32AlignedKArgKernel<ItemsPerLane, BlockThreads, Staged>;
-                cudaFuncAttributes attributes{};
-                CUDA_CHECK(cudaFuncGetAttributes(&attributes, kernel));
-                int active_blocks = 0;
-                CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active_blocks, kernel, BlockThreads, 0));
-                occupancy = CubKernelOccupancyInfo{attributes.numRegs, attributes.sharedSizeBytes, 0, active_blocks,
-                                                   active_blocks * (BlockThreads / TILED_REDUCTION_WARP_THREADS)};
-            });
-    };
-    const bool queried = staged ? query.template operator()<true>() : query.template operator()<false>();
+    const bool queried = queryAlignedKArgOccupancyTyped<float>(packet_bytes, block_threads, staged, occupancy);
     if (!queried)
         throw std::logic_error("FP32 AlignedK ARG occupancy requires an 8- or 16-byte packet and CTA 32/64/128.");
     return occupancy;

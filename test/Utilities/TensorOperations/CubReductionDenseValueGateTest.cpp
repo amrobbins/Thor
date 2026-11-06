@@ -107,18 +107,6 @@ void expectEveryDenseValueMaskUsesOrdainedPath(const std::vector<uint64_t>& dime
             EXPECT_EQ(geometry.path, structural_geometry.path);
             EXPECT_TRUE(isOrdainedDenseValuePath(structural_geometry.path));
             EXPECT_TRUE(isOrdainedDenseValuePath(geometry.path));
-
-            if (structural_geometry.path == CubReductionPath::ComposedDense) {
-                const std::optional<CubReductionDenseCompositionPlan> plan =
-                    CubReduction::analyzeDenseCompositionPlan(dimensions, axes);
-                ASSERT_TRUE(plan.has_value());
-                ASSERT_FALSE(plan->stages.empty());
-                for (const CubReductionDenseCompositionStage& stage : plan->stages) {
-                    EXPECT_TRUE(stage.expected_path == CubReductionPath::DeviceTransformReduce
-                                || stage.expected_path == CubReductionPath::ContiguousFixedSegment
-                                || stage.expected_path == CubReductionPath::TiledFixedSegment);
-                }
-            }
         }
     }
 }
@@ -143,18 +131,6 @@ TEST(CubReductionDenseValueGate, StructuralDenseClassifierHasNoLegacyEscapeHatch
             SCOPED_TRACE(denseValueGateContext(CubReductionOp::Sum, dimensions, axes));
             const CubReductionGeometry geometry = CubReduction::analyzeGeometry(dimensions, axes);
             EXPECT_TRUE(isOrdainedDenseValuePath(geometry.path));
-
-            if (geometry.path == CubReductionPath::ComposedDense) {
-                const std::optional<CubReductionDenseCompositionPlan> plan =
-                    CubReduction::analyzeDenseCompositionPlan(dimensions, axes);
-                ASSERT_TRUE(plan.has_value());
-                ASSERT_FALSE(plan->stages.empty());
-                for (const CubReductionDenseCompositionStage& stage : plan->stages) {
-                    EXPECT_TRUE(stage.expected_path == CubReductionPath::DeviceTransformReduce
-                                || stage.expected_path == CubReductionPath::ContiguousFixedSegment
-                                || stage.expected_path == CubReductionPath::TiledFixedSegment);
-                }
-            }
         }
     }
 }

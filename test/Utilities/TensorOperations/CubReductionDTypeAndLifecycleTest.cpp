@@ -28,9 +28,6 @@ TEST(CubReduction, EverySupportedInputStorageDtypeAccumulatesInFp32) {
     expectInputStorageAccumulatesInFp32(DataType::FP8_E4M3, stream);
     expectInputStorageAccumulatesInFp32(DataType::FP8_E5M2, stream);
 #endif
-#if THOR_CUB_ENABLE_64BIT_TYPES
-    expectInputStorageAccumulatesInFp32(DataType::FP64, stream);
-#endif
 }
 
 TEST(CubReduction, PermutationAwareTiledPathSupportsEveryInputStorageDtype) {
@@ -60,9 +57,6 @@ TEST(CubReduction, PermutationAwareTiledPathSupportsEveryInputStorageDtype) {
 #if THOR_CUB_ENABLE_FP8_TYPES
     run_dtype(DataType::FP8_E4M3);
     run_dtype(DataType::FP8_E5M2);
-#endif
-#if THOR_CUB_ENABLE_64BIT_TYPES
-    run_dtype(DataType::FP64);
 #endif
 }
 
@@ -211,9 +205,6 @@ TEST(CubReduction, AwkwardLargeVectorizedShardsHandleAlignmentAndPaddedInputTail
     run_dtype(DataType::FP8_E4M3);
     run_dtype(DataType::FP8_E5M2);
 #endif
-#if THOR_CUB_ENABLE_64BIT_TYPES
-    run_dtype(DataType::FP64);
-#endif
 }
 
 #if THOR_CUB_ENABLE_FP8_TYPES
@@ -263,35 +254,6 @@ TEST(CubReduction, UnderSuppliedFp8OrdinaryDenseUsesRetainedFirstStageWithoutLeg
 }
 #endif
 
-#if THOR_CUB_ENABLE_64BIT_TYPES
-TEST(CubReduction, WideFp64RowsRespectGroupedStageCapacityAndVectorDirectBoundaries) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    for (uint64_t inner_size : {511ULL, 512ULL, 513ULL, 1023ULL, 1024ULL, 1025ULL, 2047ULL, 2048ULL, 2049ULL, 4096ULL}) {
-        SCOPED_TRACE(inner_size);
-        constexpr uint64_t reduction_size = 3;
-        std::vector<float> values(reduction_size * inner_size);
-        for (uint64_t row = 0; row < reduction_size; ++row) {
-            for (uint64_t component = 0; component < inner_size; ++component) {
-                values[row * inner_size + component] = static_cast<float>(row + 1);
-            }
-        }
-
-        Tensor input =
-            makeGpuTensor(values, {1, reduction_size, inner_size}, stream, DataType::FP64);
-        std::shared_ptr<StampedCubReduction> stamped =
-            CubReduction(CubReductionOp::Sum, 1, DataType::FP32).stamp(input, stream);
-        EXPECT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
-
-        stamped->run();
-        stream.synchronize();
-        expectFloatVectorNear(
-            copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
-            std::vector<float>(inner_size, 6.0f));
-    }
-}
-#endif
 
 TEST(CubReduction, WholeTensorBf16SumAccumulatesInFp32AndDefaultsOutputToInputDtype) {
     REQUIRE_CUDA_DEVICE();
@@ -309,7 +271,12 @@ TEST(CubReduction, WholeTensorBf16SumAccumulatesInFp32AndDefaultsOutputToInputDt
     EXPECT_EQ(stamped->getOutputDataType(), DataType::BF16);
     EXPECT_EQ(stamped->getAccumulatorDataType(), DataType::FP32);
     EXPECT_EQ(stamped->getOutputTensor().getDimensions(), (std::vector<uint64_t>{1}));
-    EXPECT_GT(stamped->getWorkspaceSizeInBytes(), 0U);
+    // 1256: the retained FP16 / BF16 R pass (an R shape whose scratch, if any, is its own; the CUB pass it replaced
+    // always had some), and the stamp owns exactly what the query reports.
+    const auto passes = stamped->getDensePhysicalPassDiagnostics();
+    ASSERT_EQ(passes.size(), 1U);
+    EXPECT_EQ(passes.front().family.rfind("retained_f16_kr:", 0), 0U) << passes.front().family;
+    EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), reduction.queryWorkspaceSizeInBytes(input.getDescriptor(), stream));
 
     stamped->run();
     stream.synchronize();
@@ -472,9 +439,6 @@ TEST(CubReduction, Fp8GeneralCompleteRuntimeOutputStorage) {
     for (DataType input_dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
         std::vector<DataType> outputs = {DataType::FP8_E4M3, DataType::FP8_E5M2,
                                          DataType::FP16, DataType::BF16, DataType::FP32};
-#if THOR_CUB_ENABLE_64BIT_TYPES
-        outputs.push_back(DataType::FP64);
-#endif
         for (bool tiled : {false, true}) {
             const auto& shapes = tiled ? runtime_k : one_window;
             for (const Shape& shape : shapes) {
@@ -599,9 +563,6 @@ TEST(CubReduction, Fp8CompleteRuntimeFinalizationMatchesFp32ThenStorage) {
                                          stream, input_dtype);
             std::vector<DataType> output_types = {DataType::FP8_E4M3, DataType::FP8_E5M2,
                                                   DataType::FP16, DataType::BF16, DataType::FP32};
-#if THOR_CUB_ENABLE_64BIT_TYPES
-            output_types.push_back(DataType::FP64);
-#endif
             for (CubReductionStageInputTransform transform :
                  {CubReductionStageInputTransform::Identity,
                   CubReductionStageInputTransform::AbsoluteValue,
@@ -733,9 +694,6 @@ float quantizeFp32ToStorage(float value, DataType dtype) {
 std::vector<DataType> fp8CompleteOutputDTypes() {
     std::vector<DataType> outputs = {DataType::FP8_E4M3, DataType::FP8_E5M2,
                                      DataType::FP16, DataType::BF16, DataType::FP32};
-#if THOR_CUB_ENABLE_64BIT_TYPES
-    outputs.push_back(DataType::FP64);
-#endif
     return outputs;
 }
 }  // namespace
@@ -1529,9 +1487,6 @@ TEST(CubReduction, RuntimeOutputIteratorSupportsEveryConfiguredOutputDtype) {
 #if THOR_CUB_ENABLE_FP8_TYPES
     output_dtypes.push_back(DataType::FP8_E4M3);
     output_dtypes.push_back(DataType::FP8_E5M2);
-#endif
-#if THOR_CUB_ENABLE_64BIT_TYPES
-    output_dtypes.push_back(DataType::FP64);
 #endif
 
     for (DataType output_dtype : output_dtypes) {

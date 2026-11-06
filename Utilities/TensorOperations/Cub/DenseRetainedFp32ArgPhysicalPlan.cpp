@@ -1,6 +1,7 @@
 #include "Utilities/TensorOperations/Cub/DenseRetainedFp32ArgPhysicalPlan.h"
 
 #include "Utilities/TensorOperations/Cub/DenseRetainedFp8KRPhysicalPlan.h"
+#include "Utilities/TensorOperations/Cub/F16RK/F16RKArgCandidates.h"
 #include "Utilities/TensorOperations/Cub/Fp32RK/Fp32RKArgCandidates.h"
 #include "Utilities/TensorOperations/Cub/Fp32RK/Fp32RKCarriedArgCandidates.h"
 
@@ -96,6 +97,59 @@ DenseReductionCandidate makeRetainedFp32KRArgCandidate(const DenseReductionProbl
     return candidateFor(problem, site, std::move(plan));
 }
 
+// 1254: an original FP16 / BF16 ARG site.
+void requireF16ArgSite(const DenseReductionProblem& problem, DataType input_dtype) {
+    if ((input_dtype != DataType::FP16 && input_dtype != DataType::BF16) ||
+        problem.aggregate_kind != DenseReductionAggregateKind::Arg ||
+        problem.input_state != DenseReductionInputState::OriginalInput)
+        throw std::invalid_argument("Retained FP16 / BF16 ARG pass requires an original FP16 / BF16 ARG site");
+}
+
+DenseReductionCandidate makeRetainedF16RKArgCandidate(const DenseReductionProblem& problem, DenseReductionSite site,
+                                                      const Fp8RK::PhysicalKernel& identity, DataType input_dtype) {
+    requireF16ArgSite(problem, input_dtype);
+    if (classifyDenseReducerFamily(problem, site) != DenseReducerFamily::RK)
+        throw std::invalid_argument("Retained FP16 / BF16 RK ARG pass requires an RK site");
+    uint64_t outer = 1, inner = 1;
+    const uint64_t r = problem.runs[site.run_index].extent;
+    for (size_t i = 0; i < problem.runs.size(); ++i) {
+        if (i < site.run_index) outer = multiplyChecked(outer, problem.runs[i].extent);
+        if (i > site.run_index) inner = multiplyChecked(inner, problem.runs[i].extent);
+    }
+    if (!F16RK::f16RKArgPassLegal(identity, outer, r, inner))
+        throw std::invalid_argument("Retained FP16 / BF16 RK ARG identity is not legal at its site");
+    DenseRetainedFp32ArgPhysicalPlan plan;
+    plan.input_dtype = input_dtype;
+    plan.identity = identity;
+    plan.input_dimensions = {outer, r, inner};
+    plan.reduction_axis = 1;
+    plan.outer_size = outer;
+    plan.reduction_size = r;
+    plan.inner_size = inner;
+    plan.scratch_bytes = F16RK::f16RKArgScratchBytes(identity, outer, r, inner);
+    return candidateFor(problem, site, std::move(plan));
+}
+
+DenseReductionCandidate makeRetainedF16KRArgCandidate(const DenseReductionProblem& problem, DenseReductionSite site,
+                                                      const Fp8KR::Fp8KRSegmentShape& shape, DataType input_dtype) {
+    requireF16ArgSite(problem, input_dtype);
+    const Fp8KRSiteGeometry geometry = fp8KRSiteGeometry(problem, site);  // the row in elements
+    if (!Fp8KR::f16KRArgShapeLegal(shape) || shape.rows != geometry.rows ||
+        shape.row_bytes != multiplyChecked(2, geometry.row_bytes))
+        throw std::invalid_argument("Retained FP16 / BF16 KR ARG shape does not match its site geometry");
+    DenseRetainedFp32ArgPhysicalPlan plan;
+    plan.kr = true;
+    plan.input_dtype = input_dtype;
+    plan.shape = shape;
+    for (const DenseReductionRun& run : problem.runs) plan.input_dimensions.push_back(run.extent);
+    plan.reduction_axis = site.run_index;
+    plan.outer_size = geometry.rows;
+    plan.reduction_size = geometry.row_bytes;
+    plan.inner_size = 1;
+    plan.scratch_bytes = Fp8KR::fp8KRScratchBytes(shape, true);
+    return candidateFor(problem, site, std::move(plan));
+}
+
 void launchRetainedFp32ArgPlan(const DenseRetainedFp32ArgPhysicalPlan& plan, const Tensor& input,
                                const Tensor* carried_index, Tensor* value_output, Tensor* index_output,
                                const CubReductionGeometry& geometry, void* scratch, bool maximum,
@@ -104,6 +158,19 @@ void launchRetainedFp32ArgPlan(const DenseRetainedFp32ArgPhysicalPlan& plan, con
         throw std::logic_error("Retained FP32 ARG pass received a carried index it does not read, or none");
     if (plan.scratch_bytes != 0 && scratch == nullptr)
         throw std::logic_error("Retained FP32 ARG pass requires its partial scratch");
+    if (plan.input_dtype != DataType::FP32) {  // 1254: a 2-byte original pass (the launchers check the input dtype)
+        if (plan.carried) throw std::logic_error("Retained FP16 / BF16 ARG passes are never carried");
+        if (plan.kr) {
+            launchF16KRArgSegments(input, value_output, index_output, plan.shape, scratch, plan.scratch_bytes, maximum,
+                                   domain_stride, stream);
+            return;
+        }
+        Tensor site_input = input;
+        site_input.reshape(plan.input_dimensions);
+        F16RK::launchF16RKArgPass(plan.identity, site_input, value_output, index_output, geometry,
+                                  static_cast<uint64_t*>(scratch), maximum, domain_stride, stream);
+        return;
+    }
     if (plan.kr) {
         if (plan.carried) {
             launchFp32KRCarriedArgSegments(input, *carried_index, value_output, index_output, plan.shape, scratch,
@@ -129,7 +196,9 @@ void launchRetainedFp32ArgPlan(const DenseRetainedFp32ArgPhysicalPlan& plan, con
 }
 
 std::string retainedFp32ArgPassName(const DenseRetainedFp32ArgPhysicalPlan& plan) {
-    std::string name = plan.carried ? "fp32_carried_arg_" : "fp32_arg_";
+    std::string name = plan.input_dtype != DataType::FP32 ? "f16_arg_"
+                       : plan.carried                      ? "fp32_carried_arg_"
+                                                           : "fp32_arg_";
     if (plan.kr) return name + "kr:" + Fp8KR::fp8KRShapeName(plan.shape);
     const Fp8RK::PhysicalKernel& p = plan.identity;
     name += std::string("rk:") + rkFamilyName(p.family) + "_a" + std::to_string(p.a) + "_b" + std::to_string(p.b) +

@@ -6,20 +6,22 @@ isolation was needed while the production translation units still compiled unsel
 retained kernel in them is reachable, so this tool measures the production objects themselves:
 
   CubReductionNarrowFlatRCooperative.cu.o   OneWindow, DeepRSmallK, RuntimeK PacketComplete, ARG twins, R / KR
-  CubReductionKParallelShardedTiled.cu.o    AlignedK (FP8 and FP32), FP32 ARG continuations, legacy KParallel
-  CubReductionAwkwardRotatedSharded.cu.o    RuntimeK rotated (FP8 and FP32), FP32 rotated ARG, legacy rotated
-  CubReductionCooperativeShardedTiled.cu.o  legacy RCooperative
+  CubReductionKParallelShardedTiled.cu.o    AlignedK (FP8, FP32, FP16/BF16), FP32 ARG continuations
+  CubReductionAwkwardRotatedSharded.cu.o    RuntimeK rotated (FP8, FP32, FP16/BF16), rotated ARG
+
+1259 deleted the legacy KParallel / RCooperative kernels (and CubReductionCooperativeShardedTiled.cu), so every
+kernel in these objects is retained; an instantiation the table does not know is an error.
 
 For every device function in their cubins (readelf FUNC symbols, sizes in bytes of SASS text), it records the kernel,
 its input dtype (the first template argument of the shared templates), and:
 
-  owner    FP32 retained | FP8 retained | FP8+FP32 shared (input-independent, e.g. the KR Split finish) |
-           Legacy FP32 (unreachable since 1227; deleted with FP16 / BF16) | Legacy FP16/BF16 | device helper
+  owner    FP32 retained | FP8 retained | FP16/BF16 retained (1233) |
+           FP8+FP32 shared (input-independent, e.g. the KR Split finish) | device helper
   family   RK OneWindow / DeepRSmallK / AlignedK / RuntimeK PacketComplete / RuntimeK Rotated / ARG continuation,
-           KR Pack / Vector / Group / Block / Split / Split finish, and the legacy KParallel / RCooperative families
+           KR Pack / Vector / Group / Block / Split / Split finish
   kind     VALUE | ARG | carried ARG
 
-Every __global__ kernel declared in the four source files must be classified, or the tool fails (classify() is the
+Every __global__ kernel declared in the three source files must be classified, or the tool fails (classify() is the
 one table to extend). Device helpers (noinline functions) are counted per object, not attributed to a kernel.
 
 Usage (from the build directory):
@@ -44,7 +46,6 @@ SOURCES = {
     'CubReductionNarrowFlatRCooperative.cu.o': 'CubReductionNarrowFlatRCooperative.cu',
     'CubReductionKParallelShardedTiled.cu.o': 'CubReductionKParallelShardedTiled.cu',
     'CubReductionAwkwardRotatedSharded.cu.o': 'CubReductionAwkwardRotatedSharded.cu',
-    'CubReductionCooperativeShardedTiled.cu.o': 'CubReductionCooperativeShardedTiled.cu',
 }
 CUDA_GLOBAL_DECLARATION = re.compile(
     r'__global__\s+(?:__launch_bounds__\((?:[^()]|\([^()]*\))*\)\s+)?void\s+(\w+)\s*\(')
@@ -62,6 +63,7 @@ SHARED_VALUE = {
     'fp8KRValueVectorKernel': 'KR Vector',
     'fp8KRValueSplitKernel': 'KR Split',
     'fp8KRValueBlockKernel': 'KR Block',
+    'fp32AlignedKKernel': 'RK AlignedK',  # 1243: FP32 and FP16 / BF16 input
 }
 FP8_ALIGNED_VALUE = ('kParallelFp8PacketKernel', 'kParallelFp8StagedHoistedCombineKernel',
                      'kParallelFp8CompleteUnifiedKernel')
@@ -77,21 +79,9 @@ FIXED = {
     'fp8ArgPackedContinuationKernel': ('FP8 retained', 'RK ARG continuation', 'ARG'),
     'fp8ArgPackedContinuationSplitKernel': ('FP8 retained', 'RK ARG continuation', 'ARG'),
     'fp8KRArgVectorKernel': ('FP8 retained', 'KR Vector', 'ARG'),
-    'fp8KRArgBlockKernel': ('FP8 retained', 'KR Block', 'ARG'),
-    'fp8KRArgGroupKernel': ('FP8 retained', 'KR Group', 'ARG'),
-    'fp8KRArgPackKernel': ('FP8 retained', 'KR Pack', 'ARG'),
-    'fp8KRArgSplitKernel': ('FP8 retained', 'KR Split', 'ARG'),
-    'fp8KRArgFinishKernel': ('FP8 retained', 'KR Split finish', 'ARG'),
-    'fp32AlignedKKernel': ('FP32 retained', 'RK AlignedK', 'VALUE'),
-    'fp32AlignedKArgKernel': ('FP32 retained', 'RK AlignedK', 'ARG'),
     'fp32AlignedKCarriedArgKernel': ('FP32 retained', 'RK AlignedK', 'carried ARG'),
-    'fp32RotatedArgKernel': ('FP32 retained', 'RK RuntimeK Rotated', 'ARG'),
     'fp32RotatedCarriedArgKernel': ('FP32 retained', 'RK RuntimeK Rotated', 'carried ARG'),
-    'fp32PacketCompleteArgKernel': ('FP32 retained', 'RK RuntimeK PacketComplete', 'ARG'),
-    'fp32OneWindowArgKernel': ('FP32 retained', 'RK OneWindow', 'ARG'),
     'fp32OneWindowCarriedArgKernel': ('FP32 retained', 'RK OneWindow', 'carried ARG'),
-    'fp32DeepRArgKernel': ('FP32 retained', 'RK DeepRSmallK', 'ARG'),
-    'fp32DeepRArgTinyKKernel': ('FP32 retained', 'RK DeepRSmallK', 'ARG'),
     'fp32DeepRCarriedArgKernel': ('FP32 retained', 'RK DeepRSmallK', 'carried ARG'),
     'fp32DeepRCarriedArgTinyKKernel': ('FP32 retained', 'RK DeepRSmallK', 'carried ARG'),
     'fp32ArgPackedContinuationKernel': ('FP32 retained', 'RK ARG continuation', 'ARG'),
@@ -109,16 +99,27 @@ FIXED = {
     'fp32KRCarriedArgSplitKernel': ('FP32 retained', 'KR Split', 'carried ARG'),
     'fp32KRCarriedArgFinishKernel': ('FP32 retained', 'KR Split finish', 'carried ARG'),
 }
-# The pre-pattern RK families (no FP32 site reaches them since 1227; FP16 / BF16 still run them).
-LEGACY = {
-    'narrowLowPrecisionFlatRCooperativeFirstStageKernel': 'Legacy RCooperative FlatRows',
-    'kParallelLeanCompleteKernel': 'Legacy KParallel',
-    'kParallelTiledStageKernel': 'Legacy KParallel',
-    'shardedCooperativeTiledMiddleFirstStageKernel': 'Legacy RCooperative aligned',
-    'cooperativeShardedTiledFirstStageKernel': 'Legacy RCooperative aligned',
+# 1248: ARG kernels templated on the input type (the dtype comes from the first template argument), as SHARED_VALUE.
+SHARED_DTYPE_ARG = {
+    'fp32AlignedKArgKernel': 'RK AlignedK',
+    'fp32RotatedArgKernel': 'RK RuntimeK Rotated',  # 1249
+    'fp32PacketCompleteArgKernel': 'RK RuntimeK PacketComplete',  # 1249
+    'fp32OneWindowArgKernel': 'RK OneWindow',  # 1250
+    'fp32DeepRArgKernel': 'RK DeepRSmallK',  # 1250
+    'fp32DeepRArgTinyKKernel': 'RK DeepRSmallK',  # 1250
 }
+# 1237: the R / KR ARG kernels shared by FP8 and FP16 / BF16 through an element-format trait (the first template
+# argument: Fp8KRArgFormat or F16KRArgFormat).
+SHARED_ARG = {
+    'fp8KRArgBlockKernel': 'KR Block',
+    'fp8KRArgGroupKernel': 'KR Group',
+    'fp8KRArgPackKernel': 'KR Pack',
+    'fp8KRArgSplitKernel': 'KR Split',
+    'fp8KRArgFinishKernel': 'KR Split finish',
+}
+ARG_FORMATS = {'Fp8KRArgFormat': ('FP8 retained', 'FP8'), 'F16KRArgFormat': ('FP16/BF16 retained', 'FP16/BF16')}
 ROTATED = 'awkwardAlignmentRotatedShardedFirstStageKernel'  # <InputT, Op, Transform, Rows, PacketBytes, Warps, Exact>
-KNOWN = set(SHARED_VALUE) | set(FP8_ALIGNED_VALUE) | set(FIXED) | set(LEGACY) | {ROTATED}
+KNOWN = set(SHARED_VALUE) | set(SHARED_DTYPE_ARG) | set(SHARED_ARG) | set(FP8_ALIGNED_VALUE) | set(FIXED) | {ROTATED}
 
 
 def template_arguments(name: str, kernel: str) -> list[str] | None:
@@ -154,10 +155,6 @@ def kernel_of(name: str) -> str | None:
     return None
 
 
-def legacy_owner(dtype: str) -> str:
-    return {'FP32': 'Legacy FP32', 'FP16': 'Legacy FP16/BF16', 'BF16': 'Legacy FP16/BF16'}.get(dtype, 'Legacy other')
-
-
 def classify(name: str) -> tuple[str, str, str, str, str] | None:
     """(kernel, owner, family, kind, dtype) for a kernel's demangled name; None for a device helper."""
     kernel = kernel_of(name)
@@ -168,8 +165,20 @@ def classify(name: str) -> tuple[str, str, str, str, str] | None:
     if kernel in FIXED:
         owner, family, kind = FIXED[kernel]
         return kernel, owner, family, kind, {'FP32 retained': 'FP32', 'FP8 retained': 'FP8'}.get(owner, 'FP8+FP32')
+    if kernel in SHARED_ARG:
+        trait = args[0].split('::')[-1] if args else ''
+        if trait not in ARG_FORMATS:
+            raise ValueError(f'{kernel} instantiated for an unexpected format {trait!r}: {name}')
+        owner, dtype = ARG_FORMATS[trait]
+        return kernel, owner, SHARED_ARG[kernel], 'ARG', dtype
+    if kernel in SHARED_DTYPE_ARG:
+        owner = {'FP32': 'FP32 retained', 'FP16': 'FP16/BF16 retained', 'BF16': 'FP16/BF16 retained'}.get(dtype)
+        if owner is None:
+            raise ValueError(f'{kernel} instantiated for an unexpected input type {dtype!r}: {name}')
+        return kernel, owner, SHARED_DTYPE_ARG[kernel], 'ARG', dtype
     if kernel in SHARED_VALUE:
-        owner = {'FP32': 'FP32 retained', 'FP8': 'FP8 retained'}.get(dtype)
+        owner = {'FP32': 'FP32 retained', 'FP8': 'FP8 retained', 'FP16': 'FP16/BF16 retained',
+                 'BF16': 'FP16/BF16 retained'}.get(dtype)
         if owner is None:
             raise ValueError(f'{kernel} instantiated for an unexpected input type {dtype!r}: {name}')
         return kernel, owner, SHARED_VALUE[kernel], 'VALUE', dtype
@@ -177,17 +186,17 @@ def classify(name: str) -> tuple[str, str, str, str, str] | None:
         if dtype != 'FP8':
             raise ValueError(f'{kernel} instantiated for a non-FP8 input type {dtype!r}: {name}')
         return kernel, 'FP8 retained', 'RK AlignedK', 'VALUE', dtype
-    if kernel in LEGACY:
-        return kernel, legacy_owner(dtype), LEGACY[kernel], 'VALUE', dtype
-    # Rotated: FP8 and the retained FP32 pass (4 cooperative warps, PrefixReserved) are retained; the 8-warp FP16 /
-    # BF16 / FP32 production pass is legacy RCooperative rotated.
+    # Rotated: FP8, the retained FP32 pass (4 cooperative warps, PrefixReserved) and (1245) the 8-warp p16 FP16 / BF16
+    # RuntimeK pass. 1259 deleted the legacy 8-warp RCooperative rotated pass, so any other instantiation is an error.
     if len(args) < 6:
         raise ValueError(f'{kernel} with unexpected template arguments: {name}')
     if dtype == 'FP8':
         return kernel, 'FP8 retained', 'RK RuntimeK Rotated', 'VALUE', dtype
     if dtype == 'FP32' and args[5] == '4':
         return kernel, 'FP32 retained', 'RK RuntimeK Rotated', 'VALUE', dtype
-    return kernel, legacy_owner(dtype), 'Legacy RCooperative rotated', 'VALUE', dtype
+    if dtype in ('FP16', 'BF16') and args[4] == '16' and args[5] == '8':
+        return kernel, 'FP16/BF16 retained', 'RK RuntimeK Rotated', 'VALUE', dtype
+    raise ValueError(f'{kernel} instantiated outside the retained rotated passes: {name}')
 
 
 def run(cmd, cwd=None, text_input=None):
@@ -277,8 +286,7 @@ def analyze(build: Path, source: Path, out: Path):
         sys.exit(1)
 
 
-OWNERS = ('FP32 retained', 'FP8 retained', 'FP8+FP32 shared', 'Legacy FP32', 'Legacy FP16/BF16', 'Legacy other',
-          'device helper')
+OWNERS = ('FP32 retained', 'FP8 retained', 'FP16/BF16 retained', 'FP8+FP32 shared', 'device helper')
 
 
 def summarize(rows: list[dict]) -> list[str]:
@@ -309,7 +317,9 @@ def summarize(rows: list[dict]) -> list[str]:
                 lines.append('')
         grand = sum(b for _, b in owner_totals.values())
         lines.append(f'  {"all functions in these objects":60s} {"":>7s} {grand:>12,}')
-        for owner in ('FP32 retained', 'FP8 retained'):
+        for owner in ('FP32 retained', 'FP8 retained', 'FP16/BF16 retained'):
+            if owner not in owner_totals:
+                continue
             by_family = defaultdict(int)
             for (o, family, _), (_, b) in totals.items():
                 if o == owner:
@@ -318,8 +328,8 @@ def summarize(rows: list[dict]) -> list[str]:
             lines.append(f'  {owner}: {owner_totals[owner][1] / 1e6:.2f} MB ({parts})')
         lines.append('')
     lines.append('FP8+FP32 shared: input-independent kernels both dtypes run (counted once). Device helpers are')
-    lines.append('noinline functions, not attributed to a kernel. Legacy FP32 is unreachable since 1227 and goes')
-    lines.append('with the FP16 / BF16 cleanup. 1118\'s isolated FP8 RK first-stage inventory measured 8.80 MB.')
+    lines.append('noinline functions, not attributed to a kernel. The legacy families were deleted in 1259.')
+    lines.append('1118\'s isolated FP8 RK first-stage inventory measured 8.80 MB.')
     return lines
 
 
@@ -337,20 +347,38 @@ def self_test():
          ('FP32 retained', 'RK RuntimeK Rotated', 'VALUE', 'FP32')),
         (f'void {ns}awkwardAlignmentRotatedShardedFirstStageKernel<__half, cuda::std::__4::plus<float>, '
          f'{ns}IdentityFp32, 64, 16, 8, true>(__half const*)',
-         ('Legacy FP16/BF16', 'Legacy RCooperative rotated', 'VALUE', 'FP16')),
-        (f'void {ns}awkwardAlignmentRotatedShardedFirstStageKernel<float, cuda::std::__4::plus<float>, '
-         f'{ns}IdentityFp32, 64, 16, 8, true>(float const*)',
-         ('Legacy FP32', 'Legacy RCooperative rotated', 'VALUE', 'FP32')),
-        (f'void {ns}fp32AlignedKKernel<1, 128, ({ns[:-len("(anonymous namespace)::")]}TiledRKStageTopology)0>'
+         ('FP16/BF16 retained', 'RK RuntimeK Rotated', 'VALUE', 'FP16')),  # 1245
+        (f'void {ns}fp32AlignedKKernel<float, 1, 128, ({ns[:-len("(anonymous namespace)::")]}TiledRKStageTopology)0>'
          f'(float const*, void*)', ('FP32 retained', 'RK AlignedK', 'VALUE', 'FP32')),
+        (f'void {ns}fp8GeneralRParallelKTileP16CompleteKernel<__half, 2, 3>(__half const*, void*)',
+         ('FP16/BF16 retained', 'RK RuntimeK PacketComplete', 'VALUE', 'FP16')),  # 1244
+        (f'void {ns}fp32AlignedKKernel<__nv_bfloat16, 8, 64, '
+         f'({ns[:-len("(anonymous namespace)::")]}TiledRKStageTopology)1>(__nv_bfloat16 const*, void*)',
+         ('FP16/BF16 retained', 'RK AlignedK', 'VALUE', 'BF16')),
+        (f'void {ns}fp32AlignedKArgKernel<float, 2, 64, true>(float const*)',
+         ('FP32 retained', 'RK AlignedK', 'ARG', 'FP32')),
+        (f'void {ns}fp32AlignedKArgKernel<__half, 8, 32, false>(__half const*)',
+         ('FP16/BF16 retained', 'RK AlignedK', 'ARG', 'FP16')),  # 1248
+        (f'void {ns}fp32RotatedArgKernel<__nv_bfloat16, true>(__nv_bfloat16 const*)',
+         ('FP16/BF16 retained', 'RK RuntimeK Rotated', 'ARG', 'BF16')),  # 1249
+        (f'void {ns}fp32PacketCompleteArgKernel<__half>(__half const*)',
+         ('FP16/BF16 retained', 'RK RuntimeK PacketComplete', 'ARG', 'FP16')),  # 1249
+        (f'void {ns}fp32OneWindowArgKernel<__half, 2, 8, true>(__half const*)',
+         ('FP16/BF16 retained', 'RK OneWindow', 'ARG', 'FP16')),  # 1250
+        (f'void {ns}fp32DeepRArgTinyKKernel<float, 4>(float const*)',
+         ('FP32 retained', 'RK DeepRSmallK', 'ARG', 'FP32')),
+        (f'void {ns}fp32RotatedArgKernel<float, false>(float const*)',
+         ('FP32 retained', 'RK RuntimeK Rotated', 'ARG', 'FP32')),
         (f'void {ns}fp32AlignedKCarriedArgKernel<2, 64, true, unsigned long>(float const*)',
          ('FP32 retained', 'RK AlignedK', 'carried ARG', 'FP32')),
         (f'void {ns}fp8KRValueFinishKernel<2>(float const*, void*)',
          ('FP8+FP32 shared', 'KR Split finish', 'VALUE', 'FP8+FP32')),
         (f'void {ns}fp8KRValueGroupKernel<float, 0, 1>(float const*)', ('FP32 retained', 'KR Group', 'VALUE', 'FP32')),
         (f'void {ns}fp32KRArgSplitKernel(float const*, unsigned long*)', ('FP32 retained', 'KR Split', 'ARG', 'FP32')),
-        (f'void {ns}kParallelTiledStageKernel<__nv_bfloat16, {ns}IdentityFp32, cuda::std::__4::plus<float>, '
-         f'{ns}IdentityFp32, 8, 256>(__nv_bfloat16 const*)', ('Legacy FP16/BF16', 'Legacy KParallel', 'VALUE', 'BF16')),
+        (f'void {ns}fp8KRArgBlockKernel<{ns}Fp8KRArgFormat>(unsigned int const*)',
+         ('FP8 retained', 'KR Block', 'ARG', 'FP8')),
+        (f'void {ns}fp8KRArgFinishKernel<{ns}F16KRArgFormat>(unsigned long const*)',
+         ('FP16/BF16 retained', 'KR Split finish', 'ARG', 'FP16/BF16')),
         (f'void {ns}kParallelFp8CompleteUnifiedKernel<__nv_fp8_e5m2, 8ul, 64, '
          f'({ns[:-len("(anonymous namespace)::")]}Fp8CompleteFinalizePolicy)1>(__nv_fp8_e5m2 const*)',
          ('FP8 retained', 'RK AlignedK', 'VALUE', 'FP8')),
@@ -360,18 +388,26 @@ def self_test():
         assert got is not None and got[1:] == expected, (name, got, expected)
     helper = f'{ns}finalizeAdditiveFp32OutOfLine(float, float, bool)'
     assert classify(helper) is None
-    nested = f'{ns}fp32AlignedKKernel<1, 32, (X)0>(float const*)::{{lambda()#1}}::operator()() const'
+    nested = f'{ns}fp32AlignedKKernel<float, 1, 32, (X)0>(float const*)::{{lambda()#1}}::operator()() const'
     assert classify(nested) is None
+    got = classify(f'void {ns}fp8KRValueGroupKernel<__half, 0, 0>(unsigned int const*)')  # 1233
+    assert got is not None and got[1:] == ('FP16/BF16 retained', 'KR Group', 'VALUE', 'FP16'), got
     try:
-        classify(f'void {ns}fp8KRValueGroupKernel<__half, 0, 0>(__half const*)')
-        raise AssertionError('an FP16 instantiation of a retained kernel must fail')
+        classify(f'void {ns}fp8KRValueGroupKernel<double, 0, 0>(unsigned int const*)')
+        raise AssertionError('an unexpected instantiation of a retained kernel must fail')
+    except ValueError:
+        pass
+    try:  # 1259: the legacy 8-warp FP32 rotated pass is deleted
+        classify(f'void {ns}awkwardAlignmentRotatedShardedFirstStageKernel<float, cuda::std::__4::plus<float>, '
+                 f'{ns}IdentityFp32, 64, 16, 8, true>(float const*)')
+        raise AssertionError('a legacy rotated instantiation must fail')
     except ValueError:
         pass
     rows = [{'arch': 'sm_120', 'owner': c[1][0], 'family': c[1][1], 'kind': c[1][2], 'bytes': 100} for c in cases]
     rows.append({'arch': 'sm_120', 'owner': 'device helper', 'family': 'CubReductionNarrowFlatRCooperative',
                  'kind': '', 'bytes': 50})
     assert any('FP32 retained total' in line for line in summarize(rows))
-    print(f'self-test: {len(cases) + 3} classifications and the summary OK')
+    print(f'self-test: {len(cases) + 5} classifications and the summary OK')
 
 
 def main():

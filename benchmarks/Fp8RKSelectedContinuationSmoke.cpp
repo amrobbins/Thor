@@ -16,17 +16,10 @@ namespace C = ThorImplementation::CubReductionInternal;
 namespace F = ThorImplementation::CubReductionInternal::Fp8RK;
 using ThorImplementation::DataType;
 
+// 1258: an injected candidate's physical plan (the legacy direct plan the injections used is gone).
+struct InjectedPhysicalPlan final : ThorImplementation::CubReductionInternal::DenseReductionPhysicalPlan {};
+
 namespace ThorImplementation::CubReductionInternal {
-DenseReductionCandidate ReducersDenseR::propose(const DenseReductionProblem&, DenseReductionSite) {
-    throw std::logic_error("lookahead host smoke accidentally used non-injected R policy");
-}
-DenseReductionCandidate ReducersDenseKR::propose(const DenseReductionProblem&, DenseReductionSite) {
-    throw std::logic_error("lookahead host smoke accidentally used non-injected KR policy");
-}
-DenseReductionCandidate ReducersDenseRK::propose(const DenseReductionProblem&, DenseReductionSite,
-                                                 const DenseRKPlanningContext&) {
-    throw std::logic_error("lookahead host smoke accidentally used non-injected RK policy");
-}
 // DenseReductionPhysicalSelector.cpp also contains the original-input FP8
 // production branch. This host-only test injects every FP32 proposal, so its
 // unreachable production dependencies deliberately fail if ever exercised.
@@ -66,7 +59,7 @@ C::DenseReductionCandidate proposal(const C::DenseReductionProblem& problem,
     C::DenseReductionCandidate candidate;
     candidate.family = family;
     candidate.site = site;
-    candidate.physical_plan = std::make_shared<C::DenseDirectReductionPhysicalPlan>();
+    candidate.physical_plan = std::make_shared<InjectedPhysicalPlan>();
     if (fixture.no_progress) {
         candidate.next_problem = problem;
     } else {

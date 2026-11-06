@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Train, validate and export Thor's R / KR shape rankers: FP8 (1158+) or, with --dtype=fp32, FP32 (1182). One model
+"""Train, validate and export Thor's R / KR shape rankers: FP8 (1158+), with --dtype=fp32 FP32 (1182), or with
+--dtype=f16 FP16 / BF16 together (1238; the BF16 flag is the alternate-format feature, f20). One model
 per dtype (user decision 2026-11-02, so a dtype's kernels can change without retraining the others), each for VALUE
 and ARG, trained only on that dtype's cells of the datasets.
 
@@ -20,8 +21,11 @@ Cut over, FP8: copy Fp8KRRankerModel.h to Utilities/TensorOperations/Cub/Fp8KR/,
 test/Utilities/TensorOperations/, and set FP8_KR_SHORTLIST_DEPTHS in Fp8KRSegments.h to the printed depths.
 Cut over, FP32: copy Fp32KRRankerModel.h to Utilities/TensorOperations/Cub/Fp32KR/, Fp32KRRankerParityFixtures.h to
 test/Utilities/TensorOperations/, and set FP32_KR_SHORTLIST_DEPTHS in Fp32KR/Fp32KRStampAutotuner.h.
+Cut over, FP16 / BF16: copy F16KRRankerModel.h to Utilities/TensorOperations/Cub/F16KR/, F16KRRankerParityFixtures.h
+to test/Utilities/TensorOperations/, and give F16KR/F16KRStampAutotuner.cpp its F16_KR_SHORTLIST_DEPTHS (it refuses to
+compile a trained model without them).
 
-Usage: train.py kr-training.csv.gz [more.csv.gz ...] --out-dir=fp8_kr_ranker_out [--dtype=fp8|fp32] [--seed=0]
+Usage: train.py kr-training.csv.gz [more.csv.gz ...] --out-dir=fp8_kr_ranker_out [--dtype=fp8|fp32|f16] [--seed=0]
 Requires numpy, scikit-learn and xgboost.
 """
 
@@ -63,6 +67,16 @@ DTYPES = {
         "parity_namespace": "ThorImplementation::CubReductionInternal::Fp32KR::Fp32KRRankerParity",
         "depths": "set in Fp32KR/Fp32KRStampAutotuner.h: FP32_KR_SHORTLIST_DEPTHS",
         "json": "fp32_kr_ranker.json",
+    },
+    "f16": {
+        "label": "FP16 / BF16",
+        "cells": lambda dtype: dtype in ("fp16", "bf16"),
+        "model_header": "F16KRRankerModel.h",
+        "fixtures_header": "F16KRRankerParityFixtures.h",
+        "model_namespace": "ThorImplementation::CubReductionInternal::F16KR::F16KRRankerModel",
+        "parity_namespace": "ThorImplementation::CubReductionInternal::F16KR::F16KRRankerParity",
+        "depths": "set in F16KR/F16KRStampAutotuner.cpp: F16_KR_SHORTLIST_DEPTHS",
+        "json": "f16_kr_ranker.json",
     },
 }
 

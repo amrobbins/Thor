@@ -116,13 +116,21 @@ The read-only census produces no kernels and does not change selection.
 
 ## Numeric contract
 
-- Input storage may be FP8 E4M3, FP8 E5M2, FP16, BF16, FP32, or an enabled FP64 type.
+- Input and output storage may be FP8 E4M3, FP8 E5M2, FP16, BF16 or FP32 (no FP64 since 1258 / 1259).
 - Input iterators convert values to FP32 before reduction.
 - Reduction state and operation-specific finalization use FP32.
 - The final store converts once to the configured output storage dtype.
 - Stamped operations own their output and CUB workspace. `run()` and `runOn()` do not allocate or re-plan.
 
 ## Dense paths
+
+> **1258 (phase 10 of the FP16/BF16 plan):** the `ReducersDenseR / KR / RK` families, `DenseRKInventory` and the
+> direct dense plan are deleted. `selectDensePhysicalPass()` sends every dense site to a retained per-dtype selector
+> (FP8, FP16/BF16 or FP32; see `FP8_REDUCTION_PATTERN.md`) and throws for anything else; FP64 reductions are not
+> supported. 1259 deleted the legacy kernels too: `CubReductionCooperativeShardedTiled.cu`, the generic FP16 /
+> BF16 / FP32 KParallel grid, the 8-warp rotated and FlatRows entry points, and the FP64 code. 1261 deleted the
+> interval-composition planner and ARG executor. Family-era text below (including the functions it names) is kept as
+> design history.
 
 `CubReduction` selects the fastest backend implied by dense row-major geometry:
 
@@ -232,15 +240,17 @@ autotuning, allocation, host synchronization, or topology discovery is introduce
 The shared `CubReduction::analyzeGeometry()` selector owns execution-family classification. An ordinary dense disjoint
 reduction is reported as `ComposedDense` immediately, and DENSE-GATE-FINAL makes that ownership an implementation
 invariant: canonical dense geometry must resolve to `DeviceTransformReduce`, `ContiguousFixedSegment`,
-`TiledFixedSegment`, or `ComposedDense`. The structural dense planner must produce a complete all-direct composition for
-every disjoint mask; failure is an internal logic error rather than an invitation to enter a catch-all view reducer.
+`TiledFixedSegment`, or `ComposedDense`; a disjoint mask is never an invitation to enter a catch-all view reducer
+(since 1261 no structural interval plan is built: `planDenseReduction()` owns every disjoint mask).
 For VALUE, `ComposedDense` is now only that structural classification: `planDenseReduction()` chooses the actual
 R/KR/RK pass sequence and globally replans after each pass. ARG-P1 (Thor1106) moved original FP8 input ARG onto the
 same planner: `CubArgReduction::stamp()` plans FP8 dense ARG with `planDenseReduction()` (aggregate kind `Arg`,
 carried index width from the whole original domain) and executes the planned passes as direct ARG stages (FP32 value +
 carried original index between passes, `local * original_arg_domain_stride` added per pass, nothing added for a
-reducer-created intermediate run). The public geometry and `getPath()` stay the analyzed dense geometry. FP16/BF16/FP32
-ARG still uses the transitional interval-composition executor until its own cutover.
+reducer-created intermediate run). The public geometry and `getPath()` stay the analyzed dense geometry. FP32 (1221)
+and FP16/BF16 (1254-1257) ARG followed. 1261 deleted the interval-composition ARG executor (`stampComposedDense`,
+`stampComposedDenseWithPlan`), the interval-DP planners for VALUE and ARG (`analyzeDenseCompositionPlan*`) and the
+CUB dense ARG adapters (`CubArgReductionMin / Max.cu`); every pass of a planned dense ARG stamp is a retained pass.
 
 The ordinary-dense ARG selector obeys the same ownership contract. `CubArgReduction::stamp()` requires a dense-contiguous
 input, and the dense gate exhausts ranks 1-9 and every non-empty reduction mask, with singleton-heavy and disjoint-run
@@ -313,7 +323,8 @@ The original fix for this under-parallelism was `ROW-SPLIT-FULL-ROW`, a generic 
 R sharding could recover device utilization, but its dedicated first-stage/finalize pairing was a transitional design.
 After the KParallel/RCooperative census closed its coverage and meaningful performance gaps, the historical row-split
 kernels, selectors, benchmark registration, and stamped compatibility state were removed from the compilation surface.
-Their role is now historical calibration only; ordinary dense VALUE RK is owned entirely by `ReducersDenseRK`.
+Their role is now historical calibration only; ordinary dense VALUE RK was then owned by `ReducersDenseRK` (itself
+retired in 1258).
 
 Aligned staged full-row work has two useful ownership modes rather than two permanently paired reducer families.
 R-cooperative stages spend multiple warps on the same retained K tile and divide R among those warps. K-parallel stages
@@ -379,30 +390,18 @@ one CTA per SM, so narrowing the retained width does not recreate the under-para
 the kernel. Exact packet-aligned sub-4096 widths remain on the existing direct/cooperative families until separately
 benchmarked.
 
-### RK post-delete coverage gate
+### RK post-delete coverage gate (retired)
 
-`thor_cub_reduction_benchmark --rk-census-gate` is the durable post-delete gate for ordinary dense RK. Production now
-stamps and executes the `ReducersDenseRK` family plan directly, so the gate times that production path only. It does not
-compile or execute a second legacy/reference VALUE reducer inventory: retaining those historical CUDA/CUB kernels only
-for live A/B measurement would keep their template specializations in the binary and defeat the deletion.
-
-The gate spans the existing low-output/deep-R, retained-width, output-count, wide awkward, and sub-4096/sub-512/
-sub-256/sub-64 awkward populations for FP16/BF16/FP32. SUM/MIN/MAX/PRODUCT exercise the core geometry-dependent
-operation classes, and a compact set of Complete, aligned staged, K-parallel, rotated, and FlatRows sentinels additionally
-covers Mean/L1/L2/SumSquares so input-transform/finalizer semantics are validated through multi-pass family execution.
-Coverage gaps are reported without stopping the remaining census, while numerical disagreement remains fatal.
-
-Capture stdout and run `benchmarks/analyze_rk_census_gate.py <output>`. Missing modern rows and explicit coverage gaps
-always fail analysis. The analyzer also requires the census to exercise K-parallel, R-cooperative, rotated
-R-cooperative, flat-row R-cooperative, Complete, and Staged modern plans so an accidentally dead part of the two-strategy
-inventory cannot hide behind generic coverage. New post-delete CSVs are modern-only. The analyzer continues to accept
-archived pre-delete paired CSVs when a historical production-vs-modern comparison is useful, without requiring those
-legacy kernels to remain in the current compilation surface.
+The `thor_cub_reduction_benchmark --rk-census-gate` census and its analyzer timed the `ReducersDenseRK` family plan
+after the original inventory delete. Phase 10 of the FP16/BF16 plan (1258) removed that family: every dense VALUE and
+ARG site now goes to a retained per-dtype selector (FP8, FP16/BF16, FP32), and the benchmark, analyzer and family code
+were deleted. Coverage of the retained passes lives in the per-family selector tests and the dense production audit.
 
 ### View ownership after DELETE
 
-`thor_cub_reduction_benchmark --view-census` is now the final ownership census rather than a benchmark of a generic
-fallback. The structured view families that Thor intentionally supports are assigned directly to ordained implementations:
+The view ownership census (formerly `thor_cub_reduction_benchmark --view-census`, removed in 1258) settled ownership
+rather than benchmarking a generic fallback. The structured view families that Thor intentionally supports are
+assigned directly to ordained implementations:
 
 - VIEW-DIRECT-1 sends a one-to-one compact physical permutation with every logical axis reduced directly through
   `DeviceTransformReduce`, because visitation order is irrelevant for a full value reduction.

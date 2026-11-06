@@ -52,9 +52,6 @@ TEST(CubSegmentedReduction, ConvertsLowPrecisionInputAndAccumulatesInFp32) {
 #if THOR_CUB_ENABLE_FP8_TYPES
     input_dtypes.insert(input_dtypes.begin(), {DataType::FP8_E4M3, DataType::FP8_E5M2});
 #endif
-#if THOR_CUB_ENABLE_64BIT_TYPES
-    input_dtypes.push_back(DataType::FP64);
-#endif
     for (DataType dtype : input_dtypes) {
         SCOPED_TRACE(static_cast<int>(dtype));
         Tensor input = makeGpuTensor({1.0f, 2.0f, 3.0f, 4.0f}, {4}, stream, dtype);
@@ -163,9 +160,6 @@ TEST(CubSegmentedArgReduction, VectorValuesConvertLowPrecisionInputAndCompareInF
     std::vector<DataType> input_dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
 #if THOR_CUB_ENABLE_FP8_TYPES
     input_dtypes.insert(input_dtypes.begin(), {DataType::FP8_E4M3, DataType::FP8_E5M2});
-#endif
-#if THOR_CUB_ENABLE_64BIT_TYPES
-    input_dtypes.push_back(DataType::FP64);
 #endif
     for (DataType dtype : input_dtypes) {
         SCOPED_TRACE(static_cast<int>(dtype));
@@ -345,9 +339,6 @@ TEST(CubSegmentedReduction, VectorValuesConvertLowPrecisionInputAndAccumulateInF
     std::vector<DataType> input_dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
 #if THOR_CUB_ENABLE_FP8_TYPES
     input_dtypes.insert(input_dtypes.begin(), {DataType::FP8_E4M3, DataType::FP8_E5M2});
-#endif
-#if THOR_CUB_ENABLE_64BIT_TYPES
-    input_dtypes.push_back(DataType::FP64);
 #endif
     for (DataType dtype : input_dtypes) {
         SCOPED_TRACE(static_cast<int>(dtype));

@@ -17,6 +17,13 @@
 //     are the generic Pack measurement on short FP32 rows that decides whether vector Pack is ported. 1181: FP32 ARG
 //     cells too (launchFp32KRArgSegments, the FP32 ARG pool: fp32KRArgShapeLegal). Shape names and columns other than
 //     R are in bytes; input_bytes = 4 K R; the ranker features are FP8's (FP32's ranker comes in phase 4);
+//   - 1233 --dtypes=fp16,bf16 (with any of the others): FP16 / BF16 VALUE cells (launchF16KRValueSegments, not yet
+//     routed in production) on the 2-byte pool (retainedKRCandidatePool at element size 2). A 2-byte cell takes its
+//     geometry's row length in elements (row bytes 2 R) and half its rows (a pure R site keeps its bytes). 1237: ARG
+//     cells too (launchF16KRArgSegments, the 2-byte ARG pool: f16KRArgShapeLegal). The ranker site's alternate-format
+//     slot is the BF16 flag; frozen_margin is FP8's model (the 2-byte ranker comes in phase 4). The production stamp
+//     is today's (legacy) FP16 / BF16 plan, so the sweep also measures the gap the retained kernels close. 1234: the
+//     2-byte pool has its own vector Pack shapes (rows of 1 to 8 elements; the ring's views are 16-byte aligned);
 //   - 1217 --carried-index=uint32|uint64 (with --dtypes=fp32 and ARG operations only): the ARG cells are carried-index
 //     (intermediate) sites, kinds carried_arg_index / carried_arg_value_index: FP32 values plus a cold carried index
 //     of that width (each launch reads its own view of both), timed through launchFp32KRCarriedArgSegments at row
@@ -230,7 +237,9 @@ Settings parse(int argc, char** argv) {
                 if (d == "fp8_e4m3") s.dtypes.push_back(T::DataType::FP8_E4M3);
                 else if (d == "fp8_e5m2") s.dtypes.push_back(T::DataType::FP8_E5M2);
                 else if (d == "fp32") s.dtypes.push_back(T::DataType::FP32);  // 1179
-                else throw std::invalid_argument("--dtypes takes fp8_e4m3,fp8_e5m2,fp32");
+                else if (d == "fp16") s.dtypes.push_back(T::DataType::FP16);  // 1233
+                else if (d == "bf16") s.dtypes.push_back(T::DataType::BF16);  // 1233
+                else throw std::invalid_argument("--dtypes takes fp8_e4m3,fp8_e5m2,fp32,fp16,bf16");
             }
         } else if (auto v = value("--ops=")) {
             s.ops = splitList(*v);
@@ -263,7 +272,8 @@ Settings parse(int argc, char** argv) {
             std::cout << "thor_fp8_kr_training_sweep [--max-cells=N] [--seed=1151] [--random=3000] [--semantics=2]\n"
                          "    [--heldout-percent=10] [--targets-mib=8,32,128,512] [--min-kib=4096 | --min-mib=4]\n"
                          "    [--max-mib=512]\n"
-                         "    [--samples=5] [--dtypes=fp8_e4m3,fp8_e5m2[,fp32]] [--ops=sum,...,argmax] [--list-only]\n"
+                         "    [--samples=5] [--dtypes=fp8_e4m3,fp8_e5m2[,fp32][,fp16][,bf16]] [--ops=sum,...,argmax]\n"
+                         "    [--list-only]\n"
                          "    [--no-production] [--split-stages] [--floor-us=4] [--arena-gib=8]\n"
                          "    [--output-ring-gib=3] [--interval-us=1000] [--max-launches=256] [--queue-cells=128]\n"
                          "    [--carried-index=uint32|uint64]  (1217; with --dtypes=fp32 --ops=argmin,argmax)\n";
@@ -290,9 +300,15 @@ Settings parse(int argc, char** argv) {
 
 const char* dtypeName(T::DataType dtype) {
     if (dtype == T::DataType::FP32) return "fp32";
+    if (dtype == T::DataType::FP16) return "fp16";
+    if (dtype == T::DataType::BF16) return "bf16";
     return dtype == T::DataType::FP8_E5M2 ? "fp8_e5m2" : "fp8_e4m3";
 }
-uint32_t elementBytes(T::DataType dtype) { return dtype == T::DataType::FP32 ? 4 : 1; }
+bool isF16(T::DataType dtype) { return dtype == T::DataType::FP16 || dtype == T::DataType::BF16; }
+uint32_t elementBytes(T::DataType dtype) {
+    if (dtype == T::DataType::FP32) return 4;
+    return isF16(dtype) ? 2 : 1;
+}
 uint64_t indexBytes(T::DataType dtype) { return dtype == T::DataType::UINT64 ? 8 : 4; }
 
 uint64_t mix(uint64_t x) {  // splitmix64 finalizer: deterministic across platforms
@@ -377,6 +393,13 @@ std::vector<CellSpec> cells(const Settings& s) {
                 } else {
                     c.geometry.rows = std::max<uint64_t>(1, g.rows / 4);
                 }
+            } else if (isF16(c.dtype)) {
+                // 1233: R elements of 2 bytes and half the rows (a pure R site keeps its bytes).
+                if (g.rows == 1) {
+                    c.geometry.r = std::max<uint64_t>(1, g.r / 2);
+                } else {
+                    c.geometry.rows = std::max<uint64_t>(1, g.rows / 2);
+                }
             }
             const bool want_arg = (j % 2) == 1;
             if ((want_arg && !arg_ops.empty()) || value_ops.empty()) {
@@ -442,6 +465,7 @@ std::vector<Candidate> candidates(uint64_t rows, uint64_t row_bytes, uint32_t el
     for (const KR::Fp8KRPoolEntry& entry : KR::retainedKRCandidatePool(rows, row_bytes, sms, element_bytes)) {
         if (s.list_only && entry.list_position == 0) continue;
         if (arg && element_bytes == 4 && !KR::fp32KRArgShapeLegal(entry.shape)) continue;
+        if (arg && element_bytes == 2 && !KR::f16KRArgShapeLegal(entry.shape)) continue;  // 1237
         result.push_back({entry.shape, entry.list_position});
     }
     if (s.split_stages) {
@@ -536,7 +560,7 @@ int main(int argc, char** argv) {
         }
         const CopyCurve curve = copyCurve(inputs, outputs, stream, max_moved, settings.interval_us);
 
-        std::cout << "# fp8_kr_training=1 version=1217 method=ring_batched seed=" << settings.seed
+        std::cout << "# fp8_kr_training=1 version=1237 method=ring_batched seed=" << settings.seed
                   << " random_geometries=" << settings.random
                   << " semantics_per_geometry=" << settings.semantics_per_geometry
                   << " heldout_percent=" << settings.heldout_percent << " cells=" << total
@@ -595,9 +619,15 @@ int main(int argc, char** argv) {
             } else if (is_value && cell.spec.dtype == T::DataType::FP32) {
                 C::launchFp32KRValueSegments(*cell.semantics, in, *cell.values[out], shape, partials, scratch_bytes,
                                              1.0f, stream, stages);
+            } else if (is_value && isF16(cell.spec.dtype)) {
+                C::launchF16KRValueSegments(*cell.semantics, in, *cell.values[out], shape, partials, scratch_bytes,
+                                            1.0f, stream, stages);
             } else if (is_value) {
                 C::launchFp8KRValueSegments(*cell.semantics, in, *cell.values[out], shape, partials, scratch_bytes,
                                             1.0f, stream, stages);
+            } else if (isF16(cell.spec.dtype)) {
+                C::launchF16KRArgSegments(in, cell.values[out] ? &*cell.values[out] : nullptr, &*cell.indices[out],
+                                          shape, partials, scratch_bytes, cell.maximum, 1, stream, stages);
             } else if (cell.spec.dtype == T::DataType::FP32) {
                 C::launchFp32KRArgSegments(in, cell.values[out] ? &*cell.values[out] : nullptr, &*cell.indices[out],
                                            shape, partials, scratch_bytes, cell.maximum, 1, stream, stages);
@@ -717,7 +747,7 @@ int main(int argc, char** argv) {
                     cell->ranker_site.kind =
                         static_cast<uint8_t>((producesValue(spec.kind) ? 2 : 1) + (carried ? 2 : 0));
                     cell->ranker_site.combine = cell->maximum ? 3 : 2;
-                    cell->ranker_site.e5m2 = spec.dtype == T::DataType::FP8_E5M2;
+                    cell->ranker_site.e5m2 = spec.dtype == T::DataType::FP8_E5M2 || spec.dtype == T::DataType::BF16;
                 }
                 cell->moved_bytes = bytes + carried_bytes + (producesValue(spec.kind) ? 8 : 4) * rows;
                 const double moved = static_cast<double>(cell->moved_bytes);

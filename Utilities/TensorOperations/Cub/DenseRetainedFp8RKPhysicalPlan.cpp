@@ -98,4 +98,17 @@ DenseReductionCandidate makeRetainedFp32RKValueCandidate(const DenseReductionPro
     return makeRetainedRKCandidate(problem, site, first_stage, DataType::FP32);
 }
 
+DenseReductionCandidate makeRetainedF16RKValueCandidate(const DenseReductionProblem& problem, DenseReductionSite site,
+                                                        const Fp8RK::PhysicalKernel& first_stage,
+                                                        DataType input_dtype) {
+    if ((input_dtype != DataType::FP16 && input_dtype != DataType::BF16) ||
+        problem.aggregate_kind != DenseReductionAggregateKind::Value || !problem.final_output.produce_value ||
+        problem.final_output.produce_index || problem.input_state != DenseReductionInputState::OriginalInput ||
+        first_stage.element_bytes != 2 || classifyDenseReducerFamily(problem, site) != DenseReducerFamily::RK ||
+        problem.runs[site.run_index].kind != DenseReductionRunKind::OriginalReduction)
+        throw std::invalid_argument(
+            "Retained FP16 / BF16 RK physical pass requires an original FP16 / BF16 VALUE RK site and a 2-byte kernel");
+    return makeRetainedRKCandidate(problem, site, first_stage, input_dtype);
+}
+
 }  // namespace ThorImplementation::CubReductionInternal

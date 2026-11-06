@@ -2134,16 +2134,6 @@ add_executable(thor_fp8_rk_continuation_layout_smoke EXCLUDE_FROM_ALL
 target_include_directories(thor_fp8_rk_continuation_layout_smoke PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR})
 
-# Common physical-selector channel and iterative-planner contract (runs on the host, no GPU). Fake family
-# implementations are confined to this test TU; real R/KR/RK policy parity is checked by CubDensePhysicalSelector in
-# thor_tests. 1172: links Thor, since the physical selector now reaches the retained FP8 selectors and the selection
-# cache; the former source-list build no longer linked.
-add_executable(thor_dense_physical_selector_channel_smoke EXCLUDE_FROM_ALL
-        benchmarks/DensePhysicalSelectorChannelSmoke.cpp)
-target_include_directories(thor_dense_physical_selector_channel_smoke PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(thor_dense_physical_selector_channel_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
-
 # Retained FP8 RK first-stage physical-plan/ordinary planner contract (runs on the host, no GPU).
 # Tests inject FP8 physical identities and subsequent FP32 candidates. 1172: links Thor (see above).
 add_executable(thor_dense_retained_fp8_rk_physical_plan_smoke EXCLUDE_FROM_ALL
@@ -2270,43 +2260,6 @@ add_executable(thor_fp8_rk_stamp_autotuner_smoke EXCLUDE_FROM_ALL
 target_link_libraries(thor_fp8_rk_stamp_autotuner_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
 target_include_directories(thor_fp8_rk_stamp_autotuner_smoke PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR})
-
-add_executable(thor_cub_reduction_benchmark EXCLUDE_FROM_ALL
-        benchmarks/CubReductionBenchmark.cpp
-        benchmarks/CubReductionBenchmarkCandidate.cpp
-        benchmarks/CubReductionBenchmarkDenseRunTrailingReducedCandidate.cu
-        benchmarks/CubReductionBenchmarkDenseRunTrailingRetainedCandidates.cpp
-        benchmarks/CubReductionBenchmarkDenseRunOrderCandidates.cpp
-        benchmarks/CubReductionBenchmarkDenseRKFamilyCandidate.cu
-        benchmarks/CubReductionBenchmarkCudnnFrontendCandidate.cpp
-        benchmarks/CubReductionBenchmarkCudnnFrontendLayout.cu
-)
-thor_apply_linker_settings(thor_cub_reduction_benchmark)
-# Benchmark-only reduction candidates may add CUDA translation units. Do not enable target-wide IPO here because that
-# would also request CUDA device LTO without the matching device-link configuration.
-thor_enable_release_no_semantic_interposition(thor_cub_reduction_benchmark)
-target_link_libraries(thor_cub_reduction_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
-target_link_libraries(thor_cub_reduction_benchmark PRIVATE OpenMP::OpenMP_CXX)
-target_link_libraries(thor_cub_reduction_benchmark PRIVATE PkgConfig::LIBURING)
-target_compile_options(thor_cub_reduction_benchmark PRIVATE
-        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3>
-        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:RelWithDebInfo>>:-O3>
-        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Debug>>:-O0 -ggdb>
-        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:-O3>
-        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:RelWithDebInfo>>:-O3>
-        # Debug CUDA optimization is per-source below: one explicit -O level per NVCC compilation.
-)
-# Benchmark-only kernels remain optimized in Debug, without imposing -O3 on the RK calibration TU.
-foreach(_thor_cub_benchmark_optimized_cuda_source IN ITEMS
-        benchmarks/CubReductionBenchmarkDenseRunTrailingReducedCandidate.cu
-        benchmarks/CubReductionBenchmarkCudnnFrontendLayout.cu)
-    set_property(SOURCE ${_thor_cub_benchmark_optimized_cuda_source} APPEND PROPERTY COMPILE_OPTIONS
-            $<$<CONFIG:Debug>:-O3>)
-endforeach()
-# RK calibration runs the production family directly. Match Thor's Debug optimization level to avoid
-# measuring an artificial benchmark-only advantage, and don't pass a conflicting target-wide -O3.
-set_property(SOURCE benchmarks/CubReductionBenchmarkDenseRKFamilyCandidate.cu APPEND PROPERTY COMPILE_OPTIONS
-        $<$<CONFIG:Debug>:-O0>)
 
 # Fused-expression census contains a small CUDA cache-eviction kernel while
 # executing production Thor fused kernels for all timed work.  Keep the target

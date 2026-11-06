@@ -56,15 +56,6 @@ void storeCpuValues(Tensor& cpu, DataType dtype, const std::vector<float>& value
             return;
         }
 #endif
-#if THOR_CUB_ENABLE_64BIT_TYPES
-        case DataType::FP64: {
-            double* typed = static_cast<double*>(storage);
-            for (size_t i = 0; i < values.size(); ++i) {
-                typed[i] = static_cast<double>(values[i]);
-            }
-            return;
-        }
-#endif
         default:
             throw std::invalid_argument("Unsupported CUB reduction test storage dtype.");
     }
@@ -142,15 +133,6 @@ std::vector<float> readCpuValues(const Tensor& cpu) {
         }
         case DataType::FP8_E5M2: {
             const __nv_fp8_e5m2* typed = static_cast<const __nv_fp8_e5m2*>(storage);
-            for (size_t i = 0; i < num_elements; ++i) {
-                values[i] = static_cast<float>(typed[i]);
-            }
-            return values;
-        }
-#endif
-#if THOR_CUB_ENABLE_64BIT_TYPES
-        case DataType::FP64: {
-            const double* typed = static_cast<const double*>(storage);
             for (size_t i = 0; i < num_elements; ++i) {
                 values[i] = static_cast<float>(typed[i]);
             }

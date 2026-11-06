@@ -17,10 +17,10 @@ namespace ThorImplementation::CubReductionInternal {
 [[nodiscard]] DenseRKValueOperation denseRKValueOperation(CubReductionOp operation);
 
 /**
- * Owns the CUDA-aware selection facts for a production GPU. The exact occupancy callback's user pointer refers to
- * limits_ below; the object is intentionally neither copyable nor movable. Keep it alive for every select/plan call.
- * The active FP8 cache-miss benchmark uses context() to select hypothetical FP32 physical passes
- * through the production policy without constructing an FP32 stamp.
+ * Owns the CUDA-aware selection facts for a production GPU (its tuning stream and multiprocessor count). The object
+ * is intentionally neither copyable nor movable: context() points at the stream. Keep it alive for every select/plan
+ * call. The FP8 cache-miss benchmark uses context() to select hypothetical FP32 physical passes through the
+ * production policy without constructing an FP32 stamp.
  */
 class DenseProductionPhysicalSelectionContext {
    public:
@@ -42,16 +42,7 @@ class DenseProductionPhysicalSelectionContext {
     [[nodiscard]] const DensePhysicalSelectionContext& context() const noexcept { return context_; }
 
    private:
-    struct Limits {
-        uint32_t max_threads_per_sm = 0;
-        uint32_t max_blocks_per_sm = 0;
-        uint32_t warp_size = 32;
-    } limits_;
-
     DensePhysicalSelectionContext context_;
-
-    [[nodiscard]] static DenseRKOccupancyInfo queryProductionRKOccupancy(const DenseRKFamilyPhysicalPlan& plan,
-                                                                           void* user_context);
 };
 
 }  // namespace ThorImplementation::CubReductionInternal

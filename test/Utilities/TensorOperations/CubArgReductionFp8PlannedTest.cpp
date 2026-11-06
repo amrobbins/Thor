@@ -212,9 +212,6 @@ TEST(CubArgReductionFp8Planned, ComposedGeometriesMatchReference) {
             for (const CubArgReductionOp op : {CubArgReductionOp::ArgMin, CubArgReductionOp::ArgMax}) {
                 const CubArgReduction reduction(op, axes, valueAndIndex());
                 auto planned = reduction.stamp(input, stream);
-                // A5 (1119): the direct interval executor no longer compiles FP8 tiled stages; check against the
-                // host reference instead.
-                EXPECT_THROW(static_cast<void>(reduction.stampComposedDense(input, stream)), std::invalid_argument);
                 planned->run();
                 stream.synchronize();
                 const ArgResult expected = reference(copyGpuTensorAsFloat(input, stream), dimensions, axes,

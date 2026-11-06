@@ -1,7 +1,8 @@
 # The FP8 dense reduction pattern (template for FP16, BF16 and FP32)
 
 Status: 1172, written when FP8 reached the end of its plan (tests passing, rankers trained, framework integration
-done). 1231: FP32 follows the pattern too (section 8); FP16 / BF16 are next (the project's FP16 / BF16 plan). This
+done). 1231: FP32 follows the pattern too (section 8). 1262: FP16 / BF16 follow it (section 9), so every dense
+reduction dtype now runs the pattern and the legacy dense families are deleted (1258-1261). This
 document describes the pattern FP8 settled on, the rules it keeps, and what another dtype needs to follow it. The
 history and measurements behind each choice are in `Fp8RK/README.md`, `../../../benchmarks/*.md` and the project's FP8
 completion plan. `ReductionArchitecture.md` is the source-ownership map.
@@ -237,7 +238,8 @@ Decisions for every dtype (user, 2026-11-02):
   elements mean less ALU work per input byte. Where ALU work was not the limit, every family may still be needed for
   2- and 4-byte dtypes.
 - **Accumulate in FP32**, as today. Every reduction path accumulates in FP32: the CUB adapters `static_assert` it, and
-  the FP8 kernels accumulate in `float` and write FP32 partials. FP64 exists only as an output storage dtype.
+  the FP8 kernels accumulate in `float` and write FP32 partials. FP64 is neither an input nor an output dtype
+  (1258 / 1259).
 - **CUB stops being a candidate as soon as work on a dtype starts.** It is not timed against the dtype's new kernels.
 - **The FP8 families are the inventory for every dtype** (OneWindow, DeepRSmallK, AlignedK, RuntimeK; Pack, vector
   Pack, Group, Block, Split; their ARG forms). A dtype neither keeps other kernel families of its own (FP32's
@@ -282,6 +284,8 @@ Decisions for every dtype (user, 2026-11-02):
 | Tests | `CubReductionFp8MultiStepTest`, `Fp8GeometryRankerTest`, `Fp8KRRankerTest`, `CubReductionTuningDepthTest`, `DenseReductionSelectionCacheTest`, `CubDenseReductionLazyPlannerTest`, `CubArgReductionFp8*Test`, `NetworkReductionTuningDepthTest` |
 | FP32 (section 8) | `Fp32RK/`, `Fp32KR/`, `Fp32ArgKey.cuh`, `Fp32CarriedArgContestInput.*`, `DenseRetainedFp32ArgPhysicalPlan.*`; the FP32 kernels sit beside FP8's in the NarrowFlat, KParallel and AwkwardRotated TUs |
 | FP32 tests | `CubReductionFp32RKTest`, `CubReductionFp32KRTest`, `CubReductionFp32RKSelectorTest`, `CubReductionFp32KRSelectorTest`, `Fp32RKCandidatesTest`, `Fp32KRRankerTest`, `CubReductionFp32RoutingTest`, `CubReductionElementWidthTest` |
+| FP16 / BF16 (section 9) | `F16RK/` (`F16RKCandidates.*`, `F16RKArgCandidates.*`, `F16RKStampAutotuner.*`, `F16RKRankerModel.h`), `F16KR/` (`F16KRStampAutotuner.*`, `F16KRRankerModel.h`); the 2-byte kernels are the FP8 / FP32 kernels' typed instantiations in the same TUs |
+| FP16 / BF16 tests | `CubReductionF16RKTest`, `CubReductionF16KRTest`, `CubReductionF16RKSelectorTest`, `CubReductionF16KRSelectorTest`, `F16RKCandidatesTest`, `F16KRRankerTest`, `CubReductionF16RoutingTest` |
 
 ## 8. FP32 (1174-1230)
 
@@ -334,8 +338,8 @@ every dtype finishes in FP32. The plan, its measurements and its decisions are i
 - **Route behind a switch, audit, then remove the switch.** The before / after audits ran on one build (1220-1227).
 - **The old families stay until the last dtype that runs them converts** (user, 2026-11-04). FP32 no longer reaches
   `ReducersDenseR / KR / RK` or the direct ARG adapter, but their FP32 code is deleted with FP16 / BF16's conversion
-  rather than cut out of shared kernels now. Non-dense views (permuted, strided) keep their tiled and CUB paths for
-  every dtype.
+  rather than cut out of shared kernels now (done in 1258-1261, section 9.3). Non-dense views (permuted, strided)
+  keep their tiled and CUB paths for every dtype.
 
 ### 8.3 Open items left by FP32
 
@@ -346,3 +350,81 @@ every dtype finishes in FP32. The plan, its measurements and its decisions are i
 - **Tests.** Phase 9's no-fallback and multi-step tests are `CubReductionFp32Routing.Random*` (randomized multi-pass
   VALUE and ARG plans on FP32 and FP8 inputs, every operation, the seed printed, every FP32-reading pass checked
   retained) and `CubDensePhysicalSelector.DescriptorOnlyFP32SitesGoToTheRetainedFp32Selectors`.
+
+## 9. FP16 / BF16 (1233-1261)
+
+FP16 and BF16 were the last dtypes through the pattern, and converted together: they share an element size and
+differ only in decode and in their NaN / infinity encodings, like FP8's E4M3 / E5M2 pair. "F16" in names means both.
+The plan, its measurements and its decisions are in the project's FP16 / BF16 plan
+(`plans/Thor_FP16_BF16_Dense_Reduction_Plan_2026-11-04.md`).
+
+### 9.1 What FP16 / BF16 have
+
+- **Only original-input sites needed new work.** Every staged 2-byte pass writes FP32 partials, and every ARG
+  intermediate carries FP32 values and an index, so the FP32 selectors already owned those sites.
+  `selectDensePhysicalPass` sends original FP16 / BF16 sites to `F16RK::selectCached*Site` and
+  `F16KR::selectCached*Site`; dense 2-byte ARG runs the planned ARG executor. A host-only context is rejected.
+- **Inventory: the FP8 / FP32 kernels at element size 2**, as typed instantiations (one kernel source, a 2-byte branch
+  where the mapping differs). RK: OneWindow and DeepRSmallK (K <= 249: a 16-byte packet holds 8 elements), AlignedK
+  (2-, 4-, 8- and 16-byte packets x CTA 32 / 64 / 128 x Complete / Staged; the 2-byte packet at odd K only),
+  RuntimeK PacketComplete (tiles 8..248) and the rotated prefix (tile 249, 8 cooperative warps, depths 32..1024).
+  R / KR: Pack, Group, Block and Split, plus vector Pack (rows of 1-8 elements, VALUE only; user, 2026-11-05).
+- **ARG.** R / KR ARG uses one 64-bit word: a format-neutral 16-bit ordered key << 48 | index << 1 | negative zero,
+  merged with one unsigned minimum; FP16 and BF16 differ only in a runtime NaN threshold, so one kernel per geometry
+  serves both. RK ARG widens each element to FP32's two-word key and reuses FP32's ARG kernels and packed partials.
+- **Rankers and depths.** One model per site family for both dtypes, with a BF16 feature (FP8's E5M2 slot). KR:
+  model e425a0b4 (VALUE and ARG), depths {4, 6, 8}. RK: model 3ad15d57 (VALUE and ARG, trained on the randomized
+  15,538-cell sweep with a holdout), depths {4, 8, 12}; out of fold N=8 max 1.029 / 1.044 (VALUE / ARG), N=12 max
+  1.016 / 1.020. Cache kinds `F16RK` and `F16KR`; keys hold the input dtype, so FP16 and BF16 never share an entry.
+- **Misaligned input is not an error.** The RK selectors keep the passes that run at the input's alignment (at least
+  2 bytes: rotated at 2, AlignedK at its packet), and the first such site warns once per process. R / KR runs at any
+  2-byte address.
+- **Results against the phase-0 audit (600 cells per dtype, p50 per-cell ratio).** KR ARG 2.6-15x, RK ARG 2.6-3.4x,
+  RK VALUE 1.2-1.4x, KR VALUE 1.1-1.4x, R 1.0-1.3x. At 128 MiB and up every family runs at 1.64-1.69 TB/s median, and
+  at 16 MiB and up no cell is slower than 0.98x. Per byte, 2-byte throughput is level with FP8's or about 1-2% above
+  it at large sizes. Stamp time p50 7.4-24.6 ms by size (max 156 ms).
+- **SASS (1259, sm_120):** FP16 / BF16 retained 11.75 MB (771 kernels), against FP8's 8.89 MB and FP32's 4.74 MB.
+  RK AlignedK VALUE is the largest share (3.99 MB, 48 kernels): FP32's full configuration grid, against FP8's pruned
+  one.
+
+### 9.2 What FP16 / BF16 taught
+
+- **A smoke sweep is not training data.** The RK ranker trains on the randomized sweep with a holdout, as every
+  earlier ranker did, not on the short smoke run used to check the candidates (1251).
+- **List order matters before the ranker exists.** Listing vector Pack first raised the heuristic list's worst first
+  pick from 1.22x to 1.52x; second, it costs nothing and stays within the default depth (1235).
+- **Share kernels through a type, and prove the other dtypes unchanged.** Every 2-byte instantiation of a shared
+  FP8 / FP32 kernel came with a SASS size check that the existing instantiations were byte-identical.
+- **Narrowing an entry point breaks callers by dtype, not by name.** When `launchKParallelTiledStage` became FP8 only
+  (1259), an FP8-named test still ran its FP32 continuation through it (1260). Grep the callers and check the dtype
+  each one passes.
+- **Build-time generators need a run.** `fp8_selected_inventory_size.py`'s rotated cut marker matched twice from 1249
+  to 1259 unnoticed, because `thor_tests` does not build that target.
+- **Tests that assert a replaced path are pinned, then rewritten or deleted.** With the switch on, eight tests pinned
+  the old routing (1255); the switch's removal rewrote five and deleted three (1257).
+
+### 9.3 Cleanup (phase 10, 1258-1261)
+
+- **1258:** the ordinary dense families (`ReducersDenseR / KR / RK`, `DenseRKInventory`, the direct dense plan) and
+  their benchmark (`thor_cub_reduction_benchmark`). A dense site no retained selector owns throws. FP64 reductions are
+  removed (user, 2026-11-05).
+- **1259:** the legacy kernels: `CubReductionCooperativeShardedTiled.cu`, the generic FP16 / BF16 / FP32 KParallel
+  grid (`launchKParallelTiledStage` is FP8 AlignedK only), the 8-warp rotated and FlatRows entry points, and the FP64
+  code.
+- **1261:** the interval-composition planner (VALUE and ARG), the composed and direct CUB ARG executors with their
+  public API (`stampComposedDense*`, `analyzeDenseCompositionPlan*`), and `CubArgReductionMin / Max.cu`.
+- Non-dense views (permuted, strided, rank-1 affine) keep their tiled and CUB paths for every dtype. Whether CUB stays
+  for those is a separate decision, outside the dense pattern.
+
+### 9.4 Open items left by FP16 / BF16
+
+- **Small R / KR VALUE.** 20 FP16 and 24 BF16 audit cells below 0.95 (min 0.84), all VALUE below about 4 MiB and
+  0.1-0.5 µs slower: Split's separate finishing launch, Group at R = 3, and a few small RK cells. This is FP32's gap
+  (8.3), deferred with the Split cleanup.
+- **The Split cleanup** (user decision 2026-11-05): make Split a staged Block pass with a planner-tuned continuation
+  and the carried ARG format, for all three dtypes at once. The before data is measured (`split-before-{fp32,fp8}`).
+- **2-byte AlignedK size.** Its 24 configurations per format are FP32's grid; FP8 compiles 9. Prune on sweep data,
+  as FP8 did, if binary size matters.
+- **Line-rate decisions were measured on GDDR (sm_120).** Generic Pack's short-row result, and FP8's and FP32's,
+  may not hold on HBM parts, where each SM needs several times the bandwidth.
+

@@ -53,9 +53,9 @@ struct DensePhysicalSelectionContext {
  * describe the pass's actual output, not a hypothetical completed reduction or a sequence of required continuations.
  * The result owns only an immutable physical-plan description; the caller handles all stamping and allocation.
  *
- * Original-input FP8 RK VALUE is dispatched to the retained domain-local cached physical selector;
- * FP32 and other domains retain their existing production physical-selection policy.
- * Unsupported retained semantics fail explicitly, never falling back to legacy FP8 RK.
+ * Every site goes to a retained selector: FP32 sites (original FP32 input and every FP32 intermediate), original
+ * FP16 / BF16 sites, and original FP8 sites (below). 1258: there is no other policy; a site no retained selector covers
+ * is a planning error. Only a test's proposal_override plans without them.
  */
 [[nodiscard]] DenseReductionCandidate selectDensePhysicalPass(const DenseReductionProblem& problem,
                                                                DenseReductionSite site,
@@ -70,9 +70,24 @@ struct DensePhysicalSelectionContext {
  * (Fp32RK / Fp32KR::selectCachedArgSite) and carried-index intermediates of any dtype's earlier ARG passes
  * (selectCachedCarriedArgSite); the planned dense ARG executor then runs FP32 ARG input too.
  *
- * 1225 / 1227 (phase 9): unconditional; the switch that ran the replaced paths is gone. The ordinary families
- * (ReducersDenseR / KR / RK) are never asked for an FP32 site by selectDensePhysicalPass; only a test's
- * proposal_override can still reach them with one.
+ * 1225 / 1227 (phase 9): unconditional; the switch that ran the replaced paths is gone (and 1258 the ordinary
+ * families it replaced).
+ */
+
+/**
+ * 1254 (plans/Thor_FP16_BF16_Dense_Reduction_Plan, phase 8): the retained FP16 / BF16 routing. Every original FP16 /
+ * BF16 site is selected by the retained 2-byte selectors and runs their passes, with no fallback (a site they cannot
+ * cover is a planning error):
+ *   - VALUE RK: F16RK::selectCachedValueSite (a staged first stage's FP32 partials continue on the retained FP32
+ *     selectors, as every intermediate does);
+ *   - VALUE R / KR: F16KR::selectCachedValueSite;
+ *   - ARG RK: F16RK::selectCachedArgSite; ARG R / KR: F16KR::selectCachedArgSite. FP16 / BF16 ARG runs the planned
+ *     dense ARG executor (its intermediates on the retained FP32 carried-ARG passes).
+ * An original input off a 16-byte boundary keeps the RK passes that tolerate its alignment (the rotated RuntimeK pass at
+ * any 2-byte address, AlignedK at a packet no wider than it) and prints one warning per process.
+ *
+ * 1255 / 1257 (phase 9): unconditional; the switch that ran the replaced paths is gone (and 1258, phase 10, the
+ * ordinary families it replaced).
  */
 
 }  // namespace ThorImplementation::CubReductionInternal

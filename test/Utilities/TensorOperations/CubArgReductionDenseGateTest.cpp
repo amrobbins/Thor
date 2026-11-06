@@ -80,18 +80,6 @@ void expectEveryDenseArgMaskUsesOrdainedPath(const std::vector<uint64_t>& dimens
             EXPECT_EQ(geometry.path, structural_geometry.path);
             EXPECT_TRUE(isOrdainedDenseArgPath(structural_geometry.path));
             EXPECT_TRUE(isOrdainedDenseArgPath(geometry.path));
-
-            if (geometry.path == CubReductionPath::ComposedDense) {
-                const std::optional<CubArgReductionDenseCompositionPlan> plan =
-                    CubArgReduction::analyzeDenseCompositionPlan(dimensions, axes);
-                ASSERT_TRUE(plan.has_value());
-                ASSERT_FALSE(plan->topology.stages.empty());
-                for (const CubReductionDenseCompositionStage& stage : plan->topology.stages) {
-                    EXPECT_TRUE(stage.expected_path == CubReductionPath::DeviceTransformReduce
-                                || stage.expected_path == CubReductionPath::ContiguousFixedSegment
-                                || stage.expected_path == CubReductionPath::TiledFixedSegment);
-                }
-            }
         }
     }
 }

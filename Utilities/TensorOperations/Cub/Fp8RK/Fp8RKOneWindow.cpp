@@ -13,6 +13,15 @@ Fp8OneWindowRuntimeKUnit fp32OneWindowUnit(uint64_t k, uint32_t outputs_per_warp
     }
     throw std::logic_error("FP32 OneWindow has no unit for this ownership at K");
 }
+// 1246: the same for FP16 / BF16 (f16OneWindowRuntimeKUnits).
+Fp8OneWindowRuntimeKUnit f16OneWindowUnit(uint64_t k, uint32_t outputs_per_warp, uint32_t packet_bytes) {
+    if (packet_bytes == 16) {
+        for (const Fp8OneWindowRuntimeKUnit& unit : f16OneWindowRuntimeKUnits(k)) {
+            if (unit.outputs_per_warp == outputs_per_warp) return unit;
+        }
+    }
+    throw std::logic_error("FP16 / BF16 OneWindow has no unit for this ownership at K");
+}
 }  // namespace
 
 uint32_t oneWindowResidency(DataType input_dtype, uint64_t k,
@@ -27,6 +36,11 @@ uint32_t oneWindowResidency(DataType input_dtype, uint64_t k,
     if (input_dtype == DataType::FP32) {
         const auto occupancy = queryFp32OneWindowRuntimeKOccupancy(
             k, fp32OneWindowUnit(k, outputs_per_warp, packet_bytes), warps_per_output, combine);
+        return occupancy.max_active_blocks_per_sm > 0 ? static_cast<uint32_t>(occupancy.max_active_blocks_per_sm) : 0u;
+    }
+    if (input_dtype == DataType::FP16 || input_dtype == DataType::BF16) {  // 1246
+        const auto occupancy = queryF16OneWindowRuntimeKOccupancy(
+            input_dtype, k, f16OneWindowUnit(k, outputs_per_warp, packet_bytes), warps_per_output, combine);
         return occupancy.max_active_blocks_per_sm > 0 ? static_cast<uint32_t>(occupancy.max_active_blocks_per_sm) : 0u;
     }
     const auto occupancy = queryFp8GeneralRParallelRCooperativeCalibrationOccupancy(
@@ -45,6 +59,13 @@ void launchOneWindow(const PhysicalKernel& kernel, const CubReductionStageSemant
         launchFp32OneWindowRuntimeKComplete(
             input, output, geometry,
             fp32OneWindowUnit(geometry.inner_size, static_cast<uint32_t>(kernel.a), static_cast<uint32_t>(kernel.c)),
+            static_cast<uint32_t>(kernel.b), stream, semantics, output_scale);
+        return;
+    }
+    if (kernel.element_bytes == 2) {  // 1246: FP16 or BF16 (the launcher checks the input dtype)
+        launchF16OneWindowRuntimeKComplete(
+            input, output, geometry,
+            f16OneWindowUnit(geometry.inner_size, static_cast<uint32_t>(kernel.a), static_cast<uint32_t>(kernel.c)),
             static_cast<uint32_t>(kernel.b), stream, semantics, output_scale);
         return;
     }

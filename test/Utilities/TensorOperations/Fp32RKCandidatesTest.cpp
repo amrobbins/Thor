@@ -225,7 +225,8 @@ TEST(Fp32RKCandidates, RuntimeKProposalsAtEachElementWidth) {
             }
         }
     }
-    EXPECT_THROW(static_cast<void>(Fp8RK::enumerateRetainedRuntimeK({4, 64, 64, 170, 2}, occupancy)),
+    // 1246: element width 2 (FP16 / BF16) has proposals too (F16RKCandidatesTest); 3 is no element.
+    EXPECT_THROW(static_cast<void>(Fp8RK::enumerateRetainedRuntimeK({4, 64, 64, 170, 3}, occupancy)),
                  std::invalid_argument);
 }
 

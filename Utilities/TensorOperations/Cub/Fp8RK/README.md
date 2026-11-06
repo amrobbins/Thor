@@ -25,7 +25,7 @@ into `DenseRetainedFp8RKPhysicalPlan`. This is the **default** production route;
 there is no environment-variable opt-in or old FP8 RK production fallback.
 Original E4M3/E5M2 input supports all eight VALUE reductions (SUM, MEAN,
 PRODUCT, MIN, MAX, L1Norm, L2Norm and SumSquares), with FP8, FP16, BF16,
-FP32, and optionally FP64 final storage under Thor's ordinary build policy.
+and FP32 final storage (FP64 reductions were removed in 1258 / 1259).
 The typed retained selector handles the operation and input transform, and
 Complete kernels perform finalization and runtime FP32 scaling before output
 conversion. Staged kernels write unfinalized FP32 partials; subsequent

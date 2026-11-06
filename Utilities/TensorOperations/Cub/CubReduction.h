@@ -116,54 +116,6 @@ struct CubReductionDenseRunGeometry {
     uint32_t retained_run_count = 0;
 };
 
-// Transitional role name retained by structural ComposedDense metadata and the ARG interval executor. Ordinary
-// dense VALUE execution uses DensePassRole directly through DenseExecutablePlan.
-using CubReductionDenseCompositionStageRole = CubReductionPassRole;
-
-/**
- * Host-side description of one direct stage in the transitional/structural dense composition model.
- *
- * reduced_run_ordinal is the ordinal among the original tensor's non-singleton reduced runs. dense_run_index is the
- * corresponding index in CubReductionDenseRunGeometry::runs when such a physical run exists. It is nullopt only for
- * the degenerate all-reduced-axes-singleton case, where one extent-1 direct stage is retained to perform conversion
- * and finalization. reduction_extent and domain_stride always describe the original reduction domain, while
- * reduction_axes describe the contiguous logical interval executed by this stage; retained singleton axes may be
- * absorbed into that interval because they have no physical coordinate.
- */
-struct CubReductionDenseCompositionStage {
-    uint32_t reduced_run_ordinal = 0;
-    std::optional<uint32_t> dense_run_index = std::nullopt;
-    uint64_t reduction_extent = 1;
-    uint64_t domain_stride = 1;
-    CubReductionDenseCompositionStageRole role = CubReductionDenseCompositionStageRole::Complete;
-
-    std::vector<uint32_t> reduction_axes;
-    std::vector<uint64_t> input_dimensions;
-    std::vector<uint64_t> output_dimensions;
-
-    CubReductionPath expected_path = CubReductionPath::TiledFixedSegment;
-    uint64_t input_elements = 1;
-    uint64_t output_elements = 1;
-    uint64_t stage_reduction_size = 1;
-    uint64_t outer_size = 1;
-    uint64_t inner_size = 1;
-};
-
-/** Ordered direct-stage topology selected at stamp/build time for a dense reduction. */
-struct CubReductionDenseCompositionPlan {
-    std::vector<CubReductionDenseCompositionStage> stages;
-};
-
-/**
- * Stamp-time ARG dense-composition metadata consumed by the pair-carrying executor. carried_index_dtype is chosen
- * from the complete original flattened reduction domain, never from an individual direct stage, so later composed
- * stages cannot silently overflow a locally narrow index representation.
- */
-struct CubArgReductionDenseCompositionPlan {
-    CubReductionDenseCompositionPlan topology;
-    DataType carried_index_dtype = DataType::UINT32;
-};
-
 /**
  * Production planning metadata for a zero-copy logical permutation whose visible storage is physically dense.
  *
@@ -446,13 +398,6 @@ class CubReduction {
                                                                     const std::vector<uint64_t>& input_strides,
                                                                     const std::vector<uint32_t>& axes);
 
-    /**
-     * Returns the operation-independent dense direct-stage topology for the supplied ordinary dense reduction.
-     * This is host-only planning/introspection. It performs no allocation, synchronization, or runtime autotuning.
-     */
-    [[nodiscard]] static std::optional<CubReductionDenseCompositionPlan> analyzeDenseCompositionPlan(
-        const std::vector<uint64_t>& input_dimensions, const std::vector<uint32_t>& axes);
-
     /** Queries backend temporary storage without allocating input, output, or workspace tensors. */
     [[nodiscard]] size_t queryWorkspaceSizeInBytes(const TensorDescriptor& input_descriptor,
                                                    const Stream& stream) const;
@@ -703,34 +648,6 @@ class CubArgReduction {
     [[nodiscard]] static CubReductionGeometry analyzeDenseGeometry(
         const std::vector<uint64_t>& input_dimensions, const std::vector<uint32_t>& axes);
 
-    /**
-     * Builds the host-only structural ARG dense-composition plan. This overload intentionally carries no GPU cost
-     * calibration and remains useful for topology/indexing tests. The carried index width is selected from the complete
-     * original reduction domain.
-     */
-    [[nodiscard]] static std::optional<CubArgReductionDenseCompositionPlan> analyzeDenseCompositionPlan(
-        const std::vector<uint64_t>& input_dimensions, const std::vector<uint32_t>& axes);
-
-    /**
-     * Builds the production ARG dense-composition plan with the current coarse measured stage-cost model. Planning is
-     * stamp-time only: this performs no allocation, synchronization, autotuning, or trial execution.
-     */
-    [[nodiscard]] static std::optional<CubArgReductionDenseCompositionPlan> analyzeDenseCompositionPlanForExecution(
-        const std::vector<uint64_t>& input_dimensions,
-        const std::vector<uint32_t>& axes,
-        DataType input_dtype,
-        const CubArgReductionOutputOptions& outputs,
-        const Stream& stream);
-
-    /**
-     * Builds one explicit legal left/right end-elimination order for benchmark/test calibration. run_order contains
-     * reduced-run ordinals in execution order and is rejected unless every step removes a current interval end.
-     */
-    [[nodiscard]] static std::optional<CubArgReductionDenseCompositionPlan> analyzeDenseCompositionPlanForRunOrder(
-        const std::vector<uint64_t>& input_dimensions,
-        const std::vector<uint32_t>& axes,
-        const std::vector<uint32_t>& run_order);
-
     /** Adds one reduced run's local winner coordinate to an already-composed original flattened arg index. */
     [[nodiscard]] static uint64_t composeOriginalArgIndex(uint64_t previous_index,
                                                           uint64_t local_run_index,
@@ -738,8 +655,8 @@ class CubArgReduction {
 
     /**
      * Queries the complete stamped workspace footprint without allocating input, output, intermediate, or temporary
-     * tensors. For ComposedDense this includes every non-final FP32 value/carried-index intermediate plus each direct
-     * stage's backend temporary storage, matching StampedCubArgReduction::getWorkspaceSizeInBytes().
+     * tensors: every non-final FP32 value / carried-index intermediate of the planned pass list plus each retained
+     * pass's scratch, matching StampedCubArgReduction::getWorkspaceSizeInBytes().
      */
     [[nodiscard]] size_t queryWorkspaceSizeInBytes(const TensorDescriptor& input_descriptor,
                                                    const Stream& stream) const;
@@ -751,29 +668,7 @@ class CubArgReduction {
         const std::optional<Tensor>& preallocated_index_output,
         const Stream& stream) const;
 
-    /**
-     * Explicitly stamps the dense pair-composition executor. After ARG-PLAN-3 this remains a useful forced-composition
-     * test/benchmark hook, while normal production stamp() selects ComposedDense automatically for dense disjoint runs.
-     */
-    [[nodiscard]] std::shared_ptr<StampedCubArgReduction> stampComposedDense(const Tensor& input,
-                                                                             const Stream& stream) const;
-    [[nodiscard]] std::shared_ptr<StampedCubArgReduction> stampComposedDense(
-        const Tensor& input,
-        const std::optional<Tensor>& preallocated_value_output,
-        const std::optional<Tensor>& preallocated_index_output,
-        const Stream& stream) const;
-
-    /** Benchmark/test-only execution hook for an already validated explicit composition plan. */
-    [[nodiscard]] std::shared_ptr<StampedCubArgReduction> stampComposedDenseWithPlan(
-        const Tensor& input, const CubArgReductionDenseCompositionPlan& plan, const Stream& stream) const;
-
    private:
-    [[nodiscard]] std::shared_ptr<StampedCubArgReduction> stampValidated(
-        const Tensor& input,
-        std::optional<Tensor> value_output,
-        std::optional<Tensor> index_output,
-        const CubReductionGeometry& geometry,
-        const Stream& stream) const;
     // ARG-P1: original FP8 input. planDenseReduction() pass list executed by direct ARG stages.
     [[nodiscard]] std::shared_ptr<StampedCubArgReduction> stampPlannedDenseValidated(
         const Tensor& input,
@@ -781,14 +676,6 @@ class CubArgReduction {
         std::optional<Tensor> index_output,
         const CubReductionGeometry& geometry,
         const Stream& stream) const;
-    [[nodiscard]] std::shared_ptr<StampedCubArgReduction> stampComposedDenseValidated(
-        const Tensor& input,
-        std::optional<Tensor> value_output,
-        std::optional<Tensor> index_output,
-        const CubReductionGeometry& geometry,
-        const CubArgReductionDenseCompositionPlan& plan,
-        const Stream& stream) const;
-
     CubArgReductionOp op;
     std::vector<uint32_t> axes;
     CubArgReductionOutputOptions outputs;
@@ -796,8 +683,8 @@ class CubArgReduction {
 };
 
 /**
- * Concrete argmin/argmax reduction with no run-time allocation. Direct temporary storage and all ComposedDense
- * value/index intermediates are allocated while stamping and retained by this object for subsequent runs.
+ * Concrete argmin/argmax reduction with no run-time allocation. Every planned pass's scratch and all value / index
+ * intermediates are allocated while stamping and retained by this object for subsequent runs.
  */
 class StampedCubArgReduction {
    public:
@@ -810,7 +697,7 @@ class StampedCubArgReduction {
      */
     void runOnInputForBenchmark(const Tensor& replacement_input, Stream& run_stream) const;
     /**
-     * Benchmarks only (1174): runs this stamp, planned or direct, on another input and other outputs of the stamp's
+     * Benchmarks only (1174): runs this planned stamp on another input and other outputs of the stamp's
      * dtypes and element counts. Intermediates and scratch stay the stamp's own. Cold-L2 audits time a production
      * stamp on rotating input and output views without re-stamping. A replacement output must be given exactly when
      * the stamp has that output. Production binds its tensors.
@@ -819,8 +706,8 @@ class StampedCubArgReduction {
                                   const std::optional<Tensor>& replacement_value_output,
                                   const std::optional<Tensor>& replacement_index_output,
                                   Stream& run_stream) const;
-    /** Executed passes in order (e.g. "fp8_arg_one_window:o8_w1_p16_c1", "direct:tiled_generic") for planned FP8 ARG
-     *  and composed stamps; empty for a single direct stamp. Diagnostic only. */
+    /** Executed retained passes in order (e.g. "fp8_arg_one_window:o8_w1_p16_c1", "f16_arg_rk:..."). Diagnostic
+     *  only. */
     [[nodiscard]] std::vector<std::string> getPlannedPassNames() const;
 
     [[nodiscard]] uint32_t gpuNum() const { return input.getPlacement().getDeviceNum(); }
@@ -838,15 +725,6 @@ class StampedCubArgReduction {
     friend class CubArgReduction;
     // Workspace-allocation regression tests; never used by production dispatch.
     friend struct CubReductionTiledWorkspaceProbe;
-
-    StampedCubArgReduction(CubArgReductionOp op,
-                           CubReductionGeometry geometry,
-                           const Tensor& input,
-                           std::optional<Tensor> value_output,
-                           std::optional<Tensor> index_output,
-                           size_t temp_storage_bytes,
-                           const Tensor& temp_storage,
-                           const Stream& stream);
 
     StampedCubArgReduction(CubArgReductionOp op,
                            CubReductionGeometry geometry,
@@ -877,7 +755,7 @@ class StampedCubArgReduction {
     const size_t temp_storage_bytes;
     Tensor temp_storage;
 
-    // Present only on direct stages owned by a ComposedDense ARG executor. The first stage has no carried-index input;
+    // Present only on the per-pass stages of a planned ARG stamp. The first stage has no carried-index input;
     // later stages consume the previous stage's SoA index tensor. domain_stride maps this stage's local row coordinate
     // directly into the original flattened reduction domain.
     std::optional<Tensor> carried_index_input;

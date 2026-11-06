@@ -95,7 +95,8 @@ TEST(CubReductionFp32KR, ElementAwareShapesKeepFp8AndAreFp32Legal) {
     EXPECT_TRUE(KR::retainedKRShapeLegalForElement({8, 6, 6, 1, 8, true}, 1));
     EXPECT_FALSE(KR::retainedKRShapeLegalForElement({8, 6, 6, 4, 1, false}, 4));
     EXPECT_TRUE(KR::retainedKRShapeLegalForElement({8, 8, 8, 4, 1, false}, 4));
-    EXPECT_FALSE(KR::retainedKRShapeLegalForElement({8, 8, 8, 4, 1, false}, 2));
+    EXPECT_TRUE(KR::retainedKRShapeLegalForElement({8, 8, 8, 4, 1, false}, 2));  // 1233: FP16 / BF16
+    EXPECT_FALSE(KR::retainedKRShapeLegalForElement({8, 8, 8, 4, 1, false}, 3));
     EXPECT_THROW(static_cast<void>(KR::retainedKRCandidateShapes(8, 6, 170, 4)), std::invalid_argument);
     EXPECT_THROW(static_cast<void>(KR::retainedKRCandidatePool(8, 6, 170, 4)), std::invalid_argument);
 }

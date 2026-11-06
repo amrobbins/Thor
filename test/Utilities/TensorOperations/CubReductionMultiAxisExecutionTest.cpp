@@ -38,7 +38,10 @@ struct CubReductionTiledWorkspaceProbe {
 };
 }  // namespace ThorImplementation
 
-TEST(CubReduction, TiledKernelsHaveNoScratchAndCubScratchIsStampedAheadOfRun) {
+// 1257: was TiledKernelsHaveNoScratchAndCubScratchIsStampedAheadOfRun. No dense dtype runs the direct tiled ARG or CUB
+// passes any more (FP8, FP32, FP16 and BF16 all run retained passes); the dense BF16 cases now check that whatever
+// scratch the retained passes own is stamped ahead of run and reused.
+TEST(CubReduction, TiledKernelsHaveNoScratchAndDenseScratchIsStampedAheadOfRun) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     Tensor input = makeGpuTensor({1.0f, 3.0f, 5.0f, 7.0f, 9.0f, 11.0f,
@@ -54,59 +57,50 @@ TEST(CubReduction, TiledKernelsHaveNoScratchAndCubScratchIsStampedAheadOfRun) {
     EXPECT_EQ(tiled_stamp->getWorkspaceSizeInBytes(), 0U);
     EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*tiled_stamp), 0U);
 
-    // 1227: the dense ARG and CUB cases are BF16. Dense FP32 runs the retained FP32 passes (the planned ARG executor
-    // and the retained FP32 KR passes), not these direct tiled and CUB paths; the FP32 view above still runs the
-    // tiled one.
+    // Dense BF16 VALUE and ARG (retained FP16 / BF16 passes): the query, the stamp and the stamped scratch agree.
     Tensor bf16_input = makeGpuTensor({1.0f, 3.0f, 5.0f, 7.0f, 9.0f, 11.0f,
                                        2.0f, 4.0f, 6.0f, 8.0f, 10.0f, 12.0f}, {2, 3, 2}, stream, DataType::BF16);
-    CubArgReduction tiled_arg(CubArgReductionOp::ArgMax, 1);
-    const auto tiled_arg_stamp = tiled_arg.stamp(bf16_input, stream);
-    ASSERT_EQ(tiled_arg_stamp->getPath(), CubReductionPath::TiledFixedSegment);
-    EXPECT_EQ(tiled_arg.queryWorkspaceSizeInBytes(bf16_input.getDescriptor(), stream), 0U);
-    EXPECT_EQ(tiled_arg_stamp->getWorkspaceSizeInBytes(), 0U);
-    EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*tiled_arg_stamp), 0U);
+    CubArgReduction dense_arg(CubArgReductionOp::ArgMax, 1);
+    const size_t dense_arg_bytes = dense_arg.queryWorkspaceSizeInBytes(bf16_input.getDescriptor(), stream);
+    const auto dense_arg_stamp = dense_arg.stamp(bf16_input, stream);
+    EXPECT_EQ(dense_arg_stamp->getWorkspaceSizeInBytes(), dense_arg_bytes);
+    ASSERT_FALSE(dense_arg_stamp->getPlannedPassNames().empty());
+    EXPECT_EQ(dense_arg_stamp->getPlannedPassNames().front().rfind("f16_arg_", 0), 0U);
 
-    // A real CUB DeviceReduce must have a non-null execution pointer. Its
-    // queried storage, including CUB's one-byte minimum, is allocated at stamp
-    // time and remains allocated across run() calls.
     Tensor vector_input = makeGpuTensor({1.0f, 2.0f, 3.0f}, {3}, stream, DataType::BF16);
-    CubReduction cub_value(CubReductionOp::Sum, 0, DataType::FP32);
-    const size_t cub_value_bytes = cub_value.queryWorkspaceSizeInBytes(vector_input.getDescriptor(), stream);
-    const auto cub_value_stamp = cub_value.stamp(vector_input, stream);
-    ASSERT_EQ(cub_value_stamp->getPath(), CubReductionPath::DeviceTransformReduce);
-    ASSERT_GT(cub_value_bytes, 0U);
-    EXPECT_EQ(cub_value_stamp->getWorkspaceSizeInBytes(), cub_value_bytes);
-    EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*cub_value_stamp), cub_value_bytes);
+    CubReduction dense_value(CubReductionOp::Sum, 0, DataType::FP32);
+    const size_t dense_value_bytes = dense_value.queryWorkspaceSizeInBytes(vector_input.getDescriptor(), stream);
+    const auto dense_value_stamp = dense_value.stamp(vector_input, stream);
+    EXPECT_EQ(dense_value_stamp->getWorkspaceSizeInBytes(), dense_value_bytes);
+    EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*dense_value_stamp), dense_value_bytes);
 
-    CubArgReduction cub_arg(CubArgReductionOp::ArgMax, 0);
-    const size_t cub_arg_bytes = cub_arg.queryWorkspaceSizeInBytes(vector_input.getDescriptor(), stream);
-    const auto cub_arg_stamp = cub_arg.stamp(vector_input, stream);
-    ASSERT_EQ(cub_arg_stamp->getPath(), CubReductionPath::DeviceTransformReduce);
-    ASSERT_GT(cub_arg_bytes, 0U);
-    EXPECT_EQ(cub_arg_stamp->getWorkspaceSizeInBytes(), cub_arg_bytes);
-    EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*cub_arg_stamp), cub_arg_bytes);
+    CubArgReduction vector_arg(CubArgReductionOp::ArgMax, 0);
+    const size_t vector_arg_bytes = vector_arg.queryWorkspaceSizeInBytes(vector_input.getDescriptor(), stream);
+    const auto vector_arg_stamp = vector_arg.stamp(vector_input, stream);
+    EXPECT_EQ(vector_arg_stamp->getWorkspaceSizeInBytes(), vector_arg_bytes);
 
     tiled_stamp->run();
-    tiled_arg_stamp->run();
-    cub_value_stamp->run();
-    cub_arg_stamp->run();
+    dense_arg_stamp->run();
+    dense_value_stamp->run();
+    vector_arg_stamp->run();
     stream.synchronize();
     expectFloatVectorNear(copyGpuTensorAsFloat(tiled_stamp->getOutputTensor(), stream),
                           {15.0f, 18.0f, 21.0f, 24.0f});
-    expectFloatVectorNear(copyGpuTensorAsFloat(cub_value_stamp->getOutputTensor(), stream), {6.0f});
-    ASSERT_TRUE(tiled_arg_stamp->getIndexOutputTensor().has_value());
-    EXPECT_EQ(copyGpuTensorAsUnsigned(tiled_arg_stamp->getIndexOutputTensor().value(), stream),
+    expectFloatVectorNear(copyGpuTensorAsFloat(dense_value_stamp->getOutputTensor(), stream), {6.0f});
+    ASSERT_TRUE(dense_arg_stamp->getIndexOutputTensor().has_value());
+    EXPECT_EQ(copyGpuTensorAsUnsigned(dense_arg_stamp->getIndexOutputTensor().value(), stream),
               (std::vector<uint64_t>{2, 2, 2, 2}));
-    ASSERT_TRUE(cub_arg_stamp->getIndexOutputTensor().has_value());
-    EXPECT_EQ(copyGpuTensorAsUnsigned(cub_arg_stamp->getIndexOutputTensor().value(), stream),
+    ASSERT_TRUE(vector_arg_stamp->getIndexOutputTensor().has_value());
+    EXPECT_EQ(copyGpuTensorAsUnsigned(vector_arg_stamp->getIndexOutputTensor().value(), stream),
               (std::vector<uint64_t>{2}));
 
-    // run() must reuse the existing pointers, not allocate them on demand.
-    cub_value_stamp->run();
-    cub_arg_stamp->run();
+    // run() must reuse the existing scratch, not allocate it on demand.
+    dense_value_stamp->run();
+    vector_arg_stamp->run();
     stream.synchronize();
-    EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*cub_value_stamp), cub_value_bytes);
-    EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*cub_arg_stamp), cub_arg_bytes);
+    EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*dense_value_stamp), dense_value_bytes);
+    EXPECT_EQ(dense_value_stamp->getWorkspaceSizeInBytes(), dense_value_bytes);
+    EXPECT_EQ(vector_arg_stamp->getWorkspaceSizeInBytes(), vector_arg_bytes);
 }
 
 

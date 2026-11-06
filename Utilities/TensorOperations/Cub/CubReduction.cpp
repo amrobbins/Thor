@@ -80,21 +80,11 @@ namespace {
 using namespace CubDevicePrimitiveSupport;
 using namespace CubReductionInternal;
 
-[[nodiscard]] const char* denseRKStrategyName(DenseRKStrategy strategy) {
-    switch (strategy) {
-        case DenseRKStrategy::KParallel: return "k_parallel";
-        case DenseRKStrategy::RCooperative: return "r_cooperative";
-    }
-    return "unknown";
-}
-
-[[nodiscard]] const char* denseRKAccessName(DenseRKAccess access) {
-    switch (access) {
-        case DenseRKAccess::Aligned: return "aligned";
-        case DenseRKAccess::Rotated: return "rotated";
-        case DenseRKAccess::FlatRows: return "flat_rows";
-    }
-    return "unknown";
+// 1220 / 1254: the diagnostic family prefix of a retained R / KR VALUE pass by its input dtype.
+[[nodiscard]] std::string retainedKRFamilyPrefix(DataType input_dtype) {
+    if (input_dtype == DataType::FP32) return "retained_fp32_kr:";
+    if (input_dtype == DataType::FP16 || input_dtype == DataType::BF16) return "retained_f16_kr:";
+    return "retained_fp8_kr:";
 }
 
 [[nodiscard]] DenseReductionPlan planProductionDenseValue(CubReductionOp op,
@@ -115,8 +105,7 @@ using namespace CubReductionInternal;
     const DenseReductionProblem problem = makeInitialDenseReductionProblem(
         input_dimensions, axes, DenseReductionAggregateKind::Value, output_spec);
 
-    // The context owns the exact-occupancy callback's device fallback limits, and survives every physical
-    // selection made by this plan. Other descriptor-only callers can use the same context()/selector pairing.
+    // The context survives every physical selection made by this plan (the retained selectors read its stream).
     constexpr uint64_t kRetainedFp8RKWorkspaceBudget = uint64_t{256} * 1024 * 1024;
     const bool is_fp8 = original_input_dtype == DataType::FP8_E4M3 ||
                         original_input_dtype == DataType::FP8_E5M2;
@@ -133,8 +122,9 @@ using namespace CubReductionInternal;
             if (!strategy_chain->empty()) strategy_chain->append(">");
             if (const auto fp8 = std::dynamic_pointer_cast<const DenseRetainedFp8RKPhysicalPlan>(
                     step.selected_candidate.physical_plan); fp8) {
-                strategy_chain->append(fp8->input_dtype == DataType::FP32 ? "retained_fp32_rk:"  // 1220
-                                                                          : "retained_fp8_rk:");
+                strategy_chain->append(fp8->input_dtype == DataType::FP32   ? "retained_fp32_rk:"  // 1220
+                                       : fp8->kernel.element_bytes == 2 ? "retained_f16_rk:"   // 1254
+                                                                        : "retained_fp8_rk:");
                 switch (fp8->kernel.family) {
                     case Fp8RK::PhysicalFamily::OneWindow: strategy_chain->append("one_window"); break;
                     case Fp8RK::PhysicalFamily::DeepRSmallK: strategy_chain->append("deep_r_small_k"); break;
@@ -143,21 +133,9 @@ using namespace CubReductionInternal;
                 }
             } else if (const auto kr = std::dynamic_pointer_cast<const DenseRetainedFp8KRPhysicalPlan>(
                     step.selected_candidate.physical_plan); kr) {
-                strategy_chain->append(std::string(kr->input_dtype == DataType::FP32 ? "retained_fp32_kr:"
-                                                                                     : "retained_fp8_kr:") +
-                                       Fp8KR::fp8KRShapeName(kr->shape));
-            } else if (const auto rk = std::dynamic_pointer_cast<const DenseRKFamilyPhysicalPlan>(
-                    step.selected_candidate.physical_plan); rk) {
-                strategy_chain->append(denseRKStrategyName(rk->strategy));
-                strategy_chain->append(":");
-                strategy_chain->append(denseRKAccessName(rk->access));
-                strategy_chain->append(rk->progress == DenseRKProgress::Complete ? ":complete" : ":staged");
+                strategy_chain->append(retainedKRFamilyPrefix(kr->input_dtype) + Fp8KR::fp8KRShapeName(kr->shape));
             } else {
-                switch (step.selected_candidate.family) {
-                    case DenseReducerFamily::R: strategy_chain->append("r:direct"); break;
-                    case DenseReducerFamily::KR: strategy_chain->append("kr:direct"); break;
-                    case DenseReducerFamily::RK: strategy_chain->append("rk:generic"); break;
-                }
+                throw std::logic_error("Dense VALUE plan selected a physical pass without a retained executor");
             }
         }
     }
@@ -186,20 +164,18 @@ using namespace CubReductionInternal;
         case DataType::FP16:
         case DataType::BF16:
         case DataType::FP32:
-#if THOR_CUB_ENABLE_64BIT_TYPES
-        case DataType::FP64:
-#endif
             return true;
-        default:
+        default:  // 1258: no FP64 reductions (user decision 2026-11-05)
             return false;
     }
 }
 
 void requireSupportedFloatingStorageDType(DataType dtype, const char* role) {
     if (!isSupportedFloatingStorageDType(dtype)) {
-        throw std::invalid_argument(std::string("CUB tensor reduction does not support ") + role + " dtype " + dtypeName(dtype) +
-                                    ". Supported storage dtypes follow Thor's THOR_CUB_ENABLE_FP8_TYPES and "
-                                    "THOR_CUB_ENABLE_64BIT_TYPES build policy; TF32 is not a storage dtype.");
+        throw std::invalid_argument(std::string("CUB tensor reduction does not support ") + role + " dtype " +
+                                    dtypeName(dtype) +
+                                    ". Supported storage dtypes are FP8 (per THOR_CUB_ENABLE_FP8_TYPES), FP16, BF16 "
+                                    "and FP32; TF32 is not a storage dtype.");
     }
 }
 
@@ -246,53 +222,6 @@ void requireGpuTensorView(const Tensor& tensor, const char* name) {
     return stripped;
 }
 
-struct DenseReducedRunSpan {
-    uint32_t first_axis = 0;
-    uint32_t last_axis = 0;
-    uint32_t reduced_run_ordinal = 0;
-    std::optional<uint32_t> dense_run_index = std::nullopt;
-    uint64_t reduction_extent = 1;
-    uint64_t domain_stride = 1;
-};
-
-struct DenseDirectStageGeometry {
-    CubReductionPath path = CubReductionPath::TiledFixedSegment;
-    uint64_t input_elements = 1;
-    uint64_t output_elements = 1;
-    uint64_t reduction_size = 1;
-    uint64_t outer_size = 1;
-    uint64_t inner_size = 1;
-};
-
-struct DenseArgCompositionCostContext {
-    DataType input_dtype = DataType::FP32;
-    DataType carried_index_dtype = DataType::UINT32;
-    bool produce_value = true;
-    DataType value_output_dtype = DataType::FP32;
-    bool produce_index = true;
-    DataType index_output_dtype = DataType::UINT32;
-    uint64_t l2_cache_bytes = 0;
-};
-
-enum class DenseArgPlannerStageClass : uint8_t {
-    DeviceTransform,
-    Contiguous,
-    TiledNarrow,
-    TiledSimpleAlignedFullTiles,
-    TiledAwkwardHeadBulkTail,
-};
-
-enum class DensePlannerStageClass : uint8_t {
-    DeviceTransform,
-    ContiguousCubFixedSegment,
-    VectorizedFullRow,
-    AsyncNarrowFullRow,
-    AsyncFullRow,
-    VectorizedBlockSharded,
-    AlignmentSafeShapedBlockSharded,
-    DirectComponentTiled,
-};
-
 [[nodiscard]] bool isDirectDenseReductionPath(CubReductionPath path) {
     return path == CubReductionPath::DeviceTransformReduce || path == CubReductionPath::ContiguousFixedSegment
            || path == CubReductionPath::TiledFixedSegment;
@@ -318,426 +247,6 @@ void requireOrdainedDenseReductionPath(const CubReductionGeometry& geometry) {
     return path == CubReductionPath::ContiguousFixedSegment;
 }
 
-[[nodiscard]] DenseDirectStageGeometry analyzeDirectDenseStageGeometry(
-    const std::vector<uint64_t>& input_dimensions,
-    const std::vector<uint32_t>& reduction_axes) {
-    THOR_THROW_IF_FALSE(!reduction_axes.empty());
-    DenseDirectStageGeometry stage;
-
-    size_t reduced_cursor = 0;
-    for (uint32_t axis = 0; axis < input_dimensions.size(); ++axis) {
-        const bool reduced = reduced_cursor < reduction_axes.size() && reduction_axes[reduced_cursor] == axis;
-        if (reduced) {
-            THOR_THROW_IF_FALSE(stage.reduction_size
-                                <= std::numeric_limits<uint64_t>::max() / input_dimensions[axis]);
-            stage.reduction_size *= input_dimensions[axis];
-            ++reduced_cursor;
-        } else {
-            THOR_THROW_IF_FALSE(stage.output_elements
-                                <= std::numeric_limits<uint64_t>::max() / input_dimensions[axis]);
-            stage.output_elements *= input_dimensions[axis];
-        }
-        if (axis > reduction_axes.back()) {
-            THOR_THROW_IF_FALSE(stage.inner_size
-                                <= std::numeric_limits<uint64_t>::max() / input_dimensions[axis]);
-            stage.inner_size *= input_dimensions[axis];
-        }
-    }
-    THOR_THROW_IF_FALSE(reduced_cursor == reduction_axes.size());
-    THOR_THROW_IF_FALSE(stage.output_elements
-                        <= std::numeric_limits<uint64_t>::max() / stage.reduction_size);
-    stage.input_elements = stage.output_elements * stage.reduction_size;
-    THOR_THROW_IF_FALSE(stage.reduction_size <= std::numeric_limits<uint64_t>::max() / stage.inner_size);
-    const uint64_t reduction_inner = stage.reduction_size * stage.inner_size;
-    THOR_THROW_IF_FALSE(reduction_inner != 0);
-    THOR_THROW_IF_FALSE(stage.input_elements % reduction_inner == 0);
-    stage.outer_size = stage.input_elements / reduction_inner;
-
-    if (stage.output_elements == 1) {
-        stage.path = CubReductionPath::DeviceTransformReduce;
-    } else if (stage.inner_size == 1) {
-        stage.path = CubReductionPath::ContiguousFixedSegment;
-    } else {
-        stage.path = CubReductionPath::TiledFixedSegment;
-    }
-    return stage;
-}
-
-[[nodiscard]] std::vector<DenseReducedRunSpan> denseReducedRunSpans(
-    const CubReductionGeometry& geometry,
-    const std::vector<uint64_t>& input_dimensions) {
-    THOR_THROW_IF_FALSE(geometry.dense_run_geometry.has_value());
-
-    std::vector<bool> is_reduced(input_dimensions.size(), false);
-    for (uint32_t axis : geometry.axes) {
-        is_reduced[axis] = true;
-    }
-
-    std::vector<DenseReducedRunSpan> spans;
-    bool previous_non_singleton_was_reduced = false;
-    for (uint32_t axis = 0; axis < input_dimensions.size(); ++axis) {
-        if (input_dimensions[axis] == 1) {
-            continue;
-        }
-        if (is_reduced[axis]) {
-            if (!previous_non_singleton_was_reduced) {
-                spans.push_back(DenseReducedRunSpan{.first_axis = axis, .last_axis = axis});
-            } else {
-                spans.back().last_axis = axis;
-            }
-        }
-        previous_non_singleton_was_reduced = is_reduced[axis];
-    }
-
-    size_t reduced_run_ordinal = 0;
-    for (size_t dense_run_index = 0; dense_run_index < geometry.dense_run_geometry->runs.size(); ++dense_run_index) {
-        const CubReductionDenseRun& run = geometry.dense_run_geometry->runs[dense_run_index];
-        if (run.kind != CubReductionDenseRunKind::Reduced) {
-            continue;
-        }
-        THOR_THROW_IF_FALSE(reduced_run_ordinal < spans.size());
-        DenseReducedRunSpan& span = spans[reduced_run_ordinal];
-        THOR_THROW_IF_FALSE(reduced_run_ordinal <= std::numeric_limits<uint32_t>::max());
-        THOR_THROW_IF_FALSE(dense_run_index <= std::numeric_limits<uint32_t>::max());
-        span.reduced_run_ordinal = static_cast<uint32_t>(reduced_run_ordinal);
-        span.dense_run_index = static_cast<uint32_t>(dense_run_index);
-        span.reduction_extent = run.extent;
-        span.domain_stride = run.domain_stride;
-        ++reduced_run_ordinal;
-    }
-
-    // Every reduced axis being singleton is the only case without a physical reduced run. One extent-1 stage is kept
-    // so value composition can still perform conversion/finalization and future arg composition has an explicit root.
-    if (spans.empty()) {
-        THOR_THROW_IF_FALSE(!geometry.axes.empty());
-        spans.push_back(DenseReducedRunSpan{.first_axis = geometry.axes.front(),
-                                            .last_axis = geometry.axes.front(),
-                                            .reduced_run_ordinal = 0,
-                                            .dense_run_index = std::nullopt,
-                                            .reduction_extent = 1,
-                                            .domain_stride = 1});
-    } else {
-        THOR_THROW_IF_FALSE(reduced_run_ordinal == spans.size());
-        THOR_THROW_IF_FALSE(reduced_run_ordinal == geometry.dense_run_geometry->reduced_run_count);
-    }
-    return spans;
-}
-
-[[nodiscard]] std::vector<uint32_t> denseReducedRunAxes(const DenseReducedRunSpan& span) {
-    std::vector<uint32_t> axes;
-    axes.reserve(static_cast<size_t>(span.last_axis - span.first_axis) + 1U);
-    for (uint32_t axis = span.first_axis; axis <= span.last_axis; ++axis) {
-        axes.push_back(axis);
-    }
-    return axes;
-}
-
-[[nodiscard]] std::vector<uint64_t> denseReductionStateDimensions(
-    const std::vector<uint64_t>& input_dimensions,
-    const std::vector<DenseReducedRunSpan>& spans,
-    size_t state_left,
-    size_t state_right) {
-    std::vector<uint64_t> dimensions = input_dimensions;
-    for (size_t run_index = 0; run_index < spans.size(); ++run_index) {
-        if (run_index >= state_left && run_index <= state_right) {
-            continue;
-        }
-        for (uint32_t axis = spans[run_index].first_axis; axis <= spans[run_index].last_axis; ++axis) {
-            dimensions[axis] = 1;
-        }
-    }
-    return dimensions;
-}
-
-[[nodiscard]] std::optional<CubReductionDenseCompositionStage> makeDenseCompositionStagePlan(
-    const std::vector<uint64_t>& current_dimensions,
-    const DenseReducedRunSpan& span,
-    CubReductionDenseCompositionStageRole role) {
-    CubReductionDenseCompositionStage stage;
-    stage.reduced_run_ordinal = span.reduced_run_ordinal;
-    stage.dense_run_index = span.dense_run_index;
-    stage.reduction_extent = span.reduction_extent;
-    stage.domain_stride = span.domain_stride;
-    stage.role = role;
-    stage.reduction_axes = denseReducedRunAxes(span);
-    stage.input_dimensions = current_dimensions;
-
-    const DenseDirectStageGeometry direct_geometry =
-        analyzeDirectDenseStageGeometry(current_dimensions, stage.reduction_axes);
-    stage.expected_path = direct_geometry.path;
-    stage.input_elements = direct_geometry.input_elements;
-    stage.output_elements = direct_geometry.output_elements;
-    stage.stage_reduction_size = direct_geometry.reduction_size;
-    stage.outer_size = direct_geometry.outer_size;
-    stage.inner_size = direct_geometry.inner_size;
-    THOR_THROW_IF_FALSE(isDirectDenseReductionPath(stage.expected_path));
-    THOR_THROW_IF_FALSE(stage.stage_reduction_size == stage.reduction_extent);
-
-    if (usesCubFixedSegmentSize(stage.expected_path)
-        && direct_geometry.reduction_size > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
-        return std::nullopt;
-    }
-
-    stage.output_dimensions = current_dimensions;
-    for (uint32_t axis : stage.reduction_axes) {
-        stage.output_dimensions[axis] = 1;
-    }
-    return stage;
-}
-
-[[nodiscard]] DenseDirectStageGeometry directStageGeometryFromPlan(
-    const CubReductionDenseCompositionStage& stage) {
-    return DenseDirectStageGeometry{.path = stage.expected_path,
-                                    .input_elements = stage.input_elements,
-                                    .output_elements = stage.output_elements,
-                                    .reduction_size = stage.stage_reduction_size,
-                                    .outer_size = stage.outer_size,
-                                    .inner_size = stage.inner_size};
-}
-
-[[nodiscard]] uint64_t ceilDivideDensePlanner(uint64_t numerator, uint64_t denominator) {
-    THOR_THROW_IF_FALSE(denominator != 0);
-    return numerator / denominator + static_cast<uint64_t>(numerator % denominator != 0);
-}
-
-[[nodiscard]] uint64_t densePlannerGroupedFullRowWarps(uint64_t inner_size, uint64_t input_element_bytes) {
-    using namespace CubReductionTiledPolicy;
-    const uint64_t component_warps = ceilDivideDensePlanner(inner_size, FULL_ROW_COMPONENTS_PER_WARP);
-    THOR_THROW_IF_FALSE(inner_size <= std::numeric_limits<uint64_t>::max() / input_element_bytes);
-    const uint64_t row_bytes = inner_size * input_element_bytes;
-    const uint64_t stage_warps = ceilDivideDensePlanner(row_bytes, ASYNC_STAGE_BYTES_PER_WARP);
-    const uint64_t required_warps = std::max(component_warps, stage_warps);
-
-    uint64_t warps = 1;
-    while (warps < FULL_ROW_MAX_WARPS_PER_OUTPUT && warps < required_warps) {
-        warps *= 2;
-    }
-    return warps >= required_warps ? warps : 0;
-}
-
-[[nodiscard]] uint64_t densePlannerDirectComponentActiveWarps(const DenseDirectStageGeometry& stage) {
-    using namespace CubReductionTiledPolicy;
-    const uint64_t component_tiles = ceilDivideDensePlanner(stage.inner_size, WARP_THREADS);
-    THOR_THROW_IF_FALSE(stage.outer_size <= std::numeric_limits<uint64_t>::max() / component_tiles);
-    const uint64_t output_tiles = stage.outer_size * component_tiles;
-    const uint64_t useful_warps_from_rows = stage.reduction_size;
-    const uint64_t desired_warps_per_tile =
-        ceilDivideDensePlanner(TARGET_ACTIVE_WARPS, std::max<uint64_t>(output_tiles, 1));
-
-    uint64_t warps_per_tile = 1;
-    while (warps_per_tile < WARPS_PER_BLOCK && warps_per_tile < desired_warps_per_tile
-           && warps_per_tile < useful_warps_from_rows) {
-        warps_per_tile *= 2;
-    }
-    while (warps_per_tile > 1 && warps_per_tile > useful_warps_from_rows) {
-        warps_per_tile /= 2;
-    }
-    if (output_tiles > std::numeric_limits<uint64_t>::max() / warps_per_tile) {
-        return TARGET_ACTIVE_WARPS;
-    }
-    return std::min<uint64_t>(TARGET_ACTIVE_WARPS, output_tiles * warps_per_tile);
-}
-
-[[nodiscard]] DensePlannerStageClass classifyDensePlannerStage(const DenseDirectStageGeometry& stage,
-                                                                DataType input_dtype) {
-    using namespace CubReductionTiledPolicy;
-    if (stage.path == CubReductionPath::DeviceTransformReduce) {
-        return DensePlannerStageClass::DeviceTransform;
-    }
-    if (stage.path == CubReductionPath::ContiguousFixedSegment) {
-        return DensePlannerStageClass::ContiguousCubFixedSegment;
-    }
-
-    THOR_THROW_IF_FALSE(stage.path == CubReductionPath::TiledFixedSegment);
-    const uint64_t input_element_bytes =
-        static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(input_dtype));
-
-    if (stage.inner_size == 32 || stage.inner_size == 64 || stage.inner_size == 128
-        || stage.inner_size == 256 || stage.inner_size == FULL_ROW_COMPONENTS_PER_WARP
-        || stage.inner_size == 1024 || stage.inner_size == 2048
-        || stage.inner_size == FULL_ROW_GROUP_MAX_INNER_SIZE) {
-        return DensePlannerStageClass::VectorizedFullRow;
-    }
-    if (stage.inner_size <= 32) {
-        return DensePlannerStageClass::AsyncNarrowFullRow;
-    }
-    if (stage.inner_size < FULL_ROW_COMPONENTS_PER_WARP) {
-        const uint64_t async_stage_capacity = ASYNC_STAGE_BYTES_PER_WARP / input_element_bytes;
-        return stage.inner_size <= async_stage_capacity ? DensePlannerStageClass::AsyncFullRow
-                                                        : DensePlannerStageClass::DirectComponentTiled;
-    }
-    if (stage.inner_size < FULL_ROW_GROUP_MAX_INNER_SIZE) {
-        return densePlannerGroupedFullRowWarps(stage.inner_size, input_element_bytes) != 0
-                   ? DensePlannerStageClass::AsyncFullRow
-                   : DensePlannerStageClass::DirectComponentTiled;
-    }
-    if (stage.inner_size > FULL_ROW_GROUP_MAX_INNER_SIZE) {
-        return stage.inner_size % FULL_ROW_COMPONENTS_PER_BLOCK == 0
-                   ? DensePlannerStageClass::VectorizedBlockSharded
-                   : DensePlannerStageClass::AlignmentSafeShapedBlockSharded;
-    }
-    return DensePlannerStageClass::DirectComponentTiled;
-}
-
-[[nodiscard]] long double densePlannerExecutionPenalty(const DenseDirectStageGeometry& stage,
-                                                        DataType input_dtype,
-                                                        DensePlannerStageClass stage_class) {
-    const uint64_t input_element_bytes =
-        static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(input_dtype));
-    const bool low_precision_input = input_element_bytes <= 2;
-
-    // These are deliberately broad execution-regime weights, not per-shape timing constants. Release calibration
-    // shows three stable effects that the first traffic-only planner missed:
-    //   * CUB fixed-size segmented reductions have a pronounced short-segment trough, especially for FP16/BF16;
-    //   * the alignment-safe shaped-block fallback carries more instruction/control work per logical byte;
-    //   * very short async-narrow reductions are not pure streaming kernels.
-    // Keeping the buckets coarse lets the interval DP account for those families without learning individual census
-    // shapes or embedding measured microseconds from one GPU.
-    switch (stage_class) {
-        case DensePlannerStageClass::ContiguousCubFixedSegment:
-            if (stage.reduction_size >= 17 && stage.reduction_size <= 31) {
-                return low_precision_input ? 3.25L : 1.50L;
-            }
-            if (stage.reduction_size >= 32 && stage.reduction_size <= 127) {
-                return low_precision_input ? 1.75L : 1.00L;
-            }
-            return 1.00L;
-        case DensePlannerStageClass::AlignmentSafeShapedBlockSharded:
-            return stage.reduction_size >= 256 ? 2.45L : 1.40L;
-        case DensePlannerStageClass::AsyncNarrowFullRow:
-            if (stage.reduction_size <= 31) {
-                return low_precision_input ? 1.75L : 1.50L;
-            }
-            return 1.00L;
-        default:
-            return 1.00L;
-    }
-}
-
-/**
- * Estimate the useful warp concurrency exposed by the direct reducer that will execute this stage.
- *
- * This deliberately mirrors only the broad ownership policy of the production kernels. It does not attempt to predict
- * instruction-level throughput: the dense planner should choose between fundamentally different traffic/parallelism
- * shapes, not encode one GPU's measured microseconds. The 1024-warp target is the same architecture-level target used
- * by the direct Tiled fallback when it decides how many warps should cooperate on one output tile.
- */
-[[nodiscard]] uint64_t estimateDenseDirectStageActiveWarps(const DenseDirectStageGeometry& stage,
-                                                            DataType input_dtype) {
-    using namespace CubReductionTiledPolicy;
-    if (stage.path == CubReductionPath::DeviceTransformReduce) {
-        return std::min<uint64_t>(
-            TARGET_ACTIVE_WARPS,
-            std::max<uint64_t>(1, ceilDivideDensePlanner(stage.input_elements, WARP_THREADS)));
-    }
-
-    if (stage.path == CubReductionPath::ContiguousFixedSegment) {
-        const uint64_t warps_per_segment =
-            std::min<uint64_t>(WARPS_PER_BLOCK, ceilDivideDensePlanner(stage.reduction_size, WARP_THREADS));
-        if (stage.output_elements > std::numeric_limits<uint64_t>::max() / warps_per_segment) {
-            return TARGET_ACTIVE_WARPS;
-        }
-        return std::min<uint64_t>(
-            TARGET_ACTIVE_WARPS, std::max<uint64_t>(1, stage.output_elements * warps_per_segment));
-    }
-
-    THOR_THROW_IF_FALSE(stage.path == CubReductionPath::TiledFixedSegment);
-
-    const uint64_t input_element_bytes =
-        static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(input_dtype));
-
-    uint64_t warps_per_output = 1;
-    if (stage.inner_size == 1024) {
-        warps_per_output = 2;
-    } else if (stage.inner_size == 2048) {
-        warps_per_output = 4;
-    } else if (stage.inner_size == FULL_ROW_GROUP_MAX_INNER_SIZE) {
-        warps_per_output = FULL_ROW_MAX_WARPS_PER_OUTPUT;
-    } else if (stage.inner_size > FULL_ROW_COMPONENTS_PER_WARP
-               && stage.inner_size < FULL_ROW_GROUP_MAX_INNER_SIZE) {
-        warps_per_output = densePlannerGroupedFullRowWarps(stage.inner_size, input_element_bytes);
-        if (warps_per_output == 0) {
-            return densePlannerDirectComponentActiveWarps(stage);
-        }
-    } else if (stage.inner_size > FULL_ROW_GROUP_MAX_INNER_SIZE) {
-        const uint64_t shards = ceilDivideDensePlanner(stage.inner_size, FULL_ROW_COMPONENTS_PER_BLOCK);
-        if (stage.outer_size > std::numeric_limits<uint64_t>::max() / shards
-            || stage.outer_size * shards
-                   > std::numeric_limits<uint64_t>::max() / WARPS_PER_BLOCK) {
-            return TARGET_ACTIVE_WARPS;
-        }
-        return std::min<uint64_t>(TARGET_ACTIVE_WARPS, stage.outer_size * shards * WARPS_PER_BLOCK);
-    } else if (stage.inner_size > 256 && stage.inner_size < FULL_ROW_COMPONENTS_PER_WARP) {
-        const uint64_t async_stage_capacity = ASYNC_STAGE_BYTES_PER_WARP / input_element_bytes;
-        if (stage.inner_size > async_stage_capacity) {
-            return densePlannerDirectComponentActiveWarps(stage);
-        }
-    }
-
-    if (stage.outer_size > std::numeric_limits<uint64_t>::max() / warps_per_output) {
-        return TARGET_ACTIVE_WARPS;
-    }
-    return std::min<uint64_t>(
-        TARGET_ACTIVE_WARPS, std::max<uint64_t>(1, stage.outer_size * warps_per_output));
-}
-
-/**
- * Broad dense-stage execution model used only to choose a stamped pass order.
- *
- * The model charges logical input/output traffic, then accounts for useful-warp concurrency and the broad execution
- * regime of the direct reducer that would execute the stage. A non-root intermediate that fits entirely in L2 receives
- * an 8x input-read discount. These are intentionally coarse architecture-level weights: the planner distinguishes CUB
- * short fixed segments, shaped-block Tiled work, and short async-narrow work, but never keys on a benchmark case or a
- * measured microsecond value.
- */
-[[nodiscard]] long double estimateDenseValueStageCost(const DenseDirectStageGeometry& stage,
-                                                       DataType input_dtype,
-                                                       DataType output_dtype,
-                                                       bool intermediate_is_hot,
-                                                       uint64_t l2_cache_bytes) {
-    constexpr long double L2_RESIDENT_INPUT_DISCOUNT = 8.0L;
-    const uint64_t input_element_bytes =
-        static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(input_dtype));
-    const uint64_t output_element_bytes =
-        static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(output_dtype));
-    const long double input_bytes =
-        static_cast<long double>(stage.input_elements) * static_cast<long double>(input_element_bytes);
-    const long double output_bytes =
-        static_cast<long double>(stage.output_elements) * static_cast<long double>(output_element_bytes);
-
-    long double charged_input_bytes = input_bytes;
-    if (intermediate_is_hot && l2_cache_bytes != 0
-        && input_bytes <= static_cast<long double>(l2_cache_bytes)) {
-        charged_input_bytes /= L2_RESIDENT_INPUT_DISCOUNT;
-    }
-
-    const DensePlannerStageClass stage_class = classifyDensePlannerStage(stage, input_dtype);
-    const uint64_t active_warps = estimateDenseDirectStageActiveWarps(stage, input_dtype);
-    const long double active_warp_ratio =
-        static_cast<long double>(CubReductionTiledPolicy::TARGET_ACTIVE_WARPS)
-        / static_cast<long double>(std::max<uint64_t>(active_warps, 1));
-    const long double parallelism_penalty =
-        std::max<long double>(1.0L, std::pow(active_warp_ratio, 1.15L));
-    const long double execution_penalty = densePlannerExecutionPenalty(stage, input_dtype, stage_class);
-    long double estimated_cost =
-        (charged_input_bytes + output_bytes) * parallelism_penalty * execution_penalty;
-
-    // Async pipelines have a real producer/consumer setup floor that dominates tiny low-concurrency stages even when
-    // their logical byte count is minuscule. Express that floor in the same abstract byte-cost units as the traffic
-    // model and fade it out as useful concurrency approaches the normal saturation target.
-    if ((stage_class == DensePlannerStageClass::AsyncNarrowFullRow
-         || stage_class == DensePlannerStageClass::AsyncFullRow)
-        && active_warps < CubReductionTiledPolicy::TARGET_ACTIVE_WARPS) {
-        constexpr long double ASYNC_LOW_CONCURRENCY_EQUIVALENT_BYTES = 8'000'000.0L;
-        const long double active_fraction =
-            static_cast<long double>(active_warps)
-            / static_cast<long double>(CubReductionTiledPolicy::TARGET_ACTIVE_WARPS);
-        estimated_cost = std::max(estimated_cost,
-                                  ASYNC_LOW_CONCURRENCY_EQUIVALENT_BYTES * (1.0L - active_fraction));
-    }
-    return estimated_cost;
-}
-
 [[nodiscard]] CubReductionInternal::CubReductionStageRole physicalStageRole(bool apply_input_transform,
                                                                              bool apply_output_finalize) {
     using CubReductionInternal::CubReductionStageRole;
@@ -751,115 +260,6 @@ void requireOrdainedDenseReductionPath(const CubReductionGeometry& geometry) {
         return CubReductionStageRole::Final;
     }
     return CubReductionStageRole::Intermediate;
-}
-
-[[nodiscard]] bool cooperativeShardedTiledNaturalGeometry(const CubReductionGeometry& geometry) {
-    return geometry.path == CubReductionPath::TiledFixedSegment
-           && !geometry.payload_transpose_tiled_geometry.has_value()
-           && !geometry.pitched_tiled_geometry.has_value()
-           && !geometry.tiled_output_permuted
-           && !geometry.tiled_output_shared_transpose
-           && geometry.tiled_output_outer_stride == geometry.inner_size
-           && geometry.tiled_output_inner_stride == 1;
-}
-
-/**
- * Production gate for the benchmarked alignment-rotated replacement of awkward retained-width reducers.
- *
- * The wide 2-D census proves that packet-misaligned K >4096 needs R sharding from R=512 onward, including large outer
- * counts. For that domain a simple shard-depth progression keeps at least two R shards: rows256 below R=1024, rows512
- * below R=2048, and rows1024 thereafter. The earlier wide/sub-4096 censuses retain the deep low-output rules below the
- * wide boundary. The sub-512 census extends the same architecture to packet-misaligned 257..511 widths, and the
- * sub-256 census extends it again to packet-misaligned 65..255 widths once the reduction is at least 32768 deep, and
- * the final sub-64 census extends that same geometry rule to packet-misaligned 33..63 widths.
- *
- * Below 512 retained components, shard depth follows launch geometry rather than a K-by-K lookup. For 257..511 the
- * previous rows1024/rows256/rows512 rule remains unchanged. For 33..255, low-precision input uses rows256 while a single
- * logical component tile is less than half occupied, rows512 once that tile is at least half occupied, and rows1024
- * once a second logical tile is required; FP32 uses the corresponding 1/2/3-tile progression. If that preferred shard
- * depth cannot expose the benchmarked SM-wave target, the selector steps down to a more parallel specialization. The
- * resulting rule retained about 99.8% of the measured per-case best bandwidth in the sub-256 census while avoiding
- * width-specific tuning. The same ownership, packet, and shared-memory geometry is used for Product/Min/Max; only the
- * associative FP32 combine and its identity differ.
- */
-[[nodiscard]] long double estimateCooperativeShardedRemainderCost(uint64_t outer_size,
-                                                                  uint64_t shards_per_output,
-                                                                  uint64_t inner_size,
-                                                                  DataType output_dtype,
-                                                                  uint64_t l2_cache_bytes) {
-    using namespace CubReductionTiledPolicy;
-    DenseDirectStageGeometry remainder_geometry;
-    remainder_geometry.path = CubReductionPath::TiledFixedSegment;
-    remainder_geometry.input_elements = outer_size * shards_per_output * inner_size;
-    remainder_geometry.output_elements = outer_size * inner_size;
-    remainder_geometry.reduction_size = shards_per_output;
-    remainder_geometry.outer_size = outer_size;
-    remainder_geometry.inner_size = inner_size;
-
-    // The ordinary second stage consumes FP32 partials. When it falls inside the packet-adaptive cooperative gate,
-    // model the reducer that will actually execute rather than the older full-row ownership approximation used by
-    // the general dense-composition planner. This is essential for narrow retained widths: a single output tile can
-    // own up to 32 cooperating warps even though the legacy model would count only one useful warp.
-    if (shards_per_output >= PACKET_COOPERATIVE_MIN_REDUCTION_SIZE
-        && inner_size >= PACKET_COOPERATIVE_MIN_INNER_SIZE
-        && inner_size <= PACKET_COOPERATIVE_MAX_INNER_SIZE) {
-        constexpr uint64_t fp32_bytes = sizeof(float);
-        constexpr uint64_t components_16 = WARP_THREADS * (16 / fp32_bytes);
-        constexpr uint64_t components_8 = WARP_THREADS * (8 / fp32_bytes);
-        const uint64_t row_bytes = inner_size * fp32_bytes;
-
-        uint64_t packet_bytes = 16;
-        if (inner_size <= components_16 / 2 && row_bytes % 8 == 0) {
-            packet_bytes = 8;
-            if (inner_size <= components_8 / 2 && row_bytes % 4 == 0) {
-                packet_bytes = 4;
-            }
-        }
-        const uint64_t items_per_lane = packet_bytes / fp32_bytes;
-        const uint64_t components_per_tile = WARP_THREADS * items_per_lane;
-        const uint64_t component_tiles = ceilDivideDensePlanner(inner_size, components_per_tile);
-        if (outer_size <= std::numeric_limits<uint64_t>::max() / component_tiles) {
-            const uint64_t output_tiles = std::max<uint64_t>(1, outer_size * component_tiles);
-            const uint64_t adaptive_target_warps = TARGET_ACTIVE_WARPS * DENSE_RK_TARGET_SM_WAVES;
-            const uint64_t desired_warps = ceilDivideDensePlanner(adaptive_target_warps, output_tiles);
-
-            uint64_t warps_per_tile = 1;
-            while (warps_per_tile < 32 && warps_per_tile < desired_warps
-                   && warps_per_tile < shards_per_output) {
-                warps_per_tile <<= 1;
-            }
-            while (warps_per_tile < 32 && shards_per_output > warps_per_tile
-                   && (row_bytes * warps_per_tile) % packet_bytes != 0) {
-                warps_per_tile <<= 1;
-            }
-
-            if (warps_per_tile >= PACKET_COOPERATIVE_MIN_WARPS_PER_TILE) {
-                const uint64_t active_warps = std::min<uint64_t>(
-                    TARGET_ACTIVE_WARPS,
-                    output_tiles > std::numeric_limits<uint64_t>::max() / warps_per_tile
-                        ? TARGET_ACTIVE_WARPS
-                        : output_tiles * warps_per_tile);
-                const long double input_bytes =
-                    static_cast<long double>(remainder_geometry.input_elements) * fp32_bytes;
-                const long double output_bytes =
-                    static_cast<long double>(remainder_geometry.output_elements)
-                    * static_cast<long double>(TensorDescriptor::getElementSizeInBytes(output_dtype));
-                const long double charged_input_bytes =
-                    l2_cache_bytes != 0 && input_bytes <= static_cast<long double>(l2_cache_bytes)
-                        ? input_bytes / 8.0L
-                        : input_bytes;
-                const long double active_warp_ratio =
-                    static_cast<long double>(TARGET_ACTIVE_WARPS)
-                    / static_cast<long double>(std::max<uint64_t>(active_warps, 1));
-                const long double parallelism_penalty =
-                    std::max<long double>(1.0L, std::pow(active_warp_ratio, 1.15L));
-                return (charged_input_bytes + output_bytes) * parallelism_penalty;
-            }
-        }
-    }
-
-    return estimateDenseValueStageCost(
-        remainder_geometry, DataType::FP32, output_dtype, true, l2_cache_bytes);
 }
 
 /**
@@ -876,611 +276,6 @@ void requireOrdainedDenseReductionPath(const CubReductionGeometry& geometry) {
  * SM waves of independent CTAs; the remainder term models the ordinary FP32 [outer,shards,inner] reducer. No measured
  * microseconds or benchmark-case names are embedded here.
  */
-
-[[nodiscard]] uint64_t denseArgPlannerElementBytes(DataType dtype) {
-    return static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(dtype));
-}
-
-[[nodiscard]] uint64_t denseArgPlannerItemsPerLane(DataType value_dtype) {
-    const uint64_t element_bytes = denseArgPlannerElementBytes(value_dtype);
-    if (element_bytes == 0 || 16 % element_bytes != 0) {
-        return 1;
-    }
-    return 16 / element_bytes;
-}
-
-[[nodiscard]] uint64_t denseArgPlannerAlignmentPeriod(uint64_t inner_size, uint64_t element_bytes) {
-    uint64_t period = 1;
-    while (period < 16 && ((inner_size % 16) * (element_bytes % 16) * period) % 16 != 0) {
-        period <<= 1;
-    }
-    return period;
-}
-
-[[nodiscard]] uint64_t denseArgPlannerTargetPartitions(uint64_t reduction_size) {
-    uint64_t partitions = 1;
-    while (partitions < 32 && partitions * 16 < reduction_size) {
-        partitions <<= 1;
-    }
-    return partitions;
-}
-
-[[nodiscard]] uint64_t denseArgPlannerWarpsPerTile(const DenseDirectStageGeometry& stage,
-                                                    DataType value_dtype,
-                                                    bool has_carried_index,
-                                                    DataType carried_index_dtype) {
-    constexpr uint64_t WARP_THREADS = 32;
-    constexpr uint64_t WARPS_PER_BLOCK = 8;
-    constexpr uint64_t TARGET_ACTIVE_WARPS = CubReductionTiledPolicy::TARGET_ACTIVE_WARPS;
-
-    const uint64_t items_per_lane = denseArgPlannerItemsPerLane(value_dtype);
-    const uint64_t complete_packets = stage.inner_size / items_per_lane;
-    uint64_t desired_group_threads = 8;
-    while (desired_group_threads < WARP_THREADS && (desired_group_threads << 1) <= complete_packets) {
-        desired_group_threads <<= 1;
-    }
-
-    uint64_t alignment_period = denseArgPlannerAlignmentPeriod(stage.inner_size, denseArgPlannerElementBytes(value_dtype));
-    if (has_carried_index) {
-        alignment_period = std::max(
-            alignment_period,
-            denseArgPlannerAlignmentPeriod(stage.inner_size, denseArgPlannerElementBytes(carried_index_dtype)));
-    }
-    const uint64_t row_partitions = std::max(denseArgPlannerTargetPartitions(stage.reduction_size), alignment_period);
-    const uint64_t max_group_threads = std::max<uint64_t>(1, WARP_THREADS * WARPS_PER_BLOCK / row_partitions);
-    const uint64_t group_threads = std::min(desired_group_threads, max_group_threads);
-    const uint64_t tile_components = std::max<uint64_t>(1, group_threads * items_per_lane);
-    const uint64_t component_tiles = ceilDivideDensePlanner(stage.inner_size, tile_components);
-
-    uint64_t output_tiles = TARGET_ACTIVE_WARPS;
-    if (stage.outer_size <= std::numeric_limits<uint64_t>::max() / component_tiles) {
-        output_tiles = std::max<uint64_t>(1, stage.outer_size * component_tiles);
-    }
-    const uint64_t desired_warps = ceilDivideDensePlanner(TARGET_ACTIVE_WARPS, output_tiles);
-    uint64_t warps = 1;
-    while (warps < WARPS_PER_BLOCK && warps < desired_warps && warps < stage.reduction_size) {
-        warps <<= 1;
-    }
-
-    // Match the production alignment requirement for revisited rows. A UINT64 carried stream is intentionally treated
-    // conservatively: it is outside the current normal direct hot path and should never make an awkward stage look cheap.
-    while (warps <= WARPS_PER_BLOCK) {
-        const bool one_row_per_warp = stage.reduction_size <= warps;
-        const bool values_aligned = one_row_per_warp
-                                    || ((stage.inner_size % 16) * (denseArgPlannerElementBytes(value_dtype) % 16) * warps) % 16 == 0;
-        const bool indices_aligned = !has_carried_index || one_row_per_warp
-                                     || ((stage.inner_size % 16)
-                                         * (denseArgPlannerElementBytes(carried_index_dtype) % 16) * warps)
-                                            % 16
-                                            == 0;
-        if (values_aligned && indices_aligned) {
-            return warps;
-        }
-        warps <<= 1;
-    }
-    return WARPS_PER_BLOCK;
-}
-
-[[nodiscard]] DenseArgPlannerStageClass classifyDenseArgPlannerStage(const DenseDirectStageGeometry& stage,
-                                                                     DataType value_dtype,
-                                                                     bool has_carried_index,
-                                                                     DataType carried_index_dtype) {
-    if (stage.path == CubReductionPath::DeviceTransformReduce) {
-        return DenseArgPlannerStageClass::DeviceTransform;
-    }
-    if (stage.path == CubReductionPath::ContiguousFixedSegment) {
-        return DenseArgPlannerStageClass::Contiguous;
-    }
-    THOR_THROW_IF_FALSE(stage.path == CubReductionPath::TiledFixedSegment);
-
-    if (stage.inner_size <= 32) {
-        return DenseArgPlannerStageClass::TiledNarrow;
-    }
-    if (carried_index_dtype != DataType::UINT32) {
-        return DenseArgPlannerStageClass::TiledAwkwardHeadBulkTail;
-    }
-
-    const uint64_t value_bytes = denseArgPlannerElementBytes(value_dtype);
-    if (value_bytes < 2) {
-        return DenseArgPlannerStageClass::TiledAwkwardHeadBulkTail;
-    }
-    const uint64_t items_per_lane = denseArgPlannerItemsPerLane(value_dtype);
-    const uint64_t complete_packets = stage.inner_size / items_per_lane;
-    uint64_t desired_group_threads = 8;
-    while (desired_group_threads < 32 && (desired_group_threads << 1) <= complete_packets) {
-        desired_group_threads <<= 1;
-    }
-    uint64_t alignment_period = denseArgPlannerAlignmentPeriod(stage.inner_size, value_bytes);
-    if (has_carried_index) {
-        alignment_period = std::max<uint64_t>(alignment_period, denseArgPlannerAlignmentPeriod(stage.inner_size, 4));
-    }
-    const uint64_t row_partitions = std::max(denseArgPlannerTargetPartitions(stage.reduction_size), alignment_period);
-    const uint64_t max_group_threads = std::max<uint64_t>(1, 256 / row_partitions);
-    const uint64_t group_threads = std::min(desired_group_threads, max_group_threads);
-    const uint64_t tile_components = std::max<uint64_t>(1, group_threads * items_per_lane);
-    const bool complete_tiles = stage.inner_size % tile_components == 0;
-    const bool value_rows_aligned = ((stage.inner_size % 16) * (value_bytes % 16)) % 16 == 0;
-    const bool carried_rows_aligned = !has_carried_index || ((stage.inner_size % 4) * 4) % 16 == 0;
-    return complete_tiles && value_rows_aligned && carried_rows_aligned
-               ? DenseArgPlannerStageClass::TiledSimpleAlignedFullTiles
-               : DenseArgPlannerStageClass::TiledAwkwardHeadBulkTail;
-}
-
-[[nodiscard]] uint64_t estimateDenseArgStageActiveWarps(const DenseDirectStageGeometry& stage,
-                                                         DataType value_dtype,
-                                                         bool has_carried_index,
-                                                         DataType carried_index_dtype) {
-    constexpr uint64_t TARGET_ACTIVE_WARPS = CubReductionTiledPolicy::TARGET_ACTIVE_WARPS;
-    if (stage.path == CubReductionPath::DeviceTransformReduce) {
-        return std::min<uint64_t>(
-            TARGET_ACTIVE_WARPS,
-            std::max<uint64_t>(1, ceilDivideDensePlanner(stage.input_elements, uint64_t{32})));
-    }
-    if (stage.path == CubReductionPath::ContiguousFixedSegment) {
-        const uint64_t items_per_lane = denseArgPlannerItemsPerLane(value_dtype);
-        const uint64_t packets = stage.reduction_size / items_per_lane;
-        uint64_t group_threads = 1;
-        while (group_threads < 32 && group_threads < packets) {
-            group_threads <<= 1;
-        }
-        long double logical_threads = static_cast<long double>(stage.output_elements)
-                                      * static_cast<long double>(std::max<uint64_t>(group_threads, 1));
-        const uint64_t warps = logical_threads >= static_cast<long double>(TARGET_ACTIVE_WARPS * 32)
-                                   ? TARGET_ACTIVE_WARPS
-                                   : std::max<uint64_t>(1, static_cast<uint64_t>(std::ceil(logical_threads / 32.0L)));
-        return std::min<uint64_t>(TARGET_ACTIVE_WARPS, warps);
-    }
-
-    THOR_THROW_IF_FALSE(stage.path == CubReductionPath::TiledFixedSegment);
-    if (stage.inner_size <= 32) {
-        if (stage.outer_size > std::numeric_limits<uint64_t>::max() / 8) {
-            return TARGET_ACTIVE_WARPS;
-        }
-        return std::min<uint64_t>(TARGET_ACTIVE_WARPS, std::max<uint64_t>(1, stage.outer_size * 8));
-    }
-
-    const uint64_t items_per_lane = denseArgPlannerItemsPerLane(value_dtype);
-    const uint64_t complete_packets = stage.inner_size / items_per_lane;
-    uint64_t group_threads = 8;
-    while (group_threads < 32 && (group_threads << 1) <= complete_packets) {
-        group_threads <<= 1;
-    }
-    uint64_t alignment_period = denseArgPlannerAlignmentPeriod(stage.inner_size, denseArgPlannerElementBytes(value_dtype));
-    if (has_carried_index) {
-        alignment_period = std::max(
-            alignment_period,
-            denseArgPlannerAlignmentPeriod(stage.inner_size, denseArgPlannerElementBytes(carried_index_dtype)));
-    }
-    const uint64_t row_partitions = std::max(denseArgPlannerTargetPartitions(stage.reduction_size), alignment_period);
-    const uint64_t max_group_threads = std::max<uint64_t>(1, 256 / row_partitions);
-    group_threads = std::min(group_threads, max_group_threads);
-    const uint64_t tile_components = std::max<uint64_t>(1, group_threads * items_per_lane);
-    const uint64_t component_tiles = ceilDivideDensePlanner(stage.inner_size, tile_components);
-    if (stage.outer_size > std::numeric_limits<uint64_t>::max() / component_tiles) {
-        return TARGET_ACTIVE_WARPS;
-    }
-    const uint64_t output_tiles = std::max<uint64_t>(1, stage.outer_size * component_tiles);
-    const uint64_t warps_per_tile = denseArgPlannerWarpsPerTile(stage, value_dtype, has_carried_index, carried_index_dtype);
-    if (output_tiles > std::numeric_limits<uint64_t>::max() / warps_per_tile) {
-        return TARGET_ACTIVE_WARPS;
-    }
-    return std::min<uint64_t>(TARGET_ACTIVE_WARPS, output_tiles * warps_per_tile);
-}
-
-[[nodiscard]] long double denseArgPlannerExecutionPenalty(const DenseDirectStageGeometry& stage,
-                                                           DenseArgPlannerStageClass stage_class,
-                                                           DataType value_dtype,
-                                                           DataType carried_index_dtype,
-                                                           uint64_t active_warps) {
-    using namespace CubReductionTiledPolicy;
-    const bool low_precision = denseArgPlannerElementBytes(value_dtype) <= 2;
-
-    // ARG-PLAN-2B calibration: the forced-order census exposed two throughput troughs that a traffic-only model cannot
-    // represent. Very short contiguous rows and short narrow tiled rows can be dramatically slower than their logical
-    // byte count suggests once there is enough work to reach their steady execution regime. Conversely, multiplying
-    // that throughput penalty into a tiny under-filled later pass grossly overcharges it because the generic active-warp
-    // term already models the lack of concurrency. Apply these regime penalties only once at least one quarter of the
-    // normal saturation target is exposed. The buckets are intentionally broad and keyed only to direct-kernel geometry
-    // so the model remains easy to recalibrate when the pinned direct ARG kernels change.
-    constexpr uint64_t THROUGHPUT_REGIME_WARPS = TARGET_ACTIVE_WARPS / 4;
-    const bool throughput_regime = active_warps >= THROUGHPUT_REGIME_WARPS;
-
-    long double penalty = 1.0L;
-    switch (stage_class) {
-        case DenseArgPlannerStageClass::DeviceTransform:
-        case DenseArgPlannerStageClass::TiledSimpleAlignedFullTiles:
-            penalty = 1.0L;
-            break;
-        case DenseArgPlannerStageClass::Contiguous:
-            if (!throughput_regime) {
-                penalty = 1.0L;
-            } else if (stage.reduction_size <= 16) {
-                penalty = low_precision ? 30.0L : 20.0L;
-            } else if (stage.reduction_size <= 24) {
-                penalty = low_precision ? 8.0L : 4.0L;
-            } else if (stage.reduction_size <= 31) {
-                penalty = low_precision ? 4.0L : 2.0L;
-            } else if (stage.reduction_size <= 63) {
-                penalty = low_precision ? 2.0L : 1.0L;
-            } else {
-                penalty = 1.0L;
-            }
-            break;
-        case DenseArgPlannerStageClass::TiledNarrow:
-            if (!throughput_regime) {
-                penalty = 1.0L;
-            } else if (stage.reduction_size <= 24) {
-                penalty = low_precision ? 4.0L : 3.0L;
-            } else if (stage.reduction_size <= 31) {
-                penalty = low_precision ? 1.50L : 1.25L;
-            } else {
-                penalty = low_precision ? 1.25L : 1.10L;
-            }
-            break;
-        case DenseArgPlannerStageClass::TiledAwkwardHeadBulkTail:
-            // Current census data puts awkward FP16/BF16 tiled ARG in roughly the 0.4-0.6 TB/s regime while the clean
-            // aligned path is materially healthier. Keep this one coarse family weight so a later direct-kernel pass
-            // can recalibrate one constant instead of rewriting topology logic.
-            penalty = low_precision ? 2.75L : 1.85L;
-            break;
-    }
-    if (carried_index_dtype == DataType::UINT64) {
-        penalty *= 1.50L;
-    }
-    return penalty;
-}
-
-[[nodiscard]] long double estimateDenseArgStageCost(const DenseDirectStageGeometry& stage,
-                                                     DataType value_input_dtype,
-                                                     bool has_carried_index,
-                                                     DataType carried_index_dtype,
-                                                     uint64_t output_value_bytes_per_element,
-                                                     uint64_t output_index_bytes_per_element,
-                                                     bool intermediate_is_hot,
-                                                     uint64_t l2_cache_bytes) {
-    constexpr long double L2_RESIDENT_INPUT_DISCOUNT = 8.0L;
-    const uint64_t value_input_bytes = denseArgPlannerElementBytes(value_input_dtype);
-    const uint64_t carried_index_bytes = has_carried_index ? denseArgPlannerElementBytes(carried_index_dtype) : 0;
-    const long double input_bytes = static_cast<long double>(stage.input_elements)
-                                    * static_cast<long double>(value_input_bytes + carried_index_bytes);
-    const long double output_bytes = static_cast<long double>(stage.output_elements)
-                                     * static_cast<long double>(output_value_bytes_per_element
-                                                                + output_index_bytes_per_element);
-
-    long double charged_input_bytes = input_bytes;
-    if (intermediate_is_hot && l2_cache_bytes != 0 && input_bytes <= static_cast<long double>(l2_cache_bytes)) {
-        charged_input_bytes /= L2_RESIDENT_INPUT_DISCOUNT;
-    }
-
-    const DenseArgPlannerStageClass stage_class =
-        classifyDenseArgPlannerStage(stage, value_input_dtype, has_carried_index, carried_index_dtype);
-    const uint64_t active_warps =
-        estimateDenseArgStageActiveWarps(stage, value_input_dtype, has_carried_index, carried_index_dtype);
-    const long double active_warp_ratio = static_cast<long double>(CubReductionTiledPolicy::TARGET_ACTIVE_WARPS)
-                                          / static_cast<long double>(std::max<uint64_t>(active_warps, 1));
-    const long double parallelism_penalty = std::max<long double>(1.0L, std::pow(active_warp_ratio, 1.10L));
-    const long double execution_penalty =
-        denseArgPlannerExecutionPenalty(stage, stage_class, value_input_dtype, carried_index_dtype, active_warps);
-    return (charged_input_bytes + output_bytes) * parallelism_penalty * execution_penalty;
-}
-
-[[nodiscard]] DenseArgCompositionCostContext denseArgCompositionCostContext(
-    DataType input_dtype,
-    DataType carried_index_dtype,
-    const CubArgReductionOutputOptions& outputs,
-    DataType value_output_dtype,
-    const Stream& stream) {
-    int l2_cache_bytes = 0;
-    const cudaError_t status = cudaDeviceGetAttribute(
-        &l2_cache_bytes, cudaDevAttrL2CacheSize, static_cast<int>(stream.getGpuNum()));
-    if (status != cudaSuccess) {
-        throw std::runtime_error(std::string("Failed to query GPU L2 size for dense ARG planning: ")
-                                 + cudaGetErrorString(status));
-    }
-    return DenseArgCompositionCostContext{.input_dtype = input_dtype,
-                                          .carried_index_dtype = carried_index_dtype,
-                                          .produce_value = outputs.produce_value,
-                                          .value_output_dtype = value_output_dtype,
-                                          .produce_index = outputs.produce_index,
-                                          .index_output_dtype = outputs.index_output_dtype,
-                                          .l2_cache_bytes = l2_cache_bytes > 0 ? static_cast<uint64_t>(l2_cache_bytes) : 0};
-}
-
-/**
- * Transitional interval-DP topology planner retained for structural ComposedDense validation and ARG execution.
- *
- * VALUE no longer executes this left/right composition: ordinary dense VALUE is planned globally through
- * planDenseReduction() and materialized as a flat DenseExecutablePlan. ARG still uses this interval planner until
- * DENSE-ARG-CUTOVER, so keep it isolated from VALUE execution rather than evolving it into a second dense planner.
- */
-template <typename StageCostFn>
-[[nodiscard]] std::optional<CubReductionDenseCompositionPlan> makeDenseIntervalCompositionPlan(
-    const CubReductionGeometry& geometry,
-    const std::vector<uint64_t>& input_dimensions,
-    StageCostFn&& stage_cost) {
-    if (!geometry.dense_run_geometry.has_value()) {
-        return std::nullopt;
-    }
-    THOR_THROW_IF_FALSE(input_dimensions.size() == geometry.rank);
-
-    const std::vector<DenseReducedRunSpan> reduced_run_spans = denseReducedRunSpans(geometry, input_dimensions);
-    const size_t reduced_run_count = reduced_run_spans.size();
-    THOR_THROW_IF_FALSE(reduced_run_count != 0);
-
-    if (reduced_run_count == 1) {
-        const std::optional<CubReductionDenseCompositionStage> stage = makeDenseCompositionStagePlan(
-            input_dimensions, reduced_run_spans.front(), CubReductionDenseCompositionStageRole::Complete);
-        if (!stage.has_value() || !std::isfinite(stage_cost(stage.value()))) {
-            return std::nullopt;
-        }
-        CubReductionDenseCompositionPlan plan;
-        plan.stages.push_back(stage.value());
-        THOR_THROW_IF_FALSE(plan.stages.back().output_dimensions == geometry.output_dimensions);
-        return plan;
-    }
-
-    const long double infinity = std::numeric_limits<long double>::infinity();
-    std::vector<std::vector<long double>> subproblem_cost(
-        reduced_run_count, std::vector<long double>(reduced_run_count, infinity));
-    std::vector<std::vector<char>> subproblem_choice(
-        reduced_run_count, std::vector<char>(reduced_run_count, '\0'));
-
-    // Base states are final passes over hot partials.
-    for (size_t run_index = 0; run_index < reduced_run_count; ++run_index) {
-        const std::vector<uint64_t> state_dimensions =
-            denseReductionStateDimensions(input_dimensions, reduced_run_spans, run_index, run_index);
-        const std::optional<CubReductionDenseCompositionStage> stage = makeDenseCompositionStagePlan(
-            state_dimensions, reduced_run_spans[run_index], CubReductionDenseCompositionStageRole::Final);
-        if (!stage.has_value()) {
-            continue;
-        }
-        subproblem_cost[run_index][run_index] = stage_cost(stage.value());
-    }
-
-    // Proper non-root interval states consume and produce hot partials.
-    for (size_t remaining_runs = 2; remaining_runs < reduced_run_count; ++remaining_runs) {
-        for (size_t state_left = 0; state_left + remaining_runs <= reduced_run_count; ++state_left) {
-            const size_t state_right = state_left + remaining_runs - 1;
-            const std::vector<uint64_t> state_dimensions =
-                denseReductionStateDimensions(input_dimensions, reduced_run_spans, state_left, state_right);
-
-            auto candidateCost = [&](size_t selected_run, size_t child_left, size_t child_right) {
-                if (!std::isfinite(subproblem_cost[child_left][child_right])) {
-                    return infinity;
-                }
-                const std::optional<CubReductionDenseCompositionStage> stage = makeDenseCompositionStagePlan(
-                    state_dimensions,
-                    reduced_run_spans[selected_run],
-                    CubReductionDenseCompositionStageRole::Intermediate);
-                if (!stage.has_value()) {
-                    return infinity;
-                }
-                const long double own_cost = stage_cost(stage.value());
-                return std::isfinite(own_cost) ? own_cost + subproblem_cost[child_left][child_right] : infinity;
-            };
-
-            const long double left_cost = candidateCost(state_left, state_left + 1, state_right);
-            const long double right_cost = candidateCost(state_right, state_left, state_right - 1);
-            if (left_cost <= right_cost) {
-                subproblem_cost[state_left][state_right] = left_cost;
-                subproblem_choice[state_left][state_right] = 'L';
-            } else {
-                subproblem_cost[state_left][state_right] = right_cost;
-                subproblem_choice[state_left][state_right] = 'R';
-            }
-        }
-    }
-
-    // The root is the only cold stage.
-    const size_t root_left = 0;
-    const size_t root_right = reduced_run_count - 1;
-    auto rootCandidateCost = [&](size_t selected_run, size_t child_left, size_t child_right) {
-        if (!std::isfinite(subproblem_cost[child_left][child_right])) {
-            return infinity;
-        }
-        const std::optional<CubReductionDenseCompositionStage> stage = makeDenseCompositionStagePlan(
-            input_dimensions, reduced_run_spans[selected_run], CubReductionDenseCompositionStageRole::First);
-        if (!stage.has_value()) {
-            return infinity;
-        }
-        const long double own_cost = stage_cost(stage.value());
-        return std::isfinite(own_cost) ? own_cost + subproblem_cost[child_left][child_right] : infinity;
-    };
-
-    const long double root_left_cost = rootCandidateCost(root_left, root_left + 1, root_right);
-    const long double root_right_cost = rootCandidateCost(root_right, root_left, root_right - 1);
-    if (!std::isfinite(root_left_cost) && !std::isfinite(root_right_cost)) {
-        return std::nullopt;
-    }
-    if (root_left_cost <= root_right_cost) {
-        subproblem_cost[root_left][root_right] = root_left_cost;
-        subproblem_choice[root_left][root_right] = 'L';
-    } else {
-        subproblem_cost[root_left][root_right] = root_right_cost;
-        subproblem_choice[root_left][root_right] = 'R';
-    }
-
-    std::vector<size_t> stage_run_order;
-    stage_run_order.reserve(reduced_run_count);
-    size_t state_left = root_left;
-    size_t state_right = root_right;
-    while (state_left < state_right) {
-        const char choice = subproblem_choice[state_left][state_right];
-        if (choice == 'L') {
-            stage_run_order.push_back(state_left++);
-        } else if (choice == 'R') {
-            stage_run_order.push_back(state_right--);
-        } else {
-            return std::nullopt;
-        }
-    }
-    stage_run_order.push_back(state_left);
-
-    CubReductionDenseCompositionPlan plan;
-    plan.stages.reserve(stage_run_order.size());
-    std::vector<uint64_t> current_dimensions = input_dimensions;
-    for (size_t stage_index = 0; stage_index < stage_run_order.size(); ++stage_index) {
-        const CubReductionDenseCompositionStageRole role =
-            stage_index == 0 ? CubReductionDenseCompositionStageRole::First
-            : stage_index + 1 == stage_run_order.size() ? CubReductionDenseCompositionStageRole::Final
-                                                       : CubReductionDenseCompositionStageRole::Intermediate;
-        const std::optional<CubReductionDenseCompositionStage> stage = makeDenseCompositionStagePlan(
-            current_dimensions, reduced_run_spans[stage_run_order[stage_index]], role);
-        if (!stage.has_value()) {
-            return std::nullopt;
-        }
-        current_dimensions = stage->output_dimensions;
-        plan.stages.push_back(stage.value());
-    }
-
-    THOR_THROW_IF_FALSE(!plan.stages.empty());
-    THOR_THROW_IF_FALSE(current_dimensions == geometry.output_dimensions);
-    return plan;
-}
-
-
-[[nodiscard]] std::optional<CubReductionDenseCompositionPlan> makeDenseIntervalCompositionPlanForRunOrder(
-    const CubReductionGeometry& geometry,
-    const std::vector<uint64_t>& input_dimensions,
-    const std::vector<uint32_t>& run_order) {
-    if (!geometry.dense_run_geometry.has_value()) {
-        return std::nullopt;
-    }
-    const std::vector<DenseReducedRunSpan> reduced_run_spans = denseReducedRunSpans(geometry, input_dimensions);
-    if (run_order.size() != reduced_run_spans.size() || run_order.empty()) {
-        return std::nullopt;
-    }
-
-    size_t left = 0;
-    size_t right = reduced_run_spans.size() - 1;
-    std::vector<uint64_t> current_dimensions = input_dimensions;
-    CubReductionDenseCompositionPlan plan;
-    plan.stages.reserve(run_order.size());
-    for (size_t stage_index = 0; stage_index < run_order.size(); ++stage_index) {
-        const size_t selected = static_cast<size_t>(run_order[stage_index]);
-        if (selected >= reduced_run_spans.size()) {
-            return std::nullopt;
-        }
-        if (left == right) {
-            if (selected != left || stage_index + 1 != run_order.size()) {
-                return std::nullopt;
-            }
-        } else if (selected == left) {
-            ++left;
-        } else if (selected == right) {
-            --right;
-        } else {
-            return std::nullopt;
-        }
-
-        const CubReductionDenseCompositionStageRole role =
-            run_order.size() == 1 ? CubReductionDenseCompositionStageRole::Complete
-            : stage_index == 0 ? CubReductionDenseCompositionStageRole::First
-            : stage_index + 1 == run_order.size() ? CubReductionDenseCompositionStageRole::Final
-                                                  : CubReductionDenseCompositionStageRole::Intermediate;
-        const std::optional<CubReductionDenseCompositionStage> stage =
-            makeDenseCompositionStagePlan(current_dimensions, reduced_run_spans[selected], role);
-        if (!stage.has_value()) {
-            return std::nullopt;
-        }
-        current_dimensions = stage->output_dimensions;
-        plan.stages.push_back(stage.value());
-    }
-    if (current_dimensions != geometry.output_dimensions) {
-        return std::nullopt;
-    }
-    return plan;
-}
-
-[[nodiscard]] std::optional<CubReductionDenseCompositionPlan> makeStructuralDenseCompositionPlan(
-    const CubReductionGeometry& geometry,
-    const std::vector<uint64_t>& input_dimensions) {
-    return makeDenseIntervalCompositionPlan(
-        geometry, input_dimensions, [](const CubReductionDenseCompositionStage&) { return 1.0L; });
-}
-
-[[nodiscard]] std::optional<CubArgReductionDenseCompositionPlan> makeDenseArgCompositionPlan(
-    const CubReductionGeometry& geometry,
-    const std::vector<uint64_t>& input_dimensions,
-    std::optional<DenseArgCompositionCostContext> cost_context = std::nullopt) {
-    if (!geometry.dense_run_geometry.has_value()) {
-        return std::nullopt;
-    }
-
-    const DataType carried_index_dtype =
-        geometry.reduction_size <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())
-            ? DataType::UINT32
-            : DataType::UINT64;
-
-    std::optional<CubReductionDenseCompositionPlan> topology;
-    if (!cost_context.has_value()) {
-        topology = makeStructuralDenseCompositionPlan(geometry, input_dimensions);
-    } else {
-        DenseArgCompositionCostContext planner_context = cost_context.value();
-        planner_context.carried_index_dtype = carried_index_dtype;
-        const uint64_t intermediate_value_bytes = sizeof(float);
-        const uint64_t intermediate_index_bytes = denseArgPlannerElementBytes(carried_index_dtype);
-        const uint64_t final_value_bytes = planner_context.produce_value
-                                               ? denseArgPlannerElementBytes(planner_context.value_output_dtype)
-                                               : 0;
-        const uint64_t final_index_bytes = planner_context.produce_index
-                                               ? denseArgPlannerElementBytes(planner_context.index_output_dtype)
-                                               : 0;
-        topology = makeDenseIntervalCompositionPlan(
-            geometry,
-            input_dimensions,
-            [&](const CubReductionDenseCompositionStage& stage) {
-                const DenseDirectStageGeometry direct_geometry = directStageGeometryFromPlan(stage);
-                switch (stage.role) {
-                    case CubReductionDenseCompositionStageRole::Complete:
-                        return estimateDenseArgStageCost(direct_geometry,
-                                                         planner_context.input_dtype,
-                                                         false,
-                                                         carried_index_dtype,
-                                                         final_value_bytes,
-                                                         final_index_bytes,
-                                                         false,
-                                                         planner_context.l2_cache_bytes);
-                    case CubReductionDenseCompositionStageRole::First:
-                        return estimateDenseArgStageCost(direct_geometry,
-                                                         planner_context.input_dtype,
-                                                         false,
-                                                         carried_index_dtype,
-                                                         intermediate_value_bytes,
-                                                         intermediate_index_bytes,
-                                                         false,
-                                                         planner_context.l2_cache_bytes);
-                    case CubReductionDenseCompositionStageRole::Intermediate:
-                        return estimateDenseArgStageCost(direct_geometry,
-                                                         DataType::FP32,
-                                                         true,
-                                                         carried_index_dtype,
-                                                         intermediate_value_bytes,
-                                                         intermediate_index_bytes,
-                                                         true,
-                                                         planner_context.l2_cache_bytes);
-                    case CubReductionDenseCompositionStageRole::Final:
-                        return estimateDenseArgStageCost(direct_geometry,
-                                                         DataType::FP32,
-                                                         true,
-                                                         carried_index_dtype,
-                                                         final_value_bytes,
-                                                         final_index_bytes,
-                                                         true,
-                                                         planner_context.l2_cache_bytes);
-                }
-                throw std::logic_error("Unknown dense ARG composition stage role.");
-            });
-    }
-
-    if (!topology.has_value()) {
-        return std::nullopt;
-    }
-    CubArgReductionDenseCompositionPlan plan;
-    plan.topology = std::move(topology.value());
-    plan.carried_index_dtype = carried_index_dtype;
-    return plan;
-}
 
 void requireExecutableFixedSegmentSize(const CubReductionGeometry& geometry) {
     if (usesCubFixedSegmentSize(geometry.path)
@@ -2527,41 +1322,6 @@ void launchReduction(const CubReductionInternal::CubReductionStageSemantics& sem
     throw std::logic_error("Unsupported CUB value-reduction stage semantic combination.");
 }
 
-size_t queryArgReductionBytes(CubArgReductionOp op,
-                              const Tensor& input,
-                              Tensor* value_output,
-                              Tensor* index_output,
-                              const CubReductionGeometry& geometry,
-                              const Stream& stream) {
-    switch (op) {
-        case CubArgReductionOp::ArgMin:
-            return CubReductionInternal::queryArgMinReductionBytes(
-                input, value_output, index_output, geometry, stream);
-        case CubArgReductionOp::ArgMax:
-            return CubReductionInternal::queryArgMaxReductionBytes(
-                input, value_output, index_output, geometry, stream);
-    }
-    throw std::invalid_argument("Unsupported CUB arg reduction operation.");
-}
-
-size_t queryArgReductionBytes(CubArgReductionOp op,
-                              DataType input_dtype,
-                              std::optional<DataType> value_output_dtype,
-                              std::optional<DataType> index_output_dtype,
-                              const CubReductionGeometry& geometry,
-                              const Stream& stream) {
-    switch (op) {
-        case CubArgReductionOp::ArgMin:
-            return CubReductionInternal::queryArgMinReductionBytes(
-                input_dtype, value_output_dtype, index_output_dtype, geometry, stream);
-        case CubArgReductionOp::ArgMax:
-            return CubReductionInternal::queryArgMaxReductionBytes(
-                input_dtype, value_output_dtype, index_output_dtype, geometry, stream);
-    }
-    throw std::invalid_argument("Unsupported CUB arg reduction operation.");
-}
-
-
 [[nodiscard]] size_t checkedWorkspaceAdd(size_t lhs, size_t rhs, const char* message) {
     if (lhs > std::numeric_limits<size_t>::max() - rhs) throw std::overflow_error(message);
     return lhs + rhs;
@@ -2693,141 +1453,17 @@ size_t queryArgReductionBytes(CubArgReductionOp op,
     return executable;
 }
 
-void launchArgReduction(CubArgReductionOp op,
-                        const Tensor& temp_storage,
-                        size_t temp_storage_bytes,
-                        const Tensor& input,
-                        Tensor* value_output,
-                        Tensor* index_output,
-                        const CubReductionGeometry& geometry,
-                        Stream& stream) {
-    switch (op) {
-        case CubArgReductionOp::ArgMin:
-            CubReductionInternal::launchArgMinReduction(
-                temp_storage, temp_storage_bytes, input, value_output, index_output, geometry, stream);
-            return;
-        case CubArgReductionOp::ArgMax:
-            CubReductionInternal::launchArgMaxReduction(
-                temp_storage, temp_storage_bytes, input, value_output, index_output, geometry, stream);
-            return;
-    }
-    throw std::invalid_argument("Unsupported CUB arg reduction operation.");
-}
-
-size_t queryComposedArgReductionStageBytes(CubArgReductionOp op,
-                                           const Tensor& value_input,
-                                           const Tensor* carried_index_input,
-                                           Tensor* value_output,
-                                           Tensor* index_output,
-                                           const CubReductionGeometry& geometry,
-                                           uint64_t domain_stride,
-                                           DataType carried_index_dtype,
-                                           const Stream& stream) {
-    switch (op) {
-        case CubArgReductionOp::ArgMin:
-            return CubReductionInternal::queryComposedArgMinReductionStageBytes(value_input,
-                                                                                carried_index_input,
-                                                                                value_output,
-                                                                                index_output,
-                                                                                geometry,
-                                                                                domain_stride,
-                                                                                carried_index_dtype,
-                                                                                stream);
-        case CubArgReductionOp::ArgMax:
-            return CubReductionInternal::queryComposedArgMaxReductionStageBytes(value_input,
-                                                                                carried_index_input,
-                                                                                value_output,
-                                                                                index_output,
-                                                                                geometry,
-                                                                                domain_stride,
-                                                                                carried_index_dtype,
-                                                                                stream);
-    }
-    throw std::invalid_argument("Unsupported CUB arg reduction operation.");
-}
-
-size_t queryComposedArgReductionStageBytes(CubArgReductionOp op,
-                                           DataType value_input_dtype,
-                                           bool has_carried_index_input,
-                                           std::optional<DataType> value_output_dtype,
-                                           std::optional<DataType> index_output_dtype,
-                                           const CubReductionGeometry& geometry,
-                                           uint64_t domain_stride,
-                                           DataType carried_index_dtype,
-                                           const Stream& stream) {
-    switch (op) {
-        case CubArgReductionOp::ArgMin:
-            return CubReductionInternal::queryComposedArgMinReductionStageBytes(value_input_dtype,
-                                                                                has_carried_index_input,
-                                                                                value_output_dtype,
-                                                                                index_output_dtype,
-                                                                                geometry,
-                                                                                domain_stride,
-                                                                                carried_index_dtype,
-                                                                                stream);
-        case CubArgReductionOp::ArgMax:
-            return CubReductionInternal::queryComposedArgMaxReductionStageBytes(value_input_dtype,
-                                                                                has_carried_index_input,
-                                                                                value_output_dtype,
-                                                                                index_output_dtype,
-                                                                                geometry,
-                                                                                domain_stride,
-                                                                                carried_index_dtype,
-                                                                                stream);
-    }
-    throw std::invalid_argument("Unsupported CUB arg reduction operation.");
-}
-
-void launchComposedArgReductionStage(CubArgReductionOp op,
-                                     const Tensor& temp_storage,
-                                     size_t temp_storage_bytes,
-                                     const Tensor& value_input,
-                                     const Tensor* carried_index_input,
-                                     Tensor* value_output,
-                                     Tensor* index_output,
-                                     const CubReductionGeometry& geometry,
-                                     uint64_t domain_stride,
-                                     DataType carried_index_dtype,
-                                     Stream& stream) {
-    switch (op) {
-        case CubArgReductionOp::ArgMin:
-            CubReductionInternal::launchComposedArgMinReductionStage(temp_storage,
-                                                                     temp_storage_bytes,
-                                                                     value_input,
-                                                                     carried_index_input,
-                                                                     value_output,
-                                                                     index_output,
-                                                                     geometry,
-                                                                     domain_stride,
-                                                                     carried_index_dtype,
-                                                                     stream);
-            return;
-        case CubArgReductionOp::ArgMax:
-            CubReductionInternal::launchComposedArgMaxReductionStage(temp_storage,
-                                                                     temp_storage_bytes,
-                                                                     value_input,
-                                                                     carried_index_input,
-                                                                     value_output,
-                                                                     index_output,
-                                                                     geometry,
-                                                                     domain_stride,
-                                                                     carried_index_dtype,
-                                                                     stream);
-            return;
-    }
-    throw std::invalid_argument("Unsupported CUB arg reduction operation.");
-}
-
-// ARG-P1: original FP8 dense ARG is planned by planDenseReduction(), like VALUE, so later FP8 ARG physical passes
-// (including staged [outer, shards, inner] first stages) slot into the same planner. Other input dtypes keep the
-// interval-composition executor until their own cutover.
+// ARG-P1: dense ARG is planned by planDenseReduction(), like VALUE. Since 1261 every supported input dtype (FP8,
+// FP16, BF16, FP32) runs the planned retained pass list; there is no other dense ARG executor.
 [[nodiscard]] bool isFp8ArgInput(DataType input_dtype) {
     return input_dtype == DataType::FP8_E4M3 || input_dtype == DataType::FP8_E5M2;
 }
 
-// 1221 / 1227: and FP32 input (its retained FP32 ARG passes run in this executor).
+// 1221 / 1227: and FP32 input (its retained FP32 ARG passes run in this executor). 1254 / 1257: and FP16 / BF16 input
+// (its 2-byte ARG passes, then the retained FP32 carried ARG passes).
 [[nodiscard]] bool usesPlannedDenseArg(DataType input_dtype) {
-    return isFp8ArgInput(input_dtype) || input_dtype == DataType::FP32;
+    return isFp8ArgInput(input_dtype) || input_dtype == DataType::FP32 || input_dtype == DataType::FP16 ||
+           input_dtype == DataType::BF16;
 }
 
 [[nodiscard]] DataType denseArgCarriedIndexDType(uint64_t original_reduction_size) {
@@ -2894,12 +1530,11 @@ struct PlannedDenseArg {
 
     for (const DenseReductionPlanStep& step : plan.steps) {
         const DenseReductionCandidate& candidate = step.selected_candidate;
-        const auto direct = std::dynamic_pointer_cast<const DenseDirectReductionPhysicalPlan>(candidate.physical_plan);
         const auto fp8_arg =
             std::dynamic_pointer_cast<const DenseRetainedFp8ArgPhysicalPlan>(candidate.physical_plan);
         const auto fp32_arg =
             std::dynamic_pointer_cast<const DenseRetainedFp32ArgPhysicalPlan>(candidate.physical_plan);
-        if (!direct && !fp8_arg && !fp32_arg) {
+        if (!fp8_arg && !fp32_arg) {
             throw std::logic_error("Dense ARG plan selected a physical pass that has no ARG executor.");
         }
         const DensePhysicalPassLayout layout = describeDensePhysicalPass(*candidate.physical_plan);
@@ -2969,16 +1604,7 @@ void requireSupportedRetainedFp8PhysicalPass(
 
 DensePhysicalPassLayout describeDensePhysicalPass(const DenseReductionPhysicalPlan& physical_plan) {
     DensePhysicalPassLayout layout;
-    if (const auto* direct = dynamic_cast<const DenseDirectReductionPhysicalPlan*>(&physical_plan)) {
-        layout.input_dimensions = direct->input_dimensions;
-        layout.geometry = CubReduction::analyzeGeometry(layout.input_dimensions, std::vector<uint32_t>{direct->reduction_axis});
-    } else if (const auto* rk = dynamic_cast<const DenseRKFamilyPhysicalPlan*>(&physical_plan)) {
-        layout.input_dimensions = rk->input_dimensions;
-        layout.geometry = CubReduction::analyzeGeometry(layout.input_dimensions, std::vector<uint32_t>{rk->reduction_axis});
-        if (rk->progress == DenseRKProgress::Staged) {
-            layout.intermediate_dimensions = {rk->outer_size, rk->shards_per_output, rk->inner_size};
-        }
-    } else if (const auto* kr = dynamic_cast<const DenseRetainedFp8KRPhysicalPlan*>(&physical_plan)) {
+    if (const auto* kr = dynamic_cast<const DenseRetainedFp8KRPhysicalPlan*>(&physical_plan)) {
         // 1146: one Complete pass over the site's current runs; staged chunk partials are the pass's scratch.
         layout.input_dimensions = kr->input_dimensions;
         layout.geometry = CubReduction::analyzeGeometry(layout.input_dimensions,
@@ -3021,13 +1647,11 @@ size_t queryDensePhysicalPassScratchBytes(const DenseReductionPhysicalPlan& phys
                                          const CubReductionGeometry& geometry,
                                          float output_scale,
                                          const Stream& stream) {
-    if (dynamic_cast<const DenseDirectReductionPhysicalPlan*>(&physical_plan) != nullptr) {
-        return queryReductionBytes(semantics, input_dtype, input, input_elements, output_dtype, output,
-                                   geometry, output_scale, stream);
-    }
     if (const auto* kr = dynamic_cast<const DenseRetainedFp8KRPhysicalPlan*>(&physical_plan)) {
-        // 1220: an FP32 pass's shape is in bytes, 4 per element.
-        const uint64_t element_bytes = kr->input_dtype == DataType::FP32 ? 4 : 1;
+        // 1220: an FP32 pass's shape is in bytes, 4 per element. 1254: 2 per FP16 / BF16 element.
+        const uint64_t element_bytes = kr->input_dtype == DataType::FP32 ? 4
+                                       : kr->input_dtype == DataType::FP16 || kr->input_dtype == DataType::BF16 ? 2
+                                                                                                                : 1;
         if (input_dtype != kr->input_dtype || input_elements * element_bytes != kr->shape.rows * kr->shape.row_bytes ||
             geometry.output_elements != kr->shape.rows || !isSupportedFloatingStorageDType(output_dtype))
             throw std::invalid_argument("Retained FP8 KR physical query input/output geometry or dtype mismatch");
@@ -3045,12 +1669,11 @@ size_t queryDensePhysicalPassScratchBytes(const DenseReductionPhysicalPlan& phys
         // accounted for by the ordinary materializer. No additional scratch.
         return 0;
     }
-    const auto* rk = dynamic_cast<const DenseRKFamilyPhysicalPlan*>(&physical_plan);
-    if (rk == nullptr || !denseRKIsFamilyImplementation(rk->implementation)) {
-        throw std::logic_error("Dense VALUE physical pass has no registered physical scratch query.");
-    }
-    // KParallel and RCooperative own no temporary scratch. Their [O,N,K] partials are the pass output.
-    return 0;
+    static_cast<void>(input);
+    static_cast<void>(output);
+    static_cast<void>(output_scale);
+    static_cast<void>(stream);
+    throw std::logic_error("Dense VALUE physical pass has no registered physical scratch query.");
 }
 
 void launchDensePhysicalPass(const DenseReductionPhysicalPlan& physical_plan,
@@ -3062,10 +1685,6 @@ void launchDensePhysicalPass(const DenseReductionPhysicalPlan& physical_plan,
                              const CubReductionGeometry& geometry,
                              float output_scale,
                              Stream& stream) {
-    if (dynamic_cast<const DenseDirectReductionPhysicalPlan*>(&physical_plan) != nullptr) {
-        launchReduction(semantics, temp_storage, temp_storage_bytes, input, output, geometry, output_scale, stream);
-        return;
-    }
     if (const auto* kr = dynamic_cast<const DenseRetainedFp8KRPhysicalPlan*>(&physical_plan)) {
         // 1146: one retained R / KR kernel, plus the finishing kernel of a staged shape (partials in this scratch).
         if (input.getDataType() != kr->input_dtype || geometry.output_elements != kr->shape.rows)
@@ -3076,6 +1695,9 @@ void launchDensePhysicalPass(const DenseReductionPhysicalPlan& physical_plan,
         if (kr->input_dtype == DataType::FP32) {  // 1220: the retained FP32 R / KR pass
             launchFp32KRValueSegments(semantics, input, output, kr->shape, scratch, temp_storage_bytes, output_scale,
                                       stream);
+        } else if (kr->input_dtype == DataType::FP16 || kr->input_dtype == DataType::BF16) {  // 1254: the 2-byte pass
+            launchF16KRValueSegments(semantics, input, output, kr->shape, scratch, temp_storage_bytes, output_scale,
+                                     stream);
         } else {
             launchFp8KRValueSegments(semantics, input, output, kr->shape, scratch, temp_storage_bytes, output_scale,
                                      stream);
@@ -3098,44 +1720,7 @@ void launchDensePhysicalPass(const DenseReductionPhysicalPlan& physical_plan,
                                         geometry, output_scale, stream);
         return;
     }
-
-    const auto* rk = dynamic_cast<const DenseRKFamilyPhysicalPlan*>(&physical_plan);
-    if (rk == nullptr || !denseRKIsFamilyImplementation(rk->implementation)) {
-        throw std::logic_error("Dense executable VALUE pass has no registered physical executor.");
-    }
-    switch (rk->implementation) {
-        case DenseRKProductionImplementation::KParallelPass: {
-            const KParallelTiledStagePlan kplan{
-                rk->progress == DenseRKProgress::Complete
-                    ? TiledRKStageTopology::Complete : TiledRKStageTopology::Staged,
-                rk->packet_bytes,
-                rk->block_threads,
-                rk->shards_per_output};
-            launchKParallelTiledStage(semantics, input, output, geometry, kplan, output_scale, stream);
-            return;
-        }
-        case DenseRKProductionImplementation::RCooperativeAlignedComplete:
-            // The aligned completion uses the tiled CUDA path, not CUB's
-            // scratch-consuming device/segmented reduction APIs.
-            if (geometry.path != CubReductionPath::TiledFixedSegment || temp_storage_bytes != 0)
-                throw std::logic_error("Aligned-complete RK pass must have tiled geometry and zero scratch");
-            launchReduction(semantics, temp_storage, 0, input, output, geometry, output_scale, stream);
-            return;
-        case DenseRKProductionImplementation::RCooperativeAlignedStaged:
-            launchCooperativeShardedTiledFirstStage(semantics, input, output, geometry,
-                                                    rk->rows_per_shard, rk->shards_per_output, stream);
-            return;
-        case DenseRKProductionImplementation::RCooperativeRotatedStaged:
-            launchAwkwardAlignmentRotatedShardedFirstStage(semantics, input, output, geometry,
-                                                           rk->rows_per_shard, rk->shards_per_output, stream);
-            return;
-        case DenseRKProductionImplementation::RCooperativeFlatRowsStaged:
-            launchNarrowLowPrecisionFlatRCooperativeFirstStage(semantics, input, output, geometry,
-                                                                rk->rows_per_shard, rk->shards_per_output, stream);
-            return;
-        default:
-            throw std::logic_error("Stamped modern DenseRK plan contains a non-VALUE family implementation.");
-    }
+    throw std::logic_error("Dense executable VALUE pass has no registered physical executor.");
 }
 
 DenseExecutablePlan materializeDenseValueExecutablePlan(
@@ -3428,18 +2013,9 @@ CubReductionGeometry CubReduction::analyzeGeometry(const std::vector<uint64_t>& 
         } else if (geometry.reduced_axes_are_contiguous) {
             geometry.path = CubReductionPath::TiledFixedSegment;
         } else {
-            // DENSE-GATE-FINAL: ComposedDense remains the structural classification for ordinary dense disjoint
-            // reduced runs. The structural interval planner proves that the mask is reducible through direct dense
-            // stages, but VALUE execution no longer consumes that interval plan: planDenseReduction() globally
-            // selects R/KR/RK passes and replans after every pass. ARG still uses the transitional interval executor
-            // until DENSE-ARG-CUTOVER.
-            const std::optional<CubReductionDenseCompositionPlan> structural_plan =
-                makeStructuralDenseCompositionPlan(geometry, input_dimensions);
-            if (!structural_plan.has_value()) {
-                throw std::logic_error(
-                    "DENSE-GATE-FINAL invariant violated: dense disjoint reduction has no all-direct composition "
-                    "plan.");
-            }
+            // ComposedDense is the structural classification for ordinary dense disjoint reduced runs. VALUE and
+            // ARG both execute it through planDenseReduction(), which selects R / KR / RK passes and replans after
+            // every pass (1261: the interval-composition planner and ARG executor are deleted).
             geometry.path = CubReductionPath::ComposedDense;
         }
         requireOrdainedDenseReductionPath(geometry);
@@ -3515,13 +2091,6 @@ CubReductionGeometry CubReduction::analyzeValueGeometry(CubReductionOp op,
     CubReductionGeometry geometry = analyzeGeometry(input_dimensions, input_strides, axes);
     requireExecutableFixedSegmentSize(geometry);
     return geometry;
-}
-
-std::optional<CubReductionDenseCompositionPlan> CubReduction::analyzeDenseCompositionPlan(
-    const std::vector<uint64_t>& input_dimensions,
-    const std::vector<uint32_t>& axes) {
-    const CubReductionGeometry geometry = analyzeGeometry(input_dimensions, axes);
-    return makeStructuralDenseCompositionPlan(geometry, input_dimensions);
 }
 
 std::shared_ptr<StampedCubReduction> CubReduction::stamp(const Tensor& input, const Stream& stream) const {
@@ -3937,53 +2506,6 @@ CubReductionGeometry CubArgReduction::analyzeDenseGeometry(
     return geometry;
 }
 
-std::optional<CubArgReductionDenseCompositionPlan> CubArgReduction::analyzeDenseCompositionPlan(
-    const std::vector<uint64_t>& input_dimensions,
-    const std::vector<uint32_t>& axes) {
-    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input_dimensions, axes);
-    return makeDenseArgCompositionPlan(geometry, input_dimensions);
-}
-
-std::optional<CubArgReductionDenseCompositionPlan> CubArgReduction::analyzeDenseCompositionPlanForExecution(
-    const std::vector<uint64_t>& input_dimensions,
-    const std::vector<uint32_t>& axes,
-    DataType input_dtype,
-    const CubArgReductionOutputOptions& outputs,
-    const Stream& stream) {
-    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input_dimensions, axes);
-    if (!geometry.dense_run_geometry.has_value()) {
-        return std::nullopt;
-    }
-    const DataType carried_index_dtype =
-        geometry.reduction_size <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())
-            ? DataType::UINT32
-            : DataType::UINT64;
-    const DataType value_output_dtype = outputs.value_output_dtype.value_or(input_dtype);
-    const DenseArgCompositionCostContext cost_context = denseArgCompositionCostContext(
-        input_dtype, carried_index_dtype, outputs, value_output_dtype, stream);
-    return makeDenseArgCompositionPlan(geometry, input_dimensions, cost_context);
-}
-
-
-std::optional<CubArgReductionDenseCompositionPlan> CubArgReduction::analyzeDenseCompositionPlanForRunOrder(
-    const std::vector<uint64_t>& input_dimensions,
-    const std::vector<uint32_t>& axes,
-    const std::vector<uint32_t>& run_order) {
-    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input_dimensions, axes);
-    const std::optional<CubReductionDenseCompositionPlan> topology =
-        makeDenseIntervalCompositionPlanForRunOrder(geometry, input_dimensions, run_order);
-    if (!topology.has_value()) {
-        return std::nullopt;
-    }
-    CubArgReductionDenseCompositionPlan plan;
-    plan.topology = topology.value();
-    plan.carried_index_dtype =
-        geometry.reduction_size <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())
-            ? DataType::UINT32
-            : DataType::UINT64;
-    return plan;
-}
-
 uint64_t CubArgReduction::composeOriginalArgIndex(uint64_t previous_index,
                                                   uint64_t local_run_index,
                                                   uint64_t domain_stride) {
@@ -4060,108 +2582,33 @@ size_t CubArgReduction::queryWorkspaceSizeInBytes(const TensorDescriptor& input_
         outputs.produce_index ? std::optional<DataType>(outputs.index_output_dtype) : std::nullopt;
     ScopedGpu scoped_gpu(stream.getGpuNum());
 
-    if (usesPlannedDenseArg(input_descriptor.getDataType())) {
-        // Mirrors stampPlannedDenseValidated(): the same deterministic plan, intermediates and per-pass scratch.
-        const PlannedDenseArg planned = planProductionDenseArg(op,
-                                                               input_descriptor.getDimensions(),
-                                                               axes,
-                                                               input_descriptor.getDataType(),
-                                                               value_output_dtype,
-                                                               index_output_dtype,
-                                                               geometry.reduction_size,
-                                                               tuning_depth,
-                                                               stream);
-        size_t workspace_size_bytes = 0;
-        auto add_bytes = [&](uint64_t bytes) {
-            if (bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max() - workspace_size_bytes)) {
-                throw std::overflow_error("CUB arg reduction workspace size overflows size_t.");
-            }
-            workspace_size_bytes += static_cast<size_t>(bytes);
-        };
-        DataType current_value_dtype = input_descriptor.getDataType();
-        for (size_t pass_index = 0; pass_index < planned.passes.size(); ++pass_index) {
-            const PlannedDenseArgPass& pass = planned.passes[pass_index];
-            if (pass.fp8_arg || pass.fp32_arg) add_bytes(pass.retainedScratchBytes());
-            if (!pass.fp8_arg && !pass.fp32_arg) add_bytes(queryComposedArgReductionStageBytes(
-                op,
-                current_value_dtype,
-                pass_index != 0,
-                pass.final_pass ? value_output_dtype : std::optional<DataType>(DataType::FP32),
-                pass.final_pass ? index_output_dtype : std::optional<DataType>(planned.carried_index_dtype),
-                pass.geometry,
-                pass.domain_stride,
-                planned.carried_index_dtype,
-                stream));
-            if (!pass.final_pass) {
-                const uint64_t elements =
-                    TensorDescriptor(DataType::FP32, pass.intermediate_dimensions).getTotalNumElements();
-                add_bytes(TensorDescriptor::getArraySizeInBytes(elements, DataType::FP32));
-                add_bytes(TensorDescriptor::getArraySizeInBytes(elements, planned.carried_index_dtype));
-                current_value_dtype = DataType::FP32;
-            }
-        }
-        return workspace_size_bytes;
+    if (!usesPlannedDenseArg(input_descriptor.getDataType())) {
+        throw std::logic_error("Dense ARG has no planned executor for this input dtype.");
     }
-
-    if (geometry.path != CubReductionPath::ComposedDense) {
-        requireExecutableFixedSegmentSize(geometry);
-        return queryArgReductionBytes(
-            op, input_descriptor.getDataType(), value_output_dtype, index_output_dtype, geometry, stream);
-    }
-
-    const std::optional<CubArgReductionDenseCompositionPlan> plan = analyzeDenseCompositionPlanForExecution(
-        input_descriptor.getDimensions(), axes, input_descriptor.getDataType(), outputs, stream);
-    if (!plan.has_value()) {
-        throw std::logic_error("Composed dense ARG geometry is missing its production composition plan.");
-    }
-
+    // Mirrors stampPlannedDenseValidated(): the same deterministic plan, intermediates and per-pass scratch.
+    const PlannedDenseArg planned = planProductionDenseArg(op,
+                                                           input_descriptor.getDimensions(),
+                                                           axes,
+                                                           input_descriptor.getDataType(),
+                                                           value_output_dtype,
+                                                           index_output_dtype,
+                                                           geometry.reduction_size,
+                                                           tuning_depth,
+                                                           stream);
     size_t workspace_size_bytes = 0;
-    auto add_workspace_bytes = [&](uint64_t bytes) {
+    auto add_bytes = [&](uint64_t bytes) {
         if (bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max() - workspace_size_bytes)) {
             throw std::overflow_error("CUB arg reduction workspace size overflows size_t.");
         }
         workspace_size_bytes += static_cast<size_t>(bytes);
     };
-
-    DataType current_value_dtype = input_descriptor.getDataType();
-    for (size_t stage_index = 0; stage_index < plan->topology.stages.size(); ++stage_index) {
-        const CubReductionDenseCompositionStage& stage_plan = plan->topology.stages[stage_index];
-        const bool is_first_stage = stage_index == 0;
-        const bool is_final_stage = stage_index + 1 == plan->topology.stages.size();
-        CubReductionGeometry stage_geometry =
-            CubReduction::analyzeGeometry(stage_plan.input_dimensions, stage_plan.reduction_axes);
-        if (stage_geometry.path != stage_plan.expected_path || !isDirectDenseReductionPath(stage_geometry.path)) {
-            throw std::logic_error("Composed dense CUB arg stage did not resolve to its planned direct reducer family.");
-        }
-        requireExecutableFixedSegmentSize(stage_geometry);
-        if (stage_geometry.reduction_size != stage_plan.reduction_extent
-            || stage_geometry.input_elements != stage_plan.input_elements
-            || stage_geometry.output_elements != stage_plan.output_elements
-            || stage_geometry.outer_size != stage_plan.outer_size
-            || stage_geometry.inner_size != stage_plan.inner_size
-            || stage_geometry.output_dimensions != stage_plan.output_dimensions) {
-            throw std::logic_error("Composed dense CUB arg stage geometry changed after planning.");
-        }
-
-        const std::optional<DataType> stage_value_output_dtype =
-            is_final_stage ? value_output_dtype : std::optional<DataType>(DataType::FP32);
-        const std::optional<DataType> stage_index_output_dtype =
-            is_final_stage ? index_output_dtype : std::optional<DataType>(plan->carried_index_dtype);
-        add_workspace_bytes(queryComposedArgReductionStageBytes(op,
-                                                                 current_value_dtype,
-                                                                 !is_first_stage,
-                                                                 stage_value_output_dtype,
-                                                                 stage_index_output_dtype,
-                                                                 stage_geometry,
-                                                                 stage_plan.domain_stride,
-                                                                 plan->carried_index_dtype,
-                                                                 stream));
-
-        if (!is_final_stage) {
-            add_workspace_bytes(TensorDescriptor::getArraySizeInBytes(stage_geometry.output_elements, DataType::FP32));
-            add_workspace_bytes(
-                TensorDescriptor::getArraySizeInBytes(stage_geometry.output_elements, plan->carried_index_dtype));
-            current_value_dtype = DataType::FP32;
+    for (const PlannedDenseArgPass& pass : planned.passes) {
+        add_bytes(pass.retainedScratchBytes());
+        if (!pass.final_pass) {
+            const uint64_t elements =
+                TensorDescriptor(DataType::FP32, pass.intermediate_dimensions).getTotalNumElements();
+            add_bytes(TensorDescriptor::getArraySizeInBytes(elements, DataType::FP32));
+            add_bytes(TensorDescriptor::getArraySizeInBytes(elements, planned.carried_index_dtype));
         }
     }
     return workspace_size_bytes;
@@ -4215,257 +2662,11 @@ std::shared_ptr<StampedCubArgReduction> CubArgReduction::stamp(
     }
 
     requireArgOutputsDoNotOverlap(value_output, index_output);
-    if (usesPlannedDenseArg(input.getDataType())) {
-        return stampPlannedDenseValidated(input, std::move(value_output), std::move(index_output), geometry, stream);
+    if (!usesPlannedDenseArg(input.getDataType())) {
+        throw std::logic_error("Dense ARG has no planned executor for this input dtype.");
     }
-    if (geometry.path == CubReductionPath::ComposedDense) {
-        const std::optional<CubArgReductionDenseCompositionPlan> plan =
-            analyzeDenseCompositionPlanForExecution(input.getDimensions(), axes, input.getDataType(), outputs, stream);
-        if (!plan.has_value()) {
-            throw std::logic_error("Composed dense ARG geometry is missing its production composition plan.");
-        }
-        return stampComposedDenseValidated(
-            input, std::move(value_output), std::move(index_output), geometry, plan.value(), stream);
-    }
-    return stampValidated(input, std::move(value_output), std::move(index_output), geometry, stream);
-}
-
-std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampComposedDense(const Tensor& input,
-                                                                            const Stream& stream) const {
-    return stampComposedDense(input, std::nullopt, std::nullopt, stream);
-}
-
-std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampComposedDense(
-    const Tensor& input,
-    const std::optional<Tensor>& preallocated_value_output,
-    const std::optional<Tensor>& preallocated_index_output,
-    const Stream& stream) const {
-    requireDenseContiguousGpuTensor(input, "input");
-    requireCompatibleStream(input, stream);
-    requireSupportedFloatingStorageDType(input.getDataType(), "input");
-    // A5 (1119): FP8 ARG runs only through the planned retained FP8 ARG passes; the direct interval executor's tiled
-    // FP8 stages are no longer compiled.
-    if (isFp8ArgInput(input.getDataType())) {
-        throw std::invalid_argument("FP8 ARG reductions compose through stamp() (retained FP8 ARG passes); the direct "
-                                    "interval executor does not support FP8 input.");
-    }
-
-    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), axes);
-    const std::optional<CubArgReductionDenseCompositionPlan> plan =
-        analyzeDenseCompositionPlan(input.getDimensions(), axes);
-    if (!plan.has_value()) {
-        throw std::invalid_argument("CUB arg reduction cannot compose the requested dense reduction geometry.");
-    }
-    if (outputs.produce_index && outputs.index_output_dtype == DataType::UINT32
-        && geometry.reduction_size > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
-        throw std::invalid_argument("CUB arg reduction domain does not fit in a UINT32 public index.");
-    }
-
-    std::optional<Tensor> value_output = std::nullopt;
-    if (outputs.produce_value) {
-        const DataType value_dtype = resolveValueOutputDataType(input.getDataType());
-        if (preallocated_value_output.has_value()) {
-            requireExpectedArgOutput(input, preallocated_value_output.value(), value_dtype, geometry, "value output");
-            value_output = preallocated_value_output;
-        } else {
-            value_output = Tensor(input.getPlacement(), TensorDescriptor(value_dtype, geometry.output_dimensions));
-        }
-    } else if (preallocated_value_output.has_value()) {
-        throw std::invalid_argument("CUB arg reduction received a value output while value production is disabled.");
-    }
-
-    std::optional<Tensor> index_output = std::nullopt;
-    if (outputs.produce_index) {
-        if (preallocated_index_output.has_value()) {
-            requireExpectedArgOutput(
-                input, preallocated_index_output.value(), outputs.index_output_dtype, geometry, "index output");
-            index_output = preallocated_index_output;
-        } else {
-            index_output = Tensor(
-                input.getPlacement(), TensorDescriptor(outputs.index_output_dtype, geometry.output_dimensions));
-        }
-    } else if (preallocated_index_output.has_value()) {
-        throw std::invalid_argument("CUB arg reduction received an index output while index production is disabled.");
-    }
-
-    requireArgOutputsDoNotOverlap(value_output, index_output);
-    return stampComposedDenseValidated(
-        input, std::move(value_output), std::move(index_output), geometry, plan.value(), stream);
-}
-
-
-std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampComposedDenseWithPlan(
-    const Tensor& input,
-    const CubArgReductionDenseCompositionPlan& plan,
-    const Stream& stream) const {
-    requireDenseContiguousGpuTensor(input, "input");
-    requireCompatibleStream(input, stream);
-    requireSupportedFloatingStorageDType(input.getDataType(), "input");
-    // A5 (1119): FP8 ARG runs only through the planned retained FP8 ARG passes; the direct interval executor's tiled
-    // FP8 stages are no longer compiled.
-    if (isFp8ArgInput(input.getDataType())) {
-        throw std::invalid_argument("FP8 ARG reductions compose through stamp() (retained FP8 ARG passes); the direct "
-                                    "interval executor does not support FP8 input.");
-    }
-
-    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), axes);
-    if (!geometry.dense_run_geometry.has_value() || plan.topology.stages.empty()) {
-        throw std::invalid_argument("CUB arg reduction received an invalid explicit dense composition plan.");
-    }
-    const DataType expected_carried_index_dtype =
-        geometry.reduction_size <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())
-            ? DataType::UINT32
-            : DataType::UINT64;
-    if (plan.carried_index_dtype != expected_carried_index_dtype) {
-        throw std::invalid_argument("CUB arg reduction explicit plan uses the wrong carried-index width.");
-    }
-    if (plan.topology.stages.front().input_dimensions != input.getDimensions()
-        || plan.topology.stages.back().output_dimensions != geometry.output_dimensions) {
-        throw std::invalid_argument("CUB arg reduction explicit plan does not match the requested geometry.");
-    }
-    if (outputs.produce_index && outputs.index_output_dtype == DataType::UINT32
-        && geometry.reduction_size > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
-        throw std::invalid_argument("CUB arg reduction domain does not fit in a UINT32 public index.");
-    }
-
-    std::optional<Tensor> value_output = std::nullopt;
-    if (outputs.produce_value) {
-        value_output = Tensor(input.getPlacement(),
-                              TensorDescriptor(resolveValueOutputDataType(input.getDataType()),
-                                               geometry.output_dimensions));
-    }
-    std::optional<Tensor> index_output = std::nullopt;
-    if (outputs.produce_index) {
-        index_output = Tensor(input.getPlacement(),
-                              TensorDescriptor(outputs.index_output_dtype, geometry.output_dimensions));
-    }
-    requireArgOutputsDoNotOverlap(value_output, index_output);
-    return stampComposedDenseValidated(
-        input, std::move(value_output), std::move(index_output), geometry, plan, stream);
-}
-
-std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampComposedDenseValidated(
-    const Tensor& input,
-    std::optional<Tensor> value_output,
-    std::optional<Tensor> index_output,
-    const CubReductionGeometry& geometry,
-    const CubArgReductionDenseCompositionPlan& plan,
-    const Stream& stream) const {
-    if (plan.topology.stages.empty()) {
-        throw std::logic_error("Composed dense CUB arg reduction has no stages.");
-    }
-    requireSupportedArgIndexDType(plan.carried_index_dtype);
-
-    ScopedGpu scoped_gpu(stream.getGpuNum());
-    std::vector<std::shared_ptr<StampedCubArgReduction>> composed_stages;
-    composed_stages.reserve(plan.topology.stages.size());
-
-    Tensor current_value_input = input;
-    std::optional<Tensor> current_index_input = std::nullopt;
-    size_t workspace_size_bytes = 0;
-
-    for (size_t stage_index = 0; stage_index < plan.topology.stages.size(); ++stage_index) {
-        const CubReductionDenseCompositionStage& stage_plan = plan.topology.stages[stage_index];
-        const bool is_first_stage = stage_index == 0;
-        const bool is_final_stage = stage_index + 1 == plan.topology.stages.size();
-
-        if (current_value_input.getDimensions() != stage_plan.input_dimensions) {
-            throw std::logic_error("Composed dense CUB arg stage input dimensions do not match the stamped plan.");
-        }
-        if (is_first_stage != !current_index_input.has_value()) {
-            throw std::logic_error("Composed dense CUB arg stage has an invalid carried-index input state.");
-        }
-        if (!is_first_stage) {
-            if (current_value_input.getDataType() != DataType::FP32
-                || current_index_input->getDataType() != plan.carried_index_dtype
-                || current_index_input->getDimensions() != current_value_input.getDimensions()) {
-                throw std::logic_error("Composed dense CUB arg stage received an invalid SoA pair intermediate.");
-            }
-        }
-
-        CubReductionGeometry stage_geometry =
-            CubReduction::analyzeGeometry(current_value_input.getDimensions(), stage_plan.reduction_axes);
-        if (stage_geometry.path != stage_plan.expected_path || !isDirectDenseReductionPath(stage_geometry.path)) {
-            throw std::logic_error("Composed dense CUB arg stage did not resolve to its planned direct reducer family.");
-        }
-        requireExecutableFixedSegmentSize(stage_geometry);
-        if (stage_geometry.reduction_size != stage_plan.reduction_extent
-            || stage_geometry.input_elements != stage_plan.input_elements
-            || stage_geometry.output_elements != stage_plan.output_elements
-            || stage_geometry.outer_size != stage_plan.outer_size
-            || stage_geometry.inner_size != stage_plan.inner_size
-            || stage_geometry.output_dimensions != stage_plan.output_dimensions) {
-            throw std::logic_error("Composed dense CUB arg stage geometry changed after planning.");
-        }
-
-        std::optional<Tensor> stage_value_output;
-        std::optional<Tensor> stage_index_output;
-        if (is_final_stage) {
-            stage_value_output = value_output;
-            stage_index_output = index_output;
-        } else {
-            stage_value_output = Tensor(
-                input.getPlacement(), TensorDescriptor(DataType::FP32, stage_plan.output_dimensions));
-            stage_index_output = Tensor(
-                input.getPlacement(), TensorDescriptor(plan.carried_index_dtype, stage_plan.output_dimensions));
-        }
-
-        Tensor* stage_value_output_ptr =
-            stage_value_output.has_value() ? &stage_value_output.value() : nullptr;
-        Tensor* stage_index_output_ptr =
-            stage_index_output.has_value() ? &stage_index_output.value() : nullptr;
-        const Tensor* carried_index_input_ptr =
-            current_index_input.has_value() ? &current_index_input.value() : nullptr;
-        const size_t temp_storage_bytes = queryComposedArgReductionStageBytes(op,
-                                                                              current_value_input,
-                                                                              carried_index_input_ptr,
-                                                                              stage_value_output_ptr,
-                                                                              stage_index_output_ptr,
-                                                                              stage_geometry,
-                                                                              stage_plan.domain_stride,
-                                                                              plan.carried_index_dtype,
-                                                                              stream);
-        Tensor temp_storage;
-        if (temp_storage_bytes != 0) {
-            temp_storage = Tensor(
-                input.getPlacement(), TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(temp_storage_bytes)}));
-        }
-
-        std::shared_ptr<StampedCubArgReduction> stamped_stage(
-            new StampedCubArgReduction(op,
-                                       std::move(stage_geometry),
-                                       current_value_input,
-                                       current_index_input,
-                                       stage_value_output,
-                                       stage_index_output,
-                                       temp_storage_bytes,
-                                       temp_storage,
-                                       stage_plan.domain_stride,
-                                       plan.carried_index_dtype,
-                                       stream));
-        workspace_size_bytes += temp_storage_bytes;
-
-        if (!is_final_stage) {
-            THOR_THROW_IF_FALSE(stage_value_output.has_value());
-            THOR_THROW_IF_FALSE(stage_index_output.has_value());
-            workspace_size_bytes += static_cast<size_t>(stage_value_output->getArraySizeInBytes());
-            workspace_size_bytes += static_cast<size_t>(stage_index_output->getArraySizeInBytes());
-            current_value_input = stage_value_output.value();
-            current_index_input = stage_index_output.value();
-        }
-        composed_stages.push_back(std::move(stamped_stage));
-    }
-
-    CubReductionGeometry composed_geometry = geometry;
-    composed_geometry.path = CubReductionPath::ComposedDense;
-    return std::shared_ptr<StampedCubArgReduction>(new StampedCubArgReduction(op,
-                                                                             std::move(composed_geometry),
-                                                                             input,
-                                                                             std::move(value_output),
-                                                                             std::move(index_output),
-                                                                             workspace_size_bytes,
-                                                                             std::move(composed_stages),
-                                                                             stream));
+    // 1261: every dense ARG executes the planned retained pass list; the interval-composition executor is deleted.
+    return stampPlannedDenseValidated(input, std::move(value_output), std::move(index_output), geometry, stream);
 }
 
 std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampPlannedDenseValidated(
@@ -4515,20 +2716,7 @@ std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampPlannedDenseValida
             stage_index_output = Tensor(
                 input.getPlacement(), TensorDescriptor(planned.carried_index_dtype, pass.intermediate_dimensions));
         }
-        Tensor* stage_value_output_ptr = stage_value_output.has_value() ? &stage_value_output.value() : nullptr;
-        Tensor* stage_index_output_ptr = stage_index_output.has_value() ? &stage_index_output.value() : nullptr;
-        const Tensor* carried_index_input_ptr = current_index_input.has_value() ? &current_index_input.value() : nullptr;
-        const size_t temp_storage_bytes = pass.fp8_arg || pass.fp32_arg
-                                              ? static_cast<size_t>(pass.retainedScratchBytes())
-                                              : queryComposedArgReductionStageBytes(op,
-                                                                                             current_value_input,
-                                                                                             carried_index_input_ptr,
-                                                                                             stage_value_output_ptr,
-                                                                                             stage_index_output_ptr,
-                                                                                             pass.geometry,
-                                                                                             pass.domain_stride,
-                                                                                             planned.carried_index_dtype,
-                                                                                             stream);
+        const size_t temp_storage_bytes = static_cast<size_t>(pass.retainedScratchBytes());
         Tensor temp_storage;
         if (temp_storage_bytes != 0) {
             temp_storage = Tensor(
@@ -4565,59 +2753,6 @@ std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampPlannedDenseValida
                                                                              workspace_size_bytes,
                                                                              std::move(stages),
                                                                              stream));
-}
-
-std::shared_ptr<StampedCubArgReduction> CubArgReduction::stampValidated(
-    const Tensor& input,
-    std::optional<Tensor> value_output,
-    std::optional<Tensor> index_output,
-    const CubReductionGeometry& geometry,
-    const Stream& stream) const {
-    ScopedGpu scoped_gpu(stream.getGpuNum());
-    Tensor* value_output_ptr = value_output.has_value() ? &value_output.value() : nullptr;
-    Tensor* index_output_ptr = index_output.has_value() ? &index_output.value() : nullptr;
-    const size_t temp_storage_bytes =
-        queryArgReductionBytes(op, input, value_output_ptr, index_output_ptr, geometry, stream);
-    Tensor temp_storage;
-    if (temp_storage_bytes != 0) {
-        temp_storage = Tensor(
-            input.getPlacement(), TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(temp_storage_bytes)}));
-    }
-
-    return std::shared_ptr<StampedCubArgReduction>(new StampedCubArgReduction(op,
-                                                                             geometry,
-                                                                             input,
-                                                                             std::move(value_output),
-                                                                             std::move(index_output),
-                                                                             temp_storage_bytes,
-                                                                             temp_storage,
-                                                                             stream));
-}
-
-StampedCubArgReduction::StampedCubArgReduction(CubArgReductionOp op,
-                                               CubReductionGeometry geometry,
-                                               const Tensor& input,
-                                               std::optional<Tensor> value_output,
-                                               std::optional<Tensor> index_output,
-                                               size_t temp_storage_bytes,
-                                               const Tensor& temp_storage,
-                                               const Stream& stream)
-    : op(op),
-      geometry(std::move(geometry)),
-      input(input),
-      value_output(std::move(value_output)),
-      index_output(std::move(index_output)),
-      temp_storage_bytes(temp_storage_bytes),
-      temp_storage(temp_storage),
-      stream(stream) {
-    if (temp_storage_bytes != 0) {
-        requireTempStorage(this->temp_storage, input.getPlacement(), temp_storage_bytes);
-    } else if (this->temp_storage.isInitialized()) {
-        throw std::invalid_argument("Zero-scratch reduction must not own a temporary-storage Tensor.");
-    }
-    if (!this->value_output.has_value() && !this->index_output.has_value()) {
-        throw std::invalid_argument("Stamped CUB arg reduction requires at least one output.");
-    }
 }
 
 StampedCubArgReduction::StampedCubArgReduction(CubArgReductionOp op,
@@ -4676,7 +2811,7 @@ StampedCubArgReduction::StampedCubArgReduction(
       temp_storage_bytes(workspace_size_bytes),
       composed_stages(std::move(composed_stages)),
       stream(stream) {
-    // ComposedDense interval executors, and planned dense ARG (ARG-P1), whose public geometry may be any dense path.
+    // Planned dense ARG (ARG-P1): the public geometry may be any dense path, ComposedDense included.
     THOR_THROW_IF_FALSE(this->geometry.path == CubReductionPath::ComposedDense ||
                         isDirectDenseReductionPath(this->geometry.path));
     THOR_THROW_IF_FALSE(!this->composed_stages.empty());
@@ -4756,25 +2891,8 @@ void StampedCubArgReduction::launchBoundStage(const Tensor& stage_input, Tensor*
                                                        composed_domain_stride, run_stream);
         return;
     }
-    if (composed_carried_index_dtype.has_value()) {
-        const Tensor* carried_index_input_ptr =
-            carried_index_input.has_value() ? &carried_index_input.value() : nullptr;
-        launchComposedArgReductionStage(op,
-                                        temp_storage,
-                                        temp_storage_bytes,
-                                        stage_input,
-                                        carried_index_input_ptr,
-                                        value_output_ptr,
-                                        index_output_ptr,
-                                        geometry,
-                                        composed_domain_stride,
-                                        composed_carried_index_dtype.value(),
-                                        run_stream);
-        return;
-    }
-
-    launchArgReduction(
-        op, temp_storage, temp_storage_bytes, stage_input, value_output_ptr, index_output_ptr, geometry, run_stream);
+    // 1261: the CUB direct and interval-composition ARG stages are deleted; every stage is a retained pass.
+    throw std::logic_error("Stamped dense ARG stage has no retained ARG plan.");
 }
 
 void StampedCubArgReduction::runOnInputForBenchmark(const Tensor& replacement_input, Stream& run_stream) const {
@@ -4901,14 +3019,7 @@ std::vector<std::string> StampedCubArgReduction::getPlannedPassNames() const {
             if (stage->fp8_arg_plan->packed_partials) names.emplace_back("fp8_arg_packed_continuation");
             continue;
         }
-        switch (stage->geometry.path) {
-            case CubReductionPath::DeviceTransformReduce: names.emplace_back("direct:device_transform_reduce"); break;
-            case CubReductionPath::ContiguousFixedSegment: names.emplace_back("direct:contiguous_fixed_segment"); break;
-            case CubReductionPath::TiledFixedSegment:
-                names.emplace_back(stage->geometry.inner_size <= 32 ? "direct:tiled_narrow" : "direct:tiled_generic");
-                break;
-            default: names.emplace_back("direct:other"); break;
-        }
+        throw std::logic_error("Planned dense ARG stage has no retained ARG plan.");  // 1261
     }
     return names;
 }
@@ -5014,26 +3125,20 @@ std::vector<DensePhysicalPassDiagnostic> StampedCubReduction::getDensePhysicalPa
                     info.family = "retained_fp8_rk:runtime_k";
                     break;
             }
-            // 1220: a retained FP32 RK pass is "retained_fp32_rk:...".
+            // 1220: a retained FP32 RK pass is "retained_fp32_rk:...". 1254: a 2-byte pass "retained_f16_rk:...".
             if (fp8->input_dtype == DataType::FP32) info.family.replace(0, 15, "retained_fp32_rk");
+            if (kernel.element_bytes == 2) info.family.replace(0, 15, "retained_f16_rk");
             if (kernel.first_stage_ctas != 0) info.stage_blocks = kernel.first_stage_ctas;
             // The actual next tensor geometry is authoritative for staged N.
             info.shards_per_output = kernel.staged() ? fp8->output_dimensions.at(1) : 1;
         } else if (const auto* kr = dynamic_cast<const CubReductionInternal::DenseRetainedFp8KRPhysicalPlan*>(
                        pass.physical_plan.get())) {
-            info.family = std::string(kr->input_dtype == DataType::FP32 ? "retained_fp32_kr:" : "retained_fp8_kr:") +
+            info.family = retainedKRFamilyPrefix(kr->input_dtype) +
                           CubReductionInternal::Fp8KR::fp8KRShapeName(kr->shape);
             info.block_threads = CubReductionInternal::Fp8KR::FP8_KR_THREADS;
             info.shards_per_output = kr->shape.chunks();
-        } else if (const auto* rk = dynamic_cast<const CubReductionInternal::DenseRKFamilyPhysicalPlan*>(
-                       pass.physical_plan.get())) {
-            info.family = "production_rk";
-            if (rk->packet_bytes != 0) info.packet_bytes = rk->packet_bytes;
-            if (rk->block_threads != 0) info.block_threads = rk->block_threads;
-            if (rk->first_stage_blocks != 0) info.stage_blocks = rk->first_stage_blocks;
-            if (rk->shards_per_output != 0) info.shards_per_output = rk->shards_per_output;
         } else {
-            info.family = "production_direct";
+            throw std::logic_error("Dense VALUE pass without a retained physical plan");
         }
         result.push_back(std::move(info));
     }
@@ -5047,11 +3152,9 @@ bool StampedCubReduction::usesModernRKFamilyPlan() const {
     return std::all_of(dense_executable_plan.passes.begin(),
                        dense_executable_plan.passes.end(),
                        [](const CubReductionInternal::DenseExecutablePass& pass) {
-                           if (std::dynamic_pointer_cast<const CubReductionInternal::DenseRetainedFp8RKPhysicalPlan>(
-                                   pass.physical_plan)) return true;
-                           const auto rk = std::dynamic_pointer_cast<const CubReductionInternal::DenseRKFamilyPhysicalPlan>(
-                               pass.physical_plan);
-                           return rk != nullptr && CubReductionInternal::denseRKIsFamilyImplementation(rk->implementation);
+                           // 1258: every RK pass is a retained RK physical plan (the legacy RK families are gone).
+                           return std::dynamic_pointer_cast<const CubReductionInternal::DenseRetainedFp8RKPhysicalPlan>(
+                                      pass.physical_plan) != nullptr;
                        });
 }
 

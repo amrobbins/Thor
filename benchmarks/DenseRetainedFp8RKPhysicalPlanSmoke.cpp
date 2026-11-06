@@ -19,20 +19,8 @@ namespace C = ThorImplementation::CubReductionInternal;
 namespace F = ThorImplementation::CubReductionInternal::Fp8RK;
 using ThorImplementation::DataType;
 
-// A failing non-injected selector is deliberate: the host smoke must not call
-// a CUDA-aware production family or accidentally activate the FP8 cutover.
-namespace ThorImplementation::CubReductionInternal {
-DenseReductionCandidate ReducersDenseR::propose(const DenseReductionProblem&, DenseReductionSite) {
-    throw std::logic_error("unexpected production R selection");
-}
-DenseReductionCandidate ReducersDenseKR::propose(const DenseReductionProblem&, DenseReductionSite) {
-    throw std::logic_error("unexpected production KR selection");
-}
-DenseReductionCandidate ReducersDenseRK::propose(const DenseReductionProblem&, DenseReductionSite,
-                                                  const DenseRKPlanningContext&) {
-    throw std::logic_error("unexpected production RK selection");
-}
- }  // namespace ThorImplementation::CubReductionInternal
+// 1258: an injected candidate's physical plan (the legacy direct plan the injections used is gone).
+struct InjectedPhysicalPlan final : ThorImplementation::CubReductionInternal::DenseReductionPhysicalPlan {};
 
 namespace ThorImplementation::CubReductionInternal::Fp8RK {
 Fp8RKSelection selectCachedIsolatedRKSite(const DenseReductionProblem&, DenseReductionSite,
@@ -98,7 +86,7 @@ C::DenseReductionCandidate injectedProposal(const C::DenseReductionProblem& curr
     C::DenseReductionCandidate result;
     result.family = family;
     result.site = site;
-    result.physical_plan = std::make_shared<C::DenseDirectReductionPhysicalPlan>();
+    result.physical_plan = std::make_shared<InjectedPhysicalPlan>();
     result.next_problem = C::advanceDenseReductionProblem(current, site, 1);
     result.next_bytes = C::denseReductionProblemBytes(result.next_problem);
     return result;

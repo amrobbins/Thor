@@ -35,20 +35,26 @@ TEST(CubReductionElementWidth, IdentitiesDefaultToOneByteAndDifferByWidth) {
     EXPECT_TRUE(fp8 == fp32);
 }
 
-// 1192: FP32 has an inventory too (its DeepRSmallK runs K <= 125); other widths still validate nothing.
-TEST(CubReductionElementWidth, OnlyTheFp8AndFp32InventoriesValidate) {
+// 1192: FP32 has an inventory too (its DeepRSmallK runs K <= 125). 1246: and FP16 / BF16 (2-byte DeepRSmallK runs
+// K <= 249); other widths still validate nothing. (1256: renamed from OnlyTheFp8AndFp32InventoriesValidate.)
+TEST(CubReductionElementWidth, OnlyTheFp8Fp16AndFp32InventoriesValidate) {
     const PhysicalKernel fp8 = deepRSmallK();
     EXPECT_TRUE(Fp8RK::structurallyValid(fp8, 16, 2048, 32));
     PhysicalKernel fp32 = fp8;
     fp32.element_bytes = 4;
     EXPECT_TRUE(Fp8RK::structurallyValid(fp32, 16, 2048, 32));
-    for (const uint8_t width : {uint8_t{2}, uint8_t{8}}) {
+    PhysicalKernel f16 = fp8;
+    f16.element_bytes = 2;
+    EXPECT_TRUE(Fp8RK::structurallyValid(f16, 16, 2048, 32));
+    for (const uint8_t width : {uint8_t{3}, uint8_t{8}}) {
         PhysicalKernel other = fp8;
         other.element_bytes = width;
         EXPECT_FALSE(Fp8RK::structurallyValid(other, 16, 2048, 32)) << "width " << int(width);
     }
-    // K = 200: FP8's DeepRSmallK (K <= 256), not FP32's.
+    // K = 200: FP8's DeepRSmallK (K <= 256) and FP16 / BF16's (K <= 249), not FP32's.
     PhysicalKernel wide{PhysicalFamily::DeepRSmallK, 128, 0, 0, 0, 0, 0, 6, 16 * 16, 16 * 16 * 200 * 4};
+    EXPECT_TRUE(Fp8RK::structurallyValid(wide, 16, 2048, 200));
+    wide.element_bytes = 2;
     EXPECT_TRUE(Fp8RK::structurallyValid(wide, 16, 2048, 200));
     wide.element_bytes = 4;
     EXPECT_FALSE(Fp8RK::structurallyValid(wide, 16, 2048, 200));

@@ -209,10 +209,13 @@ def generate(source: Path, out: Path):
     specs = {
         'narrow': ('CubReductionNarrowFlatRCooperative.cu',
                    '}  // namespace\n\nvoid launchFp8DeepRSmallKRetainedFirstStage'),
+        # 1259: the rotated cut names the occupancy template that follows it (the bare namespace pair has matched
+        # twice since 1249), and the aligned cut moved to elementBytes with the generic KParallel dispatch deleted.
         'rotated': ('CubReductionAwkwardRotatedSharded.cu',
-                    '}  // namespace\n\nnamespace {'),
+                    '}  // namespace\n\nnamespace {\n\ntemplate <typename InputT, int RowsPerShard, int PacketBytes, '
+                    'int CooperativeWarps,'),
         'aligned': ('CubReductionKParallelShardedTiled.cu',
-                    'template <typename InputTransformT,\n          typename ReductionOpT,\n          typename OutputFinalizeT,\n          TiledRKStageTopology Topology>\nvoid dispatchInputType('),
+                    '[[nodiscard]] size_t elementBytes(DataType dtype) {'),
     }
     source_text = {}
     for name, (filename, marker) in specs.items():

@@ -17,7 +17,8 @@ struct RuntimeProposalGeometry {
     uint64_t outer = 0, r = 0, k = 0;
     uint32_t sm_count = 0;
     // 1192: input element width. 1 is FP8 (PacketComplete tiles of 16..496, rotated Prefix 497 and Exact 512); 4 is
-    // FP32 (PacketComplete tiles of 4..124, rotated Prefix 125, no Exact). Proposals carry it as element_bytes.
+    // FP32 (PacketComplete tiles of 4..124, rotated Prefix 125, no Exact); 1246: 2 is FP16 / BF16 (tiles of 8..248,
+    // rotated Prefix 249, no Exact). Proposals carry it as element_bytes.
     uint8_t element_bytes = 1;
 };
 

@@ -21,7 +21,12 @@ prefix), exported as Fp32RKRankerModel.h (TRAINED = true) and Fp32RKRankerParity
 depth (the smallest N whose out-of-fold max regret is <= --ultra-max for VALUE and for ARG); FP32_RK_SHORTLIST_DEPTHS in Fp32RK/Fp32RKCandidates.h is set from the
 printed depths by hand. --dtype=fp8 (the default) is unchanged.
 
-Usage: train.py fp8-training.csv.gz [more.csv.gz ...] --out-dir=fp8_ranker_out [--dtype=fp8|fp32] [--seed=0]
+1252: --dtype=f16 trains the FP16 / BF16 RK ranker (one model for both formats; f6, the E4M3 slot, is the BF16 flag)
+on the datasets' fp16 and bf16 cells (`--training --dtypes=fp16,bf16`, VALUE and ARG), as --dtype=fp32: the model
+alone, Quick / Regular / Ultra printed, exported as F16RKRankerModel.h and F16RKRankerParityFixtures.h;
+F16_RK_SHORTLIST_DEPTHS in F16RK/F16RKCandidates.h is set by hand (a trained model does not compile without them).
+
+Usage: train.py fp8-training.csv.gz [more.csv.gz ...] --out-dir=fp8_ranker_out [--dtype=fp8|fp32|f16] [--seed=0]
 """
 
 import argparse
@@ -49,6 +54,7 @@ DTYPES = {
         "trained_flag": False,
         "leaders": True,  # production's generalShortlist may keep the family-leader prefix
         "json": "fp8_geometry_ranker.json",
+        "ultra": None,
     },
     "fp32": {
         "label": "FP32",
@@ -60,6 +66,19 @@ DTYPES = {
         "trained_flag": True,
         "leaders": False,  # fp32RKRankedKernels orders by the margin alone
         "json": "fp32_rk_ranker.json",
+        "ultra": "FP32_RK_SHORTLIST_DEPTHS in Utilities/TensorOperations/Cub/Fp32RK/Fp32RKCandidates.h",
+    },
+    "f16": {  # 1252: FP16 and BF16 together (the BF16 flag is a feature)
+        "label": "FP16 / BF16",
+        "cells": lambda dtype: dtype in ("fp16", "bf16"),
+        "model_header": "F16RKRankerModel.h",
+        "fixtures_header": "F16RKRankerParityFixtures.h",
+        "model_namespace": "ThorImplementation::CubReductionInternal::F16RK::F16RKRankerModel",
+        "parity_namespace": "ThorImplementation::CubReductionInternal::F16RK::F16RKRankerParity",
+        "trained_flag": True,
+        "leaders": False,  # f16RKRankedKernels orders by the margin alone
+        "json": "f16_rk_ranker.json",
+        "ultra": "F16_RK_SHORTLIST_DEPTHS in Utilities/TensorOperations/Cub/F16RK/F16RKCandidates.h",
     },
 }
 
@@ -164,7 +183,7 @@ def main():
     parser.add_argument("--dtype", choices=sorted(DTYPES), default="fp8",
                         help="the ranker to train: its dtype's cells only (default fp8)")
     parser.add_argument("--ultra-max", type=float, default=1.01,
-                        help="--dtype=fp32: the printed Ultra depth is the smallest N with max regret <= this")
+                        help="--dtype=fp32 / f16: the printed Ultra depth is the smallest N with max regret <= this")
     args = parser.parse_args()
     spec = DTYPES[args.dtype]
     try:
@@ -243,7 +262,7 @@ def main():
     lines += [f"chosen ordering: {chosen} (leader prefix {'kept' if use_leaders else 'dropped'}); "
               f"REGULAR_DEPTH={regular} QUICK_DEPTH={quick}"]
     ultra = None
-    if args.dtype == "fp32":
+    if spec["ultra"]:
         # 1205: VALUE and ARG cells (both kinds present since the FP32 ARG sweep): the deeper of the two depths.
         for kind in KIND_GROUPS:
             series = oof_curves.get((kind, chosen))
@@ -254,8 +273,8 @@ def main():
                 ultra = None
                 break
             ultra = depth_kind if ultra is None else max(ultra, depth_kind)
-        lines.append(f"ULTRA_DEPTH={ultra} (out-of-fold max regret <= {args.ultra_max}); set FP32_RK_SHORTLIST_DEPTHS "
-                     f"in Utilities/TensorOperations/Cub/Fp32RK/Fp32RKCandidates.h from Quick / Regular / Ultra")
+        lines.append(f"ULTRA_DEPTH={ultra} (out-of-fold max regret <= {args.ultra_max}); set {spec['ultra']} "
+                     f"from Quick / Regular / Ultra")
     lines.append("")
     for subset, curves, subset_cells, subset_orders in (("out-of-fold", oof_curves, train_cells, oof_orders),
                                                          ("held-out", held_curves, held_cells, held_orders)):
@@ -309,8 +328,8 @@ def main():
     if worst > 1e-3:
         raise AssertionError(f"exported tree evaluation disagrees with XGBoost by {worst}")
     provenance_text = f"{len(cells)} cells, seed {args.seed}, {chosen}, Regular {regular}, Quick {quick}"
-    if args.dtype == "fp32":
-        provenance_text = f"fp32, {provenance_text}, Ultra {ultra}"
+    if spec["ultra"]:
+        provenance_text = f"{args.dtype}, {provenance_text}, Ultra {ultra}"
     sha = export.write_header(os.path.join(args.out_dir, spec["model_header"]), trees, dataset.FEATURE_COUNT,
                               model_bytes, provenance_text, namespace=spec["model_namespace"],
                               trained_flag=spec["trained_flag"])

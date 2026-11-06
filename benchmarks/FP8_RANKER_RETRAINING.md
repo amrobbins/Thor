@@ -203,6 +203,37 @@ python3 ../benchmarks/fp8_kr_ranker/train.py fp32-kr-ranker.csv.gz fp32-kr-carri
   - a confirmation sweep with another seed (`--seed=1182 --random=1500 --min-kib=64 --dtypes=fp32`) through
     `fp8_kr_training.py`.
 
+## FP16 / BF16 KR ranker (1238)
+
+FP16 and BF16 R / KR sites share one ranker (plans/Thor_FP16_BF16_Dense_Reduction_Plan, decision 1). Its
+alternate-format feature (f20, FP8's E5M2 slot) is the BF16 flag. It uses the same trainer, features and rules as the
+FP8 and FP32 KR rankers, with `--dtype=f16`:
+
+| | FP16 / BF16 KR ranker |
+| --- | --- |
+| Model header | `Utilities/TensorOperations/Cub/F16KR/F16KRRankerModel.h` |
+| Parity fixtures | `test/Utilities/TensorOperations/F16KRRankerParityFixtures.h` |
+| Depths | `F16_KR_SHORTLIST_DEPTHS` in `Utilities/TensorOperations/Cub/F16KR/F16KRStampAutotuner.cpp`. A trained model does not compile without them. |
+| Pool | `f16KRCandidatePool`: the 2-byte list and pool (`retainedKRCandidatePool` at element size 2, with the 2-byte vector Pack shapes), without vector Pack for ARG |
+| Test | `F16KRRanker*` |
+
+Installed model (1239): `e425a0b4…`, 18,514 FP16 / BF16 cells on the 170-SM training GPU: the 1238 sweep's 12,256
+(64 KiB and up) and 1237's 6,258, VALUE and ARG. Out of fold (VALUE / ARG), the ranked top 1 has p99 regret 1.028 /
+1.039, against 1.033 / 1.066 for FP8's model unchanged. The top 4 has max 1.054 / 1.024, and the top 8 is within
+1.013 / 1.000 of the oracle in every cell. Production runs 4 / 6 / 8 (`F16_KR_SHORTLIST_DEPTHS`, user decision
+2026-11-05; train.py's rules printed 1 / 2 / 4). Without a trained header (a placeholder with `TRAINED = false`) the
+selectors time the 2-byte heuristic list's prefix at the RK depths (6 / 12 / 24).
+
+```
+./thor_fp8_kr_training_sweep --dtypes=fp16,bf16 --seed=1238 --random=6000 --min-kib=64 --no-production 2> f16-kr-ranker.log | gzip -1 > f16-kr-ranker.csv.gz
+python3 ../benchmarks/fp8_kr_ranker/train.py f16-kr-ranker.csv.gz f16-kr-1237.csv.gz --dtype=f16 --out-dir=f16_kr_ranker_out
+```
+
+- **Datasets.** Use sweeps from 1237 onward: they have ARG cells, and their `list_position` feature reflects the
+  1235 list, which puts the 2-byte vector shape second. The 1233 and 1234 sweeps have neither.
+- **The bar.** On 1237's cells, FP8's KR model, unchanged (the sweep's `frozen` order), had VALUE / ARG top-1 p99
+  1.036 / 1.068 and top-3 max 1.028 / 1.098. The heuristic list had top-3 max 1.094 / 1.118.
+
 ## FP32 RK ranker (1196)
 
 FP32 RK sites get their own ranker too. It uses the FP8 RK trainer and rules with `--dtype=fp32`, on FP32 cells of
@@ -261,6 +292,41 @@ The sweep alternates VALUE and ARG cells per geometry by default, so this one fi
   times the pool's prefix at 6 / 12 / 24.
 - **Verify:** `./thor_tests --gtest_filter='Fp32RKCandidates*:CubReductionFp32RK*'`, then a confirmation sweep with
   another seed (`--training-seed=1196 --training-random=1500`).
+
+## FP16 / BF16 RK ranker (1252)
+
+FP16 and BF16 RK sites share one ranker, as their KR sites do. Its f6 feature (FP8's E4M3 slot) is the BF16 flag. It
+uses the FP8 RK trainer and the FP32 RK rules (the model alone, Quick / Regular / Ultra printed) with `--dtype=f16`, on
+the fp16 and bf16 cells of the RK training sweep:
+
+| | FP16 / BF16 RK ranker |
+| --- | --- |
+| Model header | `Utilities/TensorOperations/Cub/F16RK/F16RKRankerModel.h` |
+| Parity fixtures | `test/Utilities/TensorOperations/F16RKRankerParityFixtures.h` |
+| Depths | `F16_RK_SHORTLIST_DEPTHS` in `Utilities/TensorOperations/Cub/F16RK/F16RKCandidates.h` |
+| Pool | `f16RKCandidatePool` (VALUE) and `f16RKArgCandidates` (ARG: the MIN / MAX pool's twins and the ARG-only rotated passes) |
+| Features | `f16RKRankerFeatures`: FP8's 26 in 2-byte units |
+| Test | `F16RKCandidates*` (the parity check skips until a trained model is installed) |
+
+Installed model (1253): `3ad15d57…`, 15,538 FP16 / BF16 cells of the 1251 sweep on the 170-SM training GPU (VALUE and
+ARG at 1, 4, 16, 64 and 256 MiB). Out of fold (ARG / VALUE), the ranked top 4 is within 1.144 / 1.106 of the oracle in
+every cell (p99 1.016 / 1.020), the top 8 within 1.029 / 1.044 and the top 12 within 1.016 / 1.020. Held out, the top
+12 is within 1.002 / 1.000. Production runs 4 / 8 / 12 (`F16_RK_SHORTLIST_DEPTHS`, user decision 2026-11-05;
+train.py's rules printed 2 / 4 / 14).
+
+```
+./thor_fp8_retained_cold_l2_sweep --training --dtypes=fp16,bf16 --training-seed=1251 --training-random=6000 \
+    --targets-mib=1,4,16,64,256 | gzip -1 > f16-rk-1251-big.csv.gz
+python3 ../benchmarks/fp8_ranker/line_rate.py f16-rk-1251-big.csv.gz
+python3 ../benchmarks/fp8_ranker/train.py f16-rk-1251-big.csv.gz --dtype=f16 --out-dir=f16_rk_ranker_out
+```
+
+- **Datasets.** Sweeps from 1251 onward: they have ARG cells. The 1247 smoke is VALUE only.
+- **Install:** copy `F16RKRankerModel.h` and `F16RKRankerParityFixtures.h` from `f16_rk_ranker_out/`, and set
+  `F16_RK_SHORTLIST_DEPTHS` (Quick, Regular, Ultra). Without a trained header the selectors time the pool's prefix
+  at 6 / 12 / 24.
+- **Verify:** `./thor_tests --gtest_filter='F16RKCandidates*:CubReductionF16RK*'`, then a confirmation sweep with
+  another seed.
 
 ## Troubleshooting
 

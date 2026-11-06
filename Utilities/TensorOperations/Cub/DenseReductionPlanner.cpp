@@ -37,51 +37,6 @@ namespace {
     return "unknown";
 }
 
-[[nodiscard]] const char* implementationName(DenseDirectReductionImplementation implementation) {
-    switch (implementation) {
-        case DenseDirectReductionImplementation::DeviceTransformReduce:
-            return "DeviceTransformReduce";
-        case DenseDirectReductionImplementation::ContiguousFixedSegment:
-            return "ContiguousFixedSegment";
-        case DenseDirectReductionImplementation::TiledFixedSegment:
-            return "TiledFixedSegment";
-    }
-    return "unknown";
-}
-
-
-[[nodiscard]] const char* rkStrategyName(DenseRKStrategy strategy) {
-    switch (strategy) {
-        case DenseRKStrategy::KParallel:
-            return "KParallel";
-        case DenseRKStrategy::RCooperative:
-            return "RCooperative";
-    }
-    return "unknown";
-}
-
-[[nodiscard]] const char* rkAccessName(DenseRKAccess access) {
-    switch (access) {
-        case DenseRKAccess::Aligned:
-            return "Aligned";
-        case DenseRKAccess::Rotated:
-            return "Rotated";
-        case DenseRKAccess::FlatRows:
-            return "FlatRows";
-    }
-    return "unknown";
-}
-
-[[nodiscard]] const char* rkProgressName(DenseRKProgress progress) {
-    switch (progress) {
-        case DenseRKProgress::Complete:
-            return "Complete";
-        case DenseRKProgress::Staged:
-            return "Staged";
-    }
-    return "unknown";
-}
-
 [[nodiscard]] size_t reducedRunCount(const DenseReductionProblem& problem) {
     return static_cast<size_t>(std::count_if(problem.runs.begin(), problem.runs.end(), [](const DenseReductionRun& run) {
         return isDenseReductionRunReduced(run.kind);
@@ -236,24 +191,16 @@ void validateCandidateTransition(const DenseReductionProblem& current,
     if (const auto fp8 = std::dynamic_pointer_cast<const DenseRetainedFp8RKPhysicalPlan>(
             candidate.physical_plan); fp8) {
         std::ostringstream out;
-        out << (fp8->input_dtype == DataType::FP32 ? "retained_fp32_rk" : "retained_fp8_rk") << "/family=" << retainedFp8FamilyName(fp8->kernel.family)
+        out << (fp8->input_dtype == DataType::FP32   ? "retained_fp32_rk"
+                : fp8->kernel.element_bytes == 2 ? "retained_f16_rk"  // 1254
+                                                 : "retained_fp8_rk")
+            << "/family=" << retainedFp8FamilyName(fp8->kernel.family)
             << "/shards=" << fp8->output_dimensions.at(fp8->reduction_axis)
             << "/dtype=" << static_cast<unsigned>(fp8->output_dtype);
         return out.str();
     }
-    if (const auto rk = std::dynamic_pointer_cast<const DenseRKFamilyPhysicalPlan>(candidate.physical_plan); rk) {
-        std::ostringstream out;
-        out << rkStrategyName(rk->strategy) << '/' << rkAccessName(rk->access) << '/' << rkProgressName(rk->progress)
-            << "/packet" << rk->packet_bytes << "/cta" << rk->block_threads
-            << "/rows" << rk->rows_per_shard << "/shards" << rk->shards_per_output
-            << "/warps" << rk->useful_stage_warps;
-        return out.str();
-    }
-    const auto direct = std::dynamic_pointer_cast<const DenseDirectReductionPhysicalPlan>(candidate.physical_plan);
-    if (!direct) {
-        return "family-local";
-    }
-    return implementationName(direct->implementation);
+    // 1258: R / KR and ARG passes (and test-injected plans) describe themselves through their own diagnostics.
+    return "family-local";
 }
 
 }  // namespace

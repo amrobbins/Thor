@@ -4,6 +4,9 @@
 #include "benchmarks/Fp8BenchmarkArenaCursor.h"
 #include "benchmarks/ColdTiming.h"
 #include "benchmarks/Fp8OracleBatchQueue.h"
+#include "Utilities/TensorOperations/Cub/F16RK/F16RKArgCandidates.h"
+#include "Utilities/TensorOperations/Cub/F16RK/F16RKCandidates.h"
+#include "Utilities/TensorOperations/Cub/F16RK/F16RKStampAutotuner.h"
 #include "Utilities/TensorOperations/Cub/Fp32RK/Fp32RKArgCandidates.h"
 #include "Utilities/TensorOperations/Cub/Fp32RK/Fp32RKCandidates.h"
 #include "Utilities/TensorOperations/Cub/Fp32RK/Fp32RKCarriedArgCandidates.h"
@@ -162,7 +165,9 @@ Settings parse(int argc, char** argv) {
                 if (d == "e4m3") s.dtypes.push_back(T::DataType::FP8_E4M3);
                 else if (d == "e5m2") s.dtypes.push_back(T::DataType::FP8_E5M2);
                 else if (d == "fp32") s.dtypes.push_back(T::DataType::FP32);  // 1194 / 1205: --training only
-                else throw std::invalid_argument("Unknown dtype (e4m3|e5m2|fp32): " + d);
+                else if (d == "fp16") s.dtypes.push_back(T::DataType::FP16);  // 1247: --training only
+                else if (d == "bf16") s.dtypes.push_back(T::DataType::BF16);  // 1247: --training only
+                else throw std::invalid_argument("Unknown dtype (e4m3|e5m2|fp32|fp16|bf16): " + d);
             }
         } else if (a.starts_with("--targets-mib=")) {
             s.target_mib.clear();
@@ -256,6 +261,9 @@ Settings parse(int argc, char** argv) {
                       << "  --training --dtypes=fp32 (1194): FP32 cells of the FP32 RK pool, alone (one ranker per\n"
                       << "  dtype); working sets stay in bytes (a quarter of FP8's elements). 1205: VALUE and ARG cells\n"
                       << "  (the FP32 RK ARG candidates), as FP8's.\n"
+                      << "  --training --dtypes=fp16,bf16 (1247): FP16 / BF16 cells of the 2-byte RK pool (one\n"
+                      << "  ranker for both formats, apart from FP8 and FP32); half FP8's elements per byte. 1251:\n"
+                      << "  VALUE and ARG cells (the 2-byte RK ARG candidates), as FP32's.\n"
                       << "  --carried-index=uint32|uint64 (1211, with --training --dtypes=fp32 --ops=argmin,argmax):\n"
                       << "  the ARG cells are carried-index (intermediate) sites: the carried FP32 RK ARG passes\n"
                       << "  (AlignedK, rotated) over FP32 values plus a carried index of that width; the working set\n"
@@ -290,6 +298,14 @@ Settings parse(int argc, char** argv) {
     const bool fp32 = std::find(s.dtypes.begin(), s.dtypes.end(), T::DataType::FP32) != s.dtypes.end();
     if (fp32 && (!s.training || s.dtypes.size() != 1))
         throw std::invalid_argument("--dtypes=fp32 runs with --training only, and alone (one ranker per dtype)");
+    // 1247: FP16 / BF16 cells exist in --training only (the 2-byte RK pool), together and apart from FP8 and FP32;
+    // 1251: VALUE and ARG cells.
+    const auto f16 = [](T::DataType d) { return d == T::DataType::FP16 || d == T::DataType::BF16; };
+    if (std::any_of(s.dtypes.begin(), s.dtypes.end(), f16)) {
+        if (!s.training || !std::all_of(s.dtypes.begin(), s.dtypes.end(), f16))
+            throw std::invalid_argument("--dtypes=fp16,bf16 runs with --training only, apart from e4m3/e5m2/fp32");
+        if (s.carried_index) throw std::invalid_argument("--carried-index runs with --dtypes=fp32 only");
+    }
     if (s.carried_index) {
         const bool arg_only = !s.operations.empty() &&
             std::all_of(s.operations.begin(), s.operations.end(), [](const std::string& name) {
@@ -392,7 +408,8 @@ uint64_t nearTargetOuter(uint64_t r, uint64_t k, uint64_t bytes) {
     return std::max<uint64_t>(1, (bytes + (r*k) / 2) / (r*k));
 }
 const char* dtypeName(T::DataType dtype) {
-    return dtype == T::DataType::FP8_E4M3 ? "fp8_e4m3" : dtype == T::DataType::FP32 ? "fp32" : "fp8_e5m2";
+    return dtype == T::DataType::FP8_E4M3 ? "fp8_e4m3" : dtype == T::DataType::FP32 ? "fp32"
+           : dtype == T::DataType::FP16   ? "fp16" : dtype == T::DataType::BF16 ? "bf16" : "fp8_e5m2";
 }
 const char* familyName(F::PhysicalFamily f) {
     switch (f) {
@@ -988,11 +1005,13 @@ struct CellSpec {
 bool heldOutShape(uint64_t r, uint64_t k, uint64_t seed, uint32_t percent) {
     return mix(mix(seed ^ 0x48454C44ULL) ^ mix(r * 0x100000001B3ULL + k)) % 100 < percent;
 }
-// 1194: the working set is in bytes, so an FP32 cell (--dtypes=fp32, alone) has a quarter of FP8's elements.
+// 1194: the working set is in bytes, so an FP32 cell (--dtypes=fp32, alone) has a quarter of FP8's elements; 1247: an
+// FP16 / BF16 cell half.
 std::vector<Geometry> geometries(const Settings& s, const std::vector<uint64_t>& targets) {
     std::vector<Geometry> result;
     // 1211: a carried-index cell streams its carried index too, so its working set counts both.
-    const uint64_t element_bytes = s.dtypes.front() != T::DataType::FP32 ? 1
+    const bool f16 = s.dtypes.front() == T::DataType::FP16 || s.dtypes.front() == T::DataType::BF16;
+    const uint64_t element_bytes = f16 ? 2 : s.dtypes.front() != T::DataType::FP32 ? 1
                                    : s.carried_index == T::DataType::UINT64 ? 12
                                    : s.carried_index == T::DataType::UINT32 ? 8 : 4;
     for (const auto& [r, k] : allShapes())
@@ -1297,6 +1316,11 @@ void runTraining(const Settings& settings) {
                 if (stamped.combine!=semantics.combine || stamped.input_transform!=semantics.input_transform)
                     throw std::logic_error(std::string("--stamp operation does not match the cell's semantics: ")+op.name);
                 stampRow(spec.id,[&]{
+                    if (dtype==T::DataType::FP16||dtype==T::DataType::BF16)  // 1247: the 2-byte RK selector's contest
+                        return C::F16RK::autotuneValueSite(problem,site,*public_op,r,1.0f,
+                                                           arena.input(dtype,outer,r,k),stream,
+                                                           std::numeric_limits<uint64_t>::max(),
+                                                           T::CubReductionTuningDepth::Regular);
                     if (dtype==T::DataType::FP32)  // 1194: the FP32 RK selector's contest
                         return C::Fp32RK::autotuneValueSite(problem,site,*public_op,r,1.0f,
                                                             arena.input(dtype,outer,r,k),stream,
@@ -1306,6 +1330,50 @@ void runTraining(const Settings& settings) {
                                                      stream,std::numeric_limits<uint64_t>::max(),
                                                      T::CubReductionTuningDepth::Regular);
                 },[](const F::Fp8RKSelection& selection){ return physicalName(selection.physical); });
+            }
+            if (dtype==T::DataType::FP16||dtype==T::DataType::BF16) {
+                // 1247: every entry of the FP16 / BF16 RK pool (F16RK::f16RKCandidatePool, the selector's
+                // candidates), at its pool position and local rank, with the 2-byte ranker's features and margin.
+                C::F16RK::F16RKSite f16_site;
+                f16_site.outer=outer;
+                f16_site.r=r;
+                f16_site.k=k;
+                f16_site.sm_count=static_cast<uint32_t>(sm);
+                f16_site.input_dtype=dtype;
+                f16_site.semantics=semantics;
+                const auto pool=C::F16RK::f16RKCandidatePool(f16_site,[&](const F::PhysicalKernel& p) {
+                    return C::F16RK::f16RKCompiledResidency(p,dtype,k,semantics);
+                });
+                auto cell=std::make_shared<Cell>(arena.input(dtype,outer,r,k),dtype,outer,r,k,op.name);
+                uint64_t max_scratch=0;
+                for (size_t position=0;position<pool.size();++position) {
+                    const auto& entry=pool[position];
+                    const F::PhysicalKernel& physical=entry.kernel;
+                    const auto features=C::F16RK::f16RKRankerFeatures(entry,f16_site,0);
+                    auto isolated=F::planIsolatedRKSite(problem,site,physical,semantics);
+                    try {
+                        auto executable=F::makeSelectedIsolatedBenchmark(problem,site,std::move(isolated),physical,
+                            context(dtype,spec.value_op,r),1.0f,std::numeric_limits<uint64_t>::max(),stream);
+                        max_scratch=std::max<uint64_t>(max_scratch,executable.scratch_bytes);
+                        Timed timed{familyName(physical.family),std::move(executable),{},
+                            Training::recordPrefix(spec,op.name,familyName(physical.family),physicalName(physical),
+                                                   entry.local_rank,position+1,features,physical.staged(),
+                                                   C::F16RK::F16RKRankerModel::margin(features)),
+                            position+1,{}};
+                        cell->candidates.push_back(std::move(timed));
+                    } catch (const F::UnavailableIsolatedCandidate& e) {
+                        throw std::runtime_error("FP16 / BF16 candidate " + physicalName(physical) +
+                            " cannot construct complete FP32 continuation: " + e.what());
+                    }
+                }
+                if (cell->candidates.empty())
+                    throw std::logic_error("FP16 / BF16 training cell has no retained VALUE candidate");
+                auto [output,scratch]=arena.outputAndScratch(T::DataType::FP32,outer,k,max_scratch);
+                cell->output=std::move(output);
+                cell->scratch=std::move(scratch);
+                outputViews(*cell,T::DataType::FP32,{outer,k});
+                enqueue(cell);
+                continue;
             }
             if (dtype==T::DataType::FP32) {
                 // 1194: every entry of the FP32 RK pool (Fp32RK::fp32RKCandidatePool, the selector's candidates), at
@@ -1430,6 +1498,70 @@ void runTraining(const Settings& settings) {
                                                   C::Fp32RK::Fp32RKRankerModel::margin(features));
                 timed.rank=position+1;
                 cell->candidates.push_back(std::move(timed));
+            }
+            enqueue(cell);
+            continue;
+        }
+        if (dtype==T::DataType::FP16||dtype==T::DataType::BF16) {
+            // 1251: every FP16 / BF16 RK ARG candidate (F16RK::f16RKArgCandidates over the 2-byte VALUE MIN / MAX pool,
+            // the selector's candidates), at its position and local rank, with the 2-byte ranker's ARG features and
+            // margin, timed as launchF16RKArgPass runs it (staged passes include their packed continuation).
+            C::F16RK::F16RKSite f16_site;
+            f16_site.outer=outer;
+            f16_site.r=r;
+            f16_site.k=k;
+            f16_site.sm_count=static_cast<uint32_t>(sm);
+            f16_site.input_dtype=dtype;
+            f16_site.semantics=semantics;
+            const auto pool=C::F16RK::f16RKCandidatePool(f16_site,[&](const F::PhysicalKernel& p) {
+                return C::F16RK::f16RKCompiledResidency(p,dtype,k,semantics);
+            });
+            const auto args=C::F16RK::f16RKArgCandidates(pool,outer,r,k,std::numeric_limits<uint64_t>::max());
+            if (args.empty()) throw std::logic_error("FP16 / BF16 training cell has no ARG candidate");
+            const auto ranker_pool=C::F16RK::f16RKArgRankerPool(args);
+            const uint32_t aggregate=produce_value?2U:1U;
+            if (settings.training_stamp) {
+                C::DenseReductionOutputSpec out_spec;
+                out_spec.produce_value=produce_value;
+                out_spec.value_dtype=T::DataType::FP32;
+                out_spec.produce_index=true;
+                out_spec.index_dtype=T::DataType::UINT32;
+                const auto problem=C::makeInitialDenseReductionProblem({outer,r,k},{1},
+                                                                       C::DenseReductionAggregateKind::Arg,out_spec);
+                const auto site=C::enumerateDenseReductionSites(problem).front();
+                stampRow(spec.id,[&]{
+                    return C::F16RK::autotuneArgSite(problem,site,maximum,r,arena.input(dtype,outer,r,k),stream,
+                                                     std::numeric_limits<uint64_t>::max(),
+                                                     T::CubReductionTuningDepth::Regular);
+                },[](const F::Fp8RKSelection& selection){ return physicalName(selection.physical); });
+            }
+            const std::vector<uint64_t> dims{outer,r,k};
+            const T::CubReductionGeometry geometry=T::CubArgReduction::analyzeDenseGeometry(dims,{1});
+            const std::vector<uint64_t> out_dims{outer,k};
+            const uint64_t value_bytes=
+                produce_value?T::TensorDescriptor(T::DataType::FP32,out_dims).getArraySizeInBytes():0;
+            const uint64_t index_offset=CT::align256(value_bytes);
+            const uint64_t index_bytes=T::TensorDescriptor(T::DataType::UINT32,out_dims).getArraySizeInBytes();
+            auto cell=std::make_shared<Cell>(arena.input(dtype,outer,r,k),dtype,outer,r,k,op.name);
+            outputViews(*cell,T::DataType::UINT8,{index_offset+index_bytes});
+            for (size_t position=0;position<args.size();++position) {
+                const auto& candidate=args[position];
+                const auto features=C::F16RK::f16RKRankerFeatures(ranker_pool[position],f16_site,aggregate);
+                uint64_t* packed=static_cast<uint64_t*>(arena.packedArgScratch(candidate.scratch_bytes));
+                const F::PhysicalKernel identity=candidate.identity;
+                cell->candidates.push_back({familyName(identity.family),std::nullopt,
+                    [identity,geometry,packed,maximum,produce_value,out_dims,index_offset]
+                    (const T::Tensor& in,T::Tensor& out,Stream& s) {
+                        std::optional<T::Tensor> value;
+                        if (produce_value) value=out.aliasByteStorageAs(T::DataType::FP32,out_dims,0);
+                        T::Tensor index=out.aliasByteStorageAs(T::DataType::UINT32,out_dims,index_offset);
+                        C::F16RK::launchF16RKArgPass(identity,in,value?&*value:nullptr,&index,geometry,packed,
+                                                     maximum,1,s);
+                    },
+                    Training::recordPrefix(spec,op.name,familyName(identity.family),physicalName(identity),
+                                           candidate.local_rank,position+1,features,candidate.scratch_bytes!=0,
+                                           C::F16RK::F16RKRankerModel::margin(features)),
+                    position+1,{}});
             }
             enqueue(cell);
             continue;
@@ -1573,19 +1705,6 @@ std::string continuationName(const F::SelectedIsolatedBenchmark& executable) {
         if (colon!=std::string::npos) type=type.substr(colon+2);
         const char* family=pass.selected.family==C::DenseReducerFamily::R?"R":
                            pass.selected.family==C::DenseReducerFamily::KR?"KR":"RK";
-        // 1136: name the generic RK implementation and launch geometry, so the audit shows what the FP32 selector chose.
-        if (const auto* rk=dynamic_cast<const C::DenseRKFamilyPhysicalPlan*>(&plan)) {
-            const char* implementation=
-                rk->implementation==C::DenseRKProductionImplementation::KParallelPass?"KParallel":
-                rk->implementation==C::DenseRKProductionImplementation::RCooperativeAlignedComplete?"RCoopAlignedComplete":
-                rk->implementation==C::DenseRKProductionImplementation::RCooperativeAlignedStaged?"RCoopAlignedStaged":
-                rk->implementation==C::DenseRKProductionImplementation::RCooperativeRotatedStaged?"RCoopRotatedStaged":
-                rk->implementation==C::DenseRKProductionImplementation::RCooperativeFlatRowsStaged?"RCoopFlatRowsStaged":
-                "other";
-            type=std::string(implementation)+(rk->progress==C::DenseRKProgress::Complete?"_complete":"_staged")+
-                 "_p"+std::to_string(rk->packet_bytes)+"_t"+std::to_string(rk->block_threads)+
-                 "_s"+std::to_string(rk->shards_per_output);
-        }
         name+=(name.empty()?"":"+")+std::string(family)+":"+type;
     }
     return name;

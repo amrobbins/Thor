@@ -4,12 +4,16 @@
 #include "Utilities/TensorOperations/Cub/DenseRetainedFp8KRPhysicalPlan.h"
 #include "Utilities/TensorOperations/Cub/DenseRetainedFp8RKPhysicalPlan.h"
 #include "Utilities/TensorOperations/Cub/DenseRetainedFp32ArgPhysicalPlan.h"
+#include "Utilities/TensorOperations/Cub/F16KR/F16KRStampAutotuner.h"
+#include "Utilities/TensorOperations/Cub/F16RK/F16RKStampAutotuner.h"
 #include "Utilities/TensorOperations/Cub/Fp32KR/Fp32KRStampAutotuner.h"
 #include "Utilities/TensorOperations/Cub/Fp32RK/Fp32RKStampAutotuner.h"
 #include "Utilities/TensorOperations/Cub/Fp8KR/Fp8KRStampAutotuner.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalSelection.h"
 
+#include <algorithm>
 #include <iostream>
+#include <string>
 #include <mutex>
 #include <stdexcept>
 
@@ -95,6 +99,71 @@ DenseReductionCandidate selectRetainedFp32ArgPass(const DenseReductionProblem& p
     return makeRetainedFp32KRArgCandidate(problem, site, *selected.shape, carried);
 }
 
+// 1254: as warnMisalignedFp32Input, for an original FP16 / BF16 RK site.
+void warnMisalignedF16Input(const DensePhysicalSelectionContext& context) {
+    if (context.original_input_alignment_bytes >= 16) return;
+    static std::once_flag once;
+    std::call_once(once, [&] {
+        std::cerr << "Thor: an FP16 / BF16 reduction input starts on a " << context.original_input_alignment_bytes
+                  << "-byte boundary, not a 16-byte one; its RK passes run on alignment-tolerant kernels, which can be "
+                     "slower. Allocate reduction inputs (and views of them) on 16-byte boundaries for the fastest "
+                     "kernels. (Printed once per process.)"
+                  << std::endl;
+    });
+}
+
+// 1254: an original FP16 / BF16 site (the retained FP16 / BF16 routing's domain).
+bool isOriginalF16Site(const DenseReductionProblem& problem, const DensePhysicalSelectionContext& context) {
+    return problem.input_state == DenseReductionInputState::OriginalInput &&
+           (context.rk.original_input_dtype == DataType::FP16 || context.rk.original_input_dtype == DataType::BF16);
+}
+
+DenseReductionCandidate selectRetainedF16Pass(const DenseReductionProblem& problem, DenseReductionSite site,
+                                              DenseReducerFamily family,
+                                              const DensePhysicalSelectionContext& context) {
+    if (context.tuning_stream == nullptr || !context.original_value_operation || context.original_reduction_size == 0)
+        throw std::logic_error("Retained FP16 / BF16 selection requires a tuning stream, the original operation and "
+                               "the original reduction size");
+    const DataType dtype = context.rk.original_input_dtype;
+    const Stream& stream = *context.tuning_stream;
+    if (problem.aggregate_kind == DenseReductionAggregateKind::Value) {
+        if (!problem.final_output.produce_value || problem.final_output.produce_index)
+            throw std::logic_error("Retained FP16 / BF16 VALUE selection requires VALUE-only output");
+        if (family == DenseReducerFamily::RK) {
+            warnMisalignedF16Input(context);
+            const auto selected = F16RK::selectCachedValueSite(
+                problem, site, dtype, *context.original_value_operation, context.original_reduction_size,
+                context.output_scale, stream, context.max_workspace_bytes, context.tuning_depth,
+                std::max<uint64_t>(context.original_input_alignment_bytes, 2));
+            return makeRetainedF16RKValueCandidate(problem, site, selected.physical, dtype);
+        }
+        const auto selected = F16KR::selectCachedValueSite(
+            problem, site, dtype, *context.original_value_operation, context.original_reduction_size,
+            context.output_scale, context.rk.multiprocessors, stream, context.tuning_depth);
+        if (!selected.shape)
+            throw std::logic_error("Retained FP16 / BF16 R/KR VALUE kernels do not compile this operation's semantics");
+        return makeRetainedF16KRValueCandidate(problem, site, *selected.shape, dtype);
+    }
+    if (*context.original_value_operation != CubReductionOp::Min &&
+        *context.original_value_operation != CubReductionOp::Max)
+        throw std::logic_error("Retained FP16 / BF16 ARG selection requires MIN (argmin) or MAX (argmax)");
+    const bool maximum = *context.original_value_operation == CubReductionOp::Max;
+    if (family == DenseReducerFamily::RK) {
+        warnMisalignedF16Input(context);
+        const auto selected = F16RK::selectCachedArgSite(
+            problem, site, dtype, maximum, context.original_reduction_size, stream, context.max_workspace_bytes,
+            context.tuning_depth, std::max<uint64_t>(context.original_input_alignment_bytes, 2));
+        if (selected.candidate_count == 0)
+            throw std::logic_error("Retained FP16 / BF16 RK ARG selection found no legal pass for this site");
+        return makeRetainedF16RKArgCandidate(problem, site, selected.physical, dtype);
+    }
+    const auto selected =
+        F16KR::selectCachedArgSite(problem, site, dtype, maximum, context.rk.multiprocessors, stream,
+                                   context.tuning_depth);
+    if (!selected.shape) throw std::logic_error("Retained FP16 / BF16 R/KR ARG selection returned no shape");
+    return makeRetainedF16KRArgCandidate(problem, site, *selected.shape, dtype);
+}
+
 }  // namespace
 
 DenseReductionCandidate selectDensePhysicalPass(const DenseReductionProblem& problem,
@@ -114,6 +183,11 @@ DenseReductionCandidate selectDensePhysicalPass(const DenseReductionProblem& pro
         return problem.aggregate_kind == DenseReductionAggregateKind::Value
                    ? selectRetainedFp32ValuePass(problem, site, family, context)
                    : selectRetainedFp32ArgPass(problem, site, family, context);
+    }
+    // 1254 / 1257: every original FP16 / BF16 site, VALUE and ARG, is selected by the retained FP16 / BF16 selectors,
+    // with no fallback to the ordinary families.
+    if (isOriginalF16Site(problem, context)) {
+        return selectRetainedF16Pass(problem, site, family, context);
     }
     // Original FP8 RK VALUE has exactly one supported production selector:
     // the retained cached physical-first-stage autotuner. Never fall through
@@ -207,15 +281,9 @@ DenseReductionCandidate selectDensePhysicalPass(const DenseReductionProblem& pro
         if (!selected.shape) throw std::logic_error("Retained FP8 R/KR ARG selection returned no shape");
         return makeRetainedFp8KRArgCandidate(problem, site, *selected.shape, input_dtype);
     }
-    switch (family) {
-        case DenseReducerFamily::R:
-            return ReducersDenseR::propose(problem, site);
-        case DenseReducerFamily::KR:
-            return ReducersDenseKR::propose(problem, site);
-        case DenseReducerFamily::RK:
-            return ReducersDenseRK::propose(problem, site, context.rk);
-    }
-    throw std::logic_error("Unknown dense reducer family.");
+    // 1258 (phase 10): the legacy ordinary families are gone; every supported dtype's sites are covered above.
+    throw std::logic_error("Dense physical selection has no retained selector for this site (input dtype " +
+                           std::to_string(static_cast<int>(context.rk.original_input_dtype)) + ")");
 }
 
 }  // namespace ThorImplementation::CubReductionInternal

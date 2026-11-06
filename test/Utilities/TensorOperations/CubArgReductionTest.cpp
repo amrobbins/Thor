@@ -238,9 +238,6 @@ TEST(CubArgReduction, EverySupportedFloatingInputDtypeUsesFp32CandidateValues) {
     input_dtypes.push_back(DataType::FP8_E4M3);
     input_dtypes.push_back(DataType::FP8_E5M2);
 #endif
-#if THOR_CUB_ENABLE_64BIT_TYPES
-    input_dtypes.push_back(DataType::FP64);
-#endif
 
     for (DataType input_dtype : input_dtypes) {
         SCOPED_TRACE(static_cast<int>(input_dtype));
@@ -578,9 +575,6 @@ TEST(CubArgReduction, DenseTiledVectorizedPathsSupportEveryFloatingInputDtype) {
     input_dtypes.push_back(DataType::FP8_E4M3);
     input_dtypes.push_back(DataType::FP8_E5M2);
 #endif
-#if THOR_CUB_ENABLE_64BIT_TYPES
-    input_dtypes.push_back(DataType::FP64);
-#endif
 
     for (uint64_t inner_size : {8ULL, 17ULL, 64ULL, 129ULL, 4097ULL}) {
         SCOPED_TRACE(inner_size);
@@ -790,7 +784,8 @@ DenseArgReference referenceDenseAxes(const std::vector<float>& input,
 
 }  // namespace
 
-TEST(CubArgReduction, ExplicitComposedDenseExecutorCarriesOriginalIndicesAcrossReducedRuns) {
+// 1261: the interval-composition executor is deleted; these disjoint-run cases run the production planned stamp.
+TEST(CubArgReduction, ProductionDenseArgCarriesOriginalIndicesAcrossReducedRuns) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -812,24 +807,16 @@ TEST(CubArgReduction, ExplicitComposedDenseExecutorCarriesOriginalIndicesAcrossR
     for (CubArgReductionOp op : {CubArgReductionOp::ArgMin, CubArgReductionOp::ArgMax}) {
         CubArgReduction reduction(op, axes, fp32ValueAndUint32Index());
         auto production = reduction.stamp(input, stream);
-        auto composed = reduction.stampComposedDense(input, stream);
-
         EXPECT_EQ(production->getPath(), CubReductionPath::ComposedDense);
-        EXPECT_EQ(composed->getPath(), CubReductionPath::ComposedDense);
-        EXPECT_EQ(composed->getComposedStageAxes(),
-                  (std::vector<std::vector<uint32_t>>{{0}, {2}}));
-
         production->run();
-        composed->run();
         stream.synchronize();
 
         const DenseArgReference reference = referenceDenseAxes(values, dimensions, axes, op);
-        expectArgOutputs(composed, reference.values, reference.indices, stream);
         expectArgOutputs(production, reference.values, reference.indices, stream);
     }
 }
 
-TEST(CubArgReduction, ExplicitComposedDenseExecutorMatchesReferenceAcrossPatternsAndDtypes) {
+TEST(CubArgReduction, ProductionDenseArgMatchesReferenceAcrossPatternsAndDtypes) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -861,23 +848,19 @@ TEST(CubArgReduction, ExplicitComposedDenseExecutorMatchesReferenceAcrossPattern
             for (CubArgReductionOp op : {CubArgReductionOp::ArgMin, CubArgReductionOp::ArgMax}) {
                 CubArgReduction reduction(op, test_case.axes, fp32ValueAndUint32Index());
                 auto production = reduction.stamp(input, stream);
-                auto composed = reduction.stampComposedDense(input, stream);
                 ASSERT_EQ(production->getPath(), CubReductionPath::ComposedDense);
-                ASSERT_EQ(composed->getPath(), CubReductionPath::ComposedDense);
                 production->run();
-                composed->run();
                 stream.synchronize();
 
                 const DenseArgReference reference =
                     referenceDenseAxes(values, test_case.dimensions, test_case.axes, op);
                 expectArgOutputs(production, reference.values, reference.indices, stream);
-                expectArgOutputs(composed, reference.values, reference.indices, stream);
             }
         }
     }
 }
 
-TEST(CubArgReduction, ExplicitComposedDenseExecutorPreservesNaNTiesAndOriginalIndexTieBreak) {
+TEST(CubArgReduction, ProductionDenseArgPreservesNaNTiesAndOriginalIndexTieBreak) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     const float nan = std::numeric_limits<float>::quiet_NaN();
@@ -897,10 +880,10 @@ TEST(CubArgReduction, ExplicitComposedDenseExecutorPreservesNaNTiesAndOriginalIn
     Tensor input = makeGpuTensor(values, dimensions, stream);
 
     for (CubArgReductionOp op : {CubArgReductionOp::ArgMin, CubArgReductionOp::ArgMax}) {
-        auto composed = CubArgReduction(op, axes, fp32ValueAndUint32Index()).stampComposedDense(input, stream);
-        composed->run();
+        auto stamped = CubArgReduction(op, axes, fp32ValueAndUint32Index()).stamp(input, stream);
+        stamped->run();
         stream.synchronize();
-        expectArgOutputs(composed, {5.0f, nan}, {0, 2}, stream);
+        expectArgOutputs(stamped, {5.0f, nan}, {0, 2}, stream);
     }
 }
 
@@ -953,7 +936,7 @@ TEST(CubArgReduction, ProductionComposedDenseSupportsValueOnlyIndexOnlyAndUint64
     EXPECT_EQ(uint64_reduction->getIndexOutputTensor()->getDataType(), DataType::UINT64);
 }
 
-TEST(CubArgReduction, ExplicitComposedDenseExecutorAbsorbsRetainedSingletonIntoDeviceStage) {
+TEST(CubArgReduction, ProductionDenseArgReducesAcrossARetainedSingleton) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -964,10 +947,7 @@ TEST(CubArgReduction, ExplicitComposedDenseExecutorAbsorbsRetainedSingletonIntoD
 
     for (CubArgReductionOp op : {CubArgReductionOp::ArgMin, CubArgReductionOp::ArgMax}) {
         CubArgReduction reduction(op, axes, fp32ValueAndUint32Index());
-        auto composed = reduction.stampComposedDense(input, stream);
-        ASSERT_EQ(composed->getPath(), CubReductionPath::ComposedDense);
-        EXPECT_EQ(composed->getComposedStageAxes(), (std::vector<std::vector<uint32_t>>{{0, 1, 2}}));
-
+        auto composed = reduction.stamp(input, stream);
         composed->run();
         stream.synchronize();
 
@@ -976,12 +956,11 @@ TEST(CubArgReduction, ExplicitComposedDenseExecutorAbsorbsRetainedSingletonIntoD
     }
 }
 
-TEST(CubArgReduction, ExplicitComposedDenseExecutorCarriesIndicesThroughTiledIntermediateStage) {
+TEST(CubArgReduction, ProductionDenseArgCarriesIndicesThroughThreeReducedRuns) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
-    // The structural planner eliminates the left run first. After that pass, reducing axis 2 has inner_size == 64,
-    // exercising the existing exact-width Tiled ARG kernel while consuming an FP32 + carried-index intermediate.
+    // Three reduced runs: at least two planned passes, so a later pass consumes an FP32 + carried-index intermediate.
     const std::vector<uint64_t> dimensions{2, 2, 3, 8, 8};
     const std::vector<uint32_t> axes{0, 2, 4};  // R K R K R
     uint64_t total_elements = 1;
@@ -995,11 +974,8 @@ TEST(CubArgReduction, ExplicitComposedDenseExecutorCarriesIndicesThroughTiledInt
     Tensor input = makeGpuTensor(values, dimensions, stream);
 
     for (CubArgReductionOp op : {CubArgReductionOp::ArgMin, CubArgReductionOp::ArgMax}) {
-        auto composed = CubArgReduction(op, axes, fp32ValueAndUint32Index()).stampComposedDense(input, stream);
+        auto composed = CubArgReduction(op, axes, fp32ValueAndUint32Index()).stamp(input, stream);
         ASSERT_EQ(composed->getPath(), CubReductionPath::ComposedDense);
-        EXPECT_EQ(composed->getComposedStageAxes(),
-                  (std::vector<std::vector<uint32_t>>{{0}, {2}, {4}}));
-
         composed->run();
         stream.synchronize();
 
@@ -1008,13 +984,12 @@ TEST(CubArgReduction, ExplicitComposedDenseExecutorCarriesIndicesThroughTiledInt
     }
 }
 
-TEST(CubArgReduction, ExplicitComposedDenseExecutorCarriesIndicesThroughNarrowSharedTiledStage) {
+TEST(CubArgReduction, ProductionDenseArgCarriesIndicesThroughANarrowTrailingRun) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
-    // Whichever legal end-run order the structural planner chooses, the middle R run eventually executes after at
-    // least one prior stage and retains only eight physical trailing values. That forces the composed FP32+UINT32
-    // carried candidate stream through ARG-DIRECT-1's narrow shared-memory Tiled backend.
+    // BF16 input with an eight-value trailing retained run: a later planned pass reduces a narrow carried
+    // FP32 + UINT32 intermediate.
     const std::vector<uint64_t> dimensions{2, 2, 3, 2, 4};
     const std::vector<uint32_t> axes{0, 2, 4};  // R K R K R
     uint64_t total_elements = 1;
@@ -1028,7 +1003,7 @@ TEST(CubArgReduction, ExplicitComposedDenseExecutorCarriesIndicesThroughNarrowSh
     Tensor input = makeGpuTensor(values, dimensions, stream, DataType::BF16);
 
     for (CubArgReductionOp op : {CubArgReductionOp::ArgMin, CubArgReductionOp::ArgMax}) {
-        auto composed = CubArgReduction(op, axes, fp32ValueAndUint32Index()).stampComposedDense(input, stream);
+        auto composed = CubArgReduction(op, axes, fp32ValueAndUint32Index()).stamp(input, stream);
         ASSERT_EQ(composed->getPath(), CubReductionPath::ComposedDense);
         composed->run();
         stream.synchronize();
@@ -1038,22 +1013,12 @@ TEST(CubArgReduction, ExplicitComposedDenseExecutorCarriesIndicesThroughNarrowSh
     }
 }
 
-TEST(CubArgReduction, EveryLegalFourRunCompositionOrderPreservesTieAndNaNOriginalIndices) {
+TEST(CubArgReduction, ProductionDenseArgFourReducedRunsPreserveTieAndNaNOriginalIndices) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
     const std::vector<uint64_t> dimensions{2, 2, 3, 2, 2, 2, 2};  // R K R K R K R
     const std::vector<uint32_t> axes{0, 2, 4, 6};
-    const std::vector<std::vector<uint32_t>> run_orders{
-        {0, 1, 2, 3},
-        {0, 1, 3, 2},
-        {0, 3, 1, 2},
-        {0, 3, 2, 1},
-        {3, 0, 1, 2},
-        {3, 0, 2, 1},
-        {3, 2, 0, 1},
-        {3, 2, 1, 0},
-    };
 
     uint64_t total_elements = 1;
     for (uint64_t dimension : dimensions) {
@@ -1070,23 +1035,18 @@ TEST(CubArgReduction, EveryLegalFourRunCompositionOrderPreservesTieAndNaNOrigina
     };
     const float nan = std::numeric_limits<float>::quiet_NaN();
     // Both NaNs belong to retained coordinate (0,0,0), but have different original flattened reduction indices.
-    // Every physical elimination order must therefore propagate the lower original NaN index identically.
+    // The planned pass order must propagate the lower original NaN index.
     values[linear_index({0, 0, 1, 0, 0, 0, 1})] = nan;
     values[linear_index({1, 0, 0, 0, 1, 0, 0})] = nan;
 
     Tensor input = makeGpuTensor(values, dimensions, stream);
     for (CubArgReductionOp op : {CubArgReductionOp::ArgMin, CubArgReductionOp::ArgMax}) {
         const DenseArgReference reference = referenceDenseAxes(values, dimensions, axes, op);
-        CubArgReduction reduction(op, axes, fp32ValueAndUint32Index());
-        for (const std::vector<uint32_t>& run_order : run_orders) {
-            const auto plan = CubArgReduction::analyzeDenseCompositionPlanForRunOrder(dimensions, axes, run_order);
-            ASSERT_TRUE(plan.has_value());
-            auto stamped = reduction.stampComposedDenseWithPlan(input, plan.value(), stream);
-            ASSERT_EQ(stamped->getPath(), CubReductionPath::ComposedDense);
-            stamped->run();
-            stream.synchronize();
-            expectArgOutputs(stamped, reference.values, reference.indices, stream);
-        }
+        auto stamped = CubArgReduction(op, axes, fp32ValueAndUint32Index()).stamp(input, stream);
+        ASSERT_EQ(stamped->getPath(), CubReductionPath::ComposedDense);
+        stamped->run();
+        stream.synchronize();
+        expectArgOutputs(stamped, reference.values, reference.indices, stream);
     }
 }
 
