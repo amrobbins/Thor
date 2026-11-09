@@ -47,8 +47,10 @@ enum class DenseReductionSelectionKind : uint8_t {
     Fp32KR = 4,  // 1178: reserved for the FP32 R / KR selector
     F16RK = 5,   // 1236: reserved for the FP16 / BF16 RK selector (phase 5)
     F16KR = 6,   // 1236: F16KR::F16KRSelection (FP16 / BF16 R / KR sites; the key holds the input dtype)
+    RaggedKR = 7,  // 1264: reserved for the ragged KR selector (plans/Thor_Ragged_Reduction_Plan_2026-11-06.md)
+    RaggedRK = 8,  // 1264: reserved for the ragged RK selector
 };
-inline constexpr size_t DenseReductionSelectionKindCount = 7;  // kinds are indexed 1..Count-1
+inline constexpr size_t DenseReductionSelectionKindCount = 9;  // kinds are indexed 1..Count-1
 
 [[nodiscard]] constexpr const char* denseReductionSelectionKindName(DenseReductionSelectionKind kind) {
     switch (kind) {
@@ -58,6 +60,8 @@ inline constexpr size_t DenseReductionSelectionKindCount = 7;  // kinds are inde
         case DenseReductionSelectionKind::Fp32KR: return "fp32_kr";
         case DenseReductionSelectionKind::F16RK: return "f16_rk";
         case DenseReductionSelectionKind::F16KR: return "f16_kr";
+        case DenseReductionSelectionKind::RaggedKR: return "ragged_kr";
+        case DenseReductionSelectionKind::RaggedRK: return "ragged_rk";
     }
     return "unknown";
 }

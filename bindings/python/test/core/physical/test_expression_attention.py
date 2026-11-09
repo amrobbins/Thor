@@ -476,90 +476,6 @@ def test_composed_attention_projection_biases_lower_to_matmul_bias_epilogues_wit
     assert "FusedKernel" not in kinds
 
 
-@pytest.mark.cuda
-def test_packed_qkv_attention_projection_biases_lower_to_matmul_bias_epilogues_without_fused_adds():
-    dtype = thor.DataType.fp16
-    batch = 2
-    sequence = 4
-    input_features = 32
-    query_heads = 4
-    kv_heads = 2
-    qk_dim = 16
-    v_dim = 16
-    output_features = 48
-
-    q_width = query_heads * qk_dim
-    k_width = kv_heads * qk_dim
-    v_width = kv_heads * v_dim
-    qkv_width = q_width + k_width + v_width
-    merged_width = query_heads * v_dim
-
-    x = ex.input("x")
-    qkv_weights = ex.input("qkv_weights")
-    qkv_bias = ex.input("qkv_bias")
-    output_weights = ex.input("output_weights")
-    output_bias = ex.input("output_bias")
-
-    flat = x.reshape([batch * sequence, input_features])
-    qkv = ex.matmul(flat, qkv_weights, compute_dtype=thor.DataType.fp32, output_dtype=dtype) + qkv_bias
-
-    q = qkv.strided_view(
-        [batch, sequence, query_heads, qk_dim],
-        [sequence * qkv_width, qkv_width, qk_dim, 1],
-        0,
-    ).with_output_dtype(dtype)
-    k = qkv.strided_view(
-        [batch, sequence, kv_heads, qk_dim],
-        [sequence * qkv_width, qkv_width, qk_dim, 1],
-        q_width,
-    ).with_output_dtype(dtype)
-    v = qkv.strided_view(
-        [batch, sequence, kv_heads, v_dim],
-        [sequence * qkv_width, qkv_width, v_dim, 1],
-        q_width + k_width,
-    ).with_output_dtype(dtype)
-
-    attn = ex.scaled_dot_product_attention(
-        q,
-        k,
-        v,
-        q_layout=AttentionTensorLayout.bshd,
-        k_layout=AttentionTensorLayout.bshd,
-        v_layout=AttentionTensorLayout.bshd,
-        o_layout=AttentionTensorLayout.bshd,
-        attention_scale=0.7 / math.sqrt(float(qk_dim)),
-        output_dtype=dtype,
-        compute_dtype=thor.DataType.fp32,
-    ).with_output_dtype(dtype)
-    merged = attn.reshape([batch * sequence, merged_width])
-    out = (ex.matmul(merged, output_weights, compute_dtype=thor.DataType.fp32, output_dtype=dtype) +
-           output_bias).reshape([batch, sequence, output_features])
-    eq = ex.compile(out, device_num=0)
-
-    rng = np.random.default_rng(9017)
-    storage_dtype = _numpy_storage_dtype(dtype)
-    stream = Stream(gpu_num=0)
-    inputs_gpu = {
-        "x":
-            _host_to_gpu(
-                rng.normal(0.0, 0.3, size=(batch, sequence, input_features)).astype(storage_dtype), dtype, stream),
-        "qkv_weights":
-            _host_to_gpu(rng.normal(0.0, 0.2, size=(input_features, qkv_width)).astype(storage_dtype), dtype, stream),
-        "qkv_bias":
-            _host_to_gpu(rng.normal(0.0, 0.05, size=(qkv_width,)).astype(storage_dtype), dtype, stream),
-        "output_weights":
-            _host_to_gpu(
-                rng.normal(0.0, 0.2, size=(merged_width, output_features)).astype(storage_dtype), dtype, stream),
-        "output_bias":
-            _host_to_gpu(rng.normal(0.0, 0.05, size=(output_features,)).astype(storage_dtype), dtype, stream),
-    }
-
-    assert eq.output_shape(inputs_gpu) == [batch, sequence, output_features]
-    kinds = eq._debug_stage_kinds(inputs_gpu)
-    assert sum(1 for kind in kinds if kind.startswith("Matmul")) == 2
-    assert kinds.count("Attention") == 1
-    assert "FusedKernel" not in kinds
-
 
 @pytest.mark.cuda
 def test_expression_reshape_inputs_to_attention_stage_are_metadata_aliases_not_fused_kernels():
@@ -699,182 +615,6 @@ def test_attention_dense_layout_contract_matches_reference_for_mha_gqa_mqa(
     got = _copy_to_host(stamped.output(), dtype, stream)
     _assert_close(got, expected_storage, dtype)
 
-
-@pytest.mark.cuda
-def test_attention_bshd_strided_packed_qkv_view_backward_scatter_add_rejects_standalone_stamp():
-    dtype = thor.DataType.fp16
-    upstream_name = "__grad_output"
-    batch = 2
-    sequence = 3
-    query_heads = 4
-    kv_heads = 2
-    qk_dim = 16
-    v_dim = 16
-    scale = 0.61 / math.sqrt(float(qk_dim))
-
-    q_width = query_heads * qk_dim
-    k_width = kv_heads * qk_dim
-    v_width = kv_heads * v_dim
-    total_width = q_width + k_width + v_width
-
-    qkv = ex.input("qkv")
-    q = qkv.strided_view(
-        [batch, sequence, query_heads, qk_dim],
-        [sequence * total_width, total_width, qk_dim, 1],
-        0,
-    )
-    k = qkv.strided_view(
-        [batch, sequence, kv_heads, qk_dim],
-        [sequence * total_width, total_width, qk_dim, 1],
-        q_width,
-    )
-    v = qkv.strided_view(
-        [batch, sequence, kv_heads, v_dim],
-        [sequence * total_width, total_width, v_dim, 1],
-        q_width + k_width,
-    )
-    attn = ex.scaled_dot_product_attention(
-        q,
-        k,
-        v,
-        q_layout=AttentionTensorLayout.bshd,
-        k_layout=AttentionTensorLayout.bshd,
-        v_layout=AttentionTensorLayout.bshd,
-        o_layout=AttentionTensorLayout.bshd,
-        attention_scale=scale,
-        output_dtype=dtype,
-        compute_dtype=thor.DataType.fp32,
-    )
-    fwd_eq = ex.compile(attn, device_num=0)
-    bwd_eq = fwd_eq.compile_backward(["qkv"], error_input_name=upstream_name)
-    assert bwd_eq.output_names() == ["qkv_grad"]
-
-    q_np, k_np, v_np = _attention_inputs(
-        batch=batch,
-        query_heads=query_heads,
-        kv_heads=kv_heads,
-        query_len=sequence,
-        kv_len=sequence,
-        qk_dim=qk_dim,
-        v_dim=v_dim,
-        dtype=dtype,
-    )
-    q_storage = _pack_bshd_dense_storage(q_np)
-    k_storage = _pack_bshd_dense_storage(k_np)
-    v_storage = _pack_bshd_dense_storage(v_np)
-
-    qkv_np = np.zeros((batch * sequence, total_width), dtype=_numpy_storage_dtype(dtype))
-    qkv_np[:, 0:q_width] = q_storage.reshape(batch * sequence, q_width)
-    qkv_np[:, q_width:q_width + k_width] = k_storage.reshape(batch * sequence, k_width)
-    qkv_np[:, q_width + k_width:] = v_storage.reshape(batch * sequence, v_width)
-
-    rng = np.random.default_rng(271828)
-    dO_np = rng.normal(0.0, 0.25, size=(batch, query_heads, sequence, v_dim)).astype(_numpy_storage_dtype(dtype))
-    dO_storage = _pack_bshd_dense_storage(dO_np)
-    expected_dq, expected_dk, expected_dv = _attention_backward_reference(q_np, k_np, v_np, dO_np, scale=scale)
-
-    expected_qkv_grad = np.zeros((batch * sequence, total_width), dtype=np.float32)
-    expected_qkv_grad[:, 0:q_width] = _pack_bshd_dense_storage(expected_dq).reshape(batch * sequence, q_width)
-    expected_qkv_grad[:, q_width:q_width + k_width] = _pack_bshd_dense_storage(expected_dk).reshape(
-        batch * sequence, k_width)
-    expected_qkv_grad[:, q_width + k_width:] = _pack_bshd_dense_storage(expected_dv).reshape(batch * sequence, v_width)
-    expected_qkv_grad = _cast_reference_to_storage_dtype(expected_qkv_grad, dtype)
-
-    stream = Stream(gpu_num=0)
-    inputs_gpu = {
-        "qkv": _host_to_gpu(qkv_np, dtype, stream),
-        upstream_name: _host_to_gpu(dO_storage, dtype, stream),
-    }
-
-    assert bwd_eq.output_shapes(inputs_gpu) == {
-        "qkv_grad": [batch * sequence, total_width]
-    }
-
-    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
-
-
-@pytest.mark.cuda
-def test_attention_bshd_strided_packed_qkv_views_match_reference_without_split_kernel():
-    dtype = thor.DataType.fp16
-    batch = 2
-    sequence = 3
-    query_heads = 4
-    kv_heads = 2
-    qk_dim = 16
-    v_dim = 16
-    scale = 0.73 / math.sqrt(float(qk_dim))
-
-    q_width = query_heads * qk_dim
-    k_width = kv_heads * qk_dim
-    v_width = kv_heads * v_dim
-    total_width = q_width + k_width + v_width
-
-    qkv = ex.input("qkv")
-    q = qkv.strided_view(
-        [batch, sequence, query_heads, qk_dim],
-        [sequence * total_width, total_width, qk_dim, 1],
-        0,
-    )
-    k = qkv.strided_view(
-        [batch, sequence, kv_heads, qk_dim],
-        [sequence * total_width, total_width, qk_dim, 1],
-        q_width,
-    )
-    v = qkv.strided_view(
-        [batch, sequence, kv_heads, v_dim],
-        [sequence * total_width, total_width, v_dim, 1],
-        q_width + k_width,
-    )
-    attn = ex.scaled_dot_product_attention(
-        q,
-        k,
-        v,
-        q_layout=AttentionTensorLayout.bshd,
-        k_layout=AttentionTensorLayout.bshd,
-        v_layout=AttentionTensorLayout.bshd,
-        o_layout=AttentionTensorLayout.bshd,
-        attention_scale=scale,
-        output_dtype=dtype,
-        compute_dtype=thor.DataType.fp32,
-    )
-    eq = ex.compile(attn, device_num=0)
-
-    q_np, k_np, v_np = _attention_inputs(
-        batch=batch,
-        query_heads=query_heads,
-        kv_heads=kv_heads,
-        query_len=sequence,
-        kv_len=sequence,
-        qk_dim=qk_dim,
-        v_dim=v_dim,
-        dtype=dtype,
-    )
-    q_storage = _pack_bshd_dense_storage(q_np).reshape(batch, sequence, q_width)
-    k_storage = _pack_bshd_dense_storage(k_np).reshape(batch, sequence, k_width)
-    v_storage = _pack_bshd_dense_storage(v_np).reshape(batch, sequence, v_width)
-
-    qkv_np = np.zeros((batch, sequence, total_width), dtype=_numpy_storage_dtype(dtype))
-    qkv_np[:, :, 0:q_width] = q_storage
-    qkv_np[:, :, q_width:q_width + k_width] = k_storage
-    qkv_np[:, :, q_width + k_width:] = v_storage
-    qkv_np = np.ascontiguousarray(qkv_np.reshape(batch * sequence, total_width))
-
-    expected = _pack_bshd_dense_storage(
-        _cast_reference_to_storage_dtype(_attention_reference(q_np, k_np, v_np, scale=scale), dtype))
-
-    stream = Stream(gpu_num=0)
-    inputs_gpu = {
-        "qkv": _host_to_gpu(qkv_np, dtype, stream)
-    }
-
-    assert eq.output_shape(inputs_gpu) == [batch, sequence, query_heads, v_dim]
-    # Q/K/V are storage aliases into one packed input, so no split/materialize stage should be planned.
-    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
-
-    stamped = eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = _copy_to_host(stamped.output(), dtype, stream)
-    _assert_close(got, expected, dtype)
 
 
 @pytest.mark.cuda
@@ -1831,6 +1571,37 @@ def test_attention_forward_ragged_offsets_plans_single_stage_and_validates_shape
     assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
     stamped = eq.stamp(inputs_gpu, stream)
     assert list(stamped.output().dimensions) == [2, 6, 2, 16]
+
+
+@pytest.mark.cuda
+def test_attention_rejects_tensor_view_operands():
+    # q/k/v sliced out of one packed buffer are strided views. cuDNN attention would read them, and
+    # write dQ/dK/dV, with the view's row pitch, so attention operands must be dense tensors.
+    dtype = thor.DataType.fp16
+    batch, sequence, heads, head_dim = 2, 8, 2, 16
+    width = 3 * heads * head_dim
+
+    qkv = ex.input("qkv")
+    views = [
+        qkv.strided_view([batch, sequence, heads, head_dim], [sequence * width, width, head_dim, 1], i * heads * head_dim)
+        for i in range(3)
+    ]
+    attn = ex.scaled_dot_product_attention(
+        *views,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(attn, device_num=0)
+
+    stream = Stream(gpu_num=0)
+    qkv_np = np.zeros((batch * sequence, width), dtype=_numpy_storage_dtype(dtype))
+    inputs_gpu = {"qkv": _host_to_gpu(qkv_np, dtype, stream)}
+    with pytest.raises(RuntimeError, match="must be a dense, 16-byte-aligned tensor"):
+        eq.stamp(inputs_gpu, stream)
 
 
 @pytest.mark.cuda

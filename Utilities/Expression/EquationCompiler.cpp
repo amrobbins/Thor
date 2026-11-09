@@ -7670,7 +7670,7 @@ static std::optional<InPlaceRopeMaterializationCandidate> classifySplitProjectio
         return std::nullopt;
     }
     // This optimization mutates the projection output in-place. Only use it for private split-Q/K projection
-    // materializations whose dense reshape is the sole consumer. Bias/GEMM and packed-QKV strided views intentionally
+    // materializations whose dense reshape is the sole consumer. Bias/GEMM projections and strided views intentionally
     // fall back to the normal out-of-place grouped RoPE path.
     if (source.op != ExprOp::MATMUL || node_use_counts.at(reshape.lhs) != 1) {
         return std::nullopt;
@@ -8273,9 +8273,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 if (dep >= expr.nodes.size()) {
                     throw std::runtime_error("Grouped RoPE dependency node index out of range.");
                 }
-                // Packed-QKV views are intentionally not part of this optimization path. Fused kernels still
-                // cannot consume non-dense STRIDED_VIEW dependencies directly; packed QKV remains a dormant
-                // experimental path and should not receive split-path RoPE upgrades by accident.
+                // Grouped RoPE materialization only covers dense Q/K producers. A STRIDED_VIEW dependency
+                // keeps the ordinary path (attention rejects non-dense operands at stamp time anyway).
                 if (expr.nodes[dep].op == ExprOp::STRIDED_VIEW) {
                     return {};
                 }

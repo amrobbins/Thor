@@ -1,7 +1,8 @@
 #pragma once
 
 // Host reference for FP8 ARG (ARG-A1 tests and benchmarks/Fp8ArgKeyMicrobenchmark.cu): independent FP8 decoding and
-// the FP32 candidate rules of ArgMinimumCandidateFp32 / ArgMaximumCandidateFp32 (CubArgReductionOperation.cuh):
+// the FP32 candidate rules of ArgMinimumCandidateFp32 / ArgMaximumCandidateFp32 (CubArgReductionOperation.cuh, deleted
+// in 1330 with the offset-segmented ARG kernels; the retained ARG keys keep the rules):
 // NaNs propagate, the lowest index wins ties, including NaN-NaN and -0/+0 ties.
 
 #include <cmath>

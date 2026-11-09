@@ -1003,8 +1003,9 @@ TEST(ExpressionDTypeResolution, Fp8MixedWithFp16PreservesFp16StorageAndComputePr
                 ASSERT_TRUE(node.compute_dtype.has_value()) << output.name;
                 ASSERT_TRUE(node.backward_compute_dtype.has_value()) << output.name;
                 EXPECT_EQ(node.output_dtype.value(), DataType::FP16) << output.name;
-                EXPECT_EQ(node.compute_dtype.value(), DataType::FP16) << output.name;
-                EXPECT_EQ(node.backward_compute_dtype.value(), DataType::FP16) << output.name;
+                // Fused pointwise math on low-precision storage computes in FP32 by default.
+                EXPECT_EQ(node.compute_dtype.value(), DataType::FP32) << output.name;
+                EXPECT_EQ(node.backward_compute_dtype.value(), DataType::FP32) << output.name;
             }
         }
     }
@@ -1019,7 +1020,7 @@ TEST(ExpressionDTypeResolution, Fp8MixedWithFp16PreservesFp16StorageAndComputePr
     ASSERT_TRUE(mixed_node.output_dtype.has_value());
     ASSERT_TRUE(mixed_node.compute_dtype.has_value());
     EXPECT_EQ(mixed_node.output_dtype.value(), DataType::BF16);
-    EXPECT_EQ(mixed_node.compute_dtype.value(), DataType::BF16);
+    EXPECT_EQ(mixed_node.compute_dtype.value(), DataType::FP32);
 }
 
 TEST(ExpressionDTypeResolution, HomogeneousExactTensorPromotionPreservesPassthroughDType) {
@@ -1049,7 +1050,7 @@ TEST(ExpressionDTypeResolution, MixedFp8MultiInputPromotionIsOrderIndependent) {
               DataType::FP32);
 }
 
-TEST(ExpressionDTypeResolution, MixedFp8PointwiseAndWhereDefaultToBf16StorageAndCompute) {
+TEST(ExpressionDTypeResolution, MixedFp8PointwiseAndWhereDefaultToBf16StorageAndFp32Compute) {
     const Expression x = Expression::input("x", DataType::FP8_E4M3, DataType::FP8_E4M3);
     const Expression y = Expression::input("y", DataType::FP8_E5M2, DataType::FP8_E5M2);
     const Expression condition = x.greaterThan(Expression::constantScalar(0.0));
@@ -1066,12 +1067,14 @@ TEST(ExpressionDTypeResolution, MixedFp8PointwiseAndWhereDefaultToBf16StorageAnd
         ASSERT_TRUE(node.output_dtype.has_value()) << output.name;
         ASSERT_TRUE(node.compute_dtype.has_value()) << output.name;
         EXPECT_EQ(node.output_dtype.value(), DataType::BF16) << output.name;
-        EXPECT_EQ(node.compute_dtype.value(), DataType::BF16) << output.name;
+        EXPECT_EQ(node.compute_dtype.value(), DataType::FP32) << output.name;
     }
 }
 
-TEST(ExpressionDTypeResolution, Fp8PointwiseDefaultsToBf16ComputeAndBackwardCompute) {
+TEST(ExpressionDTypeResolution, Fp8PointwiseDefaultsToFp32ComputeAndBackwardCompute) {
     for (const DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        // The storage-level default and an explicit FP8 compute request still map
+        // to BF16; only the fused pointwise default is FP32.
         EXPECT_EQ(defaultComputeDType(dtype), DataType::BF16);
         EXPECT_EQ(toSupportedComputeDType(ExprOp::ADD, dtype), DataType::BF16);
         EXPECT_EQ(toSupportedComputeDType(ExprOp::MUL, dtype), DataType::BF16);
@@ -1089,10 +1092,45 @@ TEST(ExpressionDTypeResolution, Fp8PointwiseDefaultsToBf16ComputeAndBackwardComp
             found_mul = true;
             ASSERT_TRUE(node.compute_dtype.has_value());
             ASSERT_TRUE(node.backward_compute_dtype.has_value());
-            EXPECT_EQ(node.compute_dtype.value(), DataType::BF16);
-            EXPECT_EQ(node.backward_compute_dtype.value(), DataType::BF16);
+            EXPECT_EQ(node.compute_dtype.value(), DataType::FP32);
+            EXPECT_EQ(node.backward_compute_dtype.value(), DataType::FP32);
         }
         EXPECT_TRUE(found_mul);
+    }
+}
+
+TEST(ExpressionDTypeResolution, LowPrecisionPointwiseDefaultsToFp32ComputeButHonoursExplicitRequests) {
+    for (const DataType dtype : {DataType::BF16, DataType::FP16, DataType::FP8_E4M3}) {
+        const Expression x = Expression::input("x", dtype, dtype);
+        const Expression y = Expression::input("y", dtype, dtype);
+        const Expression condition = x.greaterThan(y);
+        PhysicalOutputs outputs = Expression::outputs({
+            {"chain", ((x * y + x).exp() / y).withOutputDType(dtype)},
+            {"selected", Expression::where(condition, x * y, x + y).withOutputDType(dtype)},
+            {"explicit", (x * y).withComputeDType(dtype == DataType::FP16 ? DataType::FP16 : DataType::BF16)},
+        }).physicalOutputs();
+        resolveOutputsDTypesInPlace(outputs, {dtype, dtype});
+
+        for (const ExprNode& node : outputs.expr->nodes) {
+            if (node.op == ExprOp::INPUT || node.op == ExprOp::SCALAR_FP) {
+                continue;
+            }
+            ASSERT_TRUE(node.compute_dtype.has_value());
+            if (node.op == ExprOp::GREATER) {
+                // Comparisons see FP32 intermediates without rounding them first.
+                EXPECT_EQ(node.compute_dtype.value(), DataType::FP32) << TensorDescriptor::getElementTypeName(dtype);
+            }
+        }
+        for (const NamedOutput& output : outputs.outputs) {
+            const ExprNode& node = outputs.expr->nodes.at(output.node_idx);
+            ASSERT_TRUE(node.output_dtype.has_value() && node.compute_dtype.has_value()) << output.name;
+            if (output.name == "explicit") {
+                EXPECT_EQ(node.compute_dtype.value(), dtype == DataType::FP16 ? DataType::FP16 : DataType::BF16) << output.name;
+            } else {
+                EXPECT_EQ(node.output_dtype.value(), dtype) << output.name;
+                EXPECT_EQ(node.compute_dtype.value(), DataType::FP32) << output.name;
+            }
+        }
     }
 }
 
@@ -1216,7 +1254,7 @@ TEST(ExpressionDTypeResolution, Fp8PointwiseExplicitFp16ComputeOverrideRemainsAv
     }
 }
 
-TEST(ExpressionDTypeResolution, Fp8PointwiseAutodiffDefaultsToBf16Compute) {
+TEST(ExpressionDTypeResolution, Fp8PointwiseAutodiffDefaultsToFp32Compute) {
     for (const DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
         const Expression x = Expression::input("x", dtype, dtype);
         PhysicalOutputs forward = Expression::outputs({{"y", x * x}}).physicalOutputs();
@@ -1242,7 +1280,7 @@ TEST(ExpressionDTypeResolution, Fp8PointwiseAutodiffDefaultsToBf16Compute) {
             }
             ++multiply_count;
             ASSERT_TRUE(node.compute_dtype.has_value());
-            EXPECT_EQ(node.compute_dtype.value(), DataType::BF16);
+            EXPECT_EQ(node.compute_dtype.value(), DataType::FP32);
         }
         EXPECT_GT(multiply_count, 0u);
     }
@@ -1321,7 +1359,7 @@ TEST(EquationCompiler, Bf16ReductionPreservesProducerAndReductionInputStorageDty
         if (output.name == "trunk") {
             EXPECT_EQ(output_node.output_dtype.value(), DataType::BF16);
             ASSERT_TRUE(output_node.compute_dtype.has_value());
-            EXPECT_EQ(output_node.compute_dtype.value(), DataType::BF16);
+            EXPECT_EQ(output_node.compute_dtype.value(), DataType::FP32);
             found_bf16_trunk = true;
         }
     }
@@ -1338,9 +1376,11 @@ TEST(EquationCompiler, ReductionBoundaryPropagatesProducerComputePolicyWithoutLe
     auto y = Expression::input("y");
 
     auto trunk = (x + 1.0) * (y - 0.5);
+    // Fused pointwise math defaults to FP32 compute; request FP16 explicitly so the
+    // test can observe that reduction-side widening does not leak into it.
     auto outputs = Expression::outputs({
         {"sum", trunk.reduce_sum({2}, {})},
-        {"pointwise", x + 2.0},
+        {"pointwise", (x + 2.0).withComputeDType(DataType::FP16)},
     });
 
     auto physical = outputs.physicalOutputs();
@@ -1472,11 +1512,16 @@ TEST(CudaSourceEmitter, WideScalarFlatPreservesAlignedFastPathAndHandlesUnaligne
     const std::string source = CudaSourceEmitter::emitFlat(stages[0], "wide_scalar_alignment_guard");
     EXPECT_NE(source.find("const float* in0"), std::string::npos);
     EXPECT_NE(source.find("float* out0"), std::string::npos);
-    EXPECT_NE(source.find("if (full_chunk && chunk_aligned)"), std::string::npos);
-    EXPECT_NE(source.find("*reinterpret_cast<const float4*>(in0 + base)"), std::string::npos);
-    EXPECT_NE(source.find("*reinterpret_cast<float4*>(out0 + base)"), std::string::npos);
-    EXPECT_NE(source.find("in0[lane_idx_0]"), std::string::npos);
-    EXPECT_NE(source.find("out0[lane_idx_0]"), std::string::npos);
+    EXPECT_NE(source.find("const bool vector_packet = packets_aligned && scalar_base + 4U <= active_numel"), std::string::npos);
+    EXPECT_NE(source.find("in0_chunk = *reinterpret_cast<const float4*>(in0 + scalar_base)"), std::string::npos);
+    EXPECT_NE(source.find("*reinterpret_cast<float4*>(out0 + scalar_base) = out0_chunk"), std::string::npos);
+    EXPECT_NE(source.find("reinterpret_cast<float*>(&in0_chunk)[0] = in0[scalar_base + 0]"), std::string::npos);
+    EXPECT_NE(source.find("out0[scalar_base + 0] = reinterpret_cast<const float*>(&out0_chunk)[0]"), std::string::npos);
+    // The expression body is emitted once per lane, not once for the vector path
+    // and again for the unaligned/tail path.
+    size_t abs_calls = 0;
+    for (size_t pos = source.find("fabsf("); pos != std::string::npos; pos = source.find("fabsf(", pos + 1)) ++abs_calls;
+    EXPECT_EQ(abs_calls, 4U);
 }
 
 TEST(CudaSourceEmitter, RaggedValuewiseKernelReadsOffsetsBatchElementOnDevice) {
@@ -1505,10 +1550,10 @@ TEST(CudaSourceEmitter, RaggedValuewiseKernelReadsOffsetsBatchElementOnDevice) {
         "active_values_raw = static_cast<unsigned long long>(in" + std::to_string(offsets_input_slot) + "[4ULL])";
     EXPECT_NE(source.find(active_count_load), std::string::npos);
     EXPECT_NE(source.find("runtime_numel_u64 = active_values * 1ULL"), std::string::npos);
-    EXPECT_NE(source.find("packet_count = (runtime_numel + 3U) / 4U"), std::string::npos);
-    EXPECT_NE(source.find("const float4 in"), std::string::npos);
+    EXPECT_NE(source.find("packet_count = (active_numel + 3U) / 4U"), std::string::npos);
+    EXPECT_NE(source.find("float4 in"), std::string::npos);
     EXPECT_NE(source.find("float4 out0_chunk"), std::string::npos);
-    EXPECT_NE(source.find("packet_grid_stride"), std::string::npos);
+    EXPECT_NE(source.find("idx += grid_stride"), std::string::npos);
 }
 
 TEST(CudaSourceEmitter, RaggedBf16ValuewiseUsesSixteenBytePacketsAndKeepsPartitionMetadataScalar) {
@@ -1536,15 +1581,21 @@ TEST(CudaSourceEmitter, RaggedBf16ValuewiseUsesSixteenBytePacketsAndKeepsPartiti
     ASSERT_NE(offsets_input_slot, UINT32_MAX);
 
     const std::string source = CudaSourceEmitter::emitFlat(stages[0], "ragged_bf16_vectorized");
-    EXPECT_NE(source.find("const float4* in" + std::to_string(values_input_slot)), std::string::npos);
+    const std::string values = "in" + std::to_string(values_input_slot);
+    // Scalar-typed ABI: a value tensor may be a storage alias that is element
+    // aligned but not packet aligned.
+    EXPECT_NE(source.find("const __nv_bfloat16* " + values), std::string::npos);
+    EXPECT_EQ(source.find("const float4* in"), std::string::npos);
     EXPECT_NE(source.find("const unsigned int* in" + std::to_string(offsets_input_slot)), std::string::npos);
-    EXPECT_NE(source.find("packet_scalars = 8"), std::string::npos);
-    EXPECT_NE(source.find("for (; idx < packet_count; idx += grid_stride)"), std::string::npos);
-    EXPECT_NE(source.find("const float4 in" + std::to_string(values_input_slot) + "_chunk = in" +
-                          std::to_string(values_input_slot) + "[idx]"),
-              std::string::npos);
-    EXPECT_NE(source.find("full_active_packet"), std::string::npos);
-    EXPECT_NE(source.find("reinterpret_cast<__nv_bfloat16*>(out0)[scalar_base"), std::string::npos);
+    EXPECT_NE(source.find("packet_count = (active_numel + 7U) / 8U"), std::string::npos);
+    EXPECT_NE(source.find("idx < packet_count; idx += grid_stride"), std::string::npos);
+    EXPECT_NE(source.find("const bool packets_aligned = "), std::string::npos);
+    EXPECT_NE(source.find("const bool vector_packet = packets_aligned && scalar_base + 8U <= active_numel"), std::string::npos);
+    EXPECT_NE(source.find(values + "_chunk = *reinterpret_cast<const float4*>(" + values + " + scalar_base)"), std::string::npos);
+    EXPECT_NE(source.find("*reinterpret_cast<float4*>(out0 + scalar_base) = out0_chunk"), std::string::npos);
+    // Partial / misaligned packets use masked scalar loads and stores; the
+    // expression body itself is emitted once.
+    EXPECT_NE(source.find("out0[scalar_base + 7] = reinterpret_cast<const __nv_bfloat16*>(&out0_chunk)[7]"), std::string::npos);
 }
 
 TEST(CudaSourceEmitter, RaggedLowPrecisionStorageWithFp32ComputeUsesWideScalarPackets) {
@@ -1566,11 +1617,11 @@ TEST(CudaSourceEmitter, RaggedLowPrecisionStorageWithFp32ComputeUsesWideScalarPa
         EXPECT_EQ(CudaSourceEmitter::flatElementsPerThread(stages[0]), 8U);
 
         const std::string source = CudaSourceEmitter::emitFlat(stages[0], "ragged_lowp_fp32_compute_vectorized");
-        EXPECT_NE(source.find("packet_count = (runtime_numel + 7U) / 8U"), std::string::npos);
-        EXPECT_NE(source.find("const float4 in0_chunk = *reinterpret_cast<const float4*>(in0 + base)"), std::string::npos);
+        EXPECT_NE(source.find("packet_count = (active_numel + 7U) / 8U"), std::string::npos);
+        EXPECT_NE(source.find("in0_chunk = *reinterpret_cast<const float4*>(in0 + scalar_base)"), std::string::npos);
         EXPECT_NE(source.find("float4 out0_chunk"), std::string::npos);
         EXPECT_NE(source.find("const float t"), std::string::npos);
-        EXPECT_NE(source.find("packet_grid_stride"), std::string::npos);
+        EXPECT_NE(source.find("idx += grid_stride"), std::string::npos);
     }
 }
 
@@ -1596,10 +1647,10 @@ TEST(CudaSourceEmitter, RaggedPhysicalBf16InputPromotedToFp32StillUsesWidePhysic
 
     const std::string source = CudaSourceEmitter::emitFlat(stages[0], "ragged_physical_bf16_logical_fp32");
     EXPECT_NE(source.find("const __nv_bfloat16* in0"), std::string::npos);
-    EXPECT_NE(source.find("const unsigned long long in0_chunk"), std::string::npos);
+    EXPECT_NE(source.find("unsigned long long in0_chunk{}"), std::string::npos);
     EXPECT_NE(source.find("float4 out0_chunk"), std::string::npos);
     EXPECT_NE(source.find("const float t"), std::string::npos);
-    EXPECT_NE(source.find("packet_count = (runtime_numel + 3U) / 4U"), std::string::npos);
+    EXPECT_NE(source.find("packet_count = (active_numel + 3U) / 4U"), std::string::npos);
 }
 
 TEST(CudaSourceEmitter, RaggedLowPrecisionFp32StorageBoundaryUsesFourScalarPackets) {
@@ -1620,9 +1671,9 @@ TEST(CudaSourceEmitter, RaggedLowPrecisionFp32StorageBoundaryUsesFourScalarPacke
     EXPECT_EQ(CudaSourceEmitter::flatElementsPerThread(stages[0]), 4U);
 
     const std::string source = CudaSourceEmitter::emitFlat(stages[0], "ragged_lowp_to_fp32_vectorized");
-    EXPECT_NE(source.find("const unsigned long long in0_chunk"), std::string::npos);
+    EXPECT_NE(source.find("unsigned long long in0_chunk{}"), std::string::npos);
     EXPECT_NE(source.find("float4 out0_chunk"), std::string::npos);
-    EXPECT_NE(source.find("packet_count = (runtime_numel + 3U) / 4U"), std::string::npos);
+    EXPECT_NE(source.find("packet_count = (active_numel + 3U) / 4U"), std::string::npos);
 }
 
 TEST(CudaSourceEmitter, RaggedMixedValuewiseUsesProvenFourScalarDenseMixedPackets) {
@@ -1642,11 +1693,11 @@ TEST(CudaSourceEmitter, RaggedMixedValuewiseUsesProvenFourScalarDenseMixedPacket
     EXPECT_EQ(CudaSourceEmitter::flatElementsPerThread(stages[0]), 4U);
 
     const std::string source = CudaSourceEmitter::emitFlat(stages[0], "ragged_mixed_vectorized");
-    EXPECT_NE(source.find("const unsigned long long in0_chunk"), std::string::npos);
-    EXPECT_NE(source.find("const float4 in1_chunk"), std::string::npos);
+    EXPECT_NE(source.find("unsigned long long in0_chunk{}"), std::string::npos);
+    EXPECT_NE(source.find("float4 in1_chunk{}"), std::string::npos);
     EXPECT_NE(source.find("float4 out0_chunk"), std::string::npos);
-    EXPECT_NE(source.find("packet_count = (runtime_numel + 3U) / 4U"), std::string::npos);
-    EXPECT_NE(source.find("packet_grid_stride"), std::string::npos);
+    EXPECT_NE(source.find("packet_count = (active_numel + 3U) / 4U"), std::string::npos);
+    EXPECT_NE(source.find("idx += grid_stride"), std::string::npos);
 }
 
 TEST(CudaSourceEmitter, RaggedValuewiseKernelReadsManagedActiveCountScalarAndSeparatesCacheIdentity) {

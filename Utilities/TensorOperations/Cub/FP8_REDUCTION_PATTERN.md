@@ -286,6 +286,8 @@ Decisions for every dtype (user, 2026-11-02):
 | FP32 tests | `CubReductionFp32RKTest`, `CubReductionFp32KRTest`, `CubReductionFp32RKSelectorTest`, `CubReductionFp32KRSelectorTest`, `Fp32RKCandidatesTest`, `Fp32KRRankerTest`, `CubReductionFp32RoutingTest`, `CubReductionElementWidthTest` |
 | FP16 / BF16 (section 9) | `F16RK/` (`F16RKCandidates.*`, `F16RKArgCandidates.*`, `F16RKStampAutotuner.*`, `F16RKRankerModel.h`), `F16KR/` (`F16KRStampAutotuner.*`, `F16KRRankerModel.h`); the 2-byte kernels are the FP8 / FP32 kernels' typed instantiations in the same TUs |
 | FP16 / BF16 tests | `CubReductionF16RKTest`, `CubReductionF16KRTest`, `CubReductionF16RKSelectorTest`, `CubReductionF16KRSelectorTest`, `F16RKCandidatesTest`, `F16KRRankerTest`, `CubReductionF16RoutingTest` |
+| Ragged (section 10) | `RaggedMergePath.h`, `RaggedKRWalk.h`, `RaggedRKWalk.h`, `RaggedKR*Kernels.cuh`, `RaggedRK*Kernels.cuh`, `CubRagged*.cu`, `RaggedStampAutotuner.{h,cpp}`; audit `benchmarks/RaggedReductionAudit.cpp` + `ragged_reduction_audit.py` |
+| Ragged tests | `RaggedMergePath`, `RaggedKRWalk`, `CubRaggedKR*`, `RaggedSelector`, `RaggedRouting`, `CubSegmented*` (`CubOffsetSegmentedReductionTest.cpp`), `RaggedExpression` |
 
 ## 8. FP32 (1174-1230)
 
@@ -428,3 +430,57 @@ The plan, its measurements and its decisions are in the project's FP16 / BF16 pl
 - **Line-rate decisions were measured on GDDR (sm_120).** Generic Pack's short-row result, and FP8's and FP32's,
   may not hold on HBM parts, where each SM needs several times the bandwidth.
 
+## 10. Ragged (offset-segmented) reductions (1262-1330)
+
+`CubSegmentedReduction` / `CubSegmentedArgReduction` (values `[N, D...]`, offsets `[B + 1]`) went through the same
+pattern after the dense dtypes: a small retained family, a contest at stamp, the one cache, no atomics. The plan, its
+logs and its decisions are in the project (`plans/Thor_Ragged_Reduction_Plan_2026-11-06.md` and the phase logs).
+
+### 10.1 What ragged has
+
+- **Merge-path partitioning instead of one owner per segment.** The legacy kernels gave each segment one thread,
+  warp or block, so a few long segments idled the GPU (0.03-0.06 TB/s median at >= 16 MiB, up to 3000x between length
+  distributions at one shape). Merge-path splits rows plus segment ends evenly over a persistent grid, so time depends
+  on (active rows, B, D, dtype) only; that is also what makes a stamp-time contest on synthetic offsets valid on the
+  runtime-offsets path, where nothing knows the lengths at stamp.
+- **Two families by row bytes, VALUE and ARG each,** for every dtype: ragged KR (rows under 16 bytes) and ragged RK
+  (rows of 16 bytes to 2 GiB, K tiled above 512 bytes; the kernels' row bytes and K tile offsets are 32-bit, and the
+  finisher takes at most 2^30 components). ARG uses the dense key words (`Fp8ArgKey`, `F16ArgKey`, `Fp32ArgKey`;
+  FP32 needs pair records). One kernel template per kernel for every input type; one object per family and dtype.
+- **Two launches, fixed order.** Each CTA writes at most a head and a tail record; the finisher combines them in CTA
+  order. Bit-identical run to run on one stamp. The finisher is a fixed cost (about 1.3-1.4 us), accepted in phase 2
+  over a single-kernel design that needs every CTA resident or an atomic ticket.
+- **Selection without a ranker or depth.** Three shapes per family, so every legal candidate is timed (9 rounds, one
+  trimmed at each end); the first in list order within 1% of the best wins, the 1% from the selector audit's
+  regret. Cache kinds `RaggedKR` / `RaggedRK`.
+- **Results (1325, RTX 5090, copy about 1.54 TB/s, >= 16 MiB p50):** 1.13 / 1.22 / 1.26 TB/s (E4M3 / FP16 / FP32),
+  22-44x the legacy kernels; distribution spread p90 1.07-1.31x.
+- **SASS (sm_120):** ragged retained 63 kernels, 3.36 MB; the deleted legacy kernels were 450 kernels, 4.03 MB.
+
+### 10.2 What ragged taught
+
+- **Remove the distribution axis before tuning.** A contest is only as good as its stand-in for the real input; under
+  one-owner-per-segment kernels no stand-in exists at stamp. Merge-path made uniform synthetic offsets carry over.
+- **With few candidates, time them all.** A depth selector earns its place only once the pool is several times larger
+  (user decision: unless the candidates more than triple).
+- **Pick the tie margin from the audit's regret,** not by feel (the selector audit: p90 regret 1.006-1.010).
+- **Accept a narrow regression to delete a catastrophic path.** Balanced long-segment cells, which suited the legacy
+  kernels, are 0.83-0.85x of legacy at the median; keeping legacy for them would have kept 1000x losses elsewhere.
+- **Limits are the kernels' integer widths, not round numbers.** The RK row limit went from 64 MiB to 2 GiB (1329)
+  once the 32-bit row and K tile arithmetic was checked; a site past it is an error, not a fallback.
+- **Typed views of byte storage need a flat UINT8 source** (`aliasByteStorageAs`), which the selector's contest
+  input and the misaligned-base tests both use.
+
+### 10.3 Cleanup (phase 9, 1330)
+
+- Deleted `CubReductionOffsetSegmented.cu`, `CubArgReductionOffsetSegmented.cu` (their CUB `DeviceSegmentedReduce`
+  instantiations and vector kernels) and `CubArgReductionOperation.cuh` (only they used it). A site no ragged family
+  runs throws at stamp. `ReductionSourceGuardTest` keeps them deleted; `dense_reducer_sass_size.py` has no
+  `Ragged legacy` owner.
+
+### 10.4 Open items left by ragged
+
+- **Balanced long segments:** 31-55 cells per dtype at >= 16 MiB below legacy (worst 0.53x); a tuning target.
+- **The fused value + index for segment MIN / MAX** (training reads the input twice), and reusing the partitioner for
+  segmented broadcast (the backward of `segment_sum`, `segment_softmax`).
+- **Measured on one GDDR GPU (sm_120),** as the dense line-rate decisions were.

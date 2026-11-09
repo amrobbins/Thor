@@ -228,7 +228,9 @@ struct LaunchGeometry {
         return "ragged_broadcast_scalar";
     }
     if (c.family == "broadcast" || c.family == "mixed_broadcast") {
-        return compiled.elements_per_thread > 1 ? "broadcast_vector" : "broadcast_scalar";
+        if (compiled.elements_per_thread == 8u) return "broadcast_vector8";
+        if (compiled.elements_per_thread == 4u) return "broadcast_vector4";
+        return compiled.elements_per_thread > 1 ? "broadcast_vector2" : "broadcast_scalar";
     }
     if (c.family == "indexed") {
         // Forward STRIDED_VIEW nodes are storage aliases in the compiled plan: by
@@ -788,6 +790,29 @@ class L2Evictor {
         const Expression x = typedInput("x", input_dtype);
         const Expression y = typedInput("y", input_dtype);
         return arithmeticBinary(x, y, output_dtype).transpose();
+    };
+    return c;
+}
+
+[[nodiscard]] CensusCase makeRopeCase(std::string name, DataType dtype, const std::vector<uint64_t>& shape, bool interleaved, bool with_bias) {
+    CensusCase c;
+    c.family = "rope";
+    c.name = std::move(name);
+    c.inputs = {{"x", dtype, shape, std::nullopt, false, std::nullopt}};
+    c.effective_input_dtypes = {dtype};
+    if (with_bias) {
+        c.inputs.push_back({"b", dtype, {shape.back()}, std::nullopt, false, std::nullopt});
+    }
+    c.output_dimensions = shape;
+    c.output_dtype = dtype;
+    c.build_output = [dtype, interleaved, with_bias] {
+        Expression x = typedInput("x", dtype);
+        if (with_bias) {
+            x = x + typedInput("b", dtype);
+        }
+        RotaryPositionEmbeddingOptions options;
+        options.interleaved = interleaved;
+        return x.rope(options).withOutputDType(dtype);
     };
     return c;
 }
@@ -1395,6 +1420,39 @@ class L2Evictor {
     cases.push_back(makeTransposeCase("transpose_dense_fp32", DataType::FP32, DataType::FP32, dense_shape));
     cases.push_back(makeTransposeCase("transpose_mixed_bf16_to_fp32", DataType::BF16, DataType::FP32, dense_shape));
 
+    // RoPE ([B, H, S, D] = [4, 32, 2048, 128]): index-aware broadcast launch, transcendental-heavy.
+    {
+        const std::vector<uint64_t> rope_shape{4, 32, 2048, 128};
+        cases.push_back(makeRopeCase("rope_half_bf16_b4_h32_s2048_d128", DataType::BF16, rope_shape, false, false));
+        cases.push_back(makeRopeCase("rope_interleaved_bf16_b4_h32_s2048_d128", DataType::BF16, rope_shape, true, false));
+        cases.push_back(makeRopeCase("rope_half_bias_bf16_b4_h32_s2048_d128", DataType::BF16, rope_shape, false, true));
+        cases.push_back(makeRopeCase("rope_half_fp32_b4_h32_s2048_d128", DataType::FP32, rope_shape, false, false));
+    }
+
+    // FP8 storage (default FP32 compute). Kept in their own family so the
+    // existing family baselines stay comparable.
+    {
+        std::vector<CensusCase> fp8_cases;
+        for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+            const std::string d = dataTypeName(dtype);
+            fp8_cases.push_back(makeDenseUnaryCase("dense_unary_" + d, dtype, dense_shape));
+            fp8_cases.push_back(makeDenseBinaryCase("dense_binary_" + d, dtype, dtype, dtype, dense_shape, false));
+        }
+        const DataType e4m3 = DataType::FP8_E4M3;
+        fp8_cases.push_back(makeDenseBinaryCase("dense_deep_fp8_e4m3", e4m3, e4m3, e4m3, dense_shape, true));
+        fp8_cases.push_back(makeDenseBinaryCase("dense_tail_fp8_e4m3", e4m3, e4m3, e4m3, awkward_shape, false));
+        fp8_cases.push_back(
+            makeBroadcastCase("broadcast_row_fp8_e4m3", e4m3, e4m3, e4m3, bcast_output, {1, BCAST_COLS}, bcast_output, false));
+        fp8_cases.push_back(
+            makeBroadcastCase("broadcast_scalar_tensor_fp8_e4m3", e4m3, e4m3, e4m3, bcast_output, {1, 1}, bcast_output, false));
+        fp8_cases.push_back(makeRaggedValuewiseCase("ragged_product_fp8_e4m3_t104832_w128", e4m3, PRODUCT_T, 128, false));
+        fp8_cases.push_back(makeTransposeCase("transpose_dense_fp8_e4m3", e4m3, e4m3, dense_shape));
+        for (CensusCase& c : fp8_cases) {
+            c.family = "fp8";
+            cases.push_back(std::move(c));
+        }
+    }
+
     return cases;
 }
 
@@ -1538,7 +1596,7 @@ void initializeInput(const InputSpec& spec, Tensor& tensor, Stream& stream) {
                 << "Thor fused-kernel census\n\n"
                 << "Options:\n"
                 << "  --device=N                 CUDA device (default 0)\n"
-                << "  --family=NAME              run one family (dense, mixed, broadcast, mixed_broadcast, ragged, ragged_mixed, ragged_fp32_compute, ragged_broadcast, indexed, transpose)\n"
+                << "  --family=NAME              run one family (dense, mixed, broadcast, mixed_broadcast, ragged, ragged_mixed, ragged_fp32_compute, ragged_broadcast, indexed, transpose, rope, fp8)\n"
                 << "  --case=SUBSTRING           run cases whose names contain SUBSTRING\n"
                 << "  --l2-multiple=N            rotating touched working set target / L2 (default 8)\n"
                 << "  --max-rotation-slots=N     cap stamped allocation rotation (default 64); smaller cases use untimed L2 eviction\n"

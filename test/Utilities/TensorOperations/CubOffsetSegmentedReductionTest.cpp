@@ -3,6 +3,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 
 using namespace ThorImplementation;
@@ -19,6 +20,8 @@ std::vector<float> executeSegmented(const Tensor& input,
         CubSegmentedReduction(op, output_dtype).stamp(input, offsets, stream);
     EXPECT_EQ(stamped->getPath(), CubReductionPath::OffsetSegmented);
     EXPECT_EQ(stamped->getAccumulatorDataType(), DataType::FP32);
+    // 1325 / 1328 (phase 8): every site here runs the retained ragged kernels.
+    EXPECT_TRUE(stamped->usesRetainedRagged());
     stamped->run();
     stream.synchronize();
     return copyGpuTensorAsFloat(stamped->getOutputTensor(), stream);
@@ -129,7 +132,8 @@ TEST(CubSegmentedArgReduction, VectorValuesProduceGlobalPackedWinnerIndicesAndEm
 
         auto argmin = CubSegmentedArgReduction(CubArgReductionOp::ArgMin, DataType::UINT64).stamp(input, offsets, stream);
         EXPECT_EQ(argmin->getIndexOutputTensor().getDimensions(), (std::vector<uint64_t>{3, 3}));
-        EXPECT_EQ(argmin->getWorkspaceSizeInBytes(), 1U);
+        EXPECT_TRUE(argmin->usesRetainedRagged());  // 1328: the boundary workspace, not legacy's 1 byte
+        EXPECT_GT(argmin->getWorkspaceSizeInBytes(), 1U);
         argmin->run();
         stream.synchronize();
         EXPECT_EQ(copyGpuTensorAsUnsigned(argmin->getIndexOutputTensor(), stream),
@@ -217,7 +221,8 @@ TEST(CubSegmentedArgReduction, VectorStampedReductionReusesOutputAndDynamicOffse
     auto stamped = CubSegmentedArgReduction(CubArgReductionOp::ArgMin, DataType::UINT32)
                        .stamp(input, winners, offsets, stream);
     const void* winner_storage = winners.getMemPtr<void>();
-    EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 1U);
+    EXPECT_TRUE(stamped->usesRetainedRagged());  // 1328: the boundary workspace, not legacy's 1 byte
+    EXPECT_GT(stamped->getWorkspaceSizeInBytes(), 1U);
 
     stamped->run();
     stream.synchronize();
@@ -432,7 +437,8 @@ TEST(CubSegmentedReduction, VectorStampedReductionReusesOutputAndDynamicOffsets)
 
     auto stamped = CubSegmentedReduction(CubReductionOp::Mean, DataType::FP32).stamp(input, output, offsets, stream);
     const void* output_storage = output.getMemPtr<void>();
-    EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 1U);
+    EXPECT_TRUE(stamped->usesRetainedRagged());  // 1328: the boundary workspace, not legacy's 1 byte
+    EXPECT_GT(stamped->getWorkspaceSizeInBytes(), 1U);
 
     stamped->run();
     stream.synchronize();
@@ -499,4 +505,109 @@ TEST(CubSegmentedReduction, ValidatesTensorAndOperationContractsAtStampTime) {
     EXPECT_THROW(static_cast<void>(CubSegmentedArgReduction(CubArgReductionOp::ArgMin, DataType::UINT32).stamp(
                      rank_two_input, wrong_arg_output, vector_offsets, stream)),
                  std::invalid_argument);
+}
+
+// 1263: the ragged audit's benchmark hook runs a stamp on other input, offsets and output tensors with the stamp's own
+// workspace, leaving the bound tensors alone, and names the backend it runs. 1328: the ragged family (KR below 16-byte
+// rows, RK from 16), the winner's shape and the finisher.
+TEST(CubSegmentedReduction, BenchmarkReplacementRunsOnOtherTensorsAndNamesItsBackend) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    struct Case {
+        std::vector<uint64_t> dims;
+        const char* backend;
+    };
+    for (const Case& c : {Case{{6}, "ragged_kr:"}, Case{{6, 3}, "ragged_kr:"}, Case{{6, 40}, "ragged_rk:"}}) {
+        SCOPED_TRACE(c.backend);
+        const uint64_t width = c.dims.size() == 1 ? 1 : c.dims[1];
+        std::vector<float> a_values(6 * width), b_values(6 * width);
+        for (uint64_t i = 0; i < a_values.size(); ++i) {
+            a_values[i] = static_cast<float>(i % 7);
+            b_values[i] = static_cast<float>(10 + (i % 5));
+        }
+        Tensor input_a = makeGpuTensor(a_values, c.dims, stream);
+        Tensor input_b = makeGpuTensor(b_values, c.dims, stream);
+        Tensor offsets_a = makeGpuUnsignedTensor({0, 2, 6}, {3}, stream);
+        Tensor offsets_b = makeGpuUnsignedTensor({0, 5, 5}, {3}, stream);
+        std::vector<uint64_t> out_dims = c.dims;
+        out_dims[0] = 2;
+        Tensor output_a(gpuPlacement, TensorDescriptor(DataType::FP32, out_dims));
+        Tensor output_b(gpuPlacement, TensorDescriptor(DataType::FP32, out_dims));
+
+        auto stamped = CubSegmentedReduction(CubReductionOp::Sum, DataType::FP32)
+                           .stampRuntimeOffsets(input_a, output_a, offsets_a, stream);
+        EXPECT_TRUE(stamped->usesRetainedRagged());
+        ASSERT_EQ(stamped->getPassNames().size(), 2U);
+        EXPECT_EQ(stamped->getPassNames()[0].rfind(c.backend, 0), 0U) << stamped->getPassNames()[0];
+        EXPECT_EQ(stamped->getPassNames()[1], "ragged_finish");
+        stamped->run();
+        stream.synchronize();
+        const std::vector<float> bound = copyGpuTensorAsFloat(output_a, stream);
+
+        stamped->runOnTensorsForBenchmark(input_b, offsets_b, output_b, stream);
+        stream.synchronize();
+        std::vector<float> expected(2 * width, 0.0f);
+        for (uint64_t row = 0; row < 5; ++row)
+            for (uint64_t component = 0; component < width; ++component)
+                expected[component] += b_values[row * width + component];
+        expectFloatVectorNear(copyGpuTensorAsFloat(output_b, stream), expected);
+        expectFloatVectorNear(copyGpuTensorAsFloat(output_a, stream), bound);
+
+        Tensor short_offsets = makeGpuUnsignedTensor({0, 6}, {2}, stream);
+        EXPECT_THROW(stamped->runOnTensorsForBenchmark(input_b, short_offsets, output_b, stream),
+                     std::invalid_argument);
+        Tensor uint64_offsets = makeGpuUnsignedTensor({0, 5, 5}, {3}, stream, DataType::UINT64);
+        EXPECT_THROW(stamped->runOnTensorsForBenchmark(input_b, uint64_offsets, output_b, stream),
+                     std::invalid_argument);
+    }
+}
+
+TEST(CubSegmentedArgReduction, BenchmarkReplacementRunsOnOtherTensorsAndNamesItsBackend) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    struct Case {
+        std::vector<uint64_t> dims;
+        const char* backend;
+    };
+    for (const Case& c : {Case{{6}, "ragged_kr:"}, Case{{6, 3}, "ragged_kr:"}, Case{{6, 300}, "ragged_rk:"}}) {
+        SCOPED_TRACE(c.backend);
+        const uint64_t width = c.dims.size() == 1 ? 1 : c.dims[1];
+        std::vector<float> a_values(6 * width), b_values(6 * width);
+        for (uint64_t i = 0; i < a_values.size(); ++i) {
+            a_values[i] = static_cast<float>(i % 7);
+            b_values[i] = static_cast<float>((i / width) % 3 == 1 ? -1 : 2);  // rows 1 and 4 hold the minimum
+        }
+        Tensor input_a = makeGpuTensor(a_values, c.dims, stream);
+        Tensor input_b = makeGpuTensor(b_values, c.dims, stream);
+        Tensor offsets_a = makeGpuUnsignedTensor({0, 2, 6}, {3}, stream);
+        Tensor offsets_b = makeGpuUnsignedTensor({0, 0, 6}, {3}, stream);
+        std::vector<uint64_t> out_dims = c.dims;
+        out_dims[0] = 2;
+        Tensor winners_a(gpuPlacement, TensorDescriptor(DataType::UINT32, out_dims));
+        Tensor winners_b(gpuPlacement, TensorDescriptor(DataType::UINT32, out_dims));
+
+        auto stamped = CubSegmentedArgReduction(CubArgReductionOp::ArgMin, DataType::UINT32)
+                           .stampRuntimeOffsets(input_a, winners_a, offsets_a, stream);
+        EXPECT_TRUE(stamped->usesRetainedRagged());  // 1328
+        ASSERT_EQ(stamped->getPassNames().size(), 2U);
+        EXPECT_EQ(stamped->getPassNames()[0].rfind(c.backend, 0), 0U) << stamped->getPassNames()[0];
+        EXPECT_EQ(stamped->getPassNames()[1], "ragged_finish_arg");
+        stamped->run();
+        stream.synchronize();
+        const std::vector<uint64_t> bound = copyGpuTensorAsUnsigned(winners_a, stream);
+
+        stamped->runOnTensorsForBenchmark(input_b, offsets_b, winners_b, stream);
+        stream.synchronize();
+        std::vector<uint64_t> expected(2 * width);
+        for (uint64_t component = 0; component < width; ++component) {
+            expected[component] = std::numeric_limits<uint32_t>::max();  // empty segment
+            expected[width + component] = width + component;             // row 1, the lowest tied index
+        }
+        EXPECT_EQ(copyGpuTensorAsUnsigned(winners_b, stream), expected);
+        EXPECT_EQ(copyGpuTensorAsUnsigned(winners_a, stream), bound);
+
+        Tensor wide_winners(gpuPlacement, TensorDescriptor(DataType::UINT64, out_dims));
+        EXPECT_THROW(stamped->runOnTensorsForBenchmark(input_b, offsets_b, wide_winners, stream),
+                     std::invalid_argument);
+    }
 }

@@ -378,6 +378,22 @@ static AttentionTensorSpec packedRaggedAttentionSpecForTensor(const Tensor& tens
     return spec;
 }
 
+// cuDNN attention operands must meet Thor's tensor contract: dense row-major storage and a
+// 16-byte-aligned base. cuDNN reads and writes each operand through the strides it is given, and
+// the backward graph describes dQ/dK/dV with the strides of q/k/v, so a strided view (for example
+// q/k/v sliced out of one packed buffer) would make it write dense gradient buffers with the view's
+// pitch, past their end. Views are therefore rejected at attention boundaries.
+static void requireAttentionContractTensor(const Tensor& tensor, const char* stage, const char* operand) {
+    if (!tensor.isInitialized()) {
+        throw std::runtime_error(std::string(stage) + " operand " + operand + " is not initialized.");
+    }
+    if (!tensor.isDenseContiguous() || !tensor.isAligned(16)) {
+        throw std::runtime_error(std::string(stage) + " operand " + operand +
+                                 " must be a dense, 16-byte-aligned tensor. Tensor views (such as q/k/v sliced out of one "
+                                 "packed buffer) are not supported as attention operands; use separate Q/K/V tensors.");
+    }
+}
+
 static Tensor cudnnSemanticTensorView(const Tensor& tensor, AttentionTensorLayout layout, const char* tensor_name) {
     if (layout == AttentionTensorLayout::BHSD) {
         return tensor;
@@ -1420,6 +1436,10 @@ StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
     if (!compiled_attention) {
         throw std::runtime_error("StampedAttention requires a compiled attention payload.");
     }
+    requireAttentionContractTensor(q, "Attention", "q");
+    requireAttentionContractTensor(k, "Attention", "k");
+    requireAttentionContractTensor(v, "Attention", "v");
+    requireAttentionContractTensor(output, "Attention", "output");
     if (compiled_attention->use_ragged_offsets && q_ragged_offsets.has_value() && kv_ragged_offsets.has_value()) {
         RowPartitionRuntime::registerLogicalWorkRowPartitionPair(
             q_ragged_offsets.value(), kv_ragged_offsets.value());
@@ -1842,6 +1862,13 @@ StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAtten
     if (!compiled_attention_backward) {
         throw std::runtime_error("StampedAttentionBackward requires a compiled attention-backward payload.");
     }
+    requireAttentionContractTensor(q, "AttentionBackward", "q");
+    requireAttentionContractTensor(k, "AttentionBackward", "k");
+    requireAttentionContractTensor(v, "AttentionBackward", "v");
+    requireAttentionContractTensor(dO, "AttentionBackward", "dO");
+    requireAttentionContractTensor(this->dQ, "AttentionBackward", "dQ");
+    requireAttentionContractTensor(this->dK, "AttentionBackward", "dK");
+    requireAttentionContractTensor(this->dV, "AttentionBackward", "dV");
     if (compiled_attention_backward->use_ragged_offsets && q_ragged_offsets.has_value() && kv_ragged_offsets.has_value()) {
         RowPartitionRuntime::registerLogicalWorkRowPartitionPair(
             q_ragged_offsets.value(), kv_ragged_offsets.value());

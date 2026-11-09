@@ -14,6 +14,7 @@
 #include "Utilities/TensorOperations/Cub/DenseRetainedFp8KRPhysicalPlan.h"
 #include "Utilities/TensorOperations/Cub/DenseRetainedFp32ArgPhysicalPlan.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalKernels.h"
+#include "Utilities/TensorOperations/Cub/RaggedStampAutotuner.h"
 
 #include <cuda_runtime_api.h>
 
@@ -2319,20 +2320,17 @@ std::shared_ptr<StampedCubSegmentedReduction> CubSegmentedReduction::stampValida
     }
 
     ScopedGpu scoped_gpu(stream.getGpuNum());
-    Tensor mutable_output = output;
-    const size_t temp_storage_bytes = CubReductionInternal::queryOffsetSegmentedReductionBytes(
-        op, input, mutable_output, segment_offsets, num_items, num_segments, stream);
-    Tensor temp_storage(
-        input.getPlacement(), TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(temp_storage_bytes)}));
-    return std::shared_ptr<StampedCubSegmentedReduction>(new StampedCubSegmentedReduction(op,
-                                                                                         input,
-                                                                                         output,
-                                                                                         segment_offsets,
-                                                                                         num_items,
-                                                                                         num_segments,
-                                                                                         temp_storage_bytes,
-                                                                                         temp_storage,
-                                                                                         stream));
+    // 1325 (phase 7): the stamp runs the selector's ragged winner; its boundary workspace is the stamp's temporary
+    // storage. 1330 (phase 9): every site (the legacy offset-segmented kernels are deleted); raggedRouteSegmented
+    // throws, with the reason, for a site no ragged family runs (rows over 2 GiB).
+    std::shared_ptr<const CubReductionInternal::RaggedRoutedStamp> routed = CubReductionInternal::raggedRouteSegmented(
+        false, op, CubArgReductionOp::ArgMin, input, output, segment_offsets, stream);
+    const size_t bytes = static_cast<size_t>(routed->launch.workspace_bytes);
+    Tensor workspace(input.getPlacement(), TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(bytes)}));
+    std::shared_ptr<StampedCubSegmentedReduction> stamped(new StampedCubSegmentedReduction(
+        op, input, output, segment_offsets, num_items, num_segments, bytes, workspace, stream));
+    stamped->ragged = std::move(routed);
+    return stamped;
 }
 
 StampedCubSegmentedReduction::StampedCubSegmentedReduction(CubReductionOp op,
@@ -2361,15 +2359,8 @@ void StampedCubSegmentedReduction::run() { runOn(stream); }
 void StampedCubSegmentedReduction::runOn(Stream& run_stream) const {
     requireCompatibleStream(input, run_stream);
     ScopedGpu scoped_gpu(run_stream.getGpuNum());
-    CubReductionInternal::launchOffsetSegmentedReduction(op,
-                                                         temp_storage,
-                                                         temp_storage_bytes,
-                                                         input,
-                                                         output,
-                                                         segment_offsets,
-                                                         num_items,
-                                                         num_segments,
-                                                         run_stream);
+    Tensor workspace = temp_storage;  // 1325; 1330: the only path
+    CubReductionInternal::runRaggedRouted(*ragged, input, segment_offsets, output, workspace, run_stream);
 }
 
 CubSegmentedArgReduction::CubSegmentedArgReduction(CubArgReductionOp op, DataType index_output_dtype)
@@ -2452,19 +2443,15 @@ std::shared_ptr<StampedCubSegmentedArgReduction> CubSegmentedArgReduction::stamp
     }
 
     ScopedGpu scoped_gpu(stream.getGpuNum());
-    Tensor mutable_output = index_output;
-    const size_t temp_storage_bytes = CubReductionInternal::queryOffsetSegmentedArgReductionBytes(
-        op, input, mutable_output, segment_offsets, num_segments, stream);
-    Tensor temp_storage(input.getPlacement(),
-                        TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(temp_storage_bytes)}));
-    return std::shared_ptr<StampedCubSegmentedArgReduction>(new StampedCubSegmentedArgReduction(op,
-                                                                                                input,
-                                                                                                index_output,
-                                                                                                segment_offsets,
-                                                                                                num_segments,
-                                                                                                temp_storage_bytes,
-                                                                                                temp_storage,
-                                                                                                stream));
+    // 1325 (phase 7): as CubSegmentedReduction::stampValidated, with the ragged ARG kernels (1330: every site).
+    std::shared_ptr<const CubReductionInternal::RaggedRoutedStamp> routed = CubReductionInternal::raggedRouteSegmented(
+        true, CubReductionOp::Min, op, input, index_output, segment_offsets, stream);
+    const size_t bytes = static_cast<size_t>(routed->launch.workspace_bytes);
+    Tensor workspace(input.getPlacement(), TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(bytes)}));
+    std::shared_ptr<StampedCubSegmentedArgReduction> stamped(new StampedCubSegmentedArgReduction(
+        op, input, index_output, segment_offsets, num_segments, bytes, workspace, stream));
+    stamped->ragged = std::move(routed);
+    return stamped;
 }
 
 StampedCubSegmentedArgReduction::StampedCubSegmentedArgReduction(CubArgReductionOp op,
@@ -2491,8 +2478,8 @@ void StampedCubSegmentedArgReduction::run() { runOn(stream); }
 void StampedCubSegmentedArgReduction::runOn(Stream& run_stream) const {
     requireCompatibleStream(input, run_stream);
     ScopedGpu scoped_gpu(run_stream.getGpuNum());
-    CubReductionInternal::launchOffsetSegmentedArgReduction(
-        op, temp_storage, temp_storage_bytes, input, index_output, segment_offsets, num_segments, run_stream);
+    Tensor workspace = temp_storage;  // 1325; 1330: the only path
+    CubReductionInternal::runRaggedRouted(*ragged, input, segment_offsets, index_output, workspace, run_stream);
 }
 
 CubReductionGeometry CubArgReduction::analyzeDenseGeometry(
@@ -2928,6 +2915,47 @@ Tensor reshapedForBenchmark(const Tensor& replacement, const std::vector<uint64_
 }
 
 }  // namespace
+
+void StampedCubSegmentedReduction::runOnTensorsForBenchmark(const Tensor& replacement_input,
+                                                            const Tensor& replacement_segment_offsets,
+                                                            const Tensor& replacement_output,
+                                                            Stream& run_stream) const {
+    requireBenchmarkReplacement(replacement_input, input, "input");
+    requireBenchmarkReplacement(replacement_segment_offsets, segment_offsets, "segment offsets");
+    requireBenchmarkReplacement(replacement_output, output, "output");
+    requireCompatibleStream(replacement_input, run_stream);
+    ScopedGpu scoped_gpu(run_stream.getGpuNum());
+    const Tensor bound_input = reshapedForBenchmark(replacement_input, input.getDimensions());
+    const Tensor bound_offsets = reshapedForBenchmark(replacement_segment_offsets, segment_offsets.getDimensions());
+    Tensor bound_output = reshapedForBenchmark(replacement_output, output.getDimensions());
+    Tensor workspace = temp_storage;
+    CubReductionInternal::runRaggedRouted(*ragged, bound_input, bound_offsets, bound_output, workspace, run_stream);
+}
+
+std::vector<std::string> StampedCubSegmentedReduction::getPassNames() const {
+    return CubReductionInternal::raggedRoutedPassNames(*ragged);  // 1325
+}
+
+void StampedCubSegmentedArgReduction::runOnTensorsForBenchmark(const Tensor& replacement_input,
+                                                               const Tensor& replacement_segment_offsets,
+                                                               const Tensor& replacement_index_output,
+                                                               Stream& run_stream) const {
+    requireBenchmarkReplacement(replacement_input, input, "input");
+    requireBenchmarkReplacement(replacement_segment_offsets, segment_offsets, "segment offsets");
+    requireBenchmarkReplacement(replacement_index_output, index_output, "index output");
+    requireCompatibleStream(replacement_input, run_stream);
+    ScopedGpu scoped_gpu(run_stream.getGpuNum());
+    const Tensor bound_input = reshapedForBenchmark(replacement_input, input.getDimensions());
+    const Tensor bound_offsets = reshapedForBenchmark(replacement_segment_offsets, segment_offsets.getDimensions());
+    Tensor bound_index_output = reshapedForBenchmark(replacement_index_output, index_output.getDimensions());
+    Tensor workspace = temp_storage;
+    CubReductionInternal::runRaggedRouted(*ragged, bound_input, bound_offsets, bound_index_output, workspace,
+                                          run_stream);
+}
+
+std::vector<std::string> StampedCubSegmentedArgReduction::getPassNames() const {
+    return CubReductionInternal::raggedRoutedPassNames(*ragged);  // 1325
+}
 
 void StampedCubArgReduction::runOnTensorsForBenchmark(const Tensor& replacement_input,
                                                       const std::optional<Tensor>& replacement_value_output,

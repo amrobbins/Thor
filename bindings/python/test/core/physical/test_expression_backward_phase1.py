@@ -39,15 +39,20 @@ def _cast_reference_to_storage_dtype_with_saturation(values: np.ndarray, dtype: 
 
 
 def _pointwise_compute_numpy_dtype(storage_dtype: thor.DataType) -> np.dtype:
-    # Keep this reference aligned with Thor's default pointwise compute policy.
-    # FP8D2 widened both FP8 formats to BF16 compute. Fused pointwise kernels
-    # may contract arithmetic across expression nodes, so tests must not invent
-    # a rounding boundary at every AST node; round at materialized outputs.
-    if storage_dtype == thor.DataType.fp16:
-        return _numpy_storage_dtype(thor.DataType.fp16)
-    if storage_dtype in (thor.DataType.bf16, thor.DataType.fp8_e4m3, thor.DataType.fp8_e5m2):
-        return _numpy_storage_dtype(thor.DataType.bf16)
-    if storage_dtype == thor.DataType.fp32:
+    # Keep this reference aligned with Thor's default pointwise compute policy:
+    # fused pointwise nodes on FP8/BF16/FP16/FP32 storage compute in FP32, so the
+    # only rounding is the final cast to the storage dtype. (The earlier BF16
+    # compute for FP8 rounded twice, FP32 -> BF16 -> FP8: e.g. -17.0625 became
+    # -17.0 in BF16 and then tied to -16 in E4M3, where one rounding gives -18.)
+    # Fused kernels may contract arithmetic across expression nodes, so tests must
+    # not invent a rounding boundary at every AST node; round at materialized outputs.
+    if storage_dtype in (
+        thor.DataType.fp16,
+        thor.DataType.bf16,
+        thor.DataType.fp8_e4m3,
+        thor.DataType.fp8_e5m2,
+        thor.DataType.fp32,
+    ):
         return _numpy_storage_dtype(thor.DataType.fp32)
     raise AssertionError(f"Unhandled pointwise floating dtype: {storage_dtype}")
 

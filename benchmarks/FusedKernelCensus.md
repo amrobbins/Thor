@@ -104,7 +104,9 @@ A useful focused run is:
 ```bash
 ./build-release/thor_fused_kernel_census --family=ragged_fp32_compute | tee ragged-fp32-compute-census.csv
 ```
-BF16 broadcast:               packet_scalars=2  -> output_packet_bytes=4
+BF16 broadcast, row width % 8 == 0:  packet_scalars=8 -> output_packet_bytes=16
+FP32 / BF16+FP32 broadcast, width % 4 == 0: packet_scalars=4 -> FP32 span=16
+BF16 broadcast, awkward width: packet_scalars=2  -> output_packet_bytes=4
 BF16 packed ragged aligned:   packet_scalars=8  -> output_packet_bytes=16
 BF16 ragged broadcast aligned: packet_scalars=8 -> output_packet_bytes=16
 BF16 ragged broadcast awkward: packet_scalars=1 -> output_packet_bytes=2
@@ -162,10 +164,13 @@ The current gate covers:
 - dense FP32 and benchmarked BF16/FP16↔FP32 mixed flat: at least 4 scalars/thread;
 - packed-ragged homogeneous BF16/FP16 storage flat: at least 8 scalars/thread, including explicit FP32 compute;
 - packed-ragged FP32-storage and benchmarked BF16/FP16↔FP32 storage-boundary flat: at least 4 scalars/thread;
-- dense homogeneous BF16/FP16 specialized broadcast: at least 2 scalars/thread;
-- packet-aligned ragged homogeneous BF16/FP16 storage broadcast: at least 8 scalars/thread, including explicit FP32 compute;
-- packet-aligned ragged FP32-storage and benchmarked FP32 mixed broadcast: at least 4 scalars/thread.
+- packet-aligned dense or ragged homogeneous BF16/FP16 storage specialized broadcast: at least 8 scalars/thread, including explicit FP32 compute;
+- packet-aligned dense or ragged FP32-storage and FP32 mixed specialized broadcast: at least 4 scalars/thread.
+
+Dense and ragged specialized broadcast share one packet family (a dense group is a ragged group whose active
+extent is its full capacity). Dense broadcast with a row width that is not a packet multiple, strided
+broadcast operands, or FP8 storage keeps the vector2 / scalar broadcast emitters and is outside the gate.
 
 The gate intentionally does not impose a wider path on genuine gathers/scatters, transpose/index-aware
-operations, awkward ragged broadcast row cycles, runtime-scalar/unbenchmarked layouts, or BF16↔FP16-only mixed
+operations, awkward broadcast row cycles, runtime-scalar/unbenchmarked layouts, or BF16↔FP16-only mixed
 traffic. Those remain explicit exceptions rather than silently weakening the ordinary fast-path invariant.

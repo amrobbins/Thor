@@ -3900,14 +3900,15 @@ static std::optional<std::vector<uint64_t>> inferPackedDenseSourceDimsForStrided
         return std::vector<uint64_t>{dims[0], row_width};
     }
 
-    // Packed-QKV views are commonly expressed as a higher-rank logical view over a
+    // Column-slice views are often expressed as a higher-rank logical view over a
     // dense 2-D parent [outer, inner], where some prefix axes collapse into
     // `outer`, and the remaining suffix axes address a dense slice within each
-    // row of width `inner`.  Example for BSHD Q view into [B*S, QKV]:
+    // row of width `inner`.  Example: a [B, S, H, D] view of columns
+    // [start, start + H*D) of a [B*S, W] parent:
     //   dims    = [B, S, H, D]
-    //   strides = [S*QKV, QKV, D, 1]
-    //   offset  = q_start
-    // which infers source dims [B*S, QKV].
+    //   strides = [S*W, W, D, 1]
+    //   offset  = start
+    // which infers source dims [B*S, W].
     for (size_t collapsed_last_axis = 0; collapsed_last_axis + 1 < dims.size(); ++collapsed_last_axis) {
         bool ok = true;
 

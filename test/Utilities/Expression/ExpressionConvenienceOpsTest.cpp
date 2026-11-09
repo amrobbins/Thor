@@ -425,6 +425,36 @@ TEST(ExpressionConvenienceOps, TakeAlongAxisGathersAlongLastAxis) {
     expectNear(copyToCpuValues(y, stream), {13.0f, 10.0f, 12.0f, 21.0f, 21.0f, 20.0f});
 }
 
+TEST(ExpressionConvenienceOps, TakeAlongAxisOutOfRangeIndicesProduceZero) {
+    // An index at or past the gathered axis length reads nothing and produces 0, as an
+    // out-of-vocabulary embedding row does. The fused consumer (x * 2 + 1) sees that 0.
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor values = makeGpuTensor({2, 4}, {10.0f, 11.0f, 12.0f, 13.0f, 20.0f, 21.0f, 22.0f, 23.0f}, stream);
+    Tensor indices = makeGpuUint32Tensor({2, 3}, {3, 4, 0, 0xFFFFFFFFu, 1, 7}, stream);
+
+    auto gathered = Expression::input("values").takeAlongAxis(Expression::input("indices"));
+    auto expression_outputs = Expression::outputs({{"y", gathered}, {"z", gathered * 2.0f + 1.0f}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"values", values}, {"indices", indices}}, "y", stream);
+    Tensor z = runExpressionOutput(expression_outputs, {{"values", values}, {"indices", indices}}, "z", stream);
+
+    expectNear(copyToCpuValues(y, stream), {13.0f, 0.0f, 10.0f, 0.0f, 21.0f, 0.0f});
+    expectNear(copyToCpuValues(z, stream), {27.0f, 1.0f, 21.0f, 1.0f, 43.0f, 1.0f});
+}
+
+TEST(ExpressionConvenienceOps, TakeAlongAxisUint64IndicesAreBoundsCheckedAtFullWidth) {
+    // 2^32 + 1 must not wrap to the in-range index 1 when the kernel uses 32-bit index math.
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor values = makeGpuTensor({2, 4}, {10.0f, 11.0f, 12.0f, 13.0f, 20.0f, 21.0f, 22.0f, 23.0f}, stream);
+    Tensor indices = makeGpuUint64Tensor({2, 3}, {(1ULL << 32) + 1ULL, 1ULL, 3ULL, 1ULL << 63, 0ULL, 4ULL}, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("values").takeAlongAxis(Expression::input("indices"))}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"values", values}, {"indices", indices}}, "y", stream);
+
+    expectNear(copyToCpuValues(y, stream), {0.0f, 11.0f, 13.0f, 0.0f, 20.0f, 0.0f});
+}
+
 TEST(ExpressionConvenienceOps, TakeAlongAxisGathersAlongLeadingAxis) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);

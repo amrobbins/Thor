@@ -5,6 +5,9 @@
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include <algorithm>
+#include <cmath>
+#include <array>
+#include <cctype>
 #include <functional>
 #include <iomanip>
 #include <limits>
@@ -91,14 +94,36 @@ static std::string float4LaneComponent(uint32_t lane) {
     }
 }
 
+// Reads lane `lane_var` (a runtime value in [0, lane_count)) of a register chunk through constant-index
+// reads and selects. Indexing chunk_data[lane_var] directly makes the chunk addressable at a runtime offset,
+// which forces nvcc to place it in local memory (local_bytes_per_thread > 0 in the census).
+static std::string emitChunkLaneSelectExpr(const std::string& chunk_data_expr, const std::string& lane_var, uint32_t lane_count) {
+    if (lane_count == 0) {
+        throw std::runtime_error("emitChunkLaneSelectExpr requires a non-zero lane count.");
+    }
+    std::string expr = chunk_data_expr + "[" + std::to_string(lane_count - 1) + "]";
+    for (uint32_t lane = lane_count - 1; lane-- > 0;) {
+        expr = "(" + lane_var + " == " + std::to_string(lane) + "U ? " + chunk_data_expr + "[" + std::to_string(lane) + "] : " + expr + ")";
+    }
+    return expr;
+}
+
+static bool isUnsignedDecimalLiteral(const std::string& text) {
+    return !text.empty() && std::all_of(text.begin(), text.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
+}
+
 static std::string emitChunkLaneReadExpr(const std::string& chunk_expr,
                                          const std::string& chunk_type,
                                          DataType scalar_dtype,
                                          const std::string& lane_expr,
-                                         const std::string& chunk_data_expr = "") {
+                                         const std::string& chunk_data_expr = "",
+                                         uint32_t lane_count = 0) {
     if (chunk_type == "float4" && scalar_dtype == DataType::FP32) {
         const uint32_t lane = static_cast<uint32_t>(std::stoul(lane_expr));
         return chunk_expr + "." + float4LaneComponent(lane);
+    }
+    if (!chunk_data_expr.empty() && lane_count > 1 && !isUnsignedDecimalLiteral(lane_expr)) {
+        return emitChunkLaneSelectExpr(chunk_data_expr, lane_expr, lane_count);
     }
     if (!chunk_data_expr.empty()) {
         return chunk_data_expr + "[" + lane_expr + "]";
@@ -123,11 +148,141 @@ static std::string emitChunkLaneWriteStmt(const std::string& chunk_expr,
            "] = " + value_expr + ";\n";
 }
 
+// Gathers one output pack from PACK_SCALARS transposed tile words. Each 32-bit word holds PACK_SCALARS
+// scalars; inputColLane (runtime, thread dependent) picks which one. The lane is extracted with shifts on the
+// word: indexing the word's bytes as an array at a runtime lane would force it into local memory.
+static void emitPackedTransposeTileLaneGather(std::ostringstream& ss, const std::string& output_type) {
+    ss << "    constexpr unsigned int SCALAR_BITS = 32U / PACK_SCALARS;\n";
+    ss << "    constexpr unsigned int SCALAR_MASK = (PACK_SCALARS == 1U) ? 0xFFFFFFFFU : ((1U << (SCALAR_BITS % 32U)) - 1U);\n";
+    ss << "    const unsigned int inputLaneShift = inputColLane * SCALAR_BITS;\n";
+    ss << "    unsigned int output_word = 0U;\n";
+    ss << "#pragma unroll\n";
+    ss << "    for (unsigned int lane = 0; lane < PACK_SCALARS; ++lane) {\n";
+    ss << "      const unsigned int tile_word = tile[localOutPackCol * PACK_SCALARS + lane][inputPackCol];\n";
+    ss << "      output_word |= ((tile_word >> inputLaneShift) & SCALAR_MASK) << (lane * SCALAR_BITS);\n";
+    ss << "    }\n";
+    ss << "    PackRaw output_raw{};\n";
+    ss << "    output_raw.raw = output_word;\n";
+    ss << "    Pack output_pack = output_raw.pack;\n";
+    ss << "    const " << output_type << "* output_scalar = reinterpret_cast<const " << output_type << "*>(&output_pack);\n";
+}
+
 static std::string emitUnsignedLiteral(uint64_t value, bool use_uint32_index_math) {
     if (use_uint32_index_math && fitsInUInt32(value)) {
         return std::to_string(static_cast<uint32_t>(value)) + "U";
     }
     return std::to_string(value) + "ULL";
+}
+
+// ---------------------------------------------------------------------------
+// Packet load/store stages shared by the wide (multi-scalar-per-thread) emitters.
+//
+// A packet kernel owns `lanes` consecutive scalars per tensor per thread. The
+// fast path moves each tensor's packet with one naturally aligned vector access.
+// Runtime tensors can be storage aliases whose base address is element aligned
+// but not packet aligned, and a packet can extend past the end of a view (the
+// allocation's terminal padding covers the end of an allocation, not the end of
+// a view). So every packet kernel emits:
+//
+//   load stage:    vector load when (full packet && aligned), otherwise masked
+//                  scalar loads into the same packet register
+//   compute stage: emitted exactly once, reading lanes from the packet registers
+//   store stage:   vector store when (full packet && aligned), otherwise masked
+//                  scalar stores
+//
+// `packets_aligned` is grid-uniform (it depends only on the base pointers), and
+// `full_packet` is false only for the final packet, so the fallback never
+// diverges a warp on the ordinary dense path and the expression body is never
+// duplicated.
+//
+// Fused elementwise / broadcast kernel pointers are deliberately NOT __restrict__.
+// Caller-provided outputs may alias root inputs: optimizers update weights and
+// state in place (see the write-after-read handling in FusedEquation stamping).
+// With __restrict__ the compiler may re-load a const input after the store to the
+// aliased output (or keep it in the read-only path), reading the updated value.
+// Same-index aliasing is otherwise race free because each element is read and
+// written by one thread, loads first.
+struct PacketTensorAccess {
+    std::string chunk_var;     // e.g. in0_chunk
+    std::string chunk_type;    // float4 / unsigned long long / unsigned int
+    std::string scalar_type;   // storage scalar type of one lane
+    std::string pointer_expr;  // e.g. in0 (scalar-typed kernel argument)
+    std::string base_expr;     // scalar index of lane 0, e.g. scalar_base or in0_offset_base
+};
+
+static std::string emitPacketAlignmentPredicate(const std::vector<std::pair<std::string, uint64_t>>& pointers_and_bytes) {
+    if (pointers_and_bytes.empty()) {
+        return "true";
+    }
+    std::string predicate;
+    for (const auto& [pointer, bytes] : pointers_and_bytes) {
+        if (!predicate.empty()) {
+            predicate += " && ";
+        }
+        predicate += "((reinterpret_cast<unsigned long long>(" + pointer + ") & " + std::to_string(bytes - 1ULL) + "ULL) == 0ULL)";
+    }
+    return predicate;
+}
+
+static void emitPacketLoadStage(std::ostringstream& ss,
+                                const std::string& indent,
+                                const std::vector<PacketTensorAccess>& inputs,
+                                uint32_t lanes,
+                                const std::string& vector_predicate,
+                                const std::function<std::string(uint32_t)>& lane_valid_expr) {
+    if (inputs.empty()) {
+        return;
+    }
+    for (const PacketTensorAccess& in : inputs) {
+        ss << indent << in.chunk_type << " " << in.chunk_var << "{};\n";
+    }
+    ss << indent << "if (" << vector_predicate << ") {\n";
+    for (const PacketTensorAccess& in : inputs) {
+        ss << indent << "  " << in.chunk_var << " = *reinterpret_cast<const " << in.chunk_type << "*>(" << in.pointer_expr << " + "
+           << in.base_expr << ");\n";
+    }
+    ss << indent << "} else {\n";
+    for (uint32_t lane = 0; lane < lanes; ++lane) {
+        // An empty lane predicate means every lane of the packet is in range
+        // (only the base alignment failed).
+        const std::string valid = lane_valid_expr(lane);
+        const std::string lane_indent = valid.empty() ? indent + "  " : indent + "    ";
+        if (!valid.empty()) ss << indent << "  if (" << valid << ") {\n";
+        for (const PacketTensorAccess& in : inputs) {
+            ss << lane_indent << "reinterpret_cast<" << in.scalar_type << "*>(&" << in.chunk_var << ")[" << lane << "] = " << in.pointer_expr
+               << "[" << in.base_expr << " + " << lane << "];\n";
+        }
+        if (!valid.empty()) ss << indent << "  }\n";
+    }
+    ss << indent << "}\n";
+}
+
+static void emitPacketStoreStage(std::ostringstream& ss,
+                                 const std::string& indent,
+                                 const std::vector<PacketTensorAccess>& outputs,
+                                 uint32_t lanes,
+                                 const std::string& vector_predicate,
+                                 const std::function<std::string(uint32_t)>& lane_valid_expr) {
+    if (outputs.empty()) {
+        return;
+    }
+    ss << indent << "if (" << vector_predicate << ") {\n";
+    for (const PacketTensorAccess& out : outputs) {
+        ss << indent << "  *reinterpret_cast<" << out.chunk_type << "*>(" << out.pointer_expr << " + " << out.base_expr
+           << ") = " << out.chunk_var << ";\n";
+    }
+    ss << indent << "} else {\n";
+    for (uint32_t lane = 0; lane < lanes; ++lane) {
+        const std::string valid = lane_valid_expr(lane);
+        const std::string lane_indent = valid.empty() ? indent + "  " : indent + "    ";
+        if (!valid.empty()) ss << indent << "  if (" << valid << ") {\n";
+        for (const PacketTensorAccess& out : outputs) {
+            ss << lane_indent << out.pointer_expr << "[" << out.base_expr << " + " << lane << "] = reinterpret_cast<const "
+               << out.scalar_type << "*>(&" << out.chunk_var << ")[" << lane << "];\n";
+        }
+        if (!valid.empty()) ss << indent << "  }\n";
+    }
+    ss << indent << "}\n";
 }
 
 static bool groupSupportsUInt32IndexMath(const SpecializedBroadcastGroup& group) {
@@ -141,6 +296,48 @@ static bool groupSupportsUInt32IndexMath(const SpecializedBroadcastGroup& group)
         }
         for (uint64_t stride : axis.input_strides) {
             if (!fitsInUInt32(stride)) {
+                return false;
+            }
+        }
+    }
+
+    // Output-side sizes are not enough: offsets are computed on the source side. A non-dense
+    // input view (large row pitch), the source of a strided view, or a gathered tensor can be
+    // addressed past 2^32 while the output is small (e.g. a target gather from [32768, 152064]
+    // logits into [32768, 1]). Every index the kernel forms must fit.
+    const auto span_fits = [](const std::vector<uint64_t>& dims, const std::vector<uint64_t>& strides) {
+        if (dims.size() != strides.size()) {
+            return false;
+        }
+        unsigned __int128 max_index = 0;
+        for (size_t i = 0; i < dims.size(); ++i) {
+            if (dims[i] == 0) {
+                return true;
+            }
+            max_index += static_cast<unsigned __int128>(dims[i] - 1ULL) * strides[i];
+        }
+        return max_index <= static_cast<unsigned __int128>(std::numeric_limits<uint32_t>::max());
+    };
+    for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
+        unsigned __int128 max_offset = 0;
+        for (const SpecializedBroadcastAxis& axis : group.active_axes) {
+            if (used_i < axis.input_strides.size() && axis.dim > 0) {
+                max_offset += static_cast<unsigned __int128>(axis.dim - 1ULL) * axis.input_strides[used_i];
+            }
+        }
+        if (max_offset > static_cast<unsigned __int128>(std::numeric_limits<uint32_t>::max())) {
+            return false;
+        }
+        if (used_i < group.used_input_visible_dims.size() && used_i < group.used_input_visible_strides.size() &&
+            !span_fits(group.used_input_visible_dims[used_i], group.used_input_visible_strides[used_i])) {
+            return false;
+        }
+    }
+    for (const std::vector<uint64_t>& dims : group.node_dims) {
+        unsigned __int128 numel = 1;
+        for (uint64_t dim : dims) {
+            numel *= dim;
+            if (numel > static_cast<unsigned __int128>(std::numeric_limits<uint32_t>::max())) {
                 return false;
             }
         }
@@ -730,6 +927,9 @@ static void emitCudaFp16Header(std::ostringstream& ss) {
     ss << "#include <cuda_fp16.h>\n";
 }
 
+// thor_half_to_fp8*_satfinite / thor_half2_to_fp8x2*_satfinite convert FP16 -> FP8 directly
+// (cvt.rn.satfinite.e4m3x2.f16x2 / e5m2x2 on sm89+): the same rounding as through the exact FP32
+// value, without the f16 -> f32 conversions.
 static void emitFp8E4M3SatfiniteHelpers(std::ostringstream& ss) {
     ss << R"(
 __device__ __forceinline__ __nv_fp8_e4m3 thor_to_fp8_e4m3_satfinite(float value) {
@@ -741,6 +941,24 @@ __device__ __forceinline__ __nv_fp8_e4m3 thor_to_fp8_e4m3_satfinite(float value)
 __device__ __forceinline__ __nv_fp8x2_e4m3 thor_to_fp8x2_e4m3_satfinite(float2 value) {
   __nv_fp8x2_e4m3 result;
   result.__x = __nv_cvt_float2_to_fp8x2(value, __NV_SATFINITE, __NV_E4M3);
+  return result;
+}
+
+__device__ __forceinline__ __nv_fp8_e4m3 thor_half_to_fp8_e4m3_satfinite(__half value) {
+  __nv_fp8_e4m3 result;
+  result.__x = __nv_cvt_halfraw_to_fp8(static_cast<__half_raw>(value), __NV_SATFINITE, __NV_E4M3);
+  return result;
+}
+
+__device__ __forceinline__ __nv_fp8x2_e4m3 thor_half2_to_fp8x2_e4m3_satfinite(__half2 value) {
+  __nv_fp8x2_e4m3 result;
+  result.__x = __nv_cvt_halfraw2_to_fp8x2(static_cast<__half2_raw>(value), __NV_SATFINITE, __NV_E4M3);
+  return result;
+}
+
+__device__ __forceinline__ __nv_fp8x2_e4m3 thor_fp8x2_e4m3_from_lanes(__nv_fp8_e4m3 lo, __nv_fp8_e4m3 hi) {
+  __nv_fp8x2_e4m3 result;
+  result.__x = static_cast<__nv_fp8x2_storage_t>(static_cast<unsigned int>(lo.__x) | (static_cast<unsigned int>(hi.__x) << 8));
   return result;
 }
 
@@ -758,6 +976,24 @@ __device__ __forceinline__ __nv_fp8_e5m2 thor_to_fp8_e5m2_satfinite(float value)
 __device__ __forceinline__ __nv_fp8x2_e5m2 thor_to_fp8x2_e5m2_satfinite(float2 value) {
   __nv_fp8x2_e5m2 result;
   result.__x = __nv_cvt_float2_to_fp8x2(value, __NV_SATFINITE, __NV_E5M2);
+  return result;
+}
+
+__device__ __forceinline__ __nv_fp8_e5m2 thor_half_to_fp8_e5m2_satfinite(__half value) {
+  __nv_fp8_e5m2 result;
+  result.__x = __nv_cvt_halfraw_to_fp8(static_cast<__half_raw>(value), __NV_SATFINITE, __NV_E5M2);
+  return result;
+}
+
+__device__ __forceinline__ __nv_fp8x2_e5m2 thor_half2_to_fp8x2_e5m2_satfinite(__half2 value) {
+  __nv_fp8x2_e5m2 result;
+  result.__x = __nv_cvt_halfraw2_to_fp8x2(static_cast<__half2_raw>(value), __NV_SATFINITE, __NV_E5M2);
+  return result;
+}
+
+__device__ __forceinline__ __nv_fp8x2_e5m2 thor_fp8x2_e5m2_from_lanes(__nv_fp8_e5m2 lo, __nv_fp8_e5m2 hi) {
+  __nv_fp8x2_e5m2 result;
+  result.__x = static_cast<__nv_fp8x2_storage_t>(static_cast<unsigned int>(lo.__x) | (static_cast<unsigned int>(hi.__x) << 8));
   return result;
 }
 
@@ -1412,7 +1648,46 @@ static uint64_t specializedBroadcastInnermostInputStride(const SpecializedBroadc
     return 0ULL;
 }
 
-static std::optional<DataType> getRaggedSpecializedBroadcastVectorizedStageStorageDType(
+// Packet ownership for the per-lane ("wide-scalar") packet kernels follows physical
+// storage, not arithmetic precision: every tensor moves at most one 16-byte packet
+// per thread. Any FP32 storage participant -> 4 scalars; BF16 or FP16 storage -> 8;
+// FP8-only storage -> 16. Mixed BF16+FP16 without FP32 remains uncensused (1).
+struct WideScalarStorageFamily {
+    bool fp8 = false;
+    bool bf16 = false;
+    bool fp16 = false;
+    bool fp32 = false;
+
+    bool accept(DataType dtype) {
+        switch (dtype) {
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
+                fp8 = true;
+                return true;
+            case DataType::BF16:
+                bf16 = true;
+                return true;
+            case DataType::FP16:
+                fp16 = true;
+                return true;
+            case DataType::FP32:
+                fp32 = true;
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    uint32_t packetScalars() const {
+        if (fp32) return 4u;
+        if (bf16 && fp16) return 1u;
+        if (bf16 || fp16) return 8u;
+        if (fp8) return 16u;
+        return 1u;
+    }
+};
+
+static std::optional<DataType> getWideSpecializedBroadcastVectorizedStageStorageDType(
     const CompiledExecutionStage& stage,
     const std::vector<SpecializedBroadcastGroup>& groups) {
     const bool has_index_mapped_ops = std::any_of(stage.expr.nodes.begin(), stage.expr.nodes.end(), [](const ExprNode& node) {
@@ -1423,10 +1698,9 @@ static std::optional<DataType> getRaggedSpecializedBroadcastVectorizedStageStora
         return std::nullopt;
     }
 
+    // Dense stages use the same packet family: a dense group is a ragged group
+    // whose active extent is its full capacity.
     const std::optional<RaggedValuewiseExtentEmissionSpec> ragged_extent = findRaggedValuewiseExtentSpec(stage.expr);
-    if (!ragged_extent.has_value()) {
-        return std::nullopt;
-    }
 
     const std::unordered_set<uint32_t> structural_slots = raggedValuewiseExtentPartitionInputSlots(stage.expr);
     const std::optional<DataType> storage_dtype = getVectorizedStageStorageDTypeImpl(
@@ -1444,7 +1718,8 @@ static std::optional<DataType> getRaggedSpecializedBroadcastVectorizedStageStora
         if ((group.output_dims.back() % packet_scalars) != 0ULL || (group.numel % packet_scalars) != 0ULL) {
             return std::nullopt;
         }
-        if ((specializedRaggedGroupElementsPerValue(ragged_extent.value(), group) % packet_scalars) != 0ULL) {
+        if (ragged_extent.has_value() &&
+            (specializedRaggedGroupElementsPerValue(ragged_extent.value(), group) % packet_scalars) != 0ULL) {
             return std::nullopt;
         }
 
@@ -1462,7 +1737,7 @@ static std::optional<DataType> getRaggedSpecializedBroadcastVectorizedStageStora
     return storage_dtype;
 }
 
-static uint32_t raggedWideScalarSpecializedBroadcastElementsPerThread(
+static uint32_t wideScalarSpecializedBroadcastElementsPerThread(
     const CompiledExecutionStage& stage,
     const std::vector<SpecializedBroadcastGroup>& groups) {
     const bool has_index_mapped_ops = std::any_of(stage.expr.nodes.begin(), stage.expr.nodes.end(), [](const ExprNode& node) {
@@ -1473,36 +1748,18 @@ static uint32_t raggedWideScalarSpecializedBroadcastElementsPerThread(
         return 1u;
     }
 
+    // Dense stages use the same packet family as ragged ones (active extent =
+    // full capacity).
     const std::optional<RaggedValuewiseExtentEmissionSpec> ragged_extent = findRaggedValuewiseExtentSpec(stage.expr);
-    if (!ragged_extent.has_value()) {
-        return 1u;
-    }
 
     const std::unordered_set<uint32_t> structural_slots = raggedValuewiseExtentPartitionInputSlots(stage.expr);
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
     const std::vector<DataType> output_dtypes = collectOutputDTypes(stage);
-    bool saw_bf16 = false;
-    bool saw_fp16 = false;
-    bool saw_fp32 = false;
-    auto accept_value_dtype = [&](DataType dtype) {
-        if (dtype == DataType::BF16) {
-            saw_bf16 = true;
-            return true;
-        }
-        if (dtype == DataType::FP16) {
-            saw_fp16 = true;
-            return true;
-        }
-        if (dtype == DataType::FP32) {
-            saw_fp32 = true;
-            return true;
-        }
-        return false;
-    };
+    WideScalarStorageFamily family;
 
     // First classify the physical value-storage family.  Compute dtype is
     // deliberately absent from this decision: the scalar-per-lane wide emitter
-    // performs any BF16/FP16 -> FP32 promotion after the coalesced packet load.
+    // performs any low-precision -> FP32 promotion after the coalesced packet load.
     for (const SpecializedBroadcastGroup& group : groups) {
         if (group.output_dims.empty() || group.used_input_slots.size() != group.used_input_load_kinds.size()) {
             return 1u;
@@ -1510,52 +1767,54 @@ static uint32_t raggedWideScalarSpecializedBroadcastElementsPerThread(
 
         for (uint32_t slot : group.used_input_slots) {
             if (slot >= stage.expr.inputs.size() || structural_slots.contains(slot) ||
-                stage.expr.inputs[slot].kind != NamedInput::Kind::Tensor || !accept_value_dtype(input_dtypes.at(slot))) {
+                stage.expr.inputs[slot].kind != NamedInput::Kind::Tensor || !family.accept(input_dtypes.at(slot))) {
                 return 1u;
             }
         }
         for (uint32_t out_idx : group.output_indices) {
-            if (out_idx >= output_dtypes.size() || !accept_value_dtype(output_dtypes[out_idx])) {
+            if (out_idx >= output_dtypes.size() || !family.accept(output_dtypes[out_idx])) {
                 return 1u;
             }
         }
     }
 
-    uint32_t packet_scalars = 1u;
-    if (saw_fp32) {
-        // Preserve one float4 transaction per FP32 tensor/thread.
-        packet_scalars = 4u;
-    } else if (saw_bf16 != saw_fp16) {
-        // Homogeneous low-precision storage owns one 16-byte packet/thread even
-        // if the expression computes in FP32.
-        packet_scalars = 8u;
-    } else {
-        // Mixed BF16/FP16 without FP32 remains uncensused.
+    const uint32_t full_packet_scalars = family.packetScalars();
+    if (full_packet_scalars <= 1u) {
         return 1u;
     }
 
     // Then prove the broadcast mapping can preserve that packet ownership: the
     // packet may not cross a row/cycle boundary, native operands must be
     // contiguous, and scalar broadcasts must truly be invariant across it.
-    for (const SpecializedBroadcastGroup& group : groups) {
-        if ((group.output_dims.back() % packet_scalars) != 0ULL || (group.numel % packet_scalars) != 0ULL ||
-            (specializedRaggedGroupElementsPerValue(ragged_extent.value(), group) % packet_scalars) != 0ULL) {
-            return 1u;
-        }
+    // Row widths that are not a full-packet multiple take the widest smaller
+    // packet that divides them (FUSED-GATE only ordains full packets).
+    const auto packet_fits = [&](uint32_t packet_scalars) {
+        for (const SpecializedBroadcastGroup& group : groups) {
+            if ((group.output_dims.back() % packet_scalars) != 0ULL || (group.numel % packet_scalars) != 0ULL ||
+                (ragged_extent.has_value() &&
+                 (specializedRaggedGroupElementsPerValue(ragged_extent.value(), group) % packet_scalars) != 0ULL)) {
+                return false;
+            }
 
-        for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
-            const uint64_t inner_stride = specializedBroadcastInnermostInputStride(group, used_i);
-            if (group.used_input_load_kinds[used_i] == SpecializedInputLoadKind::NativeVector) {
-                if (inner_stride != 1ULL) {
-                    return 1u;
+            for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
+                const uint64_t inner_stride = specializedBroadcastInnermostInputStride(group, used_i);
+                if (group.used_input_load_kinds[used_i] == SpecializedInputLoadKind::NativeVector) {
+                    if (inner_stride != 1ULL) {
+                        return false;
+                    }
+                } else if (inner_stride != 0ULL) {
+                    return false;
                 }
-            } else if (inner_stride != 0ULL) {
-                return 1u;
             }
         }
+        return true;
+    };
+    for (uint32_t packet_scalars = full_packet_scalars; packet_scalars > 1u; packet_scalars /= 2u) {
+        if (packet_fits(packet_scalars)) {
+            return packet_scalars;
+        }
     }
-
-    return packet_scalars;
+    return 1u;
 }
 
 static std::optional<DataType> getSingleTensorInputStorageDType(const PhysicalExpression& expr, const std::vector<DataType>& input_dtypes) {
@@ -1577,8 +1836,78 @@ static std::optional<DataType> getSingleTensorInputStorageDType(const PhysicalEx
     return maybe_tensor_dtype;
 }
 
+// Ops emitFloat2NodeDefinitionsForSuffix can evaluate. The float2 transpose paths
+// must not be selected for an expression containing anything else (for example
+// WHERE or a comparison, which also compute in FP32 by default).
+static bool isFloat2PathOp(ExprOp op) {
+    switch (op) {
+        case ExprOp::INPUT:
+        case ExprOp::RUNTIME_SCALAR:
+        case ExprOp::TENSOR_RUNTIME_SCALAR:
+        case ExprOp::SCALAR_FP:
+        case ExprOp::FILL:
+        case ExprOp::ADD:
+        case ExprOp::SUB:
+        case ExprOp::MUL:
+        case ExprOp::DIV:
+        case ExprOp::NEG:
+        case ExprOp::ABS:
+        case ExprOp::CEIL:
+        case ExprOp::FLOOR:
+        case ExprOp::ROUND:
+        case ExprOp::TRUNC:
+        case ExprOp::SIN:
+        case ExprOp::COS:
+        case ExprOp::TAN:
+        case ExprOp::ASIN:
+        case ExprOp::ACOS:
+        case ExprOp::ATAN:
+        case ExprOp::SINH:
+        case ExprOp::COSH:
+        case ExprOp::ASINH:
+        case ExprOp::ACOSH:
+        case ExprOp::ATANH:
+        case ExprOp::ERF:
+        case ExprOp::ERFC:
+        case ExprOp::ERFCX:
+        case ExprOp::ERFINV:
+        case ExprOp::ERFCINV:
+        case ExprOp::TGAMMA:
+        case ExprOp::LGAMMA:
+        case ExprOp::DIGAMMA:
+        case ExprOp::EXP:
+        case ExprOp::EXPM1:
+        case ExprOp::EXP2:
+        case ExprOp::EXP10:
+        case ExprOp::LN:
+        case ExprOp::LOG1P:
+        case ExprOp::LOG2:
+        case ExprOp::LOG10:
+        case ExprOp::SQRT:
+        case ExprOp::TANH:
+        case ExprOp::NORMCDF:
+        case ExprOp::RESHAPE:
+        case ExprOp::UNSQUEEZE:
+        case ExprOp::SQUEEZE:
+        case ExprOp::POW:
+        case ExprOp::MIN:
+        case ExprOp::MAX:
+        case ExprOp::MIN_GRAD_LEFT:
+        case ExprOp::MIN_GRAD_RIGHT:
+        case ExprOp::MAX_GRAD_LEFT:
+        case ExprOp::MAX_GRAD_RIGHT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool expressionUsesOnlyFloat2PathOps(const PhysicalExpression& expr) {
+    return std::all_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) { return isFloat2PathOp(node.op); });
+}
+
 static bool supportsMixedTwoByteFloat2TransposedVectorization(const PhysicalExpression& expr, DataType input_dtype, DataType output_dtype) {
-    if (expressionHasIndexAwareOps(expr)) {
+    if (expressionHasIndexAwareOps(expr) || !expressionUsesOnlyFloat2PathOps(expr)) {
         return false;
     }
 
@@ -1652,16 +1981,19 @@ static std::optional<DataType> mixedFp8TransposedVectorComputeDType(const Physic
 }
 
 static bool supportsFloat2TransposedVectorization(const PhysicalExpression& expr, DataType input_dtype, DataType output_dtype) {
-    if (expressionHasIndexAwareOps(expr)) {
+    if (expressionHasIndexAwareOps(expr) || !expressionUsesOnlyFloat2PathOps(expr)) {
         return false;
     }
 
-    if (transposePackScalars(output_dtype) <= 1 || input_dtype == output_dtype) {
+    if (transposePackScalars(output_dtype) <= 1) {
         return false;
     }
 
-    // This path is for cross-width/cross-family cases that should compute the fused
-    // producer in fp32 pairs before packing the low-precision transposed output.
+    // This path computes the fused producer in fp32 pairs before packing the
+    // low-precision transposed output: cross-width/cross-family storage, and
+    // homogeneous low-precision storage computing in FP32 (the default policy).
+    // Homogeneous storage with explicit BF16/FP16 compute uses the packed
+    // half2/bfloat162 path instead.
     if (output_dtype == DataType::FP32) {
         return false;
     }
@@ -1718,40 +2050,6 @@ static bool supportsHalf2TransposedVectorization(const PhysicalExpression& expr,
                     return false;
                 }
                 break;
-        }
-    }
-
-    return true;
-}
-
-static bool supportsFp8ToBf16Float2TransposedVectorization(const PhysicalExpression& expr, DataType input_dtype, DataType output_dtype) {
-    if (expressionHasIndexAwareOps(expr)) {
-        return false;
-    }
-
-    if (!isFp8DType(input_dtype) || output_dtype != DataType::BF16) {
-        return false;
-    }
-
-    for (const ExprNode& node : expr.nodes) {
-        switch (node.op) {
-            case ExprOp::INPUT:
-                if (requireNodeInputTensorDType(node) != input_dtype) {
-                    return false;
-                }
-                break;
-            case ExprOp::SCALAR_FP:
-            case ExprOp::FILL:
-            case ExprOp::RUNTIME_SCALAR:
-            case ExprOp::TENSOR_RUNTIME_SCALAR:
-                break;
-            default: {
-                const DataType compute_dtype = requireNodeComputeDType(node);
-                if (compute_dtype != DataType::FP32 && compute_dtype != DataType::BF16) {
-                    return false;
-                }
-                break;
-            }
         }
     }
 
@@ -1820,64 +2118,32 @@ static uint32_t raggedWideScalarFlatElementsPerThread(const PhysicalExecutionSta
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
     const std::vector<DataType> output_dtypes = collectOutputDTypes(stage);
 
-    bool saw_bf16 = false;
-    bool saw_fp16 = false;
-    bool saw_fp32 = false;
-    auto accept_value_dtype = [&](DataType dtype) {
-        if (dtype == DataType::BF16) {
-            saw_bf16 = true;
-            return true;
-        }
-        if (dtype == DataType::FP16) {
-            saw_fp16 = true;
-            return true;
-        }
-        if (dtype == DataType::FP32) {
-            saw_fp32 = true;
-            return true;
-        }
-        return false;
-    };
-
+    WideScalarStorageFamily family;
     for (uint32_t slot = 0; slot < stage.expr.inputs.size(); ++slot) {
         if (structural_slots.contains(slot)) {
             continue;
         }
-        // Keep runtime scalars and other non-tensor operands on the existing
-        // scalar path until that ABI has its own benchmark-backed wide family.
+        // Runtime scalars are read once per thread and never packetized, so they do
+        // not take part in packet ownership.
         if (stage.expr.inputs[slot].kind != NamedInput::Kind::Tensor) {
-            return 1u;
+            continue;
         }
-        if (!accept_value_dtype(input_dtypes.at(slot))) {
+        if (!family.accept(input_dtypes.at(slot))) {
             return 1u;
         }
     }
     for (DataType dtype : output_dtypes) {
-        if (!accept_value_dtype(dtype)) {
+        if (!family.accept(dtype)) {
             return 1u;
         }
     }
 
-    // Packet ownership follows physical storage, not arithmetic precision.
-    // Homogeneous BF16/FP16 storage therefore keeps the proven eight-scalar /
-    // 16-byte transaction even when the expression computes in FP32: the wide
-    // scalar emitter unpacks each lane after the coalesced load, evaluates it in
-    // the resolved compute dtype, then repacks the low-precision output.
-    if (!saw_fp32 && (saw_bf16 != saw_fp16)) {
-        return 8u;
-    }
-
-    // Whenever FP32 storage participates, use the proven four-scalar ownership
-    // so each FP32 tensor issues exactly one contiguous float4 transaction per
-    // thread.  Do not widen to eight values: two float4 instructions per thread
-    // would interleave each warp transaction.
-    if (saw_fp32) {
-        return 4u;
-    }
-
-    // Mixed BF16/FP16 without FP32 storage remains outside the benchmark-backed
-    // family for now.
-    return 1u;
+    // Homogeneous BF16/FP16 storage keeps the proven eight-scalar / 16-byte packet
+    // even when the expression computes in FP32 (the default for low-precision
+    // storage): the emitter unpacks each lane after the coalesced load, evaluates it
+    // in the resolved compute dtype, then repacks. FP8-only storage owns sixteen
+    // scalars; any FP32 storage keeps one float4 per FP32 tensor per thread.
+    return family.packetScalars();
 }
 
 
@@ -1994,7 +2260,16 @@ uint32_t CudaSourceEmitter::flatElementsPerThread(const PhysicalExecutionStage& 
         return raggedWideScalarFlatElementsPerThread(stage);
     }
 
-    return flatScalarElementsPerThreadImpl(collectInputSlotDTypes(stage.expr), collectOutputDTypes(stage));
+    // Only packetized tensors decide the packet width; runtime scalars (for example
+    // an FP32 learning rate) are read once per thread.
+    const std::vector<DataType> all_input_dtypes = collectInputSlotDTypes(stage.expr);
+    std::vector<DataType> tensor_input_dtypes;
+    for (uint32_t slot = 0; slot < stage.expr.inputs.size(); ++slot) {
+        if (stage.expr.inputs[slot].kind == NamedInput::Kind::Tensor) {
+            tensor_input_dtypes.push_back(all_input_dtypes.at(slot));
+        }
+    }
+    return flatScalarElementsPerThreadImpl(tensor_input_dtypes, collectOutputDTypes(stage));
 }
 
 uint32_t CudaSourceEmitter::tiledTransposePackScalars(const PhysicalExecutionStage& stage) {
@@ -2119,8 +2394,21 @@ static std::string castScalarExpr(const std::string& expr, DataType src_dtype, D
                     return expr;
                 case DataType::BF16:
                     return "half(float(" + expr + "))";
+                // FP8 -> FP16 is exact: convert directly (cvt.rn.f16x2.e4m3x2 / e5m2x2 on sm89+)
+                // instead of FP8 -> FP16 -> FP32 -> FP16.
                 case DataType::FP8_E4M3:
+                    return "__half(__nv_cvt_fp8_to_halfraw((" + expr + ").__x, __NV_E4M3))";
                 case DataType::FP8_E5M2:
+                    return "__half(__nv_cvt_fp8_to_halfraw((" + expr + ").__x, __NV_E5M2))";
+                case DataType::UINT8:
+                case DataType::INT8:
+                case DataType::UINT16:
+                case DataType::INT16:
+                case DataType::UINT32:
+                case DataType::INT32:
+                case DataType::UINT64:
+                case DataType::INT64:
+                    // Exact through FP32: any integer FP32 must round (> 2^24) overflows FP16 anyway.
                     return "half(float(" + expr + "))";
                 default:
                     break;
@@ -2140,6 +2428,20 @@ static std::string castScalarExpr(const std::string& expr, DataType src_dtype, D
                 case DataType::FP8_E4M3:
                 case DataType::FP8_E5M2:
                     return "__nv_bfloat16(float(" + expr + "))";
+                case DataType::UINT8:
+                case DataType::INT8:
+                case DataType::UINT16:
+                case DataType::INT16:
+                    return "__nv_bfloat16(float(" + expr + "))";  // exact in FP32
+                // Wider integers round once, directly: going through FP32 would double-round above 2^24.
+                case DataType::INT32:
+                    return "__int2bfloat16_rn(" + expr + ")";
+                case DataType::UINT32:
+                    return "__uint2bfloat16_rn(" + expr + ")";
+                case DataType::INT64:
+                    return "__ll2bfloat16_rn(" + expr + ")";
+                case DataType::UINT64:
+                    return "__ull2bfloat16_rn(" + expr + ")";
                 default:
                     break;
             }
@@ -2150,11 +2452,23 @@ static std::string castScalarExpr(const std::string& expr, DataType src_dtype, D
                 case DataType::FP32:
                     return "thor_to_fp8_e4m3_satfinite(" + expr + ")";
                 case DataType::FP16:
-                    return "thor_to_fp8_e4m3_satfinite(float(" + expr + "))";
+                    return "thor_half_to_fp8_e4m3_satfinite(" + expr + ")";
                 case DataType::BF16:
                     return "thor_to_fp8_e4m3_satfinite(float(" + expr + "))";
                 case DataType::FP8_E4M3:
                     return expr;
+                case DataType::BOOLEAN:
+                    return "thor_to_fp8_e4m3_satfinite((" + expr + ") ? 1.0f : 0.0f)";
+                case DataType::UINT8:
+                case DataType::INT8:
+                case DataType::UINT16:
+                case DataType::INT16:
+                case DataType::UINT32:
+                case DataType::INT32:
+                case DataType::UINT64:
+                case DataType::INT64:
+                    // Exact through FP32: integers FP32 must round (> 2^24) saturate FP8 anyway.
+                    return "thor_to_fp8_e4m3_satfinite(float(" + expr + "))";
                 case DataType::FP8_E5M2:
                     return "thor_to_fp8_e4m3_satfinite(float(" + expr + "))";
                 default:
@@ -2167,13 +2481,25 @@ static std::string castScalarExpr(const std::string& expr, DataType src_dtype, D
                 case DataType::FP32:
                     return "thor_to_fp8_e5m2_satfinite(" + expr + ")";
                 case DataType::FP16:
-                    return "thor_to_fp8_e5m2_satfinite(float(" + expr + "))";
+                    return "thor_half_to_fp8_e5m2_satfinite(" + expr + ")";
                 case DataType::BF16:
                     return "thor_to_fp8_e5m2_satfinite(float(" + expr + "))";
                 case DataType::FP8_E4M3:
                     return "thor_to_fp8_e5m2_satfinite(float(" + expr + "))";
                 case DataType::FP8_E5M2:
                     return expr;
+                case DataType::BOOLEAN:
+                    return "thor_to_fp8_e5m2_satfinite((" + expr + ") ? 1.0f : 0.0f)";
+                case DataType::UINT8:
+                case DataType::INT8:
+                case DataType::UINT16:
+                case DataType::INT16:
+                case DataType::UINT32:
+                case DataType::INT32:
+                case DataType::UINT64:
+                case DataType::INT64:
+                    // Exact through FP32: integers FP32 must round (> 2^24) saturate FP8 anyway.
+                    return "thor_to_fp8_e5m2_satfinite(float(" + expr + "))";
                 default:
                     break;
             }
@@ -2830,6 +3156,109 @@ static std::string emitTransposeSourceIndexForDomain(std::ostringstream& ss,
 }
 
 
+// Decodes a row-major index over `dims` into per-axis coordinates. The index must lie in
+// [0, prod(dims)), so the outermost non-unit coordinate is the remaining quotient itself (no
+// modulo) and nothing is divided past the outermost coordinate that is needed. Each non-unit
+// axis inside that costs one division by a constant (a shift for powers of two); its coordinate
+// is the remainder recovered with a multiply-subtract. Size-1 axes decode to the literal 0.
+// Only axes marked in `needed` are materialized (all when `needed` is empty); the others are
+// returned as empty strings.
+static std::vector<std::string> emitRowMajorCoordinateDecode(std::ostringstream& ss,
+                                                            const std::vector<uint64_t>& dims,
+                                                            const std::string& idx_expr,
+                                                            const std::string& prefix,
+                                                            const std::string& indent,
+                                                            bool use_uint32_index_math,
+                                                            const std::vector<bool>& needed = {}) {
+    const std::string index_type = emittedIndexType(use_uint32_index_math);
+    const size_t rank = dims.size();
+    const auto is_needed = [&](size_t axis) { return needed.empty() || needed.at(axis); };
+    std::vector<std::string> coords(rank);
+    size_t outermost_non_unit = rank;
+    size_t outermost_needed = rank;
+    for (size_t axis = rank; axis-- > 0;) {
+        if (dims[axis] == 0) {
+            throw runtime_error("Index-mapped coordinate decode does not support zero-sized dimensions.");
+        }
+        if (dims[axis] == 1ULL) {
+            if (is_needed(axis)) coords[axis] = emitUnsignedLiteral(0, use_uint32_index_math);
+            continue;
+        }
+        outermost_non_unit = axis;
+        if (is_needed(axis)) outermost_needed = axis;
+    }
+    if (outermost_needed == rank) {
+        return coords;
+    }
+
+    const bool simple_idx = std::all_of(
+        idx_expr.begin(), idx_expr.end(), [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; });
+    std::string residual = simple_idx ? idx_expr : "(" + idx_expr + ")";
+    for (size_t axis = rank; axis-- > outermost_needed;) {
+        const uint64_t dim = dims[axis];
+        if (dim == 1ULL) {
+            continue;
+        }
+        const std::string coord = prefix + "_c" + std::to_string(axis);
+        if (axis == outermost_non_unit) {
+            coords[axis] = residual;
+            break;
+        }
+        if (axis == outermost_needed) {
+            // Last coordinate needed: its remainder alone, no quotient for further axes.
+            const std::string remainder = isPowerOfTwo(dim)
+                                              ? residual + " & " + emitUnsignedLiteral(dim - 1ULL, use_uint32_index_math)
+                                              : residual + " % " + emitUnsignedLiteral(dim, use_uint32_index_math);
+            ss << indent << "const " << index_type << " " << coord << " = " << remainder << ";\n";
+            coords[axis] = coord;
+            break;
+        }
+        const std::string quotient = prefix + "_q" + std::to_string(axis);
+        if (isPowerOfTwo(dim)) {
+            ss << indent << "const " << index_type << " " << quotient << " = " << residual << " >> " << log2Exact(dim) << ";\n";
+            if (is_needed(axis)) {
+                ss << indent << "const " << index_type << " " << coord << " = " << residual << " & "
+                   << emitUnsignedLiteral(dim - 1ULL, use_uint32_index_math) << ";\n";
+                coords[axis] = coord;
+            }
+        } else {
+            const std::string dim_lit = emitUnsignedLiteral(dim, use_uint32_index_math);
+            ss << indent << "const " << index_type << " " << quotient << " = " << residual << " / " << dim_lit << ";\n";
+            if (is_needed(axis)) {
+                ss << indent << "const " << index_type << " " << coord << " = " << residual << " - " << quotient << " * " << dim_lit
+                   << ";\n";
+                coords[axis] = coord;
+            }
+        }
+        residual = quotient;
+    }
+    return coords;
+}
+
+// Sum of coord * stride over the axes with a coordinate and a non-zero stride.
+static std::string stridedOffsetExpr(const std::vector<std::string>& coords,
+                                     const std::vector<uint64_t>& strides,
+                                     uint64_t base,
+                                     bool use_uint32_index_math) {
+    std::string expr;
+    const auto append = [&](const std::string& term) { expr += (expr.empty() ? "" : " + ") + term; };
+    if (base != 0ULL) append(emitUnsignedLiteral(base, use_uint32_index_math));
+    for (size_t axis = 0; axis < coords.size(); ++axis) {
+        const uint64_t stride = strides.at(axis);
+        if (coords[axis].empty() || stride == 0ULL || coords[axis] == emitUnsignedLiteral(0, use_uint32_index_math)) {
+            continue;
+        }
+        if (stride == 1ULL) {
+            append(coords[axis]);
+        } else if (isPowerOfTwo(stride)) {
+            append("(" + coords[axis] + " << " + std::to_string(log2Exact(stride)) + ")");
+        } else {
+            append(coords[axis] + " * " + emitUnsignedLiteral(stride, use_uint32_index_math));
+        }
+    }
+    return expr.empty() ? emitUnsignedLiteral(0, use_uint32_index_math) : expr;
+}
+
 static uint64_t normalizedTakeAlongAxisForEmitter(const ExprNode& node, uint64_t rank) {
     if (rank == 0) {
         throw runtime_error("take_along_axis requires a non-scalar tensor.");
@@ -2844,15 +3273,9 @@ static uint64_t normalizedTakeAlongAxisForEmitter(const ExprNode& node, uint64_t
     return encoded_axis;
 }
 
-static std::string emitTakeAlongAxisSourceIndexForDomain(std::ostringstream& ss,
-                                                         const ExprNode& node,
-                                                         const std::vector<uint64_t>& input_dims,
-                                                         const std::vector<uint64_t>& indices_dims,
-                                                         const std::string& idx_expr,
-                                                         const std::string& selected_index_expr,
-                                                         const std::string& var_name,
-                                                         const std::string& indent,
-                                                         bool /*use_uint32_index_math*/) {
+static uint64_t validateTakeAlongAxisShapes(const ExprNode& node,
+                                           const std::vector<uint64_t>& input_dims,
+                                           const std::vector<uint64_t>& indices_dims) {
     if (input_dims.empty() || indices_dims.empty()) {
         throw runtime_error("take_along_axis requires non-scalar input and indices tensors.");
     }
@@ -2869,34 +3292,143 @@ static std::string emitTakeAlongAxisSourceIndexForDomain(std::ostringstream& ss,
             throw runtime_error("take_along_axis does not support zero-sized dimensions.");
         }
     }
+    return axis;
+}
 
-    const auto input_strides = packedStrides(input_dims);
-    ss << indent << "unsigned long long " << var_name << "_residual = static_cast<unsigned long long>(" << idx_expr << ");\n";
-    ss << indent << "unsigned long long " << var_name << " = 0ULL;\n";
+// take_along_axis out-of-range semantics. Indices are unsigned (UINT32/UINT64), so the only
+// invalid index is one at or past the gather-axis length; such an element reads 0, as an
+// out-of-vocabulary EMBEDDING_LOOKUP row does. The bound is checked on the full-width index,
+// before it narrows to the kernel index type (a UINT64 index of 2^32 + 1 must not wrap to 1),
+// and the gather coordinate of an out-of-range element is 0, so no lane ever reads outside
+// the source. The caller selects the zero with the returned in-range flag.
+struct TakeAlongAxisGatherIndex {
+    std::string coordinate;
+    std::string in_range;
+};
 
-    for (int64_t i = static_cast<int64_t>(indices_dims.size()) - 1; i >= 0; --i) {
-        const size_t dim_index = static_cast<size_t>(i);
-        const uint64_t dim = indices_dims[dim_index];
-        const uint64_t stride = input_strides[dim_index];
-        const std::string coord_var = var_name + "_coord_" + std::to_string(dim_index);
-        if (dim_index == axis) {
-            ss << indent << "const unsigned long long " << coord_var << " = static_cast<unsigned long long>(" << selected_index_expr << ");\n";
-            ss << indent << var_name << "_residual /= " << dim << "ULL;\n";
-        } else {
-            ss << indent << "const unsigned long long " << coord_var << " = " << var_name << "_residual % " << dim << "ULL;\n";
-            ss << indent << var_name << "_residual /= " << dim << "ULL;\n";
-        }
+static TakeAlongAxisGatherIndex emitTakeAlongAxisGatherIndex(std::ostringstream& ss,
+                                                             const std::string& selected_value,
+                                                             DataType selected_dtype,
+                                                             uint64_t axis_dim,
+                                                             const std::string& coordinate_var,
+                                                             const std::string& in_range_var,
+                                                             const std::string& indent,
+                                                             bool use_uint32_index_math) {
+    const bool narrow_index = isIntegralScalarCastDType(selected_dtype) && selected_dtype != DataType::UINT64 &&
+                              selected_dtype != DataType::INT64;
+    const bool compare_in_uint32 = use_uint32_index_math && narrow_index && fitsInUInt32(axis_dim);
+    const DataType compare_dtype = compare_in_uint32 ? DataType::UINT32 : DataType::UINT64;
+    const std::string index_type = emittedIndexType(use_uint32_index_math);
+    const std::string raw_var = coordinate_var + "_raw";
+    ss << indent << "const " << scalarStorageType(compare_dtype) << " " << raw_var << " = "
+       << castScalarExpr(selected_value, selected_dtype, compare_dtype) << ";\n";
+    ss << indent << "const bool " << in_range_var << " = " << raw_var << " < " << emitUnsignedLiteral(axis_dim, compare_in_uint32)
+       << ";\n";
+    const std::string narrowed = compare_in_uint32 == use_uint32_index_math ? raw_var : "static_cast<" + index_type + ">(" + raw_var + ")";
+    ss << indent << "const " << index_type << " " << coordinate_var << " = " << in_range_var << " ? " << narrowed << " : "
+       << emitUnsignedLiteral(0, use_uint32_index_math) << ";\n";
+    return {coordinate_var, in_range_var};
+}
 
-        if (stride == 1ULL) {
-            ss << indent << var_name << " += " << coord_var << ";\n";
-        } else if (isPowerOfTwo(stride)) {
-            ss << indent << var_name << " += (" << coord_var << " << " << std::to_string(log2Exact(stride)) << ");\n";
-        } else if (stride != 0ULL) {
-            ss << indent << var_name << " += " << coord_var << " * " << stride << "ULL;\n";
+// Logical (dense row-major) index into the take_along_axis input for the element at idx_expr in
+// the indices domain: the indices coordinates with the gathered index on the gather axis. Returns
+// the in-range flag of the gathered index (see emitTakeAlongAxisGatherIndex).
+static std::string emitTakeAlongAxisSourceIndexForDomain(std::ostringstream& ss,
+                                                         const ExprNode& node,
+                                                         const std::vector<uint64_t>& input_dims,
+                                                         const std::vector<uint64_t>& indices_dims,
+                                                         const std::string& idx_expr,
+                                                         const std::string& selected_index_expr,
+                                                         DataType selected_index_dtype,
+                                                         const std::string& var_name,
+                                                         const std::string& indent,
+                                                         bool use_uint32_index_math) {
+    const uint64_t axis = validateTakeAlongAxisShapes(node, input_dims, indices_dims);
+    const std::string index_type = emittedIndexType(use_uint32_index_math);
+    std::vector<bool> needed(indices_dims.size(), true);
+    needed[axis] = false;
+    std::vector<std::string> coords =
+        emitRowMajorCoordinateDecode(ss, indices_dims, idx_expr, var_name, indent, use_uint32_index_math, needed);
+    const TakeAlongAxisGatherIndex gather = emitTakeAlongAxisGatherIndex(ss,
+                                                                         selected_index_expr,
+                                                                         selected_index_dtype,
+                                                                         input_dims[axis],
+                                                                         var_name + "_gather",
+                                                                         var_name + "_in_range",
+                                                                         indent,
+                                                                         use_uint32_index_math);
+    coords[axis] = gather.coordinate;
+    ss << indent << "const " << index_type << " " << var_name << " = "
+       << stridedOffsetExpr(coords, packedStrides(input_dims), 0, use_uint32_index_math) << ";\n";
+    return gather.in_range;
+}
+
+static std::optional<size_t> findUsedInputSlotIndex(const SpecializedBroadcastGroup* group, uint32_t input_slot) {
+    if (group == nullptr) {
+        return std::nullopt;
+    }
+    for (size_t i = 0; i < group->used_input_slots.size(); ++i) {
+        if (group->used_input_slots[i] == input_slot) {
+            return i;
         }
     }
+    return std::nullopt;
+}
 
-    return var_name;
+static const std::vector<uint64_t>& usedInputVisibleDims(const SpecializedBroadcastGroup& group, size_t used_i) {
+    if (used_i >= group.used_input_visible_dims.size() || used_i >= group.used_input_visible_strides.size()) {
+        throw runtime_error("Index-aware input storage mapping is missing visible input layout metadata.");
+    }
+    const std::vector<uint64_t>& dims = group.used_input_visible_dims[used_i];
+    if (dims.size() != group.used_input_visible_strides[used_i].size()) {
+        throw runtime_error("Index-aware input storage mapping requires visible dimensions and strides with the same rank.");
+    }
+    return dims;
+}
+
+static bool visibleStridesArePacked(const std::vector<uint64_t>& dims, const std::vector<uint64_t>& strides) {
+    uint64_t expected_stride = 1ULL;
+    for (size_t axis = dims.size(); axis-- > 0;) {
+        if (dims[axis] == 1ULL) {
+            continue;
+        }
+        if (strides[axis] != expected_stride) {
+            return false;
+        }
+        expected_stride *= dims[axis];
+    }
+    return true;
+}
+
+// Storage stride of a stage input along each axis of its node dims, or nullopt when the node
+// dims and the visible layout do not line up axis for axis (ignoring size-1 axes). An input
+// without visible layout metadata is addressed densely.
+static std::optional<std::vector<uint64_t>> inputStorageStridesForNodeDims(const SpecializedBroadcastGroup& group,
+                                                                           uint32_t input_slot,
+                                                                           const std::vector<uint64_t>& node_dims) {
+    const std::optional<size_t> used_i = findUsedInputSlotIndex(&group, input_slot);
+    if (!used_i.has_value()) {
+        return packedStrides(node_dims);
+    }
+    const std::vector<uint64_t>& dims = usedInputVisibleDims(group, used_i.value());
+    const std::vector<uint64_t>& strides = group.used_input_visible_strides[used_i.value()];
+    std::vector<uint64_t> node_strides(node_dims.size(), 0ULL);
+    size_t visible_axis = 0;
+    for (size_t axis = 0; axis < node_dims.size(); ++axis) {
+        if (node_dims[axis] == 1ULL) {
+            continue;
+        }
+        while (visible_axis < dims.size() && dims[visible_axis] == 1ULL) ++visible_axis;
+        if (visible_axis == dims.size() || dims[visible_axis] != node_dims[axis]) {
+            return std::nullopt;
+        }
+        node_strides[axis] = strides[visible_axis++];
+    }
+    while (visible_axis < dims.size() && dims[visible_axis] == 1ULL) ++visible_axis;
+    if (visible_axis != dims.size()) {
+        return std::nullopt;
+    }
+    return node_strides;
 }
 
 static std::string emitInputStorageIndexForLogicalIndex(std::ostringstream& ss,
@@ -2904,7 +3436,34 @@ static std::string emitInputStorageIndexForLogicalIndex(std::ostringstream& ss,
                                                         uint32_t input_slot,
                                                         const std::string& idx_expr,
                                                         const std::string& suffix,
-                                                        const std::string& indent);
+                                                        const std::string& indent,
+                                                        bool use_uint32_index_math);
+
+// Maps a dense index in a strided view's own domain to the logical index of its source.
+// view_dims may contain the Expression copy-dimension marker (0) in the node; callers pass
+// the dims resolved by shape inference against the physical input at this placement.
+static std::string emitStridedViewSourceIndex(std::ostringstream& ss,
+                                              const ExprNode& n,
+                                              const std::vector<uint64_t>& view_dims,
+                                              const std::string& view_idx_expr,
+                                              const std::string& suffix,
+                                              const std::string& indent,
+                                              bool use_uint32_index_math) {
+    if (n.view_dims.empty() || n.view_dims.size() != n.view_strides.size() || view_dims.size() != n.view_dims.size()) {
+        throw runtime_error("Index-mapped strided_view emission requires dimensions and strides with the same non-zero rank.");
+    }
+    for (size_t axis = 0; axis < view_dims.size(); ++axis) {
+        if (view_dims[axis] == 0 || n.view_strides[axis] == 0) {
+            throw runtime_error("Index-mapped strided_view dimensions and strides must be non-zero.");
+        }
+    }
+    const std::string source_idx = "sv_source_idx" + suffix;
+    const std::vector<std::string> coords =
+        emitRowMajorCoordinateDecode(ss, view_dims, view_idx_expr, "sv" + suffix, indent, use_uint32_index_math);
+    ss << indent << "const " << emittedIndexType(use_uint32_index_math) << " " << source_idx << " = "
+       << stridedOffsetExpr(coords, n.view_strides, n.view_element_offset, use_uint32_index_math) << ";\n";
+    return source_idx;
+}
 
 static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
                                               const PhysicalExpression& expr,
@@ -2951,7 +3510,7 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
             emitBroadcastOffsetForDomain(
                 ss, group.node_dims[node_idx], domain_dims, idx_expr, logical_offset_var, indent, use_uint32_index_math);
             const std::string storage_idx = emitInputStorageIndexForLogicalIndex(
-                ss, &group, n.input_slot, logical_offset_var, suffix + "_storage", indent);
+                ss, &group, n.input_slot, logical_offset_var, suffix + "_storage", indent, use_uint32_index_math);
             ss << indent << "const " << output_type << " " << var << " = "
                << castScalarExpr("in" + std::to_string(n.input_slot) + "[" + storage_idx + "]", input_tensor_dtype, emitted_dtype) << ";\n";
             return var;
@@ -3074,55 +3633,92 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
     }
 
     if (n.op == ExprOp::TAKE_ALONG_AXIS) {
+        // Decode the element's coordinates in the indices domain once. The gathered element's
+        // address is then built straight from them: the input's storage strides on every axis,
+        // the gathered index on the gather axis. A non-input source gets the dense logical index
+        // instead. The indices tensor is read through the same coordinates when it is a
+        // non-dense input; otherwise its index is take_idx itself.
+        const std::vector<uint64_t>& input_dims = group.node_dims[n.lhs];
+        const std::vector<uint64_t>& indices_dims = group.node_dims[n.rhs];
+        const uint64_t axis = validateTakeAlongAxisShapes(n, input_dims, indices_dims);
+        const std::string index_type = emittedIndexType(use_uint32_index_math);
         const std::string take_idx = "take_eval_idx" + suffix;
         emitBroadcastOffsetForDomain(ss, group.node_dims[node_idx], domain_dims, idx_expr, take_idx, indent, use_uint32_index_math);
-        const std::string selected_value =
-            emitIndexMappedScalarValue(ss, expr, group, n.rhs, take_idx, group.node_dims[n.rhs], indent, use_uint32_index_math, emission_scope, counter);
+
+        const ExprNode& source_node = expr.nodes[n.lhs];
+        const ExprNode& indices_node = expr.nodes[n.rhs];
+        const std::optional<std::vector<uint64_t>> source_storage_strides =
+            source_node.op == ExprOp::INPUT ? inputStorageStridesForNodeDims(group, source_node.input_slot, input_dims) : std::nullopt;
+        const std::vector<uint64_t> source_strides = source_storage_strides.value_or(packedStrides(input_dims));
+        std::optional<std::vector<uint64_t>> indices_strides =
+            indices_node.op == ExprOp::INPUT ? inputStorageStridesForNodeDims(group, indices_node.input_slot, indices_dims) : std::nullopt;
+        if (indices_strides.has_value() && visibleStridesArePacked(indices_dims, indices_strides.value())) {
+            indices_strides.reset();
+        }
+
+        std::vector<bool> needed(indices_dims.size(), false);
+        for (size_t a = 0; a < indices_dims.size(); ++a) {
+            needed[a] = (a != axis && source_strides[a] != 0ULL) || (indices_strides.has_value() && indices_strides.value()[a] != 0ULL);
+        }
+        std::vector<std::string> coords =
+            emitRowMajorCoordinateDecode(ss, indices_dims, take_idx, "take" + suffix, indent, use_uint32_index_math, needed);
+
+        const auto emit_input_load = [&](const ExprNode& input_node, uint32_t input_node_idx, const std::string& storage_idx) {
+            const DataType value_dtype = emittedScalarNodeValueDType(input_node);
+            const std::string load_var =
+                "t" + std::to_string(input_node_idx) + nextIndexMappedSuffix(input_node_idx, emission_scope, counter);
+            ss << indent << "const " << scalarStorageType(value_dtype) << " " << load_var << " = "
+               << castScalarExpr("in" + std::to_string(input_node.input_slot) + "[" + storage_idx + "]",
+                                 requireNodeInputTensorDType(input_node),
+                                 value_dtype)
+               << ";\n";
+            return load_var;
+        };
+
+        std::string selected_value;
+        if (indices_strides.has_value()) {
+            selected_value =
+                emit_input_load(indices_node, n.rhs, stridedOffsetExpr(coords, indices_strides.value(), 0, use_uint32_index_math));
+        } else {
+            selected_value = emitIndexMappedScalarValue(
+                ss, expr, group, n.rhs, take_idx, indices_dims, indent, use_uint32_index_math, emission_scope, counter);
+        }
+        const TakeAlongAxisGatherIndex gather = emitTakeAlongAxisGatherIndex(ss,
+                                                                             selected_value,
+                                                                             emittedScalarNodeValueDType(indices_node),
+                                                                             input_dims[axis],
+                                                                             "take_gather_idx" + suffix,
+                                                                             "take_in_range" + suffix,
+                                                                             indent,
+                                                                             use_uint32_index_math);
+        coords[axis] = gather.coordinate;
+
         const std::string source_idx = "take_source_idx" + suffix;
-        emitTakeAlongAxisSourceIndexForDomain(
-            ss, n, group.node_dims[n.lhs], group.node_dims[n.rhs], take_idx, selected_value, source_idx, indent, use_uint32_index_math);
-        const std::string value = emitIndexMappedScalarValue(
-            ss, expr, group, n.lhs, source_idx, group.node_dims[n.lhs], indent, use_uint32_index_math, emission_scope, counter);
-        return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[n.lhs]), emitted_dtype);
+        ss << indent << "const " << index_type << " " << source_idx << " = "
+           << stridedOffsetExpr(coords, source_strides, 0, use_uint32_index_math) << ";\n";
+        const std::string value =
+            source_storage_strides.has_value()
+                ? emit_input_load(source_node, n.lhs, source_idx)
+                : emitIndexMappedScalarValue(
+                      ss, expr, group, n.lhs, source_idx, input_dims, indent, use_uint32_index_math, emission_scope, counter);
+        const std::string taken = "take_value" + suffix;
+        ss << indent << "const " << scalarStorageType(emitted_dtype) << " " << taken << " = " << gather.in_range << " ? "
+           << castScalarExpr(value, emittedScalarNodeValueDType(source_node), emitted_dtype) << " : "
+           << castScalarExpr("0.0f", DataType::FP32, emitted_dtype) << ";\n";
+        return taken;
     }
 
     if (n.op == ExprOp::STRIDED_VIEW) {
-        // view_dims may contain the Expression copy-dimension marker (0).
-        // Shape inference has already resolved it against the *physical* input
-        // at this placement; never use the unexpanded model dimensions for
-        // index arithmetic.
-        const std::vector<uint64_t>& view_dims = group.node_dims[node_idx];
-        if (n.view_dims.empty() || n.view_dims.size() != n.view_strides.size() ||
-            view_dims.size() != n.view_dims.size()) {
-            throw runtime_error("Index-mapped strided_view emission requires dimensions and strides with the same non-zero rank.");
+        // A view broadcast by its parent is first collapsed to its own dense index, as for the
+        // shape aliases below; decoding view coordinates from the parent-domain index would
+        // read the wrong elements (e.g. a [3,1] view in a [3,4] domain).
+        std::string view_idx = idx_expr;
+        if (group.node_dims[node_idx] != domain_dims) {
+            view_idx = "view_idx" + suffix;
+            emitBroadcastOffsetForDomain(ss, group.node_dims[node_idx], domain_dims, idx_expr, view_idx, indent, use_uint32_index_math);
         }
-
-        const std::string source_idx = "sv_source_idx" + suffix;
-        const std::string residual_var = "sv_residual" + suffix;
-        ss << indent << emittedIndexType(use_uint32_index_math) << " " << residual_var << " = static_cast<"
-           << emittedIndexType(use_uint32_index_math) << ">(" << idx_expr << ");\n";
-        ss << indent << emittedIndexType(use_uint32_index_math) << " " << source_idx << " = "
-           << emitUnsignedLiteral(n.view_element_offset, use_uint32_index_math) << ";\n";
-        for (int64_t axis = static_cast<int64_t>(view_dims.size()) - 1; axis >= 0; --axis) {
-            const uint64_t dim = view_dims.at(static_cast<size_t>(axis));
-            const uint64_t stride = n.view_strides.at(static_cast<size_t>(axis));
-            if (dim == 0 || stride == 0) {
-                throw runtime_error("Index-mapped strided_view dimensions and strides must be non-zero.");
-            }
-            const std::string coord_var = "sv_coord" + suffix + "_" + std::to_string(axis);
-            ss << indent << "const " << emittedIndexType(use_uint32_index_math) << " " << coord_var << " = " << residual_var
-               << " % " << emitUnsignedLiteral(dim, use_uint32_index_math) << ";\n";
-            ss << indent << residual_var << " /= " << emitUnsignedLiteral(dim, use_uint32_index_math) << ";\n";
-            if (stride == 1ULL) {
-                ss << indent << source_idx << " += " << coord_var << ";\n";
-            } else if (isPowerOfTwo(stride)) {
-                ss << indent << source_idx << " += (" << coord_var << " << " << std::to_string(log2Exact(stride)) << ");\n";
-            } else {
-                ss << indent << source_idx << " += " << coord_var << " * " << emitUnsignedLiteral(stride, use_uint32_index_math)
-                   << ";\n";
-            }
-        }
-
+        const std::string source_idx =
+            emitStridedViewSourceIndex(ss, n, group.node_dims[node_idx], view_idx, suffix, indent, use_uint32_index_math);
         const std::string value = emitIndexMappedScalarValue(
             ss, expr, group, n.lhs, source_idx, group.node_dims[n.lhs], indent, use_uint32_index_math, emission_scope, counter);
         return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[n.lhs]), emitted_dtype);
@@ -3533,8 +4129,12 @@ static std::string emitTiledLogicalTransposeConsumerScalarValue(
             const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
             const std::string offset_var = "offset" + suffix;
             emitBroadcastOffsetForDomain(ss, group.node_dims[node_idx], domain_dims, idx_expr, offset_var, indent, use_uint32_index_math);
+            // A non-dense runtime view maps its logical index through its visible strides.
+            const std::string storage_idx =
+                emitInputStorageIndexForLogicalIndex(
+                    ss, &group, n.input_slot, offset_var, suffix + "_storage", indent, use_uint32_index_math);
             ss << indent << "const " << output_type << " " << var << " = "
-               << castScalarExpr("in" + std::to_string(n.input_slot) + "[" + offset_var + "]", input_tensor_dtype, emitted_dtype) << ";\n";
+               << castScalarExpr("in" + std::to_string(n.input_slot) + "[" + storage_idx + "]", input_tensor_dtype, emitted_dtype) << ";\n";
             return var;
         }
         case ExprOp::RUNTIME_SCALAR: {
@@ -3571,8 +4171,20 @@ static std::string emitTiledLogicalTransposeConsumerScalarValue(
     }
 
     if (n.op == ExprOp::RESHAPE || n.op == ExprOp::STRIDED_VIEW || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
+        // Same contract as emitIndexMappedScalarValue: collapse the caller's domain index into
+        // this node's own dense index first (the node may be broadcast by its parent), then map
+        // it to the child's index: unchanged for shape aliases, through the strides for a view.
+        std::string own_idx = idx_expr;
+        if (group.node_dims[node_idx] != domain_dims) {
+            own_idx = "alias_idx" + suffix;
+            emitBroadcastOffsetForDomain(ss, group.node_dims[node_idx], domain_dims, idx_expr, own_idx, indent, use_uint32_index_math);
+        }
+        const std::string child_idx = n.op == ExprOp::STRIDED_VIEW
+                                          ? emitStridedViewSourceIndex(ss, n, group.node_dims[node_idx], own_idx, suffix, indent,
+                                                                       use_uint32_index_math)
+                                          : own_idx;
         const std::string value = emitTiledLogicalTransposeConsumerScalarValue(
-            ss, expr, group, n.lhs, idx_expr, group.node_dims[n.lhs], frontier_values, indent, use_uint32_index_math, counter);
+            ss, expr, group, n.lhs, child_idx, group.node_dims[n.lhs], frontier_values, indent, use_uint32_index_math, counter);
         return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[n.lhs]), emitted_dtype);
     }
 
@@ -3613,67 +4225,36 @@ static std::string refWithSuffix(uint32_t idx, const std::string& suffix) { retu
 
 static std::string stridedViewBackwardSafeSuffix(uint32_t node_idx) { return "_svbw" + std::to_string(node_idx); }
 
-static std::optional<size_t> findUsedInputSlotIndex(const SpecializedBroadcastGroup* group, uint32_t input_slot) {
-    if (group == nullptr) {
-        return std::nullopt;
-    }
-    for (size_t i = 0; i < group->used_input_slots.size(); ++i) {
-        if (group->used_input_slots[i] == input_slot) {
-            return i;
-        }
-    }
-    return std::nullopt;
-}
-
 static std::string emitInputStorageIndexForLogicalIndex(std::ostringstream& ss,
                                                         const SpecializedBroadcastGroup* group,
                                                         uint32_t input_slot,
                                                         const std::string& idx_expr,
                                                         const std::string& suffix,
-                                                        const std::string& indent) {
+                                                        const std::string& indent,
+                                                        bool use_uint32_index_math) {
     const std::optional<size_t> maybe_used_i = findUsedInputSlotIndex(group, input_slot);
     if (!maybe_used_i.has_value()) {
         return idx_expr;
     }
 
     const size_t used_i = maybe_used_i.value();
-    if (used_i >= group->used_input_visible_dims.size() || used_i >= group->used_input_visible_strides.size()) {
-        throw runtime_error("Index-aware input storage mapping is missing visible input layout metadata.");
-    }
-
-    const std::vector<uint64_t>& dims = group->used_input_visible_dims[used_i];
+    const std::vector<uint64_t>& dims = usedInputVisibleDims(*group, used_i);
     const std::vector<uint64_t>& strides = group->used_input_visible_strides[used_i];
-    if (dims.size() != strides.size()) {
-        throw runtime_error("Index-aware input storage mapping requires visible dimensions and strides with the same rank.");
-    }
     if (dims.empty()) {
         return "0ULL";
     }
-
-    const std::string residual_var = "input_residual_" + std::to_string(input_slot) + suffix;
-    const std::string storage_idx = "input_storage_idx_" + std::to_string(input_slot) + suffix;
-    ss << indent << "unsigned long long " << residual_var << " = static_cast<unsigned long long>(" << idx_expr << ");\n";
-    ss << indent << "unsigned long long " << storage_idx << " = 0ULL;\n";
-    for (int64_t axis = static_cast<int64_t>(dims.size()) - 1; axis >= 0; --axis) {
-        const uint64_t dim = dims.at(static_cast<size_t>(axis));
-        const uint64_t stride = strides.at(static_cast<size_t>(axis));
-        if (dim == 0) {
-            throw runtime_error("Index-aware input storage mapping does not support zero-sized dimensions.");
-        }
-        const std::string coord_var = "input_coord_" + std::to_string(input_slot) + "_" + std::to_string(axis) + suffix;
-        ss << indent << "const unsigned long long " << coord_var << " = " << residual_var << " % " << dim << "ULL;\n";
-        ss << indent << residual_var << " /= " << dim << "ULL;\n";
-        if (stride == 0ULL) {
-            continue;
-        }
-        if (stride == 1ULL) {
-            ss << indent << storage_idx << " += " << coord_var << ";\n";
-        } else if (isPowerOfTwo(stride)) {
-            ss << indent << storage_idx << " += (" << coord_var << " << " << std::to_string(log2Exact(stride)) << ");\n";
-        } else {
-            ss << indent << storage_idx << " += " << coord_var << " * " << stride << "ULL;\n";
-        }
+    // Packed visible strides (size-1 axes ignored): the logical index is the storage index.
+    if (visibleStridesArePacked(dims, strides)) {
+        return idx_expr;
     }
+
+    std::vector<bool> needed(dims.size());
+    for (size_t axis = 0; axis < dims.size(); ++axis) needed[axis] = strides[axis] != 0ULL;
+    const std::vector<std::string> coords = emitRowMajorCoordinateDecode(
+        ss, dims, idx_expr, "input_" + std::to_string(input_slot) + suffix, indent, use_uint32_index_math, needed);
+    const std::string storage_idx = "input_storage_idx_" + std::to_string(input_slot) + suffix;
+    ss << indent << "const " << emittedIndexType(use_uint32_index_math) << " " << storage_idx << " = "
+       << stridedOffsetExpr(coords, strides, 0, use_uint32_index_math) << ";\n";
     return storage_idx;
 }
 
@@ -3710,7 +4291,8 @@ static std::string emitScalarValueAtIndex(std::ostringstream& ss,
     switch (n.op) {
         case ExprOp::INPUT: {
             const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
-            const std::string storage_idx = emitInputStorageIndexForLogicalIndex(ss, group, n.input_slot, idx_expr, suffix, indent);
+            const std::string storage_idx = emitInputStorageIndexForLogicalIndex(
+                ss, group, n.input_slot, idx_expr, suffix, indent, /*use_uint32_index_math=*/false);
             ss << indent << "const " << output_type << " " << var << " = "
                << castScalarExpr("in" + std::to_string(n.input_slot) + "[" + storage_idx + "]", input_tensor_dtype, emitted_dtype)
                << ";\n";
@@ -3821,12 +4403,22 @@ static std::string emitScalarValueAtIndex(std::ostringstream& ss,
         const std::string selected_suffix = suffix + "_take_idx" + std::to_string(node_idx);
         const std::string selected_value = emitScalarValueAtIndex(ss, expr, n.rhs, idx_expr, selected_suffix, indent, emitted, group);
         const std::string source_idx = "take_source_idx_" + std::to_string(node_idx) + suffix;
-        emitTakeAlongAxisSourceIndexForDomain(
-            ss, n, group->node_dims[n.lhs], group->node_dims[n.rhs], idx_expr, selected_value, source_idx, indent, true);
+        const std::string in_range = emitTakeAlongAxisSourceIndexForDomain(ss,
+                                                                           n,
+                                                                           group->node_dims[n.lhs],
+                                                                           group->node_dims[n.rhs],
+                                                                           idx_expr,
+                                                                           selected_value,
+                                                                           emittedScalarNodeValueDType(expr.nodes.at(n.rhs)),
+                                                                           source_idx,
+                                                                           indent,
+                                                                           false);
         const std::string nested_suffix = suffix + "_take" + std::to_string(node_idx);
         const std::string source_value = emitScalarValueAtIndex(ss, expr, n.lhs, source_idx, nested_suffix, indent, emitted, group);
         const DataType source_dtype = emittedScalarNodeValueDType(expr.nodes.at(n.lhs));
-        ss << indent << "const " << output_type << " " << var << " = " << castScalarExpr(source_value, source_dtype, emitted_dtype) << ";\n";
+        ss << indent << "const " << output_type << " " << var << " = " << in_range << " ? "
+           << castScalarExpr(source_value, source_dtype, emitted_dtype) << " : " << castScalarExpr("0.0f", DataType::FP32, emitted_dtype)
+           << ";\n";
         mark_emitted();
         return var;
     }
@@ -3848,6 +4440,9 @@ static std::string emitScalarValueAtIndex(std::ostringstream& ss,
             throw runtime_error("Index-aware strided_view emission requires dimensions and strides with the same non-zero rank.");
         }
 
+        // The flat packet emitters evaluate every lane of a packet, including tail lanes past
+        // numel, so this decode keeps the outermost modulo: it keeps those lanes' (discarded)
+        // reads inside the source view.
         const std::string source_idx = stridedViewForwardSourceIndexVar(node_idx, suffix);
         const std::string residual_var = "sv_residual_" + std::to_string(node_idx) + suffix;
         ss << indent << "unsigned long long " << residual_var << " = static_cast<unsigned long long>(" << idx_expr << ");\n";
@@ -3995,6 +4590,151 @@ static void emitScalarStridedViewBackwardNode(std::ostringstream& ss,
        << ";\n";
 }
 
+// Emits rope_s / rope_c for one RoPE pair: position (from seq_coord or position ids), frequency
+// for the pair index (scaling kinds included), sincos, attention factor and inverse sign. Expects
+// unsigned long long rope_pair_index and rope_rotary_dim in scope. Shared by the per-element
+// emitter and the pair-per-thread kernel, so both compute identical angles.
+static void emitRopeSinCos(std::ostringstream& ss,
+                           const PhysicalExpression& expr,
+                           uint32_t node_idx,
+                           const std::string& seq_coord,
+                           const std::string& effective_seq_len_expr,
+                           const std::string& indent,
+                           const SpecializedBroadcastGroup* group) {
+    const ExprNode& n = expr.nodes.at(node_idx);
+        if (n.rope_position_ids_node != UINT32_MAX) {
+            std::unordered_set<std::string> position_emitted;
+            const std::string position_value = emitScalarValueAtIndex(
+                ss,
+                expr,
+                n.rope_position_ids_node,
+                seq_coord,
+                "_rope_position_" + std::to_string(node_idx),
+                indent + "    ",
+                position_emitted,
+                group);
+            const DataType position_dtype = emittedScalarNodeValueDType(expr.nodes.at(n.rope_position_ids_node));
+            ss << indent << "    float rope_position = "
+               << castScalarExpr(position_value, position_dtype, DataType::FP32) << ";\n";
+        } else {
+            ss << indent << "    float rope_position = static_cast<float>(" << seq_coord << ") + "
+               << emitScalarFpLiteral(static_cast<double>(n.rope_position_offset)) << ";\n";
+        }
+        if (n.rope_scaling_kind == RotaryScalingKind::Linear) {
+            ss << indent << "    rope_position = rope_position / " << emitScalarFpLiteral(n.rope_scaling_factor) << ";\n";
+        }
+        ss << indent << "    float rope_base = " << emitScalarFpLiteral(n.rope_base) << ";\n";
+        ss << indent << "    float rope_freq = 0.0f;\n";
+        if (n.rope_scaling_kind == RotaryScalingKind::DynamicNTK) {
+            ss << indent << "    const float rope_seq_len = fmaxf(" << effective_seq_len_expr << " + "
+               << emitScalarFpLiteral(static_cast<double>(std::max<int64_t>(0, n.rope_position_offset))) << ", 1.0f);\n";
+            ss << indent << "    const float rope_original_max = "
+               << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
+            ss << indent << "    if (rope_seq_len > rope_original_max && rope_rotary_dim > 2ULL) {\n";
+            ss << indent << "      const float rope_ntk_ratio = (" << emitScalarFpLiteral(n.rope_scaling_factor)
+               << " * rope_seq_len / rope_original_max) - (" << emitScalarFpLiteral(n.rope_scaling_factor) << " - 1.0f);\n";
+            ss << indent
+               << "      rope_base = rope_base * powf(rope_ntk_ratio, static_cast<float>(rope_rotary_dim) / "
+                  "static_cast<float>(rope_rotary_dim - 2ULL));\n";
+            ss << indent << "    }\n";
+            ss << indent
+               << "    rope_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
+        } else if (n.rope_scaling_kind == RotaryScalingKind::Yarn) {
+            ss << indent
+               << "    const float rope_pos_freq = powf(rope_base, 2.0f * static_cast<float>(rope_pair_index) / "
+                  "static_cast<float>(rope_rotary_dim));\n";
+            ss << indent << "    const float rope_inv_freq_extrap = 1.0f / rope_pos_freq;\n";
+            ss << indent << "    const float rope_inv_freq_interp = 1.0f / (" << emitScalarFpLiteral(n.rope_scaling_factor)
+               << " * rope_pos_freq);\n";
+            ss << indent << "    const float rope_original_max = "
+               << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
+            ss << indent << "    const float rope_log_base = logf(rope_base);\n";
+            ss << indent << "    float rope_yarn_low = (static_cast<float>(rope_rotary_dim) * logf(rope_original_max / ("
+               << emitScalarFpLiteral(n.rope_yarn_beta_fast) << " * 6.2831853071795864769f))) / (2.0f * rope_log_base);\n";
+            ss << indent << "    float rope_yarn_high = (static_cast<float>(rope_rotary_dim) * logf(rope_original_max / ("
+               << emitScalarFpLiteral(n.rope_yarn_beta_slow) << " * 6.2831853071795864769f))) / (2.0f * rope_log_base);\n";
+            ss << indent << "    rope_yarn_low = fmaxf(floorf(rope_yarn_low), 0.0f);\n";
+            ss << indent << "    rope_yarn_high = fminf(ceilf(rope_yarn_high), static_cast<float>(rope_rotary_dim - 1ULL));\n";
+            ss << indent << "    if (rope_yarn_low == rope_yarn_high) { rope_yarn_high += 0.001f; }\n";
+            ss << indent
+               << "    const float rope_yarn_ramp = fminf(fmaxf((static_cast<float>(rope_pair_index) - rope_yarn_low) / (rope_yarn_high - "
+                  "rope_yarn_low), 0.0f), 1.0f);\n";
+            ss << indent << "    rope_freq = rope_inv_freq_interp * rope_yarn_ramp + rope_inv_freq_extrap * (1.0f - rope_yarn_ramp);\n";
+        } else if (n.rope_scaling_kind == RotaryScalingKind::LongRope) {
+            if (n.rope_long_rope_short_factors.empty() || n.rope_long_rope_long_factors.empty()) {
+                throw runtime_error("LongRoPE code generation requires non-empty short/long factor lists.");
+            }
+            ss << indent << "    const float rope_seq_len = fmaxf(" << effective_seq_len_expr << " + "
+               << emitScalarFpLiteral(static_cast<double>(std::max<int64_t>(0, n.rope_position_offset))) << ", 1.0f);\n";
+            ss << indent << "    const float rope_original_max = "
+               << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
+            // static: one copy in device memory. A non-static local array indexed by the runtime pair
+            // index is rebuilt in local memory by every thread.
+            ss << indent << "    static const float rope_short_factors[] = " << emitFloatArrayLiteral(n.rope_long_rope_short_factors) << ";\n";
+            ss << indent << "    static const float rope_long_factors[] = " << emitFloatArrayLiteral(n.rope_long_rope_long_factors) << ";\n";
+            ss << indent
+               << "    const float rope_ext_factor = rope_seq_len > rope_original_max ? rope_long_factors[rope_pair_index] : "
+                  "rope_short_factors[rope_pair_index];\n";
+            ss << indent
+               << "    rope_freq = 1.0f / (rope_ext_factor * powf(rope_base, 2.0f * static_cast<float>(rope_pair_index) / "
+                  "static_cast<float>(rope_rotary_dim)));\n";
+        } else if (n.rope_scaling_kind == RotaryScalingKind::Llama3) {
+            ss << indent
+               << "    const float rope_inv_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / "
+                  "static_cast<float>(rope_rotary_dim));\n";
+            ss << indent << "    const float rope_wavelen = 6.2831853071795864769f / rope_inv_freq;\n";
+            ss << indent << "    const float rope_original_max = "
+               << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
+            ss << indent << "    const float rope_low_freq_wavelen = rope_original_max / "
+               << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ";\n";
+            ss << indent << "    const float rope_high_freq_wavelen = rope_original_max / "
+               << emitScalarFpLiteral(n.rope_llama3_high_freq_factor) << ";\n";
+            ss << indent << "    if (rope_wavelen > rope_low_freq_wavelen) {\n";
+            ss << indent << "      rope_freq = rope_inv_freq / " << emitScalarFpLiteral(n.rope_scaling_factor) << ";\n";
+            ss << indent << "    } else if (rope_wavelen < rope_high_freq_wavelen) {\n";
+            ss << indent << "      rope_freq = rope_inv_freq;\n";
+            ss << indent << "    } else {\n";
+            ss << indent << "      const float rope_smooth = (rope_original_max / rope_wavelen - "
+               << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ") / (" << emitScalarFpLiteral(n.rope_llama3_high_freq_factor)
+               << " - " << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ");\n";
+            ss << indent << "      rope_freq = (1.0f - rope_smooth) * (rope_inv_freq / " << emitScalarFpLiteral(n.rope_scaling_factor)
+               << ") + rope_smooth * rope_inv_freq;\n";
+            ss << indent << "    }\n";
+        } else {
+            // No frequency scaling (None / Linear): rope_freq = base^(-2i/R) depends only on the pair
+            // index and emit-time constants. Read it from a table computed in double and rounded
+            // once (within 0.5 ulp; powf is within ~2 ulp) instead of a powf per pair.
+            uint64_t rotary_dim = n.rope_rotary_dim;
+            if (rotary_dim == 0 && group != nullptr && n.rope_head_dim_axis < group->output_dims.size()) {
+                rotary_dim = group->output_dims[n.rope_head_dim_axis];
+            }
+            if (rotary_dim >= 2 && rotary_dim % 2 == 0 && rotary_dim <= 4096) {
+                std::vector<double> inv_freq(rotary_dim / 2);
+                for (uint64_t pair = 0; pair < rotary_dim / 2; ++pair) {
+                    inv_freq[pair] = static_cast<double>(static_cast<float>(
+                        std::pow(n.rope_base, -2.0 * static_cast<double>(pair) / static_cast<double>(rotary_dim))));
+                }
+                ss << indent << "    static const float rope_inv_freq[] = " << emitFloatArrayLiteral(inv_freq) << ";\n";
+                ss << indent << "    rope_freq = rope_inv_freq[rope_pair_index];\n";
+            } else {
+                ss << indent
+                   << "    rope_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
+            }
+        }
+        ss << indent << "    const float rope_theta = rope_position * rope_freq;\n";
+        // One range reduction for both: sincosf returns the same values as sinf and cosf.
+        ss << indent << "    float rope_s;\n";
+        ss << indent << "    float rope_c;\n";
+        ss << indent << "    sincosf(rope_theta, &rope_s, &rope_c);\n";
+        if (n.rope_attention_factor != 1.0) {
+            ss << indent << "    rope_s *= " << emitScalarFpLiteral(n.rope_attention_factor) << ";\n";
+            ss << indent << "    rope_c *= " << emitScalarFpLiteral(n.rope_attention_factor) << ";\n";
+        }
+        if (n.rope_inverse) {
+            ss << indent << "    rope_s = -rope_s;\n";
+        }
+}
+
 static void emitScalarNode(std::ostringstream& ss,
                            const PhysicalExpression& expr,
                            uint32_t node_idx,
@@ -4072,6 +4812,12 @@ static void emitScalarNode(std::ostringstream& ss,
         if (n.rope_base <= 0.0 || n.rope_scaling_factor <= 0.0) {
             throw runtime_error("Invalid RoPE base/scaling factor during code generation.");
         }
+        // c_<axis> are output-axis coordinates; they name the RoPE head/sequence axes only when
+        // the RoPE result has the output's rank (leading broadcast dims of size 1 are fine).
+        if (group != nullptr && node_idx < group->node_dims.size() && !group->node_dims[node_idx].empty() &&
+            group->node_dims[node_idx].size() != group->output_dims.size()) {
+            throw runtime_error("RoPE fused emission requires the RoPE result rank to match the fused stage output rank.");
+        }
         (void)requireNodeComputeDType(n);
         const std::string current_value = emitResolvedScalarValueExpr(expr, n.lhs, DataType::FP32);
         const std::string dim_coord = ropeAxisCoordVar(n.rope_head_dim_axis);
@@ -4104,125 +4850,41 @@ static void emitScalarNode(std::ostringstream& ss,
            << "    const unsigned long long rope_peer_idx = rope_first_lane ? (static_cast<unsigned long long>(idx) + rope_peer_abs_delta) "
               ": (static_cast<unsigned long long>(idx) - rope_peer_abs_delta);\n";
 
+        // The partner lane differs from this lane only in the head-dim coordinate, which is the
+        // innermost (stride-1) output axis. Each input's partner element is therefore at that
+        // input's own broadcast offset moved by delta * (its innermost stride): the stride is 0
+        // for an input broadcast along the head dim and the row pitch of a non-dense view is
+        // irrelevant. Reading inputs at the flat output index rope_peer_idx would ignore both.
+        const auto peer_input_value = [&](uint32_t input_slot) -> std::string {
+            if (group == nullptr) {
+                throw runtime_error("RoPE fused emission requires the broadcast group to address partner inputs.");
+            }
+            const std::optional<size_t> used_i = findUsedInputSlotIndex(group, input_slot);
+            if (!used_i.has_value()) {
+                throw runtime_error("RoPE partner subgraph references an input outside its broadcast group.");
+            }
+            const std::string offset = "in" + std::to_string(input_slot) + "_offset";
+            const uint64_t inner_stride = specializedBroadcastInnermostInputStride(*group, used_i.value());
+            std::string peer_offset = offset;
+            if (inner_stride != 0ULL) {
+                const std::string step =
+                    inner_stride == 1ULL ? std::string("rope_peer_abs_delta") : "rope_peer_abs_delta * " + std::to_string(inner_stride) + "ULL";
+                peer_offset = "(rope_first_lane ? (static_cast<unsigned long long>(" + offset + ") + " + step +
+                              ") : (static_cast<unsigned long long>(" + offset + ") - " + step + "))";
+            }
+            return "in" + std::to_string(input_slot) + "[" + peer_offset + "]";
+        };
+
         std::unordered_set<uint32_t> rope_required;
         collectRequiredNodes(expr, n.lhs, rope_required);
         for (uint32_t dep_idx = 0; dep_idx < node_idx; ++dep_idx) {
             if (!rope_required.contains(dep_idx) || !shouldEmitScalarNodeDefinition(expr, dep_idx)) {
                 continue;
             }
-            emitScalarNodeSuffixed(ss, expr, dep_idx, "rope_peer_idx", suffix, indent + "    ", "", 0, {});
+            emitScalarNodeSuffixed(ss, expr, dep_idx, "rope_peer_idx", suffix, indent + "    ", "", 0, peer_input_value);
         }
 
-        if (n.rope_position_ids_node != UINT32_MAX) {
-            std::unordered_set<std::string> position_emitted;
-            const std::string position_value = emitScalarValueAtIndex(
-                ss,
-                expr,
-                n.rope_position_ids_node,
-                seq_coord,
-                "_rope_position_" + std::to_string(node_idx),
-                indent + "    ",
-                position_emitted,
-                group);
-            const DataType position_dtype = emittedScalarNodeValueDType(expr.nodes.at(n.rope_position_ids_node));
-            ss << indent << "    float rope_position = "
-               << castScalarExpr(position_value, position_dtype, DataType::FP32) << ";\n";
-        } else {
-            ss << indent << "    float rope_position = static_cast<float>(" << seq_coord << ") + "
-               << emitScalarFpLiteral(static_cast<double>(n.rope_position_offset)) << ";\n";
-        }
-        if (n.rope_scaling_kind == RotaryScalingKind::Linear) {
-            ss << indent << "    rope_position = rope_position / " << emitScalarFpLiteral(n.rope_scaling_factor) << ";\n";
-        }
-        ss << indent << "    float rope_base = " << emitScalarFpLiteral(n.rope_base) << ";\n";
-        ss << indent << "    float rope_freq = 0.0f;\n";
-        if (n.rope_scaling_kind == RotaryScalingKind::DynamicNTK) {
-            ss << indent << "    const float rope_seq_len = fmaxf(" << effective_seq_len_expr << " + "
-               << emitScalarFpLiteral(static_cast<double>(std::max<int64_t>(0, n.rope_position_offset))) << ", 1.0f);\n";
-            ss << indent << "    const float rope_original_max = "
-               << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
-            ss << indent << "    if (rope_seq_len > rope_original_max && rope_rotary_dim > 2ULL) {\n";
-            ss << indent << "      const float rope_ntk_ratio = (" << emitScalarFpLiteral(n.rope_scaling_factor)
-               << " * rope_seq_len / rope_original_max) - (" << emitScalarFpLiteral(n.rope_scaling_factor) << " - 1.0f);\n";
-            ss << indent
-               << "      rope_base = rope_base * powf(rope_ntk_ratio, static_cast<float>(rope_rotary_dim) / "
-                  "static_cast<float>(rope_rotary_dim - 2ULL));\n";
-            ss << indent << "    }\n";
-            ss << indent
-               << "    rope_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
-        } else if (n.rope_scaling_kind == RotaryScalingKind::Yarn) {
-            ss << indent
-               << "    const float rope_pos_freq = powf(rope_base, 2.0f * static_cast<float>(rope_pair_index) / "
-                  "static_cast<float>(rope_rotary_dim));\n";
-            ss << indent << "    const float rope_inv_freq_extrap = 1.0f / rope_pos_freq;\n";
-            ss << indent << "    const float rope_inv_freq_interp = 1.0f / (" << emitScalarFpLiteral(n.rope_scaling_factor)
-               << " * rope_pos_freq);\n";
-            ss << indent << "    const float rope_original_max = "
-               << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
-            ss << indent << "    const float rope_log_base = logf(rope_base);\n";
-            ss << indent << "    float rope_yarn_low = (static_cast<float>(rope_rotary_dim) * logf(rope_original_max / ("
-               << emitScalarFpLiteral(n.rope_yarn_beta_fast) << " * 6.2831853071795864769f))) / (2.0f * rope_log_base);\n";
-            ss << indent << "    float rope_yarn_high = (static_cast<float>(rope_rotary_dim) * logf(rope_original_max / ("
-               << emitScalarFpLiteral(n.rope_yarn_beta_slow) << " * 6.2831853071795864769f))) / (2.0f * rope_log_base);\n";
-            ss << indent << "    rope_yarn_low = fmaxf(floorf(rope_yarn_low), 0.0f);\n";
-            ss << indent << "    rope_yarn_high = fminf(ceilf(rope_yarn_high), static_cast<float>(rope_rotary_dim - 1ULL));\n";
-            ss << indent << "    if (rope_yarn_low == rope_yarn_high) { rope_yarn_high += 0.001f; }\n";
-            ss << indent
-               << "    const float rope_yarn_ramp = fminf(fmaxf((static_cast<float>(rope_pair_index) - rope_yarn_low) / (rope_yarn_high - "
-                  "rope_yarn_low), 0.0f), 1.0f);\n";
-            ss << indent << "    rope_freq = rope_inv_freq_interp * rope_yarn_ramp + rope_inv_freq_extrap * (1.0f - rope_yarn_ramp);\n";
-        } else if (n.rope_scaling_kind == RotaryScalingKind::LongRope) {
-            if (n.rope_long_rope_short_factors.empty() || n.rope_long_rope_long_factors.empty()) {
-                throw runtime_error("LongRoPE code generation requires non-empty short/long factor lists.");
-            }
-            ss << indent << "    const float rope_seq_len = fmaxf(" << effective_seq_len_expr << " + "
-               << emitScalarFpLiteral(static_cast<double>(std::max<int64_t>(0, n.rope_position_offset))) << ", 1.0f);\n";
-            ss << indent << "    const float rope_original_max = "
-               << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
-            ss << indent << "    const float rope_short_factors[] = " << emitFloatArrayLiteral(n.rope_long_rope_short_factors) << ";\n";
-            ss << indent << "    const float rope_long_factors[] = " << emitFloatArrayLiteral(n.rope_long_rope_long_factors) << ";\n";
-            ss << indent
-               << "    const float rope_ext_factor = rope_seq_len > rope_original_max ? rope_long_factors[rope_pair_index] : "
-                  "rope_short_factors[rope_pair_index];\n";
-            ss << indent
-               << "    rope_freq = 1.0f / (rope_ext_factor * powf(rope_base, 2.0f * static_cast<float>(rope_pair_index) / "
-                  "static_cast<float>(rope_rotary_dim)));\n";
-        } else if (n.rope_scaling_kind == RotaryScalingKind::Llama3) {
-            ss << indent
-               << "    const float rope_inv_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / "
-                  "static_cast<float>(rope_rotary_dim));\n";
-            ss << indent << "    const float rope_wavelen = 6.2831853071795864769f / rope_inv_freq;\n";
-            ss << indent << "    const float rope_original_max = "
-               << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
-            ss << indent << "    const float rope_low_freq_wavelen = rope_original_max / "
-               << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ";\n";
-            ss << indent << "    const float rope_high_freq_wavelen = rope_original_max / "
-               << emitScalarFpLiteral(n.rope_llama3_high_freq_factor) << ";\n";
-            ss << indent << "    if (rope_wavelen > rope_low_freq_wavelen) {\n";
-            ss << indent << "      rope_freq = rope_inv_freq / " << emitScalarFpLiteral(n.rope_scaling_factor) << ";\n";
-            ss << indent << "    } else if (rope_wavelen < rope_high_freq_wavelen) {\n";
-            ss << indent << "      rope_freq = rope_inv_freq;\n";
-            ss << indent << "    } else {\n";
-            ss << indent << "      const float rope_smooth = (rope_original_max / rope_wavelen - "
-               << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ") / (" << emitScalarFpLiteral(n.rope_llama3_high_freq_factor)
-               << " - " << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ");\n";
-            ss << indent << "      rope_freq = (1.0f - rope_smooth) * (rope_inv_freq / " << emitScalarFpLiteral(n.rope_scaling_factor)
-               << ") + rope_smooth * rope_inv_freq;\n";
-            ss << indent << "    }\n";
-        } else {
-            ss << indent
-               << "    rope_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
-        }
-        ss << indent << "    const float rope_theta = rope_position * rope_freq;\n";
-        ss << indent << "    float rope_s = sinf(rope_theta);\n";
-        ss << indent << "    float rope_c = cosf(rope_theta);\n";
-        if (n.rope_attention_factor != 1.0) {
-            ss << indent << "    rope_s *= " << emitScalarFpLiteral(n.rope_attention_factor) << ";\n";
-            ss << indent << "    rope_c *= " << emitScalarFpLiteral(n.rope_attention_factor) << ";\n";
-        }
-        if (n.rope_inverse) {
-            ss << indent << "    rope_s = -rope_s;\n";
-        }
+        emitRopeSinCos(ss, expr, node_idx, seq_coord, effective_seq_len_expr, indent, group);
         const std::string peer_value = emitResolvedScalarValueExprSuffixed(expr, n.lhs, DataType::FP32, suffix);
         ss << indent << "    const float rope_current = " << current_value << ";\n";
         ss << indent << "    const float rope_peer = " << peer_value << ";\n";
@@ -4401,7 +5063,8 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
                                        chunkScalarTypeForBytes(dataTypeStorageBytes(input_tensor_dtype) * flat_elements_per_thread),
                                        input_tensor_dtype,
                                        flat_chunk_lane_expr,
-                                       "in" + std::to_string(n.input_slot) + "_chunk_data");
+                                       "in" + std::to_string(n.input_slot) + "_chunk_data",
+                                       flat_elements_per_thread);
             }
             ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
                << castScalarExpr(input_expr, input_tensor_dtype, emitted_dtype) << ";\n";
@@ -4587,12 +5250,12 @@ static std::string vector_storage_conversion(const std::string& storage_dtype_ve
         if (compute_dtype == DataType::BF16) {
             return "thor_to_fp8x2_e4m3_satfinite(__bfloat1622float2(" + variable + "))";
         }
-        return "thor_to_fp8x2_e4m3_satfinite(__half22float2(" + variable + "))";
+        return "thor_half2_to_fp8x2_e4m3_satfinite(" + variable + ")";
     } else if (storage_dtype_vector == "__nv_fp8x2_e5m2") {
         if (compute_dtype == DataType::BF16) {
             return "thor_to_fp8x2_e5m2_satfinite(__bfloat1622float2(" + variable + "))";
         }
-        return "thor_to_fp8x2_e5m2_satfinite(__half22float2(" + variable + "))";
+        return "thor_half2_to_fp8x2_e5m2_satfinite(" + variable + ")";
     }
     throw runtime_error("Unsupported vector storage dtype in vector_storage_conversion: " + storage_dtype_vector);
 }
@@ -4708,185 +5371,6 @@ static std::string emitFloatScalarRuntimeScalarValue(const PhysicalExpression& e
     return castScalarExpr(scalar_expr, output_dtype, DataType::FP32);
 }
 
-static void emitFloatScalarNodeDefinitions(std::ostringstream& ss,
-                                           const PhysicalExpression& expr,
-                                           const std::string& indent,
-                                           const std::function<std::string(uint32_t)>& input_slot_value) {
-    for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
-        const ExprNode& n = expr.nodes[node_idx];
-        switch (n.op) {
-            case ExprOp::INPUT: {
-                const std::string variable = input_slot_value(n.input_slot);
-                const DataType input_dtype = requireNodeInputTensorDType(n);
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = "
-                   << castScalarExpr(variable, input_dtype, DataType::FP32) << ";\n";
-                break;
-            }
-            case ExprOp::RUNTIME_SCALAR:
-            case ExprOp::TENSOR_RUNTIME_SCALAR:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = " << emitFloatScalarRuntimeScalarValue(expr, n)
-                   << ";\n";
-                break;
-            case ExprOp::SCALAR_FP:
-            case ExprOp::FILL:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = " << emitScalarFpLiteral(n.scalar_fp) << ";\n";
-                break;
-            case ExprOp::ADD:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = " << CudaSourceEmitter::ref(n.lhs) << " + "
-                   << CudaSourceEmitter::ref(n.rhs) << ";\n";
-                break;
-            case ExprOp::SUB:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = " << CudaSourceEmitter::ref(n.lhs) << " - "
-                   << CudaSourceEmitter::ref(n.rhs) << ";\n";
-                break;
-            case ExprOp::MUL:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = " << CudaSourceEmitter::ref(n.lhs) << " * "
-                   << CudaSourceEmitter::ref(n.rhs) << ";\n";
-                break;
-            case ExprOp::DIV:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = " << CudaSourceEmitter::ref(n.lhs) << " / "
-                   << CudaSourceEmitter::ref(n.rhs) << ";\n";
-                break;
-            case ExprOp::NEG:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = -" << CudaSourceEmitter::ref(n.lhs) << ";\n";
-                break;
-            case ExprOp::ABS:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = fabsf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::CEIL:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = ceilf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::FLOOR:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = floorf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::ROUND:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = roundf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::TRUNC:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = truncf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::SIN:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = sinf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::COS:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = cosf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::TAN:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = tanf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::ASIN:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = asinf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::ACOS:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = acosf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::ATAN:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = atanf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::SINH:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = sinhf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::COSH:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = coshf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::ASINH:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = asinhf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::ACOSH:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = acoshf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::ATANH:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = atanhf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::ERF:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = erff(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::ERFC:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = erfcf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::ERFCX:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = erfcxf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::ERFINV:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = erfinvf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::ERFCINV:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = erfcinvf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::TGAMMA:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = tgammaf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::LGAMMA:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = lgammaf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::DIGAMMA:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = thor_digammaf(" << CudaSourceEmitter::ref(n.lhs)
-                   << ");\n";
-                break;
-            case ExprOp::EXP:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = expf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::EXP2:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = exp2f(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::EXP10:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = exp10f(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::LN:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = logf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::LOG2:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = log2f(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::LOG10:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = log10f(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::SQRT:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = sqrtf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
-                break;
-            case ExprOp::RESHAPE:
-            case ExprOp::UNSQUEEZE:
-            case ExprOp::SQUEEZE:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = " << CudaSourceEmitter::ref(n.lhs) << ";\n";
-                break;
-            case ExprOp::POW:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = powf(" << CudaSourceEmitter::ref(n.lhs) << ", "
-                   << CudaSourceEmitter::ref(n.rhs) << ");\n";
-                break;
-            case ExprOp::MIN:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = fminf(" << CudaSourceEmitter::ref(n.lhs) << ", "
-                   << CudaSourceEmitter::ref(n.rhs) << ");\n";
-                break;
-            case ExprOp::MAX:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = fmaxf(" << CudaSourceEmitter::ref(n.lhs) << ", "
-                   << CudaSourceEmitter::ref(n.rhs) << ");\n";
-                break;
-            case ExprOp::MIN_GRAD_LEFT:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = ((" << CudaSourceEmitter::ref(n.lhs) << " < "
-                   << CudaSourceEmitter::ref(n.rhs) << ") ? 1.0f : ((" << CudaSourceEmitter::ref(n.lhs) << " > "
-                   << CudaSourceEmitter::ref(n.rhs) << ") ? 0.0f : 0.5f));\n";
-                break;
-            case ExprOp::MIN_GRAD_RIGHT:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = ((" << CudaSourceEmitter::ref(n.lhs) << " > "
-                   << CudaSourceEmitter::ref(n.rhs) << ") ? 1.0f : ((" << CudaSourceEmitter::ref(n.lhs) << " < "
-                   << CudaSourceEmitter::ref(n.rhs) << ") ? 0.0f : 0.5f));\n";
-                break;
-            case ExprOp::MAX_GRAD_LEFT:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = ((" << CudaSourceEmitter::ref(n.lhs) << " > "
-                   << CudaSourceEmitter::ref(n.rhs) << ") ? 1.0f : ((" << CudaSourceEmitter::ref(n.lhs) << " < "
-                   << CudaSourceEmitter::ref(n.rhs) << ") ? 0.0f : 0.5f));\n";
-                break;
-            case ExprOp::MAX_GRAD_RIGHT:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = ((" << CudaSourceEmitter::ref(n.lhs) << " < "
-                   << CudaSourceEmitter::ref(n.rhs) << ") ? 1.0f : ((" << CudaSourceEmitter::ref(n.lhs) << " > "
-                   << CudaSourceEmitter::ref(n.rhs) << ") ? 0.0f : 0.5f));\n";
-                break;
-            default:
-                throw runtime_error("Unsupported op in fp32 scalar transpose fallback emitter: " + to_string((int32_t)n.op));
-        }
-    }
-}
-
 static DataType defaultVectorizedComputeScalarDTypeForStorage(DataType storage_dtype) {
     const DataType compute_dtype = defaultComputeDType(storage_dtype);
     if (compute_dtype == DataType::FP16 || compute_dtype == DataType::BF16) {
@@ -4926,6 +5410,19 @@ static std::string emitVector2RuntimeScalarValue(const PhysicalExpression& expr,
     return emitVector2DupScalar(scalar_expr, compute_scalar_dtype);
 }
 
+// The raw FP8 pair at base[offset0], base[offset0 + 1]: one 2-byte load when the address is pair
+// aligned (element-aligned storage aliases may not be), else the two bytes. The caller converts
+// the selected pair once instead of emitting a decode in each branch.
+static std::string fp8TransposePairRawExpr(DataType fp8_dtype,
+                                           const std::string& pair_type,
+                                           const std::string& base,
+                                           const std::string& offset0) {
+    const std::string from_lanes = fp8_dtype == DataType::FP8_E4M3 ? "thor_fp8x2_e4m3_from_lanes" : "thor_fp8x2_e5m2_from_lanes";
+    return "(((reinterpret_cast<unsigned long long>(" + base + " + " + offset0 + ") % sizeof(" + pair_type +
+           ")) == 0ULL) ? reinterpret_cast<const " + pair_type + "*>(" + base + " + " + offset0 + ")[0] : " + from_lanes + "(" + base +
+           "[" + offset0 + "], " + base + "[" + offset0 + " + 1]))";
+}
+
 static std::string emitVector2BroadcastNativeLoad(const std::string& storage_dtype_vector,
                                                   const std::string& base_ptr,
                                                   const std::string& scalar_offset0,
@@ -4939,7 +5436,7 @@ static std::string emitVector2Sub(const std::string& a, const std::string& b) { 
 static std::string emitVector2Mul(const std::string& a, const std::string& b) { return "__hmul2(" + a + ", " + b + ")"; }
 static std::string emitVector2Div(const std::string& a, const std::string& b) { return "__h2div(" + a + ", " + b + ")"; }
 static std::string emitVector2Neg(const std::string& x, DataType dtype) { return "__hneg2(" + x + ")"; }
-static std::string emitVector2Abs(const std::string& x, DataType dtype) { return "__hmax2(" + x + ", " + emitVector2Neg(x, dtype) + ")"; }
+static std::string emitVector2Abs(const std::string& x, DataType dtype) { return "__habs2(" + x + ")"; }
 static std::string emitVector2Exp(const std::string& x, DataType dtype) { return "h2exp(" + x + ")"; }
 static std::string emitVector2Exp2(const std::string& x, DataType dtype) { return "h2exp2(" + x + ")"; }
 static std::string emitVector2Exp10(const std::string& x, DataType dtype) { return "h2exp10(" + x + ")"; }
@@ -5076,6 +5573,20 @@ static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
             continue;
         }
         const auto& n = expr.nodes[node_idx];
+        // Constant-folded and alias nodes (x * 1, x + 0, ...) resolve as in the scalar emitters
+        // (emitResolvedScalarValueExpr): the folded literal, or the source's value.
+        double folded_constant = 0.0;
+        uint32_t alias_source_idx = UINT32_MAX;
+        if (n.op != ExprOp::SCALAR_FP && n.op != ExprOp::FILL && tryGetEmitterConstantValue(expr, node_idx, folded_constant)) {
+            ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+               << emitVector2ScalarLiteral(folded_constant, compute_dtype) << ";\n";
+            continue;
+        }
+        if (tryGetEmitterAliasSource(expr, node_idx, alias_source_idx)) {
+            ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = " << refWithSuffix(alias_source_idx, suffix)
+               << ";\n";
+            continue;
+        }
         switch (n.op) {
             case ExprOp::INPUT: {
                 const std::string variable = input_slot_value(n.input_slot);
@@ -5746,14 +6257,28 @@ static void emitFloat2NodeDefinitionsForSuffix(std::ostringstream& ss,
                                                const std::string& suffix,
                                                const std::string& indent,
                                                const std::function<std::string(uint32_t)>& input_slot_value,
-                                               const std::function<std::string(uint32_t)>& scalar_const_value = {}) {
+                                               const std::function<std::string(uint32_t)>& scalar_const_value = {},
+                                               bool input_slot_value_is_compute = false) {
     for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
         const auto& n = expr.nodes[node_idx];
+        // Constant-folded and alias nodes (x * 1, x + 0, ...) resolve as in the scalar emitters
+        // (emitResolvedScalarValueExpr): the folded literal, or the source's value.
+        double folded_constant = 0.0;
+        uint32_t alias_source_idx = UINT32_MAX;
+        if (n.op != ExprOp::SCALAR_FP && n.op != ExprOp::FILL && tryGetEmitterConstantValue(expr, node_idx, folded_constant)) {
+            ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = " << emitFloat2ScalarLiteral(folded_constant) << ";\n";
+            continue;
+        }
+        if (tryGetEmitterAliasSource(expr, node_idx, alias_source_idx)) {
+            ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = " << refWithSuffix(alias_source_idx, suffix) << ";\n";
+            continue;
+        }
         switch (n.op) {
             case ExprOp::INPUT: {
                 const std::string variable = input_slot_value(n.input_slot);
                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
-                   << float2_compute_conversion(input_storage_dtype_vector, variable) << ";\n";
+                   << (input_slot_value_is_compute ? variable : float2_compute_conversion(input_storage_dtype_vector, variable))
+                   << ";\n";
                 break;
             }
             case ExprOp::RUNTIME_SCALAR:
@@ -6022,31 +6547,58 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
         findRaggedValuewiseExtentSpec(stage.expr);
     const std::unordered_set<uint32_t> structural_partition_slots =
         raggedValuewiseExtentPartitionInputSlots(stage.expr);
+    const uint32_t packet_scalars = packs_per_thread * 2U;
+    const std::string storage_scalar_type = scalarStorageType(storage_dtype);
 
     // CUDA vector builtins are available to NVRTC without <vector_types.h>;
     // CUDA 13.3 bundled headers do not include that legacy top-level header.
+    //
+    // The kernel ABI is scalar-typed. A runtime tensor can be a storage alias whose
+    // base is element aligned but not 16-byte aligned, and a view's final packet can
+    // extend past the view into live neighbouring storage; see emitPacketLoadStage.
     ss << "extern \"C\" __global__\n";
     ss << "void " << kernel_name << "(";
 
     for (uint32_t i = 0; i < num_inputs; ++i) {
         if (stage.expr.inputs[i].kind == NamedInput::Kind::RuntimeScalarFp32) {
             ss << scalarStorageType(input_dtypes[i]) << " in" << i;
-        } else if (structural_partition_slots.contains(i)) {
-            // Ragged row-partition / active-count metadata is not value data and
-            // must retain its scalar pointer ABI even when the packed values are
-            // loaded as 16-byte float4 packets.
-            ss << "const " << scalarStorageType(input_dtypes[i]) << "* in" << i;
         } else {
-            ss << "const float4* in" << i;
+            ss << "const " << scalarStorageType(input_dtypes[i]) << "* in" << i;
         }
         ss << ", ";
     }
 
     for (uint32_t i = 0; i < stage.outputs.size(); ++i) {
-        ss << "float4* out" << i << ", ";
+        ss << storage_scalar_type << "* out" << i << ", ";
     }
 
     ss << index_type << " numel) {\n";
+
+    std::vector<PacketTensorAccess> packet_inputs;
+    std::vector<PacketTensorAccess> packet_outputs;
+    std::vector<std::pair<std::string, uint64_t>> aligned_pointers;
+    for (uint32_t i = 0; i < num_inputs; ++i) {
+        if (stage.expr.inputs[i].kind != NamedInput::Kind::Tensor || structural_partition_slots.contains(i)) {
+            continue;
+        }
+        packet_inputs.push_back(PacketTensorAccess{.chunk_var = "in" + std::to_string(i) + "_chunk",
+                                                   .chunk_type = "float4",
+                                                   .scalar_type = storage_scalar_type,
+                                                   .pointer_expr = "in" + std::to_string(i),
+                                                   .base_expr = "scalar_base"});
+        aligned_pointers.emplace_back("in" + std::to_string(i), 16ULL);
+    }
+    for (uint32_t i = 0; i < stage.outputs.size(); ++i) {
+        packet_outputs.push_back(PacketTensorAccess{.chunk_var = "out" + std::to_string(i) + "_chunk",
+                                                    .chunk_type = "float4",
+                                                    .scalar_type = storage_scalar_type,
+                                                    .pointer_expr = "out" + std::to_string(i),
+                                                    .base_expr = "scalar_base"});
+        aligned_pointers.emplace_back("out" + std::to_string(i), 16ULL);
+    }
+
+    std::string indent = "  ";
+    ss << "  const bool packets_aligned = " << emitPacketAlignmentPredicate(aligned_pointers) << ";\n";
     if (ragged_extent.has_value()) {
         const RaggedValuewiseExtentEmissionSpec& extent = ragged_extent.value();
         ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in"
@@ -6054,46 +6606,41 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
         ss << "  const unsigned long long active_values = active_values_raw < " << extent.max_active_values
            << "ULL ? active_values_raw : " << extent.max_active_values << "ULL;\n";
         ss << "  const unsigned long long runtime_numel_u64 = active_values * " << extent.elements_per_value << "ULL;\n";
-        ss << "  const " << index_type << " runtime_numel = static_cast<" << index_type
+        ss << "  const " << index_type << " active_numel = static_cast<" << index_type
            << ">(runtime_numel_u64 < static_cast<unsigned long long>(numel) ? runtime_numel_u64 : static_cast<unsigned long long>(numel));\n";
-        ss << "  const " << index_type << " packet_scalars = "
-           << emitUnsignedLiteral(static_cast<uint64_t>(packs_per_thread * 2U), use_uint32_index_math) << ";\n";
-        ss << "  const " << index_type << " packet_count = (runtime_numel + packet_scalars - "
-           << emitUnsignedLiteral(1, use_uint32_index_math) << ") / packet_scalars;\n";
-        ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
+        ss << "  const " << index_type << " packet_count = (active_numel + "
+           << emitUnsignedLiteral(static_cast<uint64_t>(packet_scalars - 1U), use_uint32_index_math) << ") / "
+           << emitUnsignedLiteral(static_cast<uint64_t>(packet_scalars), use_uint32_index_math) << ";\n";
         ss << "  const " << index_type << " grid_stride = static_cast<" << index_type
            << ">(blockDim.x) * static_cast<" << index_type << ">(gridDim.x);\n";
-        ss << "  for (; idx < packet_count; idx += grid_stride) {\n";
+        ss << "  for (" << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math)
+           << "; idx < packet_count; idx += grid_stride) {\n";
+        indent = "    ";
     } else {
-        ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
-        ss << "  const " << index_type << " packed_numel = (numel + " << emitUnsignedLiteral(1, use_uint32_index_math) << ") >> 1;\n";
-        ss << "  const " << index_type << " packed_base = idx * "
-           << emitUnsignedLiteral(static_cast<uint64_t>(packs_per_thread), use_uint32_index_math) << ";\n";
-        ss << "  if (packed_base >= packed_numel) return;\n\n";
+        ss << "  const " << index_type << " active_numel = numel;\n";
+        ss << "  const " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
     }
-
-    bool emitted_any_tensor_chunk = false;
-    for (uint32_t i = 0; i < num_inputs; ++i) {
-        if (stage.expr.inputs[i].kind != NamedInput::Kind::Tensor || structural_partition_slots.contains(i)) {
-            continue;
-        }
-        emitted_any_tensor_chunk = true;
-        ss << "  const float4 in" << i << "_chunk = in" << i << "[idx];\n";
-        ss << "  const " << storage_dtype_vector << "* in" << i << "_chunk_data = reinterpret_cast<const " << storage_dtype_vector
-           << "*>(&in" << i << "_chunk);\n";
+    ss << indent << "const " << index_type << " scalar_base = idx * "
+       << emitUnsignedLiteral(static_cast<uint64_t>(packet_scalars), use_uint32_index_math) << ";\n";
+    if (!ragged_extent.has_value()) {
+        ss << indent << "if (scalar_base >= active_numel) return;\n";
     }
-    if (emitted_any_tensor_chunk) {
-        ss << "\n";
+    ss << indent << "const bool vector_packet = packets_aligned && scalar_base + "
+       << emitUnsignedLiteral(static_cast<uint64_t>(packet_scalars), use_uint32_index_math) << " <= active_numel;\n";
+    const auto lane_valid = [&](uint32_t lane) {
+        return "scalar_base + " + emitUnsignedLiteral(lane, use_uint32_index_math) + " < active_numel";
+    };
+    emitPacketLoadStage(ss, indent, packet_inputs, packet_scalars, "vector_packet", lane_valid);
+    for (const PacketTensorAccess& in : packet_inputs) {
+        ss << indent << "const " << storage_dtype_vector << "* " << in.chunk_var << "_data = reinterpret_cast<const " << storage_dtype_vector
+           << "*>(&" << in.chunk_var << ");\n";
     }
-
-    for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
-        ss << "  float4 out" << out_idx << "_chunk;\n";
-        ss << "  " << storage_dtype_vector << "* out" << out_idx << "_chunk_data = reinterpret_cast<" << storage_dtype_vector << "*>(&out"
-           << out_idx << "_chunk);\n";
+    for (const PacketTensorAccess& out : packet_outputs) {
+        ss << indent << "float4 " << out.chunk_var << ";\n";
+        ss << indent << storage_dtype_vector << "* " << out.chunk_var << "_data = reinterpret_cast<" << storage_dtype_vector << "*>(&"
+           << out.chunk_var << ");\n";
     }
-    if (!stage.outputs.empty()) {
-        ss << "\n";
-    }
+    ss << "\n";
 
     for (uint32_t pack = 0; pack < packs_per_thread; ++pack) {
         const std::string suffix = "_p" + std::to_string(pack);
@@ -6335,39 +6882,9 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
         ss << "\n";
     }
 
+    emitPacketStoreStage(ss, indent, packet_outputs, packet_scalars, "vector_packet", lane_valid);
     if (ragged_extent.has_value()) {
-        const uint32_t packet_scalars = packs_per_thread * 2U;
-        ss << "  const " << index_type << " scalar_base = idx * "
-           << emitUnsignedLiteral(static_cast<uint64_t>(packet_scalars), use_uint32_index_math) << ";\n";
-        ss << "  const bool full_active_packet = scalar_base + "
-           << emitUnsignedLiteral(static_cast<uint64_t>(packet_scalars), use_uint32_index_math)
-           << " <= runtime_numel;\n";
-        ss << "  if (full_active_packet) {\n";
-        for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
-            ss << "    out" << out_idx << "[idx] = out" << out_idx << "_chunk;\n";
-        }
-        ss << "  } else {\n";
-        // The allocator's 128-byte terminal guard makes the final vector read
-        // safe even when active==capacity.  Stores are masked because the
-        // inactive ragged-capacity region is observable in preallocated outputs
-        // and must retain the historical execute-only-active-prefix semantics.
-        for (uint32_t lane = 0; lane < packet_scalars; ++lane) {
-            ss << "    if (scalar_base + " << emitUnsignedLiteral(static_cast<uint64_t>(lane), use_uint32_index_math)
-               << " < runtime_numel) {\n";
-            for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
-                ss << "      reinterpret_cast<" << scalarStorageType(storage_dtype) << "*>(out" << out_idx << ")[scalar_base + "
-                   << emitUnsignedLiteral(static_cast<uint64_t>(lane), use_uint32_index_math) << "] = "
-                   << "reinterpret_cast<const " << scalarStorageType(storage_dtype) << "*>(&out" << out_idx << "_chunk)[" << lane
-                   << "];\n";
-            }
-            ss << "    }\n";
-        }
         ss << "  }\n";
-        ss << "  }\n";
-    } else {
-        for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
-            ss << "  out" << out_idx << "[idx] = out" << out_idx << "_chunk;\n";
-        }
     }
 
     ss << "}\n";
@@ -6376,6 +6893,8 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
 
 static std::string chunkScalarTypeForBytes(uint32_t bytes) {
     switch (bytes) {
+        case 2:
+            return "unsigned short";
         case 4:
             return "unsigned int";
         case 8:
@@ -6387,6 +6906,194 @@ static std::string chunkScalarTypeForBytes(uint32_t bytes) {
     }
 }
 
+// FP8 lanes in the wide-scalar packet kernels convert two lanes per instruction.
+// On sm89+ cvt.rn.f16x2.e4m3x2 / e5m2x2 decodes and cvt.rn.satfinite.e4m3x2.f32 /
+// e5m2x2 encodes a pair; the per-lane form spends a full conversion on each value
+// plus a byte extract/insert. Decoded inputs are exact FP32 values, so the
+// per-lane body reads them as FP32 (INPUT nodes retyped in a copy of the
+// expression) and every consumer cast produces the same value as before.
+// Encoding a pair is the same rounding as encoding each lane (sm80 emulates both
+// the same way).
+struct Fp8LanePairing {
+    PhysicalExpression lane_expr;
+    std::unordered_set<uint32_t> decoded_slots;
+    std::unordered_set<uint32_t> half_decoded_slots;  // decoded to half2: every consumer computes in FP16
+    std::vector<bool> paired_outputs;          // indexed by stage output index
+    std::vector<uint32_t> paired_value_nodes;  // node whose FP32 value is encoded, per paired output
+
+    [[nodiscard]] bool active() const {
+        return !decoded_slots.empty() || std::find(paired_outputs.begin(), paired_outputs.end(), true) != paired_outputs.end();
+    }
+};
+
+static uint32_t resolveEmitterAliasChain(const PhysicalExpression& expr, uint32_t node_idx) {
+    uint32_t source_idx = UINT32_MAX;
+    while (tryGetEmitterAliasSource(expr, node_idx, source_idx)) {
+        node_idx = source_idx;
+    }
+    return node_idx;
+}
+
+// The tensor input slot a stage output passes through unchanged (alias ops only: x * 1, x + 0,
+// reshape, ...) when that input is stored in the output's dtype. The scalar emitters copy the stored
+// value for such an output, so paired lanes copy the stored pair as well: decoding and re-encoding is
+// not the identity for FP8 (satfinite turns +-Inf into +-max finite and canonicalises NaN).
+static std::optional<uint32_t> passthroughInputSlotForOutput(const PhysicalExpression& expr, uint32_t output_node_idx) {
+    const ExprNode& source = expr.nodes.at(resolveEmitterAliasChain(expr, output_node_idx));
+    if (source.op != ExprOp::INPUT || requireNodeOutputDType(source) != requireNodeOutputDType(expr.nodes.at(output_node_idx))) {
+        return std::nullopt;
+    }
+    return source.input_slot;
+}
+
+static std::string fp8x2StorageType(DataType dtype) {
+    if (dtype == DataType::FP8_E4M3) return "__nv_fp8x2_e4m3";
+    if (dtype == DataType::FP8_E5M2) return "__nv_fp8x2_e5m2";
+    throw runtime_error("fp8x2StorageType requires an FP8 dtype.");
+}
+
+static std::string fp8x2SatfiniteEncoder(DataType dtype) {
+    if (dtype == DataType::FP8_E4M3) return "thor_to_fp8x2_e4m3_satfinite";
+    if (dtype == DataType::FP8_E5M2) return "thor_to_fp8x2_e5m2_satfinite";
+    throw runtime_error("fp8x2SatfiniteEncoder requires an FP8 dtype.");
+}
+
+// candidate_slots: FP8 tensor inputs held in a packet chunk (one lane per scalar).
+// output_indices: stage outputs written by this kernel (or group).
+static Fp8LanePairing planFp8LanePairing(const PhysicalExpression& expr,
+                                         const std::vector<CompiledStageOutput>& outputs,
+                                         const std::vector<uint32_t>& output_indices,
+                                         const std::vector<uint32_t>& candidate_slots,
+                                         uint32_t lanes) {
+    Fp8LanePairing plan{.lane_expr = expr,
+                        .decoded_slots = {},
+                        .half_decoded_slots = {},
+                        .paired_outputs = std::vector<bool>(outputs.size(), false),
+                        .paired_value_nodes = std::vector<uint32_t>(outputs.size(), UINT32_MAX)};
+    if (lanes < 2 || lanes % 2 != 0) {
+        return plan;
+    }
+    // An output that is an FP8 input passed straight through keeps its byte copy.
+    std::unordered_set<uint32_t> passthrough_slots;
+    for (uint32_t out_idx : output_indices) {
+        const ExprNode& source = expr.nodes.at(resolveEmitterAliasChain(expr, outputs.at(out_idx).local_node_idx));
+        if (source.op == ExprOp::INPUT) {
+            passthrough_slots.insert(source.input_slot);
+        }
+    }
+    for (uint32_t slot : candidate_slots) {
+        if (!passthrough_slots.contains(slot)) {
+            plan.decoded_slots.insert(slot);
+        }
+    }
+    // FP8 -> FP16 is exact and one conversion per pair on sm89+ (cvt.rn.f16x2.e4m3x2): an input whose
+    // every consumer computes in FP16 decodes straight to half2 instead of through float2 and back.
+    std::unordered_map<uint32_t, bool> all_consumers_fp16;
+    for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
+        const ExprNode& node = expr.nodes[node_idx];
+        if (Expression::isLeafOp(node.op) || !shouldEmitScalarNodeDefinition(expr, node_idx)) {
+            continue;
+        }
+        for (const uint32_t operand : {node.lhs, node.rhs, node.aux}) {
+            if (operand >= expr.nodes.size()) {
+                continue;
+            }
+            const ExprNode& source = expr.nodes[resolveEmitterAliasChain(expr, operand)];
+            if (source.op != ExprOp::INPUT || !plan.decoded_slots.contains(source.input_slot)) {
+                continue;
+            }
+            const bool fp16 = node.op != ExprOp::WHERE && node.compute_dtype == DataType::FP16;
+            const auto [it, inserted] = all_consumers_fp16.emplace(source.input_slot, fp16);
+            if (!inserted) {
+                it->second = it->second && fp16;
+            }
+        }
+    }
+    for (const auto& [slot, fp16] : all_consumers_fp16) {
+        if (fp16) {
+            plan.half_decoded_slots.insert(slot);
+        }
+    }
+    for (ExprNode& node : plan.lane_expr.nodes) {
+        if (node.op == ExprOp::INPUT && plan.decoded_slots.contains(node.input_slot)) {
+            if (plan.half_decoded_slots.contains(node.input_slot)) {
+                // The lane reads an already-decoded __half: no FP8 -> FP16 cast on top.
+                node.input_tensor_dtype = DataType::FP16;
+                node.output_dtype = DataType::FP16;
+            } else {
+                node.output_dtype = DataType::FP32;
+            }
+        }
+    }
+    for (uint32_t out_idx : output_indices) {
+        const uint32_t out_node = outputs.at(out_idx).local_node_idx;
+        if (!isFp8DType(requireNodeOutputDType(expr.nodes.at(out_node)))) {
+            continue;
+        }
+        const uint32_t source_idx = resolveEmitterAliasChain(plan.lane_expr, out_node);
+        double constant_value = 0.0;
+        const bool constant = tryGetEmitterConstantValue(plan.lane_expr, source_idx, constant_value);
+        const ExprNode& source = plan.lane_expr.nodes.at(source_idx);
+        if (constant || !isFp8DType(emittedScalarNodeValueDType(source))) {
+            plan.paired_outputs[out_idx] = true;
+            plan.paired_value_nodes[out_idx] = out_node;
+        } else if (source.op == ExprOp::CAST && source.lhs < plan.lane_expr.nodes.size() &&
+                   emittedScalarNodeValueDType(source) == requireNodeOutputDType(expr.nodes.at(out_node))) {
+            // An explicit cast to this FP8 type (quantize): encode the cast's input as a pair.
+            // satfinite(float(src)) is what the per-lane cast computes for every source type.
+            plan.paired_outputs[out_idx] = true;
+            plan.paired_value_nodes[out_idx] = source.lhs;
+        }
+    }
+    return plan;
+}
+
+static std::string fp8DecodedPairVar(const Fp8LanePairing& plan, uint32_t slot, uint32_t pair) {
+    return "in" + std::to_string(slot) + (plan.half_decoded_slots.contains(slot) ? "_h" : "_f") + std::to_string(pair);
+}
+
+static std::string fp8DecodedLaneExpr(const Fp8LanePairing& plan, uint32_t slot, uint32_t lane) {
+    return fp8DecodedPairVar(plan, slot, lane / 2) + ((lane % 2 == 0) ? ".x" : ".y");
+}
+
+static void emitFp8PairedInputDecode(std::ostringstream& ss,
+                                     const std::string& indent,
+                                     const Fp8LanePairing& plan,
+                                     const std::vector<DataType>& input_dtypes,
+                                     const std::function<std::string(uint32_t)>& chunk_var_for_slot,
+                                     uint32_t lanes) {
+    std::vector<uint32_t> slots(plan.decoded_slots.begin(), plan.decoded_slots.end());
+    std::sort(slots.begin(), slots.end());
+    for (uint32_t slot : slots) {
+        const std::string pair_type = fp8x2StorageType(input_dtypes.at(slot));
+        for (uint32_t pair = 0; pair < lanes / 2; ++pair) {
+            const std::string decoded_type = plan.half_decoded_slots.contains(slot) ? "__half2" : "float2";
+            ss << indent << "const " << decoded_type << " " << fp8DecodedPairVar(plan, slot, pair) << " = static_cast<" << decoded_type
+               << ">(reinterpret_cast<const "
+               << pair_type << "*>(&" << chunk_var_for_slot(slot) << ")[" << pair << "]);\n";
+        }
+    }
+}
+
+// Emitted after the odd lane of each pair; the even lane's values are still in scope.
+static void emitFp8PairedOutputStore(std::ostringstream& ss,
+                                     const std::string& indent,
+                                     const Fp8LanePairing& plan,
+                                     const CompiledStageOutput& output,
+                                     DataType output_dtype,
+                                     const std::string& chunk_var,
+                                     uint32_t odd_lane,
+                                     const std::string& even_suffix,
+                                     const std::string& odd_suffix,
+                                     uint32_t out_idx) {
+    (void)output;
+    const uint32_t value_node = plan.paired_value_nodes.at(out_idx);
+    ss << indent << "reinterpret_cast<" << fp8x2StorageType(output_dtype) << "*>(&" << chunk_var << ")[" << odd_lane / 2
+       << "] = " << fp8x2SatfiniteEncoder(output_dtype) << "(make_float2("
+       << emitResolvedScalarValueExprSuffixed(plan.lane_expr, value_node, DataType::FP32, even_suffix) << ", "
+       << emitResolvedScalarValueExprSuffixed(plan.lane_expr, value_node, DataType::FP32, odd_suffix) << "));\n";
+}
+
 static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
                                       const std::string& kernel_name,
                                       bool use_uint32_index_math,
@@ -6396,30 +7103,45 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
     const std::optional<RaggedValuewiseExtentEmissionSpec> ragged_extent = findRaggedValuewiseExtentSpec(stage.expr);
     const std::unordered_set<uint32_t> structural_slots =
         raggedValuewiseExtentPartitionInputSlots(stage.expr);
+    const std::string index_type = emittedIndexType(use_uint32_index_math);
 
-    std::vector<std::string> input_chunk_types;
-    input_chunk_types.reserve(input_dtypes.size());
+    // Packet layout per tensor: each thread owns `elements_per_thread` consecutive
+    // scalars of every tensor, moved with one chunk-sized access on the fast path.
+    std::vector<std::string> input_chunk_types(input_dtypes.size());
+    std::vector<PacketTensorAccess> packet_inputs;
+    std::vector<PacketTensorAccess> packet_outputs;
+    std::vector<std::pair<std::string, uint64_t>> aligned_pointers;
     for (uint32_t i = 0; i < input_dtypes.size(); ++i) {
-        if (structural_slots.contains(i)) {
-            input_chunk_types.emplace_back();
-        } else {
-            input_chunk_types.push_back(chunkScalarTypeForBytes(dataTypeStorageBytes(input_dtypes[i]) * elements_per_thread));
+        if (stage.expr.inputs[i].kind != NamedInput::Kind::Tensor || structural_slots.contains(i)) {
+            continue;
         }
+        const uint32_t chunk_bytes = dataTypeStorageBytes(input_dtypes[i]) * elements_per_thread;
+        input_chunk_types[i] = chunkScalarTypeForBytes(chunk_bytes);
+        packet_inputs.push_back(PacketTensorAccess{.chunk_var = "in" + std::to_string(i) + "_chunk",
+                                                   .chunk_type = input_chunk_types[i],
+                                                   .scalar_type = scalarStorageType(input_dtypes[i]),
+                                                   .pointer_expr = "in" + std::to_string(i),
+                                                   .base_expr = "scalar_base"});
+        aligned_pointers.emplace_back("in" + std::to_string(i), chunk_bytes);
     }
-
-    std::vector<std::string> output_chunk_types;
-    output_chunk_types.reserve(output_dtypes.size());
-    for (DataType output_dtype : output_dtypes) {
-        output_chunk_types.push_back(chunkScalarTypeForBytes(dataTypeStorageBytes(output_dtype) * elements_per_thread));
+    std::vector<std::string> output_chunk_types(output_dtypes.size());
+    for (uint32_t i = 0; i < output_dtypes.size(); ++i) {
+        const uint32_t chunk_bytes = dataTypeStorageBytes(output_dtypes[i]) * elements_per_thread;
+        output_chunk_types[i] = chunkScalarTypeForBytes(chunk_bytes);
+        packet_outputs.push_back(PacketTensorAccess{.chunk_var = "out" + std::to_string(i) + "_chunk",
+                                                    .chunk_type = output_chunk_types[i],
+                                                    .scalar_type = scalarStorageType(output_dtypes[i]),
+                                                    .pointer_expr = "out" + std::to_string(i),
+                                                    .base_expr = "scalar_base"});
+        aligned_pointers.emplace_back("out" + std::to_string(i), chunk_bytes);
     }
+    const auto is_fp32_float4 = [](const PacketTensorAccess& t) { return t.chunk_type == "float4" && t.scalar_type == "float"; };
 
     std::ostringstream ss;
     emitRequiredHeaders(stage.expr, ss);
 
-    // Keep the public kernel ABI scalar-typed. Runtime tensors may be storage aliases whose
-    // element offset does not preserve the wider chunk alignment. The aligned/full-chunk path
-    // below retains the existing vector memory operations for ordinary dense tensors, while
-    // the scalar path handles aliases and the final partial chunk without undefined accesses.
+    // The kernel ABI is scalar-typed: runtime tensors may be storage aliases whose
+    // element offset does not preserve chunk alignment. See emitPacketLoadStage.
     ss << "extern \"C\" __global__\n";
     ss << "void " << kernel_name << "(";
 
@@ -6447,9 +7169,10 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
     if (!first_arg) {
         ss << ", ";
     }
-    const std::string index_type = emittedIndexType(use_uint32_index_math);
     ss << index_type << " numel) {\n";
 
+    std::string indent = "  ";
+    ss << "  const bool packets_aligned = " << emitPacketAlignmentPredicate(aligned_pointers) << ";\n";
     if (ragged_extent.has_value()) {
         const RaggedValuewiseExtentEmissionSpec& extent = ragged_extent.value();
         ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in" << extent.partition_input_slot << "["
@@ -6457,147 +7180,130 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
         ss << "  const unsigned long long active_values = active_values_raw < " << extent.max_active_values
            << "ULL ? active_values_raw : " << extent.max_active_values << "ULL;\n";
         ss << "  const unsigned long long runtime_numel_u64 = active_values * " << extent.elements_per_value << "ULL;\n";
-        ss << "  const " << index_type << " runtime_numel = static_cast<" << index_type
+        ss << "  const " << index_type << " active_numel = static_cast<" << index_type
            << ">(runtime_numel_u64 < static_cast<unsigned long long>(numel) ? runtime_numel_u64 : static_cast<unsigned long long>(numel));\n";
-        ss << "  const " << index_type << " thread_packet = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
-        ss << "  const " << index_type << " packet_grid_stride = static_cast<" << index_type
-           << ">(blockDim.x) * static_cast<" << index_type << ">(gridDim.x);\n";
-        ss << "  const " << index_type << " packet_count = (runtime_numel + "
+        ss << "  const " << index_type << " packet_count = (active_numel + "
            << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread - 1u), use_uint32_index_math) << ") / "
            << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math) << ";\n";
-        ss << "  for (" << index_type << " idx = thread_packet; idx < packet_count; idx += packet_grid_stride) {\n";
-        ss << "  const " << index_type << " base = idx * "
-           << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math) << ";\n";
+        ss << "  const " << index_type << " grid_stride = static_cast<" << index_type
+           << ">(blockDim.x) * static_cast<" << index_type << ">(gridDim.x);\n";
+        ss << "  for (" << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math)
+           << "; idx < packet_count; idx += grid_stride) {\n";
+        indent = "    ";
     } else {
-        ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
-        ss << "  const " << index_type << " base = idx * "
-           << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math) << ";\n";
-        ss << "  if (base >= numel) return;\n";
+        ss << "  const " << index_type << " active_numel = numel;\n";
+        ss << "  const " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
+    }
+    ss << indent << "const " << index_type << " scalar_base = idx * "
+       << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math) << ";\n";
+    if (!ragged_extent.has_value()) {
+        ss << indent << "if (scalar_base >= active_numel) return;\n";
+    }
+    ss << indent << "const bool vector_packet = packets_aligned && scalar_base + "
+       << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math) << " <= active_numel;\n";
+    const auto lane_valid = [&](uint32_t lane) {
+        return "scalar_base + " + emitUnsignedLiteral(lane, use_uint32_index_math) + " < active_numel";
+    };
+
+    emitPacketLoadStage(ss, indent, packet_inputs, elements_per_thread, "vector_packet", lane_valid);
+    for (const PacketTensorAccess& in : packet_inputs) {
+        if (!is_fp32_float4(in)) {
+            ss << indent << "const " << in.scalar_type << "* " << in.chunk_var << "_data = reinterpret_cast<const " << in.scalar_type
+               << "*>(&" << in.chunk_var << ");\n";
+        }
+    }
+    for (const PacketTensorAccess& out : packet_outputs) {
+        ss << indent << out.chunk_type << " " << out.chunk_var << ";\n";
+        if (!is_fp32_float4(out)) {
+            ss << indent << out.scalar_type << "* " << out.chunk_var << "_data = reinterpret_cast<" << out.scalar_type << "*>(&"
+               << out.chunk_var << ");\n";
+        }
     }
     ss << "\n";
 
-    ss << "  const bool full_chunk = base + "
-       << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math)
-       << (ragged_extent.has_value() ? " <= runtime_numel;\n" : " <= numel;\n");
-    ss << "  const bool chunk_aligned = ";
-    bool emitted_alignment_term = false;
-    auto emit_alignment_term = [&](const std::string& pointer_expr, uint64_t alignment) {
-        if (emitted_alignment_term) {
-            ss << " && ";
-        }
-        emitted_alignment_term = true;
-        ss << "((reinterpret_cast<unsigned long long>(" << pointer_expr << ") & " << (alignment - 1ULL) << "ULL) == 0ULL)";
-    };
+    std::vector<uint32_t> fp8_chunk_slots;
     for (uint32_t i = 0; i < input_dtypes.size(); ++i) {
-        if (stage.expr.inputs[i].kind != NamedInput::Kind::Tensor || structural_slots.contains(i)) {
-            continue;
-        }
-        emit_alignment_term("in" + std::to_string(i), dataTypeStorageBytes(input_dtypes[i]) * elements_per_thread);
-    }
-    for (uint32_t i = 0; i < output_dtypes.size(); ++i) {
-        emit_alignment_term("out" + std::to_string(i), dataTypeStorageBytes(output_dtypes[i]) * elements_per_thread);
-    }
-    if (!emitted_alignment_term) {
-        ss << "true";
-    }
-    ss << ";\n\n";
-
-    ss << "  if (full_chunk && chunk_aligned) {\n";
-    bool emitted_any_tensor_chunk = false;
-    for (uint32_t i = 0; i < input_dtypes.size(); ++i) {
-        if (stage.expr.inputs[i].kind != NamedInput::Kind::Tensor || structural_slots.contains(i)) {
-            continue;
-        }
-        emitted_any_tensor_chunk = true;
-        ss << "    const " << input_chunk_types[i] << " in" << i << "_chunk = *reinterpret_cast<const "
-           << input_chunk_types[i] << "*>(in" << i << " + base);\n";
-        if (!(input_chunk_types[i] == "float4" && input_dtypes[i] == DataType::FP32)) {
-            ss << "    const " << scalarStorageType(input_dtypes[i]) << "* in" << i
-               << "_chunk_data = reinterpret_cast<const " << scalarStorageType(input_dtypes[i]) << "*>(&in" << i << "_chunk);\n";
+        if (!input_chunk_types[i].empty() && isFp8DType(input_dtypes[i])) {
+            fp8_chunk_slots.push_back(i);
         }
     }
-    if (emitted_any_tensor_chunk) {
+    std::vector<uint32_t> all_output_indices(stage.outputs.size());
+    std::iota(all_output_indices.begin(), all_output_indices.end(), 0u);
+    const Fp8LanePairing fp8_pairing =
+        planFp8LanePairing(stage.expr, stage.outputs, all_output_indices, fp8_chunk_slots, elements_per_thread);
+    emitFp8PairedInputDecode(
+        ss, indent, fp8_pairing, input_dtypes, [](uint32_t slot) { return "in" + std::to_string(slot) + "_chunk"; }, elements_per_thread);
+    if (!fp8_pairing.decoded_slots.empty()) {
         ss << "\n";
     }
 
-    for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
-        ss << "    " << output_chunk_types[out_idx] << " out" << out_idx << "_chunk;\n";
-        if (!(output_chunk_types[out_idx] == "float4" && output_dtypes[out_idx] == DataType::FP32)) {
-            ss << "    " << scalarStorageType(output_dtypes[out_idx]) << "* out" << out_idx
-               << "_chunk_data = reinterpret_cast<" << scalarStorageType(output_dtypes[out_idx]) << "*>(&out" << out_idx << "_chunk);\n";
-        }
-    }
-    if (!stage.outputs.empty()) {
-        ss << "\n";
-    }
-
+    // Compute stage: emitted once. Lanes past the active extent compute on zeroed
+    // packet registers and are discarded by the masked store.
     for (uint32_t lane = 0; lane < elements_per_thread; ++lane) {
-        const std::string suffix = "_fast_l" + std::to_string(lane);
-        const std::string lane_idx_expr = "base + " + emitUnsignedLiteral(static_cast<uint64_t>(lane), use_uint32_index_math);
+        const std::string suffix = "_l" + std::to_string(lane);
+        const std::string lane_idx_expr = "scalar_base + " + emitUnsignedLiteral(static_cast<uint64_t>(lane), use_uint32_index_math);
+        const auto input_value = [&](uint32_t slot) -> std::string {
+            if (fp8_pairing.decoded_slots.contains(slot)) {
+                return fp8DecodedLaneExpr(fp8_pairing, slot, lane);
+            }
+            return emitChunkLaneReadExpr("in" + std::to_string(slot) + "_chunk",
+                                         input_chunk_types.at(slot),
+                                         input_dtypes.at(slot),
+                                         std::to_string(lane),
+                                         "in" + std::to_string(slot) + "_chunk_data",
+                                         elements_per_thread);
+        };
 
-        for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
-            const ExprNode& node = stage.expr.nodes[node_idx];
+        for (uint32_t node_idx = 0; node_idx < fp8_pairing.lane_expr.nodes.size(); ++node_idx) {
+            const ExprNode& node = fp8_pairing.lane_expr.nodes[node_idx];
             if ((node.op == ExprOp::INPUT && structural_slots.contains(node.input_slot)) ||
-                !shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                !shouldEmitScalarNodeDefinition(fp8_pairing.lane_expr, node_idx)) {
                 continue;
             }
-            emitScalarNodeSuffixed(ss,
-                                   stage.expr,
-                                   node_idx,
-                                   lane_idx_expr,
-                                   suffix,
-                                   "    ",
-                                   std::to_string(lane),
-                                   elements_per_thread);
+            if (fp8_pairing.decoded_slots.empty()) {
+                emitScalarNodeSuffixed(ss,
+                                       fp8_pairing.lane_expr,
+                                       node_idx,
+                                       lane_idx_expr,
+                                       suffix,
+                                       indent,
+                                       std::to_string(lane),
+                                       elements_per_thread);
+            } else {
+                emitScalarNodeSuffixed(ss, fp8_pairing.lane_expr, node_idx, lane_idx_expr, suffix, indent, "", 0, input_value);
+            }
         }
 
-        ss << "\n";
         for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
             const CompiledStageOutput& output = stage.outputs[out_idx];
             const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
+            if (fp8_pairing.paired_outputs[out_idx]) {
+                if (lane % 2 == 1) {
+                    emitFp8PairedOutputStore(ss,
+                                             indent,
+                                             fp8_pairing,
+                                             output,
+                                             output_dtype,
+                                             "out" + std::to_string(out_idx) + "_chunk",
+                                             lane,
+                                             "_l" + std::to_string(lane - 1),
+                                             suffix,
+                                             out_idx);
+                }
+                continue;
+            }
             ss << emitChunkLaneWriteStmt("out" + std::to_string(out_idx) + "_chunk",
                                          output_chunk_types[out_idx],
                                          output_dtype,
                                          lane,
-                                         emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix),
-                                         "    ",
+                                         emitResolvedScalarValueExprSuffixed(fp8_pairing.lane_expr, output.local_node_idx, output_dtype, suffix),
+                                         indent,
                                          "out" + std::to_string(out_idx) + "_chunk_data");
         }
         ss << "\n";
     }
 
-    for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
-        ss << "    *reinterpret_cast<" << output_chunk_types[out_idx] << "*>(out" << out_idx << " + base) = out" << out_idx
-           << "_chunk;\n";
-    }
-    ss << (ragged_extent.has_value() ? "    continue;\n" : "    return;\n");
-    ss << "  }\n\n";
-
-    // Unaligned aliases and the final partial chunk use naturally aligned scalar accesses.
-    for (uint32_t lane = 0; lane < elements_per_thread; ++lane) {
-        const std::string suffix = "_scalar_l" + std::to_string(lane);
-        const std::string lane_idx_expr = "base + " + emitUnsignedLiteral(static_cast<uint64_t>(lane), use_uint32_index_math);
-        ss << "  const " << index_type << " lane_idx_" << lane << " = " << lane_idx_expr << ";\n";
-        ss << "  if (lane_idx_" << lane << (ragged_extent.has_value() ? " < runtime_numel) {\n" : " < numel) {\n");
-
-        for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
-            const ExprNode& node = stage.expr.nodes[node_idx];
-            if ((node.op == ExprOp::INPUT && structural_slots.contains(node.input_slot)) ||
-                !shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
-                continue;
-            }
-            emitScalarNodeSuffixed(ss, stage.expr, node_idx, "lane_idx_" + std::to_string(lane), suffix, "    ");
-        }
-
-        for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
-            const CompiledStageOutput& output = stage.outputs[out_idx];
-            const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
-            ss << "    out" << out_idx << "[lane_idx_" << lane << "] = "
-               << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
-        }
-        ss << "  }\n";
-    }
-
+    emitPacketStoreStage(ss, indent, packet_outputs, elements_per_thread, "vector_packet", lane_valid);
     if (ragged_extent.has_value()) {
         ss << "  }\n";
     }
@@ -6605,7 +7311,54 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
     return ss.str();
 }
 
-static std::string emitRaggedWideSpecializedBroadcast(const CompiledExecutionStage& stage,
+// Shared prologue / per-group loop header for the wide (16-byte packet)
+// specialized-broadcast emitters. A dense stage is a ragged stage whose active
+// extent is the group capacity: its packet count is a compile-time constant and
+// the launch covers every packet, so the grid-stride loop runs at most once per
+// thread. A device-ragged stage reads its active extent on device and launches
+// an occupancy-sized grid.
+static void emitWideBroadcastActiveValuesPrologue(std::ostringstream& ss,
+                                                  const std::optional<RaggedValuewiseExtentEmissionSpec>& ragged_extent,
+                                                  const std::string& index_type,
+                                                  bool use_uint32_index_math) {
+    if (ragged_extent.has_value()) {
+        const RaggedValuewiseExtentEmissionSpec& extent = ragged_extent.value();
+        ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in" << extent.partition_input_slot << "["
+           << raggedActiveValueCountLoadIndex(extent) << "]);\n";
+        ss << "  const unsigned long long active_values = active_values_raw < " << extent.max_active_values
+           << "ULL ? active_values_raw : " << extent.max_active_values << "ULL;\n";
+    }
+    ss << "  const " << index_type << " thread_packet = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
+    ss << "  const " << index_type << " packet_grid_stride = static_cast<" << index_type
+       << ">(blockDim.x) * static_cast<" << index_type << ">(gridDim.x);\n\n";
+}
+
+static void emitWideBroadcastGroupPacketLoopHeader(std::ostringstream& ss,
+                                                   const std::optional<RaggedValuewiseExtentEmissionSpec>& ragged_extent,
+                                                   const SpecializedBroadcastGroup& group,
+                                                   uint32_t g,
+                                                   uint32_t packet_scalars,
+                                                   const std::string& index_type,
+                                                   bool use_uint32_index_math) {
+    if (ragged_extent.has_value()) {
+        const uint64_t group_elements_per_value = specializedRaggedGroupElementsPerValue(ragged_extent.value(), group);
+        ss << "  const unsigned long long runtime_numel_g" << g << "_u64 = active_values * " << group_elements_per_value << "ULL;\n";
+        ss << "  const " << index_type << " runtime_numel_g" << g << " = static_cast<" << index_type
+           << ">(runtime_numel_g" << g << "_u64 < " << emitUnsignedLiteral(group.numel, false)
+           << " ? runtime_numel_g" << g << "_u64 : " << emitUnsignedLiteral(group.numel, false) << ");\n";
+        ss << "  const " << index_type << " packet_count_g" << g << " = runtime_numel_g" << g << " / "
+           << emitUnsignedLiteral(packet_scalars, use_uint32_index_math) << ";\n";
+    } else {
+        ss << "  const " << index_type << " packet_count_g" << g << " = "
+           << emitUnsignedLiteral(group.numel / packet_scalars, use_uint32_index_math) << ";\n";
+    }
+    ss << "  for (" << index_type << " packet_idx = thread_packet; packet_idx < packet_count_g" << g
+       << "; packet_idx += packet_grid_stride) {\n";
+    ss << "    const " << index_type << " scalar_base = packet_idx * "
+       << emitUnsignedLiteral(packet_scalars, use_uint32_index_math) << ";\n";
+}
+
+static std::string emitWideSpecializedBroadcast(const CompiledExecutionStage& stage,
                                                        const std::vector<SpecializedBroadcastGroup>& groups,
                                                        DataType storage_dtype_kind,
                                                        DataType vector_compute_dtype,
@@ -6614,16 +7367,15 @@ static std::string emitRaggedWideSpecializedBroadcast(const CompiledExecutionSta
     constexpr uint32_t packs_per_thread = packet_scalars / 2U;
 
     if (storage_dtype_kind != DataType::BF16 && storage_dtype_kind != DataType::FP16) {
-        throw runtime_error("emitRaggedWideSpecializedBroadcast requires BF16 or FP16 storage.");
+        throw runtime_error("emitWideSpecializedBroadcast requires BF16 or FP16 storage.");
     }
     if (!supportsVectorizedComputeDTypeForStorage(storage_dtype_kind, vector_compute_dtype)) {
-        throw runtime_error("emitRaggedWideSpecializedBroadcast called with unsupported storage/compute dtype combination.");
+        throw runtime_error("emitWideSpecializedBroadcast called with unsupported storage/compute dtype combination.");
     }
 
+    // Serves dense stages (active extent = group capacity) and device-ragged
+    // stages (active extent read from the row partition on device).
     const std::optional<RaggedValuewiseExtentEmissionSpec> ragged_extent = findRaggedValuewiseExtentSpec(stage.expr);
-    if (!ragged_extent.has_value()) {
-        throw runtime_error("emitRaggedWideSpecializedBroadcast requires a device ragged runtime extent.");
-    }
     const std::unordered_set<uint32_t> structural_slots = raggedValuewiseExtentPartitionInputSlots(stage.expr);
     const bool use_uint32_index_math = groupsSupportUInt32IndexMath(groups);
     const std::string index_type = emittedIndexType(use_uint32_index_math);
@@ -6666,20 +7418,14 @@ static std::string emitRaggedWideSpecializedBroadcast(const CompiledExecutionSta
     }
     ss << ") {\n";
 
-    const RaggedValuewiseExtentEmissionSpec& extent = ragged_extent.value();
-    ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in" << extent.partition_input_slot << "["
-       << raggedActiveValueCountLoadIndex(extent) << "]);\n";
-    ss << "  const unsigned long long active_values = active_values_raw < " << extent.max_active_values
-       << "ULL ? active_values_raw : " << extent.max_active_values << "ULL;\n";
-    ss << "  const " << index_type << " thread_packet = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
-    ss << "  const " << index_type << " packet_grid_stride = static_cast<" << index_type
-       << ">(blockDim.x) * static_cast<" << index_type << ">(gridDim.x);\n\n";
+    emitWideBroadcastActiveValuesPrologue(ss, ragged_extent, index_type, use_uint32_index_math);
 
     for (uint32_t g = 0; g < groups.size(); ++g) {
         const SpecializedBroadcastGroup& group = groups[g];
-        const uint64_t group_elements_per_value = specializedRaggedGroupElementsPerValue(extent, group);
-        if ((group_elements_per_value % packet_scalars) != 0ULL || (group.numel % packet_scalars) != 0ULL) {
-            throw runtime_error("wide ragged specialized broadcast requires an eight-scalar aligned active row width.");
+        if ((group.numel % packet_scalars) != 0ULL || (group.output_dims.back() % packet_scalars) != 0ULL ||
+            (ragged_extent.has_value() &&
+             (specializedRaggedGroupElementsPerValue(ragged_extent.value(), group) % packet_scalars) != 0ULL)) {
+            throw runtime_error("wide specialized broadcast requires an eight-scalar aligned row width.");
         }
 
         const std::vector<uint32_t> required_nodes = orderedRequiredNodesForGroup(stage, group.output_indices);
@@ -6692,16 +7438,7 @@ static std::string emitRaggedWideSpecializedBroadcast(const CompiledExecutionSta
         std::vector<size_t> all_used_indices(group.used_input_slots.size());
         std::iota(all_used_indices.begin(), all_used_indices.end(), 0);
 
-        ss << "  const unsigned long long runtime_numel_g" << g << "_u64 = active_values * " << group_elements_per_value << "ULL;\n";
-        ss << "  const " << index_type << " runtime_numel_g" << g << " = static_cast<" << index_type
-           << ">(runtime_numel_g" << g << "_u64 < " << emitUnsignedLiteral(group.numel, false)
-           << " ? runtime_numel_g" << g << "_u64 : " << emitUnsignedLiteral(group.numel, false) << ");\n";
-        ss << "  const " << index_type << " packet_count_g" << g << " = runtime_numel_g" << g << " / "
-           << emitUnsignedLiteral(packet_scalars, use_uint32_index_math) << ";\n";
-        ss << "  for (" << index_type << " packet_idx = thread_packet; packet_idx < packet_count_g" << g
-           << "; packet_idx += packet_grid_stride) {\n";
-        ss << "    const " << index_type << " scalar_base = packet_idx * "
-           << emitUnsignedLiteral(packet_scalars, use_uint32_index_math) << ";\n";
+        emitWideBroadcastGroupPacketLoopHeader(ss, ragged_extent, group, g, packet_scalars, index_type, use_uint32_index_math);
 
         for (uint32_t input_slot : group.used_input_slots) {
             ss << "    " << index_type << " in" << input_slot << "_offset_base = "
@@ -6713,6 +7450,13 @@ static std::string emitRaggedWideSpecializedBroadcast(const CompiledExecutionSta
         }
         ss << "\n";
 
+        // Packets never straddle the active extent here (row widths are packet
+        // multiples), but a native-vector operand or the output can be a storage
+        // alias whose packet address is not 16-byte aligned, so the vector access
+        // is predicated on the actual addresses of this packet.
+        std::vector<PacketTensorAccess> packet_inputs;
+        std::vector<PacketTensorAccess> packet_outputs;
+        std::vector<std::pair<std::string, uint64_t>> packet_addresses;
         for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
             const uint32_t input_slot = group.used_input_slots[used_i];
             const uint64_t inner_stride = specializedBroadcastInnermostInputStride(group, used_i);
@@ -6721,20 +7465,37 @@ static std::string emitRaggedWideSpecializedBroadcast(const CompiledExecutionSta
                 if (inner_stride != 1ULL) {
                     throw runtime_error("native-vector ragged broadcast input lost unit innermost stride.");
                 }
-                ss << "    const float4 in" << input_slot << "_packet = *reinterpret_cast<const float4*>(in" << input_slot
-                   << " + in" << input_slot << "_offset_base);\n";
-                ss << "    const " << storage_dtype_vector << "* in" << input_slot
-                   << "_packet_data = reinterpret_cast<const " << storage_dtype_vector << "*>(&in" << input_slot << "_packet);\n";
+                const std::string slot = std::to_string(input_slot);
+                packet_inputs.push_back(PacketTensorAccess{.chunk_var = "in" + slot + "_packet",
+                                                           .chunk_type = "float4",
+                                                           .scalar_type = storage_dtype,
+                                                           .pointer_expr = "in" + slot,
+                                                           .base_expr = "in" + slot + "_offset_base"});
+                packet_addresses.emplace_back("in" + slot + " + in" + slot + "_offset_base", 16ULL);
             } else if (inner_stride == 0ULL) {
                 ss << "    const " << storage_dtype << " in" << input_slot << "_packet_scalar = in" << input_slot
                    << "[in" << input_slot << "_offset_base];\n";
             }
         }
-
         for (uint32_t out_idx : group.output_indices) {
-            ss << "    float4 out" << out_idx << "_packet;\n";
-            ss << "    " << storage_dtype_vector << "* out" << out_idx
-               << "_packet_data = reinterpret_cast<" << storage_dtype_vector << "*>(&out" << out_idx << "_packet);\n";
+            packet_outputs.push_back(PacketTensorAccess{.chunk_var = "out" + std::to_string(out_idx) + "_packet",
+                                                        .chunk_type = "float4",
+                                                        .scalar_type = storage_dtype,
+                                                        .pointer_expr = "out" + std::to_string(out_idx),
+                                                        .base_expr = "scalar_base"});
+            packet_addresses.emplace_back("out" + std::to_string(out_idx) + " + scalar_base", 16ULL);
+        }
+        const auto all_lanes_valid = [](uint32_t) { return std::string{}; };
+        ss << "    const bool vector_packet = " << emitPacketAlignmentPredicate(packet_addresses) << ";\n";
+        emitPacketLoadStage(ss, "    ", packet_inputs, packet_scalars, "vector_packet", all_lanes_valid);
+        for (const PacketTensorAccess& in : packet_inputs) {
+            ss << "    const " << storage_dtype_vector << "* " << in.chunk_var << "_data = reinterpret_cast<const " << storage_dtype_vector
+               << "*>(&" << in.chunk_var << ");\n";
+        }
+        for (const PacketTensorAccess& out : packet_outputs) {
+            ss << "    float4 " << out.chunk_var << ";\n";
+            ss << "    " << storage_dtype_vector << "* " << out.chunk_var << "_data = reinterpret_cast<" << storage_dtype_vector << "*>(&"
+               << out.chunk_var << ");\n";
         }
         ss << "\n";
 
@@ -6791,9 +7552,7 @@ static std::string emitRaggedWideSpecializedBroadcast(const CompiledExecutionSta
             ss << "\n";
         }
 
-        for (uint32_t out_idx : group.output_indices) {
-            ss << "    *reinterpret_cast<float4*>(out" << out_idx << " + scalar_base) = out" << out_idx << "_packet;\n";
-        }
+        emitPacketStoreStage(ss, "    ", packet_outputs, packet_scalars, "vector_packet", all_lanes_valid);
         ss << "  }\n\n";
     }
 
@@ -6801,19 +7560,17 @@ static std::string emitRaggedWideSpecializedBroadcast(const CompiledExecutionSta
     return ss.str();
 }
 
-static std::string emitRaggedWideScalarSpecializedBroadcast(const CompiledExecutionStage& stage,
+static std::string emitWideScalarSpecializedBroadcast(const CompiledExecutionStage& stage,
                                                             const std::vector<SpecializedBroadcastGroup>& groups,
                                                             const std::string& kernel_name,
                                                             uint32_t packet_scalars) {
-    const uint32_t selected_packet_scalars = raggedWideScalarSpecializedBroadcastElementsPerThread(stage, groups);
+    const uint32_t selected_packet_scalars = wideScalarSpecializedBroadcastElementsPerThread(stage, groups);
     if (selected_packet_scalars <= 1u || selected_packet_scalars != packet_scalars) {
-        throw runtime_error("emitRaggedWideScalarSpecializedBroadcast called with an ineligible packet width.");
+        throw runtime_error("emitWideScalarSpecializedBroadcast called with an ineligible packet width.");
     }
 
+    // Serves dense stages (active extent = group capacity) and device-ragged stages.
     const std::optional<RaggedValuewiseExtentEmissionSpec> ragged_extent = findRaggedValuewiseExtentSpec(stage.expr);
-    if (!ragged_extent.has_value()) {
-        throw runtime_error("wide-scalar ragged specialized broadcast requires a device ragged runtime extent.");
-    }
 
     const std::unordered_set<uint32_t> structural_slots = raggedValuewiseExtentPartitionInputSlots(stage.expr);
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
@@ -6843,18 +7600,10 @@ static std::string emitRaggedWideScalarSpecializedBroadcast(const CompiledExecut
     }
     ss << ") {\n";
 
-    const RaggedValuewiseExtentEmissionSpec& extent = ragged_extent.value();
-    ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in" << extent.partition_input_slot << "["
-       << raggedActiveValueCountLoadIndex(extent) << "]);\n";
-    ss << "  const unsigned long long active_values = active_values_raw < " << extent.max_active_values
-       << "ULL ? active_values_raw : " << extent.max_active_values << "ULL;\n";
-    ss << "  const " << index_type << " thread_packet = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
-    ss << "  const " << index_type << " packet_grid_stride = static_cast<" << index_type
-       << ">(blockDim.x) * static_cast<" << index_type << ">(gridDim.x);\n\n";
+    emitWideBroadcastActiveValuesPrologue(ss, ragged_extent, index_type, use_uint32_index_math);
 
     for (uint32_t g = 0; g < groups.size(); ++g) {
         const SpecializedBroadcastGroup& group = groups[g];
-        const uint64_t group_elements_per_value = specializedRaggedGroupElementsPerValue(extent, group);
         const std::vector<uint32_t> required_nodes = orderedRequiredNodesForGroup(stage, group.output_indices);
         std::unordered_map<uint32_t, size_t> used_index_by_slot;
         used_index_by_slot.reserve(group.used_input_slots.size());
@@ -6864,16 +7613,7 @@ static std::string emitRaggedWideScalarSpecializedBroadcast(const CompiledExecut
         std::vector<size_t> all_used_indices(group.used_input_slots.size());
         std::iota(all_used_indices.begin(), all_used_indices.end(), 0);
 
-        ss << "  const unsigned long long runtime_numel_g" << g << "_u64 = active_values * " << group_elements_per_value << "ULL;\n";
-        ss << "  const " << index_type << " runtime_numel_g" << g << " = static_cast<" << index_type
-           << ">(runtime_numel_g" << g << "_u64 < " << emitUnsignedLiteral(group.numel, false)
-           << " ? runtime_numel_g" << g << "_u64 : " << emitUnsignedLiteral(group.numel, false) << ");\n";
-        ss << "  const " << index_type << " packet_count_g" << g << " = runtime_numel_g" << g << " / "
-           << emitUnsignedLiteral(packet_scalars, use_uint32_index_math) << ";\n";
-        ss << "  for (" << index_type << " packet_idx = thread_packet; packet_idx < packet_count_g" << g
-           << "; packet_idx += packet_grid_stride) {\n";
-        ss << "    const " << index_type << " scalar_base = packet_idx * "
-           << emitUnsignedLiteral(packet_scalars, use_uint32_index_math) << ";\n";
+        emitWideBroadcastGroupPacketLoopHeader(ss, ragged_extent, group, g, packet_scalars, index_type, use_uint32_index_math);
 
         for (uint32_t input_slot : group.used_input_slots) {
             ss << "    " << index_type << " in" << input_slot << "_offset_base = "
@@ -6885,21 +7625,29 @@ static std::string emitRaggedWideScalarSpecializedBroadcast(const CompiledExecut
         }
         ss << "\n";
 
+        // Packets never straddle the active extent (row widths are packet
+        // multiples), but a native-vector operand or the output can be a storage
+        // alias whose packet address is not chunk aligned; predicate the vector
+        // access on this packet's actual addresses.
         std::unordered_map<uint32_t, std::string> input_chunk_types;
+        std::vector<PacketTensorAccess> packet_inputs;
+        std::vector<PacketTensorAccess> packet_outputs;
+        std::vector<std::pair<std::string, uint64_t>> packet_addresses;
         for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
             const uint32_t input_slot = group.used_input_slots[used_i];
             const DataType input_dtype = input_dtypes.at(input_slot);
             const uint64_t inner_stride = specializedBroadcastInnermostInputStride(group, used_i);
             if (group.used_input_load_kinds[used_i] == SpecializedInputLoadKind::NativeVector) {
-                const std::string chunk_type = chunkScalarTypeForBytes(dataTypeStorageBytes(input_dtype) * packet_scalars);
+                const uint32_t chunk_bytes = dataTypeStorageBytes(input_dtype) * packet_scalars;
+                const std::string chunk_type = chunkScalarTypeForBytes(chunk_bytes);
+                const std::string slot = std::to_string(input_slot);
                 input_chunk_types.emplace(input_slot, chunk_type);
-                ss << "    const " << chunk_type << " in" << input_slot << "_packet = *reinterpret_cast<const "
-                   << chunk_type << "*>(in" << input_slot << " + in" << input_slot << "_offset_base);\n";
-                if (!(chunk_type == "float4" && input_dtype == DataType::FP32)) {
-                    ss << "    const " << scalarStorageType(input_dtype) << "* in" << input_slot
-                       << "_packet_data = reinterpret_cast<const " << scalarStorageType(input_dtype) << "*>(&in" << input_slot
-                       << "_packet);\n";
-                }
+                packet_inputs.push_back(PacketTensorAccess{.chunk_var = "in" + slot + "_packet",
+                                                           .chunk_type = chunk_type,
+                                                           .scalar_type = scalarStorageType(input_dtype),
+                                                           .pointer_expr = "in" + slot,
+                                                           .base_expr = "in" + slot + "_offset_base"});
+                packet_addresses.emplace_back("in" + slot + " + in" + slot + "_offset_base", chunk_bytes);
             } else if (inner_stride == 0ULL) {
                 ss << "    const " << scalarStorageType(input_dtype) << " in" << input_slot << "_packet_scalar = in" << input_slot
                    << "[in" << input_slot << "_offset_base];\n";
@@ -6909,21 +7657,58 @@ static std::string emitRaggedWideScalarSpecializedBroadcast(const CompiledExecut
         std::vector<std::string> output_chunk_types(stage.outputs.size());
         for (uint32_t out_idx : group.output_indices) {
             const DataType output_dtype = output_dtypes.at(out_idx);
-            const std::string chunk_type = chunkScalarTypeForBytes(dataTypeStorageBytes(output_dtype) * packet_scalars);
+            const uint32_t chunk_bytes = dataTypeStorageBytes(output_dtype) * packet_scalars;
+            const std::string chunk_type = chunkScalarTypeForBytes(chunk_bytes);
             output_chunk_types[out_idx] = chunk_type;
-            ss << "    " << chunk_type << " out" << out_idx << "_packet;\n";
-            if (!(chunk_type == "float4" && output_dtype == DataType::FP32)) {
-                ss << "    " << scalarStorageType(output_dtype) << "* out" << out_idx
-                   << "_packet_data = reinterpret_cast<" << scalarStorageType(output_dtype) << "*>(&out" << out_idx << "_packet);\n";
+            packet_outputs.push_back(PacketTensorAccess{.chunk_var = "out" + std::to_string(out_idx) + "_packet",
+                                                        .chunk_type = chunk_type,
+                                                        .scalar_type = scalarStorageType(output_dtype),
+                                                        .pointer_expr = "out" + std::to_string(out_idx),
+                                                        .base_expr = "scalar_base"});
+            packet_addresses.emplace_back("out" + std::to_string(out_idx) + " + scalar_base", chunk_bytes);
+        }
+        const auto all_lanes_valid = [](uint32_t) { return std::string{}; };
+        ss << "    const bool vector_packet = " << emitPacketAlignmentPredicate(packet_addresses) << ";\n";
+        emitPacketLoadStage(ss, "    ", packet_inputs, packet_scalars, "vector_packet", all_lanes_valid);
+        for (size_t i = 0; i < packet_inputs.size(); ++i) {
+            const PacketTensorAccess& in = packet_inputs[i];
+            if (!(in.chunk_type == "float4" && in.scalar_type == "float")) {
+                ss << "    const " << in.scalar_type << "* " << in.chunk_var << "_data = reinterpret_cast<const " << in.scalar_type << "*>(&"
+                   << in.chunk_var << ");\n";
+            }
+        }
+        for (const PacketTensorAccess& out : packet_outputs) {
+            ss << "    " << out.chunk_type << " " << out.chunk_var << ";\n";
+            if (!(out.chunk_type == "float4" && out.scalar_type == "float")) {
+                ss << "    " << out.scalar_type << "* " << out.chunk_var << "_data = reinterpret_cast<" << out.scalar_type << "*>(&"
+                   << out.chunk_var << ");\n";
             }
         }
         ss << "\n";
+
+        std::vector<uint32_t> fp8_chunk_slots;
+        for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
+            const uint32_t slot = group.used_input_slots[used_i];
+            if (group.used_input_load_kinds[used_i] == SpecializedInputLoadKind::NativeVector && isFp8DType(input_dtypes.at(slot))) {
+                fp8_chunk_slots.push_back(slot);
+            }
+        }
+        const Fp8LanePairing fp8_pairing =
+            planFp8LanePairing(stage.expr, stage.outputs, group.output_indices, fp8_chunk_slots, packet_scalars);
+        emitFp8PairedInputDecode(
+            ss, "    ", fp8_pairing, input_dtypes, [](uint32_t slot) { return "in" + std::to_string(slot) + "_packet"; }, packet_scalars);
+        if (!fp8_pairing.decoded_slots.empty()) {
+            ss << "\n";
+        }
 
         for (uint32_t lane = 0; lane < packet_scalars; ++lane) {
             const std::string suffix = "_rmp_l" + std::to_string(lane);
             const std::string lane_idx = "scalar_base + " + emitUnsignedLiteral(lane, use_uint32_index_math);
 
             auto input_value = [&](uint32_t input_slot) -> std::string {
+                if (fp8_pairing.decoded_slots.contains(input_slot)) {
+                    return fp8DecodedLaneExpr(fp8_pairing, input_slot, lane);
+                }
                 const auto used_it = used_index_by_slot.find(input_slot);
                 if (used_it == used_index_by_slot.end()) {
                     throw runtime_error("wide-scalar ragged broadcast node references an input outside its broadcast group.");
@@ -6950,17 +7735,32 @@ static std::string emitRaggedWideScalarSpecializedBroadcast(const CompiledExecut
             };
 
             for (uint32_t node_idx : required_nodes) {
-                const ExprNode& node = stage.expr.nodes[node_idx];
+                const ExprNode& node = fp8_pairing.lane_expr.nodes[node_idx];
                 if ((node.op == ExprOp::INPUT && structural_slots.contains(node.input_slot)) ||
-                    !shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                    !shouldEmitScalarNodeDefinition(fp8_pairing.lane_expr, node_idx)) {
                     continue;
                 }
-                emitScalarNodeSuffixed(ss, stage.expr, node_idx, lane_idx, suffix, "    ", "", 0, input_value);
+                emitScalarNodeSuffixed(ss, fp8_pairing.lane_expr, node_idx, lane_idx, suffix, "    ", "", 0, input_value);
             }
 
             for (uint32_t out_idx : group.output_indices) {
                 const CompiledStageOutput& output = stage.outputs[out_idx];
                 const DataType output_dtype = output_dtypes.at(out_idx);
+                if (fp8_pairing.paired_outputs[out_idx]) {
+                    if (lane % 2 == 1) {
+                        emitFp8PairedOutputStore(ss,
+                                                 "    ",
+                                                 fp8_pairing,
+                                                 output,
+                                                 output_dtype,
+                                                 "out" + std::to_string(out_idx) + "_packet",
+                                                 lane,
+                                                 "_rmp_l" + std::to_string(lane - 1),
+                                                 suffix,
+                                                 out_idx);
+                    }
+                    continue;
+                }
                 const std::string& chunk_type = output_chunk_types[out_idx];
                 const std::string chunk_data = (chunk_type == "float4" && output_dtype == DataType::FP32)
                                                    ? std::string{}
@@ -6969,17 +7769,14 @@ static std::string emitRaggedWideScalarSpecializedBroadcast(const CompiledExecut
                                              chunk_type,
                                              output_dtype,
                                              lane,
-                                             emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix),
+                                             emitResolvedScalarValueExprSuffixed(fp8_pairing.lane_expr, output.local_node_idx, output_dtype, suffix),
                                              "    ",
                                              chunk_data);
             }
             ss << "\n";
         }
 
-        for (uint32_t out_idx : group.output_indices) {
-            ss << "    *reinterpret_cast<" << output_chunk_types[out_idx] << "*>(out" << out_idx << " + scalar_base) = out" << out_idx
-               << "_packet;\n";
-        }
+        emitPacketStoreStage(ss, "    ", packet_outputs, packet_scalars, "vector_packet", all_lanes_valid);
         ss << "  }\n\n";
     }
 
@@ -7375,9 +8172,17 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
             const std::string packed_value = "out" + std::to_string(out_idx) + "_packed";
             ss << "    const " << storage_dtype_vector << " " << packed_value << " = "
                << vector_storage_conversion(storage_dtype_vector, CudaSourceEmitter::ref(output.local_node_idx), vector_compute_dtype) << ";\n";
+            // With an odd element count the final pair owns one valid lane. The
+            // packed store would write one element past the output, which is live
+            // storage when the output is a view, so that pair takes the masked path.
+            const std::string odd_tail_guard =
+                (group.numel % 2ULL) != 0ULL
+                    ? " && (idx0 + " + emitUnsignedLiteral(1, use_uint32_index_math) + " < " +
+                          emitUnsignedLiteral(group.numel, use_uint32_index_math) + ")"
+                    : std::string{};
             ss << "    const bool out" << out_idx << "_native_aligned = "
                << "((reinterpret_cast<unsigned long long>(out" << out_idx << " + idx0) & "
-               << (storage_vector_alignment - 1u) << "ULL) == 0ULL);\n";
+               << (storage_vector_alignment - 1u) << "ULL) == 0ULL)" << odd_tail_guard << ";\n";
             ss << "    if (out" << out_idx << "_native_aligned) {\n";
             ss << "      *reinterpret_cast<" << storage_dtype_vector << "*>(out" << out_idx << " + idx0) = "
                << packed_value << ";\n";
@@ -7398,6 +8203,73 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
 
     ss << "}\n";
     return ss.str();
+}
+
+
+// Address-alignment conjunction for a packed access of `pack_type` at
+// in<slot> + <index_expr> for every listed input. The element index being a pack
+// multiple is not enough: runtime tensors can be storage aliases whose base is
+// only element aligned.
+static std::string emitInputsPackAddressAligned(const std::vector<uint32_t>& input_slots,
+                                                const std::string& index_expr,
+                                                const std::string& pack_type) {
+    std::string predicate;
+    for (uint32_t slot : input_slots) {
+        predicate += " && ((reinterpret_cast<unsigned long long>(in" + std::to_string(slot) + " + " + index_expr + ") % sizeof(" +
+                     pack_type + ")) == 0ULL)";
+    }
+    return predicate;
+}
+
+static std::vector<uint32_t> tensorInputSlots(const PhysicalExpression& expr) {
+    std::vector<uint32_t> slots;
+    for (uint32_t i = 0; i < expr.inputs.size(); ++i) {
+        if (expr.inputs[i].kind == NamedInput::Kind::Tensor) slots.push_back(i);
+    }
+    return slots;
+}
+
+// Algebraic strength reductions applied to a copy of the stage expression right
+// before emission, so every emitter path (scalar, wide, packed vector, float2,
+// broadcast, transpose) benefits without per-path special cases.
+//
+//   pow(x, 2) -> x * x   powf costs tens of instructions per lane (and the packed
+//                        BF16/FP16 path calls it once per lane after a float
+//                        round trip); a fused stage has only a few hundred
+//                        instructions per 16-byte packet before it stops being
+//                        memory bound. x * x is also the correctly rounded square.
+//   pow(x, 1) -> x * 1   the multiply by one is folded away by the scalar emitters.
+//
+// Only compile-time constant exponents are rewritten. The rewrite reuses existing
+// nodes, so node order (children before parents) and every dtype annotation are
+// unchanged, and vector eligibility is unaffected (MUL is supported wherever POW is).
+static bool tryGetEmitterConstantValue(const PhysicalExpression& expr, uint32_t node_idx, double& value);
+
+static bool isStrengthReduciblePow(const PhysicalExpression& expr, const ExprNode& node) {
+    if (node.op != ExprOp::POW || node.rhs >= expr.nodes.size()) {
+        return false;
+    }
+    double exponent = 0.0;
+    return tryGetEmitterConstantValue(expr, node.rhs, exponent) && (exponent == 2.0 || exponent == 1.0);
+}
+
+static bool expressionHasStrengthReductions(const PhysicalExpression& expr) {
+    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [&](const ExprNode& node) { return isStrengthReduciblePow(expr, node); });
+}
+
+static void applyStrengthReductions(PhysicalExpression& expr) {
+    for (ExprNode& node : expr.nodes) {
+        if (!isStrengthReduciblePow(expr, node)) {
+            continue;
+        }
+        double exponent = 0.0;
+        tryGetEmitterConstantValue(expr, node.rhs, exponent);
+        node.op = ExprOp::MUL;
+        if (exponent == 2.0) {
+            node.rhs = node.lhs;
+        }
+        // exponent == 1.0 keeps rhs: the constant-one operand.
+    }
 }
 
 static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionStage& stage,
@@ -7435,12 +8307,9 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
     const bool emit_cross_width_half2_path =
         maybe_tensor_input_dtype.has_value() &&
         supportsHalf2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.value(), output_dtype);
-    const bool emit_fp8_to_bf16_float2_path =
-        maybe_tensor_input_dtype.has_value() &&
-        supportsFp8ToBf16Float2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.value(), output_dtype);
     const bool emit_packed_vectorized_path = emit_homogeneous_packed_vectorized_path || emit_mixed_two_byte_float2_path ||
                                              emit_mixed_fp8_vectorized_path || emit_cross_width_float2_path ||
-                                             emit_cross_width_half2_path || emit_fp8_to_bf16_float2_path;
+                                             emit_cross_width_half2_path;
     const bool emit_decoupled_line_vectorized_path = shouldUseDecoupledLineVectorizedTranspose(maybe_tensor_input_dtype, output_dtype);
     const std::string index_type = emittedIndexType(use_uint32_index_math);
     std::ostringstream ss;
@@ -7510,6 +8379,14 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
 
         auto emit_flat_scalar_lanes = [&](const std::string& base_indent, const std::string& idx_expr_base, bool use_loaded_chunks) {
             if (use_loaded_chunks && isFp8DType(input_dtype)) {
+                // Decode each loaded FP8 chunk as two fp8x2 pairs (one conversion per pair) and
+                // run the lanes on the exact FP32 values. Lanes are unrolled with constant indices,
+                // so neither the chunk nor the decoded pairs are ever indexed by a runtime lane.
+                const Fp8LanePairing fp8_pairing =
+                    planFp8LanePairing(stage.expr, stage.outputs, {0u}, tensorInputSlots(stage.expr), read_pack_scalars);
+                emitFp8PairedInputDecode(
+                    ss, base_indent, fp8_pairing, input_dtypes, [](uint32_t slot) { return "in" + std::to_string(slot) + "_chunk"; },
+                    read_pack_scalars);
                 for (uint32_t lane = 0; lane < read_pack_scalars; ++lane) {
                     const std::string suffix = "_dl" + std::to_string(lane);
                     const std::string lane_literal = emitUnsignedLiteral(lane, use_uint32_index_math);
@@ -7518,16 +8395,21 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
                     ss << base_indent << "  const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
                     const std::string lane_idx_expr = idx_expr_base + " + " + lane_literal;
                     auto input_value = [&](uint32_t input_slot) -> std::string {
+                        if (fp8_pairing.decoded_slots.contains(input_slot)) {
+                            return fp8DecodedLaneExpr(fp8_pairing, input_slot, lane);
+                        }
                         return emitFp8PackLaneMemberExpr("in" + std::to_string(input_slot) + "_chunk", lane, input_dtype);
                     };
-                    for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
-                        if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                    for (uint32_t node_idx = 0; node_idx < fp8_pairing.lane_expr.nodes.size(); ++node_idx) {
+                        if (!shouldEmitScalarNodeDefinition(fp8_pairing.lane_expr, node_idx)) {
                             continue;
                         }
-                        emitScalarNodeSuffixed(ss, stage.expr, node_idx, lane_idx_expr, suffix, base_indent + "  ", "", 0, input_value);
+                        emitScalarNodeSuffixed(
+                            ss, fp8_pairing.lane_expr, node_idx, lane_idx_expr, suffix, base_indent + "  ", "", 0, input_value);
                     }
                     ss << base_indent << "  tile[localRow][LOCAL_COL] = thor_pack_transpose_word<" << output_type << ">("
-                       << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ");\n";
+                       << emitResolvedScalarValueExprSuffixed(fp8_pairing.lane_expr, output.local_node_idx, output_dtype, suffix)
+                       << ");\n";
                     ss << base_indent << "}\n";
                 }
                 return;
@@ -7593,7 +8475,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         if (read_pack_scalars > 1) {
             ss << "    const bool inputPackedLoadOk = (logicalRow < numRows) && (logicalColBase + READ_PACK_SCALARS <= numCols) &&\n";
             ss << "                                   ((idx_base % READ_PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math)
-               << ");\n";
+               << ")" << emitInputsPackAddressAligned(tensorInputSlots(stage.expr), "idx_base", "InputPack") << ";\n";
             ss << "    if (inputPackedLoadOk) {\n";
             for (uint32_t i = 0; i < input_dtypes.size(); ++i) {
                 if (stage.expr.inputs[i].kind != NamedInput::Kind::Tensor) {
@@ -7638,7 +8520,8 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
             ss << "    const " << index_type << " out_base_idx = matrixOffset + outputRow * numRows + outputColBase;\n";
             ss << "    const bool outputPackedStoreOk = (outputRow < numCols) && (outputColBase + WRITE_PACK_SCALARS <= numRows) &&\n";
             ss << "                                     ((out_base_idx % WRITE_PACK_SCALARS) == "
-               << emitUnsignedLiteral(0, use_uint32_index_math) << ");\n";
+               << emitUnsignedLiteral(0, use_uint32_index_math)
+               << ") && ((reinterpret_cast<unsigned long long>(out0 + out_base_idx) % sizeof(OutputPack)) == 0ULL);\n";
             ss << "    if (outputPackedStoreOk) {\n";
             ss << "      OutputPack* out_ptr = reinterpret_cast<OutputPack*>(out0 + out_base_idx);\n";
             ss << "      *out_ptr = output_pack;\n";
@@ -7665,7 +8548,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         const DataType dtype = output_dtype;
         const bool needs_input_vector_type = emit_homogeneous_packed_vectorized_path || emit_mixed_two_byte_float2_path ||
                                              emit_mixed_fp8_vectorized_path || emit_cross_width_float2_path ||
-                                             emit_cross_width_half2_path || emit_fp8_to_bf16_float2_path;
+                                             emit_cross_width_half2_path;
         const DataType vector_input_dtype = needs_input_vector_type
                                                 ? (maybe_tensor_input_dtype.has_value() ? maybe_tensor_input_dtype.value() : output_dtype)
                                                 : output_dtype;
@@ -7681,6 +8564,10 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         const std::string input_storage_dtype_vector =
             needs_input_vector_type ? transposeVector2StorageType(vector_input_dtype) : output_storage_dtype_vector;
 
+        // FP8 inputs: the thread's 4-lane input chunk is one 4-byte load (two pairs) when its actual
+        // address is 4-byte aligned; runtime tensors can be element-offset views, so the address is checked.
+        const bool load_fp8_input_chunk = emit_packed_vectorized_path && maybe_tensor_input_dtype.has_value() &&
+                                          isFp8DType(maybe_tensor_input_dtype.value()) && pack_scalars == 4U;
         ss << "  constexpr unsigned int PACK_SCALARS = " << pack_scalars << "U;\n";
         ss << "  constexpr unsigned int TILE_COL_SCALARS = TILE_DIM * PACK_SCALARS;\n";
         ss << "  using Pack = " << pack_type << ";\n";
@@ -7688,6 +8575,16 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
             ss << "  using OutputVec2 = " << output_storage_dtype_vector << ";\n";
             ss << "  using InputVec2 = " << input_storage_dtype_vector << ";\n";
         }
+        if (load_fp8_input_chunk) {
+            ss << "  using InputPack = unsigned int;\n";
+        }
+        // Pair PAIR of input slot `slot` on the vectorized path.
+        const auto input_pair_expr = [&](uint32_t slot, const std::string& vec2_type) -> std::string {
+            if (load_fp8_input_chunk) {
+                return "reinterpret_cast<const " + vec2_type + "*>(&in" + std::to_string(slot) + "_chunk)[PAIR]";
+            }
+            return "reinterpret_cast<const " + vec2_type + "*>(in" + std::to_string(slot) + " + idx_base)[PAIR]";
+        };
         ss << "  union PackRaw { unsigned int raw; Pack pack; };\n";
         emitSharedTransposeTileDeclaration(ss);
         ss << "  const " << index_type << " rowStart = rowTile * TILE_DIM;\n";
@@ -7700,7 +8597,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
                 if (node.op != ExprOp::SCALAR_FP && node.op != ExprOp::FILL) {
                     continue;
                 }
-                if (emit_mixed_two_byte_float2_path || emit_cross_width_float2_path || emit_fp8_to_bf16_float2_path) {
+                if (emit_mixed_two_byte_float2_path || emit_cross_width_float2_path) {
                     ss << "  const float2 c" << node_idx << " = " << emitFloat2ScalarLiteral(node.scalar_fp) << ";\n";
                 } else {
                     ss << "  const " << (vector_compute_dtype == DataType::BF16 ? "__nv_bfloat162" : "half2") << " c" << node_idx << " = "
@@ -7714,26 +8611,35 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         ss << "    const " << index_type << " logicalRow = rowStart + threadIdx.y + j;\n";
         ss << "    const " << index_type << " idx_base = matrixOffset + logicalRow * numCols + logicalColBase;\n";
         ss << "    const bool inputPackedLoadOk = (logicalRow < numRows) && (logicalColBase + PACK_SCALARS <= numCols) &&\n";
-        ss << "                                   ((idx_base % PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math)
-           << ");\n";
+        ss << "                                   ((idx_base % PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math) << ")"
+           << (emit_packed_vectorized_path
+                   ? emitInputsPackAddressAligned(tensorInputSlots(stage.expr), "idx_base", load_fp8_input_chunk ? "InputPack" : "InputVec2")
+                   : std::string{})
+           << ";\n";
         ss << "    Pack output_pack{};\n";
         if (emit_packed_vectorized_path) {
+            const std::optional<uint32_t> passthrough_slot = passthroughInputSlotForOutput(stage.expr, output.local_node_idx);
             ss << "    if (inputPackedLoadOk) {\n";
+            if (load_fp8_input_chunk) {
+                for (uint32_t slot : tensorInputSlots(stage.expr)) {
+                    ss << "      const InputPack in" << slot << "_chunk = *reinterpret_cast<const InputPack*>(in" << slot << " + idx_base);\n";
+                }
+            }
             ss << "      OutputVec2* output_vec2 = reinterpret_cast<OutputVec2*>(&output_pack);\n";
             for (uint32_t pair = 0; pair < pairs_per_pack; ++pair) {
                 const std::string suffix = "_tp" + std::to_string(pair);
                 ss << "      {\n";
                 ss << "        constexpr unsigned int PAIR = " << pair << "U;\n";
-                if (emit_mixed_two_byte_float2_path || emit_cross_width_float2_path || emit_fp8_to_bf16_float2_path) {
+                if (passthrough_slot.has_value()) {
+                    ss << "        output_vec2[PAIR] = " << input_pair_expr(passthrough_slot.value(), "OutputVec2") << ";\n";
+                } else if (emit_mixed_two_byte_float2_path || emit_cross_width_float2_path) {
                     emitFloat2NodeDefinitionsForSuffix(
                         ss,
                         stage.expr,
                         input_storage_dtype_vector,
                         suffix,
                         "        ",
-                        [&](uint32_t input_slot) {
-                            return "reinterpret_cast<const InputVec2*>(in" + std::to_string(input_slot) + " + idx_base)[PAIR]";
-                        },
+                        [&](uint32_t input_slot) { return input_pair_expr(input_slot, "InputVec2"); },
                         [&](uint32_t scalar_node_idx) { return "c" + std::to_string(scalar_node_idx); });
                     ss << "        output_vec2[PAIR] = "
                        << float2_storage_conversion(output_storage_dtype_vector, refWithSuffix(output.local_node_idx, suffix)) << ";\n";
@@ -7745,9 +8651,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
                         input_storage_dtype_vector,
                         suffix,
                         "        ",
-                        [&](uint32_t input_slot) {
-                            return "reinterpret_cast<const InputVec2*>(in" + std::to_string(input_slot) + " + idx_base)[PAIR]";
-                        },
+                        [&](uint32_t input_slot) { return input_pair_expr(input_slot, "InputVec2"); },
                         [&](uint32_t scalar_node_idx) { return "c" + std::to_string(scalar_node_idx); });
                     ss << "        output_vec2[PAIR] = "
                        << vector_storage_conversion(output_storage_dtype_vector, refWithSuffix(output.local_node_idx, suffix), vector_compute_dtype)
@@ -7765,20 +8669,13 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         ss << "        if (logicalCol < numCols) {\n";
         ss << "          const " << index_type << " idx = matrixOffset + logicalRow * numCols + logicalCol;\n";
         ss << "          {\n";
-        if (emit_fp8_to_bf16_float2_path) {
-            emitFloatScalarNodeDefinitions(
-                ss, stage.expr, "            ", [&](uint32_t input_slot) { return "in" + std::to_string(input_slot) + "[idx]"; });
-            ss << "            output_scalar[lane] = __nv_bfloat16(" << CudaSourceEmitter::ref(output.local_node_idx) << ");\n";
-        } else {
-            for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
-                if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
-                    continue;
-                }
-                emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/false, "            ");
+        for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+            if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                continue;
             }
-            ss << "            output_scalar[lane] = " << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype)
-               << ";\n";
+            emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/false, "            ");
         }
+        ss << "            output_scalar[lane] = " << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype) << ";\n";
         ss << "          }\n";
         ss << "        }\n";
         ss << "      }\n";
@@ -7800,18 +8697,11 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         ss << "    const " << index_type << " outputRow = colStart + localOutRow;\n";
         ss << "    const " << index_type << " outputColBase = rowStart + static_cast<" << index_type
            << ">(localOutPackCol) * PACK_SCALARS;\n";
-        ss << "    Pack output_pack{};\n";
-        ss << "    " << output_type << "* output_scalar = reinterpret_cast<" << output_type << "*>(&output_pack);\n";
-        ss << "    for (unsigned int lane = 0; lane < PACK_SCALARS; ++lane) {\n";
-        ss << "      PackRaw input_raw{};\n";
-        ss << "      input_raw.raw = tile[localOutPackCol * PACK_SCALARS + lane][inputPackCol];\n";
-        ss << "      const " << output_type << "* input_scalar = reinterpret_cast<const " << output_type << "*>(&input_raw.pack);\n";
-        ss << "      output_scalar[lane] = input_scalar[inputColLane];\n";
-        ss << "    }\n";
+        emitPackedTransposeTileLaneGather(ss, output_type);
         ss << "    const " << index_type << " out_base_idx = matrixOffset + outputRow * numRows + outputColBase;\n";
         ss << "    const bool outputPackedStoreOk = (outputRow < numCols) && (outputColBase + PACK_SCALARS <= numRows) &&\n";
         ss << "                                     ((out_base_idx % PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math)
-           << ");\n";
+           << ") && ((reinterpret_cast<unsigned long long>(out0 + out_base_idx) % sizeof(Pack)) == 0ULL);\n";
         ss << "    if (outputPackedStoreOk) {\n";
         ss << "      Pack* out_ptr = reinterpret_cast<Pack*>(out0 + out_base_idx);\n";
         ss << "      *out_ptr = output_pack;\n";
@@ -7883,7 +8773,18 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExpression& expr, const st
     return emitFlat(stage, kernel_name, use_uint32_index_math);
 }
 
+static std::string emitFlatImpl(const PhysicalExecutionStage& stage, const std::string& kernel_name, bool use_uint32_index_math);
+
 std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, const std::string& kernel_name, bool use_uint32_index_math) {
+    if (expressionHasStrengthReductions(stage.expr)) {
+        PhysicalExecutionStage reduced = stage;
+        applyStrengthReductions(reduced.expr);
+        return emitFlatImpl(reduced, kernel_name, use_uint32_index_math);
+    }
+    return emitFlatImpl(stage, kernel_name, use_uint32_index_math);
+}
+
+static std::string emitFlatImpl(const PhysicalExecutionStage& stage, const std::string& kernel_name, bool use_uint32_index_math) {
     if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
         throw runtime_error("CudaSourceEmitter::emitFlat(stage, ...) called on non-fused stage.");
     }
@@ -7906,7 +8807,7 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
 
     std::optional<DataType> vectorized_dtype = ragged_extent.has_value()
                                                    ? getRaggedFlatVectorizedStageStorageDType(stage)
-                                                   : getVectorizedStageStorageDType(stage);
+                                                   : CudaSourceEmitter::getVectorizedStageStorageDType(stage);
     if (vectorized_dtype.has_value()) {
         const std::optional<DataType> vector_compute_dtype = getVectorizedStageComputeDTypeImpl(stage.expr, vectorized_dtype.value());
         if (!vector_compute_dtype.has_value()) {
@@ -7915,7 +8816,7 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
         return emitVector2Flat(stage, vectorized_dtype.value(), vector_compute_dtype.value(), kernel_name, use_uint32_index_math);
     }
 
-    const uint32_t elements_per_thread = flatElementsPerThread(stage);
+    const uint32_t elements_per_thread = CudaSourceEmitter::flatElementsPerThread(stage);
     if (elements_per_thread > 1) {
         return emitWideScalarFlat(stage, kernel_name, use_uint32_index_math, elements_per_thread);
     }
@@ -8006,11 +8907,18 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
 }
 
 std::string CudaSourceEmitter::emitPaddedRaggedPointwise(
-    const PhysicalExecutionStage& stage,
+    const PhysicalExecutionStage& original_stage,
     const std::vector<PaddedRaggedPointwiseInputAccess>& input_access,
     uint64_t batch_size,
     uint64_t channels,
     const std::string& kernel_name) {
+    PhysicalExecutionStage reduced_storage;
+    const bool reduce = expressionHasStrengthReductions(original_stage.expr);
+    if (reduce) {
+        reduced_storage = original_stage;
+        applyStrengthReductions(reduced_storage.expr);
+    }
+    const PhysicalExecutionStage& stage = reduce ? reduced_storage : original_stage;
     if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
         throw runtime_error("emitPaddedRaggedPointwise called on non-fused stage.");
     }
@@ -8134,9 +9042,27 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
     const std::optional<DataType> maybe_vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
     const std::optional<DataType> maybe_vectorized_compute_dtype =
         maybe_vectorized_dtype.has_value() ? getVectorizedStageComputeDTypeImpl(stage.expr, maybe_vectorized_dtype.value()) : std::nullopt;
-    const bool emit_fp8_vectorized_pair_path = emit_packed_low_precision_path && isFp8DType(output_dtype) &&
-                                               maybe_vectorized_dtype.has_value() && maybe_vectorized_dtype.value() == output_dtype &&
-                                               maybe_vectorized_compute_dtype.has_value();
+    const bool emit_fp8_vector_compute_pair_path = emit_packed_low_precision_path && isFp8DType(output_dtype) &&
+                                                   maybe_vectorized_dtype.has_value() && maybe_vectorized_dtype.value() == output_dtype &&
+                                                   maybe_vectorized_compute_dtype.has_value();
+    // FP8 storage computing in FP32 (the default policy): same paired loads/stores,
+    // float2 arithmetic.
+    const bool emit_fp8_float2_pair_path = [&] {
+        if (!emit_packed_low_precision_path || !isFp8DType(output_dtype) || emit_fp8_vector_compute_pair_path ||
+            !expressionUsesOnlyFloat2PathOps(stage.expr)) {
+            return false;
+        }
+        for (const ExprNode& node : stage.expr.nodes) {
+            if (node.op == ExprOp::INPUT) {
+                if (requireNodeInputTensorDType(node) != output_dtype) return false;
+            } else if (node.op != ExprOp::SCALAR_FP && node.op != ExprOp::FILL && node.op != ExprOp::RUNTIME_SCALAR &&
+                       node.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
+                if (requireNodeComputeDType(node) != DataType::FP32 || requireNodeOutputDType(node) != output_dtype) return false;
+            }
+        }
+        return true;
+    }();
+    const bool emit_fp8_vectorized_pair_path = emit_fp8_vector_compute_pair_path || emit_fp8_float2_pair_path;
     const bool use_uint32_index_math = groupSupportsUInt32IndexMath(group);
     const std::string index_type = emittedIndexType(use_uint32_index_math);
 
@@ -8250,7 +9176,9 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
             for (size_t used_i : native_vector_indices) {
                 const uint32_t input_slot = group.used_input_slots[used_i];
                 ss << "    inputPackedLoadOk = inputPackedLoadOk && ((in" << input_slot
-                   << "_offset_base % READ_PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math) << ");\n";
+                   << "_offset_base % READ_PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math)
+                   << ") && ((reinterpret_cast<unsigned long long>(in" << input_slot << " + in" << input_slot
+                   << "_offset_base) % sizeof(InputPack)) == 0ULL);\n";
             }
             ss << "    if (inputPackedLoadOk) {\n";
             for (size_t used_i : native_vector_indices) {
@@ -8263,6 +9191,16 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
                 }
             }
             if (isFp8DType(input_dtype)) {
+                // Native-vector FP8 chunks decode as two fp8x2 pairs; constant lane indices only.
+                std::vector<uint32_t> native_fp8_slots;
+                for (size_t used_i : native_vector_indices) {
+                    native_fp8_slots.push_back(group.used_input_slots[used_i]);
+                }
+                const Fp8LanePairing fp8_pairing =
+                    planFp8LanePairing(stage.expr, stage.outputs, {0u}, native_fp8_slots, read_pack_scalars);
+                emitFp8PairedInputDecode(
+                    ss, "      ", fp8_pairing, input_dtypes, [](uint32_t slot) { return "in" + std::to_string(slot) + "_chunk"; },
+                    read_pack_scalars);
                 for (uint32_t lane = 0; lane < read_pack_scalars; ++lane) {
                     const std::string suffix = "_dbl" + std::to_string(lane);
                     const std::string lane_literal = emitUnsignedLiteral(lane, use_uint32_index_math);
@@ -8276,19 +9214,23 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
                         if (kind_it == input_load_kind_by_slot.end()) {
                             throw std::runtime_error("Missing input load kind for decoupled transposed broadcast input.");
                         }
+                        if (fp8_pairing.decoded_slots.contains(input_slot)) {
+                            return fp8DecodedLaneExpr(fp8_pairing, input_slot, lane);
+                        }
                         if (kind_it->second == SpecializedInputLoadKind::NativeVector) {
                             return emitFp8PackLaneMemberExpr("in" + std::to_string(input_slot) + "_chunk", lane, input_dtype);
                         }
                         return "in" + std::to_string(input_slot) + "[in" + std::to_string(input_slot) + "_offset]";
                     };
-                    for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
-                        if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                    for (uint32_t node_idx = 0; node_idx < fp8_pairing.lane_expr.nodes.size(); ++node_idx) {
+                        if (!shouldEmitScalarNodeDefinition(fp8_pairing.lane_expr, node_idx)) {
                             continue;
                         }
-                        emitScalarNodeSuffixed(ss, stage.expr, node_idx, "logical_idx", suffix, "        ", "", 0, input_value);
+                        emitScalarNodeSuffixed(ss, fp8_pairing.lane_expr, node_idx, "logical_idx", suffix, "        ", "", 0, input_value);
                     }
                     ss << "        tile[localRow][LOCAL_COL] = thor_pack_transpose_word<" << output_type << ">("
-                       << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ");\n";
+                       << emitResolvedScalarValueExprSuffixed(fp8_pairing.lane_expr, output.local_node_idx, output_dtype, suffix)
+                       << ");\n";
                     ss << "      }\n";
                 }
             } else {
@@ -8303,7 +9245,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
                         throw std::runtime_error("Missing input load kind for decoupled transposed broadcast input.");
                     }
                     if (kind_it->second == SpecializedInputLoadKind::NativeVector) {
-                        return "in" + std::to_string(input_slot) + "_chunk_data[LANE]";
+                        return emitChunkLaneSelectExpr("in" + std::to_string(input_slot) + "_chunk_data", "LANE", read_pack_scalars);
                     }
                     return "in" + std::to_string(input_slot) + "[in" + std::to_string(input_slot) + "_offset]";
                 };
@@ -8368,7 +9310,8 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
             ss << "    const " << index_type << " out_base_idx = matrixOffset + outputRow * numRows + outputColBase;\n";
             ss << "    const bool outputPackedStoreOk = (outputRow < numCols) && (outputColBase + WRITE_PACK_SCALARS <= numRows) &&\n";
             ss << "                                     ((out_base_idx % WRITE_PACK_SCALARS) == "
-               << emitUnsignedLiteral(0, use_uint32_index_math) << ");\n";
+               << emitUnsignedLiteral(0, use_uint32_index_math)
+               << ") && ((reinterpret_cast<unsigned long long>(out0 + out_base_idx) % sizeof(OutputPack)) == 0ULL);\n";
             ss << "    if (outputPackedStoreOk) {\n";
             ss << "      OutputPack* out_ptr = reinterpret_cast<OutputPack*>(out0 + out_base_idx);\n";
             ss << "      *out_ptr = output_pack;\n";
@@ -8407,7 +9350,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         ss << "  const " << index_type << " colStart = static_cast<" << index_type << ">(blockIdx.x) * TILE_COL_SCALARS;\n";
         ss << "  const unsigned int packedCol = threadIdx.x;\n";
         ss << "  const " << index_type << " logicalColBase = colStart + static_cast<" << index_type << ">(packedCol) * PACK_SCALARS;\n";
-        if (emit_fp8_vectorized_pair_path) {
+        if (emit_fp8_vector_compute_pair_path) {
             for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
                 const ExprNode& node = stage.expr.nodes[node_idx];
                 if (node.op != ExprOp::SCALAR_FP && node.op != ExprOp::FILL) {
@@ -8426,6 +9369,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         ss << "    if (logicalRow < numRows) {\n";
         if (emit_fp8_vectorized_pair_path) {
             const uint32_t pairs_per_pack = pack_scalars / 2U;
+            const std::optional<uint32_t> passthrough_slot = passthroughInputSlotForOutput(stage.expr, output.local_node_idx);
             ss << "      Vec2* output_vec2 = reinterpret_cast<Vec2*>(&output_pack);\n";
             ss << "      bool pair_done[PACK_SCALARS / 2U] = {};\n";
             for (uint32_t pair = 0; pair < pairs_per_pack; ++pair) {
@@ -8437,7 +9381,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
                 ss << "        constexpr unsigned int PAIR_BASE_LANE = PAIR * 2U;\n";
                 ss << "        const " << index_type << " logicalColPairBase = logicalColBase + PAIR_BASE_LANE;\n";
                 ss << "        if (logicalColPairBase + 1U < numCols) {\n";
-                ss << "          const " << index_type << " logical_idx" << suffix0 << " = static_cast<" << index_type
+                ss << "          const " << index_type << " logical_idx" << suffix0 << " = matrixOffset + static_cast<" << index_type
                    << ">(logicalRow) * static_cast<" << index_type << ">(numCols) + static_cast<" << index_type
                    << ">(logicalColPairBase);\n";
                 for (uint32_t input_slot : group.used_input_slots) {
@@ -8461,37 +9405,82 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
                     }
                     ss << "\n";
                 }
-                const DataType vector_compute_dtype = maybe_vectorized_compute_dtype.value();
-                emitVector2NodeDefinitionsForSuffix(
-                    ss,
-                    stage.expr,
-                    vector_compute_dtype,
-                    transposeVector2StorageType(output_dtype),
-                    suffix,
-                    "          ",
-                    [&](uint32_t input_slot) {
-                        const auto kind_it = input_load_kind_by_slot.find(input_slot);
-                        if (kind_it == input_load_kind_by_slot.end()) {
-                            throw std::runtime_error("Missing input load kind for transposed vector broadcast input.");
-                        }
-                        if (kind_it->second == SpecializedInputLoadKind::NativeVector) {
-                            return emitVector2BroadcastNativeLoad(transposeVector2StorageType(output_dtype),
-                                                                  "in" + std::to_string(input_slot),
-                                                                  "in" + std::to_string(input_slot) + "_offset" + suffix0,
-                                                                  vector_compute_dtype);
-                        }
-                        const std::string var0 =
-                            "in" + std::to_string(input_slot) + "[in" + std::to_string(input_slot) + "_offset" + suffix0 + "]";
-                        const std::string var1 =
-                            "in" + std::to_string(input_slot) + "[in" + std::to_string(input_slot) + "_offset" + suffix1 + "]";
-                        return emitVector2BroadcastPackLoad(output_type, var0, var1, vector_compute_dtype);
-                    },
-                    [&](uint32_t scalar_node_idx) { return "c" + std::to_string(scalar_node_idx); },
-                    true);
-                ss << "          output_vec2[PAIR] = "
-                   << vector_storage_conversion(
-                          transposeVector2StorageType(output_dtype), refWithSuffix(output.local_node_idx, suffix), vector_compute_dtype)
-                   << ";\n";
+                const std::string vec2_type = transposeVector2StorageType(output_dtype);
+                if (passthrough_slot.has_value()) {
+                    const uint32_t input_slot = passthrough_slot.value();
+                    const auto kind_it = input_load_kind_by_slot.find(input_slot);
+                    if (kind_it == input_load_kind_by_slot.end()) {
+                        throw std::runtime_error("Missing input load kind for transposed broadcast passthrough input.");
+                    }
+                    const std::string base = "in" + std::to_string(input_slot);
+                    const std::string from_lanes =
+                        output_dtype == DataType::FP8_E4M3 ? "thor_fp8x2_e4m3_from_lanes" : "thor_fp8x2_e5m2_from_lanes";
+                    ss << "          output_vec2[PAIR] = "
+                       << (kind_it->second == SpecializedInputLoadKind::NativeVector
+                               ? fp8TransposePairRawExpr(output_dtype, vec2_type, base, base + "_offset" + suffix0)
+                               : from_lanes + "(" + base + "[" + base + "_offset" + suffix0 + "], " + base + "[" + base + "_offset" +
+                                     suffix1 + "])")
+                       << ";\n";
+                } else if (emit_fp8_float2_pair_path) {
+                    emitFloat2NodeDefinitionsForSuffix(
+                        ss,
+                        stage.expr,
+                        vec2_type,
+                        suffix,
+                        "          ",
+                        [&](uint32_t input_slot) {
+                            const auto kind_it = input_load_kind_by_slot.find(input_slot);
+                            if (kind_it == input_load_kind_by_slot.end()) {
+                                throw std::runtime_error("Missing input load kind for transposed float2 broadcast input.");
+                            }
+                            const std::string base = "in" + std::to_string(input_slot);
+                            if (kind_it->second == SpecializedInputLoadKind::NativeVector) {
+                                // Element-aligned storage aliases may not be pair aligned.
+                                const std::string offset0 = base + "_offset" + suffix0;
+                                return "static_cast<float2>(" + fp8TransposePairRawExpr(output_dtype, vec2_type, base, offset0) + ")";
+                            }
+                            return "make_float2(float(" + base + "[" + base + "_offset" + suffix0 + "]), float(" + base + "[" + base +
+                                   "_offset" + suffix1 + "]))";
+                        },
+                        {},
+                        /*input_slot_value_is_compute=*/true);
+                    ss << "          output_vec2[PAIR] = "
+                       << float2_storage_conversion(vec2_type, refWithSuffix(output.local_node_idx, suffix)) << ";\n";
+                } else {
+                    const DataType vector_compute_dtype = maybe_vectorized_compute_dtype.value();
+                    emitVector2NodeDefinitionsForSuffix(
+                        ss,
+                        stage.expr,
+                        vector_compute_dtype,
+                        transposeVector2StorageType(output_dtype),
+                        suffix,
+                        "          ",
+                        [&](uint32_t input_slot) {
+                            const auto kind_it = input_load_kind_by_slot.find(input_slot);
+                            if (kind_it == input_load_kind_by_slot.end()) {
+                                throw std::runtime_error("Missing input load kind for transposed vector broadcast input.");
+                            }
+                            if (kind_it->second == SpecializedInputLoadKind::NativeVector) {
+                                // Element-aligned storage aliases may not be pair aligned.
+                                const std::string base = "in" + std::to_string(input_slot);
+                                const std::string offset0 = base + "_offset" + suffix0;
+                                const std::string pair_type = transposeVector2StorageType(output_dtype);
+                                return vector_compute_conversion(
+                                    pair_type, fp8TransposePairRawExpr(output_dtype, pair_type, base, offset0), vector_compute_dtype);
+                            }
+                            const std::string var0 =
+                                "in" + std::to_string(input_slot) + "[in" + std::to_string(input_slot) + "_offset" + suffix0 + "]";
+                            const std::string var1 =
+                                "in" + std::to_string(input_slot) + "[in" + std::to_string(input_slot) + "_offset" + suffix1 + "]";
+                            return emitVector2BroadcastPackLoad(output_type, var0, var1, vector_compute_dtype);
+                        },
+                        [&](uint32_t scalar_node_idx) { return "c" + std::to_string(scalar_node_idx); },
+                        true);
+                    ss << "          output_vec2[PAIR] = "
+                       << vector_storage_conversion(
+                              transposeVector2StorageType(output_dtype), refWithSuffix(output.local_node_idx, suffix), vector_compute_dtype)
+                       << ";\n";
+                }
                 ss << "          pair_done[PAIR] = true;\n";
                 ss << "        }\n";
                 ss << "      }\n";
@@ -8545,20 +9534,13 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         ss << "    const " << index_type << " outputRow = colStart + localOutRow;\n";
         ss << "    const " << index_type << " outputColBase = rowStart + static_cast<" << index_type
            << ">(localOutPackCol) * PACK_SCALARS;\n";
-        ss << "    Pack output_pack{};\n";
-        ss << "    " << output_type << "* output_scalar = reinterpret_cast<" << output_type << "*>(&output_pack);\n";
-        ss << "    for (unsigned int lane = 0; lane < PACK_SCALARS; ++lane) {\n";
-        ss << "      PackRaw input_raw{};\n";
-        ss << "      input_raw.raw = tile[localOutPackCol * PACK_SCALARS + lane][inputPackCol];\n";
-        ss << "      const " << output_type << "* input_scalar = reinterpret_cast<const " << output_type << "*>(&input_raw.pack);\n";
-        ss << "      output_scalar[lane] = input_scalar[inputColLane];\n";
-        ss << "    }\n";
+        emitPackedTransposeTileLaneGather(ss, output_type);
         ss << "    const " << index_type << " out_base_idx = matrixOffset + static_cast<" << index_type << ">(outputRow) * static_cast<"
            << index_type << ">(numRows) +\n";
         ss << "                                     static_cast<" << index_type << ">(outputColBase);\n";
         ss << "    const bool outputPackedStoreOk = (outputRow < numCols) && (outputColBase + PACK_SCALARS <= numRows) &&\n";
         ss << "                                     ((out_base_idx % PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math)
-           << ");\n";
+           << ") && ((reinterpret_cast<unsigned long long>(out0 + out_base_idx) % sizeof(Pack)) == 0ULL);\n";
         ss << "    if (outputPackedStoreOk) {\n";
         ss << "      Pack* out_ptr = reinterpret_cast<Pack*>(out0 + out_base_idx);\n";
         ss << "      *out_ptr = output_pack;\n";
@@ -8763,7 +9745,9 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
             ss << "        const bool inputPackedLoadOk = (logical_col_base + static_cast<" << index_type
                << ">(LOGICAL_TRANSPOSE_PACK_SCALARS) <= numCols) &&\n";
             ss << "                                       ((source_idx_base % static_cast<" << index_type
-               << ">(LOGICAL_TRANSPOSE_PACK_SCALARS)) == static_cast<" << index_type << ">(0));\n";
+               << ">(LOGICAL_TRANSPOSE_PACK_SCALARS)) == static_cast<" << index_type << ">(0)) &&\n";
+            ss << "                                       ((reinterpret_cast<unsigned long long>(in" << dense_input_load->input_slot
+               << " + source_idx_base) % " << raw_load_bytes << "ULL) == 0ULL);\n";
             ss << "        if (inputPackedLoadOk) {\n";
             ss << "          // Direct dense frontier: one owner thread performs one packed global load, then expands\n";
             ss << "          // it into the uint32_t shared-memory bank word used by the logical transpose tile.\n";
@@ -9087,31 +10071,19 @@ std::optional<uint32_t> CudaSourceEmitter::fusedGateRequiredSpecializedBroadcast
         return std::nullopt;
     }
 
+    // Dense and device-ragged specialized broadcast share one packet family:
+    // homogeneous BF16/FP16 storage owns one 16-byte packet (eight scalars) per
+    // tensor per thread, and any FP32 storage participant uses four scalars so
+    // each FP32 tensor still moves one float4 per thread.
     uint32_t required_elements_per_thread = 0u;
-    if (is_ragged) {
-        if (fusedGateAllSameDType(value_dtypes, DataType::BF16) ||
-            fusedGateAllSameDType(value_dtypes, DataType::FP16)) {
-            required_elements_per_thread = 8u;
-        } else if (std::any_of(value_dtypes.begin(), value_dtypes.end(), [](DataType dtype) {
-                       return dtype == DataType::FP32;
-                   })) {
-            required_elements_per_thread = 4u;
-        } else {
-            // As with flat FUSED-GATE, mixed BF16/FP16 without FP32 remains
-            // intentionally outside the benchmark-backed invariant.
-            return std::nullopt;
-        }
+    if (fusedGateAllSameDType(value_dtypes, DataType::BF16) || fusedGateAllSameDType(value_dtypes, DataType::FP16)) {
+        required_elements_per_thread = 8u;
+    } else if (std::any_of(value_dtypes.begin(), value_dtypes.end(), [](DataType dtype) { return dtype == DataType::FP32; })) {
+        required_elements_per_thread = 4u;
     } else {
-        // Dense BF16/FP16 specialized broadcast was benchmarked and ordained at
-        // the existing vector2 ownership. Dense FP32 and mixed dense broadcast
-        // are intentionally scalar today but already saturate their useful
-        // bandwidth regime, so FUSED-GATE does not manufacture a wider mandate.
-        if (fusedGateAllSameDType(value_dtypes, DataType::BF16) ||
-            fusedGateAllSameDType(value_dtypes, DataType::FP16)) {
-            required_elements_per_thread = 2u;
-        } else {
-            return std::nullopt;
-        }
+        // As with flat FUSED-GATE, mixed BF16/FP16 without FP32 remains
+        // intentionally outside the benchmark-backed invariant.
+        return std::nullopt;
     }
 
     for (const SpecializedBroadcastGroup& group : groups) {
@@ -9144,26 +10116,245 @@ std::optional<uint32_t> CudaSourceEmitter::fusedGateRequiredSpecializedBroadcast
     return required_elements_per_thread;
 }
 
+// The wide-scalar packet width that dispatch actually uses. When only a two-lane
+// packet fits and the stage already computes in packed BF16/FP16 (explicit
+// request), the vector2 broadcast emitter owns the same two lanes with paired
+// arithmetic, so it is preferred.
+static uint32_t dispatchedWideScalarSpecializedBroadcastElementsPerThread(const CompiledExecutionStage& stage,
+                                                                          const std::vector<SpecializedBroadcastGroup>& groups) {
+    const uint32_t packet_scalars = wideScalarSpecializedBroadcastElementsPerThread(stage, groups);
+    if (packet_scalars <= 2u && CudaSourceEmitter::getVectorizedStageStorageDType(stage).has_value()) {
+        return 1u;
+    }
+    return packet_scalars;
+}
+
+// ---------------------------------------------------------------------------
+// RoPE, one thread per rotation pair.
+//
+// The per-element RoPE path makes every output element compute its own frequency (powf) and
+// sincos and evaluate its input subgraph twice (own value and partner). Both lanes of a pair share
+// the pair index and the position, so a thread that owns the pair computes the angle once, reads
+// each input element once, and writes both lanes. The per-lane formulas are the per-element ones,
+// so results are unchanged.
+//
+// Eligible: one broadcast group, no ragged extent, exactly one ROPE node whose result spans the
+// group domain (head dim innermost, stride-1 output axis), no other index-aware ops, and no dynamic
+// effective-sequence-length input. Everything else keeps the per-element path.
+static std::optional<uint32_t> ropePairPerThreadNode(const CompiledExecutionStage& stage,
+                                                    const std::vector<SpecializedBroadcastGroup>& groups) {
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel || groups.size() != 1 ||
+        stageHasTransposedMaterializedOutput(stage.outputs) || findRaggedValuewiseExtentSpec(stage.expr).has_value()) {
+        return std::nullopt;
+    }
+    std::optional<uint32_t> rope_node;
+    for (uint32_t i = 0; i < stage.expr.nodes.size(); ++i) {
+        const ExprOp op = stage.expr.nodes[i].op;
+        if (op == ExprOp::STRIDED_VIEW || op == ExprOp::STRIDED_VIEW_BACKWARD || op == ExprOp::TRANSPOSE ||
+            op == ExprOp::TAKE_ALONG_AXIS) {
+            return std::nullopt;
+        }
+        if (op == ExprOp::ROPE) {
+            if (rope_node.has_value()) {
+                return std::nullopt;
+            }
+            rope_node = i;
+        }
+    }
+    if (!rope_node.has_value()) {
+        return std::nullopt;
+    }
+    const ExprNode& n = stage.expr.nodes[rope_node.value()];
+    const SpecializedBroadcastGroup& group = groups.front();
+    const size_t rank = group.output_dims.size();
+    if (n.rope_effective_sequence_length_node != UINT32_MAX || rank < 2 || n.rope_head_dim_axis + 1 != rank ||
+        n.rope_sequence_axis >= rank || group.node_dims.size() != stage.expr.nodes.size() ||
+        group.node_dims[rope_node.value()] != group.output_dims || group.active_axes.size() != rank ||
+        group.active_axes.back().output_stride != 1ULL || group.active_axes.back().dim != group.output_dims.back()) {
+        return std::nullopt;
+    }
+    const uint64_t head_dim = group.output_dims.back();
+    const uint64_t rotary_dim = n.rope_rotary_dim == 0 ? head_dim : n.rope_rotary_dim;
+    if (head_dim < 2 || head_dim % 2 != 0 || rotary_dim < 2 || rotary_dim % 2 != 0 || rotary_dim > head_dim) {
+        return std::nullopt;
+    }
+    return rope_node;
+}
+
+static std::string emitRopePairSpecializedBroadcast(const CompiledExecutionStage& stage,
+                                                    const SpecializedBroadcastGroup& group,
+                                                    uint32_t rope_idx,
+                                                    const std::string& kernel_name) {
+    const PhysicalExpression& expr = stage.expr;
+    const ExprNode& rope = expr.nodes.at(rope_idx);
+    const std::vector<DataType> input_dtypes = collectInputSlotDTypes(expr);
+    const std::vector<DataType> output_dtypes = collectOutputDTypes(stage);
+    const bool u32 = groupSupportsUInt32IndexMath(group);
+    const std::string index_type = emittedIndexType(u32);
+    const size_t rank = group.output_dims.size();
+    const uint64_t head_dim = group.output_dims.back();
+    const uint64_t rotary_dim = rope.rope_rotary_dim == 0 ? head_dim : rope.rope_rotary_dim;
+    const uint64_t pairs_per_row = head_dim / 2;
+    const auto lit = [&](uint64_t v) { return emitUnsignedLiteral(v, u32); };
+
+    std::ostringstream ss;
+    emitRequiredHeaders(expr, ss);
+    ss << "extern \"C\" __global__\n";
+    ss << "void " << kernel_name << "(";
+    bool first_arg = true;
+    for (uint32_t i = 0; i < input_dtypes.size(); ++i) {
+        ss << (first_arg ? "" : ", ");
+        first_arg = false;
+        if (expr.inputs[i].kind == NamedInput::Kind::RuntimeScalarFp32) {
+            ss << scalarStorageType(input_dtypes[i]) << " in" << i;
+        } else {
+            ss << "const " << scalarStorageType(input_dtypes[i]) << "* in" << i;
+        }
+    }
+    for (uint32_t i = 0; i < output_dtypes.size(); ++i) {
+        ss << (first_arg ? "" : ", ");
+        first_arg = false;
+        ss << scalarStorageType(output_dtypes[i]) << "* out" << i;
+    }
+    ss << ") {\n";
+    const std::string indent = "    ";
+    ss << "  const " << index_type << " pair_idx = " << emitFlatThreadIndexExpr(u32) << ";\n";
+    ss << "  if (pair_idx < " << lit(group.numel / 2) << ") {\n";
+    for (size_t axis = 0; axis < rank; ++axis) {
+        ss << indent << "const " << index_type << " out_dim_" << axis << " = " << lit(group.output_dims[axis]) << ";\n";
+    }
+    const std::string row_expr = isPowerOfTwo(pairs_per_row)
+                                     ? "(pair_idx >> " + std::to_string(log2Exact(pairs_per_row)) + ")"
+                                     : "(pair_idx / " + lit(pairs_per_row) + ")";
+    ss << indent << "const " << index_type << " rope_row = " << row_expr << ";\n";
+    ss << indent << "const " << index_type << " rope_slot = pair_idx - rope_row * " << lit(pairs_per_row) << ";\n";
+    ss << indent << "const unsigned long long rope_rotary_dim = " << rotary_dim << "ULL;\n";
+    ss << indent << "const unsigned long long rope_pair_index = static_cast<unsigned long long>(rope_slot);\n";
+    // Lane 0 is the pair's first lane (rotate-half: d, interleaved: 2p); lane 1 its partner.
+    const std::string rotated_d0 = rope.rope_interleaved ? "(rope_slot << 1)" : "rope_slot";
+    const std::string rotated_d1 =
+        rope.rope_interleaved ? "((rope_slot << 1) + " + lit(1) + ")" : "(rope_slot + " + lit(rotary_dim / 2) + ")";
+    if (rotary_dim == head_dim) {
+        ss << indent << "const bool rope_rotated = true;\n";
+        ss << indent << "const " << index_type << " rope_d0 = " << rotated_d0 << ";\n";
+        ss << indent << "const " << index_type << " rope_d1 = " << rotated_d1 << ";\n";
+    } else {
+        // Partial rotary: the trailing head_dim - rotary_dim elements pass through, two per slot.
+        ss << indent << "const bool rope_rotated = rope_slot < " << lit(rotary_dim / 2) << ";\n";
+        ss << indent << "const " << index_type << " rope_d0 = rope_rotated ? " << rotated_d0 << " : (" << lit(rotary_dim)
+           << " + ((rope_slot - " << lit(rotary_dim / 2) << ") << 1));\n";
+        ss << indent << "const " << index_type << " rope_d1 = rope_rotated ? " << rotated_d1 << " : (rope_d0 + " << lit(1) << ");\n";
+    }
+    ss << indent << "const " << index_type << " e0 = rope_row * " << lit(head_dim) << " + rope_d0;\n";
+    ss << indent << "const " << index_type << " e1 = rope_row * " << lit(head_dim) << " + rope_d1;\n";
+
+    // Offsets: full decode for lane 0; lane 1 differs only along the innermost axis.
+    std::vector<size_t> all_used(group.used_input_slots.size());
+    std::iota(all_used.begin(), all_used.end(), 0);
+    for (uint32_t slot : group.used_input_slots) {
+        ss << indent << index_type << " in" << slot << "_offset_e0 = " << lit(0) << ";\n";
+    }
+    emitSpecializedBroadcastOffsetMath(ss, group, all_used, "e0", "_e0", indent, u32);
+    for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
+        const uint32_t slot = group.used_input_slots[used_i];
+        const uint64_t inner = specializedBroadcastInnermostInputStride(group, used_i);
+        ss << indent << "const " << index_type << " in" << slot << "_offset_e1 = in" << slot << "_offset_e0";
+        if (inner == 1ULL) {
+            ss << " + (rope_d1 - rope_d0)";
+        } else if (inner != 0ULL) {
+            ss << " + (rope_d1 - rope_d0) * " << lit(inner);
+        }
+        ss << ";\n";
+    }
+
+    // Nodes reachable only through RoPE position ids are evaluated by the angle emitter.
+    std::vector<CompiledStageOutput> group_outputs;
+    for (uint32_t out_idx : group.output_indices) group_outputs.push_back(stage.outputs.at(out_idx));
+    const std::unordered_set<uint32_t> skip = collectIndexAwareInputNodesToSkipForFlatOutput(expr, group_outputs);
+    const std::vector<uint32_t> required_nodes = orderedRequiredNodesForGroup(stage, group.output_indices);
+    const std::array<std::string, 2> lanes{"_e0", "_e1"};
+    for (uint32_t node_idx : required_nodes) {
+        if (skip.contains(node_idx) || !shouldEmitScalarNodeDefinition(expr, node_idx)) {
+            continue;
+        }
+        if (node_idx != rope_idx) {
+            for (size_t k = 0; k < 2; ++k) {
+                const std::string& suffix = lanes[k];
+                emitScalarNodeSuffixed(ss, expr, node_idx, "e" + std::to_string(k), suffix, indent, "", 0, [&](uint32_t slot) {
+                    return "in" + std::to_string(slot) + "[in" + std::to_string(slot) + "_offset" + suffix + "]";
+                });
+            }
+            continue;
+        }
+        const DataType emitted_dtype = emittedScalarNodeValueDType(rope);
+        const std::string output_type = scalarStorageType(emitted_dtype);
+        ss << indent << "const float rope_v0 = " << emitResolvedScalarValueExprSuffixed(expr, rope.lhs, DataType::FP32, "_e0") << ";\n";
+        ss << indent << "const float rope_v1 = " << emitResolvedScalarValueExprSuffixed(expr, rope.lhs, DataType::FP32, "_e1") << ";\n";
+        ss << indent << "float rope_out0 = rope_v0;\n";
+        ss << indent << "float rope_out1 = rope_v1;\n";
+        ss << indent << "if (rope_rotated) {\n";
+        // emitRopeSinCos writes its lines at indent + 4.
+        emitRopeSinCos(ss, expr, rope_idx, "c_e0_" + std::to_string(rope.rope_sequence_axis),
+                       "static_cast<float>(out_dim_" + std::to_string(rope.rope_sequence_axis) + ")", indent, &group);
+        // Same per-lane formulas as the per-element path (first lane: cur*c - peer*s; second: peer*s + cur*c).
+        ss << indent << "    rope_out0 = rope_v0 * rope_c - rope_v1 * rope_s;\n";
+        ss << indent << "    rope_out1 = rope_v0 * rope_s + rope_v1 * rope_c;\n";
+        ss << indent << "}\n";
+        ss << indent << "const " << output_type << " t" << rope_idx << "_e0 = " << castScalarExpr("rope_out0", DataType::FP32, emitted_dtype)
+           << ";\n";
+        ss << indent << "const " << output_type << " t" << rope_idx << "_e1 = " << castScalarExpr("rope_out1", DataType::FP32, emitted_dtype)
+           << ";\n";
+    }
+    for (uint32_t out_idx : group.output_indices) {
+        const CompiledStageOutput& output = stage.outputs[out_idx];
+        const DataType output_dtype = requireNodeOutputDType(expr.nodes[output.local_node_idx]);
+        for (size_t k = 0; k < 2; ++k) {
+            ss << indent << "out" << out_idx << "[e" << k << "] = "
+               << emitResolvedScalarValueExprSuffixed(expr, output.local_node_idx, output_dtype, lanes[k]) << ";\n";
+        }
+    }
+    ss << "  }\n";
+    ss << "}\n";
+    return ss.str();
+}
+
 uint32_t CudaSourceEmitter::specializedBroadcastElementsPerThread(
     const CompiledExecutionStage& stage,
     const std::vector<SpecializedBroadcastGroup>& groups) {
-    if (getRaggedSpecializedBroadcastVectorizedStageStorageDType(stage, groups).has_value()) {
+    if (ropePairPerThreadNode(stage, groups).has_value()) {
+        return 2u;  // one thread per RoPE pair; see emitRopePairSpecializedBroadcast
+    }
+    if (getWideSpecializedBroadcastVectorizedStageStorageDType(stage, groups).has_value()) {
         return 8u;
     }
-    const uint32_t ragged_wide_scalar_elements_per_thread =
-        raggedWideScalarSpecializedBroadcastElementsPerThread(stage, groups);
-    if (ragged_wide_scalar_elements_per_thread > 1u) {
-        return ragged_wide_scalar_elements_per_thread;
+    const uint32_t wide_scalar_elements_per_thread = dispatchedWideScalarSpecializedBroadcastElementsPerThread(stage, groups);
+    if (wide_scalar_elements_per_thread > 1u) {
+        return wide_scalar_elements_per_thread;
     }
-    // Preserve the pre-existing launch width for every non-ragged specialized
-    // broadcast path. Ragged low-precision vector8 and FP32/mixed vector4 paths
-    // opt in above.
+    // Shapes the 16-byte packet family cannot own (row width not a packet
+    // multiple, strided broadcast operands, FP8 storage) keep the vector2 /
+    // scalar broadcast emitters.
     return getVectorizedStageStorageDType(stage).has_value() ? 2u : 1u;
 }
+
+static std::string emitSpecializedBroadcastImpl(const CompiledExecutionStage& stage,
+                                                const std::vector<SpecializedBroadcastGroup>& groups,
+                                                const std::string& kernel_name);
 
 std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionStage& stage,
                                                         const std::vector<SpecializedBroadcastGroup>& groups,
                                                         const std::string& kernel_name) {
+    if (stage.kind == CompiledExecutionStage::Kind::FusedKernel && expressionHasStrengthReductions(stage.expr)) {
+        CompiledExecutionStage reduced = stage;
+        applyStrengthReductions(reduced.expr);
+        return emitSpecializedBroadcastImpl(reduced, groups, kernel_name);
+    }
+    return emitSpecializedBroadcastImpl(stage, groups, kernel_name);
+}
+
+static std::string emitSpecializedBroadcastImpl(const CompiledExecutionStage& stage,
+                                                const std::vector<SpecializedBroadcastGroup>& groups,
+                                                const std::string& kernel_name) {
     if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
         throw std::runtime_error("emitSpecializedBroadcast called on non-fused stage.");
     }
@@ -9203,26 +10394,28 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
         return emitIndexMappedSpecializedBroadcast(stage, groups, kernel_name);
     }
 
+    if (const std::optional<uint32_t> rope_node = ropePairPerThreadNode(stage, groups); rope_node.has_value()) {
+        return emitRopePairSpecializedBroadcast(stage, groups.front(), rope_node.value(), kernel_name);
+    }
+
     const std::optional<DataType> ragged_vectorized_dtype =
-        getRaggedSpecializedBroadcastVectorizedStageStorageDType(stage, groups);
+        getWideSpecializedBroadcastVectorizedStageStorageDType(stage, groups);
     if (ragged_vectorized_dtype.has_value()) {
         const std::optional<DataType> vector_compute_dtype =
             getVectorizedStageComputeDTypeImpl(stage.expr, ragged_vectorized_dtype.value());
         if (!vector_compute_dtype.has_value()) {
             throw runtime_error("Wide ragged specialized-broadcast stage lost its compute dtype after eligibility selection.");
         }
-        return emitRaggedWideSpecializedBroadcast(
+        return emitWideSpecializedBroadcast(
             stage, groups, ragged_vectorized_dtype.value(), vector_compute_dtype.value(), kernel_name);
     }
 
-    const uint32_t ragged_wide_scalar_elements_per_thread =
-        raggedWideScalarSpecializedBroadcastElementsPerThread(stage, groups);
-    if (ragged_wide_scalar_elements_per_thread > 1u) {
-        return emitRaggedWideScalarSpecializedBroadcast(
-            stage, groups, kernel_name, ragged_wide_scalar_elements_per_thread);
+    const uint32_t wide_scalar_elements_per_thread = dispatchedWideScalarSpecializedBroadcastElementsPerThread(stage, groups);
+    if (wide_scalar_elements_per_thread > 1u) {
+        return emitWideScalarSpecializedBroadcast(stage, groups, kernel_name, wide_scalar_elements_per_thread);
     }
 
-    std::optional<DataType> vectorized_dtype = getVectorizedStageStorageDType(stage);
+    std::optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
     if (vectorized_dtype.has_value()) {
         const std::optional<DataType> vector_compute_dtype = getVectorizedStageComputeDTypeImpl(stage.expr, vectorized_dtype.value());
         if (!vector_compute_dtype.has_value()) {

@@ -103,10 +103,6 @@ def _physical_tensor(device_type: DeviceType, shape: tuple[int, ...], dtype: tho
     )
 
 
-def _gpu_tensor(shape: tuple[int, ...], dtype: thor.DataType) -> PhysicalTensor:
-    return _physical_tensor(DeviceType.gpu, shape, dtype)
-
-
 def _resolve_input_alias(name: str, input_aliases: dict[str, str]) -> str:
     seen: set[str] = set()
     current = name
@@ -457,135 +453,6 @@ def _build_sdpa_with_rope_case(
     return build
 
 
-def _build_packed_qkv_layer_case(
-    *,
-    batch: int,
-    sequence: int,
-    input_features: int,
-    output_features: int,
-    query_heads: int,
-    kv_heads: int,
-    qk_dim: int,
-    v_dim: int,
-    has_bias: bool,
-    mask_kind: AttentionMaskKind = AttentionMaskKind.none,
-    use_rope: bool = False,
-    rope_rotary_dim: int = 0,
-    rope_interleaved: bool = False,
-    rope_scaling_kind: RotaryScalingKind = RotaryScalingKind.none,
-    rope_scaling_factor: float = 1.0,
-    rope_original_max_position_embeddings: int = 0,
-    rope_in_place: bool = False,
-):
-
-    def build(dtype: thor.DataType):
-        feature_input = ex.input("feature_input")
-        qkv_weights = ex.input("qkv_weights")
-        output_weights = ex.input("output_weights")
-
-        q_width = query_heads * qk_dim
-        k_width = kv_heads * qk_dim
-        v_width = kv_heads * v_dim
-        qkv_width = q_width + k_width + v_width
-        merged_width = query_heads * v_dim
-
-        flat = feature_input.reshape([batch * sequence, input_features])
-        qkv = ex.matmul(flat, qkv_weights, compute_dtype=thor.DataType.fp32, output_dtype=dtype)
-        if has_bias:
-            qkv = qkv + ex.input("qkv_bias")
-
-        batch_stride = sequence * qkv_width
-        q = qkv.strided_view(
-            [batch, sequence, query_heads, qk_dim],
-            [batch_stride, qkv_width, qk_dim, 1],
-            0,
-        ).with_output_dtype(dtype)
-        k = qkv.strided_view(
-            [batch, sequence, kv_heads, qk_dim],
-            [batch_stride, qkv_width, qk_dim, 1],
-            q_width,
-        ).with_output_dtype(dtype)
-        v = qkv.strided_view(
-            [batch, sequence, kv_heads, v_dim],
-            [batch_stride, qkv_width, v_dim, 1],
-            q_width + k_width,
-        ).with_output_dtype(dtype)
-
-        if use_rope:
-            rope_kwargs = {
-                "sequence_axis": 1,
-                "head_dim_axis": 3,
-                "rotary_dim": rope_rotary_dim,
-                "interleaved": rope_interleaved,
-                "scaling_kind": rope_scaling_kind,
-                "scaling_factor": rope_scaling_factor,
-                "original_max_position_embeddings": rope_original_max_position_embeddings,
-                "allow_in_place_materialization": rope_in_place,
-                "output_dtype": dtype,
-                "compute_dtype": thor.DataType.fp32,
-            }
-            q = ex.rope(q, **rope_kwargs)
-            k = ex.rope(k, **rope_kwargs)
-
-        attn = ex.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            q_layout=AttentionTensorLayout.bshd,
-            k_layout=AttentionTensorLayout.bshd,
-            v_layout=AttentionTensorLayout.bshd,
-            o_layout=AttentionTensorLayout.bshd,
-            mask_kind=mask_kind,
-            attention_scale=1.0 / math.sqrt(float(qk_dim)),
-            output_dtype=dtype,
-            compute_dtype=thor.DataType.fp32,
-        ).with_output_dtype(dtype)
-
-        merged = attn.reshape([batch * sequence, merged_width])
-        out = ex.matmul(merged, output_weights, compute_dtype=thor.DataType.fp32, output_dtype=dtype)
-        if has_bias:
-            out = out + ex.input("output_bias")
-        out = out.reshape([batch, sequence, output_features]).with_output_dtype(dtype)
-
-        input_shapes = {
-            "feature_input": (batch, sequence, input_features),
-            "qkv_weights": (input_features, qkv_width),
-            "output_weights": (merged_width, output_features),
-        }
-        if has_bias:
-            input_shapes["qkv_bias"] = (qkv_width,)
-            input_shapes["output_bias"] = (output_features,)
-
-        output_shape = (batch, sequence, output_features)
-        projection_flops = 2 * batch * sequence * input_features * qkv_width
-        output_projection_flops = 2 * batch * sequence * merged_width * output_features
-        flops = projection_flops + output_projection_flops + _attention_flops(
-            batch=batch,
-            query_len=sequence,
-            kv_len=sequence,
-            query_heads=query_heads,
-            qk_dim=qk_dim,
-            v_dim=v_dim,
-        )
-        metadata = {
-            "source": "expression",
-            "qkv_projection_mode": "packed",
-            "has_bias": has_bias,
-            "use_rope": use_rope,
-            "rope_in_place": rope_in_place,
-        }
-        if use_rope:
-            metadata.update({
-                "rope_rotary_dim": rope_rotary_dim if rope_rotary_dim != 0 else qk_dim,
-                "rope_interleaved": rope_interleaved,
-                "rope_scaling_kind": _rotary_scaling_kind_name(rope_scaling_kind),
-                "rope_in_place": rope_in_place,
-            })
-        return ex.compile(out, device_num=GPU_NUM), input_shapes, output_shape, flops, metadata
-
-    return build
-
-
 def _build_split_qkv_layer_case(
     *,
     batch: int,
@@ -793,9 +660,7 @@ def _build_public_attention_layer_case(
             "key_input": (batch, sequence, input_features),
             "value_input": (batch, sequence, input_features),
         }
-        # Public Attention always owns independent Q/K/V projections now. Packed QKV
-        # remains useful as an expression-level benchmark, but is no longer a public
-        # Attention implementation mode or API contract.
+        # Attention always uses independent Q/K/V projections; packed QKV is not supported.
         projection_mode = "split"
         input_shapes["query_weights"] = (input_features, q_width)
         input_shapes["key_weights"] = (input_features, k_width)
@@ -842,80 +707,6 @@ def _build_public_attention_layer_case(
                 "rope_in_place": rope_in_place,
             })
         return layer._debug_expression(), input_shapes, output_shape, flops, metadata
-
-    return build
-
-
-def _build_packed_qkv_attention_backward_case(
-    *,
-    batch: int,
-    sequence: int,
-    query_heads: int,
-    kv_heads: int,
-    qk_dim: int,
-    v_dim: int,
-    mask_kind: AttentionMaskKind = AttentionMaskKind.none,
-):
-
-    def build(dtype: thor.DataType):
-        q_width = query_heads * qk_dim
-        k_width = kv_heads * qk_dim
-        v_width = kv_heads * v_dim
-        qkv_width = q_width + k_width + v_width
-
-        qkv = ex.input("qkv")
-        batch_stride = sequence * qkv_width
-        q = qkv.strided_view(
-            [batch, sequence, query_heads, qk_dim],
-            [batch_stride, qkv_width, qk_dim, 1],
-            0,
-        ).with_output_dtype(dtype)
-        k = qkv.strided_view(
-            [batch, sequence, kv_heads, qk_dim],
-            [batch_stride, qkv_width, qk_dim, 1],
-            q_width,
-        ).with_output_dtype(dtype)
-        v = qkv.strided_view(
-            [batch, sequence, kv_heads, v_dim],
-            [batch_stride, qkv_width, v_dim, 1],
-            q_width + k_width,
-        ).with_output_dtype(dtype)
-
-        out = ex.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            q_layout=AttentionTensorLayout.bshd,
-            k_layout=AttentionTensorLayout.bshd,
-            v_layout=AttentionTensorLayout.bshd,
-            o_layout=AttentionTensorLayout.bshd,
-            mask_kind=mask_kind,
-            attention_scale=1.0 / math.sqrt(float(qk_dim)),
-            output_dtype=dtype,
-            compute_dtype=thor.DataType.fp32,
-        )
-
-        # AttentionBackward may not be stamped standalone: cuDNN backward must consume
-        # state from the real forward that actually executed. Make this a same-plan
-        # backward by choosing a loss whose derivative depends on the Attention output.
-        # The resulting pointwise/reduction work runs before AttentionBackward; the
-        # packed dQ/dK/dV scatter, if it were not elided, would run after it.
-        loss = ex.reduce_sum(out * out, axis=[0, 1, 2, 3], squeeze=False)
-        fwd = ex.compile(loss, device_num=GPU_NUM)
-        bwd = fwd.compile_backward(["qkv"])
-        input_shapes = {
-            "qkv": (batch * sequence, qkv_width),
-        }
-        output_shape = (batch * sequence, qkv_width)
-        flops = 2 * _attention_flops(
-            batch=batch,
-            query_len=sequence,
-            kv_len=sequence,
-            query_heads=query_heads,
-            qk_dim=qk_dim,
-            v_dim=v_dim,
-        )
-        return bwd, input_shapes, output_shape, flops
 
     return build
 
@@ -1110,22 +901,6 @@ CASES = [
         description="cuDNN Frontend public-reference DeepSeek V3 causal SDPA shape.",
     ),
     AttentionPerfCase(
-        name="expression_packed_qkv_attention_layer_llama_style_b1_s2048_model4096_h32_kv8_d128",
-        builder=_build_packed_qkv_layer_case(
-            batch=int(os.getenv("THOR_ATTENTION_PERF_LAYER_BATCH", "1")),
-            sequence=int(os.getenv("THOR_ATTENTION_PERF_LAYER_SEQUENCE", "2048")),
-            input_features=4096,
-            output_features=4096,
-            query_heads=32,
-            kv_heads=8,
-            qk_dim=128,
-            v_dim=128,
-            has_bias=False,
-            mask_kind=AttentionMaskKind.causal_top_left,
-        ),
-        description="Hand-built expression hot path: packed QKV projection, cuDNN SDPA, output projection.",
-    ),
-    AttentionPerfCase(
         name="expression_split_qkv_attention_layer_llama_style_b1_s2048_model4096_h32_kv8_d128",
         builder=_build_split_qkv_layer_case(
             batch=int(os.getenv("THOR_ATTENTION_PERF_LAYER_BATCH", "1")),
@@ -1296,72 +1071,6 @@ elif not ENABLE_LARGE_CASES:
 
 
 @pytest.mark.cuda
-@pytest.mark.performance
-@pytest.mark.parametrize("dtype", DTYPES, ids=_dtype_name)
-def test_packed_qkv_attention_backward_runtime_has_no_pack_scatter_kernel(dtype: thor.DataType, record_property):
-    if not cudnn_frontend_attention_available():
-        pytest.skip("Thor was not built with cuDNN Frontend attention support")
-
-    case = AttentionPerfCase(
-        name="packed_qkv_attention_backward_direct_cudnn_output_guard",
-        builder=_build_packed_qkv_attention_backward_case(
-            batch=int(os.getenv("THOR_ATTENTION_PERF_LAYER_BATCH", "1")),
-            sequence=int(os.getenv("THOR_ATTENTION_PERF_LAYER_SEQUENCE", "2048")),
-            query_heads=32,
-            kv_heads=8,
-            qk_dim=128,
-            v_dim=128,
-            mask_kind=AttentionMaskKind.causal_top_left,
-        ),
-        description="Packed-QKV SDPA backward must write dQ/dK/dV directly into the packed dQKV buffer.",
-    )
-
-    stream = Stream(Placement(DeviceType.gpu, GPU_NUM))
-    program, input_shapes, output_shape, _, _ = _unpack_built_case(case.builder(dtype))
-    inputs = {
-        name: _gpu_tensor(shape, dtype) for name, shape in input_shapes.items()
-    }
-
-    # DynamicExpression does not expose _debug_stage_kinds directly.  Prepare it first,
-    # then inspect the underlying FusedEquation with the exact stamp-time bindings chosen
-    # by the public layer builder.  The stamped runtime debug path intentionally reports
-    # only concrete runtime stage kinds, so check both surfaces.
-    if isinstance(program, thor.physical.DynamicExpression):
-        prepared = program.prepare(inputs, {}, stream)
-        compiled_stage_kinds = prepared.equation._debug_stage_kinds(
-            prepared.stamp_inputs,
-            tensor_scalar_inputs=prepared.tensor_scalar_inputs,
-        )
-        stamped = prepared.stamp()
-    else:
-        # A backward that consumes Attention state must be paired with the real
-        # forward that produced that state. Inspect the concrete paired plans
-        # rather than the removed same-plan forward-replay graph.
-        forward_stamped, stamped = program.stamp_forward_backward_pair(inputs, stream)
-        compiled_stage_kinds = forward_stamped._debug_stage_kinds() + stamped._debug_stage_kinds()
-
-    runtime_stage_kinds = stamped._debug_stage_kinds()
-
-    record_property("case", case.name)
-    record_property("description", case.description)
-    record_property("dtype", _dtype_name(dtype))
-    record_property("compiled_stage_kinds", str(compiled_stage_kinds))
-    record_property("runtime_stage_kinds", str(runtime_stage_kinds))
-    record_property("output_shape", str(output_shape))
-
-    # The real-forward/backward pair must contain exactly one Attention forward
-    # and one AttentionBackward. The concrete backward runtime must not need a
-    # trailing packed dQKV scatter kernel: cuDNN writes directly into the packed
-    # gradient destination.
-    assert compiled_stage_kinds.count("Attention") == 1
-    assert compiled_stage_kinds.count("AttentionBackward") == 1
-
-    assert runtime_stage_kinds.count("AttentionBackward") == 1
-    runtime_backward_index = runtime_stage_kinds.index("AttentionBackward")
-    assert "FusedKernel" not in runtime_stage_kinds[runtime_backward_index + 1 :]
-
-
-@pytest.mark.cuda
 @pytest.mark.parametrize("dtype", DTYPES, ids=_dtype_name)
 def test_public_attention_projection_biases_compile_as_gemm_epilogues(dtype: thor.DataType, record_property):
     if not cudnn_frontend_attention_available():
@@ -1409,7 +1118,7 @@ def test_public_attention_projection_biases_compile_as_gemm_epilogues(dtype: tho
     compiled_matmul_stage_kinds = [stage for stage in compiled_stage_kinds if stage.startswith("Matmul")]
     runtime_matmul_stage_kinds = [stage for stage in runtime_stage_kinds if stage.startswith("Matmul")]
 
-    expected_matmul_stages = 2 if metadata.get("qkv_projection_mode") == "packed" else 4
+    expected_matmul_stages = 4
     record_property("compiled_stage_kinds", str(compiled_stage_kinds))
     record_property("runtime_stage_kinds", str(runtime_stage_kinds))
     record_property("projection_mode", str(metadata.get("qkv_projection_mode")))

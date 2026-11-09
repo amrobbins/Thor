@@ -78,6 +78,7 @@ allocation, or kernel selection is permitted within normal `runOn()`.
 | Cache-miss FP8 candidate measurement and immutable recipe cache | `Fp8RK/Fp8RKStampAutotuner.*`, `Fp8KR/Fp8KRStampAutotuner.*`, `DenseReductionSelectionCache.h` (one cache for every selector, 1171) |
 | Benchmark-only hypothetical FP32 completion | `Fp8RK/Fp8RKSelectedContinuation*` |
 | Pass workspace, tensor ownership, and launch order | `CubReduction.{h,cpp}`, `DensePhysicalPassExecution.h` |
+| Ragged (offset-segmented) kernels, selection and routing (1330: the only segmented path) | `CubRagged*.cu`, `Ragged*.{h,cuh}`, `RaggedStampAutotuner.{h,cpp}` |
 
 The hypothetical FP32 continuation is an ephemeral **measurement program**, not
 part of a production stamp. The production planner independently chooses each
@@ -266,7 +267,7 @@ fallback topologies. Composed UINT32 contiguous stages likewise have no CUB segm
 normal aligned contiguous kernel and every carried-index stage is FP32 by construction. The remaining CUB segmented ARG
 instantiations in the dense executor are therefore limited to genuine UINT64 *composed* contiguous stages; direct
 contiguous ARG above UINT32 is unreachable because the CUB fixed-segment API's `int` segment-size gate rejects it first.
-The separate offset-segmented ARG API retains its own intentionally independent segmented implementation.
+The separate offset-segmented ARG API runs its own kernels, the ragged ARG family (see the ragged section below).
 
 ### Recursive stage-planning invariant
 
@@ -433,21 +434,53 @@ reduction mechanism.
 logical-index header to stay absent and rejects the historical mapper/indexing symbols if they reappear in active CUB
 reduction sources.
 
-## Offset-segmented path
+## Ragged (offset-segmented) path
 
-`CubSegmentedReduction` accepts values `[N,D...]` with row offsets `[B+1]` and produces `[B,D...]` for ragged sum,
-mean, min, and max. Rank-1 values retain CUB `DeviceSegmentedReduce`; vector-valued rows use a zero-workspace Thor CUDA
-backend where adjacent threads own adjacent trailing components and each thread walks the rows in one segment. This
-keeps every row load coalesced while preserving FP32 accumulation, runtime output conversion, and the scalar empty-row
-identities. Expression's scalar and vector segmented forward reductions both stamp this central implementation; the former private
-Expression vector forward kernel has been removed. `CubSegmentedArgReduction` accepts the same `[N,D...]` row geometry
-and returns global packed winner indices `[B,D...]`; narrow vectors split segment rows across logical warp lanes while
-wider vectors assign adjacent trailing components to adjacent threads. Empty segments return the maximum index sentinel
-per component, NaNs propagate, and the lowest packed index wins ties. `RaggedExpression::segment_mean()` emits the direct segmented-mean
-stage, so FP32 accumulation, division by row length, empty-row handling, and output conversion happen in one reduction
-stage without materializing row lengths or segmented sums. Segment offsets are row indices for both scalar and vector
-values, are validated while stamping, and empty segments use the same explicit identities as
-`CubReduction::getFp32EmptyReductionValue()`.
+`CubSegmentedReduction` accepts values `[N,D...]` with row offsets `[B+1]` (UINT32 or UINT64) and produces `[B,D...]`
+for ragged sum, mean, min and max; `CubSegmentedArgReduction` returns global packed winner indices
+`row * D + component` (UINT32 or UINT64) for argmin and argmax. Inputs are FP8 E4M3 / E5M2, FP16, BF16 and FP32,
+accumulated in FP32. Empty segments give 0 (sum, mean), +inf (min), -inf (max) or the index sentinel, per component;
+NaNs propagate and the lowest packed index wins ties. `stamp()` validates the offset contents; `stampRuntimeOffsets()`
+(the Expression path) reads them only at run time. Rows past `offsets[B]` (reserved capacity) are never read.
+
+Since 1330 every segmented stamp runs the merge-path ragged kernels (plans/Thor_Ragged_Reduction_Plan_2026-11-06.md;
+1263-1329 also kept the legacy one-owner-per-segment kernels, CUB `DeviceSegmentedReduce` for rank-1 values and
+vector warp / block kernels for `[N,D...]`, which ran at 0.03-0.06 TB/s median at >= 16 MiB and up to 3000x slower on
+skewed lengths; they are deleted, and `ReductionSourceGuardTest` keeps them deleted). A site no ragged family runs is
+an error at stamp, with the reason: rows over 2 GiB, or more than 2^30 components.
+
+- **Partition.** The work is the merge of the offsets with the rows (each row weighted by its input bytes, each
+  segment end by its output bytes), split evenly over a persistent grid fixed at stamp (SMs x resident CTAs). Each CTA
+  finds its start with one binary search over the offsets, so time depends on (active rows, B, D, dtype), not on how
+  the lengths are distributed. Shared host / device index arithmetic: `RaggedMergePath.h`.
+- **Families,** each with VALUE and ARG forms, chosen by row bytes:
+  - ragged KR, rows under 16 bytes (FP8 D 1-15, FP16 / BF16 1-7, FP32 1-3): `RaggedKRKernels.cuh`,
+    `RaggedKRArgKernels.cuh`, `RaggedKRWalk.h`;
+  - ragged RK, rows of 16 bytes to 2 GiB (at most 2^30 components): lanes own 16-byte chunks of a K tile of at most
+    512 bytes, wider rows are K tiled, `RaggedRKKernels.cuh`, `RaggedRKArgKernels.cuh`, `RaggedRKWalk.h`.
+  One object per family and dtype group (`CubRagged<Family>[Arg]<Dtype>.cu`, the narrow-rows RK variants in
+  `*Narrow.cu`), launchers in `CubRaggedKR[Arg].cu` / `CubRaggedRK[Arg].cu`. Any input address works (alignment to the
+  element only).
+- **Finishing.** Each CTA writes at most a head and a tail record for the segments it shares with its neighbours (the
+  stamp's workspace); a second launch combines them in CTA order and stores the output (`CubRaggedFinish*.cu`: block,
+  wide and FP32 ARG pair-record finishers). No atomics; results are bit-identical from run to run on one stamp (SUM may
+  round differently between stamps with different grids).
+- **Selection** (`RaggedStampAutotuner.{h,cpp}`). Three candidate shapes per family; every legal candidate is timed at
+  stamp on synthetic uniform offsets over the stamped capacity (9 rounds, one trimmed at each end, no depth), and the
+  first in list order within 1% of the best wins. Winners are cached in `DenseReductionSelectionCache` under the kinds
+  `RaggedKR` / `RaggedRK`, keyed by op, dtypes, D, capacity, B and the input's address mod 16. Pass names:
+  `ragged_kr:<shape>` or `ragged_rk:<shape>`, then `ragged_finish` / `ragged_finish_arg`. `getPath()` stays
+  `OffsetSegmented`.
+- **Measured (1325, RTX 5090, copy about 1.54 TB/s, moved >= 16 MiB, p50):** 1.13 / 1.22 / 1.26 TB/s (E4M3 / FP16 /
+  FP32), against the legacy kernels' 0.026 / 0.039 / 0.057; the spread between the fastest and slowest length
+  distribution at one shape p90 1.07-1.31x (legacy 1420-3030x). Balanced long-segment cells, where the legacy kernels
+  had one owner per segment and no imbalance, are the exception: 31-55 cells per dtype were slower than legacy
+  (median 0.83-0.85x, worst 0.53x), accepted with the switch (user decision, 2026-11-08).
+
+`RaggedExpression::segment_mean()` emits the direct segmented-mean stage, so FP32 accumulation, division by row
+length, empty-row handling and output conversion happen in one reduction stage without materializing row lengths or
+segmented sums. Expression's segmented forward reductions and the segment min / max backward (through
+`CubSegmentedArgReduction`) all stamp this path.
 
 ## Expression integration
 

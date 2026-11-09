@@ -301,6 +301,28 @@ DataType defaultComputeDType(DataType input_dtype, DataType output_dtype) {
     return promoteTensorValueDTypes(input_dtype, output_dtype);
 }
 
+// Default arithmetic dtype for an ordinary fused pointwise node whose caller did not
+// request one. Low-precision storage (FP8 / FP16 / BF16) computes in FP32:
+//
+//   - Accuracy: a fused chain keeps every intermediate in FP32 and rounds once, at
+//     the materialized output, instead of rounding to the storage dtype after every
+//     op.
+//   - Cost: fused stages are memory bound. The packed BF16/FP16 path only saves ALU
+//     on add/mul/min/max; every other op (exp, erf, tanh, sin, pow, div, ...) already
+//     round-tripped each lane through float, so FP32 removes conversions there.
+//
+// Stage-boundary operations (matmul, convolution, softmax, normalizations, attention,
+// reductions, scans, segmented ops, ...) keep their own policies via
+// defaultComputeDType(). An explicit compute dtype is always honoured, so callers can
+// still request packed BF16/FP16 arithmetic.
+static DataType defaultFusedPointwiseComputeDType(ExprOp op, DataType input_dtype, DataType output_dtype) {
+    if (!isExpressionCompilerStageBoundaryOp(op) && isSupportedFusionFloatingType(input_dtype) &&
+        isSupportedFusionFloatingType(output_dtype)) {
+        return DataType::FP32;
+    }
+    return defaultComputeDType(input_dtype, output_dtype);
+}
+
 DataType toSupportedInputDType(ExprOp op, DataType dtype) {
     if (isExactUnsignedSubtractOp(op) && isExactUnsignedPointwiseDType(dtype)) {
         return dtype;
@@ -1391,19 +1413,24 @@ static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
             } else if (logical_input_dtype == DataType::BOOLEAN || logical_input_dtype == DataType::UINT8) {
                 requested_compute_dtype = DataType::BOOLEAN;
             } else if (isSupportedFusionFloatingType(logical_input_dtype)) {
-                requested_compute_dtype = defaultComputeDType(logical_input_dtype);
+                // Compare FP32 intermediates without first rounding them to storage precision.
+                requested_compute_dtype = DataType::FP32;
             } else {
                 requested_compute_dtype = DataType::FP32;
             }
         } else if (isLogicalOp(node.op)) {
             requested_compute_dtype = node.compute_dtype.has_value() ? node.compute_dtype.value() : logical_input_dtype;
         } else if (isWhereOp(node.op)) {
-            requested_compute_dtype = node.compute_dtype.has_value() ? node.compute_dtype.value() : logical_input_dtype;
+            // Selecting between FP32 intermediates must not round them to storage precision.
+            requested_compute_dtype = node.compute_dtype.has_value()          ? node.compute_dtype.value()
+                                      : isSupportedFusionFloatingType(logical_input_dtype) ? DataType::FP32
+                                                                                           : logical_input_dtype;
         } else if (isScanOp(node.op)) {
             requested_compute_dtype = node.compute_dtype.has_value() ? node.compute_dtype.value() : output_dtype;
         } else {
-            requested_compute_dtype =
-                node.compute_dtype.has_value() ? node.compute_dtype.value() : defaultComputeDType(logical_input_dtype, output_dtype);
+            requested_compute_dtype = node.compute_dtype.has_value()
+                                          ? node.compute_dtype.value()
+                                          : defaultFusedPointwiseComputeDType(node.op, logical_input_dtype, output_dtype);
         }
         if (fp8_matmul_storage && !node.compute_dtype.has_value()) {
             requested_compute_dtype = DataType::FP32;

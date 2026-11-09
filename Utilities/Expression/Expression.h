@@ -923,6 +923,7 @@ class Expression {
     [[nodiscard]] Expression unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const;
     [[nodiscard]] Expression squeeze(const std::vector<uint64_t>& squeeze_axes) const;
     [[nodiscard]] Expression transpose() const;
+    // Gathers along `axis` with UINT32/UINT64 indices; an index >= dims[axis] yields 0.
     [[nodiscard]] Expression takeAlongAxis(const Expression& indices, int64_t axis = -1) const;
     [[nodiscard]] static Expression takeAlongAxis(const Expression& input, const Expression& indices, int64_t axis = -1);
     [[nodiscard]] Expression scan(ScanOp op = ScanOp::Sum, int64_t axis = -1, bool inclusive = true) const;

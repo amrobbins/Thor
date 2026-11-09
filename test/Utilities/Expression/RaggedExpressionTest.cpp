@@ -12,6 +12,7 @@
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/TensorOperations/Ragged/PaddedRaggedSequence.h"
 #include "Utilities/TensorOperations/Ragged/RaggedConv1dWidthCapacity.h"
+#include "Utilities/TensorOperations/Cub/DenseReductionSelectionCache.h"
 
 #include "cuda_runtime.h"
 
@@ -9246,4 +9247,117 @@ TEST(RaggedExpression, TrailingTransposeBackwardRunsOnlyAcrossActivePackedRows) 
         }
     }
     expectNear(actual, expected);
+}
+
+// 1325 (phase 7; the end-to-end item moved from phase 5): segment_sum / mean / min / max and the segment MIN / MAX
+// backward through Expression on the retained ragged kernels. 1328 (phase 8): the routing switch is removed, so the
+// outputs and gradients are checked against host references (1325 compared routing on with off): FP16 / BF16 / FP32,
+// D 1 (KR), 3 (KR in FP16, RK in FP32), 8 and 17 (RK), UINT32 and UINT64 offsets, random lengths with empty segments,
+// ties (the gradient goes to the first winner), and inactive capacity whose gradient keeps its sentinel. Integer values
+// keep SUM and the gradients exact; MEAN to a rounding. The stamps tune under the RaggedKR / RaggedRK selection kinds.
+TEST(RaggedExpression, SegmentReductionsAndMinMaxBackwardRunOnTheRetainedRaggedKernels) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    using ThorImplementation::CubReductionInternal::DenseReductionSelectionKind;
+    using ThorImplementation::CubReductionInternal::denseReductionSelectionCache;
+    denseReductionSelectionCache().clear();
+    uint64_t seed = 0x1325;
+    const auto next = [&] {
+        seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+        return seed >> 33;
+    };
+    size_t case_index = 0;
+    for (const DataType dtype : {DataType::FP16, DataType::BF16, DataType::FP32}) {
+        for (const uint64_t d : {1ULL, 3ULL, 8ULL, 17ULL}) {
+            const DataType offsets_dtype = case_index++ % 2 ? DataType::UINT64 : DataType::UINT32;
+            SCOPED_TRACE(std::string(TensorDescriptor::getElementTypeName(dtype)) + " D " + std::to_string(d));
+            const uint64_t batch = 40 + next() % 60, capacity = 600 + next() % 400;
+            const uint64_t active = capacity - capacity / 5;
+            std::vector<uint64_t> offsets_host(batch + 1, 0);
+            for (uint64_t i = 1; i < batch; ++i) offsets_host[i] = next() % (active + 1);
+            offsets_host[batch] = active;
+            std::sort(offsets_host.begin(), offsets_host.end());
+            for (uint64_t i = 5; i < batch; i += 5) offsets_host[i] = offsets_host[i - 1];  // empty segments
+            std::vector<float> values_host(capacity * d), upstream_host(batch * d);
+            for (float& v : values_host) v = static_cast<float>(static_cast<int>(next() % 9) - 4);  // many ties
+            for (float& v : upstream_host) v = static_cast<float>(1 + next() % 7);
+            const std::vector<uint64_t> trailing = d == 1 ? std::vector<uint64_t>{} : std::vector<uint64_t>{d};
+            const std::vector<uint64_t> value_dims =
+                d == 1 ? std::vector<uint64_t>{capacity} : std::vector<uint64_t>{capacity, d};
+            const std::vector<uint64_t> grad_dims =
+                d == 1 ? std::vector<uint64_t>{batch} : std::vector<uint64_t>{batch, d};
+            const RaggedExpression ragged =
+                RaggedExpression::input("x", makeDescriptor(dtype, trailing, batch, capacity, offsets_dtype));
+            Tensor values = makeGpuTensorFromFloats(value_dims, values_host, dtype, stream);
+            Tensor upstream = makeGpuTensorFromFloats(grad_dims, upstream_host, dtype, stream);
+            Tensor offsets;
+            if (offsets_dtype == DataType::UINT64) {
+                offsets = makeGpuTensor<uint64_t>({batch + 1}, offsets_host, stream);
+            } else {
+                offsets = makeGpuTensor<uint32_t>({batch + 1},
+                                                  std::vector<uint32_t>(offsets_host.begin(), offsets_host.end()),
+                                                  stream);
+            }
+            const std::unordered_map<std::string, Tensor> forward_inputs{{"x.values", values}, {"x.offsets", offsets}};
+            const std::unordered_map<std::string, Tensor> backward_inputs{
+                {"x.values", values}, {"x.offsets", offsets}, {"dy", upstream}};
+
+            for (int which = 0; which < 4; ++which) {
+                SCOPED_TRACE("forward op " + std::to_string(which));
+                const Expression e = which == 0   ? ragged.segment_sum()
+                                     : which == 1 ? ragged.segment_mean()
+                                     : which == 2 ? ragged.segment_min()
+                                                  : ragged.segment_max();
+                const std::vector<float> got =
+                    copyToCpuFloatValues(runExpressionOutput(e, forward_inputs, "y", stream), stream);
+                ASSERT_EQ(got.size(), batch * d);
+                for (uint64_t s = 0; s < batch; ++s) {
+                    for (uint64_t c = 0; c < d; ++c) {
+                        const uint64_t begin = offsets_host[s], end = offsets_host[s + 1];
+                        float want = which == 2   ? std::numeric_limits<float>::infinity()
+                                     : which == 3 ? -std::numeric_limits<float>::infinity()
+                                                  : 0.0f;
+                        for (uint64_t r = begin; r < end; ++r) {
+                            const float v = values_host[r * d + c];
+                            want = which == 2 ? std::min(want, v) : which == 3 ? std::max(want, v) : want + v;
+                        }
+                        if (which == 1) want = end > begin ? want / static_cast<float>(end - begin) : 0.0f;
+                        const float g = got[s * d + c];
+                        if (which == 1) {
+                            ASSERT_NEAR(g, want, 1e-2f * std::max(1.0f, std::fabs(want))) << s << ", " << c;
+                        } else {
+                            ASSERT_EQ(g, want) << s << ", " << c;
+                        }
+                    }
+                }
+            }
+            for (const bool minimum : {true, false}) {
+                SCOPED_TRACE(minimum ? "segment_min backward" : "segment_max backward");
+                Tensor gradient(gpuPlacement, TensorDescriptor(dtype, value_dims));
+                gradient.fill(55.0, stream);
+                const Expression f = minimum ? ragged.segment_min() : ragged.segment_max();
+                const std::vector<float> got = copyToCpuFloatValues(
+                    runBackwardOutput(f, backward_inputs, "x.values", "dy", stream, gradient), stream);
+                std::vector<float> want(capacity * d, 55.0f);  // inactive rows keep the sentinel
+                std::fill(want.begin(), want.begin() + active * d, 0.0f);
+                for (uint64_t s = 0; s < batch; ++s) {
+                    for (uint64_t c = 0; c < d; ++c) {
+                        uint64_t best = offsets_host[s];
+                        if (best == offsets_host[s + 1]) continue;  // empty: no winner
+                        for (uint64_t r = offsets_host[s]; r < offsets_host[s + 1]; ++r) {
+                            const float v = values_host[r * d + c], w = values_host[best * d + c];
+                            if (minimum ? v < w : v > w) best = r;
+                        }
+                        want[best * d + c] = upstream_host[s * d + c];
+                    }
+                }
+                ASSERT_EQ(got.size(), want.size());
+                for (size_t i = 0; i < got.size(); ++i) ASSERT_EQ(got[i], want[i]) << i;
+            }
+        }
+    }
+    // The stamps went through the ragged selector (both families: D 1 is KR, D 8 and 17 are RK).
+    EXPECT_GT(denseReductionSelectionCache().tuningAttempts(DenseReductionSelectionKind::RaggedKR), 0U);
+    EXPECT_GT(denseReductionSelectionCache().tuningAttempts(DenseReductionSelectionKind::RaggedRK), 0U);
+    denseReductionSelectionCache().clear();
 }

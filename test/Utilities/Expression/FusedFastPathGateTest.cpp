@@ -277,7 +277,7 @@ TEST(FusedFastPathGate, RaggedBroadcastLowPrecisionStorageKeepsVector8OwnershipW
                   std::optional<uint32_t>(8u));
         EXPECT_EQ(CudaSourceEmitter::specializedBroadcastElementsPerThread(stage, {group}), 8u);
         const std::string source = CudaSourceEmitter::emitSpecializedBroadcast(stage, {group}, "ragged_lowp_fp32_broadcast");
-        EXPECT_NE(source.find("const float4 in0_packet = *reinterpret_cast<const float4*>(in0 + in0_offset_base)"),
+        EXPECT_NE(source.find("in0_packet = *reinterpret_cast<const float4*>(in0 + in0_offset_base)"),
                   std::string::npos);
         EXPECT_NE(source.find("float4 out0_packet"), std::string::npos);
         EXPECT_NE(source.find("const float t"), std::string::npos);
@@ -310,17 +310,47 @@ TEST(FusedFastPathGate, AwkwardBroadcastAndTrueGatherRemainIntentionalExceptions
     }
 }
 
-TEST(FusedFastPathGate, DenseLowPrecisionBroadcastPreservesCurrentVector2Ordination) {
+TEST(FusedFastPathGate, DenseBroadcastUsesSixteenBytePacketFamily) {
+    // Dense specialized broadcast shares the ragged packet family: eight scalars
+    // per thread for homogeneous BF16/FP16 storage, four with FP32 storage.
+    struct Case {
+        DataType x;
+        DataType bias;
+        DataType out;
+        uint32_t width;
+    };
+    for (const Case& c : {Case{DataType::BF16, DataType::BF16, DataType::BF16, 8u},
+                          Case{DataType::FP16, DataType::FP16, DataType::FP16, 8u},
+                          Case{DataType::FP32, DataType::FP32, DataType::FP32, 4u},
+                          Case{DataType::BF16, DataType::FP32, DataType::FP32, 4u}}) {
+        const Expression x = Expression::input("x", c.x, c.x);
+        const Expression bias = Expression::input("bias", c.bias, c.bias);
+        auto physical = Expression::outputs({{"out", (x + bias).withOutputDType(c.out)}}).physicalOutputs();
+        resolveOutputsDTypesInPlace(physical, {c.x, c.bias});
+        const CompiledExecutionStage stage = makeCompiledStage(physical);
+        const SpecializedBroadcastGroup group =
+            makeTwoInputBroadcastGroup(6u, 8u, 8u, SpecializedInputLoadKind::NativeVector);
+
+        ASSERT_EQ(CudaSourceEmitter::fusedGateRequiredSpecializedBroadcastElementsPerThread(stage, {group}),
+                  std::optional<uint32_t>(c.width))
+            << TensorDescriptor::getElementTypeName(c.x) << "+" << TensorDescriptor::getElementTypeName(c.bias);
+        EXPECT_EQ(CudaSourceEmitter::specializedBroadcastElementsPerThread(stage, {group}), c.width);
+        const std::string source = CudaSourceEmitter::emitSpecializedBroadcast(stage, {group}, "dense_wide_broadcast");
+        EXPECT_NE(source.find("packet_idx < packet_count_g0"), std::string::npos);
+        EXPECT_EQ(source.find("active_values"), std::string::npos);
+    }
+}
+
+TEST(FusedFastPathGate, DenseBroadcastWithUnalignedRowWidthKeepsNarrowPath) {
     const Expression x = Expression::input("x", DataType::BF16, DataType::BF16);
     const Expression bias = Expression::input("bias", DataType::BF16, DataType::BF16);
     auto physical = Expression::outputs({{"out", x + bias}}).physicalOutputs();
     resolveOutputsDTypesInPlace(physical, {DataType::BF16, DataType::BF16});
     const CompiledExecutionStage stage = makeCompiledStage(physical);
     const SpecializedBroadcastGroup group =
-        makeTwoInputBroadcastGroup(6u, 8u, 8u, SpecializedInputLoadKind::NativeVector);
+        makeTwoInputBroadcastGroup(6u, 6u, 6u, SpecializedInputLoadKind::NativeVector);
 
-    ASSERT_EQ(CudaSourceEmitter::fusedGateRequiredSpecializedBroadcastElementsPerThread(stage, {group}),
-              std::optional<uint32_t>(2u));
+    EXPECT_FALSE(CudaSourceEmitter::fusedGateRequiredSpecializedBroadcastElementsPerThread(stage, {group}).has_value());
     EXPECT_EQ(CudaSourceEmitter::specializedBroadcastElementsPerThread(stage, {group}), 2u);
 }
 

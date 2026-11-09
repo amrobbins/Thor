@@ -321,6 +321,9 @@ class StampedCubReduction;
 class StampedCubArgReduction;
 class StampedCubSegmentedArgReduction;
 class StampedCubSegmentedReduction;
+namespace CubReductionInternal {
+struct RaggedRoutedStamp;  // 1325: RaggedStampAutotuner.h
+}
 
 /**
  * Describes a one-or-more-axis CUB reduction.
@@ -498,6 +501,17 @@ class StampedCubSegmentedReduction {
    public:
     void run();
     void runOn(Stream& run_stream) const;
+    /**
+     * Benchmarks only (1263): runs this stamp on another input, offsets and output of the stamp's dtypes and element
+     * counts, with the stamp's own workspace, so the ragged audit can time a stamp on rotating cold views without
+     * re-stamping. Production binds its tensors.
+     */
+    void runOnTensorsForBenchmark(const Tensor& replacement_input,
+                                  const Tensor& replacement_segment_offsets,
+                                  const Tensor& replacement_output,
+                                  Stream& run_stream) const;
+    /** The physical passes this stamp runs, in order (diagnostic only, 1263). */
+    [[nodiscard]] std::vector<std::string> getPassNames() const;
 
     [[nodiscard]] uint32_t gpuNum() const { return input.getPlacement().getDeviceNum(); }
     [[nodiscard]] Tensor getOutputTensor() const { return output; }
@@ -510,6 +524,8 @@ class StampedCubSegmentedReduction {
     [[nodiscard]] uint64_t getNumItems() const { return num_items; }
     [[nodiscard]] uint64_t getNumSegments() const { return num_segments; }
     [[nodiscard]] size_t getWorkspaceSizeInBytes() const { return temp_storage_bytes; }
+    /** 1325: true when the stamp runs the retained ragged kernels (1330: always; the legacy kernels are deleted). */
+    [[nodiscard]] bool usesRetainedRagged() const { return ragged != nullptr; }
 
    private:
     friend class CubSegmentedReduction;
@@ -535,6 +551,8 @@ class StampedCubSegmentedReduction {
     const size_t temp_storage_bytes;
     Tensor temp_storage;
     Stream stream;
+    // 1325: the retained ragged plan (its workspace is temp_storage); 1330: never null.
+    std::shared_ptr<const CubReductionInternal::RaggedRoutedStamp> ragged;
 };
 
 /**
@@ -584,12 +602,21 @@ class StampedCubSegmentedArgReduction {
    public:
     void run();
     void runOn(Stream& run_stream) const;
+    /** Benchmarks only (1263): as StampedCubSegmentedReduction::runOnTensorsForBenchmark, with the index output. */
+    void runOnTensorsForBenchmark(const Tensor& replacement_input,
+                                  const Tensor& replacement_segment_offsets,
+                                  const Tensor& replacement_index_output,
+                                  Stream& run_stream) const;
+    /** The physical passes this stamp runs, in order (diagnostic only, 1263). */
+    [[nodiscard]] std::vector<std::string> getPassNames() const;
 
     [[nodiscard]] uint32_t gpuNum() const { return input.getPlacement().getDeviceNum(); }
     [[nodiscard]] Tensor getIndexOutputTensor() const { return index_output; }
     [[nodiscard]] DataType getOffsetDataType() const { return segment_offsets.getDataType(); }
     [[nodiscard]] uint64_t getNumSegments() const { return num_segments; }
     [[nodiscard]] size_t getWorkspaceSizeInBytes() const { return temp_storage_bytes; }
+    /** 1325: true when the stamp runs the retained ragged ARG kernels (1330: always). */
+    [[nodiscard]] bool usesRetainedRagged() const { return ragged != nullptr; }
 
    private:
     friend class CubSegmentedArgReduction;
@@ -611,6 +638,8 @@ class StampedCubSegmentedArgReduction {
     size_t temp_storage_bytes;
     Tensor temp_storage;
     Stream stream;
+    // 1325: the retained ragged plan (its workspace is temp_storage); 1330: never null.
+    std::shared_ptr<const CubReductionInternal::RaggedRoutedStamp> ragged;
 };
 
 /**

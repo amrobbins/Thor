@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace ThorImplementation::CubReductionInternal {
@@ -1040,37 +1041,8 @@ void launchMaxReduction(const Tensor& temp_storage,
                         float output_scale,
                         Stream& stream);
 
-size_t queryOffsetSegmentedReductionBytes(CubReductionOp op,
-                                          const Tensor& input,
-                                          Tensor& output,
-                                          const Tensor& segment_offsets,
-                                          uint64_t num_items,
-                                          uint64_t num_segments,
-                                          const Stream& stream);
-void launchOffsetSegmentedReduction(CubReductionOp op,
-                                    const Tensor& temp_storage,
-                                    size_t temp_storage_bytes,
-                                    const Tensor& input,
-                                    Tensor& output,
-                                    const Tensor& segment_offsets,
-                                    uint64_t num_items,
-                                    uint64_t num_segments,
-                                    Stream& stream);
-
-size_t queryOffsetSegmentedArgReductionBytes(CubArgReductionOp op,
-                                             const Tensor& input,
-                                             Tensor& index_output,
-                                             const Tensor& segment_offsets,
-                                             uint64_t num_segments,
-                                             const Stream& stream);
-void launchOffsetSegmentedArgReduction(CubArgReductionOp op,
-                                       const Tensor& temp_storage,
-                                       size_t temp_storage_bytes,
-                                       const Tensor& input,
-                                       Tensor& index_output,
-                                       const Tensor& segment_offsets,
-                                       uint64_t num_segments,
-                                       Stream& stream);
+// 1330 (ragged phase 9): the legacy offset-segmented VALUE and ARG kernels, with their query, launch and backend-name
+// functions, are deleted; every segmented stamp runs the ragged kernels (RaggedStampAutotuner.h, raggedRouteSegmented).
 
 /**
  * 1146-1148: retained FP8 R / KR VALUE pass over [shape.rows, shape.row_bytes] (Fp8KR/Fp8KRSegments.h) writing

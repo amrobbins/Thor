@@ -461,6 +461,37 @@ def test_terminal_materialized_tiled_transpose_is_not_reported_as_logical_auto_s
     assert launch["logical_vectorized_outputs"] == "0"
 
 
+def _half_vector_compute_dtype(storage_dtype: thor.DataType) -> thor.DataType:
+    # Fused pointwise math defaults to FP32, which the logical-transpose consumer
+    # evaluates per lane (FP32 has no packed arithmetic to gain). Its half2 /
+    # bfloat162 lane math is used when the consumer explicitly computes in FP16/BF16;
+    # FP8 frontiers pair with BF16.
+    return thor.DataType.fp16 if storage_dtype == thor.DataType.fp16 else thor.DataType.bf16
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [thor.DataType.fp16, thor.DataType.bf16, thor.DataType.fp8_e4m3])
+def test_auto_swizzle_logical_transpose_default_fp32_compute_uses_per_lane_math_metadata(dtype: thor.DataType):
+    x = ex.input("x")
+    y = ex.input("y")
+
+    out = (x.transpose() + y.transpose()).with_output_dtype(dtype)
+    eq = ex.compile(out, device_num=0)
+
+    shape = (35, 67)
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(_make_matrix(shape, dtype, scale=0.0025, bias=-0.25), dtype, stream),
+        "y": _host_to_gpu(_make_matrix(shape, dtype, scale=-0.0015, bias=0.5), dtype, stream),
+    }
+
+    launch = _single_debug_fused_launch(eq, inputs_gpu)
+    assert launch["launch"] == "FusedTiledTranspose"
+    assert launch["logical_transpose"] == "1"
+    assert launch["logical_dense_packed_loads"] == "2"
+    assert launch["logical_vectorized_outputs"] == "0"
+
+
 @pytest.mark.cuda
 @pytest.mark.parametrize(
     "dtype,expected_slot_bytes,expected_pack_scalars",
@@ -478,8 +509,8 @@ def test_auto_swizzle_logical_transpose_low_precision_frontiers_emit_optimized_l
     y = ex.input("y")
 
     # Keep the whole consumer expression low precision so the downstream lane math
-    # can use half2/bfloat162 rather than promoting to FP32 scalar math.
-    out = (x.transpose() + y.transpose()).with_output_dtype(dtype)
+    # can use half2/bfloat162 rather than FP32 scalar math (FP32 is the default).
+    out = (x.transpose() + y.transpose()).with_compute_dtype(_half_vector_compute_dtype(dtype)).with_output_dtype(dtype)
     eq = ex.compile(out, device_num=0)
 
     shape = (35, 67)
@@ -504,7 +535,7 @@ def test_auto_swizzle_logical_transpose_mixed_fp8_fp16_uses_larger_dtype_pack_me
     x = ex.input("x")
     y = ex.input("y")
 
-    out = (x.transpose() + y.transpose()).with_output_dtype(thor.DataType.fp16)
+    out = (x.transpose() + y.transpose()).with_compute_dtype(thor.DataType.fp16).with_output_dtype(thor.DataType.fp16)
     eq = ex.compile(out, device_num=0)
 
     shape = (37, 65)
@@ -531,7 +562,7 @@ def test_auto_swizzle_logical_transpose_computed_frontier_keeps_packed_banks_but
     pre_bias = ex.input("pre_bias")
 
     frontier = (x + pre_bias).transpose()
-    out = (frontier + frontier).with_output_dtype(thor.DataType.fp16)
+    out = (frontier + frontier).with_compute_dtype(thor.DataType.fp16).with_output_dtype(thor.DataType.fp16)
     eq = ex.compile(out, device_num=0)
 
     dtype = thor.DataType.fp16
@@ -703,9 +734,10 @@ def test_auto_swizzle_logical_transpose_multi_output_fused_stage_emits_optimized
     x = ex.input("x")
     y = ex.input("y")
 
+    compute = _half_vector_compute_dtype(dtype)
     outs = ex.outputs({
-        "sum": (x.transpose() + y.transpose()).with_output_dtype(dtype),
-        "diff": (x.transpose() - y.transpose()).with_output_dtype(dtype),
+        "sum": (x.transpose() + y.transpose()).with_compute_dtype(compute).with_output_dtype(dtype),
+        "diff": (x.transpose() - y.transpose()).with_compute_dtype(compute).with_output_dtype(dtype),
     })
     eq = outs.compile(device_num=0)
 

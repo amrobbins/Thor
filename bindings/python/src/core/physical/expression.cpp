@@ -799,9 +799,9 @@ Return a zero-materialization storage alias with explicit element strides.
 
 The alias shares the source allocation, starts at element_offset elements from the
 source tensor's visible base pointer, and indexes the requested shape using the
-provided element strides. This is intended for layout/descriptor adapters such as
-packed-QKV attention views; generic fused kernels should materialize or lower a
-layout-aware kernel before consuming non-dense views.
+provided element strides. Fused elementwise kernels read views directly.
+Attention operands must be dense tensors, so a view cannot be passed to
+scaled_dot_product_attention.
 )nbdoc");
 
     expr.def(
@@ -815,7 +815,8 @@ Gather values from this expression along one axis using integer indices.
 The input and indices tensors must have the same rank. Dimensions must match on
 all axes except the gathered axis, and the output shape is the indices shape.
 Indices must be UINT32 or UINT64. The default axis=-1 gathers along the final
-axis.
+axis. An index at or past the length of the gathered axis produces 0, as an
+out-of-vocabulary embedding row does; no out-of-bounds memory is read.
 )nbdoc");
 
     expr.def(
@@ -2961,8 +2962,7 @@ Return the per-stage semantic FLOP counts for this stamped execution plan.
                          R"nbdoc(
 Return the concrete runtime stage kinds in this stamped execution plan.
 
-This reflects stages that will actually run, after runtime-stage elision such as
-direct packed-QKV attention-backward outputs.
+This reflects stages that will actually run, after runtime-stage elision.
 )nbdoc");
 }
 

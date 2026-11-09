@@ -157,44 +157,67 @@ TEST(ExpressionReductionArchitecture, GeneralReductionsAreCentralizedUnderCubRed
 }
 
 TEST(ExpressionReductionArchitecture, ArgReductionDoesNotRetainSupersededKernelFamilies) {
-    const std::filesystem::path path =
-        std::filesystem::path(SOURCE_DIR) / "Utilities/TensorOperations/Cub/CubArgReductionOperation.cuh";
-    ASSERT_TRUE(std::filesystem::exists(path));
-    const std::string contents = readTextFile(path);
-
-    const std::vector<std::string> forbidden_tokens = {
-        "vectorizedDirectFullRowArgReductionKernel",
-        "vectorizedDirectGroupedFullRowArgReductionKernel",
-        "vectorizedDirectBlockShardedArgReductionKernel",
-        "alignmentSafeVectorizedShardRangeArgReductionKernel",
-        "StridedArgCandidateInput",
-        "makeStridedArgCandidateIterator",
-        "struct ContiguousArgCandidateInput {",
-        "makeContiguousArgCandidateIterator",
-        "struct DeviceArgCandidateInput {",
-        "struct CompactContiguousArgCandidateInput {",
-        "makeCompactContiguousArgCandidateIterator",
-        // 1261: the CUB dense ARG families and the interval-composition ARG stage are deleted.
-        "alignedContiguousSegmentArgReductionKernel",
-        "alignedAsyncNarrowTiledArgReductionKernel",
-        "alignedCooperativeTiledArgReductionKernel",
-        "directTiledFixedSegmentArgReductionKernel",
-        "ComposedOperationArgReductionStage",
-        "makeComposedDeviceArgCandidateIterator",
-    };
-
-    for (const std::string& token : forbidden_tokens) {
-        EXPECT_EQ(contents.find(token), std::string::npos)
-            << "Superseded/dead ARG reduction implementation must remain deleted: " << token;
-    }
-
-    // The offset-segmented ARG kernels still use the FP32 candidate rules.
-    EXPECT_NE(contents.find("struct ArgMinimumCandidateFp32"), std::string::npos);
-    EXPECT_NE(contents.find("struct ArgMaximumCandidateFp32"), std::string::npos);
     const std::filesystem::path cub_root = std::filesystem::path(SOURCE_DIR) / "Utilities/TensorOperations/Cub";
     EXPECT_FALSE(std::filesystem::exists(cub_root / "CubArgReductionMin.cu"));
     EXPECT_FALSE(std::filesystem::exists(cub_root / "CubArgReductionMax.cu"));
+    // 1330 (ragged phase 9): the header's last users, the offset-segmented ARG kernels, are deleted, so the header is
+    // too (1261 had cut it to their FP32 candidate rules and stores).
+    EXPECT_FALSE(std::filesystem::exists(cub_root / "CubArgReductionOperation.cuh"));
 }
+
+// 1330 (ragged phase 9): the legacy offset-segmented kernels (one owner per segment: CUB DeviceSegmentedReduce over
+// offset pointers for rank-1 values, the vector narrow / wide kernels for [N, D...]) are deleted. Every segmented
+// stamp runs the merge-path ragged kernels (CubRagged*.cu, RaggedStampAutotuner.cpp); a site no ragged family runs
+// throws. They must stay deleted.
+TEST(ExpressionReductionArchitecture, SegmentedReductionDoesNotRetainLegacyOffsetSegmentedKernels) {
+    const std::filesystem::path cub_root = std::filesystem::path(SOURCE_DIR) / "Utilities/TensorOperations/Cub";
+    EXPECT_FALSE(std::filesystem::exists(cub_root / "CubReductionOffsetSegmented.cu"));
+    EXPECT_FALSE(std::filesystem::exists(cub_root / "CubArgReductionOffsetSegmented.cu"));
+
+    const std::vector<std::filesystem::path> source_roots = {
+        std::filesystem::path(SOURCE_DIR) / "Utilities",
+        std::filesystem::path(SOURCE_DIR) / "DeepLearning",
+        std::filesystem::path(SOURCE_DIR) / "bindings",
+    };
+    const std::vector<std::string> forbidden_tokens = {
+        "CubReductionOffsetSegmented",
+        "CubArgReductionOffsetSegmented",
+        "CubArgReductionOperation.cuh",
+        "queryOffsetSegmentedReductionBytes",
+        "launchOffsetSegmentedReduction",
+        "queryOffsetSegmentedArgReductionBytes",
+        "launchOffsetSegmentedArgReduction",
+        "offsetSegmentedReductionBackendName",
+        "offsetSegmentedArgReductionBackendName",
+        "narrowVectorOffsetSegmentedReductionKernel",
+        "vectorOffsetSegmentedReductionKernel",
+        "narrowVectorOffsetSegmentedArgReductionKernel",
+        "vectorOffsetSegmentedArgReductionKernel",
+        "OffsetSegmentedArgCandidateInput",
+        "device_segmented_reduce.cuh",
+    };
+    // The dense fixed-size segmented CUB reduction (ContiguousFixedSegment) is a dense path, not a ragged one.
+    const std::string dense_owner = "Utilities/TensorOperations/Cub/CubReductionOperation.cuh";
+
+    std::vector<std::string> violations;
+    forEachActiveSourceFile(source_roots, [&](const std::filesystem::path& path) {
+        const std::string relative = std::filesystem::relative(path, SOURCE_DIR).generic_string();
+        const std::string contents = readTextFile(path);
+        for (const std::string& token : forbidden_tokens) {
+            if (token == "device_segmented_reduce.cuh" && relative == dense_owner) continue;
+            if (contents.find(token) != std::string::npos) violations.push_back(relative + ": " + token);
+        }
+    });
+    EXPECT_TRUE(violations.empty()) << "The legacy offset-segmented reduction kernels must stay deleted.\n"
+                                    << [&]() {
+                                           std::ostringstream message;
+                                           for (const std::string& violation : violations) {
+                                               message << violation << '\n';
+                                           }
+                                           return message.str();
+                                       }();
+}
+
 TEST(ExpressionReductionArchitecture, ValueReductionSharesAdditiveTemplateMatrices) {
     const std::filesystem::path cub_root =
         std::filesystem::path(SOURCE_DIR) / "Utilities/TensorOperations/Cub";
@@ -232,7 +255,6 @@ TEST(ExpressionReductionArchitecture, ValueReductionDoesNotRetainLegacyLogicalIn
         cub_root / "CubReduction.h",
         cub_root / "CubReduction.cpp",
         cub_root / "CubReductionOperation.cuh",
-        cub_root / "CubArgReductionOperation.cuh",
     };
     const std::vector<std::string> forbidden_tokens = {
         "StridedFixedSegment",
