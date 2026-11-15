@@ -136,20 +136,22 @@ TEST(RowPartition, ReportsSupportedOffsetDTypes) {
 }
 
 
-TEST(RowPartition, ActiveValueCountAliasesLastOffsetWithoutCopy) {
+TEST(RowPartition, ActiveValueCountIsTheLastOffsetWithoutCopyOrView) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
     Tensor offsets = makeGpuVector<uint32_t>({0U, 2U, 5U, 5U}, stream);
-    Tensor activeCount = rowPartitionActiveValueCount(offsets, 3);
+    const RaggedRuntimeExtent extent = raggedRuntimeExtentFromOffsets(offsets, 3, 8);
 
-    EXPECT_EQ(activeCount.getDimensions(), (std::vector<uint64_t>{1}));
-    EXPECT_EQ(activeCount.getDataType(), DataType::UINT32);
-    EXPECT_EQ(activeCount.getPlacement(), offsets.getPlacement());
-    EXPECT_EQ(activeCount.getMemPtr<uint32_t>(), offsets.getMemPtr<uint32_t>() + 3);
+    EXPECT_EQ(extent.activeValueCount.tensor.getTensorId(), offsets.getTensorId());
+    EXPECT_EQ(extent.activeValueCount.index, 3U);
+    EXPECT_EQ(extent.activeValueCount.getDataType(), DataType::UINT32);
+    EXPECT_EQ(extent.activeValueCount.getPlacement(), offsets.getPlacement());
+    EXPECT_EQ(extent.activeValueCount.pointer<uint32_t>(), offsets.getMemPtr<uint32_t>() + 3);
 
     uint32_t hostValue = 0U;
-    ASSERT_EQ(cudaMemcpyAsync(&hostValue, activeCount.getMemPtr<uint32_t>(), sizeof(uint32_t), cudaMemcpyDeviceToHost, stream.getStream()),
+    ASSERT_EQ(cudaMemcpyAsync(&hostValue, extent.activeValueCount.pointer<uint32_t>(), sizeof(uint32_t), cudaMemcpyDeviceToHost,
+                              stream.getStream()),
               cudaSuccess);
     stream.synchronize();
     EXPECT_EQ(hostValue, 5U);
@@ -311,7 +313,7 @@ TEST(RowPartition, RuntimeExtentBuildsFromOffsetsWithStaticCapacityAndTrailingEl
     RaggedRuntimeExtent extent = raggedRuntimeExtentFromOffsets(offsets, 2, 9, 7);
 
     EXPECT_TRUE(extent.isInitialized());
-    EXPECT_EQ(extent.activeValueCount.getMemPtr<uint64_t>(), offsets.getMemPtr<uint64_t>() + 2);
+    EXPECT_EQ(extent.activeValueCount.pointer<uint64_t>(), offsets.getMemPtr<uint64_t>() + 2);
     EXPECT_EQ(extent.maxActiveValues, 9ULL);
     EXPECT_EQ(extent.elementsPerValue, 7ULL);
     EXPECT_EQ(extent.maxLaunchElements(), 63ULL);
@@ -331,7 +333,7 @@ TEST(RowPartition, RaggedTensorRuntimeExtentDerivesTrailingElementsPerValue) {
     EXPECT_EQ(extent.maxActiveValues, 9ULL);
     EXPECT_EQ(extent.elementsPerValue, 12ULL);
     EXPECT_EQ(extent.maxLaunchElements(), 108ULL);
-    EXPECT_EQ(extent.activeValueCount.getMemPtr<uint32_t>(), offsets.getMemPtr<uint32_t>() + 2);
+    EXPECT_EQ(extent.activeValueCount.pointer<uint32_t>(), offsets.getMemPtr<uint32_t>() + 2);
 }
 
 TEST(RowPartition, RaggedTensorRuntimeExtentRequiresAuthoritativeHostPartition) {

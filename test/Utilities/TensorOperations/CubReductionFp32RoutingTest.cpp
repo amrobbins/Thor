@@ -597,8 +597,9 @@ TEST(CubReductionFp32Routing, RandomMultiPassArgPlans) {
 }
 
 // 1222: an FP32 input view off a 16-byte boundary (4 and 8 bytes) still reduces: its RK passes are the
-// alignment-tolerant ones (the rotated RuntimeK pass; AlignedK at a packet no wider than the alignment), its KR passes
-// any shape, and VALUE and ARG results are exact (a one-time warning names the slower path).
+// alignment-tolerant ones (the rotated RuntimeK pass; AlignedK at a packet no wider than the alignment; 1381: the VALUE
+// OneWindow kernel), its KR passes any shape, and VALUE and ARG results are exact (a one-time warning names the
+// slower path).
 TEST(CubReductionFp32Routing, MisalignedInputsUseTolerantPasses) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -611,7 +612,7 @@ TEST(CubReductionFp32Routing, MisalignedInputsUseTolerantPasses) {
             SCOPED_TRACE(describe(shape) + " offset " + std::to_string(offset_bytes));
             const Mapping m = mapping(shape);
             const uint64_t elements = product(shape.dims);
-            // A flat UINT8 storage holding the FP32 bytes at the offset (aliasByteStorageAs views byte storage), kept
+            // A flat UINT8 storage holding the FP32 bytes at the offset (bytesAs reads byte storage as FP32), kept
             // alive beside its view.
             std::vector<Tensor> storages;
             const auto misaligned = [&](const std::vector<float>& values) {
@@ -622,15 +623,15 @@ TEST(CubReductionFp32Routing, MisalignedInputsUseTolerantPasses) {
                     for (uint64_t b = 0; b < 4; ++b) bytes[offset_bytes + 4 * i + b] = element[b];
                 }
                 storages.push_back(makeGpuUnsignedTensor(bytes, {bytes.size()}, stream, DataType::UINT8));
-                return storages.back().aliasByteStorageAs(DataType::FP32, shape.dims, offset_bytes);
+                return StridedSpan(storages.back()).bytesAs(offset_bytes, DataType::FP32, shape.dims);
             };
             // VALUE data without NaNs (MAX propagates a NaN; the host reference does not), ARG data with them.
             const std::vector<float> values = drawValues(rng, elements, false, Data::Extremum, m.reduced);
             const std::vector<float> arg_values = drawValues(rng, elements, false, Data::Arg, m.reduced);
-            const Tensor input = misaligned(values);
-            const Tensor arg_input = misaligned(arg_values);
+            const StridedSpan input = misaligned(values);
+            const StridedSpan arg_input = misaligned(arg_values);
             ASSERT_EQ(offset_bytes == 0 ? 16u : offset_bytes, input.alignmentBytes(16));
-            ASSERT_EQ(offset_bytes == 0, input.isAligned(16));
+            ASSERT_EQ(offset_bytes == 0, input.alignmentBytes(16) == 16);
 
             // VALUE: Max is exact.
             auto value = CubReduction(CubReductionOp::Max, shape.axes, DataType::FP32).stamp(input, stream);
@@ -641,6 +642,7 @@ TEST(CubReductionFp32Routing, MisalignedInputsUseTolerantPasses) {
             const DensePhysicalPassDiagnostic& first = passes.front();
             if (offset_bytes != 0 && startsWith(first.family, "retained_fp32_rk")) {
                 const bool tolerant = first.family == "retained_fp32_rk:runtime_k" ||
+                                      first.family == "retained_fp32_rk:one_window" ||  // 1381
                                       (first.family == "retained_fp32_rk:aligned_k" && first.packet_bytes &&
                                        *first.packet_bytes <= offset_bytes);
                 EXPECT_TRUE(tolerant) << first.family;
@@ -659,6 +661,7 @@ TEST(CubReductionFp32Routing, MisalignedInputsUseTolerantPasses) {
             expectRetainedArgPasses(arg_passes, false);
             if (offset_bytes != 0 && startsWith(arg_passes.front(), "fp32_arg_rk:")) {
                 EXPECT_TRUE(startsWith(arg_passes.front(), "fp32_arg_rk:runtime_k") ||
+                            startsWith(arg_passes.front(), "fp32_arg_rk:one_window") ||  // 1383
                             startsWith(arg_passes.front(), offset_bytes >= 8 ? "fp32_arg_rk:aligned_k_a8"
                                                                              : "fp32_arg_rk:runtime_k"))
                     << arg_passes.front();

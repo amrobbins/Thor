@@ -28,14 +28,6 @@ uint64_t elementSizeBytes(DataType dtype) {
     return rounded;
 }
 
-std::vector<uint64_t> denseStrides(const std::vector<uint64_t>& dims) {
-    std::vector<uint64_t> strides(dims.size(), 1);
-    for (size_t i = dims.size(); i-- > 1;) {
-        strides[i - 1] = checkedMul(strides[i], dims[i], "padded ragged dense stride");
-    }
-    return strides;
-}
-
 }  // namespace
 
 uint64_t PaddedRaggedSequencePlan::logicalValueElements() const {
@@ -138,20 +130,22 @@ void PaddedRaggedSequence::reconfigure(PaddedRaggedSequencePlan newPlan) {
     plan = std::move(newPlan);
 }
 
-Tensor PaddedRaggedSequence::paddedTensor() const { return paddedTensorForWidth(plan.widthCapacity); }
-
-Tensor PaddedRaggedSequence::paddedTensorForWidth(uint64_t widthCapacity) const {
+std::vector<uint64_t> PaddedRaggedSequence::paddedDimensionsForWidth(uint64_t widthCapacity) const {
     if (widthCapacity == 0) {
-        throw std::runtime_error("PaddedRaggedSequence has no dense tensor for an all-empty width-0 batch.");
+        throw std::runtime_error("PaddedRaggedSequence has no dense batch for an all-empty width-0 batch.");
     }
     if (widthCapacity > reservedWidthCapacity) {
-        throw std::invalid_argument("PaddedRaggedSequence requested view width exceeds reserved storage.");
+        throw std::invalid_argument("PaddedRaggedSequence requested width exceeds reserved storage.");
     }
     if (!paddedValues.isInitialized()) {
         throw std::runtime_error("PaddedRaggedSequence value storage is not initialized.");
     }
-    const std::vector<uint64_t> dims{plan.batchSize, plan.channels, 1, widthCapacity};
-    return paddedValues.aliasView(dims, denseStrides(dims), 0);
+    return {plan.batchSize, plan.channels, 1, widthCapacity};
+}
+
+TensorSpan PaddedRaggedSequence::paddedValuesForWidth(uint64_t widthCapacity) const {
+    const std::vector<uint64_t> dims = paddedDimensionsForWidth(widthCapacity);
+    return TensorSpan(paddedValues, 0, checkedMul(checkedMul(dims[0], dims[1], "padded ragged B*C"), dims[3], "padded ragged B*C*W"));
 }
 
 void PaddedRaggedSequence::packFrom(const Tensor& packedValues, Stream& stream) {

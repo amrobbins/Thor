@@ -16,6 +16,7 @@
 // B is the device-to-device copy bandwidth (read + write bytes per second) measured once at startup (1146: the output
 // is counted too; at R = 2 a VALUE result is twice its input). stamp_ms is the stamp's wall time, which includes the
 // retained R / KR autotuning on a selection-cache miss. No experimental kernels.
+#include "test/Utilities/TensorOperations/OutputSpan.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 #include "Utilities/TensorOperations/Cub/CubReductionStageSemantics.h"
@@ -236,7 +237,11 @@ int main(int argc, char** argv) {
         const std::vector<Geometry> grid = geometries(settings);
         uint64_t done = 0;
         for (T::DataType dtype : settings.dtypes) {
-            input_bytes.aliasByteStorageAs(dtype, {settings.max_bytes}, 0).fillRandom(-100.0, 100.0, stream);
+            // The arena as this dtype (FP8: one byte per element, so the same bytes), random values in it.
+            stream.synchronize();
+            input_bytes.dropReference();
+            input_bytes = T::Tensor(placement, T::TensorDescriptor(dtype, {settings.max_bytes}));
+            input_bytes.fillRandom(-100.0, 100.0, stream);
             stream.synchronize();
             for (const Geometry& g : grid) {
                 const uint64_t bytes = g.k * g.r;
@@ -248,9 +253,9 @@ int main(int argc, char** argv) {
                 const size_t batch = std::min<size_t>(
                     std::max<uint64_t>(1, settings.max_bytes / slot_stride),
                     static_cast<size_t>(std::clamp(std::ceil(200.0 / (double(bytes) / 1.5e6 + 3.0)), 1.0, 32.0)));
-                std::vector<T::Tensor> inputs;
+                std::vector<T::StridedSpan> inputs;
                 for (size_t slot = 0; slot < batch; ++slot)
-                    inputs.push_back(input_bytes.aliasByteStorageAs(dtype, dims, slot * slot_stride));
+                    inputs.push_back(T::StridedSpan(input_bytes).bytesAs(slot * slot_stride, dtype, dims));
                 for (const std::string& op : settings.ops) {
                     try {
                         std::string path, passes;
@@ -264,7 +269,7 @@ int main(int argc, char** argv) {
                         if (op == "sum" || op == "max") {
                             const T::CubReduction reduction(op == "sum" ? T::CubReductionOp::Sum : T::CubReductionOp::Max,
                                                             axis, T::DataType::FP32);
-                            for (const T::Tensor& slot_input : inputs) {
+                            for (const T::StridedSpan& slot_input : inputs) {
                                 values.push_back(reduction.stamp(slot_input, stream));
                                 if (values.size() == 1) first_stamp_end = std::chrono::steady_clock::now();
                             }
@@ -283,7 +288,7 @@ int main(int argc, char** argv) {
                             const T::CubArgReduction reduction(op == "argmax" ? T::CubArgReductionOp::ArgMax
                                                                               : T::CubArgReductionOp::ArgMin,
                                                                axis, outputs);
-                            for (const T::Tensor& slot_input : inputs) {
+                            for (const T::StridedSpan& slot_input : inputs) {
                                 args.push_back(reduction.stamp(slot_input, stream));
                                 if (args.size() == 1) first_stamp_end = std::chrono::steady_clock::now();
                             }
@@ -333,7 +338,7 @@ int main(int argc, char** argv) {
                                         C::launchFp8KRValueSegments(semantics, inputs[slot], out, shape, scratch_ptr,
                                                                     scratch_bytes, 1.0f, stream);
                                     } else {
-                                        C::launchFp8KRArgSegments(inputs[slot], nullptr, &out, shape, scratch_ptr,
+                                        C::launchFp8KRArgSegments(inputs[slot], nullptr, outputSpan(out), shape, scratch_ptr,
                                                                   scratch_bytes, op == "argmax", 1, stream);
                                     }
                                 }, batch);

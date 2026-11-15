@@ -64,7 +64,8 @@ class BucketedCublasGemm {
                                     BucketedCublasGemmShape fullCapacityShape,
                                     BucketedCublasGemmRowBinding rowBinding,
                                     CublasMatrixMultiply::MatmulDataTypes dataTypes,
-                                    bool printResults = false);
+                                    bool printResults = false,
+                                    CublasOperandAlignment alignment = {});
 
     [[nodiscard]] uint64_t getFullCapacityRows() const { return fullCapacityRows; }
     [[nodiscard]] const std::vector<uint64_t> &getCapacityBuckets() const { return capacityBuckets; }
@@ -74,6 +75,9 @@ class BucketedCublasGemm {
     [[nodiscard]] CublasKernelSelection getSelectedKernelSelectionForTests(uint64_t activeRows) const;
     [[nodiscard]] uintptr_t getSelectedExecutionStateIdForTests(uint64_t activeRows) const;
     [[nodiscard]] uint64_t getWorkspaceSizeInBytes() const { return workspaceSizeInBytes; }
+
+    // Throws unless the operands are as aligned as every bucket's algorithm needs.
+    void requireOperandAlignment(const Tensor &A, const Tensor &B, const Tensor &C, const Tensor &D) const;
 
     cublasStatus_t launchUncheckedPrevalidated(uint64_t activeRows,
                                                Tensor A,

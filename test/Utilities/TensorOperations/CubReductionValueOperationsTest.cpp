@@ -1,5 +1,6 @@
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 
+#include "Utilities/Exceptions.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 
 #include <algorithm>
@@ -1027,7 +1028,7 @@ TEST(CubReduction, CompactPhysicalPermutationFullReductionSupportsEveryValueOper
         values.push_back(1.0f);
     }
     Tensor storage = makeGpuTensor(values, {3, 4, 2}, stream);
-    Tensor permuted = storage.aliasView({2, 3, 4}, {1, 8, 2}, 0);
+    StridedSpan permuted = StridedSpan(storage, 0, {2, 3, 4}, {1, 8, 2});
     const std::vector<uint32_t> axes = {0, 1, 2};
 
     const std::vector<OperationExpectation> expectations = {
@@ -1064,7 +1065,7 @@ TEST(CubReduction, CompactPhysicalPermutationTrailingReductionUsesContiguousSegm
         {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f},
         {2, 3, 2},
         stream);
-    Tensor permuted = storage.aliasView({2, 2, 3}, {1, 6, 2}, 0);
+    StridedSpan permuted = StridedSpan(storage, 0, {2, 2, 3}, {1, 6, 2});
 
     const std::vector<OperationExpectation> expectations = {
         {CubReductionOp::Sum, {3.0f, 7.0f, 11.0f, 15.0f, 19.0f, 23.0f}, 0.0f},
@@ -1134,17 +1135,17 @@ TEST(CubReduction, TiledFixedSegmentPathSupportsEveryValueOperation) {
                      stream);
 }
 
-TEST(CubReduction, PermutationAwareTiledPathSupportsEveryValueOperation) {
+// 1390: a rotated-output view (F), refused by the reducer and run in the caller's two parts.
+TEST(CubReduction, RotatedOutputViewTwoPartsSupportEveryValueOperation) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     Tensor storage = makeGpuTensor(
         {-1.0f, 2.0f, -3.0f, 4.0f, -5.0f, 6.0f, -7.0f, 8.0f, -9.0f, 10.0f, -11.0f, 12.0f},
         {2, 3, 2},
         stream);
-    Tensor permuted = storage.aliasView({2, 2, 3}, {1, 6, 2}, 0);
+    StridedSpan permuted = StridedSpan(storage, 0, {2, 2, 3}, {1, 6, 2});
 
-    expectOperations(permuted,
-                     2,
+    const std::vector<OperationExpectation> expectations =
                      {{CubReductionOp::Sum, {-9.0f, -27.0f, 12.0f, 30.0f}, 0.0f},
                       {CubReductionOp::Product, {-15.0f, -693.0f, 48.0f, 960.0f}, 0.0f},
                       {CubReductionOp::Mean, {-3.0f, -9.0f, 4.0f, 10.0f}, 0.0f},
@@ -1154,11 +1155,17 @@ TEST(CubReduction, PermutationAwareTiledPathSupportsEveryValueOperation) {
                       {CubReductionOp::L2Norm,
                        {std::sqrt(35.0f), std::sqrt(251.0f), std::sqrt(56.0f), std::sqrt(308.0f)},
                        1.0e-5f},
-                      {CubReductionOp::SumSquares, {35.0f, 251.0f, 56.0f, 308.0f}, 0.0f}},
-                     stream);
+                      {CubReductionOp::SumSquares, {35.0f, 251.0f, 56.0f, 308.0f}, 0.0f}};
+    for (const OperationExpectation& expectation : expectations) {
+        SCOPED_TRACE(static_cast<int>(expectation.op));
+        expectFloatVectorNear(executeRefusedViewInTwoParts(permuted, expectation.op, {2}, stream),
+                              expectation.expected,
+                              expectation.tolerance);
+    }
 }
 
-TEST(CubReduction, TiledFixedSegmentCanCoalescePermutedDenseOutputWithoutIntermediate) {
+// 1390: the reducer refuses the view, with or without a preallocated output; the two parts write the rotated output.
+TEST(CubReduction, RotatedOutputViewIsRefusedWithAPreallocatedOutput) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -1178,21 +1185,12 @@ TEST(CubReduction, TiledFixedSegmentCanCoalescePermutedDenseOutputWithoutInterme
     }
 
     Tensor storage = makeGpuTensor(values, {outer, reduction, inner}, stream);
-    Tensor permuted = storage.aliasView(
-        {inner, outer, reduction}, {1, reduction * inner, inner}, 0);
+    StridedSpan permuted = StridedSpan(storage, 0, {inner, outer, reduction}, {1, reduction * inner, inner});
     Tensor squeezed_output(gpuPlacement, TensorDescriptor(DataType::FP32, {inner, outer}));
-    std::shared_ptr<StampedCubReduction> stamped =
-        CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(permuted, squeezed_output, stream);
-
-    ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
-    EXPECT_TRUE(stamped->getGeometry().tiled_output_permuted);
-    EXPECT_TRUE(stamped->getGeometry().tiled_output_shared_transpose);
-    EXPECT_EQ(stamped->getOutputTensor().getDimensions(), (std::vector<uint64_t>{inner, outer}));
-    EXPECT_EQ(stamped->getOutputTensor().getMemPtr<void>(), squeezed_output.getMemPtr<void>());
-
-    stamped->run();
-    stream.synchronize();
-    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
+    EXPECT_THROW(static_cast<void>(
+                     CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(permuted, squeezed_output, stream)),
+                 NotImplementedException);
+    expectFloatVectorNear(executeRefusedViewInTwoParts(permuted, CubReductionOp::Sum, {2}, stream), expected);
 }
 
 TEST(CubReduction, PermutationAwareExactWarpWidthHandlesShortReduction) {
@@ -1215,19 +1213,11 @@ TEST(CubReduction, PermutationAwareExactWarpWidthHandlesShortReduction) {
     }
 
     Tensor storage = makeGpuTensor(values, {outer, reduction, inner}, stream);
-    Tensor permuted = storage.aliasView(
-        {inner, outer, reduction}, {1, reduction * inner, inner}, 0);
-    std::shared_ptr<StampedCubReduction> stamped =
-        CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(permuted, stream);
-
-    ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
-    ASSERT_TRUE(stamped->getGeometry().tiled_output_shared_transpose);
-    stamped->run();
-    stream.synchronize();
-    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
+    StridedSpan permuted = StridedSpan(storage, 0, {inner, outer, reduction}, {1, reduction * inner, inner});
+    expectFloatVectorNear(executeRefusedViewInTwoParts(permuted, CubReductionOp::Sum, {2}, stream), expected);
 }
 
-TEST(CubReduction, SharedTransposePermutedTiledWriterSupportsStorageDTypesAndTailTiles) {
+TEST(CubReduction, RotatedOutputViewSupportsStorageDTypesAndTailTiles) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -1254,18 +1244,13 @@ TEST(CubReduction, SharedTransposePermutedTiledWriterSupportsStorageDTypesAndTai
     for (DataType dtype : input_dtypes) {
         SCOPED_TRACE(static_cast<int>(dtype));
         Tensor storage = makeGpuTensor(values, {outer, reduction, inner}, stream, dtype);
-        Tensor input = storage.aliasView(
-            {inner, outer, reduction}, {1, reduction * inner, inner}, 0);
-        std::shared_ptr<StampedCubReduction> stamped =
-            CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(input, stream);
-        ASSERT_TRUE(stamped->getGeometry().tiled_output_shared_transpose);
-        stamped->run();
-        stream.synchronize();
-        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected, 1.0e-4f);
+        StridedSpan input = StridedSpan(storage, 0, {inner, outer, reduction}, {1, reduction * inner, inner});
+        expectFloatVectorNear(
+            executeRefusedViewInTwoParts(input, CubReductionOp::Sum, {2}, stream), expected, 1.0e-4f);
     }
 }
 
-TEST(CubReduction, SharedTransposePermutedTiledWriterCoversRetainedWidthRegimes) {
+TEST(CubReduction, RotatedOutputViewCoversRetainedWidthRegimes) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -1304,20 +1289,13 @@ TEST(CubReduction, SharedTransposePermutedTiledWriterCoversRetainedWidthRegimes)
         }
 
         Tensor storage = makeGpuTensor(values, {outer, reduction, inner}, stream);
-        Tensor permuted = storage.aliasView(
-            {inner, outer, reduction}, {1, reduction * inner, inner}, 0);
-        std::shared_ptr<StampedCubReduction> stamped =
-            CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(permuted, stream);
-        ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
-        ASSERT_TRUE(stamped->getGeometry().tiled_output_shared_transpose);
-
-        stamped->run();
-        stream.synchronize();
-        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected, 1.0e-5f);
+        StridedSpan permuted = StridedSpan(storage, 0, {inner, outer, reduction}, {1, reduction * inner, inner});
+        expectFloatVectorNear(
+            executeRefusedViewInTwoParts(permuted, CubReductionOp::Sum, {2}, stream), expected, 1.0e-5f);
     }
 }
 
-TEST(CubReduction, SharedTransposePermutedTiledWriterHonorsDenseViewStorageOffset) {
+TEST(CubReduction, RotatedOutputViewHonorsDenseViewStorageOffset) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -1339,18 +1317,11 @@ TEST(CubReduction, SharedTransposePermutedTiledWriterHonorsDenseViewStorageOffse
     }
 
     Tensor storage = makeGpuTensor(storage_values, {storage_values.size()}, stream);
-    Tensor input = storage.aliasView(
-        {inner, outer, reduction}, {1, reduction * inner, inner}, offset);
-    std::shared_ptr<StampedCubReduction> stamped =
-        CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(input, stream);
-    ASSERT_TRUE(stamped->getGeometry().tiled_output_shared_transpose);
-
-    stamped->run();
-    stream.synchronize();
-    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
+    StridedSpan input = StridedSpan(storage, offset, {inner, outer, reduction}, {1, reduction * inner, inner});
+    expectFloatVectorNear(executeRefusedViewInTwoParts(input, CubReductionOp::Sum, {2}, stream), expected);
 }
 
-TEST(CubReduction, SharedTransposePermutedTiledWriterGridStridesPast65535OuterRows) {
+TEST(CubReduction, RotatedOutputViewGridStridesPast65535OuterRows) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -1359,15 +1330,8 @@ TEST(CubReduction, SharedTransposePermutedTiledWriterGridStridesPast65535OuterRo
     constexpr uint64_t inner = 33;
     std::vector<float> values(outer * reduction * inner, 1.0f);
     Tensor storage = makeGpuTensor(values, {outer, reduction, inner}, stream);
-    Tensor input = storage.aliasView(
-        {inner, outer, reduction}, {1, reduction * inner, inner}, 0);
-    std::shared_ptr<StampedCubReduction> stamped =
-        CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(input, stream);
-    ASSERT_TRUE(stamped->getGeometry().tiled_output_shared_transpose);
-
-    stamped->run();
-    stream.synchronize();
-    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
+    StridedSpan input = StridedSpan(storage, 0, {inner, outer, reduction}, {1, reduction * inner, inner});
+    expectFloatVectorNear(executeRefusedViewInTwoParts(input, CubReductionOp::Sum, {2}, stream),
                           std::vector<float>(inner * outer, 2.0f));
 }
 
@@ -1441,7 +1405,7 @@ TEST(CubReduction, ShallowOddLowPrecisionNonAdditiveRKRunsTheRetainedF16Pass) {
     }
 }
 
-TEST(CubReduction, PacketAdaptiveCooperativeTiledPathPreservesAdditiveTransformsAndFinalizers) {
+TEST(CubReduction, DenseRKShardGeometryPreservesAdditiveTransformsAndFinalizers) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -1453,9 +1417,9 @@ TEST(CubReduction, PacketAdaptiveCooperativeTiledPathPreservesAdditiveTransforms
                                  stream,
                                  DataType::BF16);
 
-    // This is the ordinary second-stage geometry produced by a 512-row shard of the deep transformer reduction.
-    // It is inside the release-calibrated packet-adaptive cooperative gate (8-byte BF16 packets, many cooperating
-    // warps) but still exercises the generic additive transforms/finalizers rather than a Sum-only special case.
+    // This is the ordinary second-stage geometry produced by a 512-row shard of the deep transformer reduction. It is
+    // dense, so the dense RK planner owns it (1385: the packet-adaptive tiled reducer that once claimed it is deleted);
+    // the test checks the generic additive transforms/finalizers rather than a Sum-only special case.
     const std::vector<OperationExpectation> expectations = {
         {CubReductionOp::Sum, std::vector<float>(inner_size, 205.0f), 0.0f},
         {CubReductionOp::Mean, std::vector<float>(inner_size, 1.0f), 0.0f},
@@ -1551,7 +1515,7 @@ TEST(CubReduction, ModernDenseRKOwnsFormerRowSplitBoundaryShapes) {
     }
 }
 
-TEST(CubReduction, PermutationAwareTiledPathCoversTunedWidthPolicies) {
+TEST(CubReduction, PermutedOutputViewsCoverTheFormerTiledWidthPolicies) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -1574,19 +1538,9 @@ TEST(CubReduction, PermutationAwareTiledPathCoversTunedWidthPolicies) {
         }
 
         Tensor storage = makeGpuTensor(values, {outer_size, reduction_size, inner_size}, stream);
-        Tensor permuted = storage.aliasView(
-            {inner_size, outer_size, reduction_size},
-            {1, reduction_size * inner_size, inner_size},
-            0);
-        std::shared_ptr<StampedCubReduction> stamped =
-            CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(permuted, stream);
-        ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
-        ASSERT_TRUE(stamped->getGeometry().permutation_aware_tiled_geometry.has_value());
-        EXPECT_TRUE(stamped->getGeometry().tiled_output_permuted);
-        EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 0U);
-        stamped->run();
-        stream.synchronize();
-        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
+        StridedSpan permuted = StridedSpan(storage, 0, {inner_size, outer_size, reduction_size}, {1, reduction_size * inner_size, inner_size});
+        // 1390: the reducer refuses the view; the caller's two parts (the dense plan of the bytes, then the copy).
+        expectFloatVectorNear(executeRefusedViewInTwoParts(permuted, CubReductionOp::Sum, {2}, stream), expected);
     }
 }
 

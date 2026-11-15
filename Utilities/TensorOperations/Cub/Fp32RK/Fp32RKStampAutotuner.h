@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/Tensor/StridedSpan.h"
+
 // 1192: stamp-time selection of retained FP32 RK VALUE first stages (plans/Thor_FP32_Dense_Reduction_Plan, phase 5).
 // The FP8 RK selector's pattern at element size 4: the candidates are the FP32 pool's shortlist (Fp32RKCandidates.h:
 // the trained FP32 ranker's top N, or without one the pool's family round-robin prefix at the FP8 RK depths, Quick 6,
@@ -36,7 +38,7 @@ using Fp32RKSelection = Fp8RK::Fp8RKSelection;
                                                 CubReductionOp operation,
                                                 uint64_t original_reduction_size,
                                                 float output_scale,
-                                                const Tensor& representative_input,
+                                                const StridedSpan& representative_input,
                                                 const Stream& stream,
                                                 uint64_t workspace_budget_bytes = std::numeric_limits<uint64_t>::max(),
                                                 CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular,
@@ -69,7 +71,7 @@ using Fp32RKSelection = Fp8RK::Fp8RKSelection;
                                               DenseReductionSite site,
                                               bool maximum,
                                               uint64_t original_reduction_size,
-                                              const Tensor& representative_input,
+                                              const StridedSpan& representative_input,
                                               const Stream& stream,
                                               uint64_t workspace_budget_bytes = std::numeric_limits<uint64_t>::max(),
                                               CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular,

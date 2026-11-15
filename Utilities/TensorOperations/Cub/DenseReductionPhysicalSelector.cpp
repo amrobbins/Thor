@@ -112,6 +112,19 @@ void warnMisalignedF16Input(const DensePhysicalSelectionContext& context) {
     });
 }
 
+// 1378: as warnMisalignedFp32Input, for an original FP8 RK site.
+void warnMisalignedFp8Input(const DensePhysicalSelectionContext& context) {
+    if (context.original_input_alignment_bytes >= 16) return;
+    static std::once_flag once;
+    std::call_once(once, [&] {
+        std::cerr << "Thor: an FP8 reduction input starts on a " << context.original_input_alignment_bytes
+                  << "-byte boundary, not a 16-byte one; its RK passes run on alignment-tolerant kernels, which can be "
+                     "slower. Allocate reduction inputs (and views of them) on 16-byte boundaries for the fastest "
+                     "kernels. (Printed once per process.)"
+                  << std::endl;
+    });
+}
+
 // 1254: an original FP16 / BF16 site (the retained FP16 / BF16 routing's domain).
 bool isOriginalF16Site(const DenseReductionProblem& problem, const DensePhysicalSelectionContext& context) {
     return problem.input_state == DenseReductionInputState::OriginalInput &&
@@ -209,10 +222,13 @@ DenseReductionCandidate selectDensePhysicalPass(const DenseReductionProblem& pro
         // for the independently planned final reduction.
         if (context.tuning_stream == nullptr || context.original_reduction_size == 0)
             throw std::logic_error("Retained FP8 RK production requires a tuning stream and original reduction size");
+        // 1378: the passes that read at the input's alignment (Fp8RK::fp8RKPassInputAlignment), as FP32 / FP16.
+        warnMisalignedFp8Input(context);
         const auto selected = Fp8RK::selectCachedIsolatedRKSite(
             problem, site, *context.original_value_operation, context.original_reduction_size,
             context.output_scale, context.rk.original_input_dtype, *context.tuning_stream,
-            context.max_workspace_bytes, context.tuning_depth);
+            context.max_workspace_bytes, context.tuning_depth,
+            std::max<uint64_t>(context.original_input_alignment_bytes, 1));
         return makeRetainedFp8RKPhysicalCandidate(problem, site, selected.physical, context);
     }
     // 1142: original FP8 RK ARG ranks and autotunes its own retained ARG passes (Fp8RK::selectCachedArgRKSite).
@@ -231,9 +247,11 @@ DenseReductionCandidate selectDensePhysicalPass(const DenseReductionProblem& pro
             throw std::logic_error("Retained FP8 ARG selection requires MIN (argmin) or MAX (argmax)");
         if (context.tuning_stream == nullptr || context.original_reduction_size == 0)
             throw std::logic_error("Retained FP8 ARG selection requires a tuning stream and original reduction size");
+        warnMisalignedFp8Input(context);  // 1379
         const auto selected = Fp8RK::selectCachedArgRKSite(
             problem, site, *context.original_value_operation == CubReductionOp::Max, context.original_reduction_size,
-            context.rk.original_input_dtype, *context.tuning_stream, context.max_workspace_bytes, context.tuning_depth);
+            context.rk.original_input_dtype, *context.tuning_stream, context.max_workspace_bytes, context.tuning_depth,
+            std::max<uint64_t>(context.original_input_alignment_bytes, 1));
         if (selected.candidate_count == 0)
             throw std::logic_error("Retained FP8 ARG selection found no legal retained ARG pass for this RK site "
                                    "(beyond the retained kernels' grid limits); FP8 has no generic ARG fallback");

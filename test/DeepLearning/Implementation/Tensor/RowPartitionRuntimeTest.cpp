@@ -171,9 +171,3 @@ TEST(RowPartitionRuntime, ConstructorRequiresDescriptorMatchingCanonicalOffsetsA
     EXPECT_THROW((void)RowPartitionRuntime(offsets, RowPartitionDescriptor(3, 9, DataType::UINT64)), std::logic_error);
 }
 
-TEST(RowPartitionRuntime, RejectsOffsetsViewsSoRuntimeStateHasOneCanonicalOwner) {
-    constexpr uint64_t batchSize = 3;
-    Tensor offsets(TensorPlacement(TensorPlacement::MemDevices::CPU), TensorDescriptor(DataType::UINT32, {batchSize + 1}));
-    Tensor offsetsView = offsets.aliasView({batchSize + 1}, {1}, 0);
-    EXPECT_THROW((void)RowPartitionRuntime(offsetsView, RowPartitionDescriptor(batchSize, 9, DataType::UINT32)), std::logic_error);
-}

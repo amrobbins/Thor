@@ -7,6 +7,7 @@
 #include "DeepLearning/Implementation/Data/Materialization/MaterializedNamedDatasetSnapshot.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentWindowMaterializationKernel.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Tensor/TensorSpan.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensor.h"
 
 #include <cstdint>
@@ -100,7 +101,7 @@ class DeviceResidentNamedDataset {
 
     [[nodiscard]] RaggedBatchExtent validateCompactRaggedBatchCapacity(
         const std::string &fieldName,
-        const ThorImplementation::Tensor &rowIndicesHost,
+        const ThorImplementation::TensorSpan &rowIndicesHost,
         uint64_t logicalRows,
         uint64_t maxTotalValues,
         uint64_t maxValuesPerRow = 0) const;
@@ -109,14 +110,14 @@ class DeviceResidentNamedDataset {
     // authoritative host partition for this selected batch.
     void enqueueCompactRaggedFieldMaterialization(
         const std::string &fieldName,
-        const ThorImplementation::Tensor &rowIndicesDevice,
+        const ThorImplementation::TensorSpan &rowIndicesDevice,
         uint64_t logicalRows,
         ThorImplementation::RaggedTensor &destination,
         Stream &stream) const;
 
     [[nodiscard]] RaggedBatchExtent validateSnapshotRaggedBatchCapacity(
         const std::string &fieldName,
-        const ThorImplementation::Tensor &rowIndicesHost,
+        const ThorImplementation::TensorSpan &rowIndicesHost,
         uint64_t logicalRows,
         uint64_t maxTotalValues,
         uint64_t maxValuesPerRow = 0) const;
@@ -125,7 +126,7 @@ class DeviceResidentNamedDataset {
     // authoritative host partition for this selected batch.
     void enqueueSnapshotRaggedFieldMaterialization(
         const std::string &fieldName,
-        const ThorImplementation::Tensor &rowIndicesDevice,
+        const ThorImplementation::TensorSpan &rowIndicesDevice,
         uint64_t logicalRows,
         ThorImplementation::RaggedTensor &destination,
         Stream &stream) const;
@@ -134,18 +135,18 @@ class DeviceResidentNamedDataset {
     [[nodiscard]] std::optional<std::string> compactWindowPlanNameForField(
         const std::string &fieldName) const;
     [[nodiscard]] uint64_t compactWindowPlanBytesPerRow(const std::string &planName) const;
-    // Stage exactly logicalRows descriptors.  The destination may be a byte
-    // tensor or an aligned UINT64 alias into a larger selection-metadata block.
+    // Stage exactly logicalRows descriptors.  The destination may be a whole byte
+    // tensor or a UINT64 span of a larger selection-metadata block.
     void stageCompactWindowPlan(
         const std::string &planName,
-        const ThorImplementation::Tensor &rowIndicesHost,
+        const ThorImplementation::TensorSpan &rowIndicesHost,
         uint64_t logicalRows,
-        ThorImplementation::Tensor &planHostStaging) const;
+        const ThorImplementation::TensorSpan &planHostStaging) const;
 
     void enqueueCompactFieldMaterialization(
         const std::string &fieldName,
-        const ThorImplementation::Tensor &rowIndicesDevice,
-        const ThorImplementation::Tensor &windowPlanDevice,
+        const ThorImplementation::TensorSpan &rowIndicesDevice,
+        const ThorImplementation::TensorSpan &windowPlanDevice,
         uint64_t logicalRows,
         ThorImplementation::Tensor &destination,
         Stream &stream) const;

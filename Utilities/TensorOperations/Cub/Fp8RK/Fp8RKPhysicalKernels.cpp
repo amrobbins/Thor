@@ -4,7 +4,7 @@
 
 namespace ThorImplementation::CubReductionInternal::Fp8RK {
 void launchPhysicalFirstStage(const PhysicalKernel& p, const CubReductionStageSemantics& semantics,
-                              const Tensor& input, Tensor& output,
+                              const StridedSpan& input, const StridedSpan& output,
                               const CubReductionGeometry& geometry, float output_scale,
                               Stream& stream) {
     switch (p.family) {

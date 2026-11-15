@@ -303,6 +303,7 @@ TEST(RaggedMergePath, RaggedSelectionKindsAreReserved) {
     using ThorImplementation::CubReductionInternal::denseReductionSelectionKindName;
     EXPECT_EQ(std::string(denseReductionSelectionKindName(DenseReductionSelectionKind::RaggedKR)), "ragged_kr");
     EXPECT_EQ(std::string(denseReductionSelectionKindName(DenseReductionSelectionKind::RaggedRK)), "ragged_rk");
+    // RaggedRK is the last kind (1366-1370 had StridedR after it; 1371 removed it).
     EXPECT_EQ(static_cast<size_t>(DenseReductionSelectionKind::RaggedRK) + 1,
               ThorImplementation::CubReductionInternal::DenseReductionSelectionKindCount);
 }

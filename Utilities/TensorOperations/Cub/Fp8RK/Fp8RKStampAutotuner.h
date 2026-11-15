@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/Tensor/StridedSpan.h"
+
 #include "Utilities/TensorOperations/Cub/CubReductionTuningDepth.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalSelection.h"
 
@@ -19,10 +21,11 @@ namespace ThorImplementation::CubReductionInternal::Fp8RK {
     CubReductionOp operation,
     uint64_t original_reduction_size,
     float output_scale,
-    const Tensor& representative_input,
+    const StridedSpan& representative_input,
     const Stream& stream,
     uint64_t workspace_budget_bytes,
-    CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular);
+    CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular,
+    uint64_t input_alignment_bytes = 16);
 
 // Production selection: reuse the GEMM-style, bounded process-wide recipe
 // cache and coalesce concurrent misses. This legacy Tensor overload validates
@@ -34,10 +37,11 @@ namespace ThorImplementation::CubReductionInternal::Fp8RK {
     CubReductionOp operation,
     uint64_t original_reduction_size,
     float output_scale,
-    const Tensor& representative_input,
+    const StridedSpan& representative_input,
     const Stream& stream,
     uint64_t workspace_budget_bytes,
-    CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular);
+    CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular,
+    uint64_t input_alignment_bytes = 16);
 
 // 1142: FP8 ARG's own ranked, autotuned selection at an original FP8 ARG RK site (benchmarks may call it directly).
 // The recipe's `physical` is the winner's ARG identity (retainedFp8ArgPlanForIdentity rebuilds the pass);
@@ -47,9 +51,10 @@ namespace ThorImplementation::CubReductionInternal::Fp8RK {
     DenseReductionSite site,
     bool maximum,
     uint64_t original_reduction_size,
-    const Tensor& representative_input,
+    const StridedSpan& representative_input,
     const Stream& stream,
     uint64_t workspace_budget_bytes,
-    CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular);
+    CubReductionTuningDepth tuning_depth = CubReductionTuningDepth::Regular,
+    uint64_t input_alignment_bytes = 16);
 
 } // namespace ThorImplementation::CubReductionInternal::Fp8RK

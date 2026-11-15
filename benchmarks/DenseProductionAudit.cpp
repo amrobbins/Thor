@@ -20,6 +20,7 @@
 // Output: '#' header lines (settings, device, copy curve) and one CSV row per cell. benchmarks/dense_production_audit.py
 // reports it.
 #include "benchmarks/ColdTiming.h"
+#include "Utilities/TensorOperations/Cub/ReductionAutotunerCore.h"
 #include "benchmarks/Fp8OracleBatchQueue.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Cub/CubReductionTuningDepth.h"
@@ -270,8 +271,8 @@ struct Cell {
     CellSpec spec;
     std::shared_ptr<T::StampedCubReduction> value_stamp;
     std::shared_ptr<T::StampedCubArgReduction> arg_stamp;
-    std::vector<T::Tensor> inputs;
-    std::vector<std::optional<T::Tensor>> values, indices;
+    std::vector<T::StridedSpan> inputs;  // views of the input ring
+    std::vector<std::optional<T::StridedSpan>> values, indices;  // views of the output ring
     size_t next_input = 0, next_output = 0;
     uint64_t input_bytes = 0, moved_bytes = 0, launches = 1;
     double stamp_ms = 0, probe_us = 0, copy_us = 0;
@@ -281,7 +282,7 @@ struct Cell {
 };
 
 void runOnce(Cell& cell, Stream& stream) {
-    const T::Tensor& input = cell.inputs[cell.next_input];
+    const T::StridedSpan& input = cell.inputs[cell.next_input];
     cell.next_input = (cell.next_input + 1) % cell.inputs.size();
     const size_t o = cell.next_output;
     cell.next_output = (cell.next_output + 1) % cell.values.size();
@@ -316,9 +317,12 @@ int main(int argc, char** argv) {
         check(cudaGetDeviceProperties(&properties, 0), "device properties");
         const T::ScopedCubReductionTuningDepth depth_scope(settings.depth);
 
-        // Outputs: value FP32 [outputs], then (256-byte aligned) index UINT32 [outputs].
+        // Outputs: value FP32 [outputs], then index UINT32 [outputs] at nextSliceOffset (256-byte aligned, at least 128
+        // bytes past the value, as production lays them out).
         const auto footprint = [&](const CellSpec& c) {
-            const uint64_t value = (!c.op->arg || settings.arg_value_index) ? align256(4 * c.outputs()) : 0;
+            const uint64_t value = (!c.op->arg || settings.arg_value_index)
+                                       ? T::ReductionAutotuning::nextSliceOffset(4 * c.outputs())
+                                       : 0;
             const uint64_t index = c.op->arg ? 4 * c.outputs() : 0;
             return value + index;
         };
@@ -412,17 +416,17 @@ int main(int argc, char** argv) {
                     cell->inputs.push_back(inputs.view(settings.dtype->dtype, c.dims(), inputs.take(cell->input_bytes)));
                 const uint64_t out_bytes = footprint(c);
                 const bool has_value = !c.op->arg || settings.arg_value_index;
-                const uint64_t index_offset = has_value ? align256(4 * c.outputs()) : 0;
+                const uint64_t index_offset = has_value ? T::ReductionAutotuning::nextSliceOffset(4 * c.outputs()) : 0;
                 std::vector<uint64_t> out_dims = c.dims();
                 out_dims.erase(out_dims.begin() + c.axis());
                 if (out_dims.empty()) out_dims.push_back(1);
                 for (uint64_t v = 0, count = B::ColdTiming::viewCount(out_bytes, OutputReuseBytes, outputs.bytes());
                      v < count; ++v) {
                     const uint64_t base = outputs.take(out_bytes);
-                    cell->values.push_back(has_value ? std::optional<T::Tensor>(
+                    cell->values.push_back(has_value ? std::optional<T::StridedSpan>(
                                                            outputs.view(T::DataType::FP32, out_dims, base))
                                                      : std::nullopt);
-                    cell->indices.push_back(c.op->arg ? std::optional<T::Tensor>(outputs.view(
+                    cell->indices.push_back(c.op->arg ? std::optional<T::StridedSpan>(outputs.view(
                                                             T::DataType::UINT32, out_dims, base + index_offset))
                                                       : std::nullopt);
                 }

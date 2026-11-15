@@ -205,9 +205,6 @@ void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor, u
     this->placement = placement;
 
     this->descriptor = descriptor;
-    storageElementOffset = 0;
-    storageNumElements = descriptor.getTotalNumElements();
-    customStridesElements.clear();
     descriptorOverridden = false;
 
     backingMemory = std::make_shared<BackingMemory>(placement);
@@ -321,14 +318,6 @@ static uint8_t *dataPointerWithElementOffset(void *mem, DataType dataType, uint6
     return static_cast<uint8_t *>(mem) + elementOffset * elementSizeBytes;
 }
 
-static const uint8_t *dataPointerWithElementOffset(const void *mem, DataType dataType, uint64_t elementOffset) {
-    if (elementOffset == 0) {
-        return static_cast<const uint8_t *>(mem);
-    }
-    const uint64_t elementSizeBytes = checkedWholeByteElementSizeBytes(dataType, "Tensor storage offsets");
-    return static_cast<const uint8_t *>(mem) + elementOffset * elementSizeBytes;
-}
-
 static std::vector<uint64_t> denseStridesForDims(const std::vector<uint64_t> &dims) {
     if (dims.empty()) {
         throw std::runtime_error("Tensor dense strides require non-empty dimensions.");
@@ -341,28 +330,6 @@ static std::vector<uint64_t> denseStridesForDims(const std::vector<uint64_t> &di
         strides[static_cast<size_t>(i)] = strides[static_cast<size_t>(i) + 1] * dims[static_cast<size_t>(i) + 1];
     }
     return strides;
-}
-
-static uint64_t maxElementOffsetForView(const std::vector<uint64_t> &dims, const std::vector<uint64_t> &strides) {
-    if (dims.size() != strides.size() || dims.empty()) {
-        throw std::runtime_error("Tensor alias view dimensions/strides must have the same non-zero rank.");
-    }
-    uint64_t maxOffset = 0;
-    for (size_t i = 0; i < dims.size(); ++i) {
-        if (dims[i] == 0) {
-            throw std::runtime_error("Tensor alias view dimensions must be non-zero.");
-        }
-        const uint64_t extentMinusOne = dims[i] - 1;
-        if (extentMinusOne != 0 && strides[i] > std::numeric_limits<uint64_t>::max() / extentMinusOne) {
-            throw std::runtime_error("Tensor alias view stride extent overflowed.");
-        }
-        const uint64_t axisMax = extentMinusOne * strides[i];
-        if (maxOffset > std::numeric_limits<uint64_t>::max() - axisMax) {
-            throw std::runtime_error("Tensor alias view max offset overflowed.");
-        }
-        maxOffset += axisMax;
-    }
-    return maxOffset;
 }
 
 template <typename ElementDataType>
@@ -412,7 +379,7 @@ ElementDataType *Tensor::getMemPtr() {
             THOR_UNREACHABLE();
     }
     return reinterpret_cast<ElementDataType *>(
-        dataPointerWithElementOffset(getBaseMemPtr(), descriptor.getDataType(), storageElementOffset));
+        static_cast<uint8_t *>(getBaseMemPtr()));
 }
 
 template <typename ElementDataType>
@@ -462,7 +429,7 @@ const ElementDataType *Tensor::getMemPtr() const {
     }
 
     return reinterpret_cast<const ElementDataType *>(
-        dataPointerWithElementOffset(getBaseMemPtr(), descriptor.getDataType(), storageElementOffset));
+        static_cast<const uint8_t *>(getBaseMemPtr()));
 }
 
 template <typename ElementDataType>
@@ -594,7 +561,7 @@ ElementDataType *Tensor::getElementPointer(std::vector<unsigned long> dimensionI
     const std::vector<uint64_t> dims = getDimensions();
     const std::vector<uint64_t> strides = getStridesElements();
     THOR_THROW_IF_FALSE(dimensionIndex.size() <= dims.size());
-    uint64_t elementOffset = storageElementOffset;
+    uint64_t elementOffset = 0;
     for (size_t i = 0; i < dimensionIndex.size(); ++i) {
         THOR_THROW_IF_FALSE(dimensionIndex[i] < dims[i]);
         elementOffset += dimensionIndex[i] * strides[i];
@@ -603,95 +570,16 @@ ElementDataType *Tensor::getElementPointer(std::vector<unsigned long> dimensionI
 }
 
 // Use same memory, but change dimension sizes, must be exactly the same number of elements.
-void Tensor::reshape(vector<unsigned long> dimensions) {
-    descriptor.reshape(dimensions);
-    if (customStridesElements.empty()) {
-        // TensorDescriptor::reshape preserves the original descriptor stride cache. Keep view-stride
-        // queries correct by computing dense strides from the current visible dimensions on demand.
-        return;
-    }
-    customStridesElements = denseStridesForDims(dimensions);
-}
-
-Tensor Tensor::aliasView(vector<unsigned long> dimensions, vector<unsigned long> strides_elements, uint64_t element_offset) const {
-    THOR_THROW_IF_FALSE(isInitialized());
-    (void)checkedWholeByteElementSizeBytes(descriptor.getDataType(), "Tensor::aliasView");
-    if (dimensions.empty() || dimensions.size() != strides_elements.size()) {
-        throw std::runtime_error("Tensor::aliasView requires dimensions and strides with the same non-zero rank.");
-    }
-    for (uint64_t dim : dimensions) {
-        if (dim == 0) {
-            throw std::runtime_error("Tensor::aliasView dimensions must be non-zero.");
-        }
-    }
-    const uint64_t maxRelativeOffset = maxElementOffsetForView(dimensions, strides_elements);
-    if (element_offset > std::numeric_limits<uint64_t>::max() - maxRelativeOffset) {
-        throw std::runtime_error("Tensor::aliasView offset overflowed.");
-    }
-    const uint64_t totalVisibleMaxOffset = element_offset + maxRelativeOffset;
-    if (storageElementOffset > std::numeric_limits<uint64_t>::max() - totalVisibleMaxOffset) {
-        throw std::runtime_error("Tensor::aliasView base offset overflowed.");
-    }
-    const uint64_t sourceAllocationElements = storageNumElements;
-    if (storageElementOffset + totalVisibleMaxOffset >= sourceAllocationElements) {
-        throw std::runtime_error("Tensor::aliasView would address beyond the source tensor allocation.");
-    }
-
-    Tensor view = *this;
-    view.descriptor = TensorDescriptor(descriptor.getDataType(), dimensions);
-    view.storageElementOffset = storageElementOffset + element_offset;
-    view.customStridesElements = std::move(strides_elements);
-    return view;
-}
-
-Tensor Tensor::aliasByteStorageAs(DataType data_type,
-                                  std::vector<uint64_t> dimensions,
-                                  uint64_t byte_offset) const {
-    THOR_THROW_IF_FALSE(isInitialized());
-    if (descriptor.getDataType() != DataType::UINT8 || descriptor.getNumDimensions() != 1 ||
-        !isDenseContiguous()) {
-        throw std::runtime_error("Tensor::aliasByteStorageAs requires a contiguous flat UINT8 tensor");
-    }
-    const uint64_t element_bytes = checkedWholeByteElementSizeBytes(
-        data_type, "Tensor::aliasByteStorageAs");
-    const uint64_t visible_bytes = descriptor.getArraySizeInBytes();
-    // The source is UINT8: its storage-element offset is a byte offset.
-    // Validate the source view before computing an absolute byte offset.
-    if (storageElementOffset > storageNumElements ||
-        visible_bytes > storageNumElements - storageElementOffset) {
-        throw std::runtime_error("Tensor::aliasByteStorageAs source view exceeds backing storage");
-    }
-    TensorDescriptor view_descriptor(data_type, dimensions);
-    const uint64_t view_bytes = view_descriptor.getArraySizeInBytes();
-    if (view_bytes == 0 || byte_offset > visible_bytes ||
-        view_bytes > visible_bytes - byte_offset) {
-        throw std::runtime_error("Tensor::aliasByteStorageAs exceeds source byte view");
-    }
-    const uint64_t absolute_byte_offset = storageElementOffset + byte_offset;
-    if (absolute_byte_offset % element_bytes != 0) {
-        throw std::runtime_error("Tensor::aliasByteStorageAs requires aligned whole-element storage");
-    }
-    // All visible typed elements fit inside the allocation, even if its
-    // trailing byte count isn't a multiple of the destination element size.
-    Tensor view = *this;
-    view.descriptor = std::move(view_descriptor);
-    view.storageElementOffset = absolute_byte_offset / element_bytes;
-    view.storageNumElements = storageNumElements / element_bytes;
-    view.customStridesElements.clear();
-    return view;
-}
+void Tensor::reshape(vector<unsigned long> dimensions) { descriptor.reshape(dimensions); }
 
 std::vector<uint64_t> Tensor::getStridesElements() const {
     THOR_THROW_IF_FALSE(isInitialized());
-    if (!customStridesElements.empty()) {
-        return customStridesElements;
-    }
     return denseStridesForDims(getDimensions());
 }
 
 bool Tensor::isDenseContiguous() const {
     THOR_THROW_IF_FALSE(isInitialized());
-    return getStridesElements() == denseStridesForDims(getDimensions());
+    return true;
 }
 
 bool Tensor::isAligned(uint64_t bytes) const {
@@ -719,6 +607,62 @@ void Tensor::copyFromAsync(Tensor source, Stream stream) {
         THOR_THROW_IF_FALSE(stream.getGpuNum() == devicesInvolved[0] ||
                             (devicesInvolved.size() == 2 && stream.getGpuNum() == devicesInvolved[1]));
     copyFromAsyncImpl(source, stream);
+}
+
+// One same-type byte copy between any two placements, on copyStream.
+static void copyBytesAsync(void *destMem,
+                           const TensorPlacement &destPlacement,
+                           const void *sourceMem,
+                           const TensorPlacement &sourcePlacement,
+                           uint64_t numBytes,
+                           Stream copyStream) {
+    const bool sourceOnGpu = sourcePlacement.getMemDevice() == TensorPlacement::MemDevices::GPU;
+    const bool destOnGpu = destPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU;
+    if (!sourceOnGpu && !destOnGpu) {
+        ScopedGpu scopedGpu(0);  // CPU local stream belongs to gpu 0
+        CUDA_CHECK(cudaMemcpyAsync(destMem, sourceMem, numBytes, cudaMemcpyHostToHost, copyStream.getStream()));
+    } else if (!sourceOnGpu) {
+        ScopedGpu scopedGpu(destPlacement.getDeviceNum());
+        CUDA_CHECK(cudaMemcpyAsync(destMem, sourceMem, numBytes, cudaMemcpyHostToDevice, copyStream.getStream()));
+    } else if (!destOnGpu) {
+        ScopedGpu scopedGpu(sourcePlacement.getDeviceNum());
+        CUDA_CHECK(cudaMemcpyAsync(destMem, sourceMem, numBytes, cudaMemcpyDeviceToHost, copyStream.getStream()));
+    } else if (destPlacement.getDeviceNum() == sourcePlacement.getDeviceNum()) {
+        ScopedGpu scopedGpu(destPlacement.getDeviceNum());
+        CUDA_CHECK(cudaMemcpyAsync(destMem, sourceMem, numBytes, cudaMemcpyDeviceToDevice, copyStream.getStream()));
+    } else {
+        ScopedGpu scopedGpu(destPlacement.getDeviceNum());
+        CUDA_CHECK(cudaMemcpyPeerAsync(
+            destMem, destPlacement.getDeviceNum(), sourceMem, sourcePlacement.getDeviceNum(), numBytes, copyStream.getStream()));
+    }
+}
+
+void Tensor::copyElementsFromAsync(Tensor source, uint64_t numElements, Stream stream) {
+    THOR_THROW_IF_FALSE(!uninitialized());
+    THOR_THROW_IF_FALSE(!source.uninitialized());
+    if (source.getDataType() != getDataType()) {
+        throw std::invalid_argument("Tensor::copyElementsFromAsync requires source and destination of the same data type.");
+    }
+    if (numElements > source.getTotalNumElements() || numElements > getTotalNumElements()) {
+        throw std::invalid_argument("Tensor::copyElementsFromAsync copies " + to_string(numElements) + " elements, but the source holds " +
+                                    to_string(source.getTotalNumElements()) + " and the destination " + to_string(getTotalNumElements()) +
+                                    ".");
+    }
+    if (numElements == 0 || (source.getTensorId() == getTensorId() && source.getMemPtr<void>() == getMemPtr<void>())) {
+        return;
+    }
+    vector<int> devicesInvolved;
+    if (source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU)
+        devicesInvolved.push_back(source.getPlacement().getDeviceNum());
+    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU)
+        devicesInvolved.push_back(getPlacement().getDeviceNum());
+    if (!devicesInvolved.empty())
+        THOR_THROW_IF_FALSE(stream.getGpuNum() == devicesInvolved[0] ||
+                            (devicesInvolved.size() == 2 && stream.getGpuNum() == devicesInvolved[1]));
+
+    const uint64_t elementBytes = getArraySizeInBytes() / getTotalNumElements();
+    THOR_THROW_IF_FALSE(elementBytes * getTotalNumElements() == getArraySizeInBytes());
+    copyBytesAsync(getMemPtr<void>(), placement, source.getMemPtr<void>(), source.placement, numElements * elementBytes, stream);
 }
 
 void Tensor::downloadSection(Tensor &source, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes) {
@@ -779,7 +723,9 @@ void Tensor::copyFromAsyncImpl(Tensor source, Stream copyStream) {
     THOR_THROW_IF_FALSE(!uninitialized());
     THOR_THROW_IF_FALSE(!source.uninitialized());
 
-    if (source.getTensorId() == getTensorId() && source.getDescriptor().getDataType() == getDescriptor().getDataType()) {
+    void *destMem = getMemPtr<void>();
+    void *sourceMem = source.getMemPtr<void>();
+    if (destMem == sourceMem && source.getDescriptor().getDataType() == getDescriptor().getDataType()) {
         return;
     }
 
@@ -788,8 +734,6 @@ void Tensor::copyFromAsyncImpl(Tensor source, Stream copyStream) {
     // must have the same number of elements
     TensorDescriptor sourceDescriptor = source.getDescriptor();
     TensorDescriptor destDescriptor = getDescriptor();
-    void *destMem = getBaseMemPtr();
-    void *sourceMem = source.getBaseMemPtr();
     if (sourceDescriptor.getTotalNumElements() != destDescriptor.getTotalNumElements()) {
         printf("Error: total number of elements does not match when copying tensors.\n source dimensions %s\n dest dimensions %s\n",
                source.dimensionsToString().c_str(),
@@ -849,12 +793,10 @@ void Tensor::copyFromAsyncImpl(Tensor source, Stream copyStream) {
 
     if (source.placement.getMemDevice() == TensorPlacement::MemDevices::CPU &&
         placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
-        ScopedGpu scopedGpu(0);  // CPU local stream belongs to gpu 0
-
         if (sourceDescriptor.getDataType() == destDescriptor.getDataType()) {
-            CUDA_CHECK(
-                cudaMemcpyAsync(destMem, sourceMem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyHostToHost, copyStream.getStream()));
+            copyBytesAsync(destMem, placement, sourceMem, source.placement, sourceDescriptor.getArraySizeInBytes(), copyStream);
         } else {
+            ScopedGpu scopedGpu(0);  // CPU local stream belongs to gpu 0
             // Convert between data types on cpu.
             // Note that this may be an in-place conversion
             TypeConverter::convertType(source,
@@ -866,26 +808,18 @@ void Tensor::copyFromAsyncImpl(Tensor source, Stream copyStream) {
         }
     } else if (source.placement.getMemDevice() == TensorPlacement::MemDevices::CPU &&
                placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
-        ScopedGpu scopedGpu(destDeviceNum);
-
-        CUDA_CHECK(
-            cudaMemcpyAsync(destMem, sourceMem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyHostToDevice, copyStream.getStream()));
+        copyBytesAsync(destMem, placement, sourceMem, source.placement, sourceDescriptor.getArraySizeInBytes(), copyStream);
     } else if (source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU &&
                placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
-        ScopedGpu scopedGpu(sourceDeviceNum);
-
-        CUDA_CHECK(
-            cudaMemcpyAsync(destMem, sourceMem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyDeviceToHost, copyStream.getStream()));
+        copyBytesAsync(destMem, placement, sourceMem, source.placement, sourceDescriptor.getArraySizeInBytes(), copyStream);
     } else if (source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU &&
                placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
         if (destDeviceNum == sourceDeviceNum) {
             // Local copy
-            ScopedGpu scopedGpu(destDeviceNum);
-
             if (sourceDescriptor.getDataType() == destDescriptor.getDataType()) {
-                CUDA_CHECK(cudaMemcpyAsync(
-                    destMem, sourceMem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyDeviceToDevice, copyStream.getStream()));
+                copyBytesAsync(destMem, placement, sourceMem, source.placement, sourceDescriptor.getArraySizeInBytes(), copyStream);
             } else {
+                ScopedGpu scopedGpu(destDeviceNum);
                 // Convert between data types on device.
                 // Note that this may be an in-place conversion
                 TypeConverter::convertType(sourceMem,
@@ -898,10 +832,7 @@ void Tensor::copyFromAsyncImpl(Tensor source, Stream copyStream) {
             }
         } else {
             // Cross device copy
-            ScopedGpu scopedGpu(destDeviceNum);
-
-            CUDA_CHECK(cudaMemcpyPeerAsync(
-                destMem, destDeviceNum, sourceMem, sourceDeviceNum, sourceDescriptor.getArraySizeInBytes(), copyStream.getStream()));
+            copyBytesAsync(destMem, placement, sourceMem, source.placement, sourceDescriptor.getArraySizeInBytes(), copyStream);
         }
     } else {
         THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
@@ -1071,6 +1002,46 @@ void Tensor::memsetAsync(Stream stream, int8_t value, uint64_t numElements) {
     } else {
         std::unique_ptr<HostFunctionArgsBase> args(new MemsetArgs(*this, value, numElements));
         stream.enqueueHostFunction(callMemsetOnTensor, std::move(args));
+    }
+}
+
+struct MemsetBytesArgs : HostFunctionArgsBase {
+    MemsetBytesArgs(Tensor tensor, int8_t value, uint64_t firstByte, uint64_t numBytes)
+        : tensor(tensor), value(value), firstByte(firstByte), numBytes(numBytes) {}
+    Tensor tensor;  // keeps the storage alive until the host function runs
+    int8_t value;
+    uint64_t firstByte;
+    uint64_t numBytes;
+};
+
+void callMemsetBytesOnTensor(void *data) {
+    MemsetBytesArgs *args = dynamic_cast<MemsetBytesArgs *>(static_cast<HostFunctionArgsBase *>(data));
+    THOR_THROW_IF_FALSE(args != nullptr);
+    ::memset(static_cast<uint8_t *>(args->tensor.getMemPtr<void>()) + args->firstByte, args->value, args->numBytes);
+}
+
+void Tensor::memsetElementsAsync(Stream stream, int8_t value, uint64_t firstElement, uint64_t numElements) {
+    THOR_THROW_IF_FALSE(!uninitialized());
+    const uint64_t totalElements = getTotalNumElements();
+    if (firstElement > totalElements || numElements > totalElements - firstElement) {
+        throw std::invalid_argument("Tensor::memsetElementsAsync range [" + to_string(firstElement) + ", " +
+                                    to_string(firstElement) + " + " + to_string(numElements) + ") is outside the tensor's " +
+                                    to_string(totalElements) + " elements.");
+    }
+    if (numElements == 0) {
+        return;
+    }
+    const uint64_t elementBytes = getArraySizeInBytes() / totalElements;
+    THOR_THROW_IF_FALSE(elementBytes * totalElements == getArraySizeInBytes());
+    const uint64_t firstByte = firstElement * elementBytes;
+    const uint64_t numBytes = numElements * elementBytes;
+
+    if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
+        ScopedGpu scopedGpu(placement.getDeviceNum());
+        CUDA_CHECK(cudaMemsetAsync(static_cast<uint8_t *>(getMemPtr<void>()) + firstByte, value, numBytes, stream));
+    } else {
+        std::unique_ptr<HostFunctionArgsBase> args(new MemsetBytesArgs(*this, value, firstByte, numBytes));
+        stream.enqueueHostFunction(callMemsetBytesOnTensor, std::move(args));
     }
 }
 

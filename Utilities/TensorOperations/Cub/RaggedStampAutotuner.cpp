@@ -16,7 +16,8 @@ namespace ThorImplementation::CubReductionInternal {
 namespace {
 
 // The site of a kind-RaggedKR / RaggedRK key: a layout version, then the site's fields.
-constexpr uint64_t RaggedSiteVersion = 1;
+// 2: the input's head (its address mod 16) left the site; every Tensor starts on its allocation's 256-byte boundary.
+constexpr uint64_t RaggedSiteVersion = 2;
 
 uint32_t elementBytes(DataType dtype) { return raggedKRInputBytes(dtype); }  // 1, 2, 4, or 0 for any other dtype
 
@@ -54,9 +55,6 @@ void validateSite(const RaggedSite& site) {
         if (!valueOpRuns(site.value_op)) fail("the operation must be SUM, MEAN, MIN or MAX");
         if (!valueOutputRuns(site.output_dtype)) fail("the output must be FP8, FP16, BF16 or FP32");
     }
-    const uint32_t bytes = elementBytes(site.input_dtype);
-    if (site.input_head >= 16 || site.input_head % bytes != 0)
-        fail("the input head must be a multiple of the element's bytes below 16");
 }
 
 std::vector<uint64_t> inputDims(const RaggedSite& site) {
@@ -112,9 +110,7 @@ struct LegalCandidate {
 RaggedSelection tuneRagged(const RaggedSite& site, RaggedFamily family, const Stream& stream) {
     const int gpu = static_cast<int>(stream.getGpuNum());
     const TensorPlacement placement(TensorPlacement::MemDevices::GPU, stream.getGpuNum());
-    const uint32_t bytes = elementBytes(site.input_dtype);
     const std::vector<uint64_t> input_dims = inputDims(site);
-    const uint64_t input_elements = site.capacity_rows * site.components + site.input_head / bytes;
     const TensorDescriptor output_descriptor(site.output_dtype, outputDims(site));
 
     std::vector<LegalCandidate> legal;
@@ -144,18 +140,16 @@ RaggedSelection tuneRagged(const RaggedSite& site, RaggedFamily family, const St
                     if (!first_refusal) first_refusal = std::current_exception();
                 }
             }
-            // A flat UINT8 tensor (so every cold slot can be viewed at the site's head), 1.0 in every element.
-            representative =
-                Tensor(placement, TensorDescriptor(DataType::UINT8, {input_elements * uint64_t{bytes}}));
-            representative.aliasByteStorageAs(site.input_dtype, {input_elements}, 0).fill(1.0, prepare_stream);
+            // The site's input shape and dtype, 1.0 in every element.
+            representative = Tensor(placement, TensorDescriptor(site.input_dtype, input_dims));
+            representative.fill(1.0, prepare_stream);
             offsets = uploadUniformOffsets(site.capacity_rows, site.segments, site.offsets_dtype, placement,
                                            prepare_stream);
             output = Tensor(placement, output_descriptor);
             workspace = Tensor(placement, TensorDescriptor(DataType::UINT8, {workspace_bytes}));
-            const Tensor input = representative.aliasByteStorageAs(site.input_dtype, input_dims, site.input_head);
             for (const auto& [candidate, launch] : planned) {
                 try {
-                    launchRaggedSelection(candidate, site, launch, input, offsets, output, workspace,
+                    launchRaggedSelection(candidate, site, launch, representative, offsets, output, workspace,
                                           prepare_stream);
                     legal.push_back({candidate, launch});
                 } catch (const std::invalid_argument&) {
@@ -177,9 +171,8 @@ RaggedSelection tuneRagged(const RaggedSite& site, RaggedFamily family, const St
             const RaggedSelection selection = c.selection;
             const RaggedSelectedLaunch launch = c.launch;
             const Tensor site_offsets = offsets;
-            candidate.launch = [site, selection, launch, site_offsets, input_dims](
-                                   const Tensor& slot, Tensor& out, Tensor& scratch, Stream& run_stream) {
-                const Tensor in = slot.aliasByteStorageAs(site.input_dtype, input_dims, site.input_head);
+            candidate.launch = [site, selection, launch, site_offsets](const StridedSpan& in, const StridedSpan& out,
+                                                                       const StridedSpan& scratch, Stream& run_stream) {
                 launchRaggedSelection(selection, site, launch, in, site_offsets, out, scratch, run_stream);
             };
             candidates.push_back(std::move(candidate));
@@ -321,10 +314,10 @@ RaggedSelectedLaunch raggedSelectedLaunch(const RaggedSelection& selection, cons
 void launchRaggedSelection(const RaggedSelection& selection,
                            const RaggedSite& site,
                            const RaggedSelectedLaunch& launch,
-                           const Tensor& input,
-                           const Tensor& offsets,
-                           Tensor& output,
-                           Tensor& workspace,
+                           const StridedSpan& input,
+                           const StridedSpan& offsets,
+                           const StridedSpan& output,
+                           const StridedSpan& workspace,
                            Stream& stream) {
     if (selection.family == RaggedFamily::KR) {
         if (site.arg) {
@@ -358,8 +351,7 @@ DenseReductionSelectionKey raggedSelectionKey(const RaggedSite& site, const Stre
                 static_cast<uint64_t>(site.output_dtype),
                 site.components,
                 site.capacity_rows,
-                site.segments,
-                site.input_head};
+                site.segments};
     return key;
 }
 
@@ -396,7 +388,6 @@ std::shared_ptr<const RaggedRoutedStamp> raggedRouteSegmented(bool arg,
     site.capacity_rows = input_dims.front();
     site.components = input.getTotalNumElements() / site.capacity_rows;
     site.segments = offsets_dims.front() - 1;
-    site.input_head = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & 15U);
     // 1330 (phase 9): an unroutable site is an error (1325-1329: the legacy kernels, deleted).
     if (!raggedFamilyFor(site.arg, site.input_dtype, site.components)) {
         const uint32_t bytes = elementBytes(site.input_dtype);
@@ -419,13 +410,13 @@ std::shared_ptr<const RaggedRoutedStamp> raggedRouteSegmented(bool arg,
 }
 
 void runRaggedRouted(const RaggedRoutedStamp& routed,
-                     const Tensor& input,
-                     const Tensor& offsets,
-                     Tensor& output,
-                     Tensor& workspace,
+                     const StridedSpan& input,
+                     const StridedSpan& offsets,
+                     const StridedSpan& output,
+                     const StridedSpan& workspace,
                      Stream& stream) {
     const RaggedSite& site = routed.site;
-    Tensor view = input;
+    StridedSpan view = input;
     view.reshape(site.components == 1 ? std::vector<uint64_t>{site.capacity_rows}
                                       : std::vector<uint64_t>{site.capacity_rows, site.components});
     launchRaggedSelection(routed.selection, site, routed.launch, view, offsets, output, workspace, stream);

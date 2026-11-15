@@ -83,19 +83,34 @@ std::vector<float> ramp(size_t count, float scale, int modulus) {
 }
 
 // Rotate-half or interleaved RoPE over the last axis, position = coordinate on axis `rank - 2`.
-std::vector<float> ropeReference(const std::vector<float>& v, const std::vector<uint64_t>& dims, bool interleaved) {
+std::vector<float> ropeReference(const std::vector<float>& v,
+                                 const std::vector<uint64_t>& dims,
+                                 bool interleaved,
+                                 int64_t position_offset = 0,
+                                 double linear_factor = 1.0,
+                                 double dynamic_ntk_factor = 0.0,
+                                 uint64_t dynamic_ntk_original_max = 0) {
     const uint64_t d = dims.back();
     const uint64_t s = dims[dims.size() - 2];
     const uint64_t half = d / 2;
+    // DynamicNTK: base' = base * (factor * L / orig - (factor - 1))^(d / (d - 2)) once L > orig, where
+    // L is the sequence extent plus the position offset.
+    long double base = 10000.0L;
+    const long double seq_len = static_cast<long double>(s) + static_cast<long double>(std::max<int64_t>(0, position_offset));
+    if (dynamic_ntk_factor != 0.0 && seq_len > static_cast<long double>(dynamic_ntk_original_max)) {
+        const long double ratio = dynamic_ntk_factor * seq_len / static_cast<long double>(dynamic_ntk_original_max) - (dynamic_ntk_factor - 1.0L);
+        base *= std::pow(ratio, static_cast<long double>(d) / static_cast<long double>(d - 2));
+    }
     std::vector<float> out(v.size());
     for (size_t row = 0; row < v.size() / d; ++row) {
-        const double position = static_cast<double>(row % s);
+        const long double position = static_cast<long double>(static_cast<int64_t>(row % s) + position_offset);
         for (uint64_t k = 0; k < d; ++k) {
             const uint64_t pair = interleaved ? k / 2 : (k < half ? k : k - half);
             const bool first = interleaved ? (k % 2 == 0) : (k < half);
             const uint64_t partner = interleaved ? (first ? k + 1 : k - 1) : (first ? k + half : k - half);
-            const double theta = position * std::pow(10000.0, -2.0 * static_cast<double>(pair) / static_cast<double>(d));
-            const double c = std::cos(theta), sn = std::sin(theta);
+            const long double theta =
+                position * std::pow(base, -2.0L * static_cast<long double>(pair) / static_cast<long double>(d)) / linear_factor;
+            const double c = static_cast<double>(std::cos(theta)), sn = static_cast<double>(std::sin(theta));
             const double cur = v[row * d + k], peer = v[row * d + partner];
             out[row * d + k] = static_cast<float>(first ? cur * c - peer * sn : peer * sn + cur * c);
         }
@@ -137,6 +152,66 @@ TEST(FusedIndexMappingExecution, RopeOfBroadcastSumReadsPartnerFromTheSameRow) {
     }
 }
 
+TEST(FusedIndexMappingExecution, RopeAngleIsAccurateAtLongPositions) {
+    // x = 1 on the first half of each head and 0 on the second, so the rotate-half output is
+    // cos(theta) then sin(theta) for every pair. The angle is reduced exactly, so the error stays
+    // ~1e-7 at any position. A float product position * freq was off by up to half an ulp of
+    // theta: 7.6e-3 at position 131072, 6e-2 at 2^20, 0.47 at 2^23. Covers None, Linear and
+    // DynamicNTK (whose frequency is computed in float-float in the kernel).
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<uint64_t> dims{1, 1, 64, 128};
+    const size_t numel = 64 * 128;
+    std::vector<float> xv(numel, 0.0f);
+    for (size_t row = 0; row < 64; ++row)
+        for (size_t k = 0; k < 64; ++k) xv[row * 128 + k] = 1.0f;
+    Tensor xs = toGpu(xv, dims, DataType::FP32, stream);
+    for (const int64_t offset : {int64_t{0}, int64_t{131072 - 32}, int64_t{1} << 20, int64_t{8388544}}) {
+        for (const double linear_factor : {1.0, 4.0}) {
+            RotaryPositionEmbeddingOptions options;
+            options.position_offset = offset;
+            if (linear_factor != 1.0) {
+                options.scaling_kind = RotaryScalingKind::Linear;
+                options.scaling_factor = linear_factor;
+            }
+            const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+            FusedEquation eq = FusedEquation::compile(Expression::outputs({{"y", x.rope(options)}}).physicalOutputs(), 0);
+            Tensor ys(gpu_placement, TensorDescriptor(DataType::FP32, dims));
+            eq.run({{"x", xs}}, ys, stream);
+            expectNear(toHost(ys, stream),
+                       ropeReference(xv, dims, false, offset, linear_factor),
+                       5e-7f,
+                       "offset " + std::to_string(offset) + " linear factor " + std::to_string(linear_factor));
+        }
+        // DynamicNTK: the base depends on the runtime sequence length, so the frequency is built in
+        // float-float in the kernel. It was a float powf, off by 8e-3 rad at position 131072.
+        RotaryPositionEmbeddingOptions options;
+        options.position_offset = offset;
+        options.scaling_kind = RotaryScalingKind::DynamicNTK;
+        options.scaling_factor = 3.7;
+        options.original_max_position_embeddings = 3000;
+        const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+        FusedEquation eq = FusedEquation::compile(Expression::outputs({{"y", x.rope(options)}}).physicalOutputs(), 0);
+        Tensor ys(gpu_placement, TensorDescriptor(DataType::FP32, dims));
+        eq.run({{"x", xs}}, ys, stream);
+        const std::vector<float> ntk_reference = ropeReference(xv, dims, false, offset, 1.0, 3.7, 3000);
+        expectNear(toHost(ys, stream), ntk_reference, 5e-7f, "DynamicNTK offset " + std::to_string(offset));
+
+        // rope(x[1,1,64,128]) + zeros[2,1,64,128]: the RoPE result is broadcast, so the stage keeps the
+        // per-element path, which builds the DynamicNTK frequency in float-float at runtime instead of
+        // reading an emit-time table. Both batches must match the same reference.
+        const std::vector<uint64_t> wide_dims{2, 1, 64, 128};
+        Tensor zeros = toGpu(std::vector<float>(2 * numel, 0.0f), wide_dims, DataType::FP32, stream);
+        const Expression z = Expression::input("z", DataType::FP32, DataType::FP32);
+        FusedEquation wide_eq = FusedEquation::compile(Expression::outputs({{"y", x.rope(options) + z}}).physicalOutputs(), 0);
+        Tensor wide_ys(gpu_placement, TensorDescriptor(DataType::FP32, wide_dims));
+        wide_eq.run({{"x", xs}, {"z", zeros}}, wide_ys, stream);
+        std::vector<float> wide_reference(ntk_reference);
+        wide_reference.insert(wide_reference.end(), ntk_reference.begin(), ntk_reference.end());
+        expectNear(toHost(wide_ys, stream), wide_reference, 5e-7f, "DynamicNTK per-element offset " + std::to_string(offset));
+    }
+}
+
 TEST(FusedIndexMappingExecution, RopeOfStridedRuntimeViewReadsPartnerFromTheSameRow) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -145,12 +220,13 @@ TEST(FusedIndexMappingExecution, RopeOfStridedRuntimeViewReadsPartnerFromTheSame
     const std::vector<uint64_t> view_dims{2, 3, 8, 16};
     const std::vector<float> storage = ramp(storage_dims[0], 0.0625f, 29);
     Tensor buffer = toGpu(storage, storage_dims, DataType::FP32, stream);
-    Tensor q = buffer.aliasView(view_dims, {3 * 8 * 48, 8 * 48, 48, 1}, 5);
 
-    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    // q is taken inside the expression: at run time a span of the buffer, read through its row pitch.
+    const Expression x =
+        Expression::input("x", DataType::FP32, DataType::FP32).stridedView(view_dims, {3 * 8 * 48, 8 * 48, 48, 1}, 5);
     FusedEquation eq = FusedEquation::compile(Expression::outputs({{"y", x.rope()}}).physicalOutputs(), 0);
     Tensor ys(gpu_placement, TensorDescriptor(DataType::FP32, view_dims));
-    eq.run({{"x", q}}, ys, stream);
+    eq.run({{"x", buffer}}, ys, stream);
 
     std::vector<float> dense(2 * 3 * 8 * 16);
     for (size_t row = 0; row < 2 * 3 * 8; ++row)

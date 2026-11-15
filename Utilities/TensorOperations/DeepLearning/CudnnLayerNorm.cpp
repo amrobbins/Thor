@@ -1,4 +1,5 @@
 #include "Utilities/TensorOperations/DeepLearning/CudnnLayerNorm.h"
+#include "Utilities/TensorOperations/DeepLearning/CudnnTensorContract.h"
 
 #include "Utilities/Common/CudnnExecutionWorkspace.h"
 #include "Utilities/Common/CudnnFrontendPlan.h"
@@ -117,6 +118,22 @@ void requireNumElements(const Tensor& tensor, uint64_t expected, string_view nam
     }
 }
 
+// With the default [outer, hidden] layout, row-indexed tensors (I/O and per-row statistics) may hold
+// more rows than the plan: cuDNN reads and writes only the plan's leading rows, which start at the
+// tensor's base pointer because the tensor is dense. This lets a capacity-sized buffer run a smaller
+// bucket's plan directly, with no prefix view. An explicit physical layout must match exactly.
+void requireRowElements(const Tensor& tensor, uint64_t needed, bool explicitLayout, string_view name) {
+    if (explicitLayout) {
+        requireNumElements(tensor, needed, name);
+        return;
+    }
+    const uint64_t actual = tensor.getTotalNumElements();
+    if (actual < needed) {
+        throw invalid_argument(string("cuDNN LayerNorm tensor '") + string(name) + "' is too small for the plan. Needs at least " +
+                               to_string(needed) + " elements, got " + to_string(actual) + ".");
+    }
+}
+
 void requireIoTensor(const Tensor& tensor,
                      const CudnnLayerNormDescriptor& descriptor,
                      DataType expectedDtype,
@@ -124,19 +141,23 @@ void requireIoTensor(const Tensor& tensor,
                      string_view name) {
     requireSameGpu(tensor, gpuNum, name);
     requireDtype(tensor, expectedDtype, name);
-    requireNumElements(tensor, checkedMul(descriptor.outerSize, descriptor.normalizedFeatureCount, "IO"), name);
+    requireRowElements(
+        tensor, checkedMul(descriptor.outerSize, descriptor.normalizedFeatureCount, "IO"), descriptor.ioDimensions.has_value(), name);
+    requireCudnnContractTensor(tensor, "cuDNN LayerNorm", name);
 }
 
 void requireParameterTensor(const Tensor& tensor, const CudnnLayerNormDescriptor& descriptor, int gpuNum, string_view name) {
     requireSameGpu(tensor, gpuNum, name);
     requireDtype(tensor, descriptor.parameterDataType, name);
     requireNumElements(tensor, descriptor.normalizedFeatureCount, name);
+    requireCudnnContractTensor(tensor, "cuDNN LayerNorm", name);
 }
 
 void requireStatsTensor(const Tensor& tensor, const CudnnLayerNormDescriptor& descriptor, int gpuNum, string_view name) {
     requireSameGpu(tensor, gpuNum, name);
     requireDtype(tensor, DataType::FP32, name);
-    requireNumElements(tensor, descriptor.outerSize, name);
+    requireRowElements(tensor, descriptor.outerSize, descriptor.statsDimensions.has_value(), name);
+    requireCudnnContractTensor(tensor, "cuDNN LayerNorm", name);
 }
 
 void insertTensor(unordered_map<int64_t, void*>& pack, int64_t uid, const Tensor& tensor) {

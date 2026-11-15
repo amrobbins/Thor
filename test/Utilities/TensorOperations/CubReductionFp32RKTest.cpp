@@ -7,10 +7,12 @@
 // 1198: FP32 RK ARG: the AlignedK twin, Complete and Staged with the packed continuation. 1200: the rotated twin.
 // 1201: the PacketComplete twin.
 
+#include "test/Utilities/TensorOperations/OutputSpan.h"
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 #include "Utilities/TensorOperations/Cub/CubReductionStageSemantics.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8DeepRSmallKSelector.h"
+#include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalIdentity.h"
 
 #include <algorithm>
 #include <array>
@@ -184,7 +186,8 @@ TEST(CubReductionFp32RK, OneWindowFinalizeAndNarrowOutput) {
     }
 }
 
-// The launcher rejects FP8 input, K outside the unit's bucket, a misaligned base, and the wrong output size.
+// The launcher rejects FP8 input, K outside the unit's bucket, and a K that does not fit the window with a prefix at a
+// base off a 16-byte boundary. 1381: such a base otherwise reads.
 TEST(CubReductionFp32RK, OneWindowRejectsUnsupportedRequests) {
     REQUIRE_CUDA_DEVICE();
     using namespace CubReductionInternal;
@@ -193,10 +196,9 @@ TEST(CubReductionFp32RK, OneWindowRejectsUnsupportedRequests) {
     const auto geometry = CubReduction::analyzeValueGeometry(CubReductionOp::Sum, {outer_size, rows, k}, {1});
     const Tensor input = makeGpuTensor(std::vector<float>(outer_size * rows * k, 1.0f), {outer_size, rows, k}, stream,
                                        DataType::FP32);
-    // The same FP32 elements 4 bytes past a 16-byte boundary.
-    const Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(4 * outer_size * rows * k + 16, 0),
-                                               {4 * outer_size * rows * k + 16}, stream, DataType::UINT8);
-    const Tensor misaligned = bytes.aliasByteStorageAs(DataType::FP32, {outer_size, rows, k}, 4);
+    // Room for the same FP32 elements up to 12 bytes past a 16-byte boundary.
+    Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(4 * outer_size * rows * k + 16, 0),
+                                         {4 * outer_size * rows * k + 16}, stream, DataType::UINT8);
     const auto units = fp32OneWindowRuntimeKUnits(k);
     ASSERT_FALSE(units.empty());
     const auto unit = units.front();
@@ -211,9 +213,27 @@ TEST(CubReductionFp32RK, OneWindowRejectsUnsupportedRequests) {
     EXPECT_THROW(launchFp32OneWindowRuntimeKComplete(input, output, geometry, {1, 16, 8, true}, 1, stream, semantics),
                  std::logic_error);
     EXPECT_THROW(static_cast<void>(queryFp32OneWindowRuntimeKOccupancy(126, {1, 16, 4, false}, 1)), std::logic_error);
-    // A base off 16-byte alignment.
-    EXPECT_THROW(launchFp32OneWindowRuntimeKComplete(misaligned, output, geometry, unit, 1, stream, semantics),
-                 std::logic_error);
+    // 1381: a base 4, 8 and 12 bytes past a 16-byte boundary reads (the kernel's windows follow the address) on every
+    // unit whose window holds K = 16 and a 3-element prefix.
+    for (const uint64_t offset : {uint64_t{4}, uint64_t{8}, uint64_t{12}}) {
+        ASSERT_EQ(cudaSuccess, cudaMemcpyAsync(static_cast<uint8_t*>(bytes.getMemPtr<void>()) + offset,
+                                               input.getMemPtr<void>(), 4 * outer_size * rows * k,
+                                               cudaMemcpyDeviceToDevice, stream.getStream()));
+        const StridedSpan shifted = StridedSpan(bytes).bytesAs(offset, DataType::FP32, {outer_size, rows, k});
+        for (const Fp8OneWindowRuntimeKUnit& candidate : units) {
+            SCOPED_TRACE(std::to_string(offset) + " bytes in, O" + std::to_string(candidate.outputs_per_warp));
+            // O8's window holds 16 elements: K = 16 fills it at an aligned base and has no room for a prefix here.
+            if (k > Fp8RK::oneWindowUnalignedCapacity(candidate.outputs_per_warp, candidate.packet_bytes, 4)) {
+                EXPECT_THROW(
+                    launchFp32OneWindowRuntimeKComplete(shifted, output, geometry, candidate, 1, stream, semantics),
+                    std::logic_error);
+                continue;
+            }
+            launchFp32OneWindowRuntimeKComplete(shifted, output, geometry, candidate, 1, stream, semantics);
+            stream.synchronize();
+            EXPECT_EQ(copyGpuTensorAsFloat(output, stream), std::vector<float>(outer_size * k, float(rows)));
+        }
+    }
     // O2 with W2 (O2/O4/O8 are warp-local).
     const Fp8OneWindowRuntimeKUnit o2{2, 16, 1, false};
     if (std::find(units.begin(), units.end(), o2) != units.end()) {
@@ -438,8 +458,8 @@ TEST(CubReductionFp32RK, AlignedKMatchesReference) {
                                          stream, DataType::FP8_E4M3);
         const Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(4 * outer_size * rows * k + 16, 0),
                                                    {4 * outer_size * rows * k + 16}, stream, DataType::UINT8);
-        const Tensor misaligned = bytes.aliasByteStorageAs(DataType::FP32, {outer_size, rows, k}, 8);
-        const Tensor misaligned4 = bytes.aliasByteStorageAs(DataType::FP32, {outer_size, rows, k}, 4);
+        const StridedSpan misaligned = StridedSpan(bytes).bytesAs(8, DataType::FP32, {outer_size, rows, k});
+        const StridedSpan misaligned4 = StridedSpan(bytes).bytesAs(4, DataType::FP32, {outer_size, rows, k});
         Tensor complete(gpuPlacement, TensorDescriptor(DataType::FP32, geometry.output_dimensions));
         Tensor wrong(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size, 9, k}));
         CubReductionStageSemantics semantics;
@@ -631,17 +651,31 @@ TEST(CubReductionFp32RK, PacketCompleteMatchesReference) {
                                            stream, DataType::FP32);
         const Tensor fp8 = makeGpuTensor(std::vector<float>(outer_size * rows * k, 1.0f), {outer_size, rows, k},
                                          stream, DataType::FP8_E4M3);
-        const Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(4 * outer_size * rows * k + 16, 0),
+        Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(4 * outer_size * rows * k + 16, 0),
                                                    {4 * outer_size * rows * k + 16}, stream, DataType::UINT8);
-        const Tensor misaligned = bytes.aliasByteStorageAs(DataType::FP32, {outer_size, rows, k}, 4);
+        const StridedSpan misaligned = StridedSpan(bytes).bytesAs(4, DataType::FP32, {outer_size, rows, k});
         Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, geometry.output_dimensions));
         Tensor short_output(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size * k - 1}));
         const CubReductionStageSemantics semantics;
         EXPECT_THROW(launchFp32PacketComplete(fp8, output, geometry, 1, 16, stream, semantics), std::logic_error);
         EXPECT_THROW(launchFp32PacketComplete(input, output, geometry, 1, 125, stream, semantics), std::logic_error);
         EXPECT_THROW(launchFp32PacketComplete(input, output, geometry, 3, 16, stream, semantics), std::logic_error);
-        EXPECT_THROW(launchFp32PacketComplete(misaligned, output, geometry, 1, 16, stream, semantics),
+        // 1379: a base off a 16-byte boundary reads (the kernel's prefixes follow the address). A span never starts
+        // inside an element: bytesAs refuses that start.
+        EXPECT_THROW(launchFp32PacketComplete(StridedSpan(bytes).bytesAs(2, DataType::FP32, {outer_size, rows, k}),
+                                              output, geometry, 1, 16, stream, semantics),
                      std::logic_error);
+        for (const uint64_t offset : {uint64_t{4}, uint64_t{8}, uint64_t{12}}) {
+            SCOPED_TRACE(offset);
+            ASSERT_EQ(cudaSuccess, cudaMemcpyAsync(static_cast<uint8_t*>(bytes.getMemPtr<void>()) + offset,
+                                                   input.getMemPtr<void>(), 4 * outer_size * rows * k,
+                                                   cudaMemcpyDeviceToDevice, stream.getStream()));
+            const StridedSpan shifted = StridedSpan(bytes).bytesAs(offset, DataType::FP32, {outer_size, rows, k});
+            launchFp32PacketComplete(shifted, output, geometry, 1, 16, stream, semantics);
+            stream.synchronize();
+            EXPECT_EQ(copyGpuTensorAsFloat(output, stream), std::vector<float>(outer_size * k, float(rows)));
+        }
+        static_cast<void>(misaligned);
         EXPECT_THROW(launchFp32PacketComplete(input, short_output, geometry, 1, 16, stream, semantics),
                      std::logic_error);
         EXPECT_NO_THROW(launchFp32PacketComplete(input, output, geometry, 1, 16, stream, semantics));
@@ -739,7 +773,7 @@ TEST(CubReductionFp32RK, RotatedPartialsMatchReference) {
                 for (uint64_t b = 0; b < 4; ++b) bytes[offset + 4 * i + b] = (word >> (8 * b)) & 0xffU;
             }
             const Tensor storage = makeGpuUnsignedTensor(bytes, {bytes.size()}, stream, DataType::UINT8);
-            const Tensor input = storage.aliasByteStorageAs(DataType::FP32, {outer_size, rows, k}, offset);
+            const StridedSpan input = StridedSpan(storage).bytesAs(offset, DataType::FP32, {outer_size, rows, k});
             Tensor partials(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size, shards, k}));
             launchFp32RuntimeKRotatedFirstStage(input, partials, geometry, depth, shards, stream);
             stream.synchronize();
@@ -853,10 +887,10 @@ TEST(CubReductionFp32RK, AlignedKArgMatchesReference) {
                             // Value (FP32) and UINT32 index at stride 3; then the UINT64 index alone.
                             Tensor value(gpuPlacement, TensorDescriptor(DataType::FP32, {site.outer, site.k}));
                             Tensor index32(gpuPlacement, TensorDescriptor(DataType::UINT32, {site.outer, site.k}));
-                            launchFp32AlignedKArg(input, &value, &index32, geometry, packet, threads, shards, packed,
+                            launchFp32AlignedKArg(input, outputSpan(value), outputSpan(index32), geometry, packet, threads, shards, packed,
                                                   maximum, 3, stream);
                             Tensor index64(gpuPlacement, TensorDescriptor(DataType::UINT64, {site.outer, site.k}));
-                            launchFp32AlignedKArg(input, nullptr, &index64, geometry, packet, threads, shards, packed,
+                            launchFp32AlignedKArg(input, nullptr, outputSpan(index64), geometry, packet, threads, shards, packed,
                                                   maximum, 1, stream);
                             stream.synchronize();
                             const auto got_value = copyGpuTensorAsFloat(value, stream);
@@ -892,16 +926,16 @@ TEST(CubReductionFp32RK, AlignedKArgMatchesReference) {
         const Tensor fp8 = makeGpuTensor(std::vector<float>(outer * rows * k, 1.0f), {outer, rows, k}, stream,
                                          DataType::FP8_E4M3);
         Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
-        EXPECT_THROW(launchFp32AlignedKArg(fp8, nullptr, &index, geometry, 16, 32, 1, nullptr, false, 1, stream),
+        EXPECT_THROW(launchFp32AlignedKArg(fp8, nullptr, outputSpan(index), geometry, 16, 32, 1, nullptr, false, 1, stream),
                      std::logic_error);
         EXPECT_THROW(launchFp32AlignedKArg(input, nullptr, nullptr, geometry, 16, 32, 1, nullptr, false, 1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32AlignedKArg(input, nullptr, &index, geometry, 16, 32, 10, nullptr, false, 1, stream),
+        EXPECT_THROW(launchFp32AlignedKArg(input, nullptr, outputSpan(index), geometry, 16, 32, 10, nullptr, false, 1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32AlignedKArg(input, nullptr, &index, geometry, 16, 32, 1, nullptr, false,
+        EXPECT_THROW(launchFp32AlignedKArg(input, nullptr, outputSpan(index), geometry, 16, 32, 1, nullptr, false,
                                            uint64_t{1} << 32, stream),
                      std::logic_error);
-        EXPECT_NO_THROW(launchFp32AlignedKArg(input, nullptr, &index, geometry, 16, 32, 1, nullptr, false, 1, stream));
+        EXPECT_NO_THROW(launchFp32AlignedKArg(input, nullptr, outputSpan(index), geometry, 16, 32, 1, nullptr, false, 1, stream));
         stream.synchronize();
     }
 }
@@ -931,7 +965,7 @@ TEST(CubReductionFp32RK, RotatedArgMatchesReference) {
                     for (uint64_t b = 0; b < 4; ++b) bytes[offset + 4 * i + b] = (word >> (8 * b)) & 0xffU;
                 }
                 const Tensor storage = makeGpuUnsignedTensor(bytes, {bytes.size()}, stream, DataType::UINT8);
-                const Tensor input = storage.aliasByteStorageAs(DataType::FP32, {site.outer, site.rows, site.k}, offset);
+                const StridedSpan input = StridedSpan(storage).bytesAs(offset, DataType::FP32, {site.outer, site.rows, site.k});
                 const auto geometry =
                     CubReduction::analyzeGeometry({site.outer, site.rows, site.k}, std::vector<uint32_t>{1});
                 for (bool maximum : {false, true}) {
@@ -949,7 +983,7 @@ TEST(CubReductionFp32RK, RotatedArgMatchesReference) {
                         uint64_t* packed = scratch ? static_cast<uint64_t*>(scratch->getMemPtr<void>()) : nullptr;
                         Tensor value(gpuPlacement, TensorDescriptor(DataType::FP32, {site.outer, site.k}));
                         Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT64, {site.outer, site.k}));
-                        launchFp32RuntimeKArg(input, &value, &index, geometry, depth, packed, maximum, 2, stream);
+                        launchFp32RuntimeKArg(input, outputSpan(value), outputSpan(index), geometry, depth, packed, maximum, 2, stream);
                         stream.synchronize();
                         const auto got_value = copyGpuTensorAsFloat(value, stream);
                         const auto got_index = copyGpuTensorAsUnsigned(index, stream);
@@ -981,15 +1015,15 @@ TEST(CubReductionFp32RK, RotatedArgMatchesReference) {
         const Tensor fp8 = makeGpuTensor(std::vector<float>(outer * rows * k, 1.0f), {outer, rows, k}, stream,
                                          DataType::FP8_E4M3);
         Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
-        EXPECT_THROW(launchFp32RuntimeKArg(fp8, nullptr, &index, geometry, 1024, nullptr, false, 1, stream),
+        EXPECT_THROW(launchFp32RuntimeKArg(fp8, nullptr, outputSpan(index), geometry, 1024, nullptr, false, 1, stream),
                      std::logic_error);
         EXPECT_THROW(launchFp32RuntimeKArg(input, nullptr, nullptr, geometry, 1024, nullptr, false, 1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32RuntimeKArg(input, nullptr, &index, geometry, 64, nullptr, false, 1, stream),
+        EXPECT_THROW(launchFp32RuntimeKArg(input, nullptr, outputSpan(index), geometry, 64, nullptr, false, 1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32RuntimeKArg(input, nullptr, &index, geometry, 0, nullptr, false, 1, stream),
+        EXPECT_THROW(launchFp32RuntimeKArg(input, nullptr, outputSpan(index), geometry, 0, nullptr, false, 1, stream),
                      std::logic_error);
-        EXPECT_NO_THROW(launchFp32RuntimeKArg(input, nullptr, &index, geometry, 1024, nullptr, false, 1, stream));
+        EXPECT_NO_THROW(launchFp32RuntimeKArg(input, nullptr, outputSpan(index), geometry, 1024, nullptr, false, 1, stream));
         stream.synchronize();
     }
 }
@@ -1024,9 +1058,9 @@ TEST(CubReductionFp32RK, PacketCompleteArgMatchesReference) {
                         ASSERT_TRUE(fp32PacketCompleteArgSupports(site.outer, site.rows, site.k, w, tile));
                         Tensor value(gpuPlacement, TensorDescriptor(DataType::FP32, {site.outer, site.k}));
                         Tensor index32(gpuPlacement, TensorDescriptor(DataType::UINT32, {site.outer, site.k}));
-                        launchFp32PacketCompleteArg(input, &value, &index32, geometry, w, tile, maximum, 5, stream);
+                        launchFp32PacketCompleteArg(input, outputSpan(value), outputSpan(index32), geometry, w, tile, maximum, 5, stream);
                         Tensor index64(gpuPlacement, TensorDescriptor(DataType::UINT64, {site.outer, site.k}));
-                        launchFp32PacketCompleteArg(input, nullptr, &index64, geometry, w, tile, maximum, 1, stream);
+                        launchFp32PacketCompleteArg(input, nullptr, outputSpan(index64), geometry, w, tile, maximum, 1, stream);
                         stream.synchronize();
                         const auto got_value = copyGpuTensorAsFloat(value, stream);
                         const auto got_index32 = copyGpuTensorAsUnsigned(index32, stream);
@@ -1051,7 +1085,7 @@ TEST(CubReductionFp32RK, PacketCompleteArgMatchesReference) {
             }
         }
     }
-    // Rejections: FP8 input, no outputs, a tile past 124, W3, a misaligned base.
+    // Rejections: FP8 input, no outputs, a tile past 124, W3. 1384: a base off a 16-byte boundary reads.
     {
         const uint64_t outer = 2, rows = 30, k = 16;
         const auto geometry = CubReduction::analyzeGeometry({outer, rows, k}, std::vector<uint32_t>{1});
@@ -1059,22 +1093,28 @@ TEST(CubReductionFp32RK, PacketCompleteArgMatchesReference) {
                                            DataType::FP32);
         const Tensor fp8 = makeGpuTensor(std::vector<float>(outer * rows * k, 1.0f), {outer, rows, k}, stream,
                                          DataType::FP8_E4M3);
-        const Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(4 * outer * rows * k + 16, 0),
-                                                   {4 * outer * rows * k + 16}, stream, DataType::UINT8);
-        const Tensor misaligned = bytes.aliasByteStorageAs(DataType::FP32, {outer, rows, k}, 4);
+        Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(4 * outer * rows * k + 16, 0),
+                                             {4 * outer * rows * k + 16}, stream, DataType::UINT8);
+        ASSERT_EQ(cudaSuccess, cudaMemcpyAsync(static_cast<uint8_t*>(bytes.getMemPtr<void>()) + 4,
+                                               input.getMemPtr<void>(), 4 * outer * rows * k,
+                                               cudaMemcpyDeviceToDevice, stream.getStream()));
+        const StridedSpan misaligned = StridedSpan(bytes).bytesAs(4, DataType::FP32, {outer, rows, k});
         Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
-        EXPECT_THROW(launchFp32PacketCompleteArg(fp8, nullptr, &index, geometry, 1, 16, false, 1, stream),
+        Tensor misaligned_index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
+        EXPECT_THROW(launchFp32PacketCompleteArg(fp8, nullptr, outputSpan(index), geometry, 1, 16, false, 1, stream),
                      std::logic_error);
         EXPECT_THROW(launchFp32PacketCompleteArg(input, nullptr, nullptr, geometry, 1, 16, false, 1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32PacketCompleteArg(input, nullptr, &index, geometry, 1, 125, false, 1, stream),
+        EXPECT_THROW(launchFp32PacketCompleteArg(input, nullptr, outputSpan(index), geometry, 1, 125, false, 1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32PacketCompleteArg(input, nullptr, &index, geometry, 3, 16, false, 1, stream),
+        EXPECT_THROW(launchFp32PacketCompleteArg(input, nullptr, outputSpan(index), geometry, 3, 16, false, 1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32PacketCompleteArg(misaligned, nullptr, &index, geometry, 1, 16, false, 1, stream),
-                     std::logic_error);
-        EXPECT_NO_THROW(launchFp32PacketCompleteArg(input, nullptr, &index, geometry, 1, 16, false, 1, stream));
+        // 1384: a base 4 bytes past a 16-byte boundary reads and gives the aligned launch's indices.
+        EXPECT_NO_THROW(launchFp32PacketCompleteArg(misaligned, nullptr, outputSpan(misaligned_index), geometry, 1, 16,
+                                                    false, 1, stream));
+        EXPECT_NO_THROW(launchFp32PacketCompleteArg(input, nullptr, outputSpan(index), geometry, 1, 16, false, 1, stream));
         stream.synchronize();
+        EXPECT_EQ(copyGpuTensorAsUnsigned(misaligned_index, stream), copyGpuTensorAsUnsigned(index, stream));
     }
 }
 
@@ -1112,9 +1152,9 @@ TEST(CubReductionFp32RK, OneWindowArgMatchesReference) {
                                          << " max " << maximum << " nans " << nans);
                             Tensor value(gpuPlacement, TensorDescriptor(DataType::FP32, {site.outer, k}));
                             Tensor index32(gpuPlacement, TensorDescriptor(DataType::UINT32, {site.outer, k}));
-                            launchFp32OneWindowArg(input, &value, &index32, geometry, unit, w, maximum, 5, stream);
+                            launchFp32OneWindowArg(input, outputSpan(value), outputSpan(index32), geometry, unit, w, maximum, 5, stream);
                             Tensor index64(gpuPlacement, TensorDescriptor(DataType::UINT64, {site.outer, k}));
-                            launchFp32OneWindowArg(input, nullptr, &index64, geometry, unit, w, maximum, 1, stream);
+                            launchFp32OneWindowArg(input, nullptr, outputSpan(index64), geometry, unit, w, maximum, 1, stream);
                             stream.synchronize();
                             const auto got_value = copyGpuTensorAsFloat(value, stream);
                             const auto got_index32 = copyGpuTensorAsUnsigned(index32, stream);
@@ -1140,7 +1180,7 @@ TEST(CubReductionFp32RK, OneWindowArgMatchesReference) {
             }
         }
     }
-    // Rejections: FP8 input, no outputs, K past the unit's bucket, O2 W2, a misaligned base.
+    // Rejections: FP8 input, no outputs, K past the unit's bucket, O2 W2. 1383: a base off a 16-byte boundary reads.
     {
         const uint64_t outer = 2, rows = 30, k = 16;
         const auto geometry = CubReduction::analyzeGeometry({outer, rows, k}, std::vector<uint32_t>{1});
@@ -1148,26 +1188,33 @@ TEST(CubReductionFp32RK, OneWindowArgMatchesReference) {
                                            DataType::FP32);
         const Tensor fp8 = makeGpuTensor(std::vector<float>(outer * rows * k, 1.0f), {outer, rows, k}, stream,
                                          DataType::FP8_E4M3);
-        const Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(4 * outer * rows * k + 16, 0),
-                                                   {4 * outer * rows * k + 16}, stream, DataType::UINT8);
-        const Tensor misaligned = bytes.aliasByteStorageAs(DataType::FP32, {outer, rows, k}, 4);
+        Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(4 * outer * rows * k + 16, 0),
+                                             {4 * outer * rows * k + 16}, stream, DataType::UINT8);
+        ASSERT_EQ(cudaSuccess, cudaMemcpyAsync(static_cast<uint8_t*>(bytes.getMemPtr<void>()) + 4,
+                                               input.getMemPtr<void>(), 4 * outer * rows * k,
+                                               cudaMemcpyDeviceToDevice, stream.getStream()));
+        const StridedSpan misaligned = StridedSpan(bytes).bytesAs(4, DataType::FP32, {outer, rows, k});
         Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
+        Tensor misaligned_index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
         const Fp8OneWindowRuntimeKUnit o1{1, 16, 1, false};
         const Fp8OneWindowRuntimeKUnit o2{2, 16, 1, false};
         const Fp8OneWindowRuntimeKUnit o1_bucket4{1, 16, 4, false};
         EXPECT_FALSE(fp32OneWindowArgSupports(outer, rows, k, o1_bucket4, 1));
         EXPECT_FALSE(fp32OneWindowArgSupports(outer, rows, k, o2, 2));
-        EXPECT_THROW(launchFp32OneWindowArg(fp8, nullptr, &index, geometry, o1, 1, false, 1, stream), std::logic_error);
+        EXPECT_THROW(launchFp32OneWindowArg(fp8, nullptr, outputSpan(index), geometry, o1, 1, false, 1, stream), std::logic_error);
         EXPECT_THROW(launchFp32OneWindowArg(input, nullptr, nullptr, geometry, o1, 1, false, 1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32OneWindowArg(input, nullptr, &index, geometry, o1_bucket4, 1, false, 1, stream),
+        EXPECT_THROW(launchFp32OneWindowArg(input, nullptr, outputSpan(index), geometry, o1_bucket4, 1, false, 1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32OneWindowArg(input, nullptr, &index, geometry, o2, 2, false, 1, stream),
+        EXPECT_THROW(launchFp32OneWindowArg(input, nullptr, outputSpan(index), geometry, o2, 2, false, 1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32OneWindowArg(misaligned, nullptr, &index, geometry, o1, 1, false, 1, stream),
-                     std::logic_error);
-        EXPECT_NO_THROW(launchFp32OneWindowArg(input, nullptr, &index, geometry, o1, 1, false, 1, stream));
+        // 1383: a base 4 bytes past a 16-byte boundary reads (the kernel's windows follow the address) and gives the
+        // aligned launch's indices.
+        EXPECT_NO_THROW(launchFp32OneWindowArg(misaligned, nullptr, outputSpan(misaligned_index), geometry, o1, 1,
+                                               false, 1, stream));
+        EXPECT_NO_THROW(launchFp32OneWindowArg(input, nullptr, outputSpan(index), geometry, o1, 1, false, 1, stream));
         stream.synchronize();
+        EXPECT_EQ(copyGpuTensorAsUnsigned(misaligned_index, stream), copyGpuTensorAsUnsigned(index, stream));
     }
 }
 
@@ -1213,9 +1260,9 @@ TEST(CubReductionFp32RK, DeepRSmallKArgMatchesReference) {
                                                       << " nans " << nans);
                     Tensor value(gpuPlacement, TensorDescriptor(DataType::FP32, {site.outer, site.k}));
                     Tensor index32(gpuPlacement, TensorDescriptor(DataType::UINT32, {site.outer, site.k}));
-                    launchFp32DeepRSmallKArg(input, &value, &index32, geometry, depth, packed, maximum, 3, stream);
+                    launchFp32DeepRSmallKArg(input, outputSpan(value), outputSpan(index32), geometry, depth, packed, maximum, 3, stream);
                     Tensor index64(gpuPlacement, TensorDescriptor(DataType::UINT64, {site.outer, site.k}));
-                    launchFp32DeepRSmallKArg(input, nullptr, &index64, geometry, depth, packed, maximum, 1, stream);
+                    launchFp32DeepRSmallKArg(input, nullptr, outputSpan(index64), geometry, depth, packed, maximum, 1, stream);
                     stream.synchronize();
                     const auto got_value = copyGpuTensorAsFloat(value, stream);
                     const auto got_index32 = copyGpuTensorAsUnsigned(index32, stream);
@@ -1249,27 +1296,27 @@ TEST(CubReductionFp32RK, DeepRSmallKArgMatchesReference) {
                                          DataType::FP8_E4M3);
         const Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(4 * outer * rows * k + 16, 0),
                                                    {4 * outer * rows * k + 16}, stream, DataType::UINT8);
-        const Tensor misaligned = bytes.aliasByteStorageAs(DataType::FP32, {outer, rows, k}, 4);
+        const StridedSpan misaligned = StridedSpan(bytes).bytesAs(4, DataType::FP32, {outer, rows, k});
         Tensor scratch(gpuPlacement, TensorDescriptor(DataType::UINT8, {fp32ArgPackedScratchBytes(outer, 5, k)}));
         uint64_t* packed = static_cast<uint64_t*>(scratch.getMemPtr<void>());
         Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
         const auto short_geometry = CubReduction::analyzeGeometry({outer, 64, k}, std::vector<uint32_t>{1});
         const Tensor short_input = makeGpuTensor(fp32ArgValues(outer * 64 * k, k, false), {outer, 64, k}, stream,
                                                  DataType::FP32);
-        EXPECT_THROW(launchFp32DeepRSmallKArg(fp8, nullptr, &index, geometry, 64, packed, false, 1, stream),
+        EXPECT_THROW(launchFp32DeepRSmallKArg(fp8, nullptr, outputSpan(index), geometry, 64, packed, false, 1, stream),
                      std::logic_error);
         EXPECT_THROW(launchFp32DeepRSmallKArg(input, nullptr, nullptr, geometry, 64, packed, false, 1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32DeepRSmallKArg(input, nullptr, &index, geometry, 64, nullptr, false, 1, stream),
+        EXPECT_THROW(launchFp32DeepRSmallKArg(input, nullptr, outputSpan(index), geometry, 64, nullptr, false, 1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32DeepRSmallKArg(input, nullptr, &index, geometry, 96, packed, false, 1, stream),
+        EXPECT_THROW(launchFp32DeepRSmallKArg(input, nullptr, outputSpan(index), geometry, 96, packed, false, 1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32DeepRSmallKArg(short_input, nullptr, &index, short_geometry, 64, packed, false, 1,
+        EXPECT_THROW(launchFp32DeepRSmallKArg(short_input, nullptr, outputSpan(index), short_geometry, 64, packed, false, 1,
                                               stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32DeepRSmallKArg(misaligned, nullptr, &index, geometry, 64, packed, false, 1, stream),
+        EXPECT_THROW(launchFp32DeepRSmallKArg(misaligned, nullptr, outputSpan(index), geometry, 64, packed, false, 1, stream),
                      std::logic_error);
-        EXPECT_NO_THROW(launchFp32DeepRSmallKArg(input, nullptr, &index, geometry, 64, packed, false, 1, stream));
+        EXPECT_NO_THROW(launchFp32DeepRSmallKArg(input, nullptr, outputSpan(index), geometry, 64, packed, false, 1, stream));
         stream.synchronize();
     }
 }
@@ -1391,7 +1438,7 @@ TEST(CubReductionFp32RK, AlignedKCarriedArgMatchesReference) {
                                     Tensor value(gpuPlacement, TensorDescriptor(DataType::FP32, {site.outer, site.k}));
                                     Tensor index(gpuPlacement,
                                                  TensorDescriptor(DataType::UINT64, {site.outer, site.k}));
-                                    launchFp32AlignedKCarriedArg(input, carried_index, &value, &index, geometry, packet,
+                                    launchFp32AlignedKCarriedArg(input, carried_index, outputSpan(value), outputSpan(index), geometry, packet,
                                                                  threads, shards,
                                                                  scratch ? scratch->getMemPtr<void>() : nullptr,
                                                                  maximum, stride, stream);
@@ -1421,19 +1468,19 @@ TEST(CubReductionFp32RK, AlignedKCarriedArgMatchesReference) {
         Tensor scratch(gpuPlacement,
                        TensorDescriptor(DataType::UINT8, {fp32ArgWideScratchBytes(outer, 10, k)}));
         Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
-        EXPECT_THROW(launchFp32AlignedKCarriedArg(input, carried, nullptr, &index, geometry, 16, 64, 10, nullptr, false,
+        EXPECT_THROW(launchFp32AlignedKCarriedArg(input, carried, nullptr, outputSpan(index), geometry, 16, 64, 10, nullptr, false,
                                                   1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32AlignedKCarriedArg(input, short_carried, nullptr, &index, geometry, 16, 64, 10,
+        EXPECT_THROW(launchFp32AlignedKCarriedArg(input, short_carried, nullptr, outputSpan(index), geometry, 16, 64, 10,
                                                   scratch.getMemPtr<void>(), false, 1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32AlignedKCarriedArg(input, byte_carried, nullptr, &index, geometry, 16, 64, 10,
+        EXPECT_THROW(launchFp32AlignedKCarriedArg(input, byte_carried, nullptr, outputSpan(index), geometry, 16, 64, 10,
                                                   scratch.getMemPtr<void>(), false, 1, stream),
                      std::logic_error);
         EXPECT_THROW(launchFp32AlignedKCarriedArg(input, carried, nullptr, nullptr, geometry, 16, 64, 10,
                                                   scratch.getMemPtr<void>(), false, 1, stream),
                      std::logic_error);
-        EXPECT_NO_THROW(launchFp32AlignedKCarriedArg(input, carried, nullptr, &index, geometry, 16, 64, 10,
+        EXPECT_NO_THROW(launchFp32AlignedKCarriedArg(input, carried, nullptr, outputSpan(index), geometry, 16, 64, 10,
                                                      scratch.getMemPtr<void>(), false, 1, stream));
         stream.synchronize();
     }
@@ -1482,7 +1529,7 @@ TEST(CubReductionFp32RK, RotatedCarriedArgMatchesReference) {
                                 scratch = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {scratch_bytes}));
                             Tensor value(gpuPlacement, TensorDescriptor(DataType::FP32, {site.outer, site.k}));
                             Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT64, {site.outer, site.k}));
-                            launchFp32RuntimeKCarriedArg(input, carried_index, &value, &index, geometry, depth,
+                            launchFp32RuntimeKCarriedArg(input, carried_index, outputSpan(value), outputSpan(index), geometry, depth,
                                                          scratch ? scratch->getMemPtr<void>() : nullptr, maximum,
                                                          stride, stream);
                             stream.synchronize();
@@ -1505,26 +1552,26 @@ TEST(CubReductionFp32RK, RotatedCarriedArgMatchesReference) {
             makeGpuUnsignedTensor(fp32CarriedIndices(outer * k, 1000), {outer, k}, stream, DataType::UINT32);
         const Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(4 * outer * rows * k + 16, 0),
                                                    {4 * outer * rows * k + 16}, stream, DataType::UINT8);
-        const Tensor misaligned = bytes.aliasByteStorageAs(DataType::FP32, {outer, rows, k}, 4);
-        const Tensor misaligned_carried = bytes.aliasByteStorageAs(DataType::UINT32, {outer, rows, k}, 4);
+        const StridedSpan misaligned = StridedSpan(bytes).bytesAs(4, DataType::FP32, {outer, rows, k});
+        const StridedSpan misaligned_carried = StridedSpan(bytes).bytesAs(4, DataType::UINT32, {outer, rows, k});
         Tensor scratch(gpuPlacement, TensorDescriptor(DataType::UINT8, {fp32ArgWideScratchBytes(outer, 10, k)}));
         Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
         void* wide = scratch.getMemPtr<void>();
-        EXPECT_THROW(launchFp32RuntimeKCarriedArg(misaligned, carried, nullptr, &index, geometry, 32, wide, false, 1,
+        EXPECT_THROW(launchFp32RuntimeKCarriedArg(misaligned, carried, nullptr, outputSpan(index), geometry, 32, wide, false, 1,
                                                   stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32RuntimeKCarriedArg(input, misaligned_carried, nullptr, &index, geometry, 32, wide, false,
+        EXPECT_THROW(launchFp32RuntimeKCarriedArg(input, misaligned_carried, nullptr, outputSpan(index), geometry, 32, wide, false,
                                                   1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32RuntimeKCarriedArg(input, short_carried, nullptr, &index, geometry, 32, wide, false, 1,
+        EXPECT_THROW(launchFp32RuntimeKCarriedArg(input, short_carried, nullptr, outputSpan(index), geometry, 32, wide, false, 1,
                                                   stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32RuntimeKCarriedArg(input, carried, nullptr, &index, geometry, 32, nullptr, false, 1,
+        EXPECT_THROW(launchFp32RuntimeKCarriedArg(input, carried, nullptr, outputSpan(index), geometry, 32, nullptr, false, 1,
                                                   stream),
                      std::logic_error);
-        EXPECT_NO_THROW(launchFp32RuntimeKCarriedArg(input, carried, nullptr, &index, geometry, 32, wide, false, 1,
+        EXPECT_NO_THROW(launchFp32RuntimeKCarriedArg(input, carried, nullptr, outputSpan(index), geometry, 32, wide, false, 1,
                                                      stream));
-        EXPECT_NO_THROW(launchFp32RuntimeKCarriedArg(input, carried, nullptr, &index, geometry, rows, nullptr, false,
+        EXPECT_NO_THROW(launchFp32RuntimeKCarriedArg(input, carried, nullptr, outputSpan(index), geometry, rows, nullptr, false,
                                                      1, stream));
         stream.synchronize();
     }
@@ -1571,7 +1618,7 @@ TEST(CubReductionFp32RK, OneWindowCarriedArgMatchesReference) {
                                              << maximum);
                                 Tensor value(gpuPlacement, TensorDescriptor(DataType::FP32, {site.outer, k}));
                                 Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT64, {site.outer, k}));
-                                launchFp32OneWindowCarriedArg(input, carried_index, &value, &index, geometry, unit, w,
+                                launchFp32OneWindowCarriedArg(input, carried_index, outputSpan(value), outputSpan(index), geometry, unit, w,
                                                               maximum, stride, stream);
                                 stream.synchronize();
                                 expectFp32CarriedArg(values, carried, site.outer, site.rows, k, maximum, stride,
@@ -1594,20 +1641,20 @@ TEST(CubReductionFp32RK, OneWindowCarriedArgMatchesReference) {
             makeGpuUnsignedTensor(fp32CarriedIndices(outer * k, 1000), {outer, k}, stream, DataType::UINT32);
         const Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(4 * outer * rows * k + 16, 0),
                                                    {4 * outer * rows * k + 16}, stream, DataType::UINT8);
-        const Tensor misaligned = bytes.aliasByteStorageAs(DataType::FP32, {outer, rows, k}, 4);
-        const Tensor misaligned_carried = bytes.aliasByteStorageAs(DataType::UINT32, {outer, rows, k}, 4);
+        const StridedSpan misaligned = StridedSpan(bytes).bytesAs(4, DataType::FP32, {outer, rows, k});
+        const StridedSpan misaligned_carried = StridedSpan(bytes).bytesAs(4, DataType::UINT32, {outer, rows, k});
         Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
         const Fp8OneWindowRuntimeKUnit o1{1, 16, 1, false};
-        EXPECT_THROW(launchFp32OneWindowCarriedArg(misaligned, carried, nullptr, &index, geometry, o1, 1, false, 1,
+        EXPECT_THROW(launchFp32OneWindowCarriedArg(misaligned, carried, nullptr, outputSpan(index), geometry, o1, 1, false, 1,
                                                    stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32OneWindowCarriedArg(input, misaligned_carried, nullptr, &index, geometry, o1, 1, false,
+        EXPECT_THROW(launchFp32OneWindowCarriedArg(input, misaligned_carried, nullptr, outputSpan(index), geometry, o1, 1, false,
                                                    1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32OneWindowCarriedArg(input, short_carried, nullptr, &index, geometry, o1, 1, false, 1,
+        EXPECT_THROW(launchFp32OneWindowCarriedArg(input, short_carried, nullptr, outputSpan(index), geometry, o1, 1, false, 1,
                                                    stream),
                      std::logic_error);
-        EXPECT_NO_THROW(launchFp32OneWindowCarriedArg(input, carried, nullptr, &index, geometry, o1, 1, false, 1,
+        EXPECT_NO_THROW(launchFp32OneWindowCarriedArg(input, carried, nullptr, outputSpan(index), geometry, o1, 1, false, 1,
                                                       stream));
         stream.synchronize();
     }
@@ -1651,7 +1698,7 @@ TEST(CubReductionFp32RK, DeepRSmallKCarriedArgMatchesReference) {
                                      << " max " << maximum);
                         Tensor value(gpuPlacement, TensorDescriptor(DataType::FP32, {site.outer, site.k}));
                         Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT64, {site.outer, site.k}));
-                        launchFp32DeepRSmallKCarriedArg(input, carried_index, &value, &index, geometry, depth,
+                        launchFp32DeepRSmallKCarriedArg(input, carried_index, outputSpan(value), outputSpan(index), geometry, depth,
                                                         scratch.getMemPtr<void>(), maximum, stride, stream);
                         stream.synchronize();
                         expectFp32CarriedArg(values, carried, site.outer, site.rows, site.k, maximum, stride, value,
@@ -1673,16 +1720,16 @@ TEST(CubReductionFp32RK, DeepRSmallKCarriedArgMatchesReference) {
         Tensor scratch(gpuPlacement, TensorDescriptor(DataType::UINT8, {fp32ArgWideScratchBytes(outer, 5, k)}));
         Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
         void* wide = scratch.getMemPtr<void>();
-        EXPECT_THROW(launchFp32DeepRSmallKCarriedArg(input, carried, nullptr, &index, geometry, 64, nullptr, false, 1,
+        EXPECT_THROW(launchFp32DeepRSmallKCarriedArg(input, carried, nullptr, outputSpan(index), geometry, 64, nullptr, false, 1,
                                                      stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32DeepRSmallKCarriedArg(input, short_carried, nullptr, &index, geometry, 64, wide, false,
+        EXPECT_THROW(launchFp32DeepRSmallKCarriedArg(input, short_carried, nullptr, outputSpan(index), geometry, 64, wide, false,
                                                      1, stream),
                      std::logic_error);
-        EXPECT_THROW(launchFp32DeepRSmallKCarriedArg(input, carried, nullptr, &index, geometry, 96, wide, false, 1,
+        EXPECT_THROW(launchFp32DeepRSmallKCarriedArg(input, carried, nullptr, outputSpan(index), geometry, 96, wide, false, 1,
                                                      stream),
                      std::logic_error);
-        EXPECT_NO_THROW(launchFp32DeepRSmallKCarriedArg(input, carried, nullptr, &index, geometry, 64, wide, false, 1,
+        EXPECT_NO_THROW(launchFp32DeepRSmallKCarriedArg(input, carried, nullptr, outputSpan(index), geometry, 64, wide, false, 1,
                                                         stream));
         stream.synchronize();
     }

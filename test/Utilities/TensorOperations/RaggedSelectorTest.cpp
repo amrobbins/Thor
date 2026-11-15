@@ -53,10 +53,6 @@ std::vector<std::string> candidateNames(RaggedFamily family) {
     return names;
 }
 
-uint32_t elementBytes(DataType dtype) {
-    return dtype == DataType::FP32 ? 4 : (dtype == DataType::FP16 || dtype == DataType::BF16) ? 2 : 1;
-}
-
 // Random offsets over the first active rows of the capacity, about every seventh segment forced empty.
 std::vector<uint64_t> randomOffsets(uint64_t active, uint64_t segments, std::mt19937_64& rng) {
     std::vector<uint64_t> offsets(segments + 1, 0);
@@ -71,7 +67,7 @@ struct Problem {
     RaggedSite site;
     std::vector<float> values;  // capacity x D, row major
     std::vector<uint64_t> offsets;
-    Tensor storage, input, offsets_tensor;
+    Tensor input, offsets_tensor;
 };
 
 Problem makeProblem(const RaggedSite& site, uint64_t seed, Stream& stream) {
@@ -79,22 +75,12 @@ Problem makeProblem(const RaggedSite& site, uint64_t seed, Stream& stream) {
     p.site = site;
     std::mt19937_64 rng(seed);
     const uint64_t n = site.capacity_rows, d = site.components;
-    const uint64_t head_elements = site.input_head / elementBytes(site.input_dtype);
-    std::vector<float> flat(head_elements + n * d, 0.0f);
     p.values.resize(n * d);
-    for (uint64_t i = 0; i < n * d; ++i) {
+    for (uint64_t i = 0; i < n * d; ++i)
         p.values[i] = static_cast<float>(static_cast<int>(rng() % 17) - 8);  // exact in every input dtype
-        flat[head_elements + i] = p.values[i];
-    }
     p.offsets = randomOffsets(n - n / 7, site.segments, rng);  // the last seventh of the capacity inactive
-    // A flat UINT8 storage (views need one), the values copied in through a typed view of it.
-    p.storage = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {flat.size() * elementBytes(site.input_dtype)}));
-    Tensor typed = p.storage.aliasByteStorageAs(site.input_dtype, {flat.size()}, 0);
-    typed.copyFromAsync(makeGpuTensor(flat, {flat.size()}, stream, site.input_dtype), stream);
-    stream.synchronize();
-    p.input = p.storage.aliasByteStorageAs(site.input_dtype,
-                                           d == 1 ? std::vector<uint64_t>{n} : std::vector<uint64_t>{n, d},
-                                           site.input_head);
+    p.input = makeGpuTensor(p.values, d == 1 ? std::vector<uint64_t>{n} : std::vector<uint64_t>{n, d}, stream,
+                            site.input_dtype);
     p.offsets_tensor = makeGpuUnsignedTensor(p.offsets, {site.segments + 1}, stream, site.offsets_dtype);
     return p;
 }
@@ -103,18 +89,21 @@ Problem makeProblem(const RaggedSite& site, uint64_t seed, Stream& stream) {
 std::vector<uint64_t> runSelection(const RaggedSelection& selection, Problem& p, Stream& stream) {
     const RaggedSelectedLaunch launch = raggedSelectedLaunch(selection, p.site, 0);
     const uint64_t b = p.site.segments, d = p.site.components;
-    const DataType bits_dtype = p.site.arg ? p.site.output_dtype : DataType::UINT32;
-    const uint64_t width = bits_dtype == DataType::UINT64 ? 8 : 4;
-    Tensor storage(gpuPlacement, TensorDescriptor(DataType::UINT8, {b * d * width}));
-    Tensor output = storage.aliasByteStorageAs(bits_dtype, {b, d}, 0);
-    output.copyFromAsync(makeGpuUnsignedTensor(std::vector<uint64_t>(b * d, 0x5A5A5A5AU), {b, d}, stream, bits_dtype),
-                         stream);
-    stream.synchronize();
-    Tensor value_output = p.site.arg ? output : storage.aliasByteStorageAs(DataType::FP32, {b, d}, 0);
+    // The output in its own dtype (the index dtype, or FP32 for VALUE), filled with garbage first; read back as bits.
+    const DataType output_dtype = p.site.arg ? p.site.output_dtype : DataType::FP32;
+    const uint64_t width = output_dtype == DataType::UINT64 ? 8 : 4;
+    Tensor output(gpuPlacement, TensorDescriptor(output_dtype, {b, d}));
+    output.memsetAsync(stream, 0x5A);
     Tensor workspace(gpuPlacement, TensorDescriptor(DataType::UINT8, {launch.workspace_bytes}));
-    launchRaggedSelection(selection, p.site, launch, p.input, p.offsets_tensor, value_output, workspace, stream);
+    launchRaggedSelection(selection, p.site, launch, p.input, p.offsets_tensor, output, workspace, stream);
+    std::vector<uint8_t> bytes(b * d * width);
+    EXPECT_EQ(cudaMemcpyAsync(bytes.data(), output.getMemPtr<void>(), bytes.size(), cudaMemcpyDeviceToHost,
+                              stream.getStream()),
+              cudaSuccess);
     stream.synchronize();
-    return copyGpuTensorAsUnsigned(output, stream);
+    std::vector<uint64_t> bits(b * d, 0);
+    for (uint64_t i = 0; i < bits.size(); ++i) std::memcpy(&bits[i], bytes.data() + i * width, width);
+    return bits;
 }
 
 // The host reference: ARG the first winner (lowest row) per column or the sentinel; VALUE SUM / MAX exact.
@@ -224,11 +213,6 @@ TEST(RaggedSelector, FamiliesCandidatesAndRefusals) {
     site = valueSite(DataType::FP32, 4, CubReductionOp::Sum, 100, 10);
     site.output_dtype = DataType::UINT32;
     refuses(site);
-    site.output_dtype = DataType::FP32;
-    site.input_head = 2;  // not a multiple of 4
-    refuses(site);
-    site.input_head = 16;
-    refuses(site);
     site = argSite(DataType::FP16, 8, CubArgReductionOp::ArgMax, 100, 10, DataType::FP32);
     refuses(site);
     refuses(argSite(DataType::FP32, 3, CubArgReductionOp::ArgMin, (uint64_t{1} << 32) / 3 + 1, 10));  // UINT32 index
@@ -239,15 +223,18 @@ TEST(RaggedSelector, TimesEveryLegalCandidateAndCachesPerSite) {
     Stream stream(0);
     DenseReductionSelectionCache& cache = denseReductionSelectionCache();
     cache.clear();
-    const auto attempts = [&] {
-        return cache.tuningAttempts(DenseReductionSelectionKind::RaggedKR) +
-               cache.tuningAttempts(DenseReductionSelectionKind::RaggedRK);
-    };
+    // The attempt counts are process-wide and clear() keeps them, so earlier tests that tuned ragged reductions
+    // leave them non-zero: count from here.
+    const uint64_t kr_before = cache.tuningAttempts(DenseReductionSelectionKind::RaggedKR);
+    const uint64_t rk_before = cache.tuningAttempts(DenseReductionSelectionKind::RaggedRK);
+    const auto kr_attempts = [&] { return cache.tuningAttempts(DenseReductionSelectionKind::RaggedKR) - kr_before; };
+    const auto rk_attempts = [&] { return cache.tuningAttempts(DenseReductionSelectionKind::RaggedRK) - rk_before; };
+    const auto attempts = [&] { return kr_attempts() + rk_attempts(); };
 
     const RaggedSite base = valueSite(DataType::FP32, 1, CubReductionOp::Sum, 50000, 300);
     const RaggedSelection first = selectCachedRagged(base, stream);
-    EXPECT_EQ(cache.tuningAttempts(DenseReductionSelectionKind::RaggedKR), 1U);
-    EXPECT_EQ(cache.tuningAttempts(DenseReductionSelectionKind::RaggedRK), 0U);
+    EXPECT_EQ(kr_attempts(), 1U);
+    EXPECT_EQ(rk_attempts(), 0U);
     EXPECT_EQ(first.family, RaggedFamily::KR);
     EXPECT_EQ(first.candidate_count, 3U);
     EXPECT_EQ(first.winner_name, raggedSelectionShapeName(first));
@@ -278,7 +265,7 @@ TEST(RaggedSelector, TimesEveryLegalCandidateAndCachesPerSite) {
 
     // Every field of the site is its own entry.
     std::vector<RaggedSite> variants;
-    for (int field = 0; field < 9; ++field) {
+    for (int field = 0; field < 8; ++field) {
         RaggedSite v = base;
         switch (field) {
             case 0: v.value_op = CubReductionOp::Max; break;
@@ -288,7 +275,6 @@ TEST(RaggedSelector, TimesEveryLegalCandidateAndCachesPerSite) {
             case 4: v.components = 2; break;
             case 5: v.capacity_rows = 50001; break;
             case 6: v.segments = 301; break;
-            case 7: v.input_head = 4; break;
             default: v = argSite(DataType::FP32, 1, CubArgReductionOp::ArgMin, 50000, 300); break;
         }
         variants.push_back(v);
@@ -307,7 +293,7 @@ TEST(RaggedSelector, TimesEveryLegalCandidateAndCachesPerSite) {
     // An RK site: kind RaggedRK, its three candidates.
     const RaggedSite rk = valueSite(DataType::FP16, 64, CubReductionOp::Min, 20000, 500);
     const RaggedSelection r = selectCachedRagged(rk, stream);
-    EXPECT_EQ(cache.tuningAttempts(DenseReductionSelectionKind::RaggedRK), 1U);
+    EXPECT_EQ(rk_attempts(), 1U);
     EXPECT_EQ(r.family, RaggedFamily::RK);
     EXPECT_EQ(r.candidate_count, 3U);
     const std::vector<std::string> rk_names = candidateNames(RaggedFamily::RK);
@@ -332,9 +318,8 @@ TEST(RaggedSelector, WinnerComputesWhatTheFirstCandidateAndTheReferenceCompute) 
     std::vector<RaggedSite> sites;
     sites.push_back(valueSite(DataType::FP16, 3, CubReductionOp::Sum, 30000, 700));  // KR
     {
-        RaggedSite s = valueSite(DataType::FP32, 64, CubReductionOp::Max, 6000, 300);  // RK, misaligned
+        RaggedSite s = valueSite(DataType::FP32, 64, CubReductionOp::Max, 6000, 300);  // RK
         s.offsets_dtype = DataType::UINT64;
-        s.input_head = 4;
         sites.push_back(s);
     }
     sites.push_back(valueSite(DataType::BF16, 9, CubReductionOp::Mean, 20000, 900));  // RK, odd D
@@ -344,7 +329,6 @@ TEST(RaggedSelector, WinnerComputesWhatTheFirstCandidateAndTheReferenceCompute) 
 #endif
     {
         RaggedSite s = argSite(DataType::BF16, 17, CubArgReductionOp::ArgMin, 9000, 250, DataType::UINT64);  // RK
-        s.input_head = 2;
         sites.push_back(s);
     }
     sites.push_back(argSite(DataType::FP32, 300, CubArgReductionOp::ArgMax, 1500, 60));  // RK, wide pair finisher

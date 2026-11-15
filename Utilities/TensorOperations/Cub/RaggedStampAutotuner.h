@@ -22,6 +22,7 @@
 // address mod 16.
 
 #include "Utilities/Common/AcceleratorBackendCachePolicy.h"
+#include "DeepLearning/Implementation/Tensor/StridedSpan.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Cub/DenseReductionSelectionCache.h"
 #include "Utilities/TensorOperations/Cub/RaggedReduction.h"
@@ -48,7 +49,6 @@ struct RaggedSite {
     uint64_t components = 1;                  // D
     uint64_t capacity_rows = 0;               // N
     uint64_t segments = 0;                    // B
-    uint32_t input_head = 0;                  // the input's address mod 16, a multiple of the element's bytes
 };
 
 /** A selected ragged launch shape: the KR shape for family KR, the RK shape for family RK. */
@@ -109,10 +109,10 @@ struct RaggedSelectedLaunch {
 void launchRaggedSelection(const RaggedSelection& selection,
                            const RaggedSite& site,
                            const RaggedSelectedLaunch& launch,
-                           const Tensor& input,
-                           const Tensor& offsets,
-                           Tensor& output,
-                           Tensor& workspace,
+                           const StridedSpan& input,
+                           const StridedSpan& offsets,
+                           const StridedSpan& output,
+                           const StridedSpan& workspace,
                            Stream& stream);
 
 /** The cache key of `site` on `stream`'s GPU (kind RaggedKR or RaggedRK; the depth always Regular). Throws
@@ -142,9 +142,7 @@ struct RaggedRoutedStamp {
 /** 1325: the ragged plan of an offset-segmented stamp: input [N, D...], output [B, D...] (the value dtype, or the index
  *  dtype when `arg`), offsets [B + 1]. Runs the selector (a contest on a miss). 1330: throws std::invalid_argument,
  *  with the reason, for a site no ragged family runs (1325-1329: nullptr, and the legacy kernels ran it): rows over
- *  2 GiB, more than 2^30 components, or an input address not a multiple of its element's bytes.
- *  The input's address mod 16 is part of the site, so the stamp is valid for the tensors it was stamped on and others
- *  of the same alignment. */
+ *  2 GiB or more than 2^30 components. */
 [[nodiscard]] std::shared_ptr<const RaggedRoutedStamp> raggedRouteSegmented(bool arg,
                                                                             CubReductionOp value_op,
                                                                             CubArgReductionOp arg_op,
@@ -156,10 +154,10 @@ struct RaggedRoutedStamp {
 /** 1325: runs a routed stamp on `input` (viewed as [N] or [N, D]), `offsets`, `output` and the stamp's `workspace`
  *  (at least routed.launch.workspace_bytes). Allocation-free; two launches on `stream`. */
 void runRaggedRouted(const RaggedRoutedStamp& routed,
-                     const Tensor& input,
-                     const Tensor& offsets,
-                     Tensor& output,
-                     Tensor& workspace,
+                     const StridedSpan& input,
+                     const StridedSpan& offsets,
+                     const StridedSpan& output,
+                     const StridedSpan& workspace,
                      Stream& stream);
 
 /** 1325: a routed stamp's passes (diagnostic): the winner's name, then the finisher's. */

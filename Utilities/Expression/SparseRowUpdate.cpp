@@ -386,7 +386,7 @@ std::string vectorBinaryExpr(ExprOp op, const std::string& lhs, const std::strin
 }
 
 void validateDenseContiguous(const Tensor& tensor, const std::string& label) {
-    if (tensor.hasCustomStrides() || !tensor.isDenseContiguous()) {
+    if (!tensor.isDenseContiguous()) {
         throw std::invalid_argument("Sparse row update " + label + " tensor must be dense contiguous.");
     }
 }

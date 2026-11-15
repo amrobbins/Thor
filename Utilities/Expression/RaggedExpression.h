@@ -13,7 +13,10 @@
 namespace ThorImplementation {
 
 struct RaggedExpressionRuntimeExtent {
-    Expression activeValueCount = Expression::constantScalar(0.0);
+    // The active value count is element activeValueCountIndex of activeValueCountSource: the row-partition offsets
+    // at index B, or a one-element active-count input at index 0. No view expression.
+    Expression activeValueCountSource = Expression::constantScalar(0.0);
+    uint64_t activeValueCountIndex = 0;
     uint64_t maxActiveValues = 0;
     uint64_t elementsPerValue = 1;
 

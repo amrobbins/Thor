@@ -1009,23 +1009,23 @@ class FusedEquation {
                                                                  const Stream& stream) const;
 
     std::shared_ptr<StampedReduction> stampReduction(const std::shared_ptr<CompiledReduction>& compiledReduction,
-                                                     Tensor& input,
+                                                     const StridedSpan& input,
                                                      const Stream& stream,
                                                      const std::vector<uint64_t>& requested_output_shape) const;
 
     [[nodiscard]] std::shared_ptr<StampedReduction> stampReduction(const std::shared_ptr<CompiledReduction>& compiledReduction,
-                                                                   Tensor& input,
+                                                                   const StridedSpan& input,
                                                                    const std::optional<Tensor>& preallocatedOutput,
                                                                    const Stream& stream,
                                                                    const std::vector<uint64_t>& requested_output_shape) const;
 
     [[nodiscard]] std::shared_ptr<StampedArgMinMax> stampArgMinMax(const std::shared_ptr<CompiledArgMinMax>& compiledStage,
-                                                                   Tensor& input,
+                                                                   const StridedSpan& input,
                                                                    const Stream& stream,
                                                                    const std::vector<uint64_t>& requested_output_shape) const;
 
     [[nodiscard]] std::shared_ptr<StampedArgMinMax> stampArgMinMax(const std::shared_ptr<CompiledArgMinMax>& compiledStage,
-                                                                   Tensor& input,
+                                                                   const StridedSpan& input,
                                                                    const std::optional<Tensor>& preallocatedOutput,
                                                                    const Stream& stream,
                                                                    const std::vector<uint64_t>& requested_output_shape) const;
@@ -1070,9 +1070,10 @@ class FusedEquation {
         std::shared_ptr<RmsNormForwardState> saved_forward_state = nullptr,
         bool packedTailsPreparedExternally = false) const;
 
+    // lhs / rhs: whole tensors (which convert) or, for a plain MATMUL, strided spans of them.
     [[nodiscard]] std::shared_ptr<StampedMatmul> stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
-                                                             Tensor& lhs,
-                                                             Tensor& rhs,
+                                                             const StridedSpan& lhs,
+                                                             const StridedSpan& rhs,
                                                              const std::optional<Tensor>& preallocatedOutput,
                                                              const Stream& stream,
                                                              const std::optional<RuntimeInputValue>& alpha_input = std::nullopt,
@@ -1082,7 +1083,8 @@ class FusedEquation {
                                                              const std::optional<Tensor>& epilogue_aux = std::nullopt,
                                                              const std::optional<Tensor>& preallocatedBgradOutput = std::nullopt,
                                                              const std::optional<Tensor>& rowPartitionOffsets = std::nullopt,
-                                                             bool packedTailsPreparedExternally = false) const;
+                                                             bool packedTailsPreparedExternally = false,
+                                                             const std::optional<MatmulOperands>& group = std::nullopt) const;
 
     [[nodiscard]] std::shared_ptr<StampedAttention> stampAttention(const std::shared_ptr<CompiledAttention>& compiledStage,
                                                                    const Tensor& q,
@@ -1156,21 +1158,21 @@ class FusedEquation {
 
     [[nodiscard]] std::shared_ptr<StampedReduceMinMaxBackward> stampReduceMinMaxBackward(
         const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage,
-        Tensor& input,
+        const StridedSpan& input,
         Tensor& grad_output,
         const std::optional<Tensor>& preallocatedOutput,
         const Stream& stream) const;
 
     [[nodiscard]] std::shared_ptr<StampedReduceMinMaxBackward> stampReduceMinMaxBackward(
         const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage,
-        Tensor& input,
+        const StridedSpan& input,
         Tensor& grad_output,
         const std::optional<Tensor>& offsets,
         const std::optional<Tensor>& preallocatedOutput,
         const Stream& stream) const;
 
     [[nodiscard]] std::shared_ptr<StampedReduceMinMaxBackward> stampReduceMinMaxBackward(
-        const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage, Tensor& input, Tensor& grad_output, const Stream& stream) const;
+        const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage, const StridedSpan& input, Tensor& grad_output, const Stream& stream) const;
 
     [[nodiscard]] std::shared_ptr<StampedScanMinMaxBackward> stampScanMinMaxBackward(
         const std::shared_ptr<CompiledScanMinMaxBackward>& compiledStage,

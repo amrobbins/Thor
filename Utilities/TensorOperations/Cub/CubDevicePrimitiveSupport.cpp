@@ -14,7 +14,7 @@ void requireDenseContiguousGpuTensor(const Tensor& tensor, const char* name) {
     if (tensor.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
         throw std::invalid_argument(std::string(name) + " must be a GPU tensor.");
     }
-    if (tensor.hasCustomStrides() || !tensor.isDenseContiguous()) {
+    if (!tensor.isDenseContiguous()) {
         throw std::invalid_argument(std::string(name) + " must be dense contiguous.");
     }
 }

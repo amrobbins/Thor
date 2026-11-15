@@ -4,6 +4,7 @@
 // kind F16KR (a deeper selection answers a shallower request), FP16 and BF16 at one geometry are separate entries, and
 // the winner computes the reduction. 1237: and the ARG selector (F16KR::selectCachedArgSite).
 
+#include "test/Utilities/TensorOperations/OutputSpan.h"
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 #include "test/Utilities/TensorOperations/Fp8ArgReference.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
@@ -298,7 +299,7 @@ TEST(CubReductionF16KRSelector, ArgSelectsCachesAndComputes) {
             std::optional<Tensor> scratch;
             const uint64_t scratch_bytes = KR::fp8KRScratchBytes(*regular.shape, true);
             if (scratch_bytes != 0) scratch = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {scratch_bytes}));
-            launchF16KRArgSegments(input, nullptr, &index, *regular.shape,
+            launchF16KRArgSegments(input, nullptr, outputSpan(index), *regular.shape,
                                    scratch ? scratch->getMemPtr<void>() : nullptr, scratch_bytes, s.maximum, 1,
                                    stream);
             stream.synchronize();

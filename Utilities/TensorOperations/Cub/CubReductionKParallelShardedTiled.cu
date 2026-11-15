@@ -1844,8 +1844,8 @@ template <typename InputT,
           size_t PacketBytes,
           int BlockThreads,
           TiledRKStageTopology Topology>
-void launchKParallelFp8ForBlock(const Tensor& input,
-                                Tensor& stage_output,
+void launchKParallelFp8ForBlock(const StridedSpan& input,
+                                const StridedSpan& stage_output,
                                 const CubReductionGeometry& geometry,
                                 uint64_t shards_per_output,
                                 InputTransformT input_transform,
@@ -2020,8 +2020,8 @@ void launchKParallelFp8ForBlock(const Tensor& input,
 // configuration, launchKParallelFp8ForBlock selects the hoisted staged, unified
 // complete or typed packet kernel, and honors the accepted typed pruning.
 template <TiledRKStageTopology Topology, typename TransformT, typename ReductionOpT, typename OutputFinalizeT>
-void launchFp8AlignedKRetained(const Tensor& input,
-                               Tensor& stage_output,
+void launchFp8AlignedKRetained(const StridedSpan& input,
+                               const StridedSpan& stage_output,
                                const CubReductionGeometry& geometry,
                                const KParallelTiledStagePlan& plan,
                                OutputFinalizeT output_finalize,
@@ -2049,8 +2049,8 @@ void launchFp8AlignedKRetained(const Tensor& input,
 
 template <TiledRKStageTopology Topology, typename ReductionOpT>
 void launchFp8AlignedKNonadditive(const CubReductionStageSemantics& semantics,
-                                  const Tensor& input,
-                                  Tensor& stage_output,
+                                  const StridedSpan& input,
+                                  const StridedSpan& stage_output,
                                   const CubReductionGeometry& geometry,
                                   const KParallelTiledStagePlan& plan,
                                   float output_scale,
@@ -2073,8 +2073,8 @@ void launchFp8AlignedKNonadditive(const CubReductionStageSemantics& semantics,
 
 template <TiledRKStageTopology Topology>
 void dispatchFp8AlignedKStageSemantics(const CubReductionStageSemantics& semantics,
-                                       const Tensor& input,
-                                       Tensor& stage_output,
+                                       const StridedSpan& input,
+                                       const StridedSpan& stage_output,
                                        const CubReductionGeometry& geometry,
                                        const KParallelTiledStagePlan& plan,
                                        float output_scale,
@@ -2110,7 +2110,7 @@ void dispatchFp8AlignedKStageSemantics(const CubReductionStageSemantics& semanti
 
 #endif  // THOR_CUB_ENABLE_FP8_TYPES
 
-void validateCompleteOutput(const Tensor& output, const CubReductionGeometry& geometry) {
+void validateCompleteOutput(const StridedSpan& output, const CubReductionGeometry& geometry) {
     if (geometry.outer_size > std::numeric_limits<uint64_t>::max() / geometry.inner_size) {
         throw std::overflow_error("K-parallel complete tiled output element count overflows uint64_t.");
     }
@@ -2174,8 +2174,8 @@ CubKernelOccupancyInfo queryKParallelTiledStageOccupancy(DataType input_dtype,
 }
 
 void launchKParallelTiledStage(const CubReductionStageSemantics& semantics,
-                               const Tensor& input,
-                               Tensor& stage_output,
+                               const StridedSpan& input,
+                               const StridedSpan& stage_output,
                                const CubReductionGeometry& geometry,
                                const KParallelTiledStagePlan& plan,
                                float output_scale,
@@ -2538,8 +2538,8 @@ namespace {
 // launcher checks the input dtype and picks InputT; `name` labels the errors.
 template <typename InputT>
 void launchAlignedKStageTyped(const CubReductionStageSemantics& semantics,
-                              const Tensor& input,
-                              Tensor& stage_output,
+                              const StridedSpan& input,
+                              const StridedSpan& stage_output,
                               const CubReductionGeometry& geometry,
                               uint32_t packet_bytes,
                               uint32_t block_threads,
@@ -2611,8 +2611,8 @@ template <typename InputT>
 }  // namespace
 
 void launchFp32AlignedKStage(const CubReductionStageSemantics& semantics,
-                             const Tensor& input,
-                             Tensor& stage_output,
+                             const StridedSpan& input,
+                             const StridedSpan& stage_output,
                              const CubReductionGeometry& geometry,
                              uint32_t packet_bytes,
                              uint32_t block_threads,
@@ -2633,8 +2633,8 @@ CubKernelOccupancyInfo queryFp32AlignedKOccupancy(uint32_t packet_bytes, uint32_
 }
 
 void launchF16AlignedKStage(const CubReductionStageSemantics& semantics,
-                            const Tensor& input,
-                            Tensor& stage_output,
+                            const StridedSpan& input,
+                            const StridedSpan& stage_output,
                             const CubReductionGeometry& geometry,
                             uint32_t packet_bytes,
                             uint32_t block_threads,
@@ -2697,7 +2697,7 @@ uint64_t fp32ArgPackedScratchBytes(uint64_t outer_size, uint64_t shards, uint64_
 namespace {
 // The outputs of an FP32 ARG pass: value (any float storage) and / or index (UINT32 or UINT64; UINT32 must hold the
 // largest original-domain index).
-[[nodiscard]] Fp32ArgOutputs fp32ArgOutputsFor(Tensor* value_output, Tensor* index_output, uint64_t outputs,
+[[nodiscard]] Fp32ArgOutputs fp32ArgOutputsFor(const StridedSpan* value_output, const StridedSpan* index_output, uint64_t outputs,
                                                uint64_t reduction_size, bool maximum, uint64_t domain_stride,
                                                const char* who) {
     if ((value_output == nullptr && index_output == nullptr) ||
@@ -2743,8 +2743,8 @@ void launchFp32ArgPackedContinuationRows(const uint64_t* packed, const Fp32ArgOu
 }  // namespace
 
 void launchFp32ArgPackedContinuation(const uint64_t* packed_partials,
-                                     Tensor* value_output,
-                                     Tensor* index_output,
+                                     const StridedSpan* value_output,
+                                     const StridedSpan* index_output,
                                      uint64_t outer_size,
                                      uint64_t reduction_size,
                                      uint64_t inner_size,
@@ -2772,9 +2772,9 @@ void launchFp32ArgPackedContinuation(const uint64_t* packed_partials,
 namespace {
 // One input type's AlignedK ARG pass (FP32, or 1248 FP16 / BF16 widened to the FP32 key); `name` labels the errors.
 template <typename InputT>
-void launchAlignedKArgTyped(const Tensor& input,
-                            Tensor* value_output,
-                            Tensor* index_output,
+void launchAlignedKArgTyped(const StridedSpan& input,
+                            const StridedSpan* value_output,
+                            const StridedSpan* index_output,
                             const CubReductionGeometry& geometry,
                             uint32_t packet_bytes,
                             uint32_t block_threads,
@@ -2844,9 +2844,9 @@ template <typename InputT>
 }
 }  // namespace
 
-void launchFp32AlignedKArg(const Tensor& input,
-                           Tensor* value_output,
-                           Tensor* index_output,
+void launchFp32AlignedKArg(const StridedSpan& input,
+                           const StridedSpan* value_output,
+                           const StridedSpan* index_output,
                            const CubReductionGeometry& geometry,
                            uint32_t packet_bytes,
                            uint32_t block_threads,
@@ -2861,9 +2861,9 @@ void launchFp32AlignedKArg(const Tensor& input,
                                   shards_per_output, packed_scratch, maximum, domain_stride, stream, "FP32");
 }
 
-void launchF16AlignedKArg(const Tensor& input,
-                          Tensor* value_output,
-                          Tensor* index_output,
+void launchF16AlignedKArg(const StridedSpan& input,
+                          const StridedSpan* value_output,
+                          const StridedSpan* index_output,
                           const CubReductionGeometry& geometry,
                           uint32_t packet_bytes,
                           uint32_t block_threads,
@@ -2922,7 +2922,7 @@ namespace {
 
 // The outputs of a carried-index pass: the tails hold the composed index, so the index stride is 1. A UINT32 index
 // output is the caller's choice (the planner sizes it from the whole original domain).
-[[nodiscard]] Fp32ArgOutputs fp32CarriedArgOutputsFor(Tensor* value_output, Tensor* index_output, uint64_t outputs,
+[[nodiscard]] Fp32ArgOutputs fp32CarriedArgOutputsFor(const StridedSpan* value_output, const StridedSpan* index_output, uint64_t outputs,
                                                       bool maximum, const char* who) {
     return fp32ArgOutputsFor(value_output, index_output, outputs, 1, maximum, 1, who);
 }
@@ -2949,7 +2949,7 @@ void launchFp32ArgWideContinuationPartials(const Fp32ArgWidePartials& partials, 
 }
 
 // A carried index tensor of the input's element count, UINT32 or UINT64, aligned to `alignment` bytes.
-void checkFp32CarriedIndex(const Tensor& carried_index, uint64_t elements, uint64_t alignment, const char* who) {
+void checkFp32CarriedIndex(const StridedSpan& carried_index, uint64_t elements, uint64_t alignment, const char* who) {
     if ((carried_index.getDataType() != DataType::UINT32 && carried_index.getDataType() != DataType::UINT64) ||
         carried_index.getTotalNumElements() != elements ||
         (reinterpret_cast<uintptr_t>(carried_index.getMemPtr<void>()) & uintptr_t{alignment - 1}) != 0) {
@@ -2959,8 +2959,8 @@ void checkFp32CarriedIndex(const Tensor& carried_index, uint64_t elements, uint6
 }  // namespace
 
 void launchFp32ArgWideContinuation(void* wide_scratch,
-                                   Tensor* value_output,
-                                   Tensor* index_output,
+                                   const StridedSpan* value_output,
+                                   const StridedSpan* index_output,
                                    uint64_t outer_size,
                                    uint64_t shards,
                                    uint64_t inner_size,
@@ -2976,10 +2976,10 @@ void launchFp32ArgWideContinuation(void* wide_scratch,
                                           outer_size, shards, inner_size, stream);
 }
 
-void launchFp32AlignedKCarriedArg(const Tensor& input,
-                                  const Tensor& carried_index,
-                                  Tensor* value_output,
-                                  Tensor* index_output,
+void launchFp32AlignedKCarriedArg(const StridedSpan& input,
+                                  const StridedSpan& carried_index,
+                                  const StridedSpan* value_output,
+                                  const StridedSpan* index_output,
                                   const CubReductionGeometry& geometry,
                                   uint32_t packet_bytes,
                                   uint32_t block_threads,

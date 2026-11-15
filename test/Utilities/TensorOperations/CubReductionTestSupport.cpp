@@ -1,6 +1,8 @@
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 
 #include "Utilities/Common/LowPrecisionFloat.h"
+#include "Utilities/Exceptions.h"
+#include "Utilities/TensorOperations/Copy/StridedCopy.h"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -256,14 +258,14 @@ void expectFloatVectorNear(const std::vector<float>& actual,
     }
 }
 
-std::vector<float> executeFp32Output(const Tensor& input, CubReductionOp op, uint32_t axis, Stream& stream) {
+std::vector<float> executeFp32Output(const StridedSpan& input, CubReductionOp op, uint32_t axis, Stream& stream) {
     std::shared_ptr<StampedCubReduction> stamped = CubReduction(op, axis, DataType::FP32).stamp(input, stream);
     stamped->run();
     stream.synchronize();
     return copyGpuTensorAsFloat(stamped->getOutputTensor(), stream);
 }
 
-std::vector<float> executeFp32Output(const Tensor& input,
+std::vector<float> executeFp32Output(const StridedSpan& input,
                                      CubReductionOp op,
                                      const std::vector<uint32_t>& axes,
                                      Stream& stream) {
@@ -273,7 +275,7 @@ std::vector<float> executeFp32Output(const Tensor& input,
     return copyGpuTensorAsFloat(stamped->getOutputTensor(), stream);
 }
 
-void expectOperations(const Tensor& input,
+void expectOperations(const StridedSpan& input,
                       uint32_t axis,
                       const std::vector<OperationExpectation>& expectations,
                       Stream& stream) {
@@ -294,6 +296,50 @@ void expectInputStorageAccumulatesInFp32(DataType input_dtype, Stream& stream) {
     stamped->run();
     stream.synchronize();
     expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {3.0f, 7.0f});
+}
+
+Tensor runRefusedViewInTwoParts(const StridedSpan& view,
+                                CubReductionOp op,
+                                const std::vector<uint32_t>& axes,
+                                Stream& stream,
+                                std::optional<DataType> output_dtype,
+                                std::optional<CubReductionViewSplit::Kind>* kind) {
+    const std::vector<uint64_t>& dims = view.getDimensions();
+    const std::vector<uint64_t>& strides = view.getStridesElements();
+    EXPECT_THROW(static_cast<void>(CubReduction::analyzeGeometry(dims, strides, axes)), NotImplementedException);
+    const DataType resolved_output = CubReduction(op, axes, output_dtype).resolveOutputDataType(view.getDataType());
+    // 1392: the split the view has without the reducer's in-place pitched read (CubReduction::pitchedCompleteLaunch).
+    const std::optional<CubReductionViewSplit> split =
+        CubReduction::splitRefusedView(view, axes, resolved_output, false);
+    if (!split.has_value()) throw std::logic_error("runRefusedViewInTwoParts: the reducer does not refuse the view.");
+    if (kind != nullptr) *kind = split->kind;
+    const CubReduction reduction(op, split->dense_axes, output_dtype);
+    if (split->kind == CubReductionViewSplit::Kind::PackedInput) {
+        Tensor packed(view.getPlacement(), TensorDescriptor(view.getDataType(), split->dense_dimensions));
+        copyToDenseAsync(view, packed, stream);
+        const std::shared_ptr<StampedCubReduction> stamped = reduction.stamp(StridedSpan(packed), stream);
+        stamped->run();
+        stream.synchronize();
+        return stamped->getOutputTensor();
+    }
+    // Rotated (F / G) or sliced (H read at its row pitch): the reduction of the bytes, then the copy of its output.
+    const std::shared_ptr<StampedCubReduction> stamped = reduction.stamp(split->reducedInput(view), stream);
+    stamped->run();
+    const Tensor& buffer = stamped->getOutputTensor();  // buffer_dimensions, with the reduced axis kept as extent 1
+    Tensor output(view.getPlacement(), TensorDescriptor(buffer.getDataType(), split->copy_dimensions));
+    copyToDenseAsync(split->copySource(buffer), output, stream);
+    stream.synchronize();
+    std::vector<uint64_t> output_dims = dims;  // the reducer keeps a reduced axis as extent 1
+    for (const uint32_t axis : axes) output_dims[axis] = 1;
+    output.reshape(output_dims);
+    return output;
+}
+
+std::vector<float> executeRefusedViewInTwoParts(const StridedSpan& view,
+                                                CubReductionOp op,
+                                                const std::vector<uint32_t>& axes,
+                                                Stream& stream) {
+    return copyGpuTensorAsFloat(runRefusedViewInTwoParts(view, op, axes, stream, DataType::FP32), stream);
 }
 
 }  // namespace ThorImplementation::CubReductionTestSupport

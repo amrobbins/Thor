@@ -33,11 +33,8 @@ RowPartitionRuntime::RowPartitionRuntime(Tensor offsets, RowPartitionDescriptor 
     THOR_THROW_IF_FALSE(this->offsets.getDescriptor() == descriptor.getOffsetsDescriptor());
     // When an offsets representation exists it also serves as a host-state carrier,
     // but it is not the semantic row-partition identity. HOST_EXTENT-only runtimes
-    // instead carry the same publication on another tensor. Views are rejected so
-    // one offsets representation still has exactly one host publication.
-    THOR_THROW_IF_FALSE(this->offsets.isDenseContiguous());
-    THOR_THROW_IF_FALSE(this->offsets.getStorageElementOffset() == 0);
-    THOR_THROW_IF_FALSE(!this->offsets.hasCustomStrides());
+    // instead carry the same publication on another tensor. A Tensor is never a
+    // view, so one offsets representation has exactly one host publication.
     rowPartitionId = this->offsets.getTensorId();
     THOR_THROW_IF_FALSE(rowPartitionId != 0);
     initialized = true;

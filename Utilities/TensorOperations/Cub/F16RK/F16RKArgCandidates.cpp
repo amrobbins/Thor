@@ -120,8 +120,8 @@ std::vector<F16RKPoolEntry> f16RKArgRankerPool(const std::vector<F16RKArgCandida
     return pool;
 }
 
-void launchF16RKArgPass(const PhysicalKernel& identity, const Tensor& input, Tensor* value_output,
-                         Tensor* index_output, const CubReductionGeometry& geometry, uint64_t* packed_scratch,
+void launchF16RKArgPass(const PhysicalKernel& identity, const StridedSpan& input, const StridedSpan* value_output,
+                         const StridedSpan* index_output, const CubReductionGeometry& geometry, uint64_t* packed_scratch,
                          bool maximum, uint64_t domain_stride, Stream& stream) {
     const uint64_t outer = geometry.outer_size, r = geometry.reduction_size, k = geometry.inner_size;
     if (!f16RKArgPassLegal(identity, outer, r, k))

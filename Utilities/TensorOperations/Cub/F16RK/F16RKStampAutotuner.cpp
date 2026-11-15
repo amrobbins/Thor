@@ -90,7 +90,7 @@ bool isOriginalF16RKSite(const DenseReductionProblem& problem, DenseReductionSit
 
 F16RKSelection autotuneValueSite(const DenseReductionProblem& problem, DenseReductionSite site,
                                  CubReductionOp operation, uint64_t original_reduction_size, float output_scale,
-                                 const Tensor& representative_input, const Stream& stream,
+                                 const StridedSpan& representative_input, const Stream& stream,
                                  uint64_t workspace_budget_bytes, CubReductionTuningDepth tuning_depth,
                                  uint64_t input_alignment_bytes) {
     const DataType input_dtype = representative_input.getDataType();
@@ -117,10 +117,14 @@ F16RKSelection autotuneValueSite(const DenseReductionProblem& problem, DenseRedu
     candidate_site.input_dtype = input_dtype;
     candidate_site.semantics = semantics;
     candidate_site.scratch_budget_bytes = workspace_budget_bytes;
+    candidate_site.input_alignment_bytes = alignment;  // 1379
     auto pool = f16RKCandidatePool(candidate_site, [&](const PhysicalKernel& kernel) {
         return f16RKCompiledResidency(kernel, input_dtype, shape.k, semantics);
     });
-    std::erase_if(pool, [&](const F16RKPoolEntry& entry) { return f16RKPassInputAlignment(entry.kernel) > alignment; });
+    // 1381: a VALUE pass's own alignment (the VALUE OneWindow kernel reads any 2-byte address when K fits).
+    std::erase_if(pool, [&](const F16RKPoolEntry& entry) {
+        return f16RKPassInputAlignmentAtK(entry.kernel, shape.k) > alignment;
+    });
     if (pool.empty())
         throw std::runtime_error("No retained FP16 / BF16 RK pass runs at this input's " + std::to_string(alignment) +
                                  "-byte alignment");
@@ -215,7 +219,7 @@ F16RKSelection selectCachedValueSite(const DenseReductionProblem& problem, Dense
 }
 
 F16RKSelection autotuneArgSite(const DenseReductionProblem& problem, DenseReductionSite site, bool maximum,
-                               uint64_t original_reduction_size, const Tensor& representative_input,
+                               uint64_t original_reduction_size, const StridedSpan& representative_input,
                                const Stream& stream, uint64_t workspace_budget_bytes,
                                CubReductionTuningDepth tuning_depth, uint64_t input_alignment_bytes) {
     const DataType input_dtype = representative_input.getDataType();
@@ -249,8 +253,14 @@ F16RKSelection autotuneArgSite(const DenseReductionProblem& problem, DenseReduct
     auto generated = f16RKArgCandidates(value_pool, shape.outer, shape.r, shape.k, workspace_budget_bytes);
     F16RKSelection selection;
     if (generated.empty()) return selection;  // candidate_count 0: no 2-byte ARG pass
+    // 1383: the ARG OneWindow twin reads any 2-byte address when K fits its window with a prefix and the byte
+    // offsets, which then start up to 15 bytes early, fit 32 bits (launchF16OneWindowArg).
+    const uint64_t elements = checkedMul(checkedMul(shape.outer, shape.r), shape.k);
     std::erase_if(generated, [&](const F16RKArgCandidate& candidate) {
-        return f16RKPassInputAlignment(candidate.identity) > alignment;
+        if (alignment < 16 && candidate.identity.family == PhysicalFamily::OneWindow &&
+            elements > (std::numeric_limits<uint32_t>::max() - 15u) / 2)
+            return true;
+        return f16RKPassInputAlignmentAtK(candidate.identity, shape.k) > alignment;
     });
     if (generated.empty())
         throw std::runtime_error("No retained FP16 / BF16 RK ARG pass runs at this input's " +
@@ -264,12 +274,12 @@ F16RKSelection autotuneArgSite(const DenseReductionProblem& problem, DenseReduct
                                            f16RKShortlistLength(tuning_depth), aggregate);
 
     // Outputs exactly as the stamped pass writes them: the requested outputs on the final site, else the FP32 value +
-    // carried index intermediate. One UINT8 output slot holds the value then (256-byte aligned) the index.
+    // carried index intermediate. One UINT8 output slot holds the value, then the index (at nextSliceOffset: 256-byte aligned, 128 bytes past the value).
     const DataType value_dtype = final_site ? problem.final_output.value_dtype : DataType::FP32;
     const DataType index_dtype = final_site ? problem.final_output.index_dtype : problem.carried_arg_index_dtype;
     const std::vector<uint64_t> output_dims{shape.outer, shape.k};
     const uint64_t value_bytes = produce_value ? TensorDescriptor(value_dtype, output_dims).getArraySizeInBytes() : 0;
-    const uint64_t index_offset = (value_bytes + 255) & ~uint64_t{255};
+    const uint64_t index_offset = ReductionAutotuning::nextSliceOffset(value_bytes);
     const uint64_t index_bytes = produce_index ? TensorDescriptor(index_dtype, output_dims).getArraySizeInBytes() : 0;
     const uint64_t domain_stride = denseArgOriginalIndexStride(problem.runs[site.run_index]).value_or(0);
     const CubReductionGeometry geometry = CubArgReduction::analyzeDenseGeometry({shape.outer, shape.r, shape.k}, {1});
@@ -280,12 +290,12 @@ F16RKSelection autotuneArgSite(const DenseReductionProblem& problem, DenseReduct
         candidate.name = std::string(familyName(identity.family)) + "_arg#" + std::to_string(candidates.size());
         candidate.scratch_bytes = f16RKArgScratchBytes(identity, shape.outer, shape.r, shape.k);
         const bool staged = candidate.scratch_bytes != 0;
-        candidate.launch = [=](const Tensor& input, Tensor& output, Tensor& scratch, Stream& run_stream) {
-            Tensor site_input = input;
+        candidate.launch = [=](const StridedSpan& input, const StridedSpan& output, const StridedSpan& scratch, Stream& run_stream) {
+            StridedSpan site_input = input;
             site_input.reshape({shape.outer, shape.r, shape.k});
-            std::optional<Tensor> value, index;
-            if (produce_value) value = output.aliasByteStorageAs(value_dtype, output_dims, 0);
-            if (produce_index) index = output.aliasByteStorageAs(index_dtype, output_dims, index_offset);
+            std::optional<StridedSpan> value, index;
+            if (produce_value) value = output.bytesAs(0, value_dtype, output_dims);
+            if (produce_index) index = output.bytesAs(index_offset, index_dtype, output_dims);
             uint64_t* packed = staged ? static_cast<uint64_t*>(scratch.getMemPtr<void>()) : nullptr;
             launchF16RKArgPass(identity, site_input, value ? &*value : nullptr, index ? &*index : nullptr, geometry,
                                packed, maximum, domain_stride, run_stream);

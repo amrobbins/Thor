@@ -29,6 +29,10 @@ struct Fp32RKSite {
     uint32_t sm_count = 0;
     CubReductionStageSemantics semantics{};
     uint64_t scratch_budget_bytes = std::numeric_limits<uint64_t>::max();
+    // 1379: the input base alignment the site reads (4, 8 or 16). At 4 the 4-byte AlignedK packet is offered at even K
+    // too: no wider packet reads that base, and the rotated pass needs R > 32. 1381: below 16 the OneWindow kernels
+    // are those whose window holds K and a prefix.
+    uint64_t input_alignment_bytes = 16;
 };
 
 struct Fp32RKPoolEntry {
@@ -46,9 +50,15 @@ using Fp32RKResidency = std::function<uint32_t(const Fp8RK::PhysicalKernel&)>;
                                                const CubReductionStageSemantics& semantics);
 
 /** 1222: the input base alignment (bytes) the FP32 RK pass `kernel` requires, VALUE stage or ARG twin alike: 4 (any
- *  FP32 address) for the rotated RuntimeK pass, the packet for AlignedK, 16 for OneWindow, DeepRSmallK and RuntimeK
- *  PacketComplete. The carried-index twins read fresh, aligned intermediates. */
+ *  FP32 address) for the rotated RuntimeK pass and (1384) RuntimeK PacketComplete, the packet for AlignedK, 16 for
+ *  OneWindow and DeepRSmallK (see fp32RKPassInputAlignmentAtK for OneWindow). The carried-index twins read fresh,
+ *  aligned intermediates. */
 [[nodiscard]] uint32_t fp32RKPassInputAlignment(const Fp8RK::PhysicalKernel& kernel);
+
+/** 1381: the same for an original-input stage at inner size `k`: the OneWindow kernel reads any FP32 address (4) when
+ *  K fits its window less a prefix (Fp8RK::oneWindowUnalignedCapacity). 1383: its ARG twin too (the carried twin reads
+ *  16-byte aligned intermediates only). */
+[[nodiscard]] uint32_t fp32RKPassInputAlignmentAtK(const Fp8RK::PhysicalKernel& kernel, uint64_t k);
 
 /** The pool at `site`, families interleaved by local rank (OneWindow, DeepRSmallK, AlignedK, RuntimeK). Every entry
  *  satisfies Fp8RK::structurallyValid and the family's FP32 launch limits. */

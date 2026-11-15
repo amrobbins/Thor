@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Tensor/TensorElement.h"
 #include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 
 #include <cstdint>
@@ -10,7 +11,8 @@ namespace ThorImplementation {
 inline constexpr RaggedPartitionRequirement kRaggedRuntimeExtentPartitionRequirement = RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT;
 
 struct RaggedRuntimeExtent {
-    Tensor activeValueCount;
+    // The device-resident active value count: element B of the row-partition offsets, or a one-element count tensor.
+    TensorElement activeValueCount;
     uint64_t maxActiveValues = 0;
     uint64_t elementsPerValue = 1;
 
@@ -18,8 +20,6 @@ struct RaggedRuntimeExtent {
     [[nodiscard]] uint64_t maxLaunchElements() const;
     [[nodiscard]] uint32_t maxGridDimX(uint32_t blockDimX) const;
 };
-
-[[nodiscard]] Tensor rowPartitionActiveValueCount(const Tensor& offsets, uint64_t batch_size);
 
 [[nodiscard]] RaggedRuntimeExtent raggedRuntimeExtentFromOffsets(const Tensor& offsets,
                                                                  uint64_t batch_size,

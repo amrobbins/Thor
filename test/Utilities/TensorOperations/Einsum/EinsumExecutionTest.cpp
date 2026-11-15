@@ -506,7 +506,7 @@ TEST(EinsumExecution, BlasAddressableDiagonalFeedsStridedBatchedGemm) {
     expectNear(copyToCpu(einsum->getOutputTensor(), stream), {5, 23, 67, 109});
 }
 
-TEST(EinsumExecution, DiagonalPreReductionHappensBeforeGemmWithoutOperandMaterialization) {
+TEST(EinsumExecution, DiagonalPreReductionHappensBeforeGemmOnTheDiagonalViewsDenseCopy) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     Tensor lhs = makeGpuTensor({2, 2, 2, 3},
@@ -527,16 +527,18 @@ TEST(EinsumExecution, DiagonalPreReductionHappensBeforeGemmWithoutOperandMateria
     EXPECT_EQ(std::count(stage_kinds.begin(), stage_kinds.end(), "Reduction"), 1);
     EXPECT_EQ(std::count(stage_kinds.begin(), stage_kinds.end(), "Matmul"), 1);
     EXPECT_EQ(std::count(stage_kinds.begin(), stage_kinds.end(), "FusedKernel"), 0);
+    // 1390: the repeated-label diagonal view [2, 2, 3] with strides [18, 3, 1] has gaps between its slabs
+    // (VIEW-PITCHED-TILED), which the reducer refuses: Expression copies it dense (copyToDenseAsync) and reduces that.
+    EXPECT_EQ(std::count(stage_kinds.begin(), stage_kinds.end(), "DenseCopy"), 1);
 
     const std::vector<StampedReductionStageDiagnostic> reductions =
         einsum->getStandaloneReductionDiagnostics();
     ASSERT_EQ(reductions.size(), 1u);
-    // VIEW-PITCHED-TILED takes ownership without materializing the repeated-label diagonal view.
     EXPECT_EQ(reductions[0].path, CubReductionPath::TiledFixedSegment);
     EXPECT_EQ(reductions[0].input_dimensions, (std::vector<uint64_t>{2, 2, 3}));
-    EXPECT_EQ(reductions[0].input_strides_elements, (std::vector<uint64_t>{18, 3, 1}));
+    EXPECT_EQ(reductions[0].input_strides_elements, (std::vector<uint64_t>{6, 3, 1}));
     EXPECT_EQ(reductions[0].reduction_axes, (std::vector<uint64_t>{1}));
-    EXPECT_TRUE(reductionMatchesOriginalDiagonalView(einsum->getPlan(), reductions[0]));
+    EXPECT_FALSE(reductionMatchesOriginalDiagonalView(einsum->getPlan(), reductions[0]));
     expectEinsumViewGateNoLegacyMapper(*einsum, "equation=iirk,kj->ij");
 
     einsum->run();
@@ -561,15 +563,17 @@ TEST(EinsumExecution, DiagonalLocalReductionBeforePairProductIsTrackedByViewGate
     EXPECT_EQ(einsum->getExecutionPath(), EinsumExecutionPath::PAIR_PRODUCT);
     EXPECT_TRUE(einsum->usesStandaloneReduction());
 
+    // 1390: the same pitched diagonal outside GEMM lowering ([2, 3] with strides [9, 1]) is copied dense first.
+    const std::vector<std::string> stage_kinds = einsum->getExpressionStageKindNames();
+    EXPECT_EQ(std::count(stage_kinds.begin(), stage_kinds.end(), "DenseCopy"), 1);
     const std::vector<StampedReductionStageDiagnostic> reductions =
         einsum->getStandaloneReductionDiagnostics();
     ASSERT_EQ(reductions.size(), 1u);
-    // The same pitched affine family is required outside GEMM lowering.
     EXPECT_EQ(reductions[0].path, CubReductionPath::TiledFixedSegment);
     EXPECT_EQ(reductions[0].input_dimensions, (std::vector<uint64_t>{2, 3}));
-    EXPECT_EQ(reductions[0].input_strides_elements, (std::vector<uint64_t>{9, 1}));
+    EXPECT_EQ(reductions[0].input_strides_elements, (std::vector<uint64_t>{3, 1}));
     EXPECT_EQ(reductions[0].reduction_axes, (std::vector<uint64_t>{0}));
-    EXPECT_TRUE(reductionMatchesOriginalDiagonalView(einsum->getPlan(), reductions[0]));
+    EXPECT_FALSE(reductionMatchesOriginalDiagonalView(einsum->getPlan(), reductions[0]));
     expectEinsumViewGateNoLegacyMapper(*einsum, "equation=iir,j->rj");
 
     einsum->run();
@@ -1778,7 +1782,9 @@ TEST(EinsumExecution, ExactFourOperandTreeHonorsNonCanonicalFinalOutputOrder) {
     expectNear(copyToCpu(einsum->getOutputTensor(), stream), {35, 80, 25, 67});
 }
 
-TEST(EinsumExecution, UnaryPermutationAndReductionUsesCentralPermutationAwareTiledCubWithoutInputMaterialization) {
+// 1390: "ijk->ki" reduces the input's bytes in physical order (the dense [i, j, k] over j, no input copy), then a
+// DenseCopy stage writes the [i, k] result rotated into the [k, i] output.
+TEST(EinsumExecution, UnaryPermutationAndReductionReducesTheBytesThenCopiesTheResultRotated) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     Tensor input = makeGpuTensor({2, 3, 2},
@@ -1798,6 +1804,13 @@ TEST(EinsumExecution, UnaryPermutationAndReductionUsesCentralPermutationAwareTil
     ASSERT_TRUE(einsum->getStandaloneReductionPath().has_value());
     EXPECT_EQ(einsum->getStandaloneReductionPath().value(), CubReductionPath::TiledFixedSegment);
     EXPECT_EQ(einsum->getOutputTensor().getDimensions(), (std::vector<uint64_t>{2, 2}));
+    const std::vector<std::string> stage_kinds = einsum->getExpressionStageKindNames();
+    EXPECT_EQ(std::count(stage_kinds.begin(), stage_kinds.end(), "Reduction"), 1);
+    EXPECT_EQ(std::count(stage_kinds.begin(), stage_kinds.end(), "DenseCopy"), 1);
+    const std::vector<StampedReductionStageDiagnostic> reductions = einsum->getStandaloneReductionDiagnostics();
+    ASSERT_EQ(reductions.size(), 1u);
+    EXPECT_EQ(reductions[0].input_dimensions, (std::vector<uint64_t>{2, 3, 2}));
+    EXPECT_EQ(reductions[0].input_strides_elements, (std::vector<uint64_t>{6, 2, 1}));
 
     einsum->run();
     // k-major, i-minor output after summing j.

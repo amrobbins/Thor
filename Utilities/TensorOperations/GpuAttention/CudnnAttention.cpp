@@ -8,6 +8,7 @@
 #include "Utilities/Common/ScopedGpu.h"
 
 #include <algorithm>
+#include <array>
 #ifdef THOR_DEBUG
 #include <atomic>
 #endif
@@ -252,6 +253,34 @@ void requireOptionalGpuTensor(const optional<Tensor>& tensor, string_view name, 
     requireGpuTensor(tensor.value(), name, gpuNum);
 }
 
+// True when the spec's semantic [B,H,S,D] dimensions and strides describe this tensor's storage in another axis
+// order (a BSHD tensor described to cuDNN as BHSD): every (extent, stride) pair of the tensor is one of the spec's.
+// Extent-1 axes carry no stride information and are skipped.
+bool specDescribesTensorLayout(const Tensor& tensor, const AttentionTensorSpec& spec) {
+    const vector<uint64_t>& dims = tensor.getDimensionsRef();
+    if (dims.size() != 4 || spec.dimensions.size() != 4 || spec.strides.size() != 4) {
+        return false;
+    }
+    const vector<uint64_t> strides = tensor.getStridesElements();
+    array<pair<int64_t, int64_t>, 4> actual{};
+    array<pair<int64_t, int64_t>, 4> expected{};
+    size_t actualCount = 0;
+    size_t expectedCount = 0;
+    for (size_t i = 0; i < 4; ++i) {
+        if (dims[i] > static_cast<uint64_t>(numeric_limits<int64_t>::max()) ||
+            strides[i] > static_cast<uint64_t>(numeric_limits<int64_t>::max()))
+            throwInvalidAttention("tensor dimension or stride is too large for cuDNN Frontend int64 dimensions");
+        if (dims[i] != 1) actual[actualCount++] = {static_cast<int64_t>(dims[i]), static_cast<int64_t>(strides[i])};
+        if (spec.dimensions[i] != 1) expected[expectedCount++] = {spec.dimensions[i], spec.strides[i]};
+    }
+    if (actualCount != expectedCount) {
+        return false;
+    }
+    sort(actual.begin(), actual.begin() + actualCount);
+    sort(expected.begin(), expected.begin() + expectedCount);
+    return equal(actual.begin(), actual.begin() + actualCount, expected.begin());
+}
+
 void requireTensorMatchesSpec(const Tensor& tensor, const AttentionTensorSpec& spec, string_view name) {
     requireInitialized(tensor, name);
     if (tensor.getDataType() != spec.dataType) {
@@ -269,7 +298,7 @@ void requireTensorMatchesSpec(const Tensor& tensor, const AttentionTensorSpec& s
                                                : semanticMaxTotalTokens(spec, name);
         // Check both legal representations without constructing packed-shape
         // vectors on the successful execution path.
-        const bool logicalShape = matchesInt64Dimensions(dims, spec.dimensions);
+        const bool logicalShape = matchesInt64Dimensions(dims, spec.dimensions) || specDescribesTensorLayout(tensor, spec);
         const bool packedShape = dims.size() == 3 &&
                                  static_cast<int64_t>(dims[0]) == packedTokenCapacity &&
                                  static_cast<int64_t>(dims[1]) == spec.dimensions[1] &&
@@ -280,9 +309,10 @@ void requireTensorMatchesSpec(const Tensor& tensor, const AttentionTensorSpec& s
                                    "' dimension mismatch. Expected BSHD " + joinInts(spec.dimensions) + " or packed THD " +
                                    joinInts(expectedPacked) + ", got " + joinInts(asInt64(dims)));
         }
-    } else if (!matchesInt64Dimensions(dims, spec.dimensions)) {
+    } else if (!matchesInt64Dimensions(dims, spec.dimensions) && !specDescribesTensorLayout(tensor, spec)) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dimension mismatch. Expected " +
-                               joinInts(spec.dimensions) + ", got " + joinInts(asInt64(dims)));
+                               joinInts(spec.dimensions) + " (or a tensor whose layout those dimensions and strides " +
+                               "describe), got " + joinInts(asInt64(dims)));
     }
 }
 

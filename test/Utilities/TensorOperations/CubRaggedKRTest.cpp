@@ -101,7 +101,8 @@ struct RaggedInput {
     std::vector<float> values;  // active rows x D
     std::vector<uint64_t> offsets;
     uint64_t d = 1;
-    Tensor storage, input, offsets_tensor;
+    Tensor storage, offsets_tensor;
+    StridedSpan input;  // the input's bytes in `storage`, read as its dtype (at a chosen misalignment)
 };
 
 // Active rows of dyadic values; rows past `rows` up to the capacity hold NaN (never decoded); `misalign` bytes before.
@@ -131,8 +132,8 @@ RaggedInput makeInput(const Format& f, uint64_t rows, uint64_t capacity, uint64_
         putElement(bytes, misalign + e * width, f.nan, width);
     }
     in.storage = makeGpuUnsignedTensor(bytes, {bytes.size()}, stream, DataType::UINT8);
-    in.input = components == 1 ? in.storage.aliasByteStorageAs(f.dtype, {capacity}, misalign)
-                               : in.storage.aliasByteStorageAs(f.dtype, {capacity, components}, misalign);
+    in.input = components == 1 ? StridedSpan(in.storage).bytesAs(misalign, f.dtype, {capacity})
+                               : StridedSpan(in.storage).bytesAs(misalign, f.dtype, {capacity, components});
     in.offsets = A::makeOffsets(rows, segments, d, seed);
     in.offsets_tensor =
         makeGpuUnsignedTensor(in.offsets, {segments + 1}, stream, offset_width == 8 ? DataType::UINT64 : DataType::UINT32);
@@ -340,7 +341,7 @@ TEST(CubRaggedKR, EmptySegmentsTinyProblemsAndTheContract) {
     Tensor workspace(gpuPlacement, TensorDescriptor(DataType::UINT8, {raggedValueWorkspaceBytes(4)}));
     const RaggedInput in = makeInput(FORMATS[0], 100, 100, 10, A::Distribution::Uniform, 4, 0, 5, stream);
     Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, {10}));
-    const auto launch = [&](CubReductionOp op, RaggedKRShape shape, uint32_t grid, const Tensor& input, Tensor& ws) {
+    const auto launch = [&](CubReductionOp op, RaggedKRShape shape, uint32_t grid, const StridedSpan& input, Tensor& ws) {
         launchRaggedKRValue(op, shape, grid, input, in.offsets_tensor, output, ws, stream);
     };
     EXPECT_THROW(launch(CubReductionOp::Product, {16, 0}, 4, in.input, workspace), std::invalid_argument);
@@ -353,12 +354,12 @@ TEST(CubRaggedKR, EmptySegmentsTinyProblemsAndTheContract) {
     // 1284: FP16 / BF16 / FP32 input is legal; integers are not.
     Tensor fp16 = makeGpuTensor(std::vector<float>(100, 1.0f), {100}, stream, DataType::FP16);
     EXPECT_NO_THROW(launch(CubReductionOp::Sum, {16, 0}, 4, fp16, workspace));
-    Tensor int32 = in.storage.aliasByteStorageAs(DataType::INT32, {25}, 0);
+    StridedSpan int32 = StridedSpan(in.storage).bytesAs(0, DataType::INT32, {25});
     EXPECT_THROW(launch(CubReductionOp::Sum, {16, 0}, 4, int32, workspace), std::invalid_argument);
     // 1280: D = 2 is legal (the components kernel), with an output of segments x D; rows of 16 bytes are RK's.
-    Tensor wide = in.storage.aliasByteStorageAs(DataType::FP8_E4M3, {50, 2}, 0);
+    StridedSpan wide = StridedSpan(in.storage).bytesAs(0, DataType::FP8_E4M3, {50, 2});
     EXPECT_THROW(launch(CubReductionOp::Sum, {16, 0}, 4, wide, workspace), std::invalid_argument);  // output 10, not 20
-    Tensor row16 = in.storage.aliasByteStorageAs(DataType::FP8_E4M3, {6, 16}, 0);
+    StridedSpan row16 = StridedSpan(in.storage).bytesAs(0, DataType::FP8_E4M3, {6, 16});
     Tensor output16(gpuPlacement, TensorDescriptor(DataType::FP32, {10, 16}));
     EXPECT_THROW(launchRaggedKRValue(CubReductionOp::Sum, {16, 0}, 4, row16, in.offsets_tensor, output16, workspace,
                                      stream),
@@ -379,20 +380,20 @@ TEST(CubRaggedKR, EmptySegmentsTinyProblemsAndTheContract) {
     Tensor workspace7(gpuPlacement, TensorDescriptor(DataType::UINT8, {raggedValueWorkspaceBytes(4, 7)}));
     Tensor workspace3(gpuPlacement, TensorDescriptor(DataType::UINT8, {raggedValueWorkspaceBytes(4, 3)}));
     Tensor workspace4(gpuPlacement, TensorDescriptor(DataType::UINT8, {raggedValueWorkspaceBytes(4, 4)}));
-    const auto launch_into = [&](const Tensor& input, Tensor& out, Tensor& ws) {
+    const auto launch_into = [&](const StridedSpan& input, Tensor& out, Tensor& ws) {
         launchRaggedKRValue(CubReductionOp::Sum, {16, 0}, 4, input, in.offsets_tensor, out, ws, stream);
     };
-    EXPECT_THROW(launch_into(in.storage.aliasByteStorageAs(DataType::FP16, {6, 8}, 0), output8, workspace8),
+    EXPECT_THROW(launch_into(StridedSpan(in.storage).bytesAs(0, DataType::FP16, {6, 8}), output8, workspace8),
                  std::invalid_argument);
-    EXPECT_THROW(launch_into(in.storage.aliasByteStorageAs(DataType::BF16, {6, 8}, 0), output8, workspace8),
+    EXPECT_THROW(launch_into(StridedSpan(in.storage).bytesAs(0, DataType::BF16, {6, 8}), output8, workspace8),
                  std::invalid_argument);
-    EXPECT_THROW(launch_into(in.storage.aliasByteStorageAs(DataType::FP32, {6, 4}, 0), output4, workspace4),
+    EXPECT_THROW(launch_into(StridedSpan(in.storage).bytesAs(0, DataType::FP32, {6, 4}), output4, workspace4),
                  std::invalid_argument);
-    EXPECT_NO_THROW(launch_into(in.storage.aliasByteStorageAs(DataType::BF16, {7, 7}, 2), output7, workspace7));
-    EXPECT_NO_THROW(launch_into(in.storage.aliasByteStorageAs(DataType::FP32, {8, 3}, 4), output3, workspace3));
-    // (A tensor view is always aligned to its element: aliasByteStorageAs refuses a misaligned base, so the
-    // launcher's own alignment check is defensive.)
-    EXPECT_THROW(static_cast<void>(in.storage.aliasByteStorageAs(DataType::FP16, {7, 7}, 1)), std::runtime_error);
+    EXPECT_NO_THROW(launch_into(StridedSpan(in.storage).bytesAs(2, DataType::BF16, {7, 7}), output7, workspace7));
+    EXPECT_NO_THROW(launch_into(StridedSpan(in.storage).bytesAs(4, DataType::FP32, {8, 3}), output3, workspace3));
+    // (A span is always aligned to its element: bytesAs refuses a misaligned start, so the launcher's own
+    // alignment check is defensive.)
+    EXPECT_THROW(static_cast<void>(StridedSpan(in.storage).bytesAs(1, DataType::FP16, {7, 7})), std::invalid_argument);
     stream.synchronize();
 }
 
@@ -1036,7 +1037,7 @@ TEST(CubRaggedKR, RkShapesLaunchesAndTheContract) {
     const RaggedRKLaunch launch = raggedRKLaunch(RaggedRKShape{}, 4, DataType::FP8_E4M3, 16, 100);
     Tensor workspace(gpuPlacement, TensorDescriptor(DataType::UINT8, {launch.workspace_bytes}));
     Tensor small(gpuPlacement, TensorDescriptor(DataType::UINT8, {launch.workspace_bytes - 1}));
-    const auto go = [&](CubReductionOp op, const Tensor& input, Tensor& out, Tensor& ws) {
+    const auto go = [&](CubReductionOp op, const StridedSpan& input, Tensor& out, Tensor& ws) {
         launchRaggedRKValue(op, RaggedRKShape{}, 4, input, in.offsets_tensor, out, ws, stream);
     };
     EXPECT_NO_THROW(go(CubReductionOp::Sum, in.input, output, workspace));
@@ -1044,18 +1045,18 @@ TEST(CubRaggedKR, RkShapesLaunchesAndTheContract) {
     EXPECT_THROW(go(CubReductionOp::Sum, in.input, output, small), std::invalid_argument);
     Tensor output_short(gpuPlacement, TensorDescriptor(DataType::FP32, {10, 15}));
     EXPECT_THROW(go(CubReductionOp::Sum, in.input, output_short, workspace), std::invalid_argument);
-    Tensor narrow = in.storage.aliasByteStorageAs(DataType::FP8_E4M3, {100, 15}, 0);
+    StridedSpan narrow = StridedSpan(in.storage).bytesAs(0, DataType::FP8_E4M3, {100, 15});
     EXPECT_THROW(go(CubReductionOp::Sum, narrow, output_short, workspace), std::invalid_argument);  // KR's rows
-    Tensor flat = in.storage.aliasByteStorageAs(DataType::FP8_E4M3, {1600}, 0);
+    StridedSpan flat = StridedSpan(in.storage).bytesAs(0, DataType::FP8_E4M3, {1600});
     EXPECT_THROW(go(CubReductionOp::Sum, flat, output, workspace), std::invalid_argument);
     // 1295: 16-bit rows under 16 bytes are KR's (16-bit rows of 16 bytes run: D 8); a non-float input is refused.
-    Tensor fp16 = in.storage.aliasByteStorageAs(DataType::FP16, {100, 7}, 0);
+    StridedSpan fp16 = StridedSpan(in.storage).bytesAs(0, DataType::FP16, {100, 7});
     Tensor output7(gpuPlacement, TensorDescriptor(DataType::FP32, {10, 7}));
     EXPECT_THROW(go(CubReductionOp::Sum, fp16, output7, workspace), std::invalid_argument);
-    Tensor fp16_rows = in.storage.aliasByteStorageAs(DataType::FP16, {100, 8}, 0);
+    StridedSpan fp16_rows = StridedSpan(in.storage).bytesAs(0, DataType::FP16, {100, 8});
     Tensor output8(gpuPlacement, TensorDescriptor(DataType::FP32, {10, 8}));
     EXPECT_NO_THROW(go(CubReductionOp::Sum, fp16_rows, output8, workspace));
-    Tensor bytes = in.storage.aliasByteStorageAs(DataType::UINT8, {100, 16}, 0);
+    StridedSpan bytes = StridedSpan(in.storage).bytesAs(0, DataType::UINT8, {100, 16});
     EXPECT_THROW(go(CubReductionOp::Sum, bytes, output, workspace), std::invalid_argument);
     stream.synchronize();
 }
@@ -1112,7 +1113,8 @@ struct ArgInput {
     std::vector<float> values;  // active rows x D, decoded
     std::vector<uint64_t> offsets;
     uint64_t d = 1;  // 1300
-    Tensor storage, input, offsets_tensor;
+    Tensor storage, offsets_tensor;
+    StridedSpan input;  // the input's bytes in `storage`, read as its dtype (at a chosen misalignment)
 };
 
 // [capacity] (1300: [capacity, D] when D > 1) of format f with `rows` active rows from `pool`, the inactive capacity
@@ -1138,8 +1140,8 @@ ArgInput makeArgInput(const Format& f, uint64_t rows, uint64_t capacity, uint64_
         in.values[e] = A::decodeElement(f.format, b);
     }
     in.storage = makeGpuUnsignedTensor(bytes, {bytes.size()}, stream, DataType::UINT8);
-    in.input = components == 1 ? in.storage.aliasByteStorageAs(f.dtype, {capacity}, base)
-                               : in.storage.aliasByteStorageAs(f.dtype, {capacity, components}, base);
+    in.input = components == 1 ? StridedSpan(in.storage).bytesAs(base, f.dtype, {capacity})
+                               : StridedSpan(in.storage).bytesAs(base, f.dtype, {capacity, components});
     in.offsets = A::makeOffsets(rows, segments, d, seed);
     in.offsets_tensor =
         makeGpuUnsignedTensor(in.offsets, {segments + 1}, stream, offset_width == 8 ? DataType::UINT64 : DataType::UINT32);
@@ -1373,7 +1375,7 @@ TEST(CubRaggedKR, ArgEmptySegmentsTinyProblemsPartsAndTheContract) {  // 1311: F
     Tensor output(gpuPlacement, TensorDescriptor(DataType::UINT32, {segments}));
     Tensor workspace(gpuPlacement, TensorDescriptor(DataType::UINT8, {raggedArgWorkspaceBytes(DataType::FP8_E4M3, 4)}));
     Tensor small(gpuPlacement, TensorDescriptor(DataType::UINT8, {raggedArgWorkspaceBytes(DataType::FP8_E4M3, 4) - 1}));
-    const auto go = [&](CubArgReductionOp op, uint32_t g, const Tensor& input, Tensor& out, Tensor& ws) {
+    const auto go = [&](CubArgReductionOp op, uint32_t g, const StridedSpan& input, Tensor& out, Tensor& ws) {
         launchRaggedKRArg(op, RaggedKRShape{16, 0}, g, input, in.offsets_tensor, out, ws, stream);
     };
     EXPECT_NO_THROW(go(CubArgReductionOp::ArgMax, 4, in.input, output, workspace));
@@ -1389,14 +1391,14 @@ TEST(CubRaggedKR, ArgEmptySegmentsTinyProblemsPartsAndTheContract) {  // 1311: F
     Tensor short_output(gpuPlacement, TensorDescriptor(DataType::UINT32, {segments - 1}));
     EXPECT_THROW(go(CubArgReductionOp::ArgMax, 4, in.input, short_output, workspace), std::invalid_argument);
     // 1300: D = 2 with its own records (D = 1's workspace is too small); rows of 16 bytes are not KR's.
-    Tensor wide = in.storage.aliasByteStorageAs(DataType::FP8_E4M3, {25000, 2}, 0);
+    StridedSpan wide = StridedSpan(in.storage).bytesAs(0, DataType::FP8_E4M3, {25000, 2});
     Tensor output2(gpuPlacement, TensorDescriptor(DataType::UINT32, {segments, 2}));
     EXPECT_THROW(go(CubArgReductionOp::ArgMax, 4, wide, output2, workspace), std::invalid_argument);
     Tensor workspace2(gpuPlacement,
                       TensorDescriptor(DataType::UINT8, {raggedArgWorkspaceBytes(DataType::FP8_E4M3, 4, 2)}));
     EXPECT_NO_THROW(go(CubArgReductionOp::ArgMax, 4, wide, output2, workspace2));
     EXPECT_THROW(go(CubArgReductionOp::ArgMax, 4, wide, output, workspace2), std::invalid_argument);  // segments, not x 2
-    Tensor row16 = in.storage.aliasByteStorageAs(DataType::FP8_E4M3, {3000, 16}, 0);
+    StridedSpan row16 = StridedSpan(in.storage).bytesAs(0, DataType::FP8_E4M3, {3000, 16});
     Tensor output16(gpuPlacement, TensorDescriptor(DataType::UINT32, {segments, 16}));
     Tensor workspace16(gpuPlacement,
                        TensorDescriptor(DataType::UINT8, {raggedArgWorkspaceBytes(DataType::FP8_E4M3, 4, 16)}));
@@ -1404,26 +1406,26 @@ TEST(CubRaggedKR, ArgEmptySegmentsTinyProblemsPartsAndTheContract) {  // 1311: F
     EXPECT_THROW(static_cast<void>(raggedKRArgGrid(RaggedKRShape{16, 0}, DataType::FP8_E4M3, 0, 16)),
                  std::invalid_argument);
     // 1311: FP16 at D = 1 and BF16 at D = 2 take their own kernels; FP16 rows of 16 bytes are refused.
-    Tensor fp16 = in.storage.aliasByteStorageAs(DataType::FP16, {25000}, 0);
+    StridedSpan fp16 = StridedSpan(in.storage).bytesAs(0, DataType::FP16, {25000});
     EXPECT_NO_THROW(go(CubArgReductionOp::ArgMax, 4, fp16, output, workspace));
-    Tensor bf16 = in.storage.aliasByteStorageAs(DataType::BF16, {12500, 2}, 0);
+    StridedSpan bf16 = StridedSpan(in.storage).bytesAs(0, DataType::BF16, {12500, 2});
     EXPECT_NO_THROW(go(CubArgReductionOp::ArgMin, 4, bf16, output2, workspace2));
-    Tensor fp16_row16 = in.storage.aliasByteStorageAs(DataType::FP16, {3000, 8}, 0);
+    StridedSpan fp16_row16 = StridedSpan(in.storage).bytesAs(0, DataType::FP16, {3000, 8});
     Tensor output8(gpuPlacement, TensorDescriptor(DataType::UINT32, {segments, 8}));
     Tensor workspace8(gpuPlacement, TensorDescriptor(DataType::UINT8, {raggedArgWorkspaceBytes(DataType::FP16, 4, 7)}));
     EXPECT_THROW(go(CubArgReductionOp::ArgMax, 4, fp16_row16, output8, workspace8), std::invalid_argument);
     // 1313: FP32 at D = 1 and D = 3 with their pair records (the 64-bit records of the same grid are too small); FP32
     // rows of 16 bytes are refused.
-    Tensor fp32 = in.storage.aliasByteStorageAs(DataType::FP32, {12500}, 0);
+    StridedSpan fp32 = StridedSpan(in.storage).bytesAs(0, DataType::FP32, {12500});
     EXPECT_THROW(go(CubArgReductionOp::ArgMax, 4, fp32, output, workspace), std::invalid_argument);
     Tensor pairs(gpuPlacement, TensorDescriptor(DataType::UINT8, {raggedArgWorkspaceBytes(DataType::FP32, 4)}));
     EXPECT_NO_THROW(go(CubArgReductionOp::ArgMax, 4, fp32, output, pairs));
-    Tensor fp32_d3 = in.storage.aliasByteStorageAs(DataType::FP32, {4000, 3}, 0);
+    StridedSpan fp32_d3 = StridedSpan(in.storage).bytesAs(0, DataType::FP32, {4000, 3});
     Tensor output3(gpuPlacement, TensorDescriptor(DataType::UINT32, {segments, 3}));
     Tensor pairs3(gpuPlacement, TensorDescriptor(DataType::UINT8, {raggedArgWorkspaceBytes(DataType::FP32, 4, 3)}));
     EXPECT_THROW(go(CubArgReductionOp::ArgMin, 4, fp32_d3, output3, pairs), std::invalid_argument);
     EXPECT_NO_THROW(go(CubArgReductionOp::ArgMin, 4, fp32_d3, output3, pairs3));
-    Tensor fp32_row16 = in.storage.aliasByteStorageAs(DataType::FP32, {3000, 4}, 0);
+    StridedSpan fp32_row16 = StridedSpan(in.storage).bytesAs(0, DataType::FP32, {3000, 4});
     Tensor output4(gpuPlacement, TensorDescriptor(DataType::UINT32, {segments, 4}));
     EXPECT_THROW(go(CubArgReductionOp::ArgMax, 4, fp32_row16, output4, workspace16), std::invalid_argument);
     stream.synchronize();
@@ -1730,7 +1732,7 @@ TEST(CubRaggedKR, RkArgIgnoresInactiveCapacityEmptySegmentsPartsAndTheContract) 
     Tensor output(gpuPlacement, TensorDescriptor(DataType::UINT32, {10, 20}));
     Tensor workspace(gpuPlacement, TensorDescriptor(DataType::UINT8, {launch.workspace_bytes}));
     Tensor small(gpuPlacement, TensorDescriptor(DataType::UINT8, {launch.workspace_bytes - 1}));
-    const auto go = [&](CubArgReductionOp op, const RaggedRKShape& shape, const Tensor& input, Tensor& out,
+    const auto go = [&](CubArgReductionOp op, const RaggedRKShape& shape, const StridedSpan& input, Tensor& out,
                         Tensor& ws) { launchRaggedRKArg(op, shape, 7, input, in.offsets_tensor, out, ws, stream); };
     EXPECT_NO_THROW(go(CubArgReductionOp::ArgMax, RaggedRKShape{}, in.input, output, workspace));
     EXPECT_THROW(go(CubArgReductionOp::ArgMax, RaggedRKShape{}, in.input, output, small), std::invalid_argument);
@@ -1741,25 +1743,25 @@ TEST(CubRaggedKR, RkArgIgnoresInactiveCapacityEmptySegmentsPartsAndTheContract) 
     Tensor short_output(gpuPlacement, TensorDescriptor(DataType::UINT32, {10, 19}));
     EXPECT_THROW(go(CubArgReductionOp::ArgMax, RaggedRKShape{}, in.input, short_output, workspace),
                  std::invalid_argument);
-    Tensor narrow = in.storage.aliasByteStorageAs(DataType::FP8_E4M3, {1000, 15}, 0);  // KR's
+    StridedSpan narrow = StridedSpan(in.storage).bytesAs(0, DataType::FP8_E4M3, {1000, 15});  // KR's
     Tensor output15(gpuPlacement, TensorDescriptor(DataType::UINT32, {10, 15}));
     EXPECT_THROW(go(CubArgReductionOp::ArgMin, RaggedRKShape{}, narrow, output15, workspace), std::invalid_argument);
-    Tensor fp16 = in.storage.aliasByteStorageAs(DataType::FP16, {1000, 10}, 0);  // 1320: FP16 RK ARG at D 10
+    StridedSpan fp16 = StridedSpan(in.storage).bytesAs(0, DataType::FP16, {1000, 10});  // 1320: FP16 RK ARG at D 10
     Tensor output10(gpuPlacement, TensorDescriptor(DataType::UINT32, {10, 10}));
     EXPECT_NO_THROW(go(CubArgReductionOp::ArgMin, RaggedRKShape{}, fp16, output10, workspace));
-    Tensor fp16_narrow = in.storage.aliasByteStorageAs(DataType::FP16, {1000, 7}, 0);  // KR's
+    StridedSpan fp16_narrow = StridedSpan(in.storage).bytesAs(0, DataType::FP16, {1000, 7});  // KR's
     Tensor output7(gpuPlacement, TensorDescriptor(DataType::UINT32, {10, 7}));
     EXPECT_THROW(go(CubArgReductionOp::ArgMin, RaggedRKShape{}, fp16_narrow, output7, workspace),
                  std::invalid_argument);
-    Tensor fp32 = in.storage.aliasByteStorageAs(DataType::FP32, {500, 10}, 0);  // 1321: FP32 RK ARG at D 10
+    StridedSpan fp32 = StridedSpan(in.storage).bytesAs(0, DataType::FP32, {500, 10});  // 1321: FP32 RK ARG at D 10
     Tensor pairs(gpuPlacement, TensorDescriptor(DataType::UINT8,
                                                 {raggedRKArgLaunch(RaggedRKShape{}, 7, DataType::FP32, 10, 500)
                                                      .workspace_bytes}));
     EXPECT_NO_THROW(go(CubArgReductionOp::ArgMin, RaggedRKShape{}, fp32, output10, pairs));
-    Tensor fp32_narrow = in.storage.aliasByteStorageAs(DataType::FP32, {1000, 3}, 0);  // KR's
+    StridedSpan fp32_narrow = StridedSpan(in.storage).bytesAs(0, DataType::FP32, {1000, 3});  // KR's
     Tensor output3(gpuPlacement, TensorDescriptor(DataType::UINT32, {10, 3}));
     EXPECT_THROW(go(CubArgReductionOp::ArgMin, RaggedRKShape{}, fp32_narrow, output3, pairs), std::invalid_argument);
-    Tensor int32 = in.storage.aliasByteStorageAs(DataType::INT32, {500, 10}, 0);  // not yet
+    StridedSpan int32 = StridedSpan(in.storage).bytesAs(0, DataType::INT32, {500, 10});  // not yet
     EXPECT_THROW(go(CubArgReductionOp::ArgMin, RaggedRKShape{}, int32, output10, pairs), std::invalid_argument);
     stream.synchronize();
 }

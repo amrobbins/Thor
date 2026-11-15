@@ -794,7 +794,15 @@ class L2Evictor {
     return c;
 }
 
-[[nodiscard]] CensusCase makeRopeCase(std::string name, DataType dtype, const std::vector<uint64_t>& shape, bool interleaved, bool with_bias) {
+[[nodiscard]] CensusCase makeRopeCase(std::string name,
+                                      DataType dtype,
+                                      const std::vector<uint64_t>& shape,
+                                      bool interleaved,
+                                      bool with_bias,
+                                      int64_t position_offset = 0,
+                                      RotaryScalingKind scaling_kind = RotaryScalingKind::None,
+                                      double scaling_factor = 1.0,
+                                      uint64_t original_max_position_embeddings = 0) {
     CensusCase c;
     c.family = "rope";
     c.name = std::move(name);
@@ -805,13 +813,17 @@ class L2Evictor {
     }
     c.output_dimensions = shape;
     c.output_dtype = dtype;
-    c.build_output = [dtype, interleaved, with_bias] {
+    c.build_output = [dtype, interleaved, with_bias, position_offset, scaling_kind, scaling_factor, original_max_position_embeddings] {
         Expression x = typedInput("x", dtype);
         if (with_bias) {
             x = x + typedInput("b", dtype);
         }
         RotaryPositionEmbeddingOptions options;
         options.interleaved = interleaved;
+        options.position_offset = position_offset;
+        options.scaling_kind = scaling_kind;
+        options.scaling_factor = scaling_factor;
+        options.original_max_position_embeddings = original_max_position_embeddings;
         return x.rope(options).withOutputDType(dtype);
     };
     return c;
@@ -1427,6 +1439,32 @@ class L2Evictor {
         cases.push_back(makeRopeCase("rope_interleaved_bf16_b4_h32_s2048_d128", DataType::BF16, rope_shape, true, false));
         cases.push_back(makeRopeCase("rope_half_bias_bf16_b4_h32_s2048_d128", DataType::BF16, rope_shape, false, true));
         cases.push_back(makeRopeCase("rope_half_fp32_b4_h32_s2048_d128", DataType::FP32, rope_shape, false, false));
+        // Long-context positions (offset + [0, 2048)): the highest-frequency pairs have angles
+        // past ~1e5 rad, where an accurate sincosf of the raw angle leaves its fast path.
+        cases.push_back(makeRopeCase("rope_half_bf16_b4_h32_s2048_d128_pos128k", DataType::BF16, rope_shape, false, false, 129024));
+        cases.push_back(makeRopeCase("rope_half_bf16_b4_h32_s2048_d128_pos1m", DataType::BF16, rope_shape, false, false, 1046528));
+        cases.push_back(makeRopeCase("rope_half_fp32_b4_h32_s2048_d128_pos128k", DataType::FP32, rope_shape, false, false, 129024));
+        // DynamicNTK: here the sequence length is static, so the scaled base is folded into an
+        // emit-time frequency table like the other kinds. (Kernels with a runtime effective length
+        // build the frequency in float-float instead; that path measured 1.54 vs 1.60 TB/s bf16.)
+        cases.push_back(makeRopeCase("rope_half_ntk_bf16_b4_h32_s2048_d128_pos128k",
+                                     DataType::BF16,
+                                     rope_shape,
+                                     false,
+                                     false,
+                                     129024,
+                                     RotaryScalingKind::DynamicNTK,
+                                     2.0,
+                                     4096));
+        cases.push_back(makeRopeCase("rope_half_ntk_fp32_b4_h32_s2048_d128_pos128k",
+                                     DataType::FP32,
+                                     rope_shape,
+                                     false,
+                                     false,
+                                     129024,
+                                     RotaryScalingKind::DynamicNTK,
+                                     2.0,
+                                     4096));
     }
 
     // FP8 storage (default FP32 compute). Kept in their own family so the

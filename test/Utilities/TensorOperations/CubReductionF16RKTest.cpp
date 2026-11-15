@@ -10,6 +10,7 @@
 // 1249: the rotated and PacketComplete ARG twins. 1250: the OneWindow and DeepRSmallK ARG twins. 1251: every ARG
 // candidate (production residency) through the pass launcher.
 
+#include "test/Utilities/TensorOperations/OutputSpan.h"
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 #include "Utilities/TensorOperations/Cub/CubReductionStageSemantics.h"
@@ -209,7 +210,7 @@ TEST(CubReductionF16RK, OneWindowFinalizeAndNarrowOutput) {
     }
 }
 
-// The launcher rejects other input dtypes, K outside the unit's bucket, a misaligned base, and the wrong output size.
+// The launcher rejects other input dtypes and K outside the unit's bucket. 1381: a base off a 16-byte boundary reads.
 TEST(CubReductionF16RK, OneWindowRejectsUnsupportedRequests) {
     REQUIRE_CUDA_DEVICE();
     using namespace CubReductionInternal;
@@ -218,10 +219,9 @@ TEST(CubReductionF16RK, OneWindowRejectsUnsupportedRequests) {
     const auto geometry = CubReduction::analyzeValueGeometry(CubReductionOp::Sum, {outer_size, rows, k}, {1});
     const Tensor input = makeGpuTensor(std::vector<float>(outer_size * rows * k, 1.0f), {outer_size, rows, k}, stream,
                                        DataType::FP16);
-    // The same elements 2 bytes past a 16-byte boundary.
-    const Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(2 * outer_size * rows * k + 16, 0),
-                                               {2 * outer_size * rows * k + 16}, stream, DataType::UINT8);
-    const Tensor misaligned = bytes.aliasByteStorageAs(DataType::BF16, {outer_size, rows, k}, 2);
+    // Room for the same elements up to 14 bytes past a 16-byte boundary.
+    Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(2 * outer_size * rows * k + 16, 0),
+                                         {2 * outer_size * rows * k + 16}, stream, DataType::UINT8);
     const auto units = f16OneWindowRuntimeKUnits(k);
     ASSERT_FALSE(units.empty());
     const auto unit = units.front();
@@ -238,8 +238,21 @@ TEST(CubReductionF16RK, OneWindowRejectsUnsupportedRequests) {
                  std::logic_error);
     EXPECT_THROW(static_cast<void>(queryF16OneWindowRuntimeKOccupancy(DataType::FP16, 250, {1, 16, 8, true}, 1)),
                  std::logic_error);
-    EXPECT_THROW(launchF16OneWindowRuntimeKComplete(misaligned, output, geometry, unit, 1, stream, semantics),
-                 std::logic_error);
+    // 1381: a base 2, 6 and 14 bytes past a 16-byte boundary reads (the kernel's windows follow the address) on every
+    // unit of K = 16 (each window holds it with a 7-element prefix).
+    for (const uint64_t offset : {uint64_t{2}, uint64_t{6}, uint64_t{14}}) {
+        ASSERT_EQ(cudaSuccess, cudaMemcpyAsync(static_cast<uint8_t*>(bytes.getMemPtr<void>()) + offset,
+                                               input.getMemPtr<void>(), 2 * outer_size * rows * k,
+                                               cudaMemcpyDeviceToDevice, stream.getStream()));
+        const StridedSpan shifted = StridedSpan(bytes).bytesAs(offset, DataType::FP16, {outer_size, rows, k});
+        for (const Fp8OneWindowRuntimeKUnit& candidate : units) {
+            SCOPED_TRACE(std::to_string(offset) + " bytes in, O" + std::to_string(candidate.outputs_per_warp));
+            ASSERT_LE(k, Fp8RK::oneWindowUnalignedCapacity(candidate.outputs_per_warp, candidate.packet_bytes, 2));
+            launchF16OneWindowRuntimeKComplete(shifted, output, geometry, candidate, 1, stream, semantics);
+            stream.synchronize();
+            EXPECT_EQ(copyGpuTensorAsFloat(output, stream), std::vector<float>(outer_size * k, float(rows)));
+        }
+    }
     // O2 with W2 (O2/O4/O8 are warp-local).
     const Fp8OneWindowRuntimeKUnit o2{2, 16, 1, false};
     if (std::find(units.begin(), units.end(), o2) != units.end()) {
@@ -348,7 +361,7 @@ TEST(CubReductionF16RK, DeepRSmallKPartialsMatchReference) {
                  std::logic_error);
     const Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(2 * 2 * 200 * 16 + 16, 0), {2 * 2 * 200 * 16 + 16},
                                                stream, DataType::UINT8);
-    const Tensor misaligned = bytes.aliasByteStorageAs(DataType::FP16, {2, 200, 16}, 2);
+    const StridedSpan misaligned = StridedSpan(bytes).bytesAs(2, DataType::FP16, {2, 200, 16});
     EXPECT_THROW(launchF16DeepRSmallKRetainedFirstStage(semantics, misaligned, partials, geometry, 64, 4, stream),
                  std::logic_error);
     EXPECT_THROW(static_cast<void>(queryF16DeepRSmallKRetainedOccupancy(DataType::FP16, 64, 250, semantics)),
@@ -570,8 +583,8 @@ TEST(CubReductionF16RK, AlignedKFinalizeAndRejections) {
                                        DataType::FP16);
     const Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(2 * outer_size * rows * k + 16, 0),
                                                {2 * outer_size * rows * k + 16}, stream, DataType::UINT8);
-    const Tensor misaligned8 = bytes.aliasByteStorageAs(DataType::BF16, {outer_size, rows, k}, 8);
-    const Tensor misaligned2 = bytes.aliasByteStorageAs(DataType::BF16, {outer_size, rows, k}, 2);
+    const StridedSpan misaligned8 = StridedSpan(bytes).bytesAs(8, DataType::BF16, {outer_size, rows, k});
+    const StridedSpan misaligned2 = StridedSpan(bytes).bytesAs(2, DataType::BF16, {outer_size, rows, k});
     Tensor complete(gpuPlacement, TensorDescriptor(DataType::FP32, geometry.output_dimensions));
     Tensor wrong(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size, 9, k}));
     CubReductionStageSemantics semantics;
@@ -701,9 +714,9 @@ TEST(CubReductionF16RK, PacketCompleteMatchesReference) {
     const auto geometry = CubReduction::analyzeValueGeometry(CubReductionOp::Sum, {outer_size, rows, k}, {1});
     const Tensor input = makeGpuTensor(std::vector<float>(outer_size * rows * k, 1.0f), {outer_size, rows, k}, stream,
                                        DataType::BF16);
-    const Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(2 * outer_size * rows * k + 16, 0),
+    Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(2 * outer_size * rows * k + 16, 0),
                                                {2 * outer_size * rows * k + 16}, stream, DataType::UINT8);
-    const Tensor misaligned = bytes.aliasByteStorageAs(DataType::FP16, {outer_size, rows, k}, 2);
+    const StridedSpan misaligned = StridedSpan(bytes).bytesAs(2, DataType::FP16, {outer_size, rows, k});
     Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, geometry.output_dimensions));
     Tensor short_output(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size * k - 1}));
     const CubReductionStageSemantics semantics;
@@ -714,7 +727,22 @@ TEST(CubReductionF16RK, PacketCompleteMatchesReference) {
     }
     EXPECT_THROW(launchF16PacketComplete(input, output, geometry, 1, 249, stream, semantics), std::logic_error);
     EXPECT_THROW(launchF16PacketComplete(input, output, geometry, 3, 16, stream, semantics), std::logic_error);
-    EXPECT_THROW(launchF16PacketComplete(misaligned, output, geometry, 1, 16, stream, semantics), std::logic_error);
+    // 1379: a base off a 16-byte boundary reads (the kernel's prefixes follow the address). A span never starts inside
+    // an element: bytesAs refuses that start.
+    EXPECT_THROW(launchF16PacketComplete(StridedSpan(bytes).bytesAs(1, DataType::FP16, {outer_size, rows, k}), output,
+                                         geometry, 1, 16, stream, semantics),
+                 std::logic_error);
+    for (const uint64_t offset : {uint64_t{2}, uint64_t{6}, uint64_t{14}}) {
+        SCOPED_TRACE(offset);
+        ASSERT_EQ(cudaSuccess, cudaMemcpyAsync(static_cast<uint8_t*>(bytes.getMemPtr<void>()) + offset,
+                                               input.getMemPtr<void>(), 2 * outer_size * rows * k,
+                                               cudaMemcpyDeviceToDevice, stream.getStream()));
+        const StridedSpan shifted = StridedSpan(bytes).bytesAs(offset, DataType::BF16, {outer_size, rows, k});
+        launchF16PacketComplete(shifted, output, geometry, 1, 16, stream, semantics);
+        stream.synchronize();
+        EXPECT_EQ(copyGpuTensorAsFloat(output, stream), std::vector<float>(outer_size * k, float(rows)));
+    }
+    static_cast<void>(misaligned);
     EXPECT_THROW(launchF16PacketComplete(input, short_output, geometry, 1, 16, stream, semantics), std::logic_error);
     EXPECT_THROW(static_cast<void>(queryF16PacketCompleteOccupancy(DataType::FP32)), std::logic_error);
     EXPECT_NO_THROW(launchF16PacketComplete(input, output, geometry, 1, 16, stream, semantics));
@@ -830,7 +858,7 @@ TEST(CubReductionF16RK, RotatedPartialsMatchReference) {
                 bytes[offset + 2 * i + 1] = bits >> 8;
             }
             const Tensor storage = makeGpuUnsignedTensor(bytes, {bytes.size()}, stream, DataType::UINT8);
-            const Tensor input = storage.aliasByteStorageAs(dtype, {outer_size, rows, k}, offset);
+            const StridedSpan input = StridedSpan(storage).bytesAs(offset, dtype, {outer_size, rows, k});
             Tensor partials(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size, shards, k}));
             launchF16RuntimeKRotatedFirstStage(input, partials, geometry, depth, shards, stream);
             stream.synchronize();
@@ -1056,11 +1084,11 @@ TEST(CubReductionF16RK, AlignedKArgMatchesReference) {
                                 // and a UINT64 index.
                                 Tensor value32(gpuPlacement, TensorDescriptor(DataType::FP32, {site.outer, site.k}));
                                 Tensor index32(gpuPlacement, TensorDescriptor(DataType::UINT32, {site.outer, site.k}));
-                                launchF16AlignedKArg(input, &value32, &index32, geometry, packet, threads, shards,
+                                launchF16AlignedKArg(input, outputSpan(value32), outputSpan(index32), geometry, packet, threads, shards,
                                                      packed, maximum, 3, stream);
                                 Tensor value16(gpuPlacement, TensorDescriptor(dtype, {site.outer, site.k}));
                                 Tensor index64(gpuPlacement, TensorDescriptor(DataType::UINT64, {site.outer, site.k}));
-                                launchF16AlignedKArg(input, &value16, &index64, geometry, packet, threads, shards,
+                                launchF16AlignedKArg(input, outputSpan(value16), outputSpan(index64), geometry, packet, threads, shards,
                                                      packed, maximum, 1, stream);
                                 stream.synchronize();
                                 expectF16ArgOutputs(stored, site.outer, site.rows, site.k, maximum,
@@ -1084,19 +1112,19 @@ TEST(CubReductionF16RK, AlignedKArgMatchesReference) {
     Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
     for (const DataType other : {DataType::FP32, DataType::FP8_E4M3}) {
         const Tensor bad = makeGpuTensor(std::vector<float>(outer * rows * k, 1.0f), {outer, rows, k}, stream, other);
-        EXPECT_THROW(launchF16AlignedKArg(bad, nullptr, &index, geometry, 16, 32, 1, nullptr, false, 1, stream),
+        EXPECT_THROW(launchF16AlignedKArg(bad, nullptr, outputSpan(index), geometry, 16, 32, 1, nullptr, false, 1, stream),
                      std::logic_error);
     }
     EXPECT_THROW(launchF16AlignedKArg(input, nullptr, nullptr, geometry, 16, 32, 1, nullptr, false, 1, stream),
                  std::logic_error);
-    EXPECT_THROW(launchF16AlignedKArg(input, nullptr, &index, geometry, 16, 32, 10, nullptr, false, 1, stream),
+    EXPECT_THROW(launchF16AlignedKArg(input, nullptr, outputSpan(index), geometry, 16, 32, 10, nullptr, false, 1, stream),
                  std::logic_error);
     const Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(2 * outer * rows * k + 16, 0),
                                                {2 * outer * rows * k + 16}, stream, DataType::UINT8);
-    const Tensor misaligned = bytes.aliasByteStorageAs(DataType::FP16, {outer, rows, k}, 4);
-    EXPECT_THROW(launchF16AlignedKArg(misaligned, nullptr, &index, geometry, 8, 32, 1, nullptr, false, 1, stream),
+    const StridedSpan misaligned = StridedSpan(bytes).bytesAs(4, DataType::FP16, {outer, rows, k});
+    EXPECT_THROW(launchF16AlignedKArg(misaligned, nullptr, outputSpan(index), geometry, 8, 32, 1, nullptr, false, 1, stream),
                  std::logic_error);
-    EXPECT_NO_THROW(launchF16AlignedKArg(misaligned, nullptr, &index, geometry, 4, 32, 1, nullptr, false, 1, stream));
+    EXPECT_NO_THROW(launchF16AlignedKArg(misaligned, nullptr, outputSpan(index), geometry, 4, 32, 1, nullptr, false, 1, stream));
     EXPECT_THROW(static_cast<void>(queryF16AlignedKArgOccupancy(DataType::FP16, 2, 32, false)), std::logic_error);
     EXPECT_THROW(static_cast<void>(queryF16AlignedKArgOccupancy(DataType::FP32, 16, 32, false)), std::logic_error);
     stream.synchronize();
@@ -1156,7 +1184,7 @@ TEST(CubReductionF16RK, RotatedArgMatchesReference) {
                         bytes[offset + 2 * i + 1] = bits >> 8;
                     }
                     const Tensor storage = makeGpuUnsignedTensor(bytes, {bytes.size()}, stream, DataType::UINT8);
-                    const Tensor input = storage.aliasByteStorageAs(dtype, {site.outer, site.rows, site.k}, offset);
+                    const StridedSpan input = StridedSpan(storage).bytesAs(offset, dtype, {site.outer, site.rows, site.k});
                     for (bool maximum : {false, true}) {
                         for (uint64_t depth : {uint64_t{32}, uint64_t{256}, uint64_t{1024}, site.rows}) {
                             SCOPED_TRACE(::testing::Message()
@@ -1173,11 +1201,11 @@ TEST(CubReductionF16RK, RotatedArgMatchesReference) {
                             uint64_t* packed = scratch ? static_cast<uint64_t*>(scratch->getMemPtr<void>()) : nullptr;
                             Tensor value32(gpuPlacement, TensorDescriptor(DataType::FP32, {site.outer, site.k}));
                             Tensor index64(gpuPlacement, TensorDescriptor(DataType::UINT64, {site.outer, site.k}));
-                            launchF16RuntimeKArg(input, &value32, &index64, geometry, depth, packed, maximum, 2,
+                            launchF16RuntimeKArg(input, outputSpan(value32), outputSpan(index64), geometry, depth, packed, maximum, 2,
                                                  stream);
                             Tensor value16(gpuPlacement, TensorDescriptor(dtype, {site.outer, site.k}));
                             Tensor index32(gpuPlacement, TensorDescriptor(DataType::UINT32, {site.outer, site.k}));
-                            launchF16RuntimeKArg(input, &value16, &index32, geometry, depth, packed, maximum, 1,
+                            launchF16RuntimeKArg(input, outputSpan(value16), outputSpan(index32), geometry, depth, packed, maximum, 1,
                                                  stream);
                             stream.synchronize();
                             expectF16ArgOutputs(stored, site.outer, site.rows, site.k, maximum,
@@ -1200,17 +1228,17 @@ TEST(CubReductionF16RK, RotatedArgMatchesReference) {
     Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
     for (const DataType other : {DataType::FP32, DataType::FP8_E4M3}) {
         const Tensor bad = makeGpuTensor(std::vector<float>(outer * rows * k, 1.0f), {outer, rows, k}, stream, other);
-        EXPECT_THROW(launchF16RuntimeKArg(bad, nullptr, &index, geometry, 1024, nullptr, false, 1, stream),
+        EXPECT_THROW(launchF16RuntimeKArg(bad, nullptr, outputSpan(index), geometry, 1024, nullptr, false, 1, stream),
                      std::logic_error);
     }
     EXPECT_THROW(launchF16RuntimeKArg(input, nullptr, nullptr, geometry, 1024, nullptr, false, 1, stream),
                  std::logic_error);
-    EXPECT_THROW(launchF16RuntimeKArg(input, nullptr, &index, geometry, 64, nullptr, false, 1, stream),
+    EXPECT_THROW(launchF16RuntimeKArg(input, nullptr, outputSpan(index), geometry, 64, nullptr, false, 1, stream),
                  std::logic_error);
-    EXPECT_THROW(launchF16RuntimeKArg(input, nullptr, &index, geometry, 0, nullptr, false, 1, stream),
+    EXPECT_THROW(launchF16RuntimeKArg(input, nullptr, outputSpan(index), geometry, 0, nullptr, false, 1, stream),
                  std::logic_error);
     EXPECT_THROW(static_cast<void>(queryF16RuntimeKArgOccupancy(DataType::FP32, false)), std::logic_error);
-    EXPECT_NO_THROW(launchF16RuntimeKArg(input, nullptr, &index, geometry, 1024, nullptr, false, 1, stream));
+    EXPECT_NO_THROW(launchF16RuntimeKArg(input, nullptr, outputSpan(index), geometry, 1024, nullptr, false, 1, stream));
     stream.synchronize();
 }
 
@@ -1247,11 +1275,11 @@ TEST(CubReductionF16RK, PacketCompleteArgMatchesReference) {
                             ASSERT_TRUE(f16PacketCompleteArgSupports(site.outer, site.rows, site.k, w, tile));
                             Tensor value32(gpuPlacement, TensorDescriptor(DataType::FP32, {site.outer, site.k}));
                             Tensor index32(gpuPlacement, TensorDescriptor(DataType::UINT32, {site.outer, site.k}));
-                            launchF16PacketCompleteArg(input, &value32, &index32, geometry, w, tile, maximum, 5,
+                            launchF16PacketCompleteArg(input, outputSpan(value32), outputSpan(index32), geometry, w, tile, maximum, 5,
                                                        stream);
                             Tensor value16(gpuPlacement, TensorDescriptor(dtype, {site.outer, site.k}));
                             Tensor index64(gpuPlacement, TensorDescriptor(DataType::UINT64, {site.outer, site.k}));
-                            launchF16PacketCompleteArg(input, &value16, &index64, geometry, w, tile, maximum, 1,
+                            launchF16PacketCompleteArg(input, outputSpan(value16), outputSpan(index64), geometry, w, tile, maximum, 1,
                                                        stream);
                             stream.synchronize();
                             expectF16ArgOutputs(stored, site.outer, site.rows, site.k, maximum,
@@ -1266,31 +1294,36 @@ TEST(CubReductionF16RK, PacketCompleteArgMatchesReference) {
             }
         }
     }
-    // Rejections: FP32 and FP8 input, no outputs, a tile past 248, W3, a misaligned base.
+    // Rejections: FP32 and FP8 input, no outputs, a tile past 248, W3. 1384: a base off a 16-byte boundary reads.
     const uint64_t outer = 2, rows = 30, k = 16;
     const auto geometry = CubReduction::analyzeGeometry({outer, rows, k}, std::vector<uint32_t>{1});
     const Tensor input = makeGpuTensor(f16ArgValues(outer * rows * k, k, false), {outer, rows, k}, stream,
                                        DataType::BF16);
-    const Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(2 * outer * rows * k + 16, 0),
-                                               {2 * outer * rows * k + 16}, stream, DataType::UINT8);
-    const Tensor misaligned = bytes.aliasByteStorageAs(DataType::BF16, {outer, rows, k}, 2);
+    Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(2 * outer * rows * k + 16, 0),
+                                         {2 * outer * rows * k + 16}, stream, DataType::UINT8);
+    ASSERT_EQ(cudaSuccess, cudaMemcpyAsync(static_cast<uint8_t*>(bytes.getMemPtr<void>()) + 2, input.getMemPtr<void>(),
+                                           2 * outer * rows * k, cudaMemcpyDeviceToDevice, stream.getStream()));
+    const StridedSpan misaligned = StridedSpan(bytes).bytesAs(2, DataType::BF16, {outer, rows, k});
     Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
+    Tensor misaligned_index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
     for (const DataType other : {DataType::FP32, DataType::FP8_E4M3}) {
         const Tensor bad = makeGpuTensor(std::vector<float>(outer * rows * k, 1.0f), {outer, rows, k}, stream, other);
-        EXPECT_THROW(launchF16PacketCompleteArg(bad, nullptr, &index, geometry, 1, 16, false, 1, stream),
+        EXPECT_THROW(launchF16PacketCompleteArg(bad, nullptr, outputSpan(index), geometry, 1, 16, false, 1, stream),
                      std::logic_error);
     }
     EXPECT_THROW(launchF16PacketCompleteArg(input, nullptr, nullptr, geometry, 1, 16, false, 1, stream),
                  std::logic_error);
-    EXPECT_THROW(launchF16PacketCompleteArg(input, nullptr, &index, geometry, 1, 249, false, 1, stream),
+    EXPECT_THROW(launchF16PacketCompleteArg(input, nullptr, outputSpan(index), geometry, 1, 249, false, 1, stream),
                  std::logic_error);
-    EXPECT_THROW(launchF16PacketCompleteArg(input, nullptr, &index, geometry, 3, 16, false, 1, stream),
-                 std::logic_error);
-    EXPECT_THROW(launchF16PacketCompleteArg(misaligned, nullptr, &index, geometry, 1, 16, false, 1, stream),
+    EXPECT_THROW(launchF16PacketCompleteArg(input, nullptr, outputSpan(index), geometry, 3, 16, false, 1, stream),
                  std::logic_error);
     EXPECT_THROW(static_cast<void>(queryF16PacketCompleteArgOccupancy(DataType::FP32)), std::logic_error);
-    EXPECT_NO_THROW(launchF16PacketCompleteArg(input, nullptr, &index, geometry, 1, 16, false, 1, stream));
+    // 1384: a base 2 bytes past a 16-byte boundary reads and gives the aligned launch's indices.
+    EXPECT_NO_THROW(launchF16PacketCompleteArg(misaligned, nullptr, outputSpan(misaligned_index), geometry, 1, 16,
+                                               false, 1, stream));
+    EXPECT_NO_THROW(launchF16PacketCompleteArg(input, nullptr, outputSpan(index), geometry, 1, 16, false, 1, stream));
     stream.synchronize();
+    EXPECT_EQ(copyGpuTensorAsUnsigned(misaligned_index, stream), copyGpuTensorAsUnsigned(index, stream));
 }
 
 // 1250: the FP16 / BF16 OneWindow ARG twin. Every 2-byte unit whose bucket holds K (O1 W1/W2/W4/W8, O2/O4/O8 W1;
@@ -1330,11 +1363,11 @@ TEST(CubReductionF16RK, OneWindowArgMatchesReference) {
                                              << unit.load_ahead << " max " << maximum << " nans " << nans);
                                 Tensor value32(gpuPlacement, TensorDescriptor(DataType::FP32, {site.outer, k}));
                                 Tensor index32(gpuPlacement, TensorDescriptor(DataType::UINT32, {site.outer, k}));
-                                launchF16OneWindowArg(input, &value32, &index32, geometry, unit, w, maximum, 5,
+                                launchF16OneWindowArg(input, outputSpan(value32), outputSpan(index32), geometry, unit, w, maximum, 5,
                                                       stream);
                                 Tensor value16(gpuPlacement, TensorDescriptor(dtype, {site.outer, k}));
                                 Tensor index64(gpuPlacement, TensorDescriptor(DataType::UINT64, {site.outer, k}));
-                                launchF16OneWindowArg(input, &value16, &index64, geometry, unit, w, maximum, 1,
+                                launchF16OneWindowArg(input, outputSpan(value16), outputSpan(index64), geometry, unit, w, maximum, 1,
                                                       stream);
                                 stream.synchronize();
                                 expectF16ArgOutputs(stored, site.outer, site.rows, k, maximum,
@@ -1350,31 +1383,37 @@ TEST(CubReductionF16RK, OneWindowArgMatchesReference) {
             }
         }
     }
-    // Rejections: FP32 and FP8 input, no outputs, K past the unit's bucket, a misaligned base.
+    // Rejections: FP32 and FP8 input, no outputs, K past the unit's bucket. 1383: a base off a 16-byte boundary reads.
     const uint64_t outer = 2, rows = 30, k = 16;
     const auto geometry = CubReduction::analyzeGeometry({outer, rows, k}, std::vector<uint32_t>{1});
     const Tensor input = makeGpuTensor(f16ArgValues(outer * rows * k, k, false), {outer, rows, k}, stream,
                                        DataType::FP16);
-    const Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(2 * outer * rows * k + 16, 0),
-                                               {2 * outer * rows * k + 16}, stream, DataType::UINT8);
-    const Tensor misaligned = bytes.aliasByteStorageAs(DataType::FP16, {outer, rows, k}, 2);
+    Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(2 * outer * rows * k + 16, 0),
+                                         {2 * outer * rows * k + 16}, stream, DataType::UINT8);
+    ASSERT_EQ(cudaSuccess, cudaMemcpyAsync(static_cast<uint8_t*>(bytes.getMemPtr<void>()) + 2, input.getMemPtr<void>(),
+                                           2 * outer * rows * k, cudaMemcpyDeviceToDevice, stream.getStream()));
+    const StridedSpan misaligned = StridedSpan(bytes).bytesAs(2, DataType::FP16, {outer, rows, k});
     Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
+    Tensor misaligned_index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
     const auto units = f16OneWindowRuntimeKUnits(k);
     ASSERT_FALSE(units.empty());
     const auto unit = units.front();
     for (const DataType other : {DataType::FP32, DataType::FP8_E4M3}) {
         const Tensor bad = makeGpuTensor(std::vector<float>(outer * rows * k, 1.0f), {outer, rows, k}, stream, other);
-        EXPECT_THROW(launchF16OneWindowArg(bad, nullptr, &index, geometry, unit, 1, false, 1, stream),
+        EXPECT_THROW(launchF16OneWindowArg(bad, nullptr, outputSpan(index), geometry, unit, 1, false, 1, stream),
                      std::logic_error);
     }
     EXPECT_THROW(launchF16OneWindowArg(input, nullptr, nullptr, geometry, unit, 1, false, 1, stream),
                  std::logic_error);
     EXPECT_FALSE(f16OneWindowArgSupports(outer, rows, 300, unit, 1));
-    EXPECT_THROW(launchF16OneWindowArg(misaligned, nullptr, &index, geometry, unit, 1, false, 1, stream),
-                 std::logic_error);
     EXPECT_THROW(static_cast<void>(queryF16OneWindowArgOccupancy(DataType::FP32, k, unit, 1)), std::logic_error);
-    EXPECT_NO_THROW(launchF16OneWindowArg(input, nullptr, &index, geometry, unit, 1, false, 1, stream));
+    // 1383: a base 2 bytes past a 16-byte boundary reads (the kernel's windows follow the address) and gives the
+    // aligned launch's indices.
+    EXPECT_NO_THROW(launchF16OneWindowArg(misaligned, nullptr, outputSpan(misaligned_index), geometry, unit, 1, false,
+                                          1, stream));
+    EXPECT_NO_THROW(launchF16OneWindowArg(input, nullptr, outputSpan(index), geometry, unit, 1, false, 1, stream));
     stream.synchronize();
+    EXPECT_EQ(copyGpuTensorAsUnsigned(misaligned_index, stream), copyGpuTensorAsUnsigned(index, stream));
 }
 
 // 1250: the FP16 / BF16 DeepRSmallK ARG twins. Every ownership (TinyK at K <= 4 and <= 8, one / two / four / eight
@@ -1420,11 +1459,11 @@ TEST(CubReductionF16RK, DeepRSmallKArgMatchesReference) {
                                                           << " max " << maximum << " nans " << nans);
                         Tensor value32(gpuPlacement, TensorDescriptor(DataType::FP32, {site.outer, site.k}));
                         Tensor index32(gpuPlacement, TensorDescriptor(DataType::UINT32, {site.outer, site.k}));
-                        launchF16DeepRSmallKArg(input, &value32, &index32, geometry, depth, packed, maximum, 3,
+                        launchF16DeepRSmallKArg(input, outputSpan(value32), outputSpan(index32), geometry, depth, packed, maximum, 3,
                                                 stream);
                         Tensor value16(gpuPlacement, TensorDescriptor(dtype, {site.outer, site.k}));
                         Tensor index64(gpuPlacement, TensorDescriptor(DataType::UINT64, {site.outer, site.k}));
-                        launchF16DeepRSmallKArg(input, &value16, &index64, geometry, depth, packed, maximum, 1,
+                        launchF16DeepRSmallKArg(input, outputSpan(value16), outputSpan(index64), geometry, depth, packed, maximum, 1,
                                                 stream);
                         stream.synchronize();
                         expectF16ArgOutputs(stored, site.outer, site.rows, site.k, maximum,
@@ -1445,26 +1484,26 @@ TEST(CubReductionF16RK, DeepRSmallKArgMatchesReference) {
                                        DataType::BF16);
     const Tensor bytes = makeGpuUnsignedTensor(std::vector<uint64_t>(2 * outer * rows * k + 16, 0),
                                                {2 * outer * rows * k + 16}, stream, DataType::UINT8);
-    const Tensor misaligned = bytes.aliasByteStorageAs(DataType::BF16, {outer, rows, k}, 2);
+    const StridedSpan misaligned = StridedSpan(bytes).bytesAs(2, DataType::BF16, {outer, rows, k});
     Tensor scratch(gpuPlacement, TensorDescriptor(DataType::UINT8, {fp32ArgPackedScratchBytes(outer, 5, k)}));
     uint64_t* packed = static_cast<uint64_t*>(scratch.getMemPtr<void>());
     Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
     for (const DataType other : {DataType::FP32, DataType::FP8_E4M3}) {
         const Tensor bad = makeGpuTensor(std::vector<float>(outer * rows * k, 1.0f), {outer, rows, k}, stream, other);
-        EXPECT_THROW(launchF16DeepRSmallKArg(bad, nullptr, &index, geometry, 64, packed, false, 1, stream),
+        EXPECT_THROW(launchF16DeepRSmallKArg(bad, nullptr, outputSpan(index), geometry, 64, packed, false, 1, stream),
                      std::logic_error);
     }
     EXPECT_THROW(launchF16DeepRSmallKArg(input, nullptr, nullptr, geometry, 64, packed, false, 1, stream),
                  std::logic_error);
-    EXPECT_THROW(launchF16DeepRSmallKArg(input, nullptr, &index, geometry, 64, nullptr, false, 1, stream),
+    EXPECT_THROW(launchF16DeepRSmallKArg(input, nullptr, outputSpan(index), geometry, 64, nullptr, false, 1, stream),
                  std::logic_error);
-    EXPECT_THROW(launchF16DeepRSmallKArg(input, nullptr, &index, geometry, 32, packed, false, 1, stream),
+    EXPECT_THROW(launchF16DeepRSmallKArg(input, nullptr, outputSpan(index), geometry, 32, packed, false, 1, stream),
                  std::logic_error);
-    EXPECT_THROW(launchF16DeepRSmallKArg(misaligned, nullptr, &index, geometry, 64, packed, false, 1, stream),
+    EXPECT_THROW(launchF16DeepRSmallKArg(misaligned, nullptr, outputSpan(index), geometry, 64, packed, false, 1, stream),
                  std::logic_error);
     EXPECT_THROW(static_cast<void>(queryF16DeepRSmallKArgOccupancy(DataType::FP16, 250)), std::logic_error);
     EXPECT_THROW(static_cast<void>(queryF16DeepRSmallKArgOccupancy(DataType::FP32, 16)), std::logic_error);
-    EXPECT_NO_THROW(launchF16DeepRSmallKArg(input, nullptr, &index, geometry, 64, packed, false, 1, stream));
+    EXPECT_NO_THROW(launchF16DeepRSmallKArg(input, nullptr, outputSpan(index), geometry, 64, packed, false, 1, stream));
     stream.synchronize();
 }
 
@@ -1514,9 +1553,9 @@ TEST(CubReductionF16RK, ArgCandidatesRunThroughThePassLauncher) {
                     uint64_t* packed = scratch ? static_cast<uint64_t*>(scratch->getMemPtr<void>()) : nullptr;
                     Tensor value32(gpuPlacement, TensorDescriptor(DataType::FP32, {outer_size, k}));
                     Tensor index32(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer_size, k}));
-                    F16RK::launchF16RKArgPass(p, input, &value32, &index32, geometry, packed, maximum, 3, stream);
+                    F16RK::launchF16RKArgPass(p, input, outputSpan(value32), outputSpan(index32), geometry, packed, maximum, 3, stream);
                     Tensor index64(gpuPlacement, TensorDescriptor(DataType::UINT64, {outer_size, k}));
-                    F16RK::launchF16RKArgPass(p, input, nullptr, &index64, geometry, packed, maximum, 1, stream);
+                    F16RK::launchF16RKArgPass(p, input, nullptr, outputSpan(index64), geometry, packed, maximum, 1, stream);
                     stream.synchronize();
                     expectF16ArgOutputs(stored, outer_size, rows, k, maximum, copyGpuTensorAsFloat(value32, stream),
                                         copyGpuTensorAsUnsigned(index32, stream), 3);
@@ -1537,9 +1576,9 @@ TEST(CubReductionF16RK, ArgCandidatesRunThroughThePassLauncher) {
     deep.family = Fp8RK::PhysicalFamily::DeepRSmallK;
     deep.element_bytes = 2;
     deep.a = 64;
-    EXPECT_THROW(F16RK::launchF16RKArgPass(deep, input, nullptr, &index, geometry, nullptr, false, 1, stream),
+    EXPECT_THROW(F16RK::launchF16RKArgPass(deep, input, nullptr, outputSpan(index), geometry, nullptr, false, 1, stream),
                  std::logic_error);
     deep.element_bytes = 4;
-    EXPECT_THROW(F16RK::launchF16RKArgPass(deep, input, nullptr, &index, geometry, nullptr, false, 1, stream),
+    EXPECT_THROW(F16RK::launchF16RKArgPass(deep, input, nullptr, outputSpan(index), geometry, nullptr, false, 1, stream),
                  std::logic_error);
 }

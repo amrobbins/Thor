@@ -258,7 +258,7 @@ bool isSupportedEmbeddingValueDtype(DataType dtype) {
 std::string dataTypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
 void validateDenseContiguous(const Tensor& tensor, const std::string& name) {
-    if (tensor.hasCustomStrides() || !tensor.isDenseContiguous()) {
+    if (!tensor.isDenseContiguous()) {
         throw std::invalid_argument("Embedding " + name + " tensor must be dense contiguous in this backend slice.");
     }
 }
@@ -1046,7 +1046,7 @@ void launchPreparedGeneratedEmbeddingForward(const PreparedEmbeddingForward& pre
     kernelArgs[2] = &outputPtr;
     size_t nextArg = 3;
     if (prepared.ragged_runtime_extent.has_value()) {
-        activeValueCountPtr = const_cast<void*>(prepared.ragged_runtime_extent->activeValueCount.getMemPtr<void>());
+        activeValueCountPtr = const_cast<void*>(prepared.ragged_runtime_extent->activeValueCount.address());
         kernelArgs[nextArg++] = &activeValueCountPtr;
     }
     for (size_t i = 0; i < epilogue_inputs.size(); ++i) {
@@ -1081,7 +1081,7 @@ void launchPreparedScalarEmbeddingForwardRaggedTyped(const PreparedEmbeddingForw
         <<<prepared.grid_blocks, THREADS_PER_BLOCK, 0, stream.getStream()>>>(indices.getMemPtr<IndexT>(),
                                                                              weights.getMemPtr<ValueT>(),
                                                                              output.getMemPtr<ValueT>(),
-                                                                             extent.activeValueCount.getMemPtr<ActiveCountT>(),
+                                                                             extent.activeValueCount.pointer<ActiveCountT>(),
                                                                              prepared.num_indices,
                                                                              extent.elementsPerValue,
                                                                              prepared.vocabulary_size,
@@ -1422,9 +1422,7 @@ void validateEmbeddingRaggedRuntimeExtent(const Tensor& indices, const RaggedRun
         runtimeExtent.activeValueCount.getDataType() != DataType::UINT64) {
         throw std::invalid_argument("Ragged Embedding active-value count must use uint32 or uint64 storage.");
     }
-    if (runtimeExtent.activeValueCount.getTotalNumElements() != 1) {
-        throw std::invalid_argument("Ragged Embedding active-value count must be a scalar tensor.");
-    }
+    runtimeExtent.activeValueCount.validate("Ragged Embedding active-value count");
     if (runtimeExtent.maxActiveValues == 0 || runtimeExtent.elementsPerValue == 0) {
         throw std::invalid_argument("Ragged Embedding runtime extent must have non-zero placement-time capacity metadata.");
     }

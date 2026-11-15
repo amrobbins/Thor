@@ -109,8 +109,18 @@ std::vector<CandidatePlan> boundCandidatePlans(const BoundSelectionRequest& requ
 
     std::vector<Fp8RuntimeKPolicy::Candidate> runtime;
     runtime.reserve(registered_runtime_k.size());
+    // 1378: below 16 bytes only the passes that read at the input's alignment compete (fp8RKPassInputAlignment:
+    // DeepRSmallK needs 16, AlignedK its packet, the RuntimeK passes any address; 1381: OneWindow any address when K
+    // fits its window less a prefix and the input its 32-bit offsets less 15). Filtering here, before the per-family
+    // shortlists, keeps every tolerant variant in the running. 1379 / 1380: a PacketComplete
+    // tile narrower than a packet (the proposal's split of a small K) competes only there: at 16 bytes OneWindow owns
+    // small K, and the aligned inventory stays what it was.
+    const uint64_t alignment = request.input_alignment_bytes;
     for (auto registered : registered_runtime_k) {
         if (registered.family != PhysicalFamily::RuntimeK ||
+            fp8RKPassInputAlignment(registered, request.k) > alignment ||
+            (alignment >= 16 && static_cast<RuntimeLayout>(registered.a) == RuntimeLayout::PacketComplete &&
+             registered.c < 16) ||
             !structurallyValid(registered, request.outer, request.r, request.k) ||
             registered.first_stage_scratch_bytes > request.first_stage_scratch_budget_bytes)
             continue;
@@ -133,18 +143,25 @@ std::vector<CandidatePlan> boundCandidatePlans(const BoundSelectionRequest& requ
     const auto ranked = selectProductionCandidates(
         context,
         [&](Fp8OneWindowPolicy::Variant v) {
+            if (alignment < 16 &&
+                (request.k > oneWindowUnalignedCapacity(v.outputs_per_warp, v.packet_bytes, 1) ||
+                 !fp8RKElementsFitUint32(request.outer, request.r, request.k) ||
+                 request.outer * request.r * request.k > FP8_RK_MAX_UINT32 - 15))
+                return 0u;
             return supportedResidency([&] {
                 return oneWindowResidency(request.input_dtype, request.k, request.semantics.combine,
                                           v.outputs_per_warp, v.warps_per_output, v.packet_bytes);
             });
         },
         [&](Fp8DeepRSmallKPolicy::Variant v) {
+            if (alignment < 16) return 0u;
             return supportedResidency([&] {
                 return deepRSmallKResidency(request.input_dtype, request.k, request.semantics,
                                             v.rows_per_shard);
             });
         },
         [&](Fp8AlignedKPolicy::Variant v) {
+            if (v.packet > alignment) return 0u;
             return supportedResidency([&] {
                 return alignedKResidency(request.input_dtype,
                     v.shards_per_output == 1 ? request.complete_output_dtype : DataType::FP32,
@@ -155,6 +172,8 @@ std::vector<CandidatePlan> boundCandidatePlans(const BoundSelectionRequest& requ
     for (const auto& candidate : ranked) {
         if (!structurallyValid(bind(candidate), request.outer, request.r, request.k))
             throw std::logic_error("Ranked retained FP8 RK kernel has invalid physical binding");
+        if (fp8RKPassInputAlignment(bind(candidate), request.k) > alignment)
+            throw std::logic_error("Ranked retained FP8 RK kernel cannot read the input's alignment");
     }
     return ranked;
 }

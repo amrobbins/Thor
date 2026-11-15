@@ -14,6 +14,7 @@
 
 using ThorImplementation::DataType;
 using ThorImplementation::Tensor;
+using ThorImplementation::TensorSpan;
 using ThorImplementation::TensorPlacement;
 
 namespace {
@@ -455,12 +456,12 @@ void launchDeviceResidentDirectMaterializationKernelWithRowsPerCtaForBenchmark(
     uint64_t fieldBytes,
     uint64_t logicalRows,
     Tensor &destination,
-    const Tensor &rowIndicesDevice,
+    const TensorSpan &rowIndicesDevice,
     uint32_t rowsPerCta,
     Stream &stream) {
     THOR_THROW_IF_FALSE(recordStorage.isInitialized());
     THOR_THROW_IF_FALSE(destination.isInitialized());
-    THOR_THROW_IF_FALSE(rowIndicesDevice.isInitialized());
+    rowIndicesDevice.validate("Device resident direct materialization row indices");
     THOR_THROW_IF_FALSE(
         recordStorage.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(destination.getPlacement() == recordStorage.getPlacement());
@@ -468,7 +469,6 @@ void launchDeviceResidentDirectMaterializationKernelWithRowsPerCtaForBenchmark(
     THOR_THROW_IF_FALSE(recordStorage.getDataType() == DataType::UINT8);
     THOR_THROW_IF_FALSE(rowIndicesDevice.getDataType() == DataType::UINT64);
     THOR_THROW_IF_FALSE(recordStorage.getDimensions().size() == 1);
-    THOR_THROW_IF_FALSE(rowIndicesDevice.getDimensions().size() == 1);
     THOR_THROW_IF_FALSE(!destination.getDimensions().empty());
     THOR_THROW_IF_FALSE(numExamples > 0);
     THOR_THROW_IF_FALSE(recordSizeBytes > 0);
@@ -481,7 +481,7 @@ void launchDeviceResidentDirectMaterializationKernelWithRowsPerCtaForBenchmark(
         recordStorage.getArraySizeInBytes() / recordSizeBytes == numExamples);
 
     const uint64_t batchCapacity = destination.getDimensions().front();
-    const uint64_t rowIndexCapacity = rowIndicesDevice.getDimensions().front();
+    const uint64_t rowIndexCapacity = rowIndicesDevice.count;
     THOR_THROW_IF_FALSE(batchCapacity > 0);
     THOR_THROW_IF_FALSE(logicalRows >= 1 && logicalRows <= batchCapacity);
     THOR_THROW_IF_FALSE(logicalRows <= rowIndexCapacity);
@@ -491,7 +491,7 @@ void launchDeviceResidentDirectMaterializationKernelWithRowsPerCtaForBenchmark(
                         (rowsPerCta <= 256 && (rowsPerCta & (rowsPerCta - 1)) == 0));
 
     const uint8_t *records = recordStorage.getMemPtr<uint8_t>();
-    const uint64_t *rowIndices = rowIndicesDevice.getMemPtr<uint64_t>();
+    const uint64_t *rowIndices = rowIndicesDevice.data<uint64_t>();
     uint8_t *destinationBytes = static_cast<uint8_t *>(destination.getMemPtr());
     const cudaStream_t cudaStream = stream.getStream();
     const uint32_t selectedRowsPerCta =
@@ -525,7 +525,7 @@ void launchDeviceResidentDirectMaterializationKernel(
     uint64_t fieldBytes,
     uint64_t logicalRows,
     Tensor &destination,
-    const Tensor &rowIndicesDevice,
+    const TensorSpan &rowIndicesDevice,
     Stream &stream) {
     launchDeviceResidentDirectMaterializationKernelWithRowsPerCtaForBenchmark(
         recordStorage, numExamples, recordSizeBytes, fieldOffsetBytes, fieldBytes,

@@ -2,6 +2,7 @@
 // Group and Split VALUE and ARG kernels against host references (misaligned inputs, NaN / -0 / ties for ARG, repeated
 // launches on one uninitialized Split scratch), and the production stamps that select among them.
 
+#include "test/Utilities/TensorOperations/OutputSpan.h"
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 #include "test/Utilities/TensorOperations/Fp8ArgReference.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
@@ -104,7 +105,7 @@ namespace {
 
 struct ByteInput {
     Tensor storage;  // UINT8, offset + rows * row_bytes (+ 3) bytes
-    Tensor input;    // the FP8 view at `offset`
+    StridedSpan input;  // the FP8 span of `storage`'s bytes at `offset`
     std::vector<uint8_t> bytes;
 };
 
@@ -150,7 +151,7 @@ ByteInput upload(std::vector<uint8_t> bytes, uint64_t rows, uint64_t row_bytes, 
     for (size_t i = 0; i < bytes.size(); ++i) padded[offset + i] = bytes[i];
     ByteInput result;
     result.storage = makeGpuUnsignedTensor(padded, {padded.size()}, stream, DataType::UINT8);
-    result.input = result.storage.aliasByteStorageAs(dtype, {rows, row_bytes}, offset);
+    result.input = StridedSpan(result.storage).bytesAs(offset, dtype, {rows, row_bytes});
     result.bytes = std::move(bytes);
     return result;
 }
@@ -336,7 +337,7 @@ TEST(CubReductionFp8KR, ArgEveryShapeMatchesReference) {
                         Tensor index(gpuPlacement, TensorDescriptor(index_dtype, {rows}));
                         const uint64_t stride = with_value ? 3 : 1;
                         for (int launch = 0; launch < 2; ++launch) {
-                            launchFp8KRArgSegments(in.input, value ? &*value : nullptr, &index, shape,
+                            launchFp8KRArgSegments(in.input, outputSpan(value), outputSpan(index), shape,
                                                    scratch ? scratch->getMemPtr<void>() : nullptr,
                                                    scratch ? scratch->getArraySizeInBytes() : 0, maximum, stride,
                                                    stream);
@@ -375,7 +376,7 @@ TEST(CubReductionFp8KR, ProductionStampsMatchReference) {
         std::vector<uint8_t> bytes = valueBytes(elements, false, false, rng);
         std::vector<uint64_t> wide(bytes.begin(), bytes.end());
         Tensor storage = makeGpuUnsignedTensor(wide, {elements}, stream, DataType::UINT8);
-        Tensor input = storage.aliasByteStorageAs(DataType::FP8_E4M3, c.dims, 0);
+        StridedSpan input = StridedSpan(storage).bytesAs(0, DataType::FP8_E4M3, c.dims);
         std::vector<float> decoded(elements);
         for (uint64_t i = 0; i < elements; ++i) decoded[i] = Reference::decode(bytes[i], false);
         Tensor fp32_input = makeGpuTensor(decoded, c.dims, stream, DataType::FP32);

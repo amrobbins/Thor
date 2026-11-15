@@ -411,7 +411,16 @@ TEST(PaddedRaggedSequence, AdaptersLeaveSelectedDenseTailsUntouchedAndRoundTripL
     storage.copyFromAsync(hostPoison, stream);
 
     padded.packFrom(gpuValues, stream);
-    EXPECT_EQ(padded.paddedTensor().getDimensions(), (std::vector<uint64_t>{batchSize, channels, 1, selectedWidth}));
+    // The width-W batch is the first B*C*W elements of the reserved storage, seen as [B, C, 1, W]: a span, not a view.
+    EXPECT_EQ(padded.paddedDimensionsForWidth(selectedWidth), (std::vector<uint64_t>{batchSize, channels, 1, selectedWidth}));
+    const TensorSpan selected = padded.paddedValuesForWidth(selectedWidth);
+    EXPECT_TRUE(selected.tensor == storage);
+    EXPECT_EQ(selected.offset, 0u);
+    EXPECT_EQ(selected.count, plan.valueElements);
+    EXPECT_EQ(selected.address(), storage.getMemPtr<void>());
+    EXPECT_EQ(padded.paddedValuesForWidth(maxValuesPerRow).count, storage.getTotalNumElements());
+    EXPECT_THROW((void)padded.paddedDimensionsForWidth(maxValuesPerRow + 1), std::invalid_argument);
+    EXPECT_THROW((void)padded.paddedDimensionsForWidth(0), std::runtime_error);
     const std::vector<float> actual = copyGpuFloatTensor(storage, stream);
     std::vector<float> expected(plan.valueElements, -12345.0F);
     for (uint64_t row = 0; row < batchSize; ++row) {

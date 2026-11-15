@@ -3,6 +3,7 @@
 // boundaries, odd row counts (2-byte packets pair rows), shard counts and R, and AlignedK-shaped production stamps end
 // to end.
 
+#include "test/Utilities/TensorOperations/OutputSpan.h"
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 #include "test/Utilities/TensorOperations/Fp8ArgReference.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
@@ -85,8 +86,8 @@ TEST(CubArgReductionFp8AlignedK, PassesMatchReference) {
                                         index = Tensor(gpuPlacement,
                                                        TensorDescriptor(mode == 2 ? DataType::UINT64 : DataType::UINT32,
                                                                         {Outer, shards, k}));
-                                    launchFp8AlignedKArgPass(input, value ? &*value : nullptr,
-                                                             index ? &*index : nullptr, geometry, packet, threads,
+                                    launchFp8AlignedKArgPass(input, outputSpan(value),
+                                                             outputSpan(index), geometry, packet, threads,
                                                              shards, maximum, stride, stream);
                                     stream.synchronize();
                                     const std::vector<float> got_values =

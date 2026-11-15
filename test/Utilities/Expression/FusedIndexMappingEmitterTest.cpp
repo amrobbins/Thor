@@ -8,6 +8,9 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -141,16 +144,89 @@ TEST(FusedIndexMappingEmitter, RopePairPerThreadComputesTheAngleOncePerPair) {
     ASSERT_EQ(CudaSourceEmitter::specializedBroadcastElementsPerThread(stage, {group}), 2u);
     const std::string source = CudaSourceEmitter::emitSpecializedBroadcast(stage, {group}, "rope_kernel");
     size_t count = 0;
-    for (size_t pos = source.find("sincosf("); pos != std::string::npos; pos = source.find("sincosf(", pos + 1)) ++count;
+    for (size_t pos = source.find("sincospif("); pos != std::string::npos; pos = source.find("sincospif(", pos + 1)) ++count;
     EXPECT_EQ(count, 1u) << source;
     // Both lanes use the per-element formulas: first lane cur*c - peer*s, second lane peer*s + cur*c.
     EXPECT_NE(source.find("rope_out0 = rope_v0 * rope_c - rope_v1 * rope_s;"), std::string::npos) << source;
     EXPECT_NE(source.find("rope_out1 = rope_v0 * rope_s + rope_v1 * rope_c;"), std::string::npos) << source;
     EXPECT_NE(source.find("out0[e0] = "), std::string::npos);
     EXPECT_NE(source.find("out0[e1] = "), std::string::npos);
-    // Unscaled frequencies come from an emit-time table (double, rounded once), not a powf per pair.
-    EXPECT_NE(source.find("static const float rope_inv_freq[] = {1.0f, "), std::string::npos) << source;
+    // Unscaled frequencies come from an emit-time table of turns per position (freq / 2pi, as a
+    // two-float hi + lo pair computed in double), not a powf per pair.
+    EXPECT_NE(source.find("static const float2 rope_turns_table[] = {{0.159154937f, 6.42063824e-09f}, "), std::string::npos)
+        << source;
     EXPECT_EQ(source.find("powf("), std::string::npos) << source;
+    // Exact angle reduction: the rounded product is pinned (no FMA contraction), its rounding error is
+    // recovered with an FMA, whole turns are dropped exactly, and sincospif evaluates the remainder.
+    EXPECT_NE(source.find("const float rope_t_hi = __fmul_rn(rope_position, rope_turns.x);"), std::string::npos) << source;
+    EXPECT_NE(source.find("const float rope_t_lo = fmaf(rope_position, rope_turns.y, fmaf(rope_position, rope_turns.x, -rope_t_hi));"),
+              std::string::npos)
+        << source;
+    EXPECT_NE(source.find("const float rope_r = (rope_t_hi - rintf(rope_t_hi)) + rope_t_lo;"), std::string::npos) << source;
+    EXPECT_EQ(source.find("sincosf("), std::string::npos) << source;
+}
+
+namespace {
+uint32_t dynamicNtkRopeOf(StageBuilder& b, uint32_t lhs) {
+    ExprNode n{};
+    n.op = ExprOp::ROPE;
+    n.lhs = lhs;
+    n.compute_dtype = DataType::FP32;
+    n.output_dtype = DataType::BF16;
+    n.rope_scaling_kind = RotaryScalingKind::DynamicNTK;
+    n.rope_scaling_factor = 2.0;
+    n.rope_original_max_position_embeddings = 8;  // the sequence extent (16) exceeds it, so the base is scaled
+    return b.push(n);
+}
+}  // namespace
+
+TEST(FusedIndexMappingEmitter, DynamicNtkRopeWithStaticSequenceLengthUsesAnEmitTimeTable) {
+    // The pair-per-thread kernel has no dynamic effective-length input, so the sequence length (16)
+    // is an emit-time constant and so is DynamicNTK's scaled base: base' = 1e4 * (2*16/8 - 1)^(64/62).
+    StageBuilder b;
+    const uint32_t x = b.input("x", DataType::BF16);
+    const CompiledExecutionStage stage = b.compiled(dynamicNtkRopeOf(b, x));
+    const std::vector<uint64_t> dims{2, 4, 16, 64};
+    const SpecializedBroadcastGroup group = makeGroup(dims, {{0, {4096, 1024, 64, 1}, dims, {4096, 1024, 64, 1}}}, {dims, dims});
+    ASSERT_EQ(CudaSourceEmitter::specializedBroadcastElementsPerThread(stage, {group}), 2u);
+    const std::string source = CudaSourceEmitter::emitSpecializedBroadcast(stage, {group}, "rope_kernel");
+    EXPECT_EQ(source.find("powf("), std::string::npos) << source;
+    EXPECT_EQ(source.find("rope_log2_table"), std::string::npos) << source;
+    // Pair 1: (1e4 * 3^(64/62))^(-2/64) / 2pi, split into float hi + lo.
+    const long double base = 10000.0L * std::pow(3.0L, 64.0L / 62.0L);
+    const float pair1 = static_cast<float>(std::pow(base, -2.0L / 64.0L) / 6.283185307179586476925286766559L);
+    std::ostringstream expected;
+    expected << std::setprecision(9) << "{0.159154937f, 6.42063824e-09f}, {" << pair1 << "f, ";
+    EXPECT_NE(source.find("static const float2 rope_turns_table[] = {" + expected.str()), std::string::npos) << expected.str() << "\n"
+                                                                                                             << source;
+    EXPECT_NE(source.find("sincospif(2.0f * rope_r, &rope_s, &rope_c);"), std::string::npos) << source;
+}
+
+TEST(FusedIndexMappingEmitter, DynamicNtkRopeOnThePerElementPathBuildsItsFrequencyInFloatFloat) {
+    // rope(x[1,4,16,64]) + y[2,4,16,64] keeps the per-element RoPE path, whose sequence length can be
+    // a runtime value, so the kernel builds turns = [base^(-2i/R) / 2pi] * ratio^(-2i/(R-2)) in
+    // float-float with table-driven log2/exp2 (no powf), then uses the same exact angle reduction.
+    StageBuilder b;
+    const uint32_t x = b.input("x", DataType::BF16);
+    const uint32_t y = b.input("y", DataType::BF16);
+    const uint32_t sum = b.binary(ExprOp::ADD, dynamicNtkRopeOf(b, x), y, DataType::FP32, DataType::BF16);
+    const CompiledExecutionStage stage = b.compiled(sum);
+    const std::vector<uint64_t> dims{2, 4, 16, 64};
+    const std::vector<uint64_t> x_dims{1, 4, 16, 64};
+    const SpecializedBroadcastGroup group = makeGroup(
+        dims, {{0, {0, 1024, 64, 1}, x_dims, {4096, 1024, 64, 1}}, {1, {4096, 1024, 64, 1}, dims, {4096, 1024, 64, 1}}}, {x_dims, dims, x_dims, dims});
+    ASSERT_EQ(CudaSourceEmitter::specializedBroadcastElementsPerThread(stage, {group}), 1u);
+    const std::string source = CudaSourceEmitter::emitSpecializedBroadcast(stage, {group}, "rope_kernel");
+    EXPECT_EQ(source.find("powf("), std::string::npos) << source;
+    EXPECT_NE(source.find("static const float4 rope_log2_table[] = "), std::string::npos) << source;
+    EXPECT_NE(source.find("static const float2 rope_exp2_table[] = "), std::string::npos) << source;
+    EXPECT_NE(source.find("static const float2 rope_ntk_exponent[] = "), std::string::npos) << source;
+    EXPECT_NE(source.find("if (rope_seq_len > 8.0f) {"), std::string::npos) << source;
+    // The series arguments are renormalized before their higher-order terms use the hi part alone.
+    EXPECT_NE(source.find("const float rope_u_lo = rope_u0_lo - (rope_u_hi - rope_u0);"), std::string::npos) << source;
+    EXPECT_NE(source.find("const float rope_v_lo = rope_v0_lo - (rope_v_hi - rope_v0);"), std::string::npos) << source;
+    EXPECT_NE(source.find("rope_turns = make_float2(rope_tn_hi, rope_tn_lo);"), std::string::npos) << source;
+    EXPECT_NE(source.find("sincospif(2.0f * rope_r, &rope_s, &rope_c);"), std::string::npos) << source;
 }
 
 TEST(FusedIndexMappingEmitter, BroadcastRopeResultKeepsPerElementPartnerAtInputOffset) {

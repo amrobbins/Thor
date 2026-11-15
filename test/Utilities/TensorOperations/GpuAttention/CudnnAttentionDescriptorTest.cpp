@@ -1,4 +1,5 @@
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
+#include "test/Utilities/TensorOperations/GpuAttention/AttentionSpecTestTensor.h"
 #include "Utilities/Expression/StampedEquation.h"
 
 #include "gtest/gtest.h"
@@ -173,26 +174,8 @@ CudnnAttentionDescriptor makeFp8ProbeDescriptor(const Fp8AttentionProbeCase& pro
     return descriptor;
 }
 
-std::vector<uint64_t> asUint64Vector(const std::vector<int64_t>& values) {
-    std::vector<uint64_t> converted;
-    converted.reserve(values.size());
-    for (int64_t value : values) {
-        converted.push_back(static_cast<uint64_t>(value));
-    }
-    return converted;
-}
-
-uint64_t storageElementsForSpec(const AttentionTensorSpec& spec) {
-    uint64_t maxOffset = 0;
-    for (size_t i = 0; i < spec.dimensions.size(); ++i) {
-        maxOffset += static_cast<uint64_t>(spec.dimensions.at(i) - 1) * static_cast<uint64_t>(spec.strides.at(i));
-    }
-    return maxOffset + 1;
-}
-
 Tensor makeTensorForSpec(TensorPlacement placement, const AttentionTensorSpec& spec, Stream stream) {
-    Tensor storage = Tensor::zeros(placement, TensorDescriptor(spec.dataType, {storageElementsForSpec(spec)}), stream);
-    return storage.aliasView(asUint64Vector(spec.dimensions), asUint64Vector(spec.strides));
+    return Tensor::zeros(placement, TensorDescriptor(spec.dataType, physicalDimensionsForAttentionSpec(spec)), stream);
 }
 
 Tensor makeFp32Scalar(TensorPlacement placement, Stream stream, double value) {

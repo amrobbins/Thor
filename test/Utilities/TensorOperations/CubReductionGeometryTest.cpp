@@ -152,36 +152,40 @@ TEST(CubReductionGeometry, SupportsRankBeyondFormerCudnnDescriptorLimit) {
     EXPECT_EQ(geometry.output_dimensions, (std::vector<uint64_t>{1, 1, 1, 1, 1, 1, 1, 1, 2}));
 }
 
-TEST(CubReductionGeometry, SelectsPermutationAwareTiledPathForDensePhysicalPermutation) {
-    // Logical [K,I,J] view over physically dense [I,J,K], matching einsum("ijk->ki") after its zero-copy permutation.
+namespace {
+
+// 1390: the reducer refuses a rotated-output view (F / G) and splitRefusedView says how a caller runs it: the dense
+// reduction of [a, r, b x p] over axis 1, then the copy of that output read as [b, a, p].
+void expectRotatedSplit(const std::vector<uint64_t>& dims,
+                        const std::vector<uint64_t>& strides,
+                        const std::vector<uint32_t>& axes,
+                        uint64_t a,
+                        uint64_t r,
+                        uint64_t b,
+                        uint64_t p) {
+    EXPECT_THROW((void)CubReduction::analyzeGeometry(dims, strides, axes), NotImplementedException);
+    for (CubReductionOp op : {CubReductionOp::Sum, CubReductionOp::Max, CubReductionOp::Mean, CubReductionOp::L2Norm})
+        EXPECT_THROW((void)CubReduction::analyzeValueGeometry(op, dims, strides, axes), NotImplementedException);
+    const std::optional<CubReductionViewSplit> split = CubReduction::splitRefusedView(dims, strides, axes);
+    ASSERT_TRUE(split.has_value());
+    EXPECT_EQ(split->kind, CubReductionViewSplit::Kind::RotatedOutput);
+    EXPECT_EQ(split->dense_dimensions, (std::vector<uint64_t>{a, r, b * p}));
+    EXPECT_EQ(split->dense_axes, std::vector<uint32_t>{1});
+    EXPECT_EQ(split->a, a);
+    EXPECT_EQ(split->b, b);
+    EXPECT_EQ(split->p, p);
+}
+
+}  // namespace
+
+TEST(CubReductionGeometry, RefusesARotatedOutputPermutationAndSplitsIt) {
+    // Logical [K,I,J] view over physically dense [I,J,K], matching einsum("ijk->ki") after its zero-copy permutation:
+    // the output [K, I] is the rotation of the dense [I, K]. 1376-1389 classified it as a permutation-aware tiled
+    // view with a permuted output (the tiled kernels until 1386, then a rotation pass inside the reducer).
     constexpr uint64_t I = 7;
     constexpr uint64_t J = 5;
     constexpr uint64_t K = 32;
-    const CubReductionGeometry permuted = CubReduction::analyzeGeometry(
-        {K, I, J}, {1, J * K, K}, std::vector<uint32_t>{2});
-
-    EXPECT_EQ(permuted.path, CubReductionPath::TiledFixedSegment);
-    EXPECT_FALSE(permuted.device_transform_uses_affine_stride);
-    EXPECT_TRUE(permuted.physical_layout_is_dense_permutation);
-    EXPECT_EQ(permuted.physical_non_singleton_axis_order, (std::vector<uint32_t>{1, 2, 0}));
-    ASSERT_TRUE(permuted.permutation_aware_tiled_geometry.has_value());
-
-    const CubReductionPermutationAwareTiledGeometry& tiled = permuted.permutation_aware_tiled_geometry.value();
-    EXPECT_EQ(tiled.physical_outer_axes, (std::vector<uint32_t>{1}));
-    EXPECT_EQ(tiled.physical_reduction_axes, (std::vector<uint32_t>{2}));
-    EXPECT_EQ(tiled.physical_inner_axes, (std::vector<uint32_t>{0}));
-    EXPECT_EQ(tiled.logical_non_singleton_retained_axes, (std::vector<uint32_t>{0, 1}));
-    EXPECT_EQ(tiled.outer_size, I);
-    EXPECT_EQ(tiled.reduction_size, J);
-    EXPECT_EQ(tiled.inner_size, K);
-    EXPECT_EQ(tiled.retained_output_order, CubReductionTiledRetainedOutputOrder::PermutedInnerOuter);
-    EXPECT_EQ(permuted.outer_size, I);
-    EXPECT_EQ(permuted.reduction_size, J);
-    EXPECT_EQ(permuted.inner_size, K);
-    EXPECT_TRUE(permuted.tiled_output_permuted);
-    EXPECT_TRUE(permuted.tiled_output_shared_transpose);
-    EXPECT_EQ(permuted.tiled_output_outer_stride, 1U);
-    EXPECT_EQ(permuted.tiled_output_inner_stride, I);
+    expectRotatedSplit({K, I, J}, {1, J * K, K}, {2}, I, J, K, 1);
 }
 
 TEST(CubReductionGeometry, DetectsNaturalRetainedOrderForDensePhysicalPermutation) {
@@ -207,49 +211,22 @@ TEST(CubReductionGeometry, DetectsNaturalRetainedOrderForDensePhysicalPermutatio
     EXPECT_EQ(geometry.tiled_output_inner_stride, 1U);
 }
 
-TEST(CubReductionGeometry, DensePhysicalPermutationPlanningIsStorageOffsetInvariant) {
+TEST(CubReductionGeometry, RotatedOutputSplitIsStorageOffsetInvariant) {
     Tensor storage(TensorPlacement(TensorPlacement::MemDevices::CPU),
                    TensorDescriptor(DataType::FP32, {8, 5, 32}));
-    Tensor offset_view = storage.aliasView({32, 7, 5}, {1, 160, 32}, 160);
-    ASSERT_EQ(offset_view.getStorageElementOffset(), 160U);
-
-    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(
-        offset_view.getDimensions(), offset_view.getStridesElements(), std::vector<uint32_t>{2});
-    EXPECT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
-    EXPECT_TRUE(geometry.physical_layout_is_dense_permutation);
-    ASSERT_TRUE(geometry.permutation_aware_tiled_geometry.has_value());
-    EXPECT_EQ(geometry.permutation_aware_tiled_geometry->outer_size, 7U);
-    EXPECT_EQ(geometry.permutation_aware_tiled_geometry->reduction_size, 5U);
-    EXPECT_EQ(geometry.permutation_aware_tiled_geometry->inner_size, 32U);
-    EXPECT_EQ(geometry.permutation_aware_tiled_geometry->retained_output_order,
-              CubReductionTiledRetainedOutputOrder::PermutedInnerOuter);
-    EXPECT_TRUE(geometry.tiled_output_shared_transpose);
-    EXPECT_EQ(geometry.tiled_output_outer_stride, 1U);
-    EXPECT_EQ(geometry.tiled_output_inner_stride, 7U);
+    StridedSpan offset_view = StridedSpan(storage, 160, {32, 7, 5}, {1, 160, 32});
+    ASSERT_EQ(offset_view.getStorage().offset, 160U);
+    expectRotatedSplit(offset_view.getDimensions(), offset_view.getStridesElements(), {2}, 7, 5, 32, 1);
+    // The caller reads the view's bytes as the dense [a, r, b] from the same first element.
+    const StridedSpan dense = offset_view.asDense({7, 5, 32});
+    EXPECT_EQ(dense.getStorage().offset, 160U);
+    EXPECT_EQ(dense.getStridesElements(), (std::vector<uint64_t>{160, 32, 1}));
 }
 
-TEST(CubReductionGeometry, DensePhysicalPermutationDetectionHandlesSingletonAxes) {
-    // Singleton axes are memory-layout neutral and must not prevent recognizing a genuine dense physical permutation.
-    const CubReductionGeometry permuted = CubReduction::analyzeGeometry(
-        {4, 1, 2, 3}, {1, 12, 12, 4}, std::vector<uint32_t>{3});
-
-    EXPECT_EQ(permuted.path, CubReductionPath::TiledFixedSegment);
-    EXPECT_TRUE(permuted.physical_layout_is_dense_permutation);
-    EXPECT_EQ(permuted.physical_non_singleton_axis_order, (std::vector<uint32_t>{2, 3, 0}));
-    ASSERT_TRUE(permuted.permutation_aware_tiled_geometry.has_value());
-    const CubReductionPermutationAwareTiledGeometry& tiled = permuted.permutation_aware_tiled_geometry.value();
-    EXPECT_EQ(tiled.physical_outer_axes, (std::vector<uint32_t>{2}));
-    EXPECT_EQ(tiled.physical_reduction_axes, (std::vector<uint32_t>{3}));
-    EXPECT_EQ(tiled.physical_inner_axes, (std::vector<uint32_t>{0}));
-    EXPECT_EQ(tiled.logical_non_singleton_retained_axes, (std::vector<uint32_t>{0, 2}));
-    EXPECT_EQ(tiled.retained_output_order, CubReductionTiledRetainedOutputOrder::PermutedInnerOuter);
-    EXPECT_EQ(permuted.outer_size, 2U);
-    EXPECT_EQ(permuted.reduction_size, 3U);
-    EXPECT_EQ(permuted.inner_size, 4U);
-    EXPECT_TRUE(permuted.tiled_output_permuted);
-    EXPECT_TRUE(permuted.tiled_output_shared_transpose);
-    EXPECT_EQ(permuted.tiled_output_outer_stride, 1U);
-    EXPECT_EQ(permuted.tiled_output_inner_stride, 2U);
+TEST(CubReductionGeometry, RotatedOutputSplitIgnoresSingletonAxes) {
+    // Singleton axes are memory-layout neutral and must not prevent recognizing a genuine dense physical permutation:
+    // physical [2, 3, 4] (logical axes 2, 3, 0) read as [4, 1, 2, 3], reducing logical 3.
+    expectRotatedSplit({4, 1, 2, 3}, {1, 12, 12, 4}, {3}, 2, 3, 4, 1);
 }
 
 TEST(CubReductionGeometry, PhysicallyContiguousReductionBlockCanUseTiledPathWhenLogicalAxesAreDisjoint) {
@@ -283,18 +260,30 @@ TEST(CubReductionGeometry, RejectsGappedOverlappingAndBroadcastStorageAfterDelet
                  NotImplementedException);
 }
 
-TEST(CubReductionGeometry, SplitPhysicalReductionIsUnsupportedAndDirect2BOwnsRetainedRotation) {
-    // Physical order is [2,0,1,3]. Reduction axes {1,2} are split by retained axis 0 in physical order.
+TEST(CubReductionGeometry, SplitPhysicalReductionIsComposedDenseAndDirect2BIsRefused) {
+    // Physical order is [2,0,1,3]. Reduction axes {1,2} are split by retained axis 0 in physical order; the retained
+    // axes {0,3} keep their physical order. 1376: a dense [2,3,5,7] reduced over its physical axes {0,2}
+    // (ComposedDense, run on the retained dense planner); before, no reducer owned it.
+    const CubReductionGeometry split = CubReduction::analyzeGeometry(
+        {3, 5, 2, 7}, {35, 7, 105, 1}, std::vector<uint32_t>{1, 2});
+    EXPECT_TRUE(split.physical_layout_is_dense_permutation);
+    EXPECT_EQ(split.path, CubReductionPath::ComposedDense);
+    EXPECT_EQ(split.output_elements, 21U);
+    EXPECT_EQ(split.reduction_size, 10U);
+    for (CubReductionOp op : {CubReductionOp::Sum, CubReductionOp::Max, CubReductionOp::Mean, CubReductionOp::L2Norm}) {
+        const CubReductionGeometry value =
+            CubReduction::analyzeValueGeometry(op, {3, 5, 2, 7}, {35, 7, 105, 1}, std::vector<uint32_t>{1, 2});
+        EXPECT_EQ(value.path, CubReductionPath::ComposedDense);
+    }
+    // The same split with the retained axes out of physical order still has no reducer: [2,3,5,7] read as
+    // [7,5,2,3] (logical axis 0 is physical 3, logical 3 is physical 1) reducing logical {1,2}.
     EXPECT_THROW((void)CubReduction::analyzeGeometry(
-                     {3, 5, 2, 7}, {35, 7, 105, 1}, std::vector<uint32_t>{1, 2}),
+                     {7, 5, 2, 3}, {1, 7, 105, 35}, std::vector<uint32_t>{1, 2}),
                  NotImplementedException);
 
-    // Reducing axis 0 is the ordained VIEW-DIRECT-2B [A,R,B,P] -> [B,A,P] retained rotation.
-    const CubReductionGeometry direct2b = CubReduction::analyzeGeometry(
-        {3, 5, 2, 7}, {35, 7, 105, 1}, std::vector<uint32_t>{0});
-    EXPECT_TRUE(direct2b.physical_layout_is_dense_permutation);
-    EXPECT_EQ(direct2b.path, CubReductionPath::TiledFixedSegment);
-    EXPECT_TRUE(direct2b.payload_transpose_tiled_geometry.has_value());
+    // Reducing axis 0 is the VIEW-DIRECT-2B [A,R,B,P] -> [B,A,P] retained rotation (physical [2, 3, 5, 7]: A 2,
+    // R 3, B 5, P 7). 1390: the reducer refuses it, and the caller rotates the dense [A, B x P] output.
+    expectRotatedSplit({3, 5, 2, 7}, {35, 7, 105, 1}, {0}, 2, 3, 5, 7);
 }
 
 TEST(CubReductionGeometry, CompactPhysicalPermutationTrailingReductionUsesContiguousSegmentsWhenOutputOrderMatches) {
@@ -521,32 +510,55 @@ TEST(CubReductionGeometry, DenseValueCompositionValidatesPerStageRatherThanMonol
     }
 }
 
-TEST(CubReductionGeometry, OnlyCubFixedSizeSegmentedPathsInheritTheIntSegmentSizeLimit) {
+// 1374: no geometry inherits CUB's `int` fixed-segment size (no reduction calls DeviceSegmentedReduce since 1373; the
+// retained, tiled and StridedR kernels carry 64-bit geometry). The GPU runs past the limit are in
+// CubReductionViewPhysicalTest.cpp.
+TEST(CubReductionGeometry, NoGeometryInheritsTheCubIntSegmentSizeLimit) {
     const uint64_t above_int_max = static_cast<uint64_t>(std::numeric_limits<int>::max()) + 1ULL;
 
-    // TiledFixedSegment is Thor-owned. Its geometry and kernel loops are uint64_t, so a middle reduced block may be
-    // larger than INT_MAX even though CUB's fixed-size segmented API cannot represent such a segment size.
+    // A middle reduced block larger than INT_MAX (TiledFixedSegment).
     const CubReductionGeometry tiled =
         CubReduction::analyzeValueGeometry(CubReductionOp::Sum, {2, above_int_max, 2}, {1});
     EXPECT_EQ(tiled.path, CubReductionPath::TiledFixedSegment);
     EXPECT_EQ(tiled.reduction_size, above_int_max);
 
-    // The same must remain true when such a Tiled stage is one pass inside a disjoint-axis dense composition.
+    // The same as one pass inside a disjoint-axis dense composition.
     const CubReductionGeometry composed =
         CubReduction::analyzeValueGeometry(CubReductionOp::Sum, {above_int_max, 2, 3, 2}, {0, 2});
     EXPECT_EQ(composed.path, CubReductionPath::ComposedDense);
     EXPECT_GT(composed.reduction_size, static_cast<uint64_t>(std::numeric_limits<int>::max()));
 
-    // Full reductions use DeviceReduce with an int64_t item count and likewise do not inherit the fixed-segment cap.
+    // A full reduction.
     const CubReductionGeometry full =
         CubReduction::analyzeValueGeometry(CubReductionOp::Sum, {above_int_max}, {0});
     EXPECT_EQ(full.path, CubReductionPath::DeviceTransformReduce);
 
-    // ContiguousFixedSegment still calls DeviceSegmentedReduce's fixed-size overload, whose segment_size parameter is
-    // an int. Keep rejecting that geometry until we deliberately replace or widen that primitive.
-    EXPECT_THROW((void)CubReduction::analyzeValueGeometry(
-                     CubReductionOp::Sum, {2, above_int_max}, {1}),
-                 std::invalid_argument);
+    // Trailing rows longer than INT_MAX (ContiguousFixedSegment), which threw until 1374, for every value op and for
+    // ARG.
+    for (CubReductionOp op : {CubReductionOp::Sum,
+                              CubReductionOp::Min,
+                              CubReductionOp::Max,
+                              CubReductionOp::Product,
+                              CubReductionOp::Mean,
+                              CubReductionOp::L1Norm,
+                              CubReductionOp::L2Norm,
+                              CubReductionOp::SumSquares}) {
+        const CubReductionGeometry rows = CubReduction::analyzeValueGeometry(op, {2, above_int_max}, {1});
+        EXPECT_EQ(rows.path, CubReductionPath::ContiguousFixedSegment);
+        EXPECT_EQ(rows.reduction_size, above_int_max);
+    }
+    const CubReductionGeometry arg_rows = CubArgReduction::analyzeDenseGeometry({2, above_int_max}, {1});
+    EXPECT_EQ(arg_rows.path, CubReductionPath::ContiguousFixedSegment);
+    EXPECT_EQ(arg_rows.reduction_size, above_int_max);
+
+    // VIEW-DIRECT-2A past the limit: [2, A, B] read as [2, B, A], the reduced axes the physical suffix.
+    const uint64_t a = 65537, b = 32771;
+    ASSERT_GT(a * b, static_cast<uint64_t>(std::numeric_limits<int>::max()));
+    const CubReductionGeometry view =
+        CubReduction::analyzeValueGeometry(CubReductionOp::Sum, {2, b, a}, {a * b, 1, b}, {1, 2});
+    EXPECT_EQ(view.path, CubReductionPath::ContiguousFixedSegment);
+    EXPECT_TRUE(view.permutation_aware_contiguous_segments);
+    EXPECT_EQ(view.reduction_size, a * b);
 }
 
 TEST(CubReductionGeometry, DenseRunPlanningCollapsesAdjacentRolesAndIgnoresSingletonSeparators) {

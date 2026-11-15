@@ -28,6 +28,15 @@ retained kernel in them is reachable, so this tool measures the production objec
   CubRaggedFinishArgWide.cu.o               (1314) the wide ragged ARG finishing kernels (D above 15)
   CubRaggedRKArgFp32.cu.o                   (1321) the retained ragged RK ARG kernels for FP32 input
   CubRaggedFinishArgPairWide.cu.o           (1321) the wide ragged ARG finishing kernel for pair records (D above 15)
+  CubReductionSum / Min / Max / Product / L1Norm / SumSquares.cu.o
+                                            (1335) the value reductions of non-dense views: CUB DeviceReduce /
+                                            DeviceSegmentedReduce instantiations (gone from 1373) and the Thor tiled
+                                            view kernels, per op and input dtype; deleted in 1393, kept so a compare
+                                            against an older build names them
+  CubStridedR.cu.o                          (1366) the StridedR kernels and the stride-0 closed form, the Thor
+                                            owners of rank-1 strided views (StridedReduction.h)
+  CubViewLayout.cu.o                        (1387) the layout passes of rotated and pitched views (ViewLayout.h);
+                                            deleted in 1390, kept so a compare against an older build names them
 
 1259 deleted the legacy KParallel / RCooperative kernels (and CubReductionCooperativeShardedTiled.cu), so every
 kernel in these objects is retained; an instantiation the table does not know is an error. 1330 (ragged phase 9)
@@ -41,10 +50,16 @@ its input dtype (the first template argument of the shared templates), and:
   owner    FP32 retained | FP8 retained | FP16/BF16 retained (1233) |
            FP8+FP32 shared (input-independent, e.g. the KR Split finish) |
            Ragged retained (1265: the merge-path ragged kernels; 1330: the only ragged kernels) |
-           device helper
+           View tiled (1335: the Thor tiled view kernels) | View CUB (1335: CUB device reductions of views) |
+           View strided (1366: the StridedR kernels of rank-1 strided views) |
+           View layout (1387: the rotation / packing passes of views on the dense planner) | device helper
   family   RK OneWindow / DeepRSmallK / AlignedK / RuntimeK PacketComplete / RuntimeK Rotated / ARG continuation,
            KR Pack / Vector / Group / Block / Split / Split finish,
-           Ragged KR / Ragged KR components / Ragged RK / Ragged finish (ragged retained)
+           Ragged KR / Ragged KR components / Ragged RK / Ragged finish (ragged retained),
+           Tiled direct / pitched / payload transpose / shared transpose (view tiled; 1385: Tiled adaptive deleted),
+           CUB reduce / CUB reduce tile / CUB segmented (view CUB),
+           StridedR kernel / StridedR closed form (view strided),
+           Layout row copy / Layout transpose (view layout; the word width, 1-byte / 2-byte / 4-byte, as the dtype)
   kind     VALUE | ARG | carried ARG
 
 Every __global__ kernel declared in the source files must be classified, or the tool fails (classify() is the
@@ -97,9 +112,19 @@ SOURCES = {
     'CubRaggedFinishArgWide.cu.o': 'CubRaggedFinishArgWide.cu',  # 1314
     'CubRaggedRKArgFp32.cu.o': 'CubRaggedRKArgFp32.cu',  # 1321
     'CubRaggedFinishArgPairWide.cu.o': 'CubRaggedFinishArgPairWide.cu',  # 1321
+    # 1335-1392: the six per-op view-reduction objects (VIEW_OBJECTS), deleted in 1393 with the Thor tiled view kernels
+    # (not scanned: stale objects may stay in the build tree). Their kernels keep their classification (VIEW_TILED).
+    'CubStridedR.cu.o': 'CubStridedR.cu',  # 1366
+    # 1387-1389: 'CubViewLayout.cu.o', the view layout passes; deleted in 1390 (not scanned: a stale object may stay in
+    # the build tree). Its kernels keep their classification, so a compare against an older run names them.
 }
+# 1335: the objects whose CUB device-reduction instantiations were counted (owner View CUB, classified by object);
+# no longer scanned from 1393.
+VIEW_OBJECTS = ('CubReductionSum.cu.o', 'CubReductionMin.cu.o', 'CubReductionMax.cu.o', 'CubReductionProduct.cu.o',
+                'CubReductionL1Norm.cu.o', 'CubReductionSumSquares.cu.o')
 # 1284: headers whose __global__ kernels the objects above instantiate (scanned for declarations with the sources).
-KERNEL_HEADERS = ('RaggedKRKernels.cuh', 'RaggedRKKernels.cuh', 'RaggedKRArgKernels.cuh', 'RaggedRKArgKernels.cuh')
+KERNEL_HEADERS = ('RaggedKRKernels.cuh', 'RaggedRKKernels.cuh', 'RaggedKRArgKernels.cuh', 'RaggedRKArgKernels.cuh',
+                  'CubReductionOperation.cuh')  # 1335
 CUDA_GLOBAL_DECLARATION = re.compile(
     r'__global__\s+(?:__launch_bounds__\((?:[^()]|\([^()]*\))*\)\s+)?void\s+(\w+)\s*\(')
 
@@ -192,9 +217,23 @@ RAGGED_RETAINED = {
 # 1298: the ragged ARG kernels' key formats (their first template argument) and their input dtypes.
 RAGGED_ARG_KEYS = {'RaggedArgKeyFp8': 'FP8', 'RaggedArgKeyF16': 'FP16/BF16', 'RaggedArgKeyFp32': 'FP32'}  # 1311, 1313
 RAGGED_INPUT_DTYPES = ('FP8', 'FP16', 'BF16', 'FP32')  # 1284 (1265-1283: FP8)
+# 1335: the Thor tiled view kernels (CubReductionOperation.cuh), templated on the input type first: their family.
+# 1393 deleted them; the classification stays so a compare against an older run names them.
+VIEW_TILED = {
+    'directTiledFixedSegmentReductionKernel': 'Tiled direct',
+    'pitchedTiledFixedSegmentReductionKernel': 'Tiled pitched',
+    'payloadTranspose32x33ReductionKernel': 'Tiled payload transpose',
+    'wideComponentTiledSharedTransposeReductionKernel': 'Tiled shared transpose',
+}
+VIEW_INPUT_DTYPES = ('FP8', 'FP16', 'BF16', 'FP32')
+# 1366: the StridedR kernels (CubStridedR.cu): <InputT, Combine>, and the closed form (any input, a runtime dtype).
+VIEW_STRIDED = {'stridedRKernel': 'StridedR kernel', 'stridedRClosedFormKernel': 'StridedR closed form'}
+# 1387: the view layout passes (CubViewLayout.cu), templated on the copied word: its width stands for the dtype.
+VIEW_LAYOUT = {'viewRowCopyKernel': 'Layout row copy', 'viewTransposeKernel': 'Layout transpose'}
+LAYOUT_WORDS = {'unsigned char': '1-byte', 'unsigned short': '2-byte', 'unsigned int': '4-byte'}
 ROTATED = 'awkwardAlignmentRotatedShardedFirstStageKernel'  # <InputT, Op, Transform, Rows, PacketBytes, Warps, Exact>
 KNOWN = (set(SHARED_VALUE) | set(SHARED_DTYPE_ARG) | set(SHARED_ARG) | set(FP8_ALIGNED_VALUE) | set(FIXED) |
-         set(RAGGED_RETAINED) | {ROTATED})
+         set(RAGGED_RETAINED) | set(VIEW_TILED) | set(VIEW_STRIDED) | set(VIEW_LAYOUT) | {ROTATED})
 
 
 def template_arguments(name: str, kernel: str) -> list[str] | None:
@@ -237,6 +276,21 @@ def classify(name: str) -> tuple[str, str, str, str, str] | None:
         return None
     args = template_arguments(name, kernel) or []
     dtype = DTYPES.get(args[0], args[0]) if args else ''
+    if kernel in VIEW_TILED:  # 1335
+        if dtype not in VIEW_INPUT_DTYPES:
+            raise ValueError(f'{kernel} instantiated for an unexpected input type {dtype!r}: {name}')
+        return kernel, 'View tiled', VIEW_TILED[kernel], 'VALUE', dtype
+    if kernel in VIEW_STRIDED:  # 1366
+        if kernel == 'stridedRClosedFormKernel':
+            return kernel, 'View strided', VIEW_STRIDED[kernel], 'VALUE', 'any'
+        if dtype not in VIEW_INPUT_DTYPES:
+            raise ValueError(f'{kernel} instantiated for an unexpected input type {dtype!r}: {name}')
+        return kernel, 'View strided', VIEW_STRIDED[kernel], 'VALUE', dtype
+    if kernel in VIEW_LAYOUT:  # 1387
+        word = LAYOUT_WORDS.get(args[0] if args else '')
+        if word is None:
+            raise ValueError(f'{kernel} instantiated for an unexpected word {args[:1]!r}: {name}')
+        return kernel, 'View layout', VIEW_LAYOUT[kernel], 'VALUE', word
     if kernel in RAGGED_RETAINED:
         family, kind, fixed_dtype = RAGGED_RETAINED[kernel]
         if fixed_dtype == 'key':  # 1298
@@ -282,6 +336,22 @@ def classify(name: str) -> tuple[str, str, str, str, str] | None:
     if dtype in ('FP16', 'BF16') and args[4] == '16' and args[5] == '8':
         return kernel, 'FP16/BF16 retained', 'RK RuntimeK Rotated', 'VALUE', dtype
     raise ValueError(f'{kernel} instantiated outside the retained rotated passes: {name}')
+
+
+def classify_view_cub(name: str, obj_name: str) -> tuple[str, str, str, str, str] | None:
+    """1335: a CUB device-reduction kernel instantiated in a view-reduction object, else None."""
+    flat = name.removeprefix('void ').lstrip()
+    if obj_name not in VIEW_OBJECTS or not flat.startswith('cub::') or not re.search(r'Kernel\w*\s*<', flat):
+        return None
+    if re.search(r'^cub::\S*EmptyKernel', flat):
+        return None
+    dtype = next((label for token, label in (('__nv_fp8_e4m3', 'FP8'), ('__nv_fp8_e5m2', 'FP8'), ('__half', 'FP16'),
+                                             ('__nv_bfloat16', 'BF16'), ('float const*', 'FP32'),
+                                             ('<float>', 'FP32'), ('<float,', 'FP32')) if token in flat), '')
+    match = re.match(r'([\w:]*?)(\w+Kernel\w*)\s*<', flat)
+    kernel = match.group(2) if match else 'cub kernel'
+    family = 'CUB segmented' if 'Segmented' in kernel else 'CUB reduce tile' if 'SingleTile' in kernel else 'CUB reduce'
+    return kernel, 'View CUB', family, 'VALUE', dtype
 
 
 def run(cmd, cwd=None, text_input=None):
@@ -348,7 +418,7 @@ def analyze(build: Path, source: Path, out: Path, other_csv: Path | None = None)
                     sys.exit(f'demangle mismatch in {cubin}')
                 for (mangled, size), name in zip(symbols, names):
                     try:
-                        c = classify(name)
+                        c = classify(name) or classify_view_cub(name, obj_name)
                     except ValueError as error:
                         problems.append(str(error))
                         continue
@@ -378,7 +448,8 @@ def analyze(build: Path, source: Path, out: Path, other_csv: Path | None = None)
         sys.exit(1)
 
 
-OWNERS = ('FP32 retained', 'FP8 retained', 'FP16/BF16 retained', 'FP8+FP32 shared', 'Ragged retained', 'device helper')
+OWNERS = ('FP32 retained', 'FP8 retained', 'FP16/BF16 retained', 'FP8+FP32 shared', 'Ragged retained', 'View tiled',
+          'View CUB', 'View strided', 'View layout', 'device helper')
 
 
 def summarize(rows: list[dict]) -> list[str]:
@@ -409,7 +480,8 @@ def summarize(rows: list[dict]) -> list[str]:
                 lines.append('')
         grand = sum(b for _, b in owner_totals.values())
         lines.append(f'  {"all functions in these objects":60s} {"":>7s} {grand:>12,}')
-        for owner in ('FP32 retained', 'FP8 retained', 'FP16/BF16 retained', 'Ragged retained'):
+        for owner in ('FP32 retained', 'FP8 retained', 'FP16/BF16 retained', 'Ragged retained', 'View tiled',
+                      'View CUB', 'View strided', 'View layout'):
             if owner not in owner_totals:
                 continue
             by_family = defaultdict(int)
@@ -423,6 +495,15 @@ def summarize(rows: list[dict]) -> list[str]:
     lines.append('noinline functions, not attributed to a kernel. The legacy dense families were deleted in 1259.')
     lines.append('Ragged retained: the merge-path ragged kernels (1265 on), their own objects; the legacy')
     lines.append('offset-segmented kernels (1263-1329, 4.03 MB at sm_120) were deleted in 1330.')
+    lines.append('View tiled / View CUB (1335): the value reductions of non-dense views, in the six per-op objects;')
+    lines.append('the View CUB owner is what plans/Thor_View_Reduction_Plan_2026-11-08.md removes (1373: no CUB device')
+    lines.append('reduction call remains, so View CUB is empty). 1393 deleted the tiled view kernels and the six')
+    lines.append('objects (unreachable since 1390), so both are empty from 1393.')
+    lines.append('View strided (1366): the StridedR kernels of rank-1 strided views, CubStridedR.cu.o; since 1370')
+    lines.append('the Split kernel finishes in its own launch (1366-1369 used the shared KR Split finish).')
+    lines.append('View layout (1387): the rotation / packing passes that put rotated and pitched views on the dense')
+    lines.append('planner, CubViewLayout.cu.o (word copies, so the word width stands for the dtype); 1390 deleted them')
+    lines.append('(callers run those views in two parts with the dense copy), so it is empty from 1390.')
     lines.append('1118\'s isolated FP8 RK first-stage inventory measured 8.80 MB.')
     return lines
 
@@ -567,7 +648,50 @@ def self_test():
         assert classify(legacy) is None, legacy
         assert re.search(r'[Kk]ernel\s*<', legacy) and 'ThorImplementation::' in legacy
     assert not any('OffsetSegmented' in obj for obj in SOURCES)
+    assert not set(VIEW_OBJECTS) & set(SOURCES)  # 1393
     assert 'Ragged legacy' not in OWNERS
+    # 1335: the view-reduction objects' tiled kernels and CUB instantiations (1393: deleted, still classified).
+    got = classify(f'void {ns}pitchedTiledFixedSegmentReductionKernel<__half, cuda::std::__4::plus<float>, '
+                   f'{ns}IdentityFp32, {ns}AdditiveFinalizeFp32>(__half const*, void*)')
+    assert got is not None and got[1:] == ('View tiled', 'Tiled pitched', 'VALUE', 'FP16'), got
+    try:
+        classify(f'void {ns}directTiledFixedSegmentReductionKernel<double, X, Y, Z, 8>(double const*)')
+        raise AssertionError('an unexpected tiled view instantiation must fail')
+    except ValueError:
+        pass
+    cub = ('void cub::CUB_300000_SM_1200_NS::detail::reduce::DeviceReduceSingleTileKernel<cub::Policy, '
+           f'thrust::transform_iterator<{ns}ToFp32<__nv_bfloat16>, __nv_bfloat16 const*>, float*>(float*)')
+    assert classify(cub) is None
+    assert classify_view_cub(cub, 'CubReductionSum.cu.o') == (
+        'DeviceReduceSingleTileKernel', 'View CUB', 'CUB reduce tile', 'VALUE', 'BF16')
+    assert classify_view_cub(cub, 'CubReductionNarrowFlatRCooperative.cu.o') is None
+    seg = ('void cub::CUB_300000_SM_1200_NS::detail::reduce::DeviceSegmentedReduceKernel<cub::Policy, '
+           f'thrust::transform_iterator<{ns}ToFp32<float>, float const*>, float*>(float const*)')
+    assert classify_view_cub(seg, 'CubReductionMax.cu.o')[2:] == ('CUB segmented', 'VALUE', 'FP32')
+    assert classify_view_cub('void cub::CUB_300000_SM_1200_NS::detail::EmptyKernel<void>()',
+                             'CubReductionMin.cu.o') is None
+    # 1366: the StridedR kernels.
+    got = classify(f'void {ns}stridedRKernel<__nv_fp8_e5m2, 2>(unsigned char const*, unsigned long, unsigned long)')
+    assert got is not None and got[1:] == ('View strided', 'StridedR kernel', 'VALUE', 'FP8'), got
+    got = classify(f'void {ns}stridedRKernel<float, 0>(float const*, unsigned long, unsigned long)')
+    assert got is not None and got[1:] == ('View strided', 'StridedR kernel', 'VALUE', 'FP32'), got
+    got = classify(f'void {ns}viewRowCopyKernel<unsigned short, true>(unsigned short const*, unsigned short*)')
+    assert got is not None and got[1:] == ('View layout', 'Layout row copy', 'VALUE', '2-byte'), got  # 1387
+    got = classify(f'void {ns}viewTransposeKernel<unsigned char>(unsigned char const*, unsigned char*)')
+    assert got is not None and got[1:] == ('View layout', 'Layout transpose', 'VALUE', '1-byte'), got
+    try:
+        classify(f'void {ns}viewTransposeKernel<double>(double const*)')
+        raise AssertionError('a layout kernel over an unexpected word classified')
+    except ValueError:
+        pass
+    got = classify(f'void {ns}stridedRClosedFormKernel(void const*, ThorImplementation::DataType, unsigned long)')
+    assert got is not None and got[1:] == ('View strided', 'StridedR closed form', 'VALUE', 'any'), got
+    assert classify(f'{ns}stridedRFinalizeOutOfLine(float, float, bool)') is None
+    try:
+        classify(f'void {ns}stridedRKernel<double, 0>(double const*)')
+        raise AssertionError('an unexpected StridedR instantiation must fail')
+    except ValueError:
+        pass
     helper = f'{ns}finalizeAdditiveFp32OutOfLine(float, float, bool)'
     assert classify(helper) is None
     nested = f'{ns}fp32AlignedKKernel<float, 1, 32, (X)0>(float const*)::{{lambda()#1}}::operator()() const'
@@ -608,7 +732,7 @@ def self_test():
     assert re.search(r'A\.cu\.o\s+sm_120\s+34\s+30\s+\+4\s+1 differ', text), text
     assert re.search(r'B\.cu\.o\s+sm_120\s+5\s+5\s+\+0\s+identical', text), text
     assert 'new in this run' in text and 'this 24 other 20: g' in text, text
-    print(f'self-test: {len(cases) + 13} classifications, the summary and the comparison OK')
+    print(f'self-test: {len(cases) + 18} classifications, the summary and the comparison OK')
 
 
 def main():

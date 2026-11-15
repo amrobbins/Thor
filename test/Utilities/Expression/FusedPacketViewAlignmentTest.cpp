@@ -1,14 +1,11 @@
-// Fused packet kernels must stay correct when a runtime tensor is a dense storage
-// alias whose base is element aligned but not packet aligned, and when the final
-// packet of a view would extend past the view into live neighbouring storage.
-// Tensor::isDenseContiguous() does not look at the element offset, so such views
-// reach the flat / specialized-broadcast fast paths.
+// Fused packet kernels must stay correct when an input is a dense span (a strided view taken inside the expression)
+// whose first element is element aligned but not packet aligned, and when the span's final packet would extend past it
+// into live neighbouring storage. A dense span reaches the flat / specialized-broadcast fast paths.
 //
-// Every case writes into an output view that sits inside a larger allocation
-// pre-filled with a sentinel, then checks the view values and that the guard
-// regions before and after the view are untouched. Shapes and offsets are
-// randomized; the seed is printed so failures reproduce
-// (THOR_TEST_SEED=<seed> to replay).
+// Every case reads its inputs as spans at random offsets into larger allocations whose other elements hold a
+// sentinel, writes a dense output tensor pre-filled with the sentinel, and checks the output values (elements a
+// ragged kernel must not write still hold the sentinel). Shapes and offsets are randomized; the seed is printed so
+// failures reproduce (THOR_TEST_SEED=<seed> to replay).
 
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/TensorOperations/DataTypeConversions/TypeConverter.h"
@@ -103,11 +100,11 @@ std::vector<float> copyStorageAsFloat(Tensor storage, Stream& stream) {
     return std::vector<float>(values, values + storage.getTotalNumElements());
 }
 
-// A dense view of `numel` elements at element `offset` inside an allocation with
-// `guard` sentinel elements after it.
+// `numel` elements at element `offset` inside an allocation with `guard` sentinel elements after them: an expression
+// reads them as a dense span (spanOf).
 struct ViewStorage {
     Tensor storage;
-    Tensor view;
+    std::vector<uint64_t> dims;
     uint64_t offset = 0;
     uint64_t numel = 0;
 };
@@ -124,12 +121,26 @@ ViewStorage makeView(const std::vector<uint64_t>& dims,
     for (uint64_t i = 0; i < numel; ++i) host[offset + i] = view_values.empty() ? kSentinel : view_values[i];
     ViewStorage result;
     result.storage = makeGpuStorage(host, dtype, stream);
-    std::vector<uint64_t> strides(dims.size(), 1);
-    for (size_t axis = dims.size(); axis-- > 1;) strides[axis - 1] = strides[axis] * dims[axis];
-    result.view = result.storage.aliasView(dims, strides, offset);
+    result.dims = dims;
     result.offset = offset;
     result.numel = numel;
     return result;
+}
+
+// The expression input `name` read as the dense span `storage` describes.
+Expression spanOf(const std::string& name, DataType dtype, const ViewStorage& storage) {
+    std::vector<uint64_t> strides(storage.dims.size(), 1);
+    for (size_t axis = storage.dims.size(); axis-- > 1;) strides[axis - 1] = strides[axis] * storage.dims[axis];
+    return Expression::input(name, dtype, dtype).stridedView(storage.dims, strides, storage.offset);
+}
+
+// A dense output tensor of its own, every element the sentinel.
+Tensor makeSentinelOutput(const std::vector<uint64_t>& dims, DataType dtype, Stream& stream) {
+    uint64_t numel = 1;
+    for (uint64_t d : dims) numel *= d;
+    Tensor out = makeGpuStorage(std::vector<float>(numel, kSentinel), dtype, stream);
+    out.reshape(dims);
+    return out;
 }
 
 // Values on a 0.5 grid in [-2, 1.5]: sums of two stay exactly representable in
@@ -141,22 +152,12 @@ std::vector<float> gridValues(uint64_t count, std::mt19937_64& rng) {
     return values;
 }
 
-// Checks the view region against `expected` (std::nullopt = must still hold the
-// sentinel) and that the guard regions on both sides were not written.
-void expectOutputView(const ViewStorage& out,
-                      const std::vector<std::optional<float>>& expected,
-                      Stream& stream,
-                      const std::string& label) {
-    const std::vector<float> all = copyStorageAsFloat(out.storage, stream);
-    for (uint64_t i = 0; i < out.offset; ++i) {
-        ASSERT_EQ(all[i], kSentinel) << label << ": wrote before the view at storage element " << i;
-    }
-    for (uint64_t i = 0; i < out.numel; ++i) {
-        const float want = expected[i].value_or(kSentinel);
-        ASSERT_EQ(all[out.offset + i], want) << label << ": view element " << i;
-    }
-    for (uint64_t i = out.offset + out.numel; i < all.size(); ++i) {
-        ASSERT_EQ(all[i], kSentinel) << label << ": wrote past the view at storage element " << i;
+// Checks the output against `expected` (std::nullopt = must still hold the sentinel).
+void expectOutput(const Tensor& out, const std::vector<std::optional<float>>& expected, Stream& stream, const std::string& label) {
+    const std::vector<float> all = copyStorageAsFloat(out, stream);
+    ASSERT_EQ(all.size(), expected.size()) << label;
+    for (uint64_t i = 0; i < all.size(); ++i) {
+        ASSERT_EQ(all[i], expected[i].value_or(kSentinel)) << label << ": output element " << i;
     }
 }
 
@@ -192,33 +193,31 @@ TEST(FusedPacketViewAlignment, FlatKernelsHandleOffsetViewsAndPartialPackets) {
     std::uniform_int_distribution<uint64_t> offset_dist(0, 17);
 
     for (const FlatDTypes& family : families) {
-        const Expression x = Expression::input("x", family.x, family.x);
-        const Expression y = Expression::input("y", family.y, family.y);
-        FusedEquation eq = FusedEquation::compile(Expression::outputs({{"z", (x + y).withOutputDType(family.out)}}).physicalOutputs(), 0);
-
         for (int trial = 0; trial < 4; ++trial) {
             const uint64_t numel = numel_dist(rng);
             // Trial 0 keeps every base packet aligned so the vector path's partial
             // final packet is exercised on its own.
             const uint64_t x_offset = trial == 0 ? 0 : offset_dist(rng);
             const uint64_t y_offset = trial == 0 ? 0 : offset_dist(rng);
-            const uint64_t z_offset = trial == 0 ? 0 : offset_dist(rng);
             const std::string label = dtypeName(family.x) + "+" + dtypeName(family.y) + "->" + dtypeName(family.out) +
                                       " numel=" + std::to_string(numel) + " offsets=" + std::to_string(x_offset) + "," +
-                                      std::to_string(y_offset) + "," + std::to_string(z_offset);
+                                      std::to_string(y_offset);
 
             const std::vector<float> xv = gridValues(numel, rng);
             const std::vector<float> yv = gridValues(numel, rng);
             ViewStorage xs = makeView({numel}, x_offset, xv, family.x, stream);
             ViewStorage ys = makeView({numel}, y_offset, yv, family.y, stream);
-            ViewStorage zs = makeView({numel}, z_offset, {}, family.out, stream);
-            ASSERT_TRUE(zs.view.isDenseContiguous());
+            Tensor z = makeSentinelOutput({numel}, family.out, stream);
 
-            eq.run({{"x", xs.view}, {"y", ys.view}}, zs.view, stream);
+            const Expression x = spanOf("x", family.x, xs);
+            const Expression y = spanOf("y", family.y, ys);
+            FusedEquation eq =
+                FusedEquation::compile(Expression::outputs({{"z", (x + y).withOutputDType(family.out)}}).physicalOutputs(), 0);
+            eq.run({{"x", xs.storage}, {"y", ys.storage}}, z, stream);
 
             std::vector<std::optional<float>> expected(numel);
             for (uint64_t i = 0; i < numel; ++i) expected[i] = xv[i] + yv[i];
-            expectOutputView(zs, expected, stream, label);
+            expectOutput(z, expected, stream, label);
         }
     }
 }
@@ -243,14 +242,9 @@ TEST(FusedPacketViewAlignment, DenseBroadcastHandlesOffsetViewsAndOddTails) {
                 const uint64_t numel = rows * cols;
                 const uint64_t x_offset = offset_dist(rng);
                 const uint64_t b_offset = offset_dist(rng);
-                const uint64_t z_offset = offset_dist(rng);
                 const std::string label = dtypeName(dtype) + (row_bias ? " row-bias " : " scalar ") + std::to_string(rows) + "x" +
                                           std::to_string(cols) + " offsets=" + std::to_string(x_offset) + "," +
-                                          std::to_string(b_offset) + "," + std::to_string(z_offset);
-
-                const Expression x = Expression::input("x", dtype, dtype);
-                const Expression b = Expression::input("b", dtype, dtype);
-                FusedEquation eq = FusedEquation::compile(Expression::outputs({{"z", (x + b).withOutputDType(dtype)}}).physicalOutputs(), 0);
+                                          std::to_string(b_offset);
 
                 const std::vector<uint64_t> b_dims = row_bias ? std::vector<uint64_t>{1, cols} : std::vector<uint64_t>{1, 1};
                 const uint64_t b_numel = row_bias ? cols : 1;
@@ -258,9 +252,13 @@ TEST(FusedPacketViewAlignment, DenseBroadcastHandlesOffsetViewsAndOddTails) {
                 const std::vector<float> bv = gridValues(b_numel, rng);
                 ViewStorage xs = makeView({rows, cols}, x_offset, xv, dtype, stream);
                 ViewStorage bs = makeView(b_dims, b_offset, bv, dtype, stream);
-                ViewStorage zs = makeView({rows, cols}, z_offset, {}, dtype, stream);
+                Tensor z = makeSentinelOutput({rows, cols}, dtype, stream);
 
-                eq.run({{"x", xs.view}, {"b", bs.view}}, zs.view, stream);
+                const Expression x = spanOf("x", dtype, xs);
+                const Expression b = spanOf("b", dtype, bs);
+                FusedEquation eq =
+                    FusedEquation::compile(Expression::outputs({{"z", (x + b).withOutputDType(dtype)}}).physicalOutputs(), 0);
+                eq.run({{"x", xs.storage}, {"b", bs.storage}}, z, stream);
 
                 std::vector<std::optional<float>> expected(numel);
                 for (uint64_t r = 0; r < rows; ++r) {
@@ -268,7 +266,7 @@ TEST(FusedPacketViewAlignment, DenseBroadcastHandlesOffsetViewsAndOddTails) {
                         expected[r * cols + c] = xv[r * cols + c] + bv[row_bias ? c : 0];
                     }
                 }
-                expectOutputView(zs, expected, stream, label);
+                expectOutput(z, expected, stream, label);
             }
         }
     }
@@ -294,17 +292,9 @@ TEST(FusedPacketViewAlignment, RaggedKernelsHandleOffsetViews) {
             const uint64_t active = active_dist(rng);
             const uint64_t x_offset = offset_dist(rng);
             const uint64_t y_offset = offset_dist(rng);
-            const uint64_t z_offset = offset_dist(rng);
             const std::string label = dtypeName(dtype) + (broadcast ? " ragged row-bias" : " ragged flat") +
                                       " active=" + std::to_string(active) + " offsets=" + std::to_string(x_offset) + "," +
-                                      std::to_string(y_offset) + "," + std::to_string(z_offset);
-
-            const Expression x = Expression::input("x", dtype, dtype);
-            const Expression y = Expression::input("y", dtype, dtype);
-            const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
-            const Expression z = (x + y).withOutputDType(dtype).withRaggedRuntimeExtent(
-                active_count, batch, max_active, width, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
-            FusedEquation eq = FusedEquation::compile(Expression::outputs({{"z", z}}).physicalOutputs(), 0);
+                                      std::to_string(y_offset);
 
             const std::vector<uint64_t> y_dims = broadcast ? std::vector<uint64_t>{1, width} : std::vector<uint64_t>{max_active, width};
             const uint64_t y_numel = broadcast ? width : max_active * width;
@@ -312,16 +302,22 @@ TEST(FusedPacketViewAlignment, RaggedKernelsHandleOffsetViews) {
             const std::vector<float> yv = gridValues(y_numel, rng);
             ViewStorage xs = makeView({max_active, width}, x_offset, xv, dtype, stream);
             ViewStorage ys = makeView(y_dims, y_offset, yv, dtype, stream);
-            ViewStorage zs = makeView({max_active, width}, z_offset, {}, dtype, stream);
+            Tensor out = makeSentinelOutput({max_active, width}, dtype, stream);
             Tensor count = makeGpuUint32(static_cast<uint32_t>(active), stream);
 
-            eq.run({{"x", xs.view}, {"y", ys.view}, {"active_count", count}}, zs.view, stream);
+            const Expression x = spanOf("x", dtype, xs);
+            const Expression y = spanOf("y", dtype, ys);
+            const Expression active_count = Expression::input("active_count", DataType::UINT32, DataType::UINT32);
+            const Expression z = (x + y).withOutputDType(dtype).withRaggedRuntimeExtent(
+                active_count, batch, max_active, width, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+            FusedEquation eq = FusedEquation::compile(Expression::outputs({{"z", z}}).physicalOutputs(), 0);
+            eq.run({{"x", xs.storage}, {"y", ys.storage}, {"active_count", count}}, out, stream);
 
             std::vector<std::optional<float>> expected(max_active * width);
             for (uint64_t i = 0; i < active * width; ++i) {
                 expected[i] = xv[i] + yv[broadcast ? (i % width) : i];
             }
-            expectOutputView(zs, expected, stream, label);
+            expectOutput(out, expected, stream, label);
         }
     }
 }
@@ -344,15 +340,9 @@ TEST(FusedPacketViewAlignment, TransposedMaterializationHandlesOffsetViews) {
             const uint64_t cols = 2 * (dim_dist(rng) / 2);  // even, so pair/pack paths are eligible
             const uint64_t x_offset = offset_dist(rng);
             const uint64_t y_offset = offset_dist(rng);
-            const uint64_t z_offset = offset_dist(rng);
             const std::string label = dtypeName(dtype) + (row_bias ? " transposed row-bias " : " transposed ") + std::to_string(rows) +
                                       "x" + std::to_string(cols) + " offsets=" + std::to_string(x_offset) + "," +
-                                      std::to_string(y_offset) + "," + std::to_string(z_offset);
-
-            const Expression x = Expression::input("x", dtype, dtype);
-            const Expression y = Expression::input("y", dtype, dtype);
-            FusedEquation eq =
-                FusedEquation::compile(Expression::outputs({{"z", (x + y).withOutputDType(dtype).transpose()}}).physicalOutputs(), 0);
+                                      std::to_string(y_offset);
 
             const std::vector<uint64_t> y_dims = row_bias ? std::vector<uint64_t>{1, cols} : std::vector<uint64_t>{rows, cols};
             const uint64_t y_numel = row_bias ? cols : rows * cols;
@@ -360,9 +350,13 @@ TEST(FusedPacketViewAlignment, TransposedMaterializationHandlesOffsetViews) {
             const std::vector<float> yv = gridValues(y_numel, rng);
             ViewStorage xs = makeView({rows, cols}, x_offset, xv, dtype, stream);
             ViewStorage ys = makeView(y_dims, y_offset, yv, dtype, stream);
-            ViewStorage zs = makeView({cols, rows}, z_offset, {}, dtype, stream);
+            Tensor z = makeSentinelOutput({cols, rows}, dtype, stream);
 
-            eq.run({{"x", xs.view}, {"y", ys.view}}, zs.view, stream);
+            const Expression x = spanOf("x", dtype, xs);
+            const Expression y = spanOf("y", dtype, ys);
+            FusedEquation eq =
+                FusedEquation::compile(Expression::outputs({{"z", (x + y).withOutputDType(dtype).transpose()}}).physicalOutputs(), 0);
+            eq.run({{"x", xs.storage}, {"y", ys.storage}}, z, stream);
 
             std::vector<std::optional<float>> expected(rows * cols);
             for (uint64_t r = 0; r < rows; ++r) {
@@ -370,7 +364,7 @@ TEST(FusedPacketViewAlignment, TransposedMaterializationHandlesOffsetViews) {
                     expected[c * rows + r] = xv[r * cols + c] + yv[row_bias ? c : r * cols + c];
                 }
             }
-            expectOutputView(zs, expected, stream, label);
+            expectOutput(z, expected, stream, label);
         }
     }
 }

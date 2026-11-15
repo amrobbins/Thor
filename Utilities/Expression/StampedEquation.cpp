@@ -1,4 +1,5 @@
 #include "Utilities/Expression/StampedEquation.h"
+#include "Utilities/TensorOperations/DeepLearning/CudnnTensorContract.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
 #include "Utilities/Common/GpuMemoryDiagnostics.h"
 #include "Utilities/Common/ReusableEventPool.h"
@@ -277,14 +278,6 @@ static AttentionTensorLogicalDims logicalAttentionDims(const std::vector<uint64_
     }
 }
 
-static std::vector<uint64_t> cudnnSemanticDims(const Tensor& tensor, AttentionTensorLayout layout, const char* tensor_name) {
-    const AttentionTensorLogicalDims logical = logicalAttentionDims(tensor.getDimensions(), layout, tensor_name);
-    return {static_cast<uint64_t>(logical.batch),
-            static_cast<uint64_t>(logical.heads),
-            static_cast<uint64_t>(logical.sequence_length),
-            static_cast<uint64_t>(logical.head_dim)};
-}
-
 static std::vector<uint64_t> cudnnSemanticStrides(const Tensor& tensor, AttentionTensorLayout layout, const char* tensor_name) {
     const std::vector<uint64_t> dims = tensor.getDimensions();
     const std::vector<uint64_t> strides = tensor.getStridesElements();
@@ -387,18 +380,11 @@ static void requireAttentionContractTensor(const Tensor& tensor, const char* sta
     if (!tensor.isInitialized()) {
         throw std::runtime_error(std::string(stage) + " operand " + operand + " is not initialized.");
     }
-    if (!tensor.isDenseContiguous() || !tensor.isAligned(16)) {
+    if (!meetsCudnnTensorContract(tensor)) {
         throw std::runtime_error(std::string(stage) + " operand " + operand +
                                  " must be a dense, 16-byte-aligned tensor. Tensor views (such as q/k/v sliced out of one "
                                  "packed buffer) are not supported as attention operands; use separate Q/K/V tensors.");
     }
-}
-
-static Tensor cudnnSemanticTensorView(const Tensor& tensor, AttentionTensorLayout layout, const char* tensor_name) {
-    if (layout == AttentionTensorLayout::BHSD) {
-        return tensor;
-    }
-    return tensor.aliasView(cudnnSemanticDims(tensor, layout, tensor_name), cudnnSemanticStrides(tensor, layout, tensor_name), 0);
 }
 
 }  // namespace
@@ -442,16 +428,28 @@ void detail::recordExpressionPhysicalExecutionForTests(ExpressionPhysicalExecuti
 }
 #endif
 
-static void putFrontendTensorPointer(std::unordered_map<int64_t, void*>& pack, int64_t uid, const Tensor& tensor);
 static void executeFrontendConvolutionGraph(const BuiltConvolution& built,
                                             const Stream& run_stream,
                                             std::unordered_map<int64_t, void*>& tensor_pack,
                                             const std::optional<Tensor>& workspace,
                                             const char* op_name);
 
+// The outer row count a norm descriptor covers: every row, or the first leading_outer of them.
+static uint64_t normDescriptorOuter(uint64_t tensor_outer, std::optional<uint64_t> leading_outer, const char* stage) {
+    if (!leading_outer.has_value()) {
+        return tensor_outer;
+    }
+    if (leading_outer.value() == 0 || leading_outer.value() > tensor_outer) {
+        throw std::runtime_error(std::string(stage) + " leading row count " + std::to_string(leading_outer.value()) +
+                                 " must be in [1, " + std::to_string(tensor_outer) + "].");
+    }
+    return leading_outer.value();
+}
+
 CudnnRmsNormDescriptor CompiledRmsNorm::descriptorFor(const Tensor& inputTensor,
                                                       const Tensor& scaleTensor,
-                                                      const Tensor& outputTensor) const {
+                                                      const Tensor& outputTensor,
+                                                      std::optional<uint64_t> leading_outer) const {
     const std::vector<uint64_t> inputDims = inputTensor.getDimensions();
     const std::vector<uint64_t> scaleDims = scaleTensor.getDimensions();
     const std::vector<uint64_t> outputDims = outputTensor.getDimensions();
@@ -478,7 +476,7 @@ CudnnRmsNormDescriptor CompiledRmsNorm::descriptorFor(const Tensor& inputTensor,
     }
 
     CudnnRmsNormDescriptor descriptor;
-    descriptor.outerSize = inputDims[0];
+    descriptor.outerSize = normDescriptorOuter(inputDims[0], leading_outer, "Thor RMSNorm expression stage");
     descriptor.normalizedFeatureCount = normalized_feature_count;
     descriptor.inputDataType = input_dtype;
     descriptor.parameterDataType = scale_dtype;
@@ -495,7 +493,8 @@ CudnnRmsNormDescriptor CompiledRmsNorm::descriptorFor(const Tensor& inputTensor,
 CudnnLayerNormDescriptor CompiledLayerNorm::descriptorFor(const Tensor& inputTensor,
                                                            const Tensor& scaleTensor,
                                                            const Tensor& biasTensor,
-                                                           const Tensor& outputTensor) const {
+                                                           const Tensor& outputTensor,
+                                                           std::optional<uint64_t> leading_outer) const {
     const std::vector<uint64_t> input_dims = inputTensor.getDimensions();
     if (input_dims.size() != 2 || outputTensor.getDimensions() != input_dims) {
         throw std::runtime_error(
@@ -512,7 +511,7 @@ CudnnLayerNormDescriptor CompiledLayerNorm::descriptorFor(const Tensor& inputTen
     }
 
     CudnnLayerNormDescriptor descriptor;
-    descriptor.outerSize = input_dims[0];
+    descriptor.outerSize = normDescriptorOuter(input_dims[0], leading_outer, "Thor LayerNorm expression stage");
     descriptor.normalizedFeatureCount = normalized_feature_count;
     descriptor.inputDataType = input_dtype;
     descriptor.outputDataType = output_dtype;
@@ -587,7 +586,8 @@ CudnnRmsNormDescriptor CompiledRmsNormBackward::descriptorFor(const Tensor& inpu
                                                               const Tensor& scaleTensor,
                                                               const Tensor& dyTensor,
                                                               const Tensor& dxTensor,
-                                                              const Tensor& dscaleTensor) const {
+                                                              const Tensor& dscaleTensor,
+                                                              std::optional<uint64_t> leading_outer) const {
     const std::vector<uint64_t> inputDims = inputTensor.getDimensions();
     if (inputDims.size() != 2 || dyTensor.getDimensions() != inputDims || dxTensor.getDimensions() != inputDims) {
         throw std::runtime_error("Thor RMSNorm backward stage requires rank-2 x/dy/dx tensors with identical dimensions.");
@@ -605,7 +605,7 @@ CudnnRmsNormDescriptor CompiledRmsNormBackward::descriptorFor(const Tensor& inpu
     }
 
     CudnnRmsNormDescriptor descriptor;
-    descriptor.outerSize = inputDims[0];
+    descriptor.outerSize = normDescriptorOuter(inputDims[0], leading_outer, "Thor RMSNorm backward stage");
     descriptor.normalizedFeatureCount = normalized_feature_count;
     descriptor.inputDataType = input_dtype;
     descriptor.parameterDataType = scale_dtype;
@@ -1256,13 +1256,8 @@ void StampedAttention::runOn(Stream& run_stream) const {
         raggedBatchSize = qOffsetDims[0] - 1;
     }
     CudnnAttentionDescriptor descriptor = compiled_attention->descriptorFor(q, k, v, output, raggedBatchSize);
-    const bool queryPackedRagged = compiled_attention->use_ragged_offsets && q.getDimensions().size() == 3;
-    const bool kvPackedRagged = compiled_attention->use_ragged_offsets && k.getDimensions().size() == 3;
-    Tensor cudnnQ = queryPackedRagged ? q : cudnnSemanticTensorView(q, compiled_attention->q_layout, "q");
-    Tensor cudnnK = kvPackedRagged ? k : cudnnSemanticTensorView(k, compiled_attention->k_layout, "k");
-    Tensor cudnnV = kvPackedRagged ? v : cudnnSemanticTensorView(v, compiled_attention->v_layout, "v");
-    Tensor cudnnO = queryPackedRagged ? output : cudnnSemanticTensorView(output, compiled_attention->o_layout, "o");
-    CudnnAttentionForwardArgs args{.q = cudnnQ, .k = cudnnK, .v = cudnnV, .o = cudnnO};
+    // The descriptor describes each tensor's layout (BSHD as permuted BHSD strides); the tensors go to cuDNN as they are.
+    CudnnAttentionForwardArgs args{.q = q, .k = k, .v = v, .o = output};
     if (compiled_attention->use_bias) {
         if (!bias.has_value()) {
             throw std::runtime_error("StampedAttention requires an additive bias tensor but none was provided.");
@@ -1440,6 +1435,8 @@ StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
     requireAttentionContractTensor(k, "Attention", "k");
     requireAttentionContractTensor(v, "Attention", "v");
     requireAttentionContractTensor(output, "Attention", "output");
+    if (dropout_seed.has_value()) requireAttentionContractTensor(dropout_seed.value(), "Attention", "dropout seed");
+    if (dropout_offset.has_value()) requireAttentionContractTensor(dropout_offset.value(), "Attention", "dropout offset");
     if (compiled_attention->use_ragged_offsets && q_ragged_offsets.has_value() && kv_ragged_offsets.has_value()) {
         RowPartitionRuntime::registerLogicalWorkRowPartitionPair(
             q_ragged_offsets.value(), kv_ragged_offsets.value());
@@ -1757,26 +1754,16 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
         }
     }
 
-    const bool queryPackedRagged = compiled_attention_backward->use_ragged_offsets && q.getDimensions().size() == 3;
-    const bool kvPackedRagged = compiled_attention_backward->use_ragged_offsets && k.getDimensions().size() == 3;
-    Tensor cudnnQ = queryPackedRagged ? q : cudnnSemanticTensorView(q, compiled_attention_backward->q_layout, "q");
-    Tensor cudnnK = kvPackedRagged ? k : cudnnSemanticTensorView(k, compiled_attention_backward->k_layout, "k");
-    Tensor cudnnV = kvPackedRagged ? v : cudnnSemanticTensorView(v, compiled_attention_backward->v_layout, "v");
-    Tensor cudnnO = queryPackedRagged ? forwardOutput : cudnnSemanticTensorView(forwardOutput, compiled_attention_backward->o_layout, "o");
-    Tensor cudnnDO = queryPackedRagged ? dO : cudnnSemanticTensorView(dO, compiled_attention_backward->o_layout, "dO");
-    Tensor cudnnDQ = queryPackedRagged ? dQ : cudnnSemanticTensorView(dQ, compiled_attention_backward->q_layout, "dQ");
-    Tensor cudnnDK = kvPackedRagged ? dK : cudnnSemanticTensorView(dK, compiled_attention_backward->k_layout, "dK");
-    Tensor cudnnDV = kvPackedRagged ? dV : cudnnSemanticTensorView(dV, compiled_attention_backward->v_layout, "dV");
-
-    CudnnAttentionBackwardArgs bwdArgs{.q = cudnnQ,
-                                       .k = cudnnK,
-                                       .v = cudnnV,
-                                       .o = cudnnO,
-                                       .dO = cudnnDO,
+    // The descriptor describes each tensor's layout (BSHD as permuted BHSD strides); the tensors go to cuDNN as they are.
+    CudnnAttentionBackwardArgs bwdArgs{.q = q,
+                                       .k = k,
+                                       .v = v,
+                                       .o = forwardOutput,
+                                       .dO = dO,
                                        .stats = forwardStats,
-                                       .dQ = cudnnDQ,
-                                       .dK = cudnnDK,
-                                       .dV = cudnnDV};
+                                       .dQ = dQ,
+                                       .dK = dK,
+                                       .dV = dV};
     if (compiled_attention_backward->use_bias) {
         if (!bias.has_value()) {
             throw std::runtime_error("StampedAttentionBackward requires an additive bias tensor but none was provided.");
@@ -1869,6 +1856,8 @@ StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAtten
     requireAttentionContractTensor(this->dQ, "AttentionBackward", "dQ");
     requireAttentionContractTensor(this->dK, "AttentionBackward", "dK");
     requireAttentionContractTensor(this->dV, "AttentionBackward", "dV");
+    if (dropout_seed.has_value()) requireAttentionContractTensor(dropout_seed.value(), "AttentionBackward", "dropout seed");
+    if (dropout_offset.has_value()) requireAttentionContractTensor(dropout_offset.value(), "AttentionBackward", "dropout offset");
     if (compiled_attention_backward->use_ragged_offsets && q_ragged_offsets.has_value() && kv_ragged_offsets.has_value()) {
         RowPartitionRuntime::registerLogicalWorkRowPartitionPair(
             q_ragged_offsets.value(), kv_ragged_offsets.value());
@@ -2128,7 +2117,7 @@ void StampedEquation::runOn(Stream& run_stream) const {
         }
     }
 
-    EquationRunner::run(compiledEquation, inputs, outputs, run_stream);
+    EquationRunner::run(compiledEquation, inputs, outputs, run_stream, numElements);
 }
 
 void StampedEquation::run(const std::unordered_map<std::string, float>& runtime_scalars) { runOn(stream, runtime_scalars); }
@@ -2172,11 +2161,11 @@ void StampedEquation::runOn(Stream& run_stream, const std::unordered_map<std::st
         }
     }
 
-    EquationRunner::run(compiledEquation, overridden_inputs, outputs, run_stream);
+    EquationRunner::run(compiledEquation, overridden_inputs, outputs, run_stream, numElements);
 }
 
 StampedReduction::StampedReduction(std::shared_ptr<BuiltReduction> built,
-                                   const Tensor& input,
+                                   const StridedSpan& input,
                                    const Tensor& output,
                                    const Stream& stream)
     : built_reduction(std::move(built)), output(output), stream(stream) {
@@ -2205,7 +2194,7 @@ void StampedReduction::runOn(Stream& run_stream) const {
 }
 
 StampedArgMinMax::StampedArgMinMax(std::shared_ptr<BuiltReduction> built,
-                                   const Tensor& input,
+                                   const StridedSpan& input,
                                    const Tensor& output,
                                    const Stream& stream)
     : built_reduction(std::move(built)), output(output), stream(stream) {
@@ -2732,6 +2721,12 @@ std::shared_ptr<CompiledConvolutionBackward> makeT9bDenseWgradDescriptor(
                                                           ragged.groups);
 }
 
+// A padded ragged value at width W as a cuDNN convolution operand: the first B*C*W elements of its retained storage,
+// seen as [B, C, 1, W]. No view is made, and the value's runtime-selected W is not changed.
+ConvolutionOperand paddedConvolutionOperand(const PaddedRaggedSequence& value, uint64_t width_capacity) {
+    return ConvolutionOperand(value.paddedValuesForWidth(width_capacity), value.paddedDimensionsForWidth(width_capacity));
+}
+
 std::shared_ptr<CompiledConvolution> makeT7r5DenseConvolutionDescriptor(const CompiledRaggedConv1dCausal& ragged) {
     ConvolutionSpatial2d spatial;
     spatial.stride_h = 1;
@@ -2793,12 +2788,12 @@ void buildT7r5PlanFamily(RaggedConv1dPaddedForwardState& state,
 
     uint64_t max_workspace_bytes = 0;
     for (uint64_t width_capacity : state.width_capacity_family) {
-        // Build every cuDNN plan against a width-specific view of the retained
+        // Build every cuDNN plan against the width-W batch of the retained
         // backing storage. Stamping must not change the runtime-selected W or
         // active population carried by either retained physical value. This is
         // the same non-mutating placement-time contract used by dgrad/wgrad.
-        Tensor padded_input = state.input_padded->paddedTensorForWidth(width_capacity);
-        Tensor padded_output = state.output_padded->paddedTensorForWidth(width_capacity);
+        const ConvolutionOperand padded_input = paddedConvolutionOperand(*state.input_padded, width_capacity);
+        const ConvolutionOperand padded_output = paddedConvolutionOperand(*state.output_padded, width_capacity);
         std::shared_ptr<BuiltConvolution> built =
             StampedEquation::buildConvolution(state.dense_convolution,
                                               padded_input,
@@ -2918,11 +2913,10 @@ void buildT9aDgradPlanFamily(RaggedConv1dPaddedBackwardDataState& state,
 
     uint64_t max_workspace_bytes = 0;
     for (uint64_t width_capacity : state.width_capacity_family) {
-        // Build every cuDNN plan directly against the retained backing storage.
-        // paddedTensorForWidth() creates only a view and does not mutate the
-        // runtime-selected representation plan.
-        Tensor padded_dy = state.grad_output_padded->paddedTensorForWidth(width_capacity);
-        Tensor padded_dx = state.output_padded->paddedTensorForWidth(width_capacity);
+        // Build every cuDNN plan directly against the retained backing storage,
+        // without changing the runtime-selected representation plan.
+        const ConvolutionOperand padded_dy = paddedConvolutionOperand(*state.grad_output_padded, width_capacity);
+        const ConvolutionOperand padded_dx = paddedConvolutionOperand(*state.output_padded, width_capacity);
         std::shared_ptr<BuiltConvolution> built = StampedEquation::buildConvolutionBackward(
             state.dense_dgrad,
             state.filter_2d,
@@ -3030,8 +3024,8 @@ void buildT9bWgradPlanFamily(RaggedConv1dPaddedBackwardFilterState& state,
     for (uint64_t width_capacity : state.width_capacity_family) {
         // Build directly against retained X/dY storage without changing either
         // value's runtime-selected W.
-        Tensor x = state.input_padded->paddedTensorForWidth(width_capacity);
-        Tensor dy = state.grad_output_padded->paddedTensorForWidth(width_capacity);
+        const ConvolutionOperand x = paddedConvolutionOperand(*state.input_padded, width_capacity);
+        const ConvolutionOperand dy = paddedConvolutionOperand(*state.grad_output_padded, width_capacity);
         std::shared_ptr<BuiltConvolution> built = StampedEquation::buildConvolutionBackward(
             state.dense_wgrad, x, dy, output_2d, stream, output.getPlacement().getDeviceNum());
         if (!built) throw std::runtime_error("Ragged Conv1D wgrad placement failed to build a cuDNN backward-filter plan.");
@@ -3211,10 +3205,9 @@ StampedSanitizePaddedRaggedTail::StampedSanitizePaddedRaggedTail(
 
     launch_plan_by_width.reserve(this->width_capacities.size());
     for (uint64_t width_capacity : this->width_capacities) {
-        // paddedTensorForWidth validates that this stamped width fits the one
-        // retained allocation. The alias is discarded immediately; only the
-        // immutable launch plan is retained by the sanitation stage.
-        (void)this->padded_values->paddedTensorForWidth(width_capacity);
+        // Validates that this stamped width fits the one retained allocation;
+        // only the immutable launch plan is retained by the sanitation stage.
+        (void)this->padded_values->paddedDimensionsForWidth(width_capacity);
         PaddedRaggedTailZeroLaunchPlan plan = preparePaddedRaggedTailZeroLaunchPlan(
             structural_plan.batchSize,
             structural_plan.channels,
@@ -3335,6 +3328,16 @@ StampedPaddedRaggedPointwise::StampedPaddedRaggedPointwise(
         this->padded_inputs.size() != this->compiled->numInputs()) {
         throw std::invalid_argument("StampedPaddedRaggedPointwise received inconsistent compiled/input metadata.");
     }
+    // The kernel reads a static tensor input as in[channel] or in[0]: it must be dense.
+    for (size_t i = 0; i < this->static_inputs.size(); ++i) {
+        const RuntimeInputValue& input = this->static_inputs[i];
+        const bool strided = (std::holds_alternative<Tensor>(input) && !std::get<Tensor>(input).isDenseContiguous()) ||
+                             (std::holds_alternative<StridedSpan>(input) && !std::get<StridedSpan>(input).isDenseContiguous());
+        if (!this->padded_inputs[i] && strided) {
+            throw std::invalid_argument("StampedPaddedRaggedPointwise static input " + std::to_string(i) +
+                                        " is a strided view; the padded pointwise kernel reads dense storage.");
+        }
+    }
     const auto first_input_it = std::find_if(
         this->padded_inputs.begin(), this->padded_inputs.end(), [](const auto& value) { return value != nullptr; });
     if (first_input_it == this->padded_inputs.end()) {
@@ -3360,10 +3363,12 @@ StampedPaddedRaggedPointwise::StampedPaddedRaggedPointwise(
                 "StampedPaddedRaggedPointwise placement-time physical element count must fit uint32_t.");
         }
 
+        // The kernel covers the width-W batch, the first B*C*W elements of each padded value's retained storage (it
+        // derives W from that count), so every invocation binds the whole storage and differs only in the count.
         std::vector<RuntimeInputValue> invocation_inputs = this->static_inputs;
         for (size_t i = 0; i < this->padded_inputs.size(); ++i) {
             if (this->padded_inputs[i]) {
-                invocation_inputs[i] = this->padded_inputs[i]->paddedTensorForWidth(width_capacity);
+                invocation_inputs[i] = this->padded_inputs[i]->paddedValuesForWidth(width_capacity).tensor;
             }
         }
         std::vector<Tensor> invocation_outputs;
@@ -3372,10 +3377,14 @@ StampedPaddedRaggedPointwise::StampedPaddedRaggedPointwise(
             if (!output) {
                 throw std::invalid_argument("StampedPaddedRaggedPointwise received a null padded output.");
             }
-            invocation_outputs.push_back(output->paddedTensorForWidth(width_capacity));
+            invocation_outputs.push_back(output->paddedValuesForWidth(width_capacity).tensor);
         }
-        auto invocation = std::make_shared<StampedEquation>(
-            this->compiled, this->input_names, std::move(invocation_inputs), std::move(invocation_outputs), this->stream);
+        auto invocation = std::make_shared<StampedEquation>(this->compiled,
+                                                            this->input_names,
+                                                            std::move(invocation_inputs),
+                                                            std::move(invocation_outputs),
+                                                            this->stream,
+                                                            physical_numel);
         const bool inserted = invocation_by_width.emplace(width_capacity, std::move(invocation)).second;
         if (!inserted) {
             throw std::logic_error("StampedPaddedRaggedPointwise placement-time width family contains a duplicate.");
@@ -3657,8 +3666,8 @@ void StampedRaggedConv1dCausal::runOn(Stream& run_stream) const {
     }
 
     std::shared_ptr<BuiltConvolution> built = t7r5PrebuiltConvolutionForWidth(state, width_capacity);
-    Tensor padded_input = state.input_padded->paddedTensor();
-    Tensor padded_output = state.output_padded->paddedTensor();
+    const ConvolutionOperand padded_input = paddedConvolutionOperand(*state.input_padded, width_capacity);
+    const ConvolutionOperand padded_output = paddedConvolutionOperand(*state.output_padded, width_capacity);
     StampedConvolution padded_convolution(state.dense_convolution,
                                           built,
                                           padded_input,
@@ -3836,8 +3845,8 @@ void StampedRaggedConv1dCausalBackwardData::runOn(Stream& run_stream) const {
     // PRS3 guarantees that this exact retained dY generation has already had
     // its selected inactive tail canonicalized to zero.
     std::shared_ptr<BuiltConvolution> built = t9aPrebuiltDgradForWidth(state, width_capacity);
-    Tensor padded_dy = state.grad_output_padded->paddedTensor();
-    Tensor padded_dx = state.output_padded->paddedTensor();
+    const ConvolutionOperand padded_dy = paddedConvolutionOperand(*state.grad_output_padded, width_capacity);
+    const ConvolutionOperand padded_dx = paddedConvolutionOperand(*state.output_padded, width_capacity);
     StampedConvolutionBackward dgrad(state.dense_dgrad,
                                      built,
                                      state.filter_2d,
@@ -3997,8 +4006,8 @@ void StampedRaggedConv1dCausalBackwardFilter::runOn(Stream& run_stream) const {
     }
     // PRS3 prepares both retained generations explicitly. Both are required:
     // IEEE 0 * NaN is NaN, so zero dY alone cannot make an undefined X tail safe.
-    Tensor x = state.input_padded->paddedTensor();
-    Tensor dy = state.grad_output_padded->paddedTensor();
+    const ConvolutionOperand x = paddedConvolutionOperand(*state.input_padded, width);
+    const ConvolutionOperand dy = paddedConvolutionOperand(*state.grad_output_padded, width);
     Tensor dw = output;
     const auto& c = *compiled_ragged_conv1d_causal_backward_filter;
     dw.reshape({c.output_channels, c.input_channels / c.groups, 1, c.kernel_width});
@@ -4231,6 +4240,11 @@ StampedSoftmax::StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
     }
     THOR_THROW_IF_FALSE(input.getDataType() == compiled_softmax->input_dtype);
     THOR_THROW_IF_FALSE(output.getDataType() == compiled_softmax->output_dtype);
+    // The legacy cuDNN descriptors are built with dense strides (that API has no 16-byte pointer
+    // contract, so only density is required).
+    if (!input.isDenseContiguous() || !output.isDenseContiguous()) {
+        throw std::invalid_argument("cuDNN Softmax input and output must be dense: their descriptors use dense strides.");
+    }
 }
 
 StampedSoftmax::StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
@@ -4395,9 +4409,9 @@ static CudnnFrontendConvolutionOwnershipDiagnostic convolutionOwnershipDiagnosti
 
 StampedConvolution::StampedConvolution(std::shared_ptr<CompiledConvolution> compiled,
                                        std::shared_ptr<BuiltConvolution> built,
-                                       const Tensor& input,
-                                       const Tensor& filter,
-                                       const Tensor& output,
+                                       const ConvolutionOperand& input,
+                                       const ConvolutionOperand& filter,
+                                       const ConvolutionOperand& output,
                                        const Stream& stream,
                                        std::optional<Tensor> workspace)
     : compiled_convolution(std::move(compiled)),
@@ -4406,7 +4420,12 @@ StampedConvolution::StampedConvolution(std::shared_ptr<CompiledConvolution> comp
       filter(filter),
       output(output),
       stream(stream),
-      workspace(std::move(workspace)) {}
+      workspace(std::move(workspace)) {
+    const char* operation = compiled_convolution && compiled_convolution->is_3d ? "CONV3D forward" : "CONV2D forward";
+    requireCudnnContractOperand(input, operation, "input");
+    requireCudnnContractOperand(filter, operation, "filter");
+    requireCudnnContractOperand(output, operation, "output");
+}
 
 CudnnFrontendConvolutionOwnershipDiagnostic StampedConvolution::ownershipDiagnostic() const {
     return convolutionOwnershipDiagnostic(built_convolution, workspace);
@@ -4426,9 +4445,9 @@ void StampedConvolution::runOn(Stream& run_stream) const {
 
     if (built_convolution->use_cudnn_frontend) {
         std::unordered_map<int64_t, void*> tensor_pack;
-        putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_X_UID, input);
-        putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_W_UID, filter);
-        putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_Y_UID, output);
+        tensor_pack[CUDNN_FRONTEND_CONV_X_UID] = input.address();
+        tensor_pack[CUDNN_FRONTEND_CONV_W_UID] = filter.address();
+        tensor_pack[CUDNN_FRONTEND_CONV_Y_UID] = output.address();
         executeFrontendConvolutionGraph(
             *built_convolution, run_stream, tensor_pack, workspace, compiled_convolution->is_3d ? "CONV3D forward" : "CONV2D forward");
         return;
@@ -4439,9 +4458,9 @@ void StampedConvolution::runOn(Stream& run_stream) const {
 
 StampedConvolutionBackward::StampedConvolutionBackward(std::shared_ptr<CompiledConvolutionBackward> compiled,
                                                        std::shared_ptr<BuiltConvolution> built,
-                                                       const Tensor& input,
-                                                       const Tensor& grad_output,
-                                                       const Tensor& output,
+                                                       const ConvolutionOperand& input,
+                                                       const ConvolutionOperand& grad_output,
+                                                       const ConvolutionOperand& output,
                                                        const Stream& stream,
                                                        std::optional<Tensor> workspace)
     : compiled_convolution_backward(std::move(compiled)),
@@ -4450,7 +4469,11 @@ StampedConvolutionBackward::StampedConvolutionBackward(std::shared_ptr<CompiledC
       grad_output(grad_output),
       output(output),
       stream(stream),
-      workspace(std::move(workspace)) {}
+      workspace(std::move(workspace)) {
+    requireCudnnContractOperand(input, "Convolution backward", "input");
+    requireCudnnContractOperand(grad_output, "Convolution backward", "grad_output");
+    requireCudnnContractOperand(output, "Convolution backward", "output");
+}
 
 CudnnFrontendConvolutionOwnershipDiagnostic StampedConvolutionBackward::ownershipDiagnostic() const {
     return convolutionOwnershipDiagnostic(built_convolution, workspace);
@@ -4475,9 +4498,9 @@ void StampedConvolutionBackward::runOn(Stream& run_stream) const {
         std::unordered_map<int64_t, void*> tensor_pack;
         if (compiled_convolution_backward->op == ExprOp::CONV2D_BACKWARD_DATA ||
             compiled_convolution_backward->op == ExprOp::CONV3D_BACKWARD_DATA) {
-            putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_W_UID, input);
-            putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_Y_UID, grad_output);
-            putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_X_UID, output);
+            tensor_pack[CUDNN_FRONTEND_CONV_W_UID] = input.address();
+            tensor_pack[CUDNN_FRONTEND_CONV_Y_UID] = grad_output.address();
+            tensor_pack[CUDNN_FRONTEND_CONV_X_UID] = output.address();
             executeFrontendConvolutionGraph(
                 *built_convolution,
                 run_stream,
@@ -4488,9 +4511,9 @@ void StampedConvolutionBackward::runOn(Stream& run_stream) const {
         }
         if (compiled_convolution_backward->op == ExprOp::CONV2D_BACKWARD_FILTER ||
             compiled_convolution_backward->op == ExprOp::CONV3D_BACKWARD_FILTER) {
-            putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_X_UID, input);
-            putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_Y_UID, grad_output);
-            putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_W_UID, output);
+            tensor_pack[CUDNN_FRONTEND_CONV_X_UID] = input.address();
+            tensor_pack[CUDNN_FRONTEND_CONV_Y_UID] = grad_output.address();
+            tensor_pack[CUDNN_FRONTEND_CONV_W_UID] = output.address();
             executeFrontendConvolutionGraph(
                 *built_convolution,
                 run_stream,
@@ -4545,11 +4568,19 @@ static void sanitizePackedRmsNormOverreadRows(Tensor tensor,
     const uint64_t hidden = dims[1];
     const uint64_t active_outer = active_rows * outer_per_packed_row;
     const uint64_t selected_outer = selected_rows * outer_per_packed_row;
-    Tensor overread = tensor.aliasView({selected_outer - active_outer, hidden},
-                                       {hidden, 1},
-                                       active_outer * hidden);
-    overread.memsetAsync(stream, 0);
+    tensor.memsetElementsAsync(stream, 0, active_outer * hidden, (selected_outer - active_outer) * hidden);
 }
+
+StampedDenseCopy::StampedDenseCopy(const StridedSpan& source, const Tensor& destination, const Stream& stream)
+    : source(source), destination(destination), stream(stream) {
+    if (!destination.isInitialized() || !destination.isDenseContiguous() || destination.getDescriptor() != source.getDescriptor() ||
+        destination.getPlacement() != source.getPlacement()) {
+        throw std::invalid_argument("StampedDenseCopy requires a dense destination of the source span's dtype, shape and placement.");
+    }
+    plan = planCopyToDense(source, destination);
+}
+
+void StampedDenseCopy::runOn(Stream& run_stream) const { launchCopyToDense(plan, source, destination, run_stream); }
 
 StampedSanitizePackedTail::StampedSanitizePackedTail(const Tensor& tensor,
                                                      const Tensor& row_partition_offsets,
@@ -4592,8 +4623,8 @@ void StampedSanitizePackedTail::runOn(Stream& run_stream) const {
 
     const uint64_t active_elements = active_rows * elements_per_packed_row;
     const uint64_t sanitize_elements = (selected_rows - active_rows) * elements_per_packed_row;
-    Tensor tail = tensor.aliasView({sanitize_elements}, {1}, active_elements);
-    tail.memsetAsync(run_stream, 0);
+    Tensor target = tensor;
+    target.memsetElementsAsync(run_stream, 0, active_elements, sanitize_elements);
 }
 
 std::vector<uintptr_t> StampedLayerNorm::executablePlanIds() const {
@@ -4683,9 +4714,7 @@ void StampedLayerNorm::prepareForwardExecutableFamily(bool training) {
         }
         for (const uint64_t capacity_rows : packed_capacity_buckets) {
             const uint64_t bucket_outer = capacity_rows * packed_outer_per_row;
-            Tensor bucket_input = input.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
-            Tensor bucket_output = output.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
-            prepare_descriptor(compiled_layer_norm->descriptorFor(bucket_input, scale, bias, bucket_output));
+            prepare_descriptor(compiled_layer_norm->descriptorFor(input, scale, bias, output, bucket_outer));
         }
     }
 
@@ -4890,25 +4919,23 @@ void StampedLayerNorm::runOn(Stream& run_stream) const {
 
     const uint64_t selected_rows = chooseRaggedMatmulCapacityBucket(active_rows, packed_capacity_buckets);
     const uint64_t selected_outer = selected_rows * packed_outer_per_row;
-    const uint64_t hidden = compiled_layer_norm->normalized_feature_count;
 
     // LayerNorm is row-local: inactive rows in the selected physical bucket do
     // not contribute to any active row. Deliberately do not sanitize the tail.
-    Tensor bucket_input = input.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
-    Tensor bucket_output = output.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
+    // The bucket's plan covers the leading selected_outer rows of the full-capacity tensors.
     CudnnLayerNormForwardArgs args;
-    args.x = bucket_input;
+    args.x = input;
     args.scale = scale;
     args.bias = bias;
-    args.y = bucket_output;
+    args.y = output;
     const CudnnLayerNormExecutablePlan& plan = forwardExecutableForOuter(selected_outer);
     if (plan.descriptor().training) {
         if (!forward_state || !forward_state->retain_for_backward || !forward_state->mean.isInitialized() ||
             !forward_state->inv_variance.isInitialized()) {
             throw std::runtime_error("Packed LayerNorm training forward was not prepared at placement time.");
         }
-        args.mean = forward_state->mean.aliasView({selected_outer}, {1}, 0);
-        args.invVariance = forward_state->inv_variance.aliasView({selected_outer}, {1}, 0);
+        args.mean = forward_state->mean;
+        args.invVariance = forward_state->inv_variance;
         forward_state->has_valid_state = false;
     }
     CudnnLayerNorm::instance().forward(plan, args, workspace, run_stream);
@@ -5106,9 +5133,7 @@ void StampedRmsNorm::prepareForwardExecutableFamily(bool training) {
 
         for (const uint64_t capacity_rows : makeRaggedRmsNormCapacityBuckets(compiled_rms_norm->packed_row_capacity)) {
             const uint64_t bucket_outer = capacity_rows * outer_per_packed_row;
-            Tensor bucket_input = input.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
-            Tensor bucket_output = output.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
-            prepare_descriptor(compiled_rms_norm->descriptorFor(bucket_input, scale, bucket_output));
+            prepare_descriptor(compiled_rms_norm->descriptorFor(input, scale, output, bucket_outer));
         }
     }
 
@@ -5249,7 +5274,6 @@ void StampedRmsNorm::runOn(Stream& run_stream) const {
     const uint64_t active_rows = row_partition.requireHostActiveValueCount();
 
     const std::vector<uint64_t> input_dims = input.getDimensions();
-    const uint64_t hidden = input_dims[1];
     const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm->packed_row_capacity;
     const std::vector<uint64_t> buckets = makeRaggedRmsNormCapacityBuckets(compiled_rms_norm->packed_row_capacity);
     const uint64_t selected_rows =
@@ -5269,19 +5293,18 @@ void StampedRmsNorm::runOn(Stream& run_stream) const {
                                           run_stream);
     }
 
-    Tensor bucket_input = input.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
-    Tensor bucket_output = output.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
+    // The bucket's plan covers the leading selected_outer rows of the full-capacity tensors.
     const CudnnRmsNormExecutablePlan& plan = forwardExecutableForOuter(selected_outer);
     CudnnRmsNormForwardArgs args;
-    args.x = bucket_input;
+    args.x = input;
     args.scale = scale;
-    args.y = bucket_output;
+    args.y = output;
     if (plan.descriptor().training) {
         if (forward_state == nullptr || !forward_state->retain_for_backward ||
             !forward_state->inv_variance.isInitialized()) {
             throw std::runtime_error("Packed stamped RMSNorm training forward state was not prepared before execution.");
         }
-        args.invVariance = forward_state->inv_variance.aliasView({selected_outer}, {1}, 0);
+        args.invVariance = forward_state->inv_variance;
         forward_state->has_valid_state = false;
     }
     CudnnRmsNorm::instance().forward(plan, args, workspace, run_stream);
@@ -5442,10 +5465,7 @@ void StampedRmsNormBackward::prepareBackwardExecutableFamilies() {
         }
         for (const uint64_t capacity_rows : makeRaggedRmsNormCapacityBuckets(compiled_rms_norm_backward->packed_row_capacity)) {
             const uint64_t bucket_outer = capacity_rows * outer_per_packed_row;
-            Tensor bucket_input = input.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
-            Tensor bucket_dy = dY.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
-            Tensor bucket_dx = dX.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
-            prepare_descriptor(compiled_rms_norm_backward->descriptorFor(bucket_input, scale, bucket_dy, bucket_dx, dScale));
+            prepare_descriptor(compiled_rms_norm_backward->descriptorFor(input, scale, dY, dX, dScale, bucket_outer));
         }
     }
 
@@ -5613,7 +5633,6 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
         row_partition_offsets.value(), compiled_rms_norm_backward->ragged_batch_size, compiled_rms_norm_backward->packed_row_capacity);
     const uint64_t active_rows = row_partition.requireHostActiveValueCount();
     const std::vector<uint64_t> input_dims = input.getDimensions();
-    const uint64_t hidden = input_dims[1];
     const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm_backward->packed_row_capacity;
     const std::vector<uint64_t> buckets = makeRaggedRmsNormCapacityBuckets(compiled_rms_norm_backward->packed_row_capacity);
     const uint64_t selected_rows =
@@ -5633,23 +5652,20 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
                                           run_stream);
     }
 
-    Tensor bucket_input = input.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
-    Tensor bucket_dy = dY.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
-    Tensor bucket_dx = dX.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
-
     if (!state->has_valid_state || !state->inv_variance.isInitialized() ||
         state->packed_active_rows != active_rows || state->packed_selected_rows != selected_rows) {
         throw std::runtime_error(
             "Packed-row RMSNorm backward requires retained cuDNN state from the matching real forward at the current logical/bucket extent.");
     }
 
+    // The bucket's plan covers the leading selected_outer rows of the full-capacity tensors.
     const CudnnRmsNormExecutablePlan& backward_plan = backwardExecutableForOuter(selected_outer);
     CudnnRmsNormBackwardArgs args;
-    args.dy = bucket_dy;
-    args.x = bucket_input;
+    args.dy = dY;
+    args.x = input;
     args.scale = scale;
-    args.invVariance = state->inv_variance.aliasView({selected_outer}, {1}, 0);
-    args.dx = bucket_dx;
+    args.invVariance = state->inv_variance;
+    args.dx = dX;
     args.dscale = dScale;
     CudnnRmsNorm::instance().backward(backward_plan, args, backward_workspace, run_stream);
 }
@@ -5686,8 +5702,8 @@ void StampedEmbeddingLookup::runOn(Stream& run_stream) const {
 
 StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
                              std::unique_ptr<BuiltMatmul> built,
-                             const Tensor& lhs,
-                             const Tensor& rhs,
+                             const StridedSpan& lhs,
+                             const StridedSpan& rhs,
                              const std::optional<Tensor>& addend,
                              const Tensor& output,
                              const Stream& stream,
@@ -5703,13 +5719,18 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
                              std::optional<Tensor> epilogue_aux,
                              std::optional<Tensor> bgrad_output,
                              std::optional<Tensor> row_partition_offsets,
-                             bool packed_tails_prepared_externally)
+                             bool packed_tails_prepared_externally,
+                             const std::optional<MatmulOperands>& group)
     : compiled_matmul(std::move(compiled)),
       built_matmul(std::move(built)),
-      lhs(lhs),
-      rhs(rhs),
+      lhs(lhs.getSourceTensor()),
+      rhs(rhs.getSourceTensor()),
       addend(addend),
       output(output),
+      lhs_operand(group.has_value() ? group->lhs.getStorage() : lhs.getStorage()),
+      rhs_operand(group.has_value() ? group->rhs.getStorage() : rhs.getStorage()),
+      output_operand(group.has_value() ? group->output.getStorage() : TensorSpan(output)),
+      c_operand(addend.has_value() && addend.value().getDimensions().size() != 1 ? TensorSpan(addend.value()) : output_operand),
       epilogue_aux(epilogue_aux),
       bgrad_output(bgrad_output),
       row_partition_offsets(std::move(row_partition_offsets)),
@@ -5757,6 +5778,38 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
             throw std::runtime_error("StampedMatmul requires workspace for the chosen optimal kernel.");
         }
         THOR_THROW_IF_FALSE(workspace.value().getArraySizeInBytes() >= built_matmul->workspace_bytes);
+    }
+
+    // The operands' own rank, not their source tensors': a strided operand may view a source of any rank (a [3]
+    // vector read as a [1, 3] matrix).
+    if (compiled_matmul->op == ExprOp::MATMUL &&
+        (lhs.getDimensions().size() < 2 || rhs.getDimensions().size() < 2 || output.getDimensions().size() < 2)) {
+        throw std::runtime_error("Stamped MATMUL requires rank >= 2 tensors.");
+    }
+
+    // A strided operand (or a group) is addressed only through lhs_operand / rhs_operand, which only the plain
+    // cuBLASLt launch uses; this->lhs / this->rhs are then its source tensors.
+    auto isWholeTensor = [](const StridedSpan& operand) {
+        return operand.isWholeTensor();
+    };
+    if ((group.has_value() || !isWholeTensor(lhs) || !isWholeTensor(rhs)) &&
+        (!built_matmul->cublas_kernel.has_value() || built_matmul->bucketed_cublas_gemm.has_value() ||
+         built_matmul->epilogue_plan || addend.has_value())) {
+        throw std::runtime_error(
+            "A grouped MATMUL group or a strided matmul operand needs a plain cuBLASLt MATMUL (no addend, epilogue or "
+            "packed rows).");
+    }
+
+    // Launches skip every check, so verify once here that the operands are as aligned as the chosen
+    // algorithm needs. C is the matrix addend, or the output when there is none (or it is a bias).
+    if (built_matmul->cublas_kernel.has_value()) {
+        built_matmul->cublas_kernel->requireOperandAlignment(lhs_operand, rhs_operand, c_operand, output_operand);
+    }
+    if (built_matmul->bucketed_cublas_gemm.has_value()) {
+        built_matmul->bucketed_cublas_gemm->requireOperandAlignment(this->lhs, this->rhs, output, output);
+    }
+    if (built_matmul->epilogue_plan) {
+        built_matmul->epilogue_plan->requireOperandAlignment(this->lhs, this->rhs, c_operand.tensor, output);
     }
 }
 
@@ -6253,10 +6306,7 @@ static void sanitizePackedMatmulOverreadRows(Tensor tensor,
     }
 
     const uint64_t row_width = dims[1];
-    Tensor overread = tensor.aliasView({selected_rows - active_rows, row_width},
-                                       {row_width, 1},
-                                       active_rows * row_width);
-    overread.memsetAsync(stream, 0);
+    tensor.memsetElementsAsync(stream, 0, active_rows * row_width, (selected_rows - active_rows) * row_width);
 }
 
 void StampedMatmul::run() { runOn(stream); }
@@ -6265,9 +6315,6 @@ void StampedMatmul::runOn(Stream& run_stream) const { runOn(run_stream, {}); }
 
 void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const {
     if (compiled_matmul->op == ExprOp::MATMUL) {
-        if (lhs.getDimensions().size() < 2 || rhs.getDimensions().size() < 2 || output.getDimensions().size() < 2) {
-            throw std::runtime_error("Stamped MATMUL requires rank >= 2 tensors.");
-        }
         if (compiled_matmul->backward_epilogue != MatmulBackwardEpilogue::Default) {
             if (compiled_matmul->epilogue != MatmulEpilogue::Default) {
                 throw std::runtime_error("Stamped MATMUL cannot combine forward and backward cuBLASLt epilogues in one stage.");
@@ -6338,10 +6385,10 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
             }
             const float alphaOne = 1.0f;
             const float betaZero = 0.0f;
-            CHECK_CUBLAS(built_matmul->cublas_kernel->launchUncheckedPrevalidated(lhs,
-                                                                        rhs,
-                                                                        output,
-                                                                        output,
+            CHECK_CUBLAS(built_matmul->cublas_kernel->launchUncheckedPrevalidated(lhs_operand,
+                                                                        rhs_operand,
+                                                                        output_operand,
+                                                                        output_operand,
                                                                         workspace,
                                                                         &alphaOne,
                                                                         &betaZero,
@@ -6463,10 +6510,10 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
     if (!built_matmul->cublas_kernel.has_value()) {
         throw std::runtime_error("Stamped GEMM runtime missing compile-time cuBLAS kernel artifact.");
     }
-    CHECK_CUBLAS(built_matmul->cublas_kernel->launchUncheckedPrevalidated(lhs,
-                                                                rhs,
-                                                                addend.value(),
-                                                                output,
+    CHECK_CUBLAS(built_matmul->cublas_kernel->launchUncheckedPrevalidated(lhs_operand,
+                                                                rhs_operand,
+                                                                c_operand,
+                                                                output_operand,
                                                                 workspace,
                                                                 resolved_scales.alpha.ptr,
                                                                 resolved_scales.beta.ptr,
@@ -6601,10 +6648,10 @@ void StampedMatmul::runOnConditionalGraphCapture(Stream& run_stream) const {
     if (!built_matmul->cublas_kernel.has_value()) {
         throw std::runtime_error("Stamped GEMM runtime missing compile-time cuBLAS kernel artifact.");
     }
-    CHECK_CUBLAS(built_matmul->cublas_kernel->launchUncheckedPrevalidated(lhs,
-                                                                          rhs,
-                                                                          addend.value(),
-                                                                          output,
+    CHECK_CUBLAS(built_matmul->cublas_kernel->launchUncheckedPrevalidated(lhs_operand,
+                                                                          rhs_operand,
+                                                                          c_operand,
+                                                                          output_operand,
                                                                           workspace,
                                                                           resolved_scales.alpha.ptr,
                                                                           resolved_scales.beta.ptr,
@@ -6694,7 +6741,7 @@ void StampedScanMinMaxBackward::runOn(Stream& run_stream) {
 }
 
 StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltReduction> built,
-                                                         const Tensor& input,
+                                                         const StridedSpan& input,
                                                          const Tensor& grad_output,
                                                          const Tensor& output,
                                                          const Tensor& indices,
@@ -6831,8 +6878,9 @@ std::optional<uint64_t> StampedReduceMinMaxBackward::runtimeLogicalByteCount(uin
         if (active_elements == 0) {
             return 0;
         }
+        // The segmented variant's input is a whole dense tensor.
         uint64_t bytes = logicalTensorBytesForActiveElements(
-            active_elements, input, "StampedReduceMinMaxBackward::runtimeLogicalByteCount input");
+            active_elements, input.getSourceTensor(), "StampedReduceMinMaxBackward::runtimeLogicalByteCount input");
         // The upstream gradient is per valid segment, while input/output are per
         // active packed value. Offsets and internally retained winner indices
         // are structural/implementation metadata and are not logical bytes.
@@ -7737,10 +7785,8 @@ std::unordered_set<std::string> StampedExecutionPlan::runtimeScalarNames() const
 }
 
 void StampedExecutionPlan::materializeOutputsOn(Stream& run_stream) const {
-    for (const StampedOutputMaterialization& materialization : output_materializations) {
-        Tensor destination = materialization.destination;
-        materializeTensorViewAsync(materialization.source, destination, run_stream);
-    }
+    for (const StampedOutputMaterialization& materialization : output_materializations)
+        launchCopyToDense(materialization.plan, materialization.source, materialization.destination, run_stream);
 }
 
 detail::StampedExecutionSchedule detail::buildStampedExecutionSchedule(const std::vector<StampedExecutionStage>& steps,
@@ -8372,7 +8418,8 @@ constexpr size_t kConvolutionSelectionCacheCapacity = 1024;
 
 struct FrontendConvolutionAutotuneBinding {
     int64_t uid;
-    Tensor reference_tensor;
+    // The operand the plan is built for: trial buffers and the cache key use its dims, the real-memory run its storage.
+    ConvolutionOperand reference;
     bool rotate_for_timing = true;
 };
 
@@ -8455,8 +8502,8 @@ static std::string frontendConvolutionSelectionCacheKey(
         return lhs->uid < rhs->uid;
     });
     for (const FrontendConvolutionAutotuneBinding* binding : ordered_bindings) {
-        out << "uid=" << binding->uid << ":dtype=" << static_cast<int>(binding->reference_tensor.getDataType()) << ":dims=";
-        const std::vector<uint64_t>& dims = binding->reference_tensor.getDimensions();
+        out << "uid=" << binding->uid << ":dtype=" << static_cast<int>(binding->reference.getDataType()) << ":dims=";
+        const std::vector<uint64_t>& dims = binding->reference.dims;
         for (size_t i = 0; i < dims.size(); ++i) {
             if (i != 0) {
                 out << ',';
@@ -8509,7 +8556,7 @@ static FrontendConvolutionValidationBuffers createFrontendConvolutionValidationB
     Stream fill_stream = stream;
     for (const FrontendConvolutionAutotuneBinding& binding : bindings) {
         const size_t tensor_index = buffers.tensors.size();
-        buffers.tensors.emplace_back(binding.reference_tensor.getPlacement(), binding.reference_tensor.getDescriptor());
+        buffers.tensors.emplace_back(binding.reference.getPlacement(), binding.reference.descriptor());
         Tensor& tensor = buffers.tensors.back();
         buffers.tensor_index_by_uid.emplace(binding.uid, tensor_index);
         buffers.tensor_pack.emplace(binding.uid, const_cast<void*>(static_cast<const void*>(tensor.getMemPtr<void>())));
@@ -8623,7 +8670,7 @@ static int chooseFrontendConvolutionAutotuneRotationSlots(const std::vector<Fron
                                                           uint64_t workspace_bytes) {
     uint64_t rotating_slot_bytes = workspace_bytes;
     for (const FrontendConvolutionAutotuneBinding& binding : bindings) {
-        const uint64_t tensor_bytes = binding.reference_tensor.getArraySizeInBytes();
+        const uint64_t tensor_bytes = binding.reference.bytes();
         if (binding.rotate_for_timing) {
             rotating_slot_bytes = safeAddAutotuneBytes(rotating_slot_bytes, tensor_bytes);
         }
@@ -8668,12 +8715,12 @@ static FrontendConvolutionAutotuneTensorPool createFrontendConvolutionAutotuneTe
             std::vector<Tensor>& rotating_tensors = pool.rotating_tensors_by_binding[binding_index];
             rotating_tensors.reserve(rotation_slots);
             for (int slot = 0; slot < rotation_slots; ++slot) {
-                rotating_tensors.emplace_back(binding.reference_tensor.getPlacement(), binding.reference_tensor.getDescriptor());
+                rotating_tensors.emplace_back(binding.reference.getPlacement(), binding.reference.descriptor());
                 pool.tensor_packs[slot][binding.uid] =
                     const_cast<void*>(static_cast<const void*>(rotating_tensors.back().getMemPtr<void>()));
             }
         } else {
-            void* ptr = const_cast<void*>(static_cast<const void*>(binding.reference_tensor.getMemPtr<void>()));
+            void* ptr = binding.reference.address();
             for (std::unordered_map<int64_t, void*>& tensor_pack : pool.tensor_packs) {
                 tensor_pack[binding.uid] = ptr;
             }
@@ -9188,10 +9235,6 @@ static void prepareFrontendConvolutionExecutable(
     built.correctness_validated = true;
 }
 
-static void putFrontendTensorPointer(std::unordered_map<int64_t, void*>& pack, int64_t uid, const Tensor& tensor) {
-    pack[uid] = const_cast<void*>(static_cast<const void*>(tensor.getMemPtr<void>()));
-}
-
 static void executeFrontendConvolutionGraph(const BuiltConvolution& built,
                                             const Stream& run_stream,
                                             std::unordered_map<int64_t, void*>& tensor_pack,
@@ -9325,13 +9368,14 @@ static BucketedCublasGemmRowBinding toBucketedRowBinding(MatmulPackedRowBinding 
 }
 
 std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<CompiledMatmul>& compiled_matmul,
-                                                          const Tensor& lhs,
-                                                          const Tensor& rhs,
+                                                          const StridedSpan& lhs,
+                                                          const StridedSpan& rhs,
                                                           const std::optional<Tensor>& addend,
                                                           const Tensor& output,
                                                           int device_num,
                                                           const std::optional<Tensor>& epilogue_aux,
-                                                          const std::optional<Tensor>& bgrad_output) {
+                                                          const std::optional<Tensor>& bgrad_output,
+                                                          const std::optional<MatmulOperands>& group) {
     if (!compiled_matmul) {
         throw std::runtime_error("buildMatmul requires non-null compiled payload.");
     }
@@ -9342,6 +9386,9 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     const bool bucketed_packed_rows = compiled_matmul->packed_row_binding != MatmulPackedRowBinding::None;
     if (bucketed_packed_rows && (!plain_matmul || compiled_matmul->packed_row_capacity == 0)) {
         throw std::runtime_error("Packed-row bucketed expression matmul currently requires a plain MATMUL with non-zero capacity.");
+    }
+    if (group.has_value() && (!plain_matmul || bucketed_packed_rows || addend.has_value())) {
+        throw std::runtime_error("buildMatmul received a grouped MATMUL group for a stage that is not a plain, unpacked MATMUL.");
     }
     if (plain_matmul) {
         if (lhs.getDimensions().size() < 2 || rhs.getDimensions().size() < 2 || output.getDimensions().size() < 2) {
@@ -9393,8 +9440,15 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     CublasStridedBatchConfig batch_config = CublasStridedBatchConfig::single();
 
     if (plain_matmul) {
+        // One group of a grouped MATMUL is planned over its own [batch, rows, cols] layouts.
         const BatchedMatmulLayoutPlan layout_plan =
-            planBatchedMatmulLayout(lhs, rhs, output, compiled_matmul->transpose_lhs, compiled_matmul->transpose_rhs);
+            group.has_value()
+                ? planBatchedMatmulLayout(group->lhs,
+                                          group->rhs,
+                                          group->output,
+                                          compiled_matmul->transpose_lhs,
+                                          compiled_matmul->transpose_rhs)
+                : planBatchedMatmulLayout(lhs, rhs, output, compiled_matmul->transpose_lhs, compiled_matmul->transpose_rhs);
         if (!layout_plan.canLowerWithoutMaterialization()) {
             throw std::runtime_error(
                 "Expression MATMUL layout cannot be consumed directly by cuBLASLt without materialization/postprocessing. "
@@ -9403,7 +9457,7 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
         if (!layout_plan.grouping.isSingleStridedBatch()) {
             throw std::runtime_error(
                 "Expression MATMUL buildMatmul received a layout that requires multiple regular strided-batched groups. "
-                "The Expression lowering layer must decompose it into single-group views before building cuBLASLt kernels.");
+                "The Expression lowering layer must decompose it into single-group operands before building cuBLASLt kernels.");
         }
 
         a_rows = checkedMatmulInt32(layout_plan.lhs_matrix.stored_rows, "lhs rows");
@@ -9427,14 +9481,18 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                 checkedMatmulInt64(layout_plan.grouping.output_batch_stride_elements, "output D batch stride"));
         }
     } else {
-        const std::vector<uint64_t> lhs_dims = lhs.getDimensions();
-        const std::vector<uint64_t> rhs_dims = rhs.getDimensions();
+        // GEMM and epilogue stages read dense row-major operands (the stage guard keeps strided values away).
+        if (!lhs.isDenseContiguous() || !rhs.isDenseContiguous()) {
+            throw std::runtime_error("GEMM and fused MATMUL epilogues require dense lhs and rhs operands.");
+        }
+        const std::vector<uint64_t>& lhs_dims = lhs.getDimensions();
+        const std::vector<uint64_t>& rhs_dims = rhs.getDimensions();
         a_rows = checkedMatmulInt32(lhs_dims[0], "lhs rows");
         a_cols = checkedMatmulInt32(lhs_dims[1], "lhs columns");
         b_rows = checkedMatmulInt32(rhs_dims[0], "rhs rows");
         b_cols = checkedMatmulInt32(rhs_dims[1], "rhs columns");
-        ld_a = leadingDimensionForStoredMatrix(lhs);
-        ld_b = leadingDimensionForStoredMatrix(rhs);
+        ld_a = checkedMatmulInt32(lhs_dims[1], "lhs leading dimension");
+        ld_b = checkedMatmulInt32(rhs_dims[1], "rhs leading dimension");
         ld_d = leadingDimensionForStoredMatrix(output);
         ld_c = addend.has_value() ? (use_bias_epilogue ? ld_d : leadingDimensionForStoredMatrix(addend.value())) : ld_d;
     }
@@ -9455,8 +9513,8 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     }
 
     const CublasMatrixMultiply::MatmulDataTypes dataTypes{
-        lhs.getDescriptor().getDataType(),
-        rhs.getDescriptor().getDataType(),
+        lhs.getDataType(),
+        rhs.getDataType(),
         addend.has_value() ? (use_bias_epilogue ? output.getDescriptor().getDataType() : addend.value().getDescriptor().getDataType())
                            : output.getDescriptor().getDataType(),
         output.getDescriptor().getDataType(),
@@ -9530,6 +9588,14 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                        dataTypes.compute,
                        device_num);
 
+    // cuBLASLt picks algorithms assuming 256-byte-aligned operand pointers unless told otherwise; a
+    // grouped-matmul group or a slice can start anywhere. C is the matrix addend or the output.
+    const TensorSpan lhs_operand = group.has_value() ? group->lhs.getStorage() : lhs.getStorage();
+    const TensorSpan rhs_operand = group.has_value() ? group->rhs.getStorage() : rhs.getStorage();
+    const TensorSpan output_operand = group.has_value() ? group->output.getStorage() : TensorSpan(output);
+    const TensorSpan c_operand = addend.has_value() && !use_bias_epilogue ? TensorSpan(addend.value()) : output_operand;
+    const CublasOperandAlignment alignment = CublasKernel::operandAlignmentOf(lhs_operand, rhs_operand, c_operand, output_operand);
+
     auto built = std::make_unique<BuiltMatmul>(key);
     bool kernelWillRunOnGpu = false;
     const bool print_verbose_matmul_diagnostics = thorMatmulDiagnosticsVerbose();
@@ -9543,7 +9609,8 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                  shape,
                                                                  toBucketedRowBinding(compiled_matmul->packed_row_binding),
                                                                  dataTypes,
-                                                                 print_verbose_matmul_diagnostics);
+                                                                 print_verbose_matmul_diagnostics,
+                                                                 alignment);
         built->workspace_bytes = built->bucketed_cublas_gemm->getWorkspaceSizeInBytes();
         kernelWillRunOnGpu = true;
         diagnostic_path = "packed-row-bucketed-matmul";
@@ -9569,7 +9636,8 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                                     backend_transpose_c,
                                                                                     dataTypes,
                                                                                     batch_config,
-                                                                                    print_verbose_matmul_diagnostics);
+                                                                                    print_verbose_matmul_diagnostics,
+                                                                                    alignment);
             diagnostic_path = "optimal-strided-batched-matmul-picker";
         } else {
             CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(device_num,
@@ -9583,7 +9651,8 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                                backend_transpose_a,
                                                                                backend_transpose_b,
                                                                                dataTypes,
-                                                                               print_verbose_matmul_diagnostics);
+                                                                               print_verbose_matmul_diagnostics,
+                                                                               alignment);
             diagnostic_path = "optimal-matmul-picker";
         }
         built->cublas_kernel = CublasMatrixMultiply::instance().materializeSelectedGemmKernel(device_num,
@@ -9600,7 +9669,8 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                                     backend_transpose_c,
                                                                                     dataTypes,
                                                                                     true,
-                                                                                    batch_config);
+                                                                                    batch_config,
+                                                                                    alignment);
         built->workspace_bytes = built->cublas_kernel->getWorkspaceSizeInBytes(device_num);
         kernelWillRunOnGpu = true;
     } else if (use_cublaslt_epilogue_wrapper) {
@@ -9625,7 +9695,10 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                 toCublasBackwardEpilogueFusion(compiled_matmul->backward_epilogue),
                 addend.has_value(),
                 epilogue_aux.value(),
-                bgrad_output);
+                bgrad_output,
+                std::nullopt,
+                std::nullopt,
+                alignment);
             kernelWillRunOnGpu = static_cast<bool>(built->epilogue_plan);
             if (kernelWillRunOnGpu) {
                 built->epilogue_algorithm = built->epilogue_plan->algorithm;
@@ -9650,7 +9723,8 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                            use_bias_epilogue,
                                                                            std::nullopt,
                                                                            std::nullopt,
-                                                                           compiled_matmul->forward_epilogue_aux ? epilogue_aux : std::nullopt);
+                                                                           compiled_matmul->forward_epilogue_aux ? epilogue_aux : std::nullopt,
+                                                                           alignment);
             kernelWillRunOnGpu = static_cast<bool>(built->epilogue_plan);
             if (kernelWillRunOnGpu) {
                 built->epilogue_algorithm = built->epilogue_plan->algorithm;
@@ -9671,7 +9745,8 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                  compiled_matmul->transpose_rhs,
                                                                  compiled_matmul->transpose_aux,
                                                                  dataTypes,
-                                                                 print_verbose_matmul_diagnostics);
+                                                                 print_verbose_matmul_diagnostics,
+                                                                 alignment);
         diagnostic_path = "optimal-gemm-picker";
         built->cublas_kernel = CublasMatrixMultiply::instance().materializeSelectedGemmKernel(device_num,
                                                                                     a_rows,
@@ -9686,7 +9761,9 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                                     compiled_matmul->transpose_rhs,
                                                                                     compiled_matmul->transpose_aux,
                                                                                     dataTypes,
-                                                                                    true);
+                                                                                    true,
+                                                                                    CublasStridedBatchConfig::single(),
+                                                                                    alignment);
         built->workspace_bytes = built->cublas_kernel->getWorkspaceSizeInBytes(device_num);
         kernelWillRunOnGpu = true;
     }
@@ -9744,9 +9821,9 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
 }
 
 std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::shared_ptr<CompiledConvolution>& compiled_convolution,
-                                                                    const Tensor& input,
-                                                                    const Tensor& filter,
-                                                                    const Tensor& output,
+                                                                    const ConvolutionOperand& input,
+                                                                    const ConvolutionOperand& filter,
+                                                                    const ConvolutionOperand& output,
                                                                     const Stream& stream,
                                                                     int device_num) {
     (void)device_num;
@@ -9755,14 +9832,14 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
     }
     const bool is_3d = compiled_convolution->is_3d;
     const size_t expected_rank = is_3d ? 5 : 4;
-    if (input.getDimensions().size() != expected_rank || filter.getDimensions().size() != expected_rank ||
-        output.getDimensions().size() != expected_rank) {
+    if (input.dims.size() != expected_rank || filter.dims.size() != expected_rank ||
+        output.dims.size() != expected_rank) {
         throw std::runtime_error(is_3d ? "buildConvolution expected rank-5 tensors for CONV3D."
                                        : "buildConvolution expected rank-4 tensors for CONV2D.");
     }
     const uint64_t groups = compiled_convolution->groups;
-    if (groups == 0 || input.getDimensions()[1] != filter.getDimensions()[1] * groups ||
-        output.getDimensions()[1] != filter.getDimensions()[0] || output.getDimensions()[1] % groups != 0) {
+    if (groups == 0 || input.dims[1] != filter.dims[1] * groups ||
+        output.dims[1] != filter.dims[0] || output.dims[1] % groups != 0) {
         throw std::runtime_error("buildConvolution received invalid grouped convolution channel geometry.");
     }
 
@@ -9791,12 +9868,12 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
         auto x = createFrontendConvolutionTensor(graph,
                                                  std::string(prefix) + "_x",
                                                  CUDNN_FRONTEND_CONV_X_UID,
-                                                 input.getDimensions(),
+                                                 input.dims,
                                                  compiled_convolution->input_dtype);
         auto w = createFrontendConvolutionTensor(graph,
                                                  std::string(prefix) + "_w",
                                                  CUDNN_FRONTEND_CONV_W_UID,
-                                                 filter.getDimensions(),
+                                                 filter.dims,
                                                  compiled_convolution->filter_dtype);
 
         auto conv_attrs = fe::graph::Conv_fprop_attributes()
@@ -9810,7 +9887,7 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
 
         auto y = graph->conv_fprop(x, w, conv_attrs);
         setFrontendConvolutionOutputTensor(
-            y, std::string(prefix) + "_y", CUDNN_FRONTEND_CONV_Y_UID, output.getDimensions(), compiled_convolution->output_dtype);
+            y, std::string(prefix) + "_y", CUDNN_FRONTEND_CONV_Y_UID, output.dims, compiled_convolution->output_dtype);
         return graph;
     };
 
@@ -9863,9 +9940,9 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
 
 std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
     const std::shared_ptr<CompiledConvolutionBackward>& compiled_convolution_backward,
-    const Tensor& input,
-    const Tensor& grad_output,
-    const Tensor& output,
+    const ConvolutionOperand& input,
+    const ConvolutionOperand& grad_output,
+    const ConvolutionOperand& output,
     const Stream& stream,
     int device_num) {
     (void)device_num;
@@ -9884,22 +9961,22 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
     const bool is_3d = compiled_convolution_backward->op == ExprOp::CONV3D_BACKWARD_DATA ||
                        compiled_convolution_backward->op == ExprOp::CONV3D_BACKWARD_FILTER;
     const size_t expected_rank = is_3d ? 5 : 4;
-    if (input.getDimensions().size() != expected_rank || grad_output.getDimensions().size() != expected_rank ||
-        output.getDimensions().size() != expected_rank) {
+    if (input.dims.size() != expected_rank || grad_output.dims.size() != expected_rank ||
+        output.dims.size() != expected_rank) {
         throw std::runtime_error(is_3d ? "buildConvolutionBackward expected rank-5 tensors for CONV3D backward."
                                        : "buildConvolutionBackward expected rank-4 tensors for CONV2D backward.");
     }
     const uint64_t groups = compiled_convolution_backward->groups;
-    if (groups == 0 || grad_output.getDimensions()[1] % groups != 0) {
+    if (groups == 0 || grad_output.dims[1] % groups != 0) {
         throw std::runtime_error("buildConvolutionBackward received invalid grouped convolution channel geometry.");
     }
     if (is_backward_data) {
-        if (output.getDimensions()[1] != input.getDimensions()[1] * groups ||
-            grad_output.getDimensions()[1] != input.getDimensions()[0]) {
+        if (output.dims[1] != input.dims[1] * groups ||
+            grad_output.dims[1] != input.dims[0]) {
             throw std::runtime_error("buildConvolutionBackward received invalid grouped dgrad channel geometry.");
         }
-    } else if (input.getDimensions()[1] != output.getDimensions()[1] * groups ||
-               grad_output.getDimensions()[1] != output.getDimensions()[0]) {
+    } else if (input.dims[1] != output.dims[1] * groups ||
+               grad_output.dims[1] != output.dims[0]) {
         throw std::runtime_error("buildConvolutionBackward received invalid grouped wgrad channel geometry.");
     }
 
@@ -9930,12 +10007,12 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
             auto w = createFrontendConvolutionTensor(graph,
                                                      std::string(prefix) + "_bwd_data_w",
                                                      CUDNN_FRONTEND_CONV_W_UID,
-                                                     input.getDimensions(),
+                                                     input.dims,
                                                      compiled_convolution_backward->input_dtype);
             auto dy = createFrontendConvolutionTensor(graph,
                                                       std::string(prefix) + "_bwd_data_dy",
                                                       CUDNN_FRONTEND_CONV_Y_UID,
-                                                      grad_output.getDimensions(),
+                                                      grad_output.dims,
                                                       compiled_convolution_backward->grad_output_dtype);
             auto conv_attrs = fe::graph::Conv_dgrad_attributes()
                                   .set_name(std::string("thor_expr_") + prefix + "_dgrad")
@@ -9950,7 +10027,7 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
             setFrontendConvolutionOutputTensor(dx,
                                                std::string(prefix) + "_bwd_data_dx",
                                                CUDNN_FRONTEND_CONV_X_UID,
-                                               output.getDimensions(),
+                                               output.dims,
                                                compiled_convolution_backward->output_dtype);
             return graph;
         };
@@ -10016,12 +10093,12 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
         auto x = createFrontendConvolutionTensor(graph,
                                                  std::string(prefix) + "_bwd_filter_x",
                                                  CUDNN_FRONTEND_CONV_X_UID,
-                                                 input.getDimensions(),
+                                                 input.dims,
                                                  compiled_convolution_backward->input_dtype);
         auto dy = createFrontendConvolutionTensor(graph,
                                                   std::string(prefix) + "_bwd_filter_dy",
                                                   CUDNN_FRONTEND_CONV_Y_UID,
-                                                  grad_output.getDimensions(),
+                                                  grad_output.dims,
                                                   compiled_convolution_backward->grad_output_dtype);
         auto conv_attrs = fe::graph::Conv_wgrad_attributes()
                               .set_name(std::string("thor_expr_") + prefix + "_wgrad")
@@ -10036,7 +10113,7 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
         setFrontendConvolutionOutputTensor(dw,
                                            std::string(prefix) + "_bwd_filter_dw",
                                            CUDNN_FRONTEND_CONV_W_UID,
-                                           output.getDimensions(),
+                                           output.dims,
                                            compiled_convolution_backward->output_dtype);
         return graph;
     };
@@ -10094,7 +10171,7 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
 }
 
 std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(const std::shared_ptr<CompiledReduction>& compiled_reduction,
-                                                                const Tensor& input,
+                                                                const StridedSpan& input,
                                                                 int device_num) {
     return buildReduction(compiled_reduction->op,
                           compiled_reduction->reduction_axes,
@@ -10114,7 +10191,7 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(ExprOp op,
                                                                 DataType output_dtype,
                                                                 DataType compute_dtype,
                                                                 ReductionResultKind result_kind,
-                                                                const Tensor& input,
+                                                                const StridedSpan& input,
                                                                 int device_num) {
     if (result_kind == ReductionResultKind::Value && !isSupportedFusionFloatingType(output_dtype)) {
         throw std::runtime_error("Thor reduction stage requested unsupported floating-point output dtype.");
@@ -10153,8 +10230,9 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(ExprOp op,
                 throw std::runtime_error("Value-reduction planning received a non-value reduction op.");
             }
             built->value_op = toCubReductionOp(built->key.op);
-            built->geometry = CubReduction::analyzeValueGeometry(
-                built->value_op.value(), input_dims, input.getStridesElements(), axes);
+            // 1392: a pitched view the reducer reads in place is accepted (CubReduction::pitchedCompleteLaunch).
+            built->geometry =
+                CubReduction::analyzeValueSpanGeometry(built->value_op.value(), input, axes, built->key.output_dtype);
             break;
         case ReductionResultKind::Indices:
             built->arg_op = toCubArgReductionOp(built->key.op);

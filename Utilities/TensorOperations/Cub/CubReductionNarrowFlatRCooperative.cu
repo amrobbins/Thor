@@ -684,8 +684,14 @@ __global__ void fp8OneWindowRuntimeKCompleteKernel(const InputT* input,
     const uint32_t warp = threadIdx.x / TILED_REDUCTION_WARP_THREADS;
     const uint32_t lane = threadIdx.x % TILED_REDUCTION_WARP_THREADS;
     const uint32_t outer_input_stride = reduction_size * k * static_cast<uint32_t>(sizeof(InputT));  // bytes
-    const uint32_t total_input_bytes = outer_size * outer_input_stride;
-    const uint8_t* const input_bytes = reinterpret_cast<const uint8_t*>(input);
+    // 1381: byte offsets count from the packet boundary at or below the base (base_shift bytes before it; 0 for an
+    // aligned base), so a group's prefix and packet addresses follow the input's address and the kernel reads any
+    // element address. The first packet starts inside the base's own 16-byte granule; the last is still assembled
+    // bytewise at the input's end. The launcher's plan leaves the window room for the prefix (aligned_base false).
+    const uint32_t base_shift =
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(input) & static_cast<uintptr_t>(PacketBytes - 1));
+    const uint32_t total_input_bytes = base_shift + outer_size * outer_input_stride;
+    const uint8_t* const input_bytes = reinterpret_cast<const uint8_t*>(input) - base_shift;
 
     // O2/O4/O8: each lane subgroup owns one output (warp-local). O1: the subgroup is the whole warp.
     const uint32_t output_slot = lane / LanesPerOutput;
@@ -714,7 +720,7 @@ __global__ void fp8OneWindowRuntimeKCompleteKernel(const InputT* input,
                 local[slot] = combine.identity();
             }
             const uint32_t outer_byte_begin =
-                valid_output ? static_cast<uint32_t>(outer_index) * outer_input_stride : 0;
+                valid_output ? base_shift + static_cast<uint32_t>(outer_index) * outer_input_stride : 0;
             streamOneWindowRuntimeKOutput<InputT, FixedOp, MaxComponentsPerLane, LanesPerOutput, PacketBytes,
                                           LoadAhead>(
                 local, staged_packet_words[warp], input_bytes, total_input_bytes, valid_output, outer_byte_begin, 0U,
@@ -777,7 +783,7 @@ __global__ void fp8OneWindowRuntimeKCompleteKernel(const InputT* input,
                 local[slot] = combine.identity();
             }
             const uint32_t outer_byte_begin =
-                valid_output ? static_cast<uint32_t>(outer_index) * outer_input_stride : 0;
+                valid_output ? base_shift + static_cast<uint32_t>(outer_index) * outer_input_stride : 0;
             streamOneWindowRuntimeKOutput<InputT, FixedOp, MaxComponentsPerLane, LanesPerOutput, PacketBytes,
                                           LoadAhead>(
                 local, staged_packet_words[warp], input_bytes, total_input_bytes, valid_output, outer_byte_begin,
@@ -891,6 +897,9 @@ __global__ void fp8OneWindowRuntimeKCompleteKernel(const InputT* input,
 // 1244: and FP16 / BF16 input (plans/Thor_FP16_BF16_Dense_Reduction_Plan, phase 5): 8 components per packet, a
 // 256-component staged window and a tile cap of 248 (31 packets), eight slots per lane. Each component is read as its
 // half-word of the staged word and widened to FP32 (widenF16Bits); MIN/MAX combine the widened values, as FP32.
+// 1392 (plans/Thor_Tiled_View_Replacement_Plan_2026-11-12.md, phase 7 C): rows are read at `row_stride` and slabs at
+// `outer_stride` elements (K and R x K for a dense input; a pitched view's row and slab pitches), since each row is
+// loaded from its own address. The output stays dense [outer, K].
 template <typename InputT, int FixedInputTransform = 0, int FixedOp = 0>
 __global__ __launch_bounds__(SHALLOW_FP8_THREADS, 4) void fp8GeneralRParallelKTileP16CompleteKernel(const InputT* input,
                                                           void* output,
@@ -898,6 +907,8 @@ __global__ __launch_bounds__(SHALLOW_FP8_THREADS, 4) void fp8GeneralRParallelKTi
                                                           uint32_t outer_size,
                                                           uint32_t reduction_size,
                                                           uint32_t inner_size,
+                                                          uint64_t row_stride,
+                                                          uint64_t outer_stride,
                                                           uint32_t tile_components,
                                                           uint32_t tile_count,
                                                           uint32_t warps_per_output,
@@ -934,7 +945,12 @@ __global__ __launch_bounds__(SHALLOW_FP8_THREADS, 4) void fp8GeneralRParallelKTi
     const uint32_t first_warp_in_output = output_group * warps_per_output;
     const uint64_t work_count = static_cast<uint64_t>(outer_size) * tile_count;
     const uint64_t block_work_stride = static_cast<uint64_t>(gridDim.x) * outputs_per_block;
-    const uint64_t outer_input_stride = static_cast<uint64_t>(reduction_size) * inner_size;
+    // 1379: the base's place in its 16-byte packet, in components (0 for an aligned base). Prefixes and packet
+    // addresses follow the input's address, not its element index, so the kernel reads any element address: a row's
+    // first packet starts at most 15 bytes before the base, inside the base's own 16-byte granule.
+    const uint32_t base_shift = static_cast<uint32_t>(
+        (reinterpret_cast<uintptr_t>(input) & uintptr_t{PacketBytes - 1}) / sizeof(InputT));
+    const uint8_t* const aligned_input = reinterpret_cast<const uint8_t*>(input) - base_shift * sizeof(InputT);
 
     for (uint64_t block_work_begin = static_cast<uint64_t>(blockIdx.x) * outputs_per_block;
          block_work_begin < work_count;
@@ -1070,13 +1086,13 @@ __global__ __launch_bounds__(SHALLOW_FP8_THREADS, 4) void fp8GeneralRParallelKTi
         // component masks prevent out-of-range values from entering the reduction.
         const auto load_row = [&](uint32_t row_index, uint32_t& prefix_bytes, uint32_t& packet_count,
                                   RawVectorPacket<PacketBytes>& packet) {
-            const uint64_t logical_begin = static_cast<uint64_t>(outer_index) * outer_input_stride +
-                                           static_cast<uint64_t>(row_index) * inner_size + tile_begin;
+            const uint64_t logical_begin = base_shift + static_cast<uint64_t>(outer_index) * outer_stride +
+                                           static_cast<uint64_t>(row_index) * row_stride + tile_begin;
             prefix_bytes = static_cast<uint32_t>(logical_begin & PacketMask);
             packet_count = (prefix_bytes + tile_width + PacketMask) >> PacketShift;
             if (lane < packet_count) {
                 packet = *reinterpret_cast<const RawVectorPacket<PacketBytes>*>(
-                    reinterpret_cast<const uint8_t*>(input) + (logical_begin - prefix_bytes) * sizeof(InputT) +
+                    aligned_input + (logical_begin - prefix_bytes) * sizeof(InputT) +
                     static_cast<uint64_t>(lane) * PacketBytes);
             }
         };
@@ -1151,9 +1167,32 @@ __global__ __launch_bounds__(SHALLOW_FP8_THREADS, 4) void fp8GeneralRParallelKTi
 
 
 
+// 1392 (phase 7 C): the row and slab strides a PacketComplete launch reads, in elements: a pitched view's, given as the
+// 3-D span [outer, R, K] with strides [slab pitch, row pitch, 1] (CubReduction's pitched stamp), else the dense
+// input's K and R x K (every other caller passes its dense [outer, R, K] in whatever dimensions).
+struct PacketCompleteRowStrides {
+    uint64_t row = 0;
+    uint64_t outer = 0;
+};
+
+[[nodiscard]] PacketCompleteRowStrides packetCompleteRowStrides(const StridedSpan& input,
+                                                                const CubReductionGeometry& geometry) {
+    const std::vector<uint64_t>& dims = input.getDimensions();
+    const std::vector<uint64_t>& strides = input.getStridesElements();
+    if (dims.size() == 3 && dims[0] == geometry.outer_size && dims[1] == geometry.reduction_size &&
+        dims[2] == geometry.inner_size && (strides[2] == 1 || dims[2] == 1) &&
+        (strides[1] >= dims[2] || dims[1] == 1)) {
+        return {strides[1], strides[0]};
+    }
+    if (!input.isDenseContiguous() && !input.isCompactPermutation()) {
+        throw std::logic_error("RuntimeK PacketComplete reads a dense input or a pitched [outer, R, K] span.");
+    }
+    return {geometry.inner_size, geometry.reduction_size * geometry.inner_size};
+}
+
 template <typename InputT, int FixedInputTransform = 0, int FixedOp = 0>
-void launchFp8GeneralRParallelKTileP16Complete(const Tensor& input,
-                                               Tensor& output,
+void launchFp8GeneralRParallelKTileP16Complete(const StridedSpan& input,
+                                               const StridedSpan& output,
                                                const CubReductionGeometry& geometry,
                                                uint32_t warps_per_output,
                                                uint32_t tile_components,
@@ -1168,8 +1207,9 @@ void launchFp8GeneralRParallelKTileP16Complete(const Tensor& input,
         (warps_per_output != 1 && warps_per_output != 2 && warps_per_output != 4 && warps_per_output != 8)) {
         throw std::logic_error("RuntimeK PacketComplete received illegal tile/W geometry.");
     }
-    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<InputT>()) & uintptr_t{15}) != 0) {
-        throw std::logic_error("RuntimeK PacketComplete requires p16-aligned input base.");
+    // 1379: any element address (the kernel takes its prefixes from the base address).
+    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<InputT>()) & uintptr_t{sizeof(InputT) - 1}) != 0) {
+        throw std::logic_error("RuntimeK PacketComplete requires an element-aligned input base.");
     }
     const uint32_t tile_count = static_cast<uint32_t>(
         ceilDivideU64(geometry.inner_size, static_cast<uint64_t>(tile_components)));
@@ -1178,6 +1218,7 @@ void launchFp8GeneralRParallelKTileP16Complete(const Tensor& input,
     const uint64_t block_count = std::min<uint64_t>(
         ceilDivideU64(work_count, static_cast<uint64_t>(outputs_per_block)),
         NARROW_FLAT_MAX_GRID_BLOCKS);
+    const PacketCompleteRowStrides row_strides = packetCompleteRowStrides(input, geometry);
     fp8GeneralRParallelKTileP16CompleteKernel<InputT, FixedInputTransform, FixedOp>
         <<<static_cast<unsigned int>(block_count), SHALLOW_FP8_THREADS, 0, stream>>>(
             input.getMemPtr<InputT>(),
@@ -1186,6 +1227,8 @@ void launchFp8GeneralRParallelKTileP16Complete(const Tensor& input,
             static_cast<uint32_t>(geometry.outer_size),
             static_cast<uint32_t>(geometry.reduction_size),
             static_cast<uint32_t>(geometry.inner_size),
+            row_strides.row,
+            row_strides.outer,
             tile_components,
             tile_count,
             warps_per_output,
@@ -1236,6 +1279,13 @@ __global__ __launch_bounds__(SHALLOW_FP8_THREADS, 4) void fp32PacketCompleteArgK
     const uint64_t work_count = static_cast<uint64_t>(outer_size) * tile_count;
     const uint64_t block_work_stride = static_cast<uint64_t>(gridDim.x) * outputs_per_block;
     const uint64_t outer_input_stride = static_cast<uint64_t>(reduction_size) * inner_size;
+    // 1384: as the VALUE kernel since 1379, the base's place in its 16-byte packet, in components (0 for an aligned
+    // base): prefixes and packet addresses follow the address, so the kernel reads any element address. A row's first
+    // packet starts at most 15 bytes before the base, inside the base's own 16-byte granule; the tile cap (124 / 248)
+    // already leaves room for a 3 / 7 component prefix. Keys carry rows, so the indices do not change.
+    const uint32_t base_shift = static_cast<uint32_t>(
+        (reinterpret_cast<uintptr_t>(input) & uintptr_t{PacketBytes - 1}) / sizeof(InputT));
+    const uint8_t* const aligned_input = reinterpret_cast<const uint8_t*>(input) - base_shift * sizeof(InputT);
 
     for (uint64_t block_work_begin = static_cast<uint64_t>(blockIdx.x) * outputs_per_block;
          block_work_begin < work_count;
@@ -1260,13 +1310,13 @@ __global__ __launch_bounds__(SHALLOW_FP8_THREADS, 4) void fp32PacketCompleteArgK
         }
         const auto load_row = [&](uint32_t row_index, uint32_t& prefix, uint32_t& packet_count,
                                   RawVectorPacket<PacketBytes>& packet) {
-            const uint64_t logical_begin = static_cast<uint64_t>(outer_index) * outer_input_stride +
+            const uint64_t logical_begin = base_shift + static_cast<uint64_t>(outer_index) * outer_input_stride +
                                            static_cast<uint64_t>(row_index) * inner_size + tile_begin;
             prefix = static_cast<uint32_t>(logical_begin & PacketMask);
             packet_count = (prefix + tile_width + PacketMask) >> PacketShift;
             if (lane < packet_count) {
                 packet = *reinterpret_cast<const RawVectorPacket<PacketBytes>*>(
-                    reinterpret_cast<const uint8_t*>(input) + (logical_begin - prefix) * sizeof(InputT) +
+                    aligned_input + (logical_begin - prefix) * sizeof(InputT) +
                     static_cast<uint64_t>(lane) * PacketBytes);
             }
         };
@@ -1809,7 +1859,7 @@ template <int PacketBytes, uint32_t ElementBytes = 1>
 template <typename InputT, typename ReductionOpT, typename InputTransformT, int PacketBytes, int LanesPerComponent,
           typename DecoderT = NarrowFp8TypedFormatDecoder<InputT>>
 void launchNarrowFp8PackedTinyKForTransform(
-    const Tensor& input, Tensor& fp32_partials, const CubReductionGeometry& geometry, uint64_t rows_per_shard,
+    const StridedSpan& input, const StridedSpan& fp32_partials, const CubReductionGeometry& geometry, uint64_t rows_per_shard,
     uint64_t shards_per_output, cudaStream_t stream,
     InputTransformT input_transform = InputTransformT{}, DecoderT decoder = DecoderT{}) {
     static_assert(sizeof(InputT) == 1 || DEEP_R_PER_ELEMENT_INPUT<InputT>);  // 1186: FP32; 1240: FP16 / BF16
@@ -1839,7 +1889,7 @@ void launchNarrowFp8PackedTinyKForTransform(
                                                          PacketBytes,
                                                          LanesPerComponent,
                                                          DecoderT>
-        <<<grid_blocks, NARROW_FLAT_THREADS, 0, stream>>>(([](const Tensor& src) -> const InputT* {
+        <<<grid_blocks, NARROW_FLAT_THREADS, 0, stream>>>(([](const StridedSpan& src) -> const InputT* {
             if constexpr (std::is_same_v<InputT, uint8_t>) return reinterpret_cast<const InputT*>(src.getMemPtr<void>());
             else return src.getMemPtr<InputT>();
         })(input),
@@ -1857,7 +1907,7 @@ void launchNarrowFp8PackedTinyKForTransform(
 template <typename InputT, typename ReductionOpT, typename InputTransformT, int PacketBytes, int MaxComponentsPerLane,
           int FixedRowsPerShardLog2 = -1, typename DecoderT = NarrowFp8TypedFormatDecoder<InputT>>
 void launchNarrowFp8PackedForTransform(
-    const Tensor& input, Tensor& fp32_partials, const CubReductionGeometry& geometry, uint64_t rows_per_shard,
+    const StridedSpan& input, const StridedSpan& fp32_partials, const CubReductionGeometry& geometry, uint64_t rows_per_shard,
     uint64_t shards_per_output, cudaStream_t stream,
     InputTransformT input_transform = InputTransformT{}, DecoderT decoder = DecoderT{}) {
     static_assert(sizeof(InputT) == 1 || DEEP_R_PER_ELEMENT_INPUT<InputT>);  // 1186: FP32; 1240: FP16 / BF16
@@ -1888,7 +1938,7 @@ void launchNarrowFp8PackedForTransform(
 
     narrowFp8PackedFlatRCooperativeFirstStageKernel<InputT, ReductionOpT, InputTransformT, PacketBytes, MaxComponentsPerLane,
                                                     FixedRowsPerShardLog2, DecoderT>
-        <<<grid_blocks, NARROW_FLAT_THREADS, 0, stream>>>(([](const Tensor& src) -> const InputT* {
+        <<<grid_blocks, NARROW_FLAT_THREADS, 0, stream>>>(([](const StridedSpan& src) -> const InputT* {
             if constexpr (std::is_same_v<InputT, uint8_t>) return reinterpret_cast<const InputT*>(src.getMemPtr<void>());
             else return src.getMemPtr<InputT>();
         })(input),
@@ -1967,7 +2017,7 @@ void dispatchDeepRRetainedFixedDepth(uint32_t depth, Callback&& callback) {
 }
 
 template <typename InputT, typename TransformT, typename ReductionOpT = cuda::std::plus<float>>
-void dispatchDeepRRetainedRows(const Tensor& input, Tensor& partials,
+void dispatchDeepRRetainedRows(const StridedSpan& input, const StridedSpan& partials,
                                   const CubReductionGeometry& geometry, uint64_t rows,
                                   uint64_t shards, cudaStream_t stream, TransformT transform) {
     const uint32_t depth = deepRRetainedRowDepth(rows);
@@ -2022,7 +2072,7 @@ CubKernelOccupancyInfo queryDeepRRetainedRows(uint64_t rows, uint64_t k) {
 static_assert(narrowPackedMaxLogicalGroupElements<16, 4> == 125, "fp32DeepRSmallKSupports restates K <= 125");
 
 template <typename TransformT, typename ReductionOpT>
-void dispatchFp32DeepRRetainedRows(const Tensor& input, Tensor& partials, const CubReductionGeometry& geometry,
+void dispatchFp32DeepRRetainedRows(const StridedSpan& input, const StridedSpan& partials, const CubReductionGeometry& geometry,
                                    uint64_t rows, uint64_t shards, cudaStream_t stream) {
     const uint32_t depth = deepRRetainedRowDepth(rows);
     const TransformT transform{};
@@ -2070,7 +2120,7 @@ inline constexpr uint64_t F16_DEEP_R_MAX_K = narrowPackedMaxLogicalGroupElements
 static_assert(F16_DEEP_R_MAX_K == 249, "f16DeepRSmallKSupports restates K <= 249");
 
 template <typename InputT, typename TransformT, typename ReductionOpT>
-void dispatchF16DeepRRetainedRows(const Tensor& input, Tensor& partials, const CubReductionGeometry& geometry,
+void dispatchF16DeepRRetainedRows(const StridedSpan& input, const StridedSpan& partials, const CubReductionGeometry& geometry,
                                   uint64_t rows, uint64_t shards, cudaStream_t stream) {
     static_assert(narrowFlatInputType<InputT>);
     const uint32_t depth = deepRRetainedRowDepth(rows);
@@ -2126,7 +2176,7 @@ CubKernelOccupancyInfo queryF16DeepRRetainedRows(uint64_t rows, uint64_t k) {
 // These wrappers deliberately share the benchmark-proven device kernels with
 // the earlier SUM calibration; no new geometry or runtime operation switch.
 template <typename InputT, typename ReductionOpT, typename TransformT>
-void launchDeepRRetainedTyped(const Tensor& input, Tensor& partials,
+void launchDeepRRetainedTyped(const StridedSpan& input, const StridedSpan& partials,
                               const CubReductionGeometry& geometry, uint64_t rows,
                               uint64_t shards, cudaStream_t stream) {
     dispatchDeepRRetainedRows<InputT, TransformT, ReductionOpT>(
@@ -2190,10 +2240,14 @@ struct OneWindowRuntimeKPlan {
 // 1185: element_bytes 4 for FP32. The window and the worst-case prefix are counted in elements (a packet holds
 // packet_bytes / element_bytes of them), so FP32 rows fit K <= 125 / 61 / 29 / 13 at O1 / O2 / O4 / O8 (P16). 1240:
 // element_bytes 2 for FP16 / BF16: K <= 249 / 121 / 57 / 25 (and the 8-element multiples 256 / 128 / 64 / 32).
+// 1381: aligned_base false is an input base off a packet boundary (the VALUE kernel reads it: its windows follow the
+// address). Every row group then carries a prefix, even at K a multiple of the packet, so the capacity is always the
+// window less the worst prefix (Fp8RK::oneWindowUnalignedCapacity).
 [[nodiscard]] inline std::optional<OneWindowRuntimeKPlan> oneWindowRuntimeKPlan(uint64_t k,
                                                                                 uint32_t outputs_per_warp,
                                                                                 uint32_t packet_bytes,
-                                                                                uint32_t element_bytes = 1) {
+                                                                                uint32_t element_bytes = 1,
+                                                                                bool aligned_base = true) {
     if (k == 0 || (outputs_per_warp != 1 && outputs_per_warp != 2 && outputs_per_warp != 4 && outputs_per_warp != 8) ||
         (packet_bytes != 4 && packet_bytes != 8 && packet_bytes != 16) ||
         (element_bytes != 1 && element_bytes != 2 && element_bytes != 4)) {
@@ -2202,7 +2256,8 @@ struct OneWindowRuntimeKPlan {
     const uint32_t lanes = TILED_REDUCTION_WARP_THREADS / outputs_per_warp;
     const uint32_t packet_elements = packet_bytes / element_bytes;
     const uint64_t window = static_cast<uint64_t>(lanes) * packet_elements;
-    const uint64_t capacity = k % packet_elements == 0 ? window : window - (packet_elements - 1);
+    const uint64_t capacity =
+        aligned_base && k % packet_elements == 0 ? window : window - (packet_elements - 1);
     if (k > capacity) {
         return std::nullopt;
     }
@@ -2278,8 +2333,10 @@ template <typename Callback>
 // The plan for `unit` at K, when the unit is compiled and K falls in its bucket.
 [[nodiscard]] std::optional<OneWindowRuntimeKPlan> oneWindowRuntimeKUnitPlan(uint64_t k,
                                                                              const Fp8OneWindowRuntimeKUnit& unit,
-                                                                             uint32_t element_bytes = 1) {
-    const auto plan = oneWindowRuntimeKPlan(k, unit.outputs_per_warp, unit.packet_bytes, element_bytes);
+                                                                             uint32_t element_bytes = 1,
+                                                                             bool aligned_base = true) {
+    const auto plan =
+        oneWindowRuntimeKPlan(k, unit.outputs_per_warp, unit.packet_bytes, element_bytes, aligned_base);
     if (!plan || plan->max_components_per_lane != unit.max_components_per_lane ||
         !oneWindowRuntimeKUnitCompiled(unit)) {
         return std::nullopt;
@@ -2317,9 +2374,10 @@ template <typename Callback>
 }
 
 [[nodiscard]] std::optional<OneWindowRuntimeKPlan> fp32OneWindowRuntimeKUnitPlan(uint64_t k,
-                                                                                 const Fp8OneWindowRuntimeKUnit& unit) {
+                                                                                 const Fp8OneWindowRuntimeKUnit& unit,
+                                                                                 bool aligned_base = true) {
     if (!oneWindowFp32Unit(unit)) return std::nullopt;
-    return oneWindowRuntimeKUnitPlan(k, unit, 4);
+    return oneWindowRuntimeKUnitPlan(k, unit, 4, aligned_base);
 }
 
 // FP32 OneWindow indexes input bytes in 32 bits (the kernel's byte offsets), so the input holds at most 2^32 - 1
@@ -2365,9 +2423,10 @@ template <typename Callback>
 }
 
 [[nodiscard]] std::optional<OneWindowRuntimeKPlan> f16OneWindowRuntimeKUnitPlan(uint64_t k,
-                                                                                const Fp8OneWindowRuntimeKUnit& unit) {
+                                                                                const Fp8OneWindowRuntimeKUnit& unit,
+                                                                                bool aligned_base = true) {
     if (!oneWindowF16Unit(unit)) return std::nullopt;
-    return oneWindowRuntimeKUnitPlan(k, unit, 2);
+    return oneWindowRuntimeKUnitPlan(k, unit, 2, aligned_base);
 }
 
 // 2-byte OneWindow indexes input bytes in 32 bits, as FP32: at most 2^32 - 1 input bytes.
@@ -2394,9 +2453,21 @@ template <typename Callback>
     return std::nullopt;
 }
 
+// 1381: the VALUE OneWindow kernel reads any element-aligned base. Off a 16-byte boundary its byte offsets start up to
+// 15 bytes before the base, so the input holds 15 bytes less than the 32-bit offset limit.
+[[nodiscard]] inline bool oneWindowBaseIsAligned(const StridedSpan& input) {
+    return (reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{15}) == 0;
+}
+[[nodiscard]] inline bool oneWindowUnalignedBaseFits(const StridedSpan& input, uint64_t element_bytes,
+                                                     uint64_t input_elements) {
+    constexpr uint64_t MaxIndex = std::numeric_limits<uint32_t>::max();
+    return (reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & static_cast<uintptr_t>(element_bytes - 1)) == 0 &&
+           input_elements <= (MaxIndex - 15) / element_bytes;
+}
+
 template <int FixedOp>
-void launchFp8OneWindowRuntimeKCompleteTyped(const Tensor& input,
-                                             Tensor& output,
+void launchFp8OneWindowRuntimeKCompleteTyped(const StridedSpan& input,
+                                             const StridedSpan& output,
                                              const CubReductionGeometry& geometry,
                                              const Fp8OneWindowRuntimeKUnit& unit,
                                              uint32_t warps_per_output,
@@ -2405,15 +2476,17 @@ void launchFp8OneWindowRuntimeKCompleteTyped(const Tensor& input,
                                              float output_scale) {
 #if THOR_CUB_ENABLE_FP8_TYPES
     const AdditiveFinalizeFp32 output_finalize = fp8CompleteFinalizerFromSemantics(semantics);
-    const auto plan = oneWindowRuntimeKUnitPlan(geometry.inner_size, unit);
+    // 1381: the plan of the base's alignment (rows per group leave room for the prefix off a 16-byte boundary).
+    const bool aligned_base = oneWindowBaseIsAligned(input);
+    const auto plan = oneWindowRuntimeKUnitPlan(geometry.inner_size, unit, 1, aligned_base);
     if (!plan || geometry.outer_size == 0 || geometry.reduction_size == 0 ||
         !oneWindowValidWarpsPerOutput(unit.outputs_per_warp, warps_per_output) ||
         !shallowFp8FitsUint32Indexing(geometry) || !fp8CompleteSupportsOutputStorage(output.getDataType()) ||
         output.getTotalNumElements() != geometry.outer_size * geometry.inner_size) {
         throw std::logic_error("FP8 bucketed OneWindow received unsupported complete geometry.");
     }
-    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{15}) != 0) {
-        throw std::logic_error("FP8 bucketed OneWindow requires a 16-byte aligned input base.");
+    if (!aligned_base && !oneWindowUnalignedBaseFits(input, 1, geometry.input_elements)) {
+        throw std::logic_error("FP8 bucketed OneWindow at an unaligned base holds at most 2^32 - 16 input bytes.");
     }
     float folded_scale = output_scale;
     const Fp8ExtremumFold extremum_fold =
@@ -2481,8 +2554,8 @@ CubKernelOccupancyInfo queryFp8OneWindowRuntimeKOccupancyTyped(DataType input_dt
 
 #if THOR_CUB_ENABLE_FP8_TYPES  // the retained kernels' gate (FP32 shares the FP8 OneWindow kernel)
 template <int FixedOp>
-void launchFp32OneWindowRuntimeKCompleteTyped(const Tensor& input,
-                                              Tensor& output,
+void launchFp32OneWindowRuntimeKCompleteTyped(const StridedSpan& input,
+                                              const StridedSpan& output,
                                               const CubReductionGeometry& geometry,
                                               const Fp8OneWindowRuntimeKUnit& unit,
                                               uint32_t warps_per_output,
@@ -2490,7 +2563,8 @@ void launchFp32OneWindowRuntimeKCompleteTyped(const Tensor& input,
                                               const CubReductionStageSemantics& semantics,
                                               float output_scale) {
     const AdditiveFinalizeFp32 output_finalize = fp8CompleteFinalizerFromSemantics(semantics);
-    const auto plan = fp32OneWindowRuntimeKUnitPlan(geometry.inner_size, unit);
+    const bool aligned_base = oneWindowBaseIsAligned(input);  // 1381
+    const auto plan = fp32OneWindowRuntimeKUnitPlan(geometry.inner_size, unit, aligned_base);
     if (input.getDataType() != DataType::FP32 || !plan || geometry.outer_size == 0 || geometry.reduction_size == 0 ||
         !oneWindowValidWarpsPerOutput(unit.outputs_per_warp, warps_per_output) ||
         !fp32OneWindowFitsIndexing(geometry) || !fp8CompleteSupportsOutputStorage(output.getDataType()) ||
@@ -2498,8 +2572,9 @@ void launchFp32OneWindowRuntimeKCompleteTyped(const Tensor& input,
         output.getTotalNumElements() != geometry.outer_size * geometry.inner_size) {
         throw std::logic_error("FP32 OneWindow received unsupported complete geometry.");
     }
-    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{15}) != 0) {
-        throw std::logic_error("FP32 OneWindow requires a 16-byte aligned input base.");
+    if (!aligned_base && !oneWindowUnalignedBaseFits(input, 4, geometry.input_elements)) {
+        throw std::logic_error("FP32 OneWindow requires a 4-byte aligned input base (and at most 2^32 - 16 input "
+                               "bytes off a 16-byte boundary).");
     }
     float folded_scale = output_scale;
     const Fp8ExtremumFold extremum_fold = fp32CompleteExtremumFold(FixedOp, semantics.input_transform, folded_scale);
@@ -2552,8 +2627,8 @@ CubKernelOccupancyInfo queryFp32OneWindowRuntimeKOccupancyTyped(uint64_t inner_s
 
 // 1240: FP16 / BF16 on the same kernel (plans/Thor_FP16_BF16_Dense_Reduction_Plan, phase 5).
 template <int FixedOp>
-void launchF16OneWindowRuntimeKCompleteTyped(const Tensor& input,
-                                             Tensor& output,
+void launchF16OneWindowRuntimeKCompleteTyped(const StridedSpan& input,
+                                             const StridedSpan& output,
                                              const CubReductionGeometry& geometry,
                                              const Fp8OneWindowRuntimeKUnit& unit,
                                              uint32_t warps_per_output,
@@ -2561,7 +2636,8 @@ void launchF16OneWindowRuntimeKCompleteTyped(const Tensor& input,
                                              const CubReductionStageSemantics& semantics,
                                              float output_scale) {
     const AdditiveFinalizeFp32 output_finalize = fp8CompleteFinalizerFromSemantics(semantics);
-    const auto plan = f16OneWindowRuntimeKUnitPlan(geometry.inner_size, unit);
+    const bool aligned_base = oneWindowBaseIsAligned(input);  // 1381
+    const auto plan = f16OneWindowRuntimeKUnitPlan(geometry.inner_size, unit, aligned_base);
     const DataType dtype = input.getDataType();
     if ((dtype != DataType::FP16 && dtype != DataType::BF16) || !plan || geometry.outer_size == 0 ||
         geometry.reduction_size == 0 || !oneWindowValidWarpsPerOutput(unit.outputs_per_warp, warps_per_output) ||
@@ -2570,8 +2646,9 @@ void launchF16OneWindowRuntimeKCompleteTyped(const Tensor& input,
         output.getTotalNumElements() != geometry.outer_size * geometry.inner_size) {
         throw std::logic_error("FP16 / BF16 OneWindow received unsupported complete geometry.");
     }
-    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{15}) != 0) {
-        throw std::logic_error("FP16 / BF16 OneWindow requires a 16-byte aligned input base.");
+    if (!aligned_base && !oneWindowUnalignedBaseFits(input, 2, geometry.input_elements)) {
+        throw std::logic_error("FP16 / BF16 OneWindow requires a 2-byte aligned input base (and at most 2^32 - 16 "
+                               "input bytes off a 16-byte boundary).");
     }
     float folded_scale = output_scale;
     const Fp8ExtremumFold extremum_fold = fp16CompleteExtremumFold(FixedOp, semantics.input_transform, folded_scale);
@@ -2862,8 +2939,12 @@ __global__ __launch_bounds__(SHALLOW_FP8_THREADS) void fp32OneWindowArgKernel(co
     const uint32_t warp = threadIdx.x / TILED_REDUCTION_WARP_THREADS;
     const uint32_t lane = threadIdx.x % TILED_REDUCTION_WARP_THREADS;
     const uint32_t outer_input_stride = reduction_size * k * static_cast<uint32_t>(sizeof(InputT));  // bytes
-    const uint32_t total_input_bytes = outer_size * outer_input_stride;
-    const uint8_t* const input_bytes = reinterpret_cast<const uint8_t*>(input);
+    // 1383: as the VALUE kernel since 1381, byte offsets count from the 16-byte boundary at or below the base
+    // (base_shift bytes before it; 0 for an aligned base), so the kernel reads any element address. The keys carry
+    // rows, not bytes, so the indices are unchanged.
+    const uint32_t base_shift = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(input) & uintptr_t{15});
+    const uint32_t total_input_bytes = base_shift + outer_size * outer_input_stride;
+    const uint8_t* const input_bytes = reinterpret_cast<const uint8_t*>(input) - base_shift;
     const uint32_t output_slot = lane / LanesPerOutput;
     const uint32_t subgroup_lane = lane % LanesPerOutput;
     const uint32_t subgroup_lane_base = output_slot * LanesPerOutput;
@@ -2888,7 +2969,7 @@ __global__ __launch_bounds__(SHALLOW_FP8_THREADS) void fp32OneWindowArgKernel(co
             const bool valid_output = outer_index < outer_size;
             streamOneWindowFp32ArgOutput<InputT, OutputsPerWarp, MaxComponentsPerLane, LoadAhead>(
                 best_key, best_tail, staged_packet_words[warp], input_bytes, total_input_bytes, valid_output,
-                valid_output ? static_cast<uint32_t>(outer_index) * outer_input_stride : 0U, 0U,
+                valid_output ? base_shift + static_cast<uint32_t>(outer_index) * outer_input_stride : 0U, 0U,
                 geometry.rows_per_group, reduction_size, geometry, lane, subgroup_lane, subgroup_lane_base, component,
                 worker, outputs.xor_mask);
             if constexpr (MultipleComponentsPerLane) {
@@ -2929,7 +3010,7 @@ __global__ __launch_bounds__(SHALLOW_FP8_THREADS) void fp32OneWindowArgKernel(co
             const bool valid_output = outer_index < outer_size;
             streamOneWindowFp32ArgOutput<InputT, OutputsPerWarp, MaxComponentsPerLane, LoadAhead>(
                 best_key, best_tail, staged_packet_words[warp], input_bytes, total_input_bytes, valid_output,
-                valid_output ? static_cast<uint32_t>(outer_index) * outer_input_stride : 0U,
+                valid_output ? base_shift + static_cast<uint32_t>(outer_index) * outer_input_stride : 0U,
                 warp_in_output * geometry.rows_per_group, rows_per_output_round, reduction_size, geometry, lane,
                 subgroup_lane, subgroup_lane_base, component, worker, outputs.xor_mask);
             if constexpr (MultipleComponentsPerLane) {
@@ -3811,7 +3892,13 @@ __global__ void fp8OneWindowArgCompleteKernel(const uint8_t* input,
     const uint32_t warp = threadIdx.x / TILED_REDUCTION_WARP_THREADS;
     const uint32_t lane = threadIdx.x % TILED_REDUCTION_WARP_THREADS;
     const uint32_t outer_input_stride = reduction_size * k;
-    const uint32_t total_input_bytes = outer_size * outer_input_stride;
+    // 1383: as the VALUE kernel since 1381, byte offsets count from the packet boundary at or below the base
+    // (base_shift bytes before it; 0 for an aligned base), so the kernel reads any byte address. The keys carry rows,
+    // not bytes, so the indices are unchanged.
+    const uint32_t base_shift =
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(input) & static_cast<uintptr_t>(PacketBytes - 1));
+    const uint32_t total_input_bytes = base_shift + outer_size * outer_input_stride;
+    const uint8_t* const input_bytes = input - base_shift;
 
     const uint32_t output_slot = lane / LanesPerOutput;
     const uint32_t subgroup_lane = lane % LanesPerOutput;
@@ -3837,9 +3924,10 @@ __global__ void fp8OneWindowArgCompleteKernel(const uint8_t* input,
             for (uint32_t slot = 0; slot < static_cast<uint32_t>(MaxComponentsPerLane); ++slot) {
                 local[slot] = Identity;
             }
-            const uint32_t outer_byte_begin = valid_output ? static_cast<uint32_t>(outer_index) * outer_input_stride : 0;
+            const uint32_t outer_byte_begin =
+                valid_output ? base_shift + static_cast<uint32_t>(outer_index) * outer_input_stride : 0;
             streamOneWindowArgOutput<MaxComponentsPerLane, LanesPerOutput, PacketBytes, LoadAhead>(
-                local, staged_packet_words[warp], input, total_input_bytes, valid_output, outer_byte_begin, 0U,
+                local, staged_packet_words[warp], input_bytes, total_input_bytes, valid_output, outer_byte_begin, 0U,
                 geometry.rows_per_group, reduction_size, geometry, lane, subgroup_lane, subgroup_lane_base, component,
                 worker, outputs.fold);
 
@@ -3890,9 +3978,10 @@ __global__ void fp8OneWindowArgCompleteKernel(const uint8_t* input,
             for (uint32_t slot = 0; slot < static_cast<uint32_t>(MaxComponentsPerLane); ++slot) {
                 local[slot] = Identity;
             }
-            const uint32_t outer_byte_begin = valid_output ? static_cast<uint32_t>(outer_index) * outer_input_stride : 0;
+            const uint32_t outer_byte_begin =
+                valid_output ? base_shift + static_cast<uint32_t>(outer_index) * outer_input_stride : 0;
             streamOneWindowArgOutput<MaxComponentsPerLane, LanesPerOutput, PacketBytes, LoadAhead>(
-                local, staged_packet_words[warp], input, total_input_bytes, valid_output, outer_byte_begin,
+                local, staged_packet_words[warp], input_bytes, total_input_bytes, valid_output, outer_byte_begin,
                 warp_in_output * geometry.rows_per_group, rows_per_output_round, reduction_size, geometry, lane,
                 subgroup_lane, subgroup_lane_base, component, worker, outputs.fold);
 
@@ -5007,6 +5096,12 @@ __global__ __launch_bounds__(SHALLOW_FP8_THREADS, 4) void fp8PacketCompleteArgKe
     const uint64_t work_count = static_cast<uint64_t>(outer_size) * tile_count;
     const uint64_t block_work_stride = static_cast<uint64_t>(gridDim.x) * outputs_per_block;
     const uint64_t outer_input_stride = static_cast<uint64_t>(reduction_size) * inner_size;
+    // 1384: as the VALUE kernel since 1379, the base's place in its 16-byte packet (0 for an aligned base): prefixes
+    // and packet addresses follow the address, so the kernel reads any byte address. A row's first packet starts at
+    // most 15 bytes before the base, inside the base's own 16-byte granule; the window (512 bytes) holds a 15-byte
+    // prefix with a 256-component tile. Keys carry rows, so the indices do not change.
+    const uint32_t base_shift = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(input) & uintptr_t{PacketMask});
+    const uint8_t* const aligned_input = input - base_shift;
 
     for (uint64_t block_work_begin = static_cast<uint64_t>(blockIdx.x) * outputs_per_block; block_work_begin < work_count;
          block_work_begin += block_work_stride) {
@@ -5051,13 +5146,13 @@ __global__ __launch_bounds__(SHALLOW_FP8_THREADS, 4) void fp8PacketCompleteArgKe
         // bytes); component masks keep those bytes out of the reduction.
         const auto load_row = [&](uint32_t row_index, uint32_t& prefix_bytes, uint32_t& packet_count,
                                   RawVectorPacket<PacketBytes>& packet) {
-            const uint64_t logical_begin = static_cast<uint64_t>(outer_index) * outer_input_stride +
+            const uint64_t logical_begin = base_shift + static_cast<uint64_t>(outer_index) * outer_input_stride +
                                            static_cast<uint64_t>(row_index) * inner_size + tile_begin;
             prefix_bytes = static_cast<uint32_t>(logical_begin & PacketMask);
             packet_count = (prefix_bytes + tile_width + PacketMask) >> PacketShift;
             if (lane < packet_count) {
                 packet = *reinterpret_cast<const RawVectorPacket<PacketBytes>*>(
-                    input + (logical_begin - prefix_bytes) + static_cast<uint64_t>(lane) * PacketBytes);
+                    aligned_input + (logical_begin - prefix_bytes) + static_cast<uint64_t>(lane) * PacketBytes);
             }
         };
         // Load-ahead as in the VALUE kernel: the next row's packet is in flight while this row is keyed.
@@ -5476,7 +5571,7 @@ template <typename Callback>
 }  // namespace
 
 void launchFp8DeepRSmallKRetainedFirstStage(const CubReductionStageSemantics& semantics,
-                                            const Tensor& input, Tensor& fp32_partials,
+                                            const StridedSpan& input, const StridedSpan& fp32_partials,
                                             const CubReductionGeometry& geometry, uint64_t rows,
                                             uint64_t shards, Stream& stream) {
 #if THOR_CUB_ENABLE_FP8_TYPES
@@ -5531,7 +5626,7 @@ bool fp32DeepRSmallKSupports(uint64_t outer_size, uint64_t reduction_size, uint6
 }
 
 void launchFp32DeepRSmallKRetainedFirstStage(const CubReductionStageSemantics& semantics,
-                                             const Tensor& input, Tensor& fp32_partials,
+                                             const StridedSpan& input, const StridedSpan& fp32_partials,
                                              const CubReductionGeometry& geometry, uint64_t rows,
                                              uint64_t shards, Stream& stream) {
 #if THOR_CUB_ENABLE_FP8_TYPES
@@ -5593,7 +5688,7 @@ bool f16DeepRSmallKSupports(uint64_t outer_size, uint64_t reduction_size, uint64
 }
 
 void launchF16DeepRSmallKRetainedFirstStage(const CubReductionStageSemantics& semantics,
-                                            const Tensor& input, Tensor& fp32_partials,
+                                            const StridedSpan& input, const StridedSpan& fp32_partials,
                                             const CubReductionGeometry& geometry, uint64_t rows,
                                             uint64_t shards, Stream& stream) {
 #if THOR_CUB_ENABLE_FP8_TYPES
@@ -5677,8 +5772,8 @@ CubKernelOccupancyInfo queryFp8DeepRSmallKRetainedOccupancy(
 
 template <int FixedOp>
 void launchFp8GeneralRParallelKTileRCooperativeCalibrationCompleteTyped(
-    const Tensor& input,
-    Tensor& output,
+    const StridedSpan& input,
+    const StridedSpan& output,
     const CubReductionGeometry& geometry,
     uint32_t warps_per_output,
     uint32_t tile_components,
@@ -5745,8 +5840,8 @@ void launchFp8GeneralRParallelKTileRCooperativeCalibrationCompleteTyped(
 
 
 void launchFp8GeneralRParallelKTileRCooperativeCalibrationComplete(
-    const Tensor& input,
-    Tensor& output,
+    const StridedSpan& input,
+    const StridedSpan& output,
     const CubReductionGeometry& geometry,
     uint32_t warps_per_output,
     uint32_t tile_components,
@@ -5860,8 +5955,8 @@ template <typename InputT, int FixedOp, typename Callback>
 
 // One input type's PacketComplete (FP32 or FP16 / BF16; `name` labels the errors).
 template <typename InputT, int FixedOp>
-void launchPacketCompleteTyped(const Tensor& input,
-                               Tensor& output,
+void launchPacketCompleteTyped(const StridedSpan& input,
+                               const StridedSpan& output,
                                const CubReductionGeometry& geometry,
                                uint32_t warps_per_output,
                                uint32_t tile_components,
@@ -5879,8 +5974,9 @@ void launchPacketCompleteTyped(const Tensor& input,
         throw std::logic_error(std::string(name) +
                                " RuntimeK PacketComplete received unsupported geometry or outputs.");
     }
-    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{15}) != 0) {
-        throw std::logic_error(std::string(name) + " RuntimeK PacketComplete requires a 16-byte aligned input base.");
+    // 1379: any element address (the kernel takes its prefixes from the base address).
+    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{sizeof(InputT) - 1}) != 0) {
+        throw std::logic_error(std::string(name) + " RuntimeK PacketComplete requires an element-aligned input base.");
     }
     const uint32_t tile_count =
         static_cast<uint32_t>(ceilDivideU64(geometry.inner_size, static_cast<uint64_t>(tile_components)));
@@ -5888,6 +5984,7 @@ void launchPacketCompleteTyped(const Tensor& input,
     const uint64_t work_count = geometry.outer_size * static_cast<uint64_t>(tile_count);
     const uint64_t block_count = std::min<uint64_t>(
         ceilDivideU64(work_count, static_cast<uint64_t>(outputs_per_block)), NARROW_FLAT_MAX_GRID_BLOCKS);
+    const PacketCompleteRowStrides row_strides = packetCompleteRowStrides(input, geometry);
     const bool launched =
         dispatchPacketCompleteTransform<InputT, FixedOp>(semantics.input_transform, [&](auto kernel) {
             kernel<<<static_cast<unsigned int>(block_count), SHALLOW_FP8_THREADS, 0, stream.getStream()>>>(
@@ -5897,6 +5994,8 @@ void launchPacketCompleteTyped(const Tensor& input,
                 static_cast<uint32_t>(geometry.outer_size),
                 static_cast<uint32_t>(geometry.reduction_size),
                 static_cast<uint32_t>(geometry.inner_size),
+                row_strides.row,
+                row_strides.outer,
                 tile_components,
                 tile_count,
                 warps_per_output,
@@ -5911,8 +6010,8 @@ void launchPacketCompleteTyped(const Tensor& input,
 }
 
 template <typename InputT>
-void launchPacketCompleteCombine(const Tensor& input,
-                                 Tensor& output,
+void launchPacketCompleteCombine(const StridedSpan& input,
+                                 const StridedSpan& output,
                                  const CubReductionGeometry& geometry,
                                  uint32_t warps_per_output,
                                  uint32_t tile_components,
@@ -5962,8 +6061,8 @@ CubKernelOccupancyInfo queryPacketCompleteOccupancyCombine(CubReductionStageInpu
 
 }  // namespace
 
-void launchFp32PacketComplete(const Tensor& input,
-                              Tensor& output,
+void launchFp32PacketComplete(const StridedSpan& input,
+                              const StridedSpan& output,
                               const CubReductionGeometry& geometry,
                               uint32_t warps_per_output,
                               uint32_t tile_components,
@@ -5976,8 +6075,8 @@ void launchFp32PacketComplete(const Tensor& input,
                                        output_scale, "FP32");
 }
 
-void launchF16PacketComplete(const Tensor& input,
-                             Tensor& output,
+void launchF16PacketComplete(const StridedSpan& input,
+                             const StridedSpan& output,
                              const CubReductionGeometry& geometry,
                              uint32_t warps_per_output,
                              uint32_t tile_components,
@@ -6022,9 +6121,9 @@ bool f16PacketCompleteArgSupports(uint64_t outer_size, uint64_t reduction_size, 
 
 namespace {
 template <typename InputT>
-void launchPacketCompleteArgTyped(const Tensor& input,
-                                  Tensor* value_output,
-                                  Tensor* index_output,
+void launchPacketCompleteArgTyped(const StridedSpan& input,
+                                  const StridedSpan* value_output,
+                                  const StridedSpan* index_output,
                                   const CubReductionGeometry& geometry,
                                   uint32_t warps_per_output,
                                   uint32_t tile_components,
@@ -6049,8 +6148,9 @@ void launchPacketCompleteArgTyped(const Tensor& input,
                                       index_output->getDataType() != DataType::UINT64)))) {
         throw std::logic_error(std::string(name) + " PacketComplete ARG received unsupported geometry or outputs.");
     }
-    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{15}) != 0) {
-        throw std::logic_error(std::string(name) + " PacketComplete ARG requires a 16-byte aligned input base.");
+    // 1384: any element-aligned base (the kernel's prefixes follow the address).
+    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{sizeof(InputT) - 1}) != 0) {
+        throw std::logic_error(std::string(name) + " PacketComplete ARG requires an element-aligned input base.");
     }
     if (index_output != nullptr && index_output->getDataType() == DataType::UINT32 &&
         (geometry.reduction_size - 1) * domain_stride > std::numeric_limits<uint32_t>::max()) {
@@ -6078,9 +6178,9 @@ void launchPacketCompleteArgTyped(const Tensor& input,
 }
 }  // namespace
 
-void launchFp32PacketCompleteArg(const Tensor& input,
-                                 Tensor* value_output,
-                                 Tensor* index_output,
+void launchFp32PacketCompleteArg(const StridedSpan& input,
+                                 const StridedSpan* value_output,
+                                 const StridedSpan* index_output,
                                  const CubReductionGeometry& geometry,
                                  uint32_t warps_per_output,
                                  uint32_t tile_components,
@@ -6093,9 +6193,9 @@ void launchFp32PacketCompleteArg(const Tensor& input,
                                         tile_components, maximum, domain_stride, stream, "FP32");
 }
 
-void launchF16PacketCompleteArg(const Tensor& input,
-                                Tensor* value_output,
-                                Tensor* index_output,
+void launchF16PacketCompleteArg(const StridedSpan& input,
+                                const StridedSpan* value_output,
+                                const StridedSpan* index_output,
                                 const CubReductionGeometry& geometry,
                                 uint32_t warps_per_output,
                                 uint32_t tile_components,
@@ -6136,8 +6236,8 @@ CubKernelOccupancyInfo queryFp32PacketCompleteOccupancy(CubReductionStageInputTr
 // the bucketed unit for (O, P, bucket(K)). Only P16 variants have units; a request without a unit throws
 // std::logic_error, which the selector treats as an excluded candidate.
 void launchFp8GeneralRParallelRCooperativeCalibrationComplete(
-    const Tensor& input,
-    Tensor& output,
+    const StridedSpan& input,
+    const StridedSpan& output,
     const CubReductionGeometry& geometry,
     uint32_t outputs_per_warp,
     uint32_t warps_per_output,
@@ -6180,8 +6280,8 @@ std::vector<Fp8OneWindowRuntimeKUnit> fp8OneWindowRuntimeKUnits(uint64_t inner_s
     return units;
 }
 
-void launchFp8OneWindowRuntimeKComplete(const Tensor& input,
-                                        Tensor& output,
+void launchFp8OneWindowRuntimeKComplete(const StridedSpan& input,
+                                        const StridedSpan& output,
                                         const CubReductionGeometry& geometry,
                                         const Fp8OneWindowRuntimeKUnit& unit,
                                         uint32_t warps_per_output,
@@ -6233,8 +6333,8 @@ std::vector<Fp8OneWindowRuntimeKUnit> fp32OneWindowRuntimeKUnits(uint64_t inner_
     return units;
 }
 
-void launchFp32OneWindowRuntimeKComplete(const Tensor& input,
-                                         Tensor& output,
+void launchFp32OneWindowRuntimeKComplete(const StridedSpan& input,
+                                         const StridedSpan& output,
                                          const CubReductionGeometry& geometry,
                                          const Fp8OneWindowRuntimeKUnit& unit,
                                          uint32_t warps_per_output,
@@ -6304,8 +6404,8 @@ std::vector<Fp8OneWindowRuntimeKUnit> f16OneWindowRuntimeKUnits(uint64_t inner_s
     return units;
 }
 
-void launchF16OneWindowRuntimeKComplete(const Tensor& input,
-                                        Tensor& output,
+void launchF16OneWindowRuntimeKComplete(const StridedSpan& input,
+                                        const StridedSpan& output,
                                         const CubReductionGeometry& geometry,
                                         const Fp8OneWindowRuntimeKUnit& unit,
                                         uint32_t warps_per_output,
@@ -6370,13 +6470,15 @@ CubKernelOccupancyInfo queryF16OneWindowRuntimeKOccupancy(DataType input_dtype,
 
 // ---- 1202: the FP32 RK ARG OneWindow twin (see fp32OneWindowArgKernel). 1250: and FP16 / BF16.
 namespace {
+// 1383: aligned_base false plans for an input base off a 16-byte boundary (oneWindowRuntimeKPlan).
 template <typename InputT>
 [[nodiscard]] std::optional<OneWindowRuntimeKPlan> oneWindowArgUnitPlan(uint64_t k,
-                                                                        const Fp8OneWindowRuntimeKUnit& unit) {
+                                                                        const Fp8OneWindowRuntimeKUnit& unit,
+                                                                        bool aligned_base = true) {
     if constexpr (std::is_same_v<InputT, float>) {
-        return fp32OneWindowRuntimeKUnitPlan(k, unit);
+        return fp32OneWindowRuntimeKUnitPlan(k, unit, aligned_base);
     } else {
-        return f16OneWindowRuntimeKUnitPlan(k, unit);
+        return f16OneWindowRuntimeKUnitPlan(k, unit, aligned_base);
     }
 }
 
@@ -6411,9 +6513,9 @@ template <typename InputT, typename Callback>
 }
 
 template <typename InputT>
-void launchOneWindowArgTyped(const Tensor& input,
-                             Tensor* value_output,
-                             Tensor* index_output,
+void launchOneWindowArgTyped(const StridedSpan& input,
+                             const StridedSpan* value_output,
+                             const StridedSpan* index_output,
                              const CubReductionGeometry& geometry,
                              const Fp8OneWindowRuntimeKUnit& unit,
                              uint32_t warps_per_output,
@@ -6422,7 +6524,9 @@ void launchOneWindowArgTyped(const Tensor& input,
                              Stream& stream,
                              const char* name) {
     const uint64_t outputs = geometry.outer_size * geometry.inner_size;
-    const auto plan = oneWindowArgUnitPlan<InputT>(geometry.inner_size, unit);
+    // 1383: the plan of the base's alignment (rows per group leave room for the prefix off a 16-byte boundary).
+    const bool aligned_base = oneWindowBaseIsAligned(input);
+    const auto plan = oneWindowArgUnitPlan<InputT>(geometry.inner_size, unit, aligned_base);
     if (!plan ||
         !oneWindowArgSupportsTyped<InputT>(geometry.outer_size, geometry.reduction_size, geometry.inner_size, unit,
                                            warps_per_output) ||
@@ -6435,8 +6539,9 @@ void launchOneWindowArgTyped(const Tensor& input,
                                       index_output->getDataType() != DataType::UINT64)))) {
         throw std::logic_error(std::string(name) + " OneWindow ARG received unsupported geometry or outputs.");
     }
-    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{15}) != 0) {
-        throw std::logic_error(std::string(name) + " OneWindow ARG requires a 16-byte aligned input base.");
+    if (!aligned_base && !oneWindowUnalignedBaseFits(input, sizeof(InputT), input.getTotalNumElements())) {
+        throw std::logic_error(std::string(name) + " OneWindow ARG requires an element-aligned input base (and at "
+                                                   "most 2^32 - 16 input bytes off a 16-byte boundary).");
     }
     if (index_output != nullptr && index_output->getDataType() == DataType::UINT32 &&
         (geometry.reduction_size - 1) * domain_stride > std::numeric_limits<uint32_t>::max()) {
@@ -6496,9 +6601,9 @@ bool f16OneWindowArgSupports(uint64_t outer_size, uint64_t reduction_size, uint6
     return oneWindowArgSupportsTyped<__half>(outer_size, reduction_size, inner_size, unit, warps_per_output);
 }
 
-void launchFp32OneWindowArg(const Tensor& input,
-                            Tensor* value_output,
-                            Tensor* index_output,
+void launchFp32OneWindowArg(const StridedSpan& input,
+                            const StridedSpan* value_output,
+                            const StridedSpan* index_output,
                             const CubReductionGeometry& geometry,
                             const Fp8OneWindowRuntimeKUnit& unit,
                             uint32_t warps_per_output,
@@ -6511,9 +6616,9 @@ void launchFp32OneWindowArg(const Tensor& input,
                                    domain_stride, stream, "FP32");
 }
 
-void launchF16OneWindowArg(const Tensor& input,
-                           Tensor* value_output,
-                           Tensor* index_output,
+void launchF16OneWindowArg(const StridedSpan& input,
+                           const StridedSpan* value_output,
+                           const StridedSpan* index_output,
                            const CubReductionGeometry& geometry,
                            const Fp8OneWindowRuntimeKUnit& unit,
                            uint32_t warps_per_output,
@@ -6561,10 +6666,10 @@ bool fp32OneWindowCarriedArgSupports(uint64_t outer_size, uint64_t reduction_siz
            outer_size * reduction_size * inner_size <= MaxIndex / 4;
 }
 
-void launchFp32OneWindowCarriedArg(const Tensor& input,
-                                   const Tensor& carried_index,
-                                   Tensor* value_output,
-                                   Tensor* index_output,
+void launchFp32OneWindowCarriedArg(const StridedSpan& input,
+                                   const StridedSpan& carried_index,
+                                   const StridedSpan* value_output,
+                                   const StridedSpan* index_output,
                                    const CubReductionGeometry& geometry,
                                    const Fp8OneWindowRuntimeKUnit& unit,
                                    uint32_t warps_per_output,
@@ -6660,9 +6765,9 @@ bool fp8OneWindowArgSupports(uint64_t outer_size, uint64_t reduction_size, uint6
     return outer_size <= MaxIndex && outer_size * reduction_size * inner_size <= MaxIndex;
 }
 
-void launchFp8OneWindowArgComplete(const Tensor& input,
-                                   Tensor* value_output,
-                                   Tensor* index_output,
+void launchFp8OneWindowArgComplete(const StridedSpan& input,
+                                   const StridedSpan* value_output,
+                                   const StridedSpan* index_output,
                                    const CubReductionGeometry& geometry,
                                    const Fp8OneWindowRuntimeKUnit& unit,
                                    uint32_t warps_per_output,
@@ -6672,7 +6777,9 @@ void launchFp8OneWindowArgComplete(const Tensor& input,
 #if THOR_CUB_ENABLE_FP8_TYPES
     const DataType input_dtype = input.getDataType();
     const uint64_t outputs = geometry.outer_size * geometry.inner_size;
-    const auto plan = oneWindowRuntimeKUnitPlan(geometry.inner_size, unit);
+    // 1383: the plan of the base's alignment (rows per group leave room for the prefix off a 16-byte boundary).
+    const bool aligned_base = oneWindowBaseIsAligned(input);
+    const auto plan = oneWindowRuntimeKUnitPlan(geometry.inner_size, unit, 1, aligned_base);
     if ((input_dtype != DataType::FP8_E4M3 && input_dtype != DataType::FP8_E5M2) || !plan ||
         !fp8OneWindowArgSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size, unit,
                                  warps_per_output) ||
@@ -6689,8 +6796,8 @@ void launchFp8OneWindowArgComplete(const Tensor& input,
         (geometry.reduction_size - 1) * domain_stride > std::numeric_limits<uint32_t>::max()) {
         throw std::logic_error("FP8 OneWindow ARG UINT32 index output cannot hold the original-domain index.");
     }
-    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{15}) != 0) {
-        throw std::logic_error("FP8 OneWindow ARG requires a 16-byte aligned input base.");
+    if (!aligned_base && !oneWindowUnalignedBaseFits(input, 1, input.getTotalNumElements())) {
+        throw std::logic_error("FP8 OneWindow ARG at an unaligned base holds at most 2^32 - 16 input bytes.");
     }
     const Fp8ArgOutputs arg_outputs{
         value_output == nullptr ? nullptr : value_output->getMemPtr<void>(),
@@ -6742,7 +6849,7 @@ bool fp8DeepRSmallKArgSupports(uint64_t outer_size, uint64_t reduction_size, uin
 
 #if THOR_CUB_ENABLE_FP8_TYPES
 namespace {
-void dispatchFp8DeepRSmallKArgFirstStage(const Tensor& input,
+void dispatchFp8DeepRSmallKArgFirstStage(const StridedSpan& input,
                                          const Fp8ArgOutputs& arg_outputs,
                                          const CubReductionGeometry& geometry,
                                          uint64_t rows_per_shard,
@@ -6751,9 +6858,9 @@ void dispatchFp8DeepRSmallKArgFirstStage(const Tensor& input,
 }  // namespace
 #endif
 
-void launchFp8DeepRSmallKArgFirstStage(const Tensor& input,
-                                       Tensor& value_partials,
-                                       Tensor& index_partials,
+void launchFp8DeepRSmallKArgFirstStage(const StridedSpan& input,
+                                       const StridedSpan& value_partials,
+                                       const StridedSpan& index_partials,
                                        const CubReductionGeometry& geometry,
                                        uint64_t rows_per_shard,
                                        uint64_t shards,
@@ -6796,7 +6903,7 @@ void launchFp8DeepRSmallKArgFirstStage(const Tensor& input,
 #endif
 }
 
-void launchFp8DeepRSmallKArgFirstStagePacked(const Tensor& input,
+void launchFp8DeepRSmallKArgFirstStagePacked(const StridedSpan& input,
                                              uint32_t* packed_partials,
                                              const CubReductionGeometry& geometry,
                                              uint64_t rows_per_shard,
@@ -6831,7 +6938,7 @@ void launchFp8DeepRSmallKArgFirstStagePacked(const Tensor& input,
 
 #if THOR_CUB_ENABLE_FP8_TYPES
 namespace {
-void dispatchFp8DeepRSmallKArgFirstStage(const Tensor& input,
+void dispatchFp8DeepRSmallKArgFirstStage(const StridedSpan& input,
                                          const Fp8ArgOutputs& arg_outputs,
                                          const CubReductionGeometry& geometry,
                                          uint64_t rows_per_shard,
@@ -6895,9 +7002,9 @@ void dispatchDeepRArgKernel(uint64_t k, Callback&& callback) {
 }
 
 template <typename InputT>
-void launchDeepRSmallKArgTyped(const Tensor& input,
-                               Tensor* value_output,
-                               Tensor* index_output,
+void launchDeepRSmallKArgTyped(const StridedSpan& input,
+                               const StridedSpan* value_output,
+                               const StridedSpan* index_output,
                                const CubReductionGeometry& geometry,
                                uint64_t rows_per_shard,
                                uint64_t* packed_scratch,
@@ -6962,9 +7069,9 @@ template <typename InputT>
 }
 }  // namespace
 
-void launchFp32DeepRSmallKArg(const Tensor& input,
-                              Tensor* value_output,
-                              Tensor* index_output,
+void launchFp32DeepRSmallKArg(const StridedSpan& input,
+                              const StridedSpan* value_output,
+                              const StridedSpan* index_output,
                               const CubReductionGeometry& geometry,
                               uint64_t rows_per_shard,
                               uint64_t* packed_scratch,
@@ -6977,9 +7084,9 @@ void launchFp32DeepRSmallKArg(const Tensor& input,
                                      maximum, domain_stride, stream, "FP32");
 }
 
-void launchF16DeepRSmallKArg(const Tensor& input,
-                             Tensor* value_output,
-                             Tensor* index_output,
+void launchF16DeepRSmallKArg(const StridedSpan& input,
+                             const StridedSpan* value_output,
+                             const StridedSpan* index_output,
                              const CubReductionGeometry& geometry,
                              uint64_t rows_per_shard,
                              uint64_t* packed_scratch,
@@ -7018,10 +7125,10 @@ CubKernelOccupancyInfo queryF16DeepRSmallKArgOccupancy(DataType input_dtype, uin
 }
 
 // ---- 1213: the carried-index DeepRSmallK ARG twins (see fp32DeepRCarriedArgKernel).
-void launchFp32DeepRSmallKCarriedArg(const Tensor& input,
-                                     const Tensor& carried_index,
-                                     Tensor* value_output,
-                                     Tensor* index_output,
+void launchFp32DeepRSmallKCarriedArg(const StridedSpan& input,
+                                     const StridedSpan& carried_index,
+                                     const StridedSpan* value_output,
+                                     const StridedSpan* index_output,
                                      const CubReductionGeometry& geometry,
                                      uint64_t rows_per_shard,
                                      void* wide_scratch,
@@ -7118,9 +7225,9 @@ bool fp8RuntimeKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64
     return shards <= MaxExtent && tiles <= MaxExtent && outer_size <= MaxExtent;
 }
 
-void launchFp8RuntimeKArgPass(const Tensor& input,
-                              Tensor* value_output,
-                              Tensor* index_output,
+void launchFp8RuntimeKArgPass(const StridedSpan& input,
+                              const StridedSpan* value_output,
+                              const StridedSpan* index_output,
                               const CubReductionGeometry& geometry,
                               uint64_t rows_per_shard,
                               uint32_t packet_bytes,
@@ -7210,9 +7317,9 @@ bool fp8PacketCompleteArgSupports(uint64_t outer_size, uint64_t reduction_size, 
            outer_size * ceilDivideU64(inner_size, tile_components) <= U32;
 }
 
-void launchFp8PacketCompleteArg(const Tensor& input,
-                                Tensor* value_output,
-                                Tensor* index_output,
+void launchFp8PacketCompleteArg(const StridedSpan& input,
+                                const StridedSpan* value_output,
+                                const StridedSpan* index_output,
                                 const CubReductionGeometry& geometry,
                                 uint32_t warps_per_output,
                                 uint32_t tile_components,
@@ -7234,9 +7341,7 @@ void launchFp8PacketCompleteArg(const Tensor& input,
                                       index_output->getDataType() != DataType::UINT64)))) {
         throw std::logic_error("FP8 PacketComplete ARG received unsupported geometry or outputs.");
     }
-    if ((reinterpret_cast<uintptr_t>(input.getMemPtr<void>()) & uintptr_t{15}) != 0) {
-        throw std::logic_error("FP8 PacketComplete ARG requires a 16-byte aligned input base.");
-    }
+    // 1384: any byte address (the kernel's prefixes follow the address).
     if (index_output != nullptr && index_output->getDataType() == DataType::UINT32 &&
         (geometry.reduction_size - 1) * domain_stride > std::numeric_limits<uint32_t>::max()) {
         throw std::logic_error("FP8 PacketComplete ARG UINT32 index cannot hold the original-domain index.");
@@ -7289,9 +7394,9 @@ bool fp8AlignedKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64
     return shards <= MaxExtent && tiles <= MaxExtent && outer_size <= MaxExtent;
 }
 
-void launchFp8AlignedKArgPass(const Tensor& input,
-                              Tensor* value_output,
-                              Tensor* index_output,
+void launchFp8AlignedKArgPass(const StridedSpan& input,
+                              const StridedSpan* value_output,
+                              const StridedSpan* index_output,
                               const CubReductionGeometry& geometry,
                               uint32_t packet_bytes,
                               uint32_t cta_threads,
@@ -7395,8 +7500,8 @@ Fp8ArgPackedSplitLayout fp8ArgPackedSplitLayout(uint64_t inner_size, uint64_t sh
 }
 
 void launchFp8ArgPackedContinuation(const uint32_t* packed_partials,
-                                    Tensor* value_output,
-                                    Tensor* index_output,
+                                    const StridedSpan* value_output,
+                                    const StridedSpan* index_output,
                                     DataType input_dtype,
                                     uint64_t outer_size,
                                     uint64_t reduction_size,
@@ -8918,7 +9023,7 @@ struct Fp8KRLaunchGeometry {
     unsigned int blocks;
 };
 
-Fp8KRLaunchGeometry fp8KRLaunchGeometry(const Tensor& input, const Fp8KR::Fp8KRSegmentShape& shape) {
+Fp8KRLaunchGeometry fp8KRLaunchGeometry(const StridedSpan& input, const Fp8KR::Fp8KRSegmentShape& shape) {
     const uintptr_t address = reinterpret_cast<uintptr_t>(input.getMemPtr<void>());
     uint32_t shift = 0;
     uint64_t blocks = 0;
@@ -8945,7 +9050,7 @@ unsigned int fp8KRFinishBlocks(uint64_t rows) {
     return static_cast<unsigned int>(std::min<uint64_t>(rows, FP8_KR_MAX_GRID_BLOCKS));
 }
 
-void requireFp8KRInput(const Tensor& input, const Fp8KR::Fp8KRSegmentShape& shape, void* scratch,
+void requireFp8KRInput(const StridedSpan& input, const Fp8KR::Fp8KRSegmentShape& shape, void* scratch,
                        uint64_t scratch_bytes, bool arg) {
     const DataType dtype = input.getDataType();
     if ((dtype != DataType::FP8_E4M3 && dtype != DataType::FP8_E5M2) || !Fp8KR::fp8KRSegmentShapeLegal(shape) ||
@@ -8962,7 +9067,7 @@ void requireFp8KRInput(const Tensor& input, const Fp8KR::Fp8KRSegmentShape& shap
 // The VALUE launch for one input element type (FP8 E4M3 / E5M2, 1179 FP32, 1233 FP16 / BF16): the family kernel at
 // the semantics.
 template <typename InputT>
-void launchRetainedKRValueTyped(const CubReductionStageSemantics& semantics, const Tensor& input, Tensor& output,
+void launchRetainedKRValueTyped(const CubReductionStageSemantics& semantics, const StridedSpan& input, const StridedSpan& output,
                                 const Fp8KR::Fp8KRSegmentShape& shape, void* scratch, float output_scale,
                                 Stream& stream, Fp8KR::Fp8KRSplitStages stages) {
     const AdditiveFinalizeFp32 output_finalize = fp8CompleteFinalizerFromSemantics(semantics);
@@ -9119,8 +9224,8 @@ bool fp8KRValueSupports(const CubReductionStageSemantics& semantics) {
 }
 
 void launchFp8KRValueSegments(const CubReductionStageSemantics& semantics,
-                              const Tensor& input,
-                              Tensor& output,
+                              const StridedSpan& input,
+                              const StridedSpan& output,
                               const Fp8KR::Fp8KRSegmentShape& shape,
                               void* scratch,
                               uint64_t scratch_bytes,
@@ -9155,8 +9260,8 @@ void launchFp8KRValueSegments(const CubReductionStageSemantics& semantics,
 }
 
 void launchFp32KRValueSegments(const CubReductionStageSemantics& semantics,
-                               const Tensor& input,
-                               Tensor& output,
+                               const StridedSpan& input,
+                               const StridedSpan& output,
                                const Fp8KR::Fp8KRSegmentShape& shape,
                                void* scratch,
                                uint64_t scratch_bytes,
@@ -9196,8 +9301,8 @@ void launchFp32KRValueSegments(const CubReductionStageSemantics& semantics,
 }
 
 void launchF16KRValueSegments(const CubReductionStageSemantics& semantics,
-                              const Tensor& input,
-                              Tensor& output,
+                              const StridedSpan& input,
+                              const StridedSpan& output,
                               const Fp8KR::Fp8KRSegmentShape& shape,
                               void* scratch,
                               uint64_t scratch_bytes,
@@ -9243,9 +9348,9 @@ void launchF16KRValueSegments(const CubReductionStageSemantics& semantics,
 #endif
 }
 
-void launchFp8KRArgSegments(const Tensor& input,
-                            Tensor* value_output,
-                            Tensor* index_output,
+void launchFp8KRArgSegments(const StridedSpan& input,
+                            const StridedSpan* value_output,
+                            const StridedSpan* index_output,
                             const Fp8KR::Fp8KRSegmentShape& shape,
                             void* scratch,
                             uint64_t scratch_bytes,
@@ -9305,9 +9410,9 @@ void launchFp8KRArgSegments(const Tensor& input,
 #endif
 }
 
-void launchF16KRArgSegments(const Tensor& input,
-                            Tensor* value_output,
-                            Tensor* index_output,
+void launchF16KRArgSegments(const StridedSpan& input,
+                            const StridedSpan* value_output,
+                            const StridedSpan* index_output,
                             const Fp8KR::Fp8KRSegmentShape& shape,
                             void* scratch,
                             uint64_t scratch_bytes,
@@ -9369,9 +9474,9 @@ void launchF16KRArgSegments(const Tensor& input,
 #endif
 }
 
-void launchFp32KRArgSegments(const Tensor& input,
-                             Tensor* value_output,
-                             Tensor* index_output,
+void launchFp32KRArgSegments(const StridedSpan& input,
+                             const StridedSpan* value_output,
+                             const StridedSpan* index_output,
                              const Fp8KR::Fp8KRSegmentShape& shape,
                              void* scratch,
                              uint64_t scratch_bytes,
@@ -9460,10 +9565,10 @@ uint64_t fp32KRCarriedArgScratchBytes(const Fp8KR::Fp8KRSegmentShape& shape) {
     return shape.family() == Fp8KR::Fp8KRFamily::Split ? fp32ArgWideScratchBytes(shape.rows, shape.chunks(), 1) : 0;
 }
 
-void launchFp32KRCarriedArgSegments(const Tensor& input,
-                                    const Tensor& carried_index,
-                                    Tensor* value_output,
-                                    Tensor* index_output,
+void launchFp32KRCarriedArgSegments(const StridedSpan& input,
+                                    const StridedSpan& carried_index,
+                                    const StridedSpan* value_output,
+                                    const StridedSpan* index_output,
                                     const Fp8KR::Fp8KRSegmentShape& shape,
                                     void* scratch,
                                     uint64_t scratch_bytes,

@@ -30,7 +30,8 @@ TEST(CubReduction, EverySupportedInputStorageDtypeAccumulatesInFp32) {
 #endif
 }
 
-TEST(CubReduction, PermutationAwareTiledPathSupportsEveryInputStorageDtype) {
+// 1390: a rotated-output view, refused by the reducer, run in the caller's two parts.
+TEST(CubReduction, RotatedOutputViewTwoPartsSupportEveryInputStorageDtype) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -39,15 +40,8 @@ TEST(CubReduction, PermutationAwareTiledPathSupportsEveryInputStorageDtype) {
     const auto run_dtype = [&](DataType dtype) {
         SCOPED_TRACE(static_cast<int>(dtype));
         Tensor storage = makeGpuTensor(values, {2, 3, 2}, stream, dtype);
-        Tensor permuted = storage.aliasView({2, 2, 3}, {1, 6, 2}, 0);
-        std::shared_ptr<StampedCubReduction> stamped =
-            CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(permuted, stream);
-        ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
-        ASSERT_TRUE(stamped->getGeometry().permutation_aware_tiled_geometry.has_value());
-        EXPECT_EQ(stamped->getAccumulatorDataType(), DataType::FP32);
-        stamped->run();
-        stream.synchronize();
-        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
+        StridedSpan permuted = StridedSpan(storage, 0, {2, 2, 3}, {1, 6, 2});
+        expectFloatVectorNear(executeRefusedViewInTwoParts(permuted, CubReductionOp::Sum, {2}, stream),
                               {9.0f, 27.0f, 12.0f, 30.0f});
     };
 
@@ -330,40 +324,29 @@ TEST(CubReduction, ValidatesPreallocatedOutputContract) {
                  std::invalid_argument);
 }
 
-TEST(CubReduction, PreallocatedOutputOverlapUsesReachableViewAddressSpan) {
+TEST(CubReduction, PreallocatedOutputOverlapUsesTheInputSpansReachableStorage) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
-    // A rank-1 affine broadcast is an ordained DeviceTransformReduce path. Its logical view contains 1024 FP32
-    // elements but can only address storage element 0. Put a valid dense scalar output later in the same allocation.
-    // The old logical-byte overlap check incorrectly rejected this even though the reachable input/output address spans
-    // are disjoint.
-    Tensor storage = Tensor::zeros(gpuPlacement, TensorDescriptor(DataType::FP32, {128}), stream);
-    Tensor input = storage.aliasView({1024}, {0}, 0);
-    Tensor disjoint_output = storage.aliasView({1}, {1}, 64);
+    // A rank-1 affine broadcast is an ordained DeviceTransformReduce path. Its logical span holds 1024 FP32 elements
+    // but reaches only storage element 0. A preallocated output of its own runs; the input's own storage as the
+    // output overlaps what the broadcast reads and is rejected.
+    Tensor storage = Tensor::zeros(gpuPlacement, TensorDescriptor(DataType::FP32, {1}), stream);
+    const StridedSpan input(storage, 0, {1024}, {0});
+    Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
 
     CubReduction reduction(CubReductionOp::Sum, 0, DataType::FP32);
-    std::shared_ptr<StampedCubReduction> stamped = reduction.stamp(input, disjoint_output, stream);
+    std::shared_ptr<StampedCubReduction> stamped = reduction.stamp(input, output, stream);
     EXPECT_EQ(stamped->getPath(), CubReductionPath::DeviceTransformReduce);
     EXPECT_TRUE(stamped->getGeometry().device_transform_uses_affine_stride);
     EXPECT_EQ(stamped->getGeometry().affine_input_stride, 0U);
-    EXPECT_EQ(stamped->getOutputTensor().getMemPtr<void>(), disjoint_output.getMemPtr<void>());
+    EXPECT_EQ(stamped->getOutputTensor().getMemPtr<void>(), output.getMemPtr<void>());
 
     stamped->run();
     stream.synchronize();
-    expectFloatVectorNear(copyGpuTensorAsFloat(disjoint_output, stream), {0.0f});
+    expectFloatVectorNear(copyGpuTensorAsFloat(output, stream), {0.0f});
 
-    // Moving the output onto an address the broadcast view can actually read must still be rejected.
-    Tensor overlapping_output = storage.aliasView({1}, {1}, 0);
-    EXPECT_THROW(static_cast<void>(reduction.stamp(input, overlapping_output, stream)), std::invalid_argument);
-
-    // Dense aliases are valid preallocated outputs, but genuinely strided multi-element output views remain
-    // unsupported. Use an independent ordained dense reduction because a one-element output has no meaningful stride.
-    Tensor dense_input = storage.aliasView({2, 2}, {2, 1}, 8);
-    Tensor strided_output = storage.aliasView({2}, {2}, 64);
-    EXPECT_THROW(static_cast<void>(CubReduction(CubReductionOp::Sum, 0, DataType::FP32)
-                                       .stamp(dense_input, strided_output, stream)),
-                 std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(reduction.stamp(input, storage, stream)), std::invalid_argument);
 }
 
 #if THOR_CUB_ENABLE_FP8_TYPES

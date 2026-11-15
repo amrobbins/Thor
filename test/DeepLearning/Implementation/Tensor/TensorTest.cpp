@@ -1,4 +1,5 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Tensor/StridedSpan.h"
 
 #include <atomic>
 #include <fstream>
@@ -106,79 +107,7 @@ TEST(Tensor, Copies) {
 }
 
 
-TEST(Tensor, MemsetHonorsAliasViewStorageOffsetOnCpuAndGpu) {
-    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
-    Stream stream(0);
-
-    Tensor host(cpuPlacement, TensorDescriptor(DataType::FP32, {6, 2}));
-    float* hostValues = host.getMemPtr<float>();
-    for (uint64_t i = 0; i < 12; ++i)
-        hostValues[i] = static_cast<float>(i + 1);
-
-    Tensor hostTail = host.aliasView({4}, {1}, 8);
-    hostTail.memsetAsync(stream, 0);
-    stream.synchronize();
-    for (uint64_t i = 0; i < 8; ++i)
-        EXPECT_EQ(hostValues[i], static_cast<float>(i + 1));
-    for (uint64_t i = 8; i < 12; ++i)
-        EXPECT_EQ(hostValues[i], 0.0f);
-
-    for (uint64_t i = 0; i < 12; ++i)
-        hostValues[i] = static_cast<float>(i + 1);
-    Tensor device(gpuPlacement, TensorDescriptor(DataType::FP32, {6, 2}));
-    device.copyFromAsync(host, stream);
-    Tensor deviceTail = device.aliasView({4}, {1}, 8);
-    deviceTail.memsetAsync(stream, 0);
-    host.copyFromAsync(device, stream);
-    stream.synchronize();
-
-    hostValues = host.getMemPtr<float>();
-    for (uint64_t i = 0; i < 8; ++i)
-        EXPECT_EQ(hostValues[i], static_cast<float>(i + 1));
-    for (uint64_t i = 8; i < 12; ++i)
-        EXPECT_EQ(hostValues[i], 0.0f);
-}
-
-TEST(TensorSharedOwnership, ByteStorageReinterpretationHonorsSubviewBoundsAndOwnership) {
-    const TensorPlacement cpu(TensorPlacement::MemDevices::CPU);
-    Tensor arena(cpu, TensorDescriptor(DataType::UINT8, {80}));
-    auto* base = arena.getMemPtr<uint8_t>();
-
-    // The autotuner allocates an owning byte arena and passes its candidates
-    // per-slot byte views. They must be reusable for typed partials and temp.
-    Tensor slot = arena.aliasByteStorageAs(DataType::UINT8, {24}, 32);
-    Tensor partials = slot.aliasByteStorageAs(DataType::FP32, {4}, 4);
-    Tensor temp = slot.aliasByteStorageAs(DataType::UINT8, {4}, 20);
-    ASSERT_EQ(partials.getMemPtr<float>(), reinterpret_cast<float*>(base + 36));
-    ASSERT_EQ(temp.getMemPtr<uint8_t>(), base + 52);
-    EXPECT_EQ(partials.getTensorId(), slot.getTensorId());
-
-    // A subview cannot reach into another slot even when the full backing
-    // allocation has enough bytes for the requested region.
-    EXPECT_THROW((void)slot.aliasByteStorageAs(DataType::FP32, {2}, 20), std::runtime_error);
-    EXPECT_THROW((void)slot.aliasByteStorageAs(DataType::FP32, {1}, 2), std::runtime_error);
-    EXPECT_THROW((void)slot.aliasByteStorageAs(DataType::FP64, {1}, 4), std::runtime_error);
-    Tensor strided = arena.aliasView({8}, {2}, 32);
-    EXPECT_THROW((void)strided.aliasByteStorageAs(DataType::FP32, {2}, 0), std::runtime_error);
-    Tensor unaligned_slot = arena.aliasByteStorageAs(DataType::UINT8, {20}, 33);
-    EXPECT_THROW((void)unaligned_slot.aliasByteStorageAs(DataType::FP32, {1}, 0), std::runtime_error);
-    EXPECT_NO_THROW((void)unaligned_slot.aliasByteStorageAs(DataType::FP32, {1}, 3));
-
-    // Keep the memory alive through a nested alias after dropping its owners.
-    temp.dropReference();
-    arena.dropReference();
-    slot.dropReference();
-    partials.getMemPtr<float>()[0] = 123.0f;
-    EXPECT_EQ(partials.getMemPtr<float>()[0], 123.0f);
-
-    // The physical backing need not end on a destination-element boundary.
-    Tensor odd_bytes(cpu, TensorDescriptor(DataType::UINT8, {79}));
-    Tensor odd_slot = odd_bytes.aliasByteStorageAs(DataType::UINT8, {16}, 32);
-    EXPECT_NO_THROW((void)odd_slot.aliasByteStorageAs(DataType::FP32, {4}, 0));
-}
-
-TEST(TensorSharedOwnership, CopiesAndAliasesKeepAllocationAliveAfterOriginalReset) {
+TEST(TensorSharedOwnership, CopiesAndSpansKeepAllocationAliveAfterOriginalReset) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorDescriptor descriptor(DataType::FP32, {8});
 
@@ -189,7 +118,7 @@ TEST(TensorSharedOwnership, CopiesAndAliasesKeepAllocationAliveAfterOriginalRese
 
     const uint64_t tensorId = original.getTensorId();
     Tensor copy = original;
-    Tensor alias = original.aliasView({4}, {1}, 2);
+    const StridedSpan alias(original, 2, {4}, {1});
 
     original.dropReference();
 
@@ -198,7 +127,7 @@ TEST(TensorSharedOwnership, CopiesAndAliasesKeepAllocationAliveAfterOriginalRese
     ASSERT_TRUE(copy.isInitialized());
     ASSERT_TRUE(alias.isInitialized());
     ASSERT_EQ(copy.getTensorId(), tensorId);
-    ASSERT_EQ(alias.getTensorId(), tensorId);
+    ASSERT_EQ(alias.getSourceTensor().getTensorId(), tensorId);
     ASSERT_EQ(copy.getMemPtr<float>(), originalMemory);
     ASSERT_EQ(alias.getMemPtr<float>(), originalMemory + 2);
 
@@ -1697,3 +1626,76 @@ TEST(Tensor, ClearAsyncGpu) {
         }
     }
 }
+
+// memsetElementsAsync sets exactly the requested element range, in storage order, and nothing either side of it.
+static void expectMemsetElementsRange(TensorPlacement placement) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Stream stream(0);
+    const uint64_t rows = 7;
+    const uint64_t cols = 5;
+    const uint64_t first = 2 * cols;  // rows 2..4
+    const uint64_t count = 3 * cols;
+    for (DataType dataType : {DataType::FP16, DataType::FP32, DataType::UINT8, DataType::FP64}) {
+        Tensor t(placement, TensorDescriptor(dataType, {rows, cols}));
+        t.memsetAsync(stream, 9);
+        t.memsetElementsAsync(stream, 0, first, count);
+        t.memsetElementsAsync(stream, 3, first, 0);  // an empty range changes nothing
+        Tensor t_h = placement.getMemDevice() == TensorPlacement::MemDevices::CPU ? t : t.clone(cpuPlacement);
+        if (placement.getMemDevice() != TensorPlacement::MemDevices::CPU)
+            t_h.copyFromAsync(t, stream);
+        stream.synchronize();
+
+        const uint64_t elementBytes = t.getArraySizeInBytes() / t.getTotalNumElements();
+        const int8_t *bytes = static_cast<const int8_t *>(t_h.getMemPtr());
+        for (uint64_t i = 0; i < t.getArraySizeInBytes(); ++i) {
+            const uint64_t element = i / elementBytes;
+            const int8_t expected = element >= first && element < first + count ? 0 : 9;
+            ASSERT_EQ(bytes[i], expected) << "byte " << i << " element " << element;
+        }
+
+        EXPECT_THROW(t.memsetElementsAsync(stream, 0, rows * cols - 2, 3), std::invalid_argument);
+        EXPECT_THROW(t.memsetElementsAsync(stream, 0, rows * cols + 1, 0), std::invalid_argument);
+    }
+}
+
+TEST(Tensor, MemsetElementsAsyncCpu) { expectMemsetElementsRange(TensorPlacement(TensorPlacement::MemDevices::CPU)); }
+
+TEST(Tensor, MemsetElementsAsyncGpu) { expectMemsetElementsRange(TensorPlacement(TensorPlacement::MemDevices::GPU, 0)); }
+
+// copyElementsFromAsync copies exactly the first numElements, between any two placements, and nothing after them.
+TEST(Tensor, CopyElementsFromAsyncCopiesOnlyThePrefix) {
+    const TensorPlacement cpu(TensorPlacement::MemDevices::CPU);
+    const TensorPlacement gpu(TensorPlacement::MemDevices::GPU, 0);
+    Stream stream(0);
+    const uint64_t elements = 37;
+    const uint64_t prefix = 23;
+
+    Tensor source_h(cpu, TensorDescriptor(DataType::FP32, {elements}));
+    for (uint64_t i = 0; i < elements; ++i)
+        source_h.getMemPtr<float>()[i] = static_cast<float>(i) + 0.5f;
+    Tensor source_d = source_h.clone(gpu);
+    source_d.copyFromAsync(source_h, stream);
+
+    for (const TensorPlacement& from : {cpu, gpu}) {
+        for (const TensorPlacement& to : {cpu, gpu}) {
+            const Tensor& source = from == cpu ? source_h : source_d;
+            Tensor destination(to, TensorDescriptor(DataType::FP32, {elements}));
+            destination.memsetAsync(stream, 0);
+            destination.copyElementsFromAsync(source, prefix, stream);
+            Tensor result = destination.clone(cpu);
+            result.copyFromAsync(destination, stream);
+            stream.synchronize();
+            for (uint64_t i = 0; i < elements; ++i) {
+                const float expected = i < prefix ? static_cast<float>(i) + 0.5f : 0.0f;
+                ASSERT_EQ(result.getMemPtr<float>()[i], expected) << "element " << i;
+            }
+        }
+    }
+
+    Tensor shorter(gpu, TensorDescriptor(DataType::FP32, {prefix - 1}));
+    EXPECT_THROW(shorter.copyElementsFromAsync(source_d, prefix, stream), std::invalid_argument);
+    Tensor halves(gpu, TensorDescriptor(DataType::FP16, {elements}));
+    EXPECT_THROW(halves.copyElementsFromAsync(source_d, prefix, stream), std::invalid_argument);
+    stream.synchronize();
+}
+

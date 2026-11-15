@@ -2,6 +2,7 @@
 // shard-relative lane candidate per partial; launchFp8ArgPackedContinuation reduces them over shards. Checked against
 // the FP32 ARG reference for FP32 value + UINT32 index, FP8 value only and UINT64 index only (stride 3).
 
+#include "test/Utilities/TensorOperations/OutputSpan.h"
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 #include "test/Utilities/TensorOperations/Fp8ArgReference.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
@@ -74,7 +75,7 @@ void checkPacked(uint64_t outer,
                 if (mode != 1)
                     index = Tensor(gpuPlacement,
                                    TensorDescriptor(mode == 2 ? DataType::UINT64 : DataType::UINT32, {outer, k}));
-                launchFp8ArgPackedContinuation(packed, value ? &*value : nullptr, index ? &*index : nullptr, dtype,
+                launchFp8ArgPackedContinuation(packed, outputSpan(value), outputSpan(index), dtype,
                                                outer, r, k, shards, uniform_rows, maximum, stride, stream);
                 stream.synchronize();
                 const std::vector<float> got_values =
@@ -196,7 +197,7 @@ TEST(CubArgReductionFp8Packed, ContinuationIndexesPastFourBillionRows) {
     }
     Tensor packed = makeGpuUnsignedTensor(partials, {Outer, Shards, K}, stream, DataType::UINT32);
     Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT64, {Outer, K}));
-    launchFp8ArgPackedContinuation(static_cast<uint32_t*>(packed.getMemPtr<void>()), nullptr, &index,
+    launchFp8ArgPackedContinuation(static_cast<uint32_t*>(packed.getMemPtr<void>()), nullptr, outputSpan(index),
                                    DataType::FP8_E4M3, Outer, R, K, Shards, Depth, false, 1, stream);
     stream.synchronize();
     const std::vector<uint64_t> got = copyGpuTensorAsUnsigned(index, stream);
@@ -273,7 +274,7 @@ TEST(CubArgReductionFp8Packed, ShardSplitContinuationMatchesHost) {
                     Tensor index(gpuPlacement, TensorDescriptor(mode == 0 ? DataType::UINT32 : DataType::UINT64,
                                                                 {shape.outer, shape.k}));
                     launchFp8ArgPackedContinuation(static_cast<uint32_t*>(packed.getMemPtr<void>()),
-                                                   value ? &*value : nullptr, &index, dtype, shape.outer, shape.r,
+                                                   outputSpan(value), outputSpan(index), dtype, shape.outer, shape.r,
                                                    shape.k, shape.shards, shape.uniform_rows, maximum, stride, stream);
                     stream.synchronize();
                     const std::vector<uint64_t> got_indices = copyGpuTensorAsUnsigned(index, stream);

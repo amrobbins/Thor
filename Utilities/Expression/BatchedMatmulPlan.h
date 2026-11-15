@@ -1,11 +1,11 @@
 #pragma once
 
+#include "DeepLearning/Implementation/Tensor/StridedSpan.h"
+
 #include <cstdint>
 #include <vector>
 
 namespace ThorImplementation {
-
-class Tensor;
 
 struct BatchedMatmulShapePlan {
     bool transpose_lhs = false;
@@ -126,6 +126,15 @@ struct MatmulBatchGroup {
     bool operator==(const MatmulBatchGroup& other) const = default;
 };
 
+// The lhs, rhs and output of one cuBLASLt matmul when they are not whole tensors: one group of a grouped MATMUL, each
+// operand the part of its tensor the group reads or writes with the group's [batch_count, rows, cols] layout.
+// cuBLASLt gets each span's address and layout; no view is made.
+struct MatmulOperands {
+    StridedSpan lhs;
+    StridedSpan rhs;
+    StridedSpan output;
+};
+
 [[nodiscard]] BatchedMatmulShapePlan planBatchedMatmulShape(const std::vector<uint64_t>& lhs_dimensions,
                                                             const std::vector<uint64_t>& rhs_dimensions,
                                                             bool transpose_lhs = false,
@@ -133,16 +142,17 @@ struct MatmulBatchGroup {
 
 [[nodiscard]] MatmulTensorLayout denseMatmulTensorLayout(const std::vector<uint64_t>& dimensions,
                                                          uint64_t storage_element_offset = 0);
-[[nodiscard]] MatmulTensorLayout matmulTensorLayout(const Tensor& tensor);
+// The planner layout of an operand: a whole tensor (which converts) or a strided span of one.
+[[nodiscard]] MatmulTensorLayout matmulTensorLayout(const StridedSpan& operand);
 
 [[nodiscard]] BatchedMatmulLayoutPlan planBatchedMatmulLayout(const MatmulTensorLayout& lhs,
                                                               const MatmulTensorLayout& rhs,
                                                               const MatmulTensorLayout& output,
                                                               bool transpose_lhs = false,
                                                               bool transpose_rhs = false);
-[[nodiscard]] BatchedMatmulLayoutPlan planBatchedMatmulLayout(const Tensor& lhs,
-                                                              const Tensor& rhs,
-                                                              const Tensor& output,
+[[nodiscard]] BatchedMatmulLayoutPlan planBatchedMatmulLayout(const StridedSpan& lhs,
+                                                              const StridedSpan& rhs,
+                                                              const StridedSpan& output,
                                                               bool transpose_lhs = false,
                                                               bool transpose_rhs = false);
 
@@ -151,5 +161,12 @@ struct MatmulBatchGroup {
 // accidentally allocating an enormous vector if max_groups would be exceeded.
 [[nodiscard]] std::vector<MatmulBatchGroup> materializeBatchedMatmulGroups(const BatchedMatmulLayoutPlan& plan,
                                                                            uint64_t max_groups = 1'000'000);
+
+// The operands of one group from materializeBatchedMatmulGroups, over the lhs, rhs and output the plan was made for
+// (whole tensors or strided spans). Throws if a group would reach past an operand's storage.
+[[nodiscard]] MatmulOperands matmulGroupOperands(const StridedSpan& lhs,
+                                                 const StridedSpan& rhs,
+                                                 const StridedSpan& output,
+                                                 const MatmulBatchGroup& group);
 
 }  // namespace ThorImplementation

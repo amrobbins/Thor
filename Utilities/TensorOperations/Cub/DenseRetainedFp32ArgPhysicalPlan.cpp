@@ -150,8 +150,8 @@ DenseReductionCandidate makeRetainedF16KRArgCandidate(const DenseReductionProble
     return candidateFor(problem, site, std::move(plan));
 }
 
-void launchRetainedFp32ArgPlan(const DenseRetainedFp32ArgPhysicalPlan& plan, const Tensor& input,
-                               const Tensor* carried_index, Tensor* value_output, Tensor* index_output,
+void launchRetainedFp32ArgPlan(const DenseRetainedFp32ArgPhysicalPlan& plan, const StridedSpan& input,
+                               const StridedSpan* carried_index, const StridedSpan* value_output, const StridedSpan* index_output,
                                const CubReductionGeometry& geometry, void* scratch, bool maximum,
                                uint64_t domain_stride, Stream& stream) {
     if ((carried_index != nullptr) != plan.carried)
@@ -165,7 +165,7 @@ void launchRetainedFp32ArgPlan(const DenseRetainedFp32ArgPhysicalPlan& plan, con
                                    domain_stride, stream);
             return;
         }
-        Tensor site_input = input;
+        StridedSpan site_input = input;
         site_input.reshape(plan.input_dimensions);
         F16RK::launchF16RKArgPass(plan.identity, site_input, value_output, index_output, geometry,
                                   static_cast<uint64_t*>(scratch), maximum, domain_stride, stream);
@@ -182,10 +182,10 @@ void launchRetainedFp32ArgPlan(const DenseRetainedFp32ArgPhysicalPlan& plan, con
         return;
     }
     // The RK launchers take the pass's own [outer, r, inner] geometry.
-    Tensor site_input = input;
+    StridedSpan site_input = input;
     site_input.reshape(plan.input_dimensions);
     if (plan.carried) {
-        Tensor site_carried = *carried_index;
+        StridedSpan site_carried = *carried_index;
         site_carried.reshape(plan.input_dimensions);
         Fp32RK::launchFp32RKCarriedArgPass(plan.identity, site_input, site_carried, value_output, index_output,
                                            geometry, scratch, maximum, domain_stride, stream);

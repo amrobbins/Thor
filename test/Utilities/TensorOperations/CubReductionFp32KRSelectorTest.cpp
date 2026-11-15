@@ -5,6 +5,7 @@
 // GPU: the winner is a shortlisted FP32 shape, the selection is cached under kind Fp32KR (a deeper selection answers
 // a shallower request), and the winner computes the reduction.
 
+#include "test/Utilities/TensorOperations/OutputSpan.h"
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 #include "test/Utilities/TensorOperations/Fp8ArgReference.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
@@ -354,7 +355,7 @@ TEST(CubReductionFp32KRSelector, ArgSelectsCachesAndComputes) {
         std::optional<Tensor> scratch;
         const uint64_t scratch_bytes = KR::fp8KRScratchBytes(*regular.shape, true);
         if (scratch_bytes != 0) scratch = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {scratch_bytes}));
-        launchFp32KRArgSegments(input, nullptr, &index, *regular.shape, scratch ? scratch->getMemPtr<void>() : nullptr,
+        launchFp32KRArgSegments(input, nullptr, outputSpan(index), *regular.shape, scratch ? scratch->getMemPtr<void>() : nullptr,
                                 scratch_bytes, s.maximum, 1, stream);
         stream.synchronize();
         const std::vector<uint64_t> got = copyGpuTensorAsUnsigned(index, stream);
@@ -481,7 +482,7 @@ TEST(CubReductionFp32KRSelector, CarriedArgSitesSelectCacheAndCompute) {
             std::optional<Tensor> scratch;
             const uint64_t scratch_bytes = fp32KRCarriedArgScratchBytes(*regular.shape);
             if (scratch_bytes != 0) scratch = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {scratch_bytes}));
-            launchFp32KRCarriedArgSegments(input, carried_index, nullptr, &index, *regular.shape,
+            launchFp32KRCarriedArgSegments(input, carried_index, nullptr, outputSpan(index), *regular.shape,
                                            scratch ? scratch->getMemPtr<void>() : nullptr, scratch_bytes, c.maximum,
                                            stride, stream);
             stream.synchronize();

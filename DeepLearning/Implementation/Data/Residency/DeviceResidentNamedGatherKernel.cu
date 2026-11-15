@@ -14,6 +14,7 @@
 #include <vector>
 
 using ThorImplementation::Tensor;
+using ThorImplementation::TensorSpan;
 using ThorImplementation::TensorPlacement;
 
 namespace {
@@ -413,10 +414,10 @@ void launchForRowIndexType(const uint8_t *source,
     }
 }
 
-void validateGatherTensorShapes(const Tensor &source, const Tensor &destination, const Tensor &rowIndicesDevice) {
+void validateGatherTensorShapes(const Tensor &source, const Tensor &destination, const TensorSpan &rowIndicesDevice) {
     THOR_THROW_IF_FALSE(source.isInitialized());
     THOR_THROW_IF_FALSE(destination.isInitialized());
-    THOR_THROW_IF_FALSE(rowIndicesDevice.isInitialized());
+    rowIndicesDevice.validate("Device resident gather row indices");
     THOR_THROW_IF_FALSE(source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(destination.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(rowIndicesDevice.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
@@ -427,12 +428,10 @@ void validateGatherTensorShapes(const Tensor &source, const Tensor &destination,
 
     const std::vector<uint64_t> sourceDims = source.getDimensions();
     const std::vector<uint64_t> destDims = destination.getDimensions();
-    const std::vector<uint64_t> indexDims = rowIndicesDevice.getDimensions();
     THOR_THROW_IF_FALSE(!sourceDims.empty());
     THOR_THROW_IF_FALSE(!destDims.empty());
     THOR_THROW_IF_FALSE(sourceDims.size() == destDims.size());
-    THOR_THROW_IF_FALSE(indexDims.size() == 1);
-    THOR_THROW_IF_FALSE(indexDims.at(0) == destDims.at(0));
+    THOR_THROW_IF_FALSE(rowIndicesDevice.count == destDims.at(0));
     THOR_THROW_IF_FALSE(sourceDims.at(0) > 0);
     THOR_THROW_IF_FALSE(destDims.at(0) > 0);
     for (uint64_t i = 1; i < sourceDims.size(); ++i) {
@@ -445,14 +444,14 @@ void validateGatherTensorShapes(const Tensor &source, const Tensor &destination,
 void launchDeviceResidentNamedGatherKernelWithRowsPerCtaForBenchmark(
     const Tensor &source,
     Tensor &destination,
-    const Tensor &rowIndicesDevice,
+    const TensorSpan &rowIndicesDevice,
     uint64_t logicalRows,
     uint32_t rowsPerCta,
     Stream &stream) {
     validateGatherTensorShapes(source, destination, rowIndicesDevice);
 
     const uint64_t batchCapacity = destination.getDimensions().at(0);
-    const uint64_t rowIndexCapacity = rowIndicesDevice.getDimensions().at(0);
+    const uint64_t rowIndexCapacity = rowIndicesDevice.count;
     THOR_THROW_IF_FALSE(logicalRows >= 1 && logicalRows <= batchCapacity);
     THOR_THROW_IF_FALSE(logicalRows <= rowIndexCapacity);
     const uint64_t sourceRows = source.getDimensions().at(0);
@@ -466,7 +465,7 @@ void launchDeviceResidentNamedGatherKernelWithRowsPerCtaForBenchmark(
 
     const uint8_t *sourceBytes = static_cast<const uint8_t *>(source.getMemPtr());
     uint8_t *destinationBytes = static_cast<uint8_t *>(destination.getMemPtr());
-    const uint64_t *rowIndices = rowIndicesDevice.getMemPtr<uint64_t>();
+    const uint64_t *rowIndices = rowIndicesDevice.data<uint64_t>();
     const cudaStream_t cudaStream = stream.getStream();
     const uint32_t selectedRowsPerCta =
         rowsPerCta == 0
@@ -491,7 +490,7 @@ void launchDeviceResidentNamedGatherKernelWithRowsPerCtaForBenchmark(
 void launchDeviceResidentNamedGatherKernel(
     const Tensor &source,
     Tensor &destination,
-    const Tensor &rowIndicesDevice,
+    const TensorSpan &rowIndicesDevice,
     uint64_t logicalRows,
     Stream &stream) {
     launchDeviceResidentNamedGatherKernelWithRowsPerCtaForBenchmark(

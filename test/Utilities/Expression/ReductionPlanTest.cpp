@@ -1,10 +1,12 @@
 #include "Utilities/Expression/CompiledEquation.h"
 #include "Utilities/Expression/StampedEquation.h"
+#include "Utilities/Exceptions.h"
 
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
 
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -61,12 +63,15 @@ TEST(ExpressionReductionPlan, CacheKeySeparatesPhysicalPermutationLayouts) {
     EXPECT_NE(ijk_to_ki, different_physical_layout);
 }
 
-TEST(ExpressionReductionPlan, PhysicalPermutationValueReductionBuildsPermutationAwareTiledPlan) {
+// 1390: the reducer refuses a rotated-output permutation ([32, 7, 5] over a dense [7, 5, 32], reducing the last axis
+// leaves [32, 7], the rotation of the dense [7, 32]), so no reduction plan is built for it. The Expression stage runs
+// it in two parts instead (FusedEquation: the dense reduction of its bytes, then a DenseCopy stage).
+TEST(ExpressionReductionPlan, PhysicalPermutationWithARotatedOutputBuildsNoPlan) {
     REQUIRE_CUDA_DEVICE();
 
     TensorPlacement gpu_placement(TensorPlacement::MemDevices::GPU, 0);
     Tensor storage(gpu_placement, TensorDescriptor(DataType::FP32, {7, 5, 32}));
-    Tensor input = storage.aliasView({32, 7, 5}, {1, 160, 32}, 0);
+    const StridedSpan input(storage, 0, {32, 7, 5}, {1, 160, 32});
     auto compiled = std::make_shared<CompiledReduction>(ExprOp::REDUCE_SUM,
                                                         std::vector<uint64_t>{2},
                                                         std::vector<uint64_t>{2},
@@ -74,18 +79,27 @@ TEST(ExpressionReductionPlan, PhysicalPermutationValueReductionBuildsPermutation
                                                         DataType::FP32,
                                                         DataType::FP32);
 
-    std::shared_ptr<BuiltReduction> built = StampedEquation::buildReduction(compiled, input, 0);
+    EXPECT_THROW(static_cast<void>(StampedEquation::buildReduction(compiled, input, 0)), NotImplementedException);
+    const std::optional<CubReductionViewSplit> split =
+        CubReduction::splitRefusedView(input.getDimensions(), input.getStridesElements(), {2});
+    ASSERT_TRUE(split.has_value());
+    EXPECT_EQ(split->kind, CubReductionViewSplit::Kind::RotatedOutput);
+    EXPECT_EQ(split->dense_dimensions, (std::vector<uint64_t>{7, 5, 32}));
+
+    // The first part is an ordinary dense plan.
+    auto dense = std::make_shared<CompiledReduction>(ExprOp::REDUCE_SUM,
+                                                     std::vector<uint64_t>{1},
+                                                     std::vector<uint64_t>{1},
+                                                     DataType::FP32,
+                                                     DataType::FP32,
+                                                     DataType::FP32);
+    std::shared_ptr<BuiltReduction> built =
+        StampedEquation::buildReduction(dense, input.asDense(split->dense_dimensions), 0);
     ASSERT_NE(built, nullptr);
     ASSERT_TRUE(built->geometry.has_value());
     EXPECT_EQ(built->geometry->path, CubReductionPath::TiledFixedSegment);
-    ASSERT_TRUE(built->geometry->permutation_aware_tiled_geometry.has_value());
-    EXPECT_EQ(built->geometry->outer_size, 7U);
     EXPECT_EQ(built->geometry->reduction_size, 5U);
-    EXPECT_EQ(built->geometry->inner_size, 32U);
-    EXPECT_TRUE(built->geometry->tiled_output_permuted);
-    EXPECT_TRUE(built->geometry->tiled_output_shared_transpose);
-    EXPECT_EQ(built->geometry->tiled_output_outer_stride, 1U);
-    EXPECT_EQ(built->geometry->tiled_output_inner_stride, 7U);
+    EXPECT_EQ(built->geometry->output_elements, 7U * 32U);
 }
 
 TEST(ExpressionReductionPlan, EveryDenseValueReductionBuildsACachedPlan) {

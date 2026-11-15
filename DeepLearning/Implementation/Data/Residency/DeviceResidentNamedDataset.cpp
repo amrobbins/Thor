@@ -25,6 +25,7 @@ using ThorImplementation::DataType;
 using ThorImplementation::Tensor;
 using ThorImplementation::TensorDescriptor;
 using ThorImplementation::TensorPlacement;
+using ThorImplementation::TensorSpan;
 using json = nlohmann::json;
 
 namespace {
@@ -1174,7 +1175,7 @@ const Tensor &DeviceResidentNamedDataset::tensor(const std::string &name) const 
 
 RaggedBatchExtent DeviceResidentNamedDataset::validateCompactRaggedBatchCapacity(
     const std::string &fieldName,
-    const Tensor &rowIndicesHost,
+    const TensorSpan &rowIndicesHost,
     uint64_t logicalRows,
     uint64_t maxTotalValues,
     uint64_t maxValuesPerRow) const {
@@ -1183,15 +1184,14 @@ RaggedBatchExtent DeviceResidentNamedDataset::validateCompactRaggedBatchCapacity
         throw std::runtime_error(
             "DeviceResidentNamedDataset has no compact ragged field '" + fieldName + "'.");
     }
-    THOR_THROW_IF_FALSE(rowIndicesHost.isInitialized());
+    rowIndicesHost.validate("Device resident row indices");
     THOR_THROW_IF_FALSE(
         rowIndicesHost.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
     THOR_THROW_IF_FALSE(rowIndicesHost.getDataType() == DataType::UINT64);
-    THOR_THROW_IF_FALSE(rowIndicesHost.getDimensions().size() == 1);
-    THOR_THROW_IF_FALSE(logicalRows >= 1 && logicalRows <= rowIndicesHost.getDimensions().front());
+    THOR_THROW_IF_FALSE(logicalRows >= 1 && logicalRows <= rowIndicesHost.count);
 
-    const uint64_t *rowIndices = rowIndicesHost.getMemPtr<uint64_t>();
-    const uint64_t physicalBatchSize = rowIndicesHost.getDimensions().front();
+    const uint64_t *rowIndices = rowIndicesHost.data<uint64_t>();
+    const uint64_t physicalBatchSize = rowIndicesHost.count;
     std::vector<uint64_t> hostOffsets(physicalBatchSize + 1, 0);
     uint64_t active = 0;
     for (uint64_t row = 0; row < logicalRows; ++row) {
@@ -1225,7 +1225,7 @@ RaggedBatchExtent DeviceResidentNamedDataset::validateCompactRaggedBatchCapacity
 
 void DeviceResidentNamedDataset::enqueueCompactRaggedFieldMaterialization(
     const std::string &fieldName,
-    const Tensor &rowIndicesDevice,
+    const TensorSpan &rowIndicesDevice,
     uint64_t logicalRows,
     ThorImplementation::RaggedTensor &destination,
     Stream &stream) const {
@@ -1238,7 +1238,7 @@ void DeviceResidentNamedDataset::enqueueCompactRaggedFieldMaterialization(
     const ThorImplementation::RaggedTensorDescriptor descriptor = destination.getDescriptor();
     THOR_THROW_IF_FALSE(descriptor.getValuesDataType() == spec.dataType);
     THOR_THROW_IF_FALSE(descriptor.getTrailingDimensions() == spec.valueDimensions);
-    THOR_THROW_IF_FALSE(descriptor.getBatchSize() == rowIndicesDevice.getDimensions().front());
+    THOR_THROW_IF_FALSE(descriptor.getBatchSize() == rowIndicesDevice.count);
     const Tensor *sourceValues = &found->second.values;
     if (spec.isWindowedSourceBacked()) {
         THOR_THROW_IF_FALSE(spec.sourceName.has_value());
@@ -1274,7 +1274,7 @@ void DeviceResidentNamedDataset::enqueueCompactRaggedFieldMaterialization(
 
 RaggedBatchExtent DeviceResidentNamedDataset::validateSnapshotRaggedBatchCapacity(
     const std::string &fieldName,
-    const Tensor &rowIndicesHost,
+    const TensorSpan &rowIndicesHost,
     uint64_t logicalRows,
     uint64_t maxTotalValues,
     uint64_t maxValuesPerRow) const {
@@ -1283,15 +1283,14 @@ RaggedBatchExtent DeviceResidentNamedDataset::validateSnapshotRaggedBatchCapacit
         throw std::runtime_error(
             "DeviceResidentNamedDataset has no snapshot ragged field '" + fieldName + "'.");
     }
-    THOR_THROW_IF_FALSE(rowIndicesHost.isInitialized());
+    rowIndicesHost.validate("Device resident row indices");
     THOR_THROW_IF_FALSE(
         rowIndicesHost.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
     THOR_THROW_IF_FALSE(rowIndicesHost.getDataType() == DataType::UINT64);
-    THOR_THROW_IF_FALSE(rowIndicesHost.getDimensions().size() == 1);
-    THOR_THROW_IF_FALSE(logicalRows >= 1 && logicalRows <= rowIndicesHost.getDimensions().front());
+    THOR_THROW_IF_FALSE(logicalRows >= 1 && logicalRows <= rowIndicesHost.count);
 
-    const uint64_t *rowIndices = rowIndicesHost.getMemPtr<uint64_t>();
-    const uint64_t physicalBatchSize = rowIndicesHost.getDimensions().front();
+    const uint64_t *rowIndices = rowIndicesHost.data<uint64_t>();
+    const uint64_t physicalBatchSize = rowIndicesHost.count;
     std::vector<uint64_t> hostOffsets(physicalBatchSize + 1, 0);
     uint64_t active = 0;
     for (uint64_t row = 0; row < logicalRows; ++row) {
@@ -1325,7 +1324,7 @@ RaggedBatchExtent DeviceResidentNamedDataset::validateSnapshotRaggedBatchCapacit
 
 void DeviceResidentNamedDataset::enqueueSnapshotRaggedFieldMaterialization(
     const std::string &fieldName,
-    const Tensor &rowIndicesDevice,
+    const TensorSpan &rowIndicesDevice,
     uint64_t logicalRows,
     ThorImplementation::RaggedTensor &destination,
     Stream &stream) const {
@@ -1338,7 +1337,7 @@ void DeviceResidentNamedDataset::enqueueSnapshotRaggedFieldMaterialization(
     const ThorImplementation::RaggedTensorDescriptor descriptor = destination.getDescriptor();
     THOR_THROW_IF_FALSE(descriptor.getValuesDataType() == storage.spec.dataType);
     THOR_THROW_IF_FALSE(descriptor.getTrailingDimensions() == storage.spec.valueDimensions);
-    THOR_THROW_IF_FALSE(descriptor.getBatchSize() == rowIndicesDevice.getDimensions().front());
+    THOR_THROW_IF_FALSE(descriptor.getBatchSize() == rowIndicesDevice.count);
     Tensor values = destination.getValues();
     Tensor offsets = destination.getOffsets();
     launchDeviceResidentRaggedMaterializationKernel(
@@ -1386,22 +1385,21 @@ uint64_t DeviceResidentNamedDataset::compactWindowPlanBytesPerRow(
 
 void DeviceResidentNamedDataset::stageCompactWindowPlan(
     const std::string &planName,
-    const Tensor &rowIndicesHost,
+    const TensorSpan &rowIndicesHost,
     uint64_t logicalRows,
-    Tensor &planHostStaging) const {
+    const TensorSpan &planHostStaging) const {
     const auto found = compactWindowPlans.find(planName);
     if (found == compactWindowPlans.end()) {
         throw std::runtime_error(
             "DeviceResidentNamedDataset has no compact window plan '" + planName + "'.");
     }
-    THOR_THROW_IF_FALSE(rowIndicesHost.isInitialized());
+    rowIndicesHost.validate("Device resident row indices");
     THOR_THROW_IF_FALSE(
         rowIndicesHost.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
     THOR_THROW_IF_FALSE(rowIndicesHost.getDataType() == DataType::UINT64);
-    THOR_THROW_IF_FALSE(rowIndicesHost.getDimensions().size() == 1);
-    const uint64_t batchCapacity = rowIndicesHost.getDimensions().front();
+    const uint64_t batchCapacity = rowIndicesHost.count;
     THOR_THROW_IF_FALSE(logicalRows <= batchCapacity);
-    THOR_THROW_IF_FALSE(planHostStaging.isInitialized());
+    planHostStaging.validate("Compact resident window plan staging");
     THOR_THROW_IF_FALSE(
         planHostStaging.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
     THOR_THROW_IF_FALSE(
@@ -1411,14 +1409,14 @@ void DeviceResidentNamedDataset::stageCompactWindowPlan(
     THOR_THROW_IF_FALSE(
         logicalRows == 0 || bytesPerRow <= std::numeric_limits<uint64_t>::max() / logicalRows);
     THOR_THROW_IF_FALSE(
-        planHostStaging.getArraySizeInBytes() == logicalRows * bytesPerRow);
+        planHostStaging.bytes() == logicalRows * bytesPerRow);
 
-    const uint64_t *rowIndices = rowIndicesHost.getMemPtr<uint64_t>();
+    const uint64_t *rowIndices = rowIndicesHost.data<uint64_t>();
     const CompactWindowPlanStorage &storage = found->second;
     if (storage.use32BitSteps) {
         THOR_THROW_IF_FALSE(storage.plans32.size() == numExamples);
         auto *destination =
-            reinterpret_cast<DeviceResidentWindowRowPlan32 *>(planHostStaging.getMemPtr());
+            reinterpret_cast<DeviceResidentWindowRowPlan32 *>(planHostStaging.address());
         for (uint64_t row = 0; row < logicalRows; ++row) {
             const uint64_t sourceRow = rowIndices[row];
             if (sourceRow >= storage.plans32.size()) {
@@ -1431,7 +1429,7 @@ void DeviceResidentNamedDataset::stageCompactWindowPlan(
     } else {
         THOR_THROW_IF_FALSE(storage.plans64.size() == numExamples);
         auto *destination =
-            reinterpret_cast<DeviceResidentWindowRowPlan64 *>(planHostStaging.getMemPtr());
+            reinterpret_cast<DeviceResidentWindowRowPlan64 *>(planHostStaging.address());
         for (uint64_t row = 0; row < logicalRows; ++row) {
             const uint64_t sourceRow = rowIndices[row];
             if (sourceRow >= storage.plans64.size()) {
@@ -1446,8 +1444,8 @@ void DeviceResidentNamedDataset::stageCompactWindowPlan(
 
 void DeviceResidentNamedDataset::enqueueCompactFieldMaterialization(
     const std::string &fieldName,
-    const Tensor &rowIndicesDevice,
-    const Tensor &windowPlanDevice,
+    const TensorSpan &rowIndicesDevice,
+    const TensorSpan &windowPlanDevice,
     uint64_t logicalRows,
     Tensor &destination,
     Stream &stream) const {
@@ -1455,7 +1453,7 @@ void DeviceResidentNamedDataset::enqueueCompactFieldMaterialization(
     if (directIt != compactDirectFields.end()) {
         const DatasetLayout::TensorSpec &spec = directIt->second.spec;
         std::vector<uint64_t> expectedDimensions;
-        expectedDimensions.push_back(rowIndicesDevice.getDimensions().front());
+        expectedDimensions.push_back(rowIndicesDevice.count);
         expectedDimensions.insert(
             expectedDimensions.end(), spec.dimensions.begin(), spec.dimensions.end());
         THOR_THROW_IF_FALSE(
@@ -1486,11 +1484,10 @@ void DeviceResidentNamedDataset::enqueueCompactFieldMaterialization(
         THOR_THROW_IF_FALSE(sourceIt != compactSources.end());
         sourceStorage = &sourceIt->second.bytes;
     }
-    THOR_THROW_IF_FALSE(rowIndicesDevice.isInitialized());
-    THOR_THROW_IF_FALSE(rowIndicesDevice.getDimensions().size() == 1);
-    const uint64_t batchCapacity = rowIndicesDevice.getDimensions().front();
+    rowIndicesDevice.validate("Device resident row indices");
+    const uint64_t batchCapacity = rowIndicesDevice.count;
     THOR_THROW_IF_FALSE(logicalRows <= batchCapacity);
-    THOR_THROW_IF_FALSE(windowPlanDevice.isInitialized());
+    windowPlanDevice.validate("Compact resident window plan");
     THOR_THROW_IF_FALSE(windowPlanDevice.getPlacement() == placement);
     THOR_THROW_IF_FALSE(
         windowPlanDevice.getDataType() == DataType::UINT8 ||
@@ -1500,7 +1497,7 @@ void DeviceResidentNamedDataset::enqueueCompactFieldMaterialization(
         compactWindowPlanBytesPerRow(fieldStorage.spec.name) <=
             std::numeric_limits<uint64_t>::max() / logicalRows);
     THOR_THROW_IF_FALSE(
-        windowPlanDevice.getArraySizeInBytes() ==
+        windowPlanDevice.bytes() ==
         logicalRows * compactWindowPlanBytesPerRow(fieldStorage.spec.name));
 
     std::vector<uint64_t> expectedDimensions;

@@ -15,7 +15,6 @@ namespace {
 uint64_t requireBatchCapacity(const Tensor& tensor, uint32_t validExampleCount) {
     THOR_THROW_IF_FALSE(tensor.isInitialized());
     THOR_THROW_IF_FALSE(tensor.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    THOR_THROW_IF_FALSE(!tensor.hasCustomStrides());
     THOR_THROW_IF_FALSE(tensor.isDenseContiguous());
     const std::vector<uint64_t> dimensions = tensor.getDimensions();
     THOR_THROW_IF_FALSE(!dimensions.empty());

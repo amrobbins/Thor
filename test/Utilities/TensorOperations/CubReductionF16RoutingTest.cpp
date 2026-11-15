@@ -14,7 +14,8 @@
 //     one a retained FP32 carried ARG pass, and values and indices match the ARG contract (THOR_F16_ROUTING_ARG_CASES,
 //     default 8 per format).
 //   - MisalignedInputsUseTolerantPasses: FP16 / BF16 input views 2, 4 and 8 bytes off a 16-byte boundary run the
-//     alignment-tolerant RK passes (rotated RuntimeK; AlignedK at a packet no wider than the offset) and stay exact.
+//     alignment-tolerant RK passes (rotated RuntimeK; AlignedK at a packet no wider than the offset; 1381: the VALUE
+//     OneWindow kernel) and stay exact.
 
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 #include "test/Utilities/TensorOperations/Fp8ArgReference.h"
@@ -589,8 +590,9 @@ TEST(CubReductionF16Routing, RandomMultiPassArgPlans) {
 }
 
 // FP16 / BF16 input views 2, 4 and 8 bytes off a 16-byte boundary still reduce: their RK passes are the
-// alignment-tolerant ones (the rotated RuntimeK pass; AlignedK at a packet no wider than the offset), their KR passes
-// any shape, and VALUE and ARG results are exact (a one-time warning names the slower path).
+// alignment-tolerant ones (the rotated RuntimeK pass; AlignedK at a packet no wider than the offset; 1381: the VALUE
+// OneWindow kernel), their KR passes any shape, and VALUE and ARG results are exact (a one-time warning names the
+// slower path).
 TEST(CubReductionF16Routing, MisalignedInputsUseTolerantPasses) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -618,13 +620,13 @@ TEST(CubReductionF16Routing, MisalignedInputsUseTolerantPasses) {
                                               packed.getMemPtr<void>(), 2 * elements, cudaMemcpyDeviceToDevice,
                                               stream.getStream()));
                     stream.synchronize();
-                    return storages.back().aliasByteStorageAs(dtype, shape.dims, offset_bytes);
+                    return StridedSpan(storages.back()).bytesAs(offset_bytes, dtype, shape.dims);
                 };
                 // VALUE data without NaNs (MAX propagates a NaN; the host reference does not), ARG data with them.
                 const std::vector<float> values = drawValues(rng, elements, false, Data::Extremum, m.reduced);
                 const std::vector<float> arg_values = drawValues(rng, elements, false, Data::Arg, m.reduced);
-                const Tensor input = misaligned(values);
-                const Tensor arg_input = misaligned(arg_values);
+                const StridedSpan input = misaligned(values);
+                const StridedSpan arg_input = misaligned(arg_values);
                 ASSERT_EQ(offset_bytes == 0 ? 16u : offset_bytes, input.alignmentBytes(16));
 
                 // VALUE: Max is exact.
@@ -635,6 +637,7 @@ TEST(CubReductionF16Routing, MisalignedInputsUseTolerantPasses) {
                 const DensePhysicalPassDiagnostic& first = passes.front();
                 if (offset_bytes != 0 && startsWith(first.family, "retained_f16_rk")) {
                     const bool tolerant = first.family == "retained_f16_rk:runtime_k" ||
+                                          first.family == "retained_f16_rk:one_window" ||  // 1381
                                           (first.family == "retained_f16_rk:aligned_k" && first.packet_bytes &&
                                            *first.packet_bytes <= offset_bytes);
                     EXPECT_TRUE(tolerant) << first.family;
@@ -645,7 +648,8 @@ TEST(CubReductionF16Routing, MisalignedInputsUseTolerantPasses) {
                               valueReference(CubReductionOp::Max, values, m));
 
                 // ARG: argmin, value and index. A tolerant RK ARG pass is the rotated one (RuntimeK layout 1,
-                // RotatedPrefix) or AlignedK at a packet no wider than the offset.
+                // RotatedPrefix), PacketComplete (layout 0, 1384), OneWindow (1383) or AlignedK at a packet no wider
+                // than the offset.
                 CubArgReductionOutputOptions outputs;
                 outputs.value_output_dtype = DataType::FP32;
                 outputs.index_output_dtype = DataType::UINT64;
@@ -654,7 +658,9 @@ TEST(CubReductionF16Routing, MisalignedInputsUseTolerantPasses) {
                 expectRetainedArgPasses(arg_passes);
                 if (offset_bytes != 0 && startsWith(arg_passes.front(), "f16_arg_rk:")) {
                     const std::string& name = arg_passes.front();
-                    bool tolerant = startsWith(name, "f16_arg_rk:runtime_k_a1_");
+                    bool tolerant = startsWith(name, "f16_arg_rk:runtime_k_a1_") ||
+                                    startsWith(name, "f16_arg_rk:runtime_k_a0_") ||
+                                    startsWith(name, "f16_arg_rk:one_window_");
                     for (const uint64_t packet : {uint64_t{4}, uint64_t{8}})
                         tolerant = tolerant || (packet <= offset_bytes &&
                                                 startsWith(name, ("f16_arg_rk:aligned_k_a" +

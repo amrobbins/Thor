@@ -295,6 +295,26 @@ namespace {
 }
 }  // namespace
 
+uint32_t retainedFp8ArgPassInputAlignment(const DenseRetainedFp8ArgPhysicalPlan& plan) {
+    if (plan.kr.group_lanes != 0) return 1;
+    switch (plan.family) {
+        case Fp8RK::PhysicalFamily::RuntimeK: return 1U;  // rotated, and (1384) the PacketComplete twin
+        case Fp8RK::PhysicalFamily::AlignedK: return plan.packet_bytes;
+        case Fp8RK::PhysicalFamily::OneWindow: {
+            // 1383: the twin reads any address when K fits its window with a prefix and the byte offsets, which then
+            // start up to 15 bytes early, fit 32 bits (launchFp8OneWindowArgComplete).
+            constexpr uint64_t MaxBytes = std::numeric_limits<uint32_t>::max() - 15;
+            const bool fits =
+                plan.inner_size != 0 && plan.unit.outputs_per_warp != 0 && plan.unit.packet_bytes != 0 &&
+                plan.inner_size <=
+                    Fp8RK::oneWindowUnalignedCapacity(plan.unit.outputs_per_warp, plan.unit.packet_bytes, 1) &&
+                multiplyChecked(multiplyChecked(plan.outer_size, plan.reduction_size), plan.inner_size) <= MaxBytes;
+            return fits ? 1U : 16U;
+        }
+        default: return 16U;
+    }
+}
+
 std::vector<RetainedFp8ArgCandidate> retainedFp8ArgCandidates(std::span<const RetainedFp8ValueSource> value_candidates,
                                                               DataType input_dtype,
                                                               uint64_t outer,
@@ -345,9 +365,9 @@ std::vector<RetainedFp8ArgCandidate> retainedFp8ArgCandidates(std::span<const Re
 }
 
 void launchRetainedFp8ArgPlan(const DenseRetainedFp8ArgPhysicalPlan& plan,
-                              const Tensor& input,
-                              Tensor* value_output,
-                              Tensor* index_output,
+                              const StridedSpan& input,
+                              const StridedSpan* value_output,
+                              const StridedSpan* index_output,
                               const CubReductionGeometry& geometry,
                               uint32_t* packed_scratch,
                               bool maximum,

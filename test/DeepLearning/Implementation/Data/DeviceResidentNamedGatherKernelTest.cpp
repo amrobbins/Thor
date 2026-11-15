@@ -338,4 +338,36 @@ TEST(DeviceResidentNamedGatherKernelTest, ScalarTypedRowsKeepManyIndependentRows
     EXPECT_EQ(copyGpuTensor<uint32_t>(destination, stream), expected);
 }
 
+TEST(DeviceResidentNamedGatherKernelTest, RowIndicesSpanAtAnOffsetIntoASharedMetadataBuffer) {
+    REQUIRE_CUDA_DEVICE();
+    // The file batch session packs the row indices and the window plans into one selection-metadata buffer and passes
+    // each as a span (offset, count) of it. The kernel must read exactly the span: the words before and after it hold
+    // indices that would gather the wrong rows.
+    constexpr uint64_t sourceRows = 9;
+    constexpr uint64_t batchSize = 4;
+    constexpr uint64_t spanOffset = 3;
+    constexpr uint32_t destinationSentinel = 0xdeadbeefU;
+    std::vector<uint32_t> source(sourceRows);
+    for (uint64_t row = 0; row < sourceRows; ++row) source[row] = static_cast<uint32_t>(1000 + row);
+    const std::vector<uint64_t> metadata = {0, 0, 0, 5, 2, 8, 1, 0, 0};
+
+    Stream stream(0);
+    Tensor sourceDevice = makeGpuTensor<uint32_t>({sourceRows}, source, stream);
+    Tensor metadataDevice = makeGpuTensor<uint64_t>({metadata.size()}, metadata, stream);
+    Tensor destination = makeGpuTensor<uint32_t>(
+        {batchSize}, std::vector<uint32_t>(batchSize, destinationSentinel), stream);
+
+    launchDeviceResidentNamedGatherKernel(
+        sourceDevice, destination, TensorSpan(metadataDevice, spanOffset, batchSize), batchSize, stream);
+    stream.synchronize();
+
+    EXPECT_EQ(copyGpuTensor<uint32_t>(destination, stream), (std::vector<uint32_t>{1005, 1002, 1008, 1001}));
+
+    // A span that runs past the buffer, or whose count is not the batch size, is rejected.
+    EXPECT_THROW(TensorSpan(metadataDevice, 6, batchSize), std::invalid_argument);
+    EXPECT_THROW(launchDeviceResidentNamedGatherKernel(sourceDevice, destination, TensorSpan(metadataDevice, spanOffset, 3),
+                                                       batchSize, stream),
+                 std::exception);
+}
+
 }  // namespace

@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <cstddef>
 #include <functional>
+#include <stdexcept>
+#include <string>
 #include <utility>
 
 struct CublasStridedBatchConfig {
@@ -50,6 +52,87 @@ struct CublasStridedBatchConfig {
     bool operator==(const CublasStridedBatchConfig &other) const = default;
 };
 
+// Byte alignment of each cuBLASLt operand's base pointer: the largest power of two dividing the
+// address, capped at 256. cuBLASLt's heuristics assume 256 for every operand unless told otherwise,
+// so an algorithm selected without this may assume more alignment than an operand that starts inside
+// a tensor (one group of a grouped matmul, a slice) provides. Leading dimensions and batch strides are in the matrix layouts,
+// which cuBLASLt already checks; only the pointers are invisible to it at selection time (PyTorch
+// passes the same pointer-only alignment). The default (256 everywhere) is what dense Thor
+// allocations always satisfy.
+struct CublasOperandAlignment {
+    static constexpr uint32_t MAX_BYTES = 256;
+
+    uint32_t a = MAX_BYTES;
+    uint32_t b = MAX_BYTES;
+    uint32_t c = MAX_BYTES;
+    uint32_t d = MAX_BYTES;
+
+    // addressOrAlignment: the pointer's address, or a power of two it is known to be aligned to.
+    static uint32_t of(uint64_t addressOrAlignment) {
+        const uint64_t bits = addressOrAlignment | MAX_BYTES;
+        return static_cast<uint32_t>(bits & (~bits + 1));  // lowest set bit
+    }
+
+    bool satisfiedBy(const CublasOperandAlignment &actual) const {
+        return actual.a >= a && actual.b >= b && actual.c >= c && actual.d >= d;
+    }
+
+    // The FP8 column-major Lt path computes D^T = B^T A^T, so cuBLASLt's A is Thor's B and vice versa.
+    CublasOperandAlignment swappedAB() const { return CublasOperandAlignment{b, a, c, d}; }
+
+    bool operator==(const CublasOperandAlignment &other) const = default;
+};
+
+// Sets the four MIN_ALIGNMENT search preferences, so heuristics only return algorithms whose
+// alignment requirement the operands meet. `alignment` is in cuBLASLt operand order (see swappedAB).
+inline cublasStatus_t setCublasLtOperandAlignmentPreferences(cublasLtMatmulPreference_t preference,
+                                                             const CublasOperandAlignment &alignment) {
+    const std::pair<cublasLtMatmulPreferenceAttributes_t, uint32_t> attributes[] = {
+        {CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES, alignment.a},
+        {CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES, alignment.b},
+        {CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES, alignment.c},
+        {CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES, alignment.d},
+    };
+    for (const auto &[attribute, value] : attributes) {
+        const cublasStatus_t status = cublasLtMatmulPreferenceSetAttribute(preference, attribute, &value, sizeof(value));
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            return status;
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// The operand pointer alignment an algorithm needs (CUBLASLT_ALGO_CAP_MIN_ALIGNMENT_*), in
+// cuBLASLt operand order. Any capability that can't be read keeps its value from `fallback`, which
+// should be the alignment the algorithm was selected for: cuBLASLt guarantees that is enough.
+inline CublasOperandAlignment queryCublasLtAlgorithmAlignment(const cublasLtMatmulAlgo_t &algorithm, CublasOperandAlignment fallback) {
+    auto query = [&](cublasLtMatmulAlgoCapAttributes_t attribute, uint32_t &field) {
+        uint32_t value = 0;
+        size_t sizeWritten = 0;
+        if (cublasLtMatmulAlgoCapGetAttribute(&algorithm, attribute, &value, sizeof(value), &sizeWritten) == CUBLAS_STATUS_SUCCESS &&
+            sizeWritten == sizeof(value))
+            field = value;
+    };
+    query(CUBLASLT_ALGO_CAP_MIN_ALIGNMENT_A_BYTES, fallback.a);
+    query(CUBLASLT_ALGO_CAP_MIN_ALIGNMENT_B_BYTES, fallback.b);
+    query(CUBLASLT_ALGO_CAP_MIN_ALIGNMENT_C_BYTES, fallback.c);
+    query(CUBLASLT_ALGO_CAP_MIN_ALIGNMENT_D_BYTES, fallback.d);
+    return fallback;
+}
+
+// Throws unless `actual` meets `needed` (both in Thor operand order).
+inline void requireCublasOperandAlignment(const CublasOperandAlignment &needed,
+                                          const CublasOperandAlignment &actual,
+                                          const std::string &what) {
+    if (needed.satisfiedBy(actual)) {
+        return;
+    }
+    throw std::runtime_error(what + " needs operand alignment A/B/C/D = " + std::to_string(needed.a) + "/" + std::to_string(needed.b) + "/" +
+                             std::to_string(needed.c) + "/" + std::to_string(needed.d) + " bytes, but the operands are aligned to " +
+                             std::to_string(actual.a) + "/" + std::to_string(actual.b) + "/" + std::to_string(actual.c) + "/" +
+                             std::to_string(actual.d) + ". Select it with the operands' real alignment.");
+}
+
 struct KernelRequirement {
     KernelRequirement(const std::string gpuType,
                       const int rowsA,
@@ -64,7 +147,8 @@ struct KernelRequirement {
                       const int ldC,
                       const int ldD,
                       const bool allowWorkspace,
-                      const CublasStridedBatchConfig batchConfig = CublasStridedBatchConfig::single())
+                      const CublasStridedBatchConfig batchConfig = CublasStridedBatchConfig::single(),
+                      const CublasOperandAlignment alignment = CublasOperandAlignment{})
         : gpuType(gpuType),
           rowsA(rowsA),
           colsA(colsA),
@@ -78,7 +162,8 @@ struct KernelRequirement {
           ldC(ldC),
           ldD(ldD),
           allowWorkspace(allowWorkspace),
-          batchConfig(batchConfig) {
+          batchConfig(batchConfig),
+          alignment(alignment) {
         THOR_THROW_IF_FALSE(rowsA > 0);
         THOR_THROW_IF_FALSE(colsA > 0);
         THOR_THROW_IF_FALSE(rowsB > 0);
@@ -127,12 +212,19 @@ struct KernelRequirement {
     const int ldD;
     const bool allowWorkspace;
     const CublasStridedBatchConfig batchConfig;
+    const CublasOperandAlignment alignment;
+
+    // A copy of this requirement for operands with the given alignment.
+    KernelRequirement withAlignment(const CublasOperandAlignment &operandAlignment) const {
+        return KernelRequirement(gpuType, rowsA, colsA, rowsB, colsB, transposeA, transposeB, transposeC, ldA, ldB, ldC, ldD,
+                                 allowWorkspace, batchConfig, operandAlignment);
+    }
 
     bool operator==(const KernelRequirement &other) const {
         return gpuType == other.gpuType && rowsA == other.rowsA && colsA == other.colsA && rowsB == other.rowsB && colsB == other.colsB &&
                transposeA == other.transposeA && transposeB == other.transposeB && transposeC == other.transposeC && ldA == other.ldA &&
                ldB == other.ldB && ldC == other.ldC && ldD == other.ldD && allowWorkspace == other.allowWorkspace &&
-               batchConfig == other.batchConfig;
+               batchConfig == other.batchConfig && alignment == other.alignment;
     }
 
     bool operator<(const KernelRequirement &other) const {
@@ -163,6 +255,8 @@ struct hash<KernelRequirement> {
         hashValue = (hashValue ^ (hash<int64_t>()(k.batchConfig.strideB))) << 1;
         hashValue = (hashValue ^ (hash<int64_t>()(k.batchConfig.strideC))) << 1;
         hashValue = (hashValue ^ (hash<int64_t>()(k.batchConfig.strideD))) << 1;
+        hashValue = (hashValue ^ (hash<uint64_t>()((uint64_t(k.alignment.a) << 48) ^ (uint64_t(k.alignment.b) << 32) ^
+                                                    (uint64_t(k.alignment.c) << 16) ^ uint64_t(k.alignment.d)))) << 1;
         hashValue = hashValue ^ hash<std::string>()(k.gpuType);
 
         return hashValue;

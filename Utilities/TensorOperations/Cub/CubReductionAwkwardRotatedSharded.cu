@@ -358,8 +358,8 @@ template <typename InputT,
           int PacketBytes,
           int CooperativeWarps,
           bool ExactFp8Tile = true>
-void launchAwkwardFirstStageForTransformPacket(const Tensor& input,
-                                               Tensor& fp32_partials,
+void launchAwkwardFirstStageForTransformPacket(const StridedSpan& input,
+                                               const StridedSpan& fp32_partials,
                                                const CubReductionGeometry& geometry,
                                                uint64_t shards_per_output,
                                                cudaStream_t stream,
@@ -461,8 +461,8 @@ template <typename Callback>
 }
 
 template <typename ReductionOpT>
-void launchFp32RuntimeKRotatedFirstStageTyped(const Tensor& input,
-                                              Tensor& fp32_partials,
+void launchFp32RuntimeKRotatedFirstStageTyped(const StridedSpan& input,
+                                              const StridedSpan& fp32_partials,
                                               const CubReductionGeometry& geometry,
                                               uint64_t rows_per_shard,
                                               uint64_t shards_per_output,
@@ -522,8 +522,8 @@ static_assert(awkwardLogicalTileElementsForPacket<__half, F16_RUNTIME_K_ROTATED_
               static_cast<int>(F16_RUNTIME_K_ROTATED_TILE_COMPONENTS));
 
 template <typename InputT, typename ReductionOpT>
-void launchF16RuntimeKRotatedFirstStageTyped(const Tensor& input,
-                                             Tensor& fp32_partials,
+void launchF16RuntimeKRotatedFirstStageTyped(const StridedSpan& input,
+                                             const StridedSpan& fp32_partials,
                                              const CubReductionGeometry& geometry,
                                              uint64_t rows_per_shard,
                                              uint64_t shards_per_output,
@@ -934,8 +934,8 @@ template <typename ReductionOpT>
 }
 
 template <typename ReductionOpT>
-void launchFp8RuntimeKRotatedFirstStageTyped(const Tensor& input,
-                                             Tensor& fp32_partials,
+void launchFp8RuntimeKRotatedFirstStageTyped(const StridedSpan& input,
+                                             const StridedSpan& fp32_partials,
                                              const CubReductionGeometry& geometry,
                                              bool exact_tile,
                                              uint64_t rows_per_shard,
@@ -1010,8 +1010,8 @@ CubKernelOccupancyInfo queryFp8RuntimeKRotatedOccupancyTyped(DataType input_dtyp
 }
 
 void launchFp8GeneralRParallelKTileRotatedCalibrationFirstStage(
-    const Tensor& input,
-    Tensor& fp32_partials,
+    const StridedSpan& input,
+    const StridedSpan& fp32_partials,
     const CubReductionGeometry& geometry,
     bool exact_tile,
     uint64_t rows_per_shard,
@@ -1066,8 +1066,8 @@ bool fp32RuntimeKRotatedSupports(uint64_t outer_size, uint64_t reduction_size, u
     return Fp8RK::fp8RKWorkGridFits(ceilDivideU64(reduction_size, rows_per_shard), tiles, outer_size);
 }
 
-void launchFp32RuntimeKRotatedFirstStage(const Tensor& input,
-                                         Tensor& fp32_partials,
+void launchFp32RuntimeKRotatedFirstStage(const StridedSpan& input,
+                                         const StridedSpan& fp32_partials,
                                          const CubReductionGeometry& geometry,
                                          uint64_t rows_per_shard,
                                          uint64_t shards_per_output,
@@ -1118,8 +1118,8 @@ bool f16RuntimeKRotatedSupports(uint64_t outer_size, uint64_t reduction_size, ui
     return Fp8RK::fp8RKWorkGridFits(ceilDivideU64(reduction_size, rows_per_shard), tiles, outer_size);
 }
 
-void launchF16RuntimeKRotatedFirstStage(const Tensor& input,
-                                        Tensor& fp32_partials,
+void launchF16RuntimeKRotatedFirstStage(const StridedSpan& input,
+                                        const StridedSpan& fp32_partials,
                                         const CubReductionGeometry& geometry,
                                         uint64_t rows_per_shard,
                                         uint64_t shards_per_output,
@@ -1178,9 +1178,9 @@ namespace {
 }
 
 template <typename InputT>
-void launchRuntimeKArgTyped(const Tensor& input,
-                            Tensor* value_output,
-                            Tensor* index_output,
+void launchRuntimeKArgTyped(const StridedSpan& input,
+                            const StridedSpan* value_output,
+                            const StridedSpan* index_output,
                             const CubReductionGeometry& geometry,
                             uint64_t rows_per_shard,
                             uint64_t* packed_scratch,
@@ -1259,9 +1259,9 @@ bool f16RuntimeKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64
                                    F16_RUNTIME_K_ROTATED_TILE_COMPONENTS);
 }
 
-void launchFp32RuntimeKArg(const Tensor& input,
-                           Tensor* value_output,
-                           Tensor* index_output,
+void launchFp32RuntimeKArg(const StridedSpan& input,
+                           const StridedSpan* value_output,
+                           const StridedSpan* index_output,
                            const CubReductionGeometry& geometry,
                            uint64_t rows_per_shard,
                            uint64_t* packed_scratch,
@@ -1274,9 +1274,9 @@ void launchFp32RuntimeKArg(const Tensor& input,
                                   domain_stride, stream, "FP32");
 }
 
-void launchF16RuntimeKArg(const Tensor& input,
-                          Tensor* value_output,
-                          Tensor* index_output,
+void launchF16RuntimeKArg(const StridedSpan& input,
+                          const StridedSpan* value_output,
+                          const StridedSpan* index_output,
                           const CubReductionGeometry& geometry,
                           uint64_t rows_per_shard,
                           uint64_t* packed_scratch,
@@ -1315,10 +1315,10 @@ bool fp32RuntimeKCarriedArgSupports(uint64_t outer_size, uint64_t reduction_size
                                     outer_size);
 }
 
-void launchFp32RuntimeKCarriedArg(const Tensor& input,
-                                  const Tensor& carried_index,
-                                  Tensor* value_output,
-                                  Tensor* index_output,
+void launchFp32RuntimeKCarriedArg(const StridedSpan& input,
+                                  const StridedSpan& carried_index,
+                                  const StridedSpan* value_output,
+                                  const StridedSpan* index_output,
                                   const CubReductionGeometry& geometry,
                                   uint64_t rows_per_shard,
                                   void* wide_scratch,

@@ -1098,3 +1098,23 @@ TEST(CubArgReduction, WorkspaceQueryMatchesStampedFootprintForDirectAndComposedP
         }
     }
 }
+
+TEST(CubArgReduction, DenseSpanStartingPartwayIntoItsStorageIsReducedInPlace) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    // Rows 1..2 of a stored [3, 4] matrix: dense, starting at element 4. ARG reads dense input, which may start
+    // partway into its storage; a strided span is rejected.
+    Tensor storage =
+        makeGpuTensor({5.0f, 1.0f, 9.0f, 2.0f, 3.0f, 8.0f, 0.0f, 4.0f, 7.0f, 6.0f, 10.0f, 11.0f}, {3, 4}, stream);
+    const StridedSpan rows(storage, 4, {2, 4}, {4, 1});
+
+    std::shared_ptr<StampedCubArgReduction> stamped =
+        CubArgReduction(CubArgReductionOp::ArgMax, 1, fp32ValueAndUint32Index()).stamp(rows, stream);
+    stamped->run();
+    stream.synchronize();
+    expectArgOutputs(stamped, {8.0f, 11.0f}, {1, 3}, stream);
+
+    const StridedSpan columns(storage, 0, {3, 2}, {4, 2});
+    EXPECT_THROW(static_cast<void>(CubArgReduction(CubArgReductionOp::ArgMax, 1, fp32ValueAndUint32Index()).stamp(columns, stream)),
+                 std::invalid_argument);
+}

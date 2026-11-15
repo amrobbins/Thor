@@ -5,6 +5,7 @@
 // the selector's winner is a shortlisted FP32 first stage, cached under kind Fp32RK (a deeper selection answers a
 // shallower request), and its timed program (first stage plus the production FP32 continuation) computes the reduction.
 
+#include "test/Utilities/TensorOperations/OutputSpan.h"
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 #include "Utilities/TensorOperations/Cub/CubReductionStageSemantics.h"
@@ -151,7 +152,7 @@ void expectArgPassComputes(const PhysicalKernel& identity, const Tensor& input, 
     if (scratch_bytes != 0) scratch = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {scratch_bytes}));
     Tensor value(gpuPlacement, TensorDescriptor(DataType::FP32, {outer, k}));
     Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
-    Fp32RK::launchFp32RKArgPass(identity, input, &value, &index, geometry,
+    Fp32RK::launchFp32RKArgPass(identity, input, outputSpan(value), outputSpan(index), geometry,
                                 scratch ? static_cast<uint64_t*>(scratch->getMemPtr<void>()) : nullptr, maximum, 3,
                                 stream);
     stream.synchronize();
@@ -614,7 +615,7 @@ TEST(CubReductionFp32RKSelector, EveryCarriedArgCandidateComputesTheReduction) {
                                              TensorDescriptor(DataType::UINT8, {candidate.scratch_bytes}));
                         Tensor value(gpuPlacement, TensorDescriptor(DataType::FP32, {outer, k}));
                         Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT64, {outer, k}));
-                        Fp32RK::launchFp32RKCarriedArgPass(p, input, carried_index, &value, &index, geometry,
+                        Fp32RK::launchFp32RKCarriedArgPass(p, input, carried_index, outputSpan(value), outputSpan(index), geometry,
                                                            scratch ? scratch->getMemPtr<void>() : nullptr, maximum,
                                                            stride, stream);
                         stream.synchronize();
@@ -695,7 +696,7 @@ void expectCarriedArgPassComputes(const PhysicalKernel& identity, uint64_t outer
     if (scratch_bytes != 0) scratch = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {scratch_bytes}));
     Tensor value(gpuPlacement, TensorDescriptor(DataType::FP32, {outer, k}));
     Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT64, {outer, k}));
-    Fp32RK::launchFp32RKCarriedArgPass(identity, input, carried_index, &value, &index, geometry,
+    Fp32RK::launchFp32RKCarriedArgPass(identity, input, carried_index, outputSpan(value), outputSpan(index), geometry,
                                        scratch ? scratch->getMemPtr<void>() : nullptr, maximum, stride, stream);
     stream.synchronize();
     const auto got_value = copyGpuTensorAsFloat(value, stream);

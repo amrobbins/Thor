@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Implementation/Tensor/StridedSpan.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Cub/CubReductionStageSemantics.h"
 #include "Utilities/TensorOperations/Cub/DenseReductionPlanner.h"
@@ -51,10 +52,10 @@ struct DensePhysicalPassLayout {
  */
 void launchDensePhysicalPass(const DenseReductionPhysicalPlan& physical_plan,
                              const CubReductionStageSemantics& semantics,
-                             const Tensor& temp_storage,
+                             const StridedSpan& temp_storage,
                              size_t temp_storage_bytes,
-                             const Tensor& input,
-                             Tensor& output,
+                             const StridedSpan& input,
+                             const StridedSpan& output,
                              const CubReductionGeometry& geometry,
                              float output_scale,
                              Stream& stream);
@@ -66,7 +67,7 @@ void launchDensePhysicalPass(const DenseReductionPhysicalPlan& physical_plan,
  * ordinary production pass-list materialization.
  */
 [[nodiscard]] DenseExecutablePlan materializeDenseValueExecutablePlan(
-    CubReductionOp op, const Tensor& input, const Tensor& output,
+    CubReductionOp op, const StridedSpan& input, const Tensor& output,
     const DenseReductionPlan& plan, uint64_t semantic_total_reduction_size,
     float output_scale, const Stream& stream);
 

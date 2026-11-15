@@ -43,7 +43,7 @@ struct SelectedIsolatedBenchmark {
 
     // Scratch is provided by the autotuner rotating buffers or a GPU smoke.
     // No selecting, allocations, or synchronizations occur in launch().
-    void launch(const Tensor& input, Tensor& output, const Tensor& scratch, Stream& stream) const;
+    void launch(const StridedSpan& input, const StridedSpan& output, const StridedSpan& scratch, Stream& stream) const;
     [[nodiscard]] ReductionAutotuning::Candidate asAutotuneCandidate(std::string name) const;
 };
 

@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "CudaHelpers.h"
+#include "DeepLearning/Implementation/Tensor/StridedSpan.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
@@ -19,7 +20,9 @@ struct TensorScalarBinding {
     DataType sourceDType = DataType::FP32;
 };
 
-using RuntimeInputValue = std::variant<Tensor, float, TensorScalarBinding>;
+// A tensor value is a Tensor, or a StridedSpan when it is an expression strided view of another value (fused kernels
+// and matmul operands read it in place; see FusedEquation's runtimeInputTensor for every other consumer).
+using RuntimeInputValue = std::variant<Tensor, float, TensorScalarBinding, StridedSpan>;
 
 // T8B physical addressing mode for tensor inputs to a retained padded-ragged
 // pointwise fused kernel. PaddedValue follows the selected [B,C,1,W] storage

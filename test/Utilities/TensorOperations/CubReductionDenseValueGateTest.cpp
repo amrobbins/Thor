@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <sstream>
 #include <string>
+#include <optional>
 #include <vector>
 
 using namespace ThorImplementation;
@@ -163,21 +164,22 @@ TEST(CubReductionDenseValueGate, SingletonSeparatedDenseRanksAvoidStridedFallbac
     expectEveryDenseValueMaskUsesOrdainedPath({1, 2, 1, 3, 1, 5, 1, 2, 1});
 }
 
-TEST(CubReductionDenseValueGate, DensePhysicalPermutationRemainsOnOrdainedPathForEveryValueOperation) {
-    // This is the logical [K,I,J] view over physically dense [I,J,K] used by the permutation-aware tiled tests.
-    // DENSE-VALUE-GATE must not accidentally classify a dense physical permutation as an arbitrary irregular view.
+TEST(CubReductionDenseValueGate, RotatedOutputPermutationIsRefusedAndSplitForEveryValueOperation) {
+    // This is the logical [K,I,J] view over physically dense [I,J,K] used by the rotated-output tests. DENSE-VALUE-GATE
+    // must not classify a dense physical permutation as an arbitrary irregular view: 1390 refuses it as a rotated
+    // output, which a caller runs in two parts (CubReduction::splitRefusedView), and it has that split.
     const std::vector<uint64_t> dimensions{2, 2, 3};
     const std::vector<uint64_t> strides{1, 6, 2};
     const std::vector<uint32_t> axes{2};
+    EXPECT_THROW((void)CubReduction::analyzeGeometry(dimensions, strides, axes), NotImplementedException);
     for (CubReductionOp op : ALL_VALUE_OPERATIONS) {
         SCOPED_TRACE(valueOperationName(op));
-        const CubReductionGeometry structural_geometry = CubReduction::analyzeGeometry(dimensions, strides, axes);
-        const CubReductionGeometry geometry = CubReduction::analyzeValueGeometry(op, dimensions, strides, axes);
-        EXPECT_EQ(geometry.path, structural_geometry.path);
-        EXPECT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
-        EXPECT_TRUE(geometry.physical_layout_is_dense_permutation);
-        EXPECT_TRUE(geometry.permutation_aware_tiled_geometry.has_value());
+        EXPECT_THROW((void)CubReduction::analyzeValueGeometry(op, dimensions, strides, axes), NotImplementedException);
     }
+    const std::optional<CubReductionViewSplit> split = CubReduction::splitRefusedView(dimensions, strides, axes);
+    ASSERT_TRUE(split.has_value());
+    EXPECT_EQ(split->kind, CubReductionViewSplit::Kind::RotatedOutput);
+    EXPECT_EQ(split->dense_dimensions, (std::vector<uint64_t>{2, 3, 2}));
 }
 
 TEST(CubReductionDenseValueGate, GenuineIrregularViewsRemainOutsideTheDenseValueGateForEveryOperation) {

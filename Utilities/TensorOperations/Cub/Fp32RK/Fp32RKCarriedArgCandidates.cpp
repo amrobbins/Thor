@@ -133,8 +133,8 @@ std::vector<Fp32RKArgCandidate> fp32RKCarriedArgCandidates(uint64_t outer, uint6
     return result;
 }
 
-void launchFp32RKCarriedArgPass(const PhysicalKernel& identity, const Tensor& input, const Tensor& carried_index,
-                                Tensor* value_output, Tensor* index_output, const CubReductionGeometry& geometry,
+void launchFp32RKCarriedArgPass(const PhysicalKernel& identity, const StridedSpan& input, const StridedSpan& carried_index,
+                                const StridedSpan* value_output, const StridedSpan* index_output, const CubReductionGeometry& geometry,
                                 void* wide_scratch, bool maximum, uint64_t row_stride, Stream& stream) {
     const uint64_t outer = geometry.outer_size, r = geometry.reduction_size, k = geometry.inner_size;
     if (!fp32RKCarriedArgPassLegal(identity, outer, r, k))

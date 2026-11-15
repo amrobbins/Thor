@@ -4590,6 +4590,242 @@ static void emitScalarStridedViewBackwardNode(std::ostringstream& ss,
        << ";\n";
 }
 
+// RoPE frequency of each rotation pair, in double, for the scaling kinds whose frequencies depend
+// only on emit-time constants (all but DynamicNTK). Mirrors the in-kernel float formulas these
+// replace; Linear's 1/factor is folded in so the position is never divided.
+static std::vector<double> ropeStaticFrequencies(const ExprNode& n, uint64_t rotary_dim, bool long_rope_long_factors) {
+    const double R = static_cast<double>(rotary_dim);
+    const double base = n.rope_base;
+    const double orig = static_cast<double>(n.rope_original_max_position_embeddings);
+    std::vector<double> freq(rotary_dim / 2);
+    for (uint64_t pair = 0; pair < rotary_dim / 2; ++pair) {
+        const double i = static_cast<double>(pair);
+        const double inv_freq = std::pow(base, -2.0 * i / R);
+        double f = inv_freq;
+        switch (n.rope_scaling_kind) {
+            case RotaryScalingKind::None:
+                break;
+            case RotaryScalingKind::Linear:
+                f = inv_freq / n.rope_scaling_factor;
+                break;
+            case RotaryScalingKind::Yarn: {
+                const double two_pi = 6.283185307179586477;
+                const double log_base = std::log(base);
+                double low = std::floor(R * std::log(orig / (n.rope_yarn_beta_fast * two_pi)) / (2.0 * log_base));
+                double high = std::ceil(R * std::log(orig / (n.rope_yarn_beta_slow * two_pi)) / (2.0 * log_base));
+                low = std::max(low, 0.0);
+                high = std::min(high, R - 1.0);
+                if (low == high) {
+                    high += 0.001;
+                }
+                const double ramp = std::min(std::max((i - low) / (high - low), 0.0), 1.0);
+                f = (inv_freq / n.rope_scaling_factor) * ramp + inv_freq * (1.0 - ramp);
+                break;
+            }
+            case RotaryScalingKind::LongRope: {
+                const std::vector<double>& factors = long_rope_long_factors ? n.rope_long_rope_long_factors : n.rope_long_rope_short_factors;
+                if (pair >= factors.size()) {
+                    throw runtime_error("LongRoPE factor list is shorter than rotary_dim / 2.");
+                }
+                f = inv_freq / factors[pair];
+                break;
+            }
+            case RotaryScalingKind::Llama3: {
+                const double wavelen = 6.283185307179586477 / inv_freq;
+                const double low_freq_wavelen = orig / n.rope_llama3_low_freq_factor;
+                const double high_freq_wavelen = orig / n.rope_llama3_high_freq_factor;
+                if (wavelen > low_freq_wavelen) {
+                    f = inv_freq / n.rope_scaling_factor;
+                } else if (wavelen >= high_freq_wavelen) {
+                    const double smooth =
+                        (orig / wavelen - n.rope_llama3_low_freq_factor) / (n.rope_llama3_high_freq_factor - n.rope_llama3_low_freq_factor);
+                    f = (1.0 - smooth) * (inv_freq / n.rope_scaling_factor) + smooth * inv_freq;
+                }
+                break;
+            }
+            case RotaryScalingKind::DynamicNTK:
+                throw runtime_error("DynamicNTK RoPE frequencies depend on the runtime sequence length.");
+        }
+        freq[pair] = f;
+    }
+    return freq;
+}
+
+// Static table of turns per position (freq / 2pi) for each pair, as float2 {hi, lo}: hi is the
+// float nearest to freq / 2pi and lo the float nearest to the remainder, ~48 bits together.
+static std::string emitRopeTurnsTable(const ExprNode& n, uint64_t rotary_dim, bool long_rope_long_factors) {
+    const std::vector<double> freq = ropeStaticFrequencies(n, rotary_dim, long_rope_long_factors);
+    std::ostringstream ss;
+    ss << "{";
+    for (size_t pair = 0; pair < freq.size(); ++pair) {
+        const long double turns = static_cast<long double>(freq[pair]) / 6.283185307179586476925286766559L;
+        const float hi = static_cast<float>(turns);
+        const float lo = static_cast<float>(turns - static_cast<long double>(hi));
+        ss << (pair == 0 ? "" : ", ") << "{" << emitScalarFpLiteral(hi) << ", " << emitScalarFpLiteral(lo) << "}";
+    }
+    ss << "}";
+    return ss.str();
+}
+
+// Float-float ("double-float") helpers for emit-time tables: value -> {hi, lo} floats.
+static std::pair<float, float> splitFloatFloat(long double v) {
+    const float hi = static_cast<float>(v);
+    return {hi, static_cast<float>(v - static_cast<long double>(hi))};
+}
+
+static std::string emitFloat2Literal(long double v) {
+    const auto [hi, lo] = splitFloatFloat(v);
+    return "{" + emitScalarFpLiteral(hi) + ", " + emitScalarFpLiteral(lo) + "}";
+}
+
+// DynamicNTK turns per position, evaluated in float-float (~45 bits) so the angle reduction that
+// follows stays exact. The base depends on the runtime sequence length L:
+//   base' = base * ratio^(R/(R-2)),  ratio = factor*L/orig - (factor-1)   (only when L > orig)
+// so freq_i / 2pi = [base^(-2i/R) / 2pi] * ratio^(-c_i), c_i = 2i/(R-2), and
+//   ratio^(-c_i) = 2^(-c_i * log2(ratio)).
+// log2 and exp2 are table-driven: 65-entry tables (log2 of 1 + k/64, 2^(k/64)) leave arguments of
+// at most 1/128, where five-term series suffice. Every rounded product that must stay rounded is
+// pinned with __fmul_rn so nvcc cannot contract it into a neighbouring add. The work is uniform per
+// kernel apart from the table reads and roughly 80 float operations per pair.
+static void emitRopeDynamicNtkTurns(std::ostringstream& ss,
+                                    const ExprNode& n,
+                                    uint64_t rotary_dim,
+                                    const std::string& effective_seq_len_expr,
+                                    const std::string& indent) {
+    const std::string in = indent + "    ";
+    const long double R = static_cast<long double>(rotary_dim);
+    const long double LN2 = 0.693147180559945309417232121458176568L;
+    ExprNode unscaled = n;
+    unscaled.rope_scaling_kind = RotaryScalingKind::None;
+    ss << in << "static const float2 rope_turns_table[] = " << emitRopeTurnsTable(unscaled, rotary_dim, false) << ";\n";
+    ss << in << "float2 rope_turns = rope_turns_table[rope_pair_index];\n";
+    if (rotary_dim <= 2) {
+        return;
+    }
+    {
+        std::ostringstream t;
+        t << "{";
+        for (uint64_t i = 0; i < rotary_dim / 2; ++i) {
+            t << (i ? ", " : "") << emitFloat2Literal(2.0L * static_cast<long double>(i) / (R - 2.0L));
+        }
+        t << "}";
+        ss << in << "static const float2 rope_ntk_exponent[] = " << t.str() << ";\n";
+    }
+    {
+        // {log2(c) hi, log2(c) lo, 1/c (float), c} for c = 1 + k/64.
+        std::ostringstream t;
+        t << "{";
+        for (int k = 0; k <= 64; ++k) {
+            const long double c = 1.0L + static_cast<long double>(k) / 64.0L;
+            const auto [lhi, llo] = splitFloatFloat(std::log2(c));
+            t << (k ? ", " : "") << "{" << emitScalarFpLiteral(lhi) << ", " << emitScalarFpLiteral(llo) << ", "
+              << emitScalarFpLiteral(static_cast<float>(1.0L / c)) << ", " << emitScalarFpLiteral(static_cast<float>(c)) << "}";
+        }
+        t << "}";
+        ss << in << "static const float4 rope_log2_table[] = " << t.str() << ";\n";
+    }
+    {
+        std::ostringstream t;
+        t << "{";
+        for (int k = -32; k <= 32; ++k) {
+            t << (k != -32 ? ", " : "") << emitFloat2Literal(std::exp2(static_cast<long double>(k) / 64.0L));
+        }
+        t << "}";
+        ss << in << "static const float2 rope_exp2_table[] = " << t.str() << ";\n";
+    }
+    const long double factor = static_cast<long double>(n.rope_scaling_factor);
+    const long double orig = static_cast<long double>(n.rope_original_max_position_embeddings);
+    const auto [a_hi, a_lo] = splitFloatFloat(factor / orig);
+    const auto [b_hi, b_lo] = splitFloatFloat(factor - 1.0L);
+    const auto [ln2_hi, ln2_lo] = splitFloatFloat(LN2);
+    const auto [log2e_hi, log2e_lo] = splitFloatFloat(1.0L / LN2);
+    auto f = [](float v) { return emitScalarFpLiteral(v); };
+
+    ss << in << "const float rope_seq_len = fmaxf(" << effective_seq_len_expr << " + "
+       << emitScalarFpLiteral(static_cast<double>(std::max<int64_t>(0, n.rope_position_offset))) << ", 1.0f);\n";
+    ss << in << "if (rope_seq_len > " << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ") {\n";
+    const std::string b = in + "  ";
+    // ratio = A*L - B, A = factor/orig, B = factor - 1 (float-float; L is an exact integer).
+    ss << b << "const float rope_p_hi = __fmul_rn(" << f(a_hi) << ", rope_seq_len);\n";
+    ss << b << "const float rope_p_lo = fmaf(" << f(a_lo) << ", rope_seq_len, fmaf(" << f(a_hi) << ", rope_seq_len, -rope_p_hi));\n";
+    ss << b << "const float rope_q_s = rope_p_hi - " << f(b_hi) << ";\n";
+    ss << b << "const float rope_q_bb = rope_q_s - rope_p_hi;\n";
+    ss << b << "const float rope_q_e = (rope_p_hi - (rope_q_s - rope_q_bb)) + (-" << f(b_hi) << " - rope_q_bb);\n";
+    ss << b << "const float rope_q_l = rope_q_e + (rope_p_lo - " << f(b_lo) << ");\n";
+    ss << b << "const float rope_r_hi = rope_q_s + rope_q_l;\n";
+    ss << b << "const float rope_r_lo = rope_q_l - (rope_r_hi - rope_q_s);\n";
+    // log2(ratio): ratio = 2^e * m, m in [1, 2); m = c_k * (1 + v), |v| <= 1/128.
+    ss << b << "const int rope_r_bits = __float_as_int(rope_r_hi);\n";
+    ss << b << "const int rope_r_exp = (rope_r_bits >> 23) - 127;\n";
+    ss << b << "const float rope_m = __int_as_float((rope_r_bits & 0x007fffff) | 0x3f800000);\n";
+    ss << b << "const float rope_m_lo = rope_r_lo * __int_as_float((127 - rope_r_exp) << 23);\n";
+    ss << b << "const float4 rope_lt = rope_log2_table[__float2int_rn((rope_m - 1.0f) * 64.0f)];\n";
+    ss << b << "const float rope_d = rope_m - rope_lt.w;\n";
+    ss << b << "const float rope_v0 = __fmul_rn(rope_d, rope_lt.z);\n";
+    ss << b << "const float rope_v0_lo = (fmaf(-rope_v0, rope_lt.w, rope_d) + rope_m_lo) * rope_lt.z;\n";
+    // Renormalize: the series below evaluates its higher-order terms from v_hi alone, which is only
+    // accurate if v_lo is within half an ulp of v_hi (m_lo can be large next to a small v).
+    ss << b << "const float rope_v_hi = rope_v0 + rope_v0_lo;\n";
+    ss << b << "const float rope_v_lo = rope_v0_lo - (rope_v_hi - rope_v0);\n";
+    // ln(1 + v) = v - v^2/2 + v^3/3 - ...; v^2/2 in float-float, the rest in float.
+    ss << b << "const float rope_v2_hi = __fmul_rn(rope_v_hi, rope_v_hi);\n";
+    ss << b << "const float rope_v2_lo = fmaf(rope_v_hi, rope_v_hi, -rope_v2_hi) + 2.0f * rope_v_hi * rope_v_lo;\n";
+    ss << b << "const float rope_v3 = rope_v2_hi * rope_v_hi * (0.333333343f - rope_v_hi * (0.25f - rope_v_hi * (0.200000003f - "
+                "rope_v_hi * 0.166666672f)));\n";
+    ss << b << "const float rope_ln_s = rope_v_hi - 0.5f * rope_v2_hi;\n";
+    ss << b << "const float rope_ln_e = (rope_v_hi - rope_ln_s) - 0.5f * rope_v2_hi;\n";
+    ss << b << "const float rope_ln_l = rope_ln_e + rope_v_lo - 0.5f * rope_v2_lo + rope_v3;\n";
+    ss << b << "const float rope_ln_hi = rope_ln_s + rope_ln_l;\n";
+    ss << b << "const float rope_ln_lo = rope_ln_l - (rope_ln_hi - rope_ln_s);\n";
+    // log2(1 + v) = ln(1 + v) / ln 2, then + e + log2(c_k).
+    ss << b << "const float rope_g_hi = __fmul_rn(rope_ln_hi, " << f(log2e_hi) << ");\n";
+    ss << b << "const float rope_g_lo = fmaf(rope_ln_hi, " << f(log2e_hi) << ", -rope_g_hi) + fmaf(rope_ln_hi, " << f(log2e_lo)
+       << ", rope_ln_lo * " << f(log2e_hi) << ");\n";
+    ss << b << "const float rope_eb = static_cast<float>(rope_r_exp) + rope_lt.x;\n";
+    ss << b << "const float rope_eb_e = (static_cast<float>(rope_r_exp) - rope_eb) + rope_lt.x;\n";
+    ss << b << "const float rope_l2_s = rope_eb + rope_g_hi;\n";
+    ss << b << "const float rope_l2_bb = rope_l2_s - rope_eb;\n";
+    ss << b << "const float rope_l2_e = (rope_eb - (rope_l2_s - rope_l2_bb)) + (rope_g_hi - rope_l2_bb);\n";
+    ss << b << "const float rope_l2_l = rope_l2_e + rope_eb_e + rope_lt.y + rope_g_lo;\n";
+    ss << b << "const float rope_l2_hi = rope_l2_s + rope_l2_l;\n";
+    ss << b << "const float rope_l2_lo = rope_l2_l - (rope_l2_hi - rope_l2_s);\n";
+    // x = -c_i * log2(ratio), in [-R/(R-2) * log2(ratio), 0].
+    ss << b << "const float2 rope_c = rope_ntk_exponent[rope_pair_index];\n";
+    ss << b << "const float rope_x_hi = -__fmul_rn(rope_c.x, rope_l2_hi);\n";
+    ss << b << "const float rope_x_lo = -(fmaf(rope_c.x, rope_l2_hi, rope_x_hi) + fmaf(rope_c.x, rope_l2_lo, rope_c.y * rope_l2_hi));\n";
+    // 2^x = 2^n * 2^(k/64) * e^u, u = (x - n - k/64) * ln 2, |u| <= ln2/128.
+    ss << b << "const float rope_xn = rintf(rope_x_hi);\n";
+    ss << b << "const float rope_f = rope_x_hi - rope_xn;\n";
+    ss << b << "const float rope_fk = rintf(rope_f * 64.0f);\n";
+    ss << b << "const float rope_t = rope_f - rope_fk * 0.015625f;\n";
+    ss << b << "const float rope_u0 = __fmul_rn(rope_t, " << f(ln2_hi) << ");\n";
+    ss << b << "const float rope_u0_lo = fmaf(rope_t, " << f(ln2_hi) << ", -rope_u0) + fmaf(rope_t, " << f(ln2_lo) << ", rope_x_lo * "
+       << f(ln2_hi) << ");\n";
+    // Renormalize: x_lo (up to half an ulp of |x| <= 16) can be large next to a small t.
+    ss << b << "const float rope_u_hi = rope_u0 + rope_u0_lo;\n";
+    ss << b << "const float rope_u_lo = rope_u0_lo - (rope_u_hi - rope_u0);\n";
+    ss << b << "const float rope_u2_hi = __fmul_rn(rope_u_hi, rope_u_hi);\n";
+    ss << b << "const float rope_u2_lo = fmaf(rope_u_hi, rope_u_hi, -rope_u2_hi) + 2.0f * rope_u_hi * rope_u_lo;\n";
+    ss << b << "const float rope_u3 = rope_u2_hi * rope_u_hi * (0.166666672f + rope_u_hi * (0.0416666679f + rope_u_hi * "
+                "0.00833333377f));\n";
+    ss << b << "const float rope_em_s = rope_u_hi + 0.5f * rope_u2_hi;\n";
+    ss << b << "const float rope_em_e = (rope_u_hi - rope_em_s) + 0.5f * rope_u2_hi;\n";
+    ss << b << "const float rope_em_l = rope_em_e + rope_u_lo + 0.5f * rope_u2_lo + rope_u3;\n";
+    ss << b << "const float2 rope_et = rope_exp2_table[__float2int_rn(rope_fk) + 32];\n";
+    ss << b << "const float rope_pe_hi = __fmul_rn(rope_et.x, rope_em_s);\n";
+    ss << b << "const float rope_pe_lo = fmaf(rope_et.x, rope_em_s, -rope_pe_hi) + fmaf(rope_et.x, rope_em_l, rope_et.y * rope_em_s);\n";
+    ss << b << "const float rope_w_s = rope_et.x + rope_pe_hi;\n";
+    ss << b << "const float rope_w_e = (rope_et.x - rope_w_s) + rope_pe_hi;\n";
+    ss << b << "const float rope_scale = __int_as_float((__float2int_rn(rope_xn) + 127) << 23);\n";
+    ss << b << "const float rope_w_hi = rope_w_s * rope_scale;\n";
+    ss << b << "const float rope_w_lo = (rope_w_e + rope_et.y + rope_pe_lo) * rope_scale;\n";
+    // turns = [base^(-2i/R) / 2pi] * ratio^(-c_i).
+    ss << b << "const float rope_tn_hi = __fmul_rn(rope_turns.x, rope_w_hi);\n";
+    ss << b << "const float rope_tn_lo = fmaf(rope_turns.x, rope_w_hi, -rope_tn_hi) + fmaf(rope_turns.x, rope_w_lo, rope_turns.y * rope_w_hi);\n";
+    ss << b << "rope_turns = make_float2(rope_tn_hi, rope_tn_lo);\n";
+    ss << in << "}\n";
+}
+
 // Emits rope_s / rope_c for one RoPE pair: position (from seq_coord or position ids), frequency
 // for the pair index (scaling kinds included), sincos, attention factor and inverse sign. Expects
 // unsigned long long rope_pair_index and rope_rotary_dim in scope. Shared by the per-element
@@ -4600,7 +4836,8 @@ static void emitRopeSinCos(std::ostringstream& ss,
                            const std::string& seq_coord,
                            const std::string& effective_seq_len_expr,
                            const std::string& indent,
-                           const SpecializedBroadcastGroup* group) {
+                           const SpecializedBroadcastGroup* group,
+                           std::optional<uint64_t> static_sequence_length = std::nullopt) {
     const ExprNode& n = expr.nodes.at(node_idx);
         if (n.rope_position_ids_node != UINT32_MAX) {
             std::unordered_set<std::string> position_emitted;
@@ -4620,112 +4857,102 @@ static void emitRopeSinCos(std::ostringstream& ss,
             ss << indent << "    float rope_position = static_cast<float>(" << seq_coord << ") + "
                << emitScalarFpLiteral(static_cast<double>(n.rope_position_offset)) << ";\n";
         }
-        if (n.rope_scaling_kind == RotaryScalingKind::Linear) {
-            ss << indent << "    rope_position = rope_position / " << emitScalarFpLiteral(n.rope_scaling_factor) << ";\n";
+        // The angle is evaluated in turns (theta / 2pi) and reduced exactly, so it is accurate to
+        // ~1e-7 rad at any position. A plain float product position * freq is off by up to half
+        // an ulp of theta (2e-3 rad at position 32768, 8e-3 at 131072, 6e-2 at 2^20), and
+        // sincosf of a large theta takes its slow (local-memory) argument-reduction path.
+        //   turns per position  g = freq / 2pi, held as two floats g_hi + g_lo (~48 bits)
+        //   t = position * g    as t_hi + t_lo, with the rounding error of position * g_hi
+        //                       recovered exactly by an FMA
+        //   r = (t_hi - rint(t_hi)) + t_lo, where t_hi - rint(t_hi) is exact
+        //   sin/cos(2pi r) = sincospif(2r), whose argument reduction is exact and cheap.
+        uint64_t rotary_dim = n.rope_rotary_dim;
+        if (rotary_dim == 0 && group != nullptr && n.rope_head_dim_axis < group->output_dims.size()) {
+            rotary_dim = group->output_dims[n.rope_head_dim_axis];
         }
-        ss << indent << "    float rope_base = " << emitScalarFpLiteral(n.rope_base) << ";\n";
-        ss << indent << "    float rope_freq = 0.0f;\n";
-        if (n.rope_scaling_kind == RotaryScalingKind::DynamicNTK) {
-            ss << indent << "    const float rope_seq_len = fmaxf(" << effective_seq_len_expr << " + "
-               << emitScalarFpLiteral(static_cast<double>(std::max<int64_t>(0, n.rope_position_offset))) << ", 1.0f);\n";
-            ss << indent << "    const float rope_original_max = "
-               << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
-            ss << indent << "    if (rope_seq_len > rope_original_max && rope_rotary_dim > 2ULL) {\n";
-            ss << indent << "      const float rope_ntk_ratio = (" << emitScalarFpLiteral(n.rope_scaling_factor)
-               << " * rope_seq_len / rope_original_max) - (" << emitScalarFpLiteral(n.rope_scaling_factor) << " - 1.0f);\n";
-            ss << indent
-               << "      rope_base = rope_base * powf(rope_ntk_ratio, static_cast<float>(rope_rotary_dim) / "
-                  "static_cast<float>(rope_rotary_dim - 2ULL));\n";
-            ss << indent << "    }\n";
-            ss << indent
-               << "    rope_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
-        } else if (n.rope_scaling_kind == RotaryScalingKind::Yarn) {
-            ss << indent
-               << "    const float rope_pos_freq = powf(rope_base, 2.0f * static_cast<float>(rope_pair_index) / "
-                  "static_cast<float>(rope_rotary_dim));\n";
-            ss << indent << "    const float rope_inv_freq_extrap = 1.0f / rope_pos_freq;\n";
-            ss << indent << "    const float rope_inv_freq_interp = 1.0f / (" << emitScalarFpLiteral(n.rope_scaling_factor)
-               << " * rope_pos_freq);\n";
-            ss << indent << "    const float rope_original_max = "
-               << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
-            ss << indent << "    const float rope_log_base = logf(rope_base);\n";
-            ss << indent << "    float rope_yarn_low = (static_cast<float>(rope_rotary_dim) * logf(rope_original_max / ("
-               << emitScalarFpLiteral(n.rope_yarn_beta_fast) << " * 6.2831853071795864769f))) / (2.0f * rope_log_base);\n";
-            ss << indent << "    float rope_yarn_high = (static_cast<float>(rope_rotary_dim) * logf(rope_original_max / ("
-               << emitScalarFpLiteral(n.rope_yarn_beta_slow) << " * 6.2831853071795864769f))) / (2.0f * rope_log_base);\n";
-            ss << indent << "    rope_yarn_low = fmaxf(floorf(rope_yarn_low), 0.0f);\n";
-            ss << indent << "    rope_yarn_high = fminf(ceilf(rope_yarn_high), static_cast<float>(rope_rotary_dim - 1ULL));\n";
-            ss << indent << "    if (rope_yarn_low == rope_yarn_high) { rope_yarn_high += 0.001f; }\n";
-            ss << indent
-               << "    const float rope_yarn_ramp = fminf(fmaxf((static_cast<float>(rope_pair_index) - rope_yarn_low) / (rope_yarn_high - "
-                  "rope_yarn_low), 0.0f), 1.0f);\n";
-            ss << indent << "    rope_freq = rope_inv_freq_interp * rope_yarn_ramp + rope_inv_freq_extrap * (1.0f - rope_yarn_ramp);\n";
-        } else if (n.rope_scaling_kind == RotaryScalingKind::LongRope) {
-            if (n.rope_long_rope_short_factors.empty() || n.rope_long_rope_long_factors.empty()) {
-                throw runtime_error("LongRoPE code generation requires non-empty short/long factor lists.");
+        const bool known_rotary_dim = rotary_dim >= 2 && rotary_dim % 2 == 0 && rotary_dim <= 4096;
+        const bool static_frequencies = n.rope_scaling_kind != RotaryScalingKind::DynamicNTK && known_rotary_dim;
+        if (n.rope_scaling_kind == RotaryScalingKind::DynamicNTK && known_rotary_dim && static_sequence_length.has_value()) {
+            // The sequence length is an emit-time constant here (the pair kernel has no dynamic
+            // effective-length input), so DynamicNTK's scaled base is too: compute it in long double
+            // and read the frequencies from a table like the static kinds, at no runtime cost.
+            const long double seq_len = std::max<long double>(
+                static_cast<long double>(*static_sequence_length) + static_cast<long double>(std::max<int64_t>(0, n.rope_position_offset)),
+                1.0L);
+            const long double orig = static_cast<long double>(n.rope_original_max_position_embeddings);
+            ExprNode scaled = n;
+            scaled.rope_scaling_kind = RotaryScalingKind::None;
+            if (seq_len > orig && rotary_dim > 2) {
+                const long double factor = static_cast<long double>(n.rope_scaling_factor);
+                const long double ratio = factor * seq_len / orig - (factor - 1.0L);
+                const long double R = static_cast<long double>(rotary_dim);
+                scaled.rope_base = static_cast<double>(static_cast<long double>(n.rope_base) * std::pow(ratio, R / (R - 2.0L)));
             }
-            ss << indent << "    const float rope_seq_len = fmaxf(" << effective_seq_len_expr << " + "
-               << emitScalarFpLiteral(static_cast<double>(std::max<int64_t>(0, n.rope_position_offset))) << ", 1.0f);\n";
-            ss << indent << "    const float rope_original_max = "
-               << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
-            // static: one copy in device memory. A non-static local array indexed by the runtime pair
-            // index is rebuilt in local memory by every thread.
-            ss << indent << "    static const float rope_short_factors[] = " << emitFloatArrayLiteral(n.rope_long_rope_short_factors) << ";\n";
-            ss << indent << "    static const float rope_long_factors[] = " << emitFloatArrayLiteral(n.rope_long_rope_long_factors) << ";\n";
-            ss << indent
-               << "    const float rope_ext_factor = rope_seq_len > rope_original_max ? rope_long_factors[rope_pair_index] : "
-                  "rope_short_factors[rope_pair_index];\n";
-            ss << indent
-               << "    rope_freq = 1.0f / (rope_ext_factor * powf(rope_base, 2.0f * static_cast<float>(rope_pair_index) / "
-                  "static_cast<float>(rope_rotary_dim)));\n";
-        } else if (n.rope_scaling_kind == RotaryScalingKind::Llama3) {
-            ss << indent
-               << "    const float rope_inv_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / "
-                  "static_cast<float>(rope_rotary_dim));\n";
-            ss << indent << "    const float rope_wavelen = 6.2831853071795864769f / rope_inv_freq;\n";
-            ss << indent << "    const float rope_original_max = "
-               << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
-            ss << indent << "    const float rope_low_freq_wavelen = rope_original_max / "
-               << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ";\n";
-            ss << indent << "    const float rope_high_freq_wavelen = rope_original_max / "
-               << emitScalarFpLiteral(n.rope_llama3_high_freq_factor) << ";\n";
-            ss << indent << "    if (rope_wavelen > rope_low_freq_wavelen) {\n";
-            ss << indent << "      rope_freq = rope_inv_freq / " << emitScalarFpLiteral(n.rope_scaling_factor) << ";\n";
-            ss << indent << "    } else if (rope_wavelen < rope_high_freq_wavelen) {\n";
-            ss << indent << "      rope_freq = rope_inv_freq;\n";
-            ss << indent << "    } else {\n";
-            ss << indent << "      const float rope_smooth = (rope_original_max / rope_wavelen - "
-               << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ") / (" << emitScalarFpLiteral(n.rope_llama3_high_freq_factor)
-               << " - " << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ");\n";
-            ss << indent << "      rope_freq = (1.0f - rope_smooth) * (rope_inv_freq / " << emitScalarFpLiteral(n.rope_scaling_factor)
-               << ") + rope_smooth * rope_inv_freq;\n";
-            ss << indent << "    }\n";
-        } else {
-            // No frequency scaling (None / Linear): rope_freq = base^(-2i/R) depends only on the pair
-            // index and emit-time constants. Read it from a table computed in double and rounded
-            // once (within 0.5 ulp; powf is within ~2 ulp) instead of a powf per pair.
-            uint64_t rotary_dim = n.rope_rotary_dim;
-            if (rotary_dim == 0 && group != nullptr && n.rope_head_dim_axis < group->output_dims.size()) {
-                rotary_dim = group->output_dims[n.rope_head_dim_axis];
-            }
-            if (rotary_dim >= 2 && rotary_dim % 2 == 0 && rotary_dim <= 4096) {
-                std::vector<double> inv_freq(rotary_dim / 2);
-                for (uint64_t pair = 0; pair < rotary_dim / 2; ++pair) {
-                    inv_freq[pair] = static_cast<double>(static_cast<float>(
-                        std::pow(n.rope_base, -2.0 * static_cast<double>(pair) / static_cast<double>(rotary_dim))));
+            ss << indent << "    static const float2 rope_turns_table[] = " << emitRopeTurnsTable(scaled, rotary_dim, false) << ";\n";
+            ss << indent << "    const float2 rope_turns = rope_turns_table[rope_pair_index];\n";
+        } else if (n.rope_scaling_kind == RotaryScalingKind::DynamicNTK && known_rotary_dim) {
+            emitRopeDynamicNtkTurns(ss, n, rotary_dim, effective_seq_len_expr, indent);
+        } else if (static_frequencies) {
+            // Every kind but DynamicNTK has frequencies that depend only on the pair index and
+            // emit-time constants: compute them in double (Linear's 1/factor folded in) and split.
+            if (n.rope_scaling_kind == RotaryScalingKind::LongRope) {
+                if (n.rope_long_rope_short_factors.empty() || n.rope_long_rope_long_factors.empty()) {
+                    throw runtime_error("LongRoPE code generation requires non-empty short/long factor lists.");
                 }
-                ss << indent << "    static const float rope_inv_freq[] = " << emitFloatArrayLiteral(inv_freq) << ";\n";
-                ss << indent << "    rope_freq = rope_inv_freq[rope_pair_index];\n";
+                ss << indent << "    const float rope_seq_len = fmaxf(" << effective_seq_len_expr << " + "
+                   << emitScalarFpLiteral(static_cast<double>(std::max<int64_t>(0, n.rope_position_offset))) << ", 1.0f);\n";
+                ss << indent << "    static const float2 rope_turns_short[] = " << emitRopeTurnsTable(n, rotary_dim, false) << ";\n";
+                ss << indent << "    static const float2 rope_turns_long[] = " << emitRopeTurnsTable(n, rotary_dim, true) << ";\n";
+                ss << indent << "    const float2 rope_turns = rope_seq_len > "
+                   << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings))
+                   << " ? rope_turns_long[rope_pair_index] : rope_turns_short[rope_pair_index];\n";
+            } else {
+                // static: one copy in device memory, not a per-thread local array.
+                ss << indent << "    static const float2 rope_turns_table[] = " << emitRopeTurnsTable(n, rotary_dim, false) << ";\n";
+                ss << indent << "    const float2 rope_turns = rope_turns_table[rope_pair_index];\n";
+            }
+        } else {
+            // Runtime float frequency, only when the rotary dim is unknown at emit time. The product
+            // and reduction are still exact, but the float frequency itself carries ~1 ulp of error.
+            if (n.rope_scaling_kind == RotaryScalingKind::Linear) {
+                ss << indent << "    rope_position = rope_position / " << emitScalarFpLiteral(n.rope_scaling_factor) << ";\n";
+            }
+            ss << indent << "    float rope_base = " << emitScalarFpLiteral(n.rope_base) << ";\n";
+            ss << indent << "    float rope_freq = 0.0f;\n";
+            if (n.rope_scaling_kind == RotaryScalingKind::DynamicNTK) {
+                ss << indent << "    const float rope_seq_len = fmaxf(" << effective_seq_len_expr << " + "
+                   << emitScalarFpLiteral(static_cast<double>(std::max<int64_t>(0, n.rope_position_offset))) << ", 1.0f);\n";
+                ss << indent << "    const float rope_original_max = "
+                   << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
+                ss << indent << "    if (rope_seq_len > rope_original_max && rope_rotary_dim > 2ULL) {\n";
+                ss << indent << "      const float rope_ntk_ratio = (" << emitScalarFpLiteral(n.rope_scaling_factor)
+                   << " * rope_seq_len / rope_original_max) - (" << emitScalarFpLiteral(n.rope_scaling_factor) << " - 1.0f);\n";
+                ss << indent
+                   << "      rope_base = rope_base * powf(rope_ntk_ratio, static_cast<float>(rope_rotary_dim) / "
+                      "static_cast<float>(rope_rotary_dim - 2ULL));\n";
+                ss << indent << "    }\n";
+                ss << indent
+                   << "    rope_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
             } else {
                 ss << indent
                    << "    rope_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
             }
+            constexpr double INV_TWO_PI = 0.15915494309189533577;
+            const float inv_two_pi_hi = static_cast<float>(INV_TWO_PI);
+            const float inv_two_pi_lo = static_cast<float>(INV_TWO_PI - static_cast<double>(inv_two_pi_hi));
+            ss << indent << "    const float rope_turns_hi = __fmul_rn(rope_freq, " << emitScalarFpLiteral(inv_two_pi_hi) << ");\n";
+            ss << indent << "    const float2 rope_turns = make_float2(rope_turns_hi, fmaf(rope_freq, "
+               << emitScalarFpLiteral(inv_two_pi_lo) << ", fmaf(rope_freq, " << emitScalarFpLiteral(inv_two_pi_hi)
+               << ", -rope_turns_hi)));\n";
         }
-        ss << indent << "    const float rope_theta = rope_position * rope_freq;\n";
-        // One range reduction for both: sincosf returns the same values as sinf and cosf.
+        // __fmul_rn: t_hi must stay the rounded product. If nvcc contracted it into the following
+        // subtraction, t_lo (its exact rounding error) would be counted twice.
+        ss << indent << "    const float rope_t_hi = __fmul_rn(rope_position, rope_turns.x);\n";
+        ss << indent << "    const float rope_t_lo = fmaf(rope_position, rope_turns.y, fmaf(rope_position, rope_turns.x, -rope_t_hi));\n";
+        ss << indent << "    const float rope_r = (rope_t_hi - rintf(rope_t_hi)) + rope_t_lo;\n";
         ss << indent << "    float rope_s;\n";
         ss << indent << "    float rope_c;\n";
-        ss << indent << "    sincosf(rope_theta, &rope_s, &rope_c);\n";
+        ss << indent << "    sincospif(2.0f * rope_r, &rope_s, &rope_c);\n";
         if (n.rope_attention_factor != 1.0) {
             ss << indent << "    rope_s *= " << emitScalarFpLiteral(n.rope_attention_factor) << ";\n";
             ss << indent << "    rope_c *= " << emitScalarFpLiteral(n.rope_attention_factor) << ";\n";
@@ -10295,7 +10522,8 @@ static std::string emitRopePairSpecializedBroadcast(const CompiledExecutionStage
         ss << indent << "if (rope_rotated) {\n";
         // emitRopeSinCos writes its lines at indent + 4.
         emitRopeSinCos(ss, expr, rope_idx, "c_e0_" + std::to_string(rope.rope_sequence_axis),
-                       "static_cast<float>(out_dim_" + std::to_string(rope.rope_sequence_axis) + ")", indent, &group);
+                       "static_cast<float>(out_dim_" + std::to_string(rope.rope_sequence_axis) + ")", indent, &group,
+                       group.output_dims.at(rope.rope_sequence_axis));
         // Same per-lane formulas as the per-element path (first lane: cur*c - peer*s; second: peer*s + cur*c).
         ss << indent << "    rope_out0 = rope_v0 * rope_c - rope_v1 * rope_s;\n";
         ss << indent << "    rope_out1 = rope_v0 * rope_s + rope_v1 * rope_c;\n";

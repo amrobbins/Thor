@@ -6,6 +6,7 @@
 
 namespace ThorImplementation {
 
-void launchSetInt64Pair(int64_t* dest_d, int64_t first, int64_t second, Stream stream);
+// Writes *first_d = first and *second_d = second with one launch.
+void launchSetInt64Pair(int64_t* first_d, int64_t first, int64_t* second_d, int64_t second, Stream stream);
 
 }  // namespace ThorImplementation

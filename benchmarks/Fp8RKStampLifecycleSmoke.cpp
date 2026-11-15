@@ -153,7 +153,7 @@ void exercise(DataType dtype) {
             "Second independent stamp with identical configuration must be a cache hit");
     requireIndependentExecution(*a, *b);
     requireSameCachedSelection(*a, *b);
-    require(a->getInputTensor().getMemPtr<void>() != b->getInputTensor().getMemPtr<void>() &&
+    require(a->getInput().getMemPtr<void>() != b->getInput().getMemPtr<void>() &&
             a->getOutputTensor().getMemPtr<void>() != b->getOutputTensor().getMemPtr<void>(),
             "Independent stamps must bind their own input and output storage");
 

@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -40,22 +41,25 @@ struct CubReductionTiledWorkspaceProbe {
 
 // 1257: was TiledKernelsHaveNoScratchAndCubScratchIsStampedAheadOfRun. No dense dtype runs the direct tiled ARG or CUB
 // passes any more (FP8, FP32, FP16 and BF16 all run retained passes); the dense BF16 cases now check that whatever
-// scratch the retained passes own is stamped ahead of run and reused.
-TEST(CubReduction, TiledKernelsHaveNoScratchAndDenseScratchIsStampedAheadOfRun) {
+// scratch the retained passes own is stamped ahead of run and reused. 1387: no view runs the tiled kernels either.
+// 1390: the reducer refuses a rotated view; the dense stamp of its bytes, the caller's first part, stamps its scratch
+// ahead of run like any dense stamp.
+TEST(CubReduction, ViewAndDenseScratchIsStampedAheadOfRun) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     Tensor input = makeGpuTensor({1.0f, 3.0f, 5.0f, 7.0f, 9.0f, 11.0f,
                                   2.0f, 4.0f, 6.0f, 8.0f, 10.0f, 12.0f}, {2, 3, 2}, stream);
 
-    // A permuted view deliberately exercises the direct tiled VALUE path,
-    // bypassing ordinary dense-family selection. Workspace queries for a view
-    // must use its actual strides; the stamped footprint is authoritative here.
-    Tensor tiled_view = input.aliasView({2, 2, 3}, {1, 6, 2}, 0);
-    CubReduction tiled(CubReductionOp::Sum, 2, DataType::FP32);
-    const auto tiled_stamp = tiled.stamp(tiled_view, stream);
-    ASSERT_EQ(tiled_stamp->getPath(), CubReductionPath::TiledFixedSegment);
-    EXPECT_EQ(tiled_stamp->getWorkspaceSizeInBytes(), 0U);
-    EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*tiled_stamp), 0U);
+    // A permuted view with a rotated output: refused; its first part is the dense stamp of its bytes.
+    StridedSpan rotated_view = StridedSpan(input, 0, {2, 2, 3}, {1, 6, 2});
+    EXPECT_THROW(static_cast<void>(CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(rotated_view, stream)),
+                 NotImplementedException);
+    const std::optional<CubReductionViewSplit> split = CubReduction::splitRefusedView(
+        rotated_view.getDimensions(), rotated_view.getStridesElements(), {2});
+    ASSERT_TRUE(split.has_value());
+    const auto tiled_stamp = CubReduction(CubReductionOp::Sum, split->dense_axes, DataType::FP32)
+                                 .stamp(rotated_view.asDense(split->dense_dimensions), stream);
+    EXPECT_EQ(CubReductionTiledWorkspaceProbe::scratchBytes(*tiled_stamp), tiled_stamp->getWorkspaceSizeInBytes());
 
     // Dense BF16 VALUE and ARG (retained FP16 / BF16 passes): the query, the stamp and the stamped scratch agree.
     Tensor bf16_input = makeGpuTensor({1.0f, 3.0f, 5.0f, 7.0f, 9.0f, 11.0f,
@@ -85,6 +89,8 @@ TEST(CubReduction, TiledKernelsHaveNoScratchAndDenseScratchIsStampedAheadOfRun) 
     vector_arg_stamp->run();
     stream.synchronize();
     expectFloatVectorNear(copyGpuTensorAsFloat(tiled_stamp->getOutputTensor(), stream),
+                          {15.0f, 21.0f, 18.0f, 24.0f});  // the dense [2, 1, 2], before the rotation
+    expectFloatVectorNear(executeRefusedViewInTwoParts(rotated_view, CubReductionOp::Sum, {2}, stream),
                           {15.0f, 18.0f, 21.0f, 24.0f});
     expectFloatVectorNear(copyGpuTensorAsFloat(dense_value_stamp->getOutputTensor(), stream), {6.0f});
     ASSERT_TRUE(dense_arg_stamp->getIndexOutputTensor().has_value());
@@ -382,31 +388,20 @@ TEST(CubReduction, RankNineDenseSumUsesComposedPathRatherThanDynamicStridedMetad
     expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {240.0f, 256.0f});
 }
 
-TEST(CubReduction, PermutedViewUsesProductionTiledPathWithoutMaterialization) {
+TEST(CubReduction, PermutedViewIsRefusedAndRunsAsTheDensePlanOfItsBytesThenTheCopy) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     Tensor storage = makeGpuTensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
                                     7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f},
                                    {2, 3, 2},
                                    stream);
-    // Logical [k,i,j] view of dense physical [i,j,k]. The production planner recognizes
-    // [outer=i,reduction=j,inner=k] and shared-transposes finalized retained values into dense [k,i].
-    Tensor permuted = storage.aliasView({2, 2, 3}, {1, 6, 2}, 0);
+    // Logical [k,i,j] view of dense physical [i,j,k]. The classifier recognizes [outer=i,reduction=j,inner=k] with the
+    // rotated output [k,i]; 1387 ran a rotation pass inside the reducer. 1390: the reducer refuses it; the caller's
+    // dense plan reduces [i,j,k] over j into [i,k] and the dense copy writes [k,i].
+    StridedSpan permuted = StridedSpan(storage, 0, {2, 2, 3}, {1, 6, 2});
 
-    auto stamped = CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(permuted, stream);
-    ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
-    ASSERT_TRUE(stamped->getGeometry().permutation_aware_tiled_geometry.has_value());
-    EXPECT_TRUE(stamped->getGeometry().tiled_output_permuted);
-    EXPECT_TRUE(stamped->getGeometry().tiled_output_shared_transpose);
-    EXPECT_EQ(stamped->getGeometry().outer_size, 2U);
-    EXPECT_EQ(stamped->getGeometry().reduction_size, 3U);
-    EXPECT_EQ(stamped->getGeometry().inner_size, 2U);
-    EXPECT_EQ(stamped->getGeometry().tiled_output_outer_stride, 1U);
-    EXPECT_EQ(stamped->getGeometry().tiled_output_inner_stride, 2U);
-    EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 0U);
-    stamped->run();
-    stream.synchronize();
-    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {9.0f, 27.0f, 12.0f, 30.0f});
+    expectFloatVectorNear(executeRefusedViewInTwoParts(permuted, CubReductionOp::Sum, {2}, stream),
+                          {9.0f, 27.0f, 12.0f, 30.0f});
 }
 
 TEST(CubReduction, DensePhysicalPermutationCanKeepNaturalRetainedOutputOrder) {
@@ -417,12 +412,16 @@ TEST(CubReduction, DensePhysicalPermutationCanKeepNaturalRetainedOutputOrder) {
                                    {2, 3, 2},
                                    stream);
     // Logical [j,i,k] over the same dense [i,j,k] storage. Reducing logical j leaves the
-    // natural physical [i,k] retained order, so the tuned kernels keep their normal dense stores.
-    Tensor permuted = storage.aliasView({3, 2, 2}, {2, 6, 1}, 0);
+    // natural physical [i,k] retained order. 1376: the classification stays the natural-output tiled candidate; the
+    // view runs as the dense [i, j, k] over j on the retained dense planner.
+    StridedSpan permuted = StridedSpan(storage, 0, {3, 2, 2}, {2, 6, 1});
 
     auto stamped = CubReduction(CubReductionOp::Sum, 0, DataType::FP32).stamp(permuted, stream);
     ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
     ASSERT_TRUE(stamped->getGeometry().permutation_aware_tiled_geometry.has_value());
+    EXPECT_TRUE(stamped->usesDenseExecutablePlan());
+    EXPECT_EQ(stamped->getModernRKStrategyChain().rfind("view_physical:", 0), 0U)
+        << stamped->getModernRKStrategyChain();
     EXPECT_FALSE(stamped->getGeometry().tiled_output_permuted);
     EXPECT_FALSE(stamped->getGeometry().tiled_output_shared_transpose);
     EXPECT_EQ(stamped->getGeometry().tiled_output_outer_stride, 2U);
@@ -432,7 +431,7 @@ TEST(CubReduction, DensePhysicalPermutationCanKeepNaturalRetainedOutputOrder) {
     expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {9.0f, 12.0f, 27.0f, 30.0f});
 }
 
-TEST(CubReduction, PermutationAwareTiledPathHonorsViewStorageOffset) {
+TEST(CubReduction, RotatedOutputViewHonorsViewStorageOffset) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     Tensor storage = makeGpuTensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
@@ -441,18 +440,14 @@ TEST(CubReduction, PermutationAwareTiledPathHonorsViewStorageOffset) {
                                    {3, 3, 2},
                                    stream);
     // Skip the first physical i-row. getMemPtr() is already offset to the visible dense [2,3,2] region.
-    Tensor permuted = storage.aliasView({2, 2, 3}, {1, 6, 2}, 6);
-    ASSERT_EQ(permuted.getStorageElementOffset(), 6U);
+    StridedSpan permuted = StridedSpan(storage, 6, {2, 2, 3}, {1, 6, 2});
+    ASSERT_EQ(permuted.getStorage().offset, 6U);
 
-    auto stamped = CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(permuted, stream);
-    ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
-    EXPECT_TRUE(stamped->getGeometry().tiled_output_permuted);
-    stamped->run();
-    stream.synchronize();
-    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {27.0f, 45.0f, 30.0f, 48.0f});
+    expectFloatVectorNear(executeRefusedViewInTwoParts(permuted, CubReductionOp::Sum, {2}, stream),
+                          {27.0f, 45.0f, 30.0f, 48.0f});
 }
 
-TEST(CubReduction, PermutationAwareTiledPathHandlesRetainedHeightAbove65535) {
+TEST(CubReduction, RotatedOutputViewHandlesRetainedHeightAbove65535) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -472,23 +467,12 @@ TEST(CubReduction, PermutationAwareTiledPathHandlesRetainedHeightAbove65535) {
     }
 
     Tensor storage = makeGpuTensor(values, {outer_size, reduction_size, inner_size}, stream);
-    Tensor permuted = storage.aliasView(
-        {inner_size, outer_size, reduction_size},
-        {1, reduction_size * inner_size, inner_size},
-        0);
+    StridedSpan permuted = StridedSpan(storage, 0, {inner_size, outer_size, reduction_size}, {1, reduction_size * inner_size, inner_size});
 
-    auto stamped = CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(permuted, stream);
-    ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
-    ASSERT_TRUE(stamped->getGeometry().permutation_aware_tiled_geometry.has_value());
-    EXPECT_TRUE(stamped->getGeometry().tiled_output_permuted);
-    EXPECT_EQ(stamped->getGeometry().outer_size, outer_size);
-    EXPECT_EQ(stamped->getGeometry().inner_size, inner_size);
-    stamped->run();
-    stream.synchronize();
-    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
+    expectFloatVectorNear(executeRefusedViewInTwoParts(permuted, CubReductionOp::Sum, {2}, stream), expected);
 }
 
-TEST(CubReduction, PhysicallyContiguousDisjointLogicalAxesUsePermutationAwareTiledExecution) {
+TEST(CubReduction, PhysicallyContiguousDisjointLogicalAxesRunAsTheDenseTensorOfTheirBytes) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -513,10 +497,8 @@ TEST(CubReduction, PhysicallyContiguousDisjointLogicalAxesUsePermutationAwareTil
     Tensor storage = makeGpuTensor(values, {outer_size, reduction_a, reduction_b, inner_size}, stream);
     // Physical order [logical 1, logical 0, logical 2, logical 3]. Reduced logical axes {0,2} are
     // disjoint in the view but contiguous in physical storage and can be flattened into one reduction domain.
-    Tensor permuted = storage.aliasView(
-        {reduction_a, outer_size, reduction_b, inner_size},
-        {reduction_b * inner_size, reduction_a * reduction_b * inner_size, inner_size, 1},
-        0);
+    // 1376: with the natural [outer, inner] output it runs as the dense [outer, a x b, inner] on the dense planner.
+    StridedSpan permuted = StridedSpan(storage, 0, {reduction_a, outer_size, reduction_b, inner_size}, {reduction_b * inner_size, reduction_a * reduction_b * inner_size, inner_size, 1});
 
     auto stamped = CubReduction(CubReductionOp::Sum, std::vector<uint32_t>{0, 2}, DataType::FP32)
                        .stamp(permuted, stream);
@@ -524,13 +506,14 @@ TEST(CubReduction, PhysicallyContiguousDisjointLogicalAxesUsePermutationAwareTil
     EXPECT_FALSE(stamped->getGeometry().reduced_axes_are_contiguous);
     ASSERT_TRUE(stamped->getGeometry().permutation_aware_tiled_geometry.has_value());
     EXPECT_FALSE(stamped->getGeometry().tiled_output_permuted);
+    EXPECT_TRUE(stamped->usesDenseExecutablePlan());
     stamped->run();
     stream.synchronize();
     expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
 }
 
 
-TEST(CubReduction, Direct2BPayloadTranspose32x33WritesLogicalBAPOrder) {
+TEST(CubReduction, Direct2BViewWritesLogicalBAPOrder) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -547,25 +530,11 @@ TEST(CubReduction, Direct2BPayloadTranspose32x33WritesLogicalBAPOrder) {
     Tensor storage = makeGpuTensor(values, {storage_elements}, stream);
 
     // Logical [R,B,A,P] aliases compact physical [A,R,B,P]. Reducing R must emit dense logical [B,A,P], so this is
-    // the payload-preserving retained-order rotation [A,B,P] -> [B,A,P] targeted by VIEW-DIRECT-2B.
-    Tensor permuted = storage.aliasView(
-        {reduction_size, b_size, a_size, payload_size},
-        {b_size * payload_size, payload_size, reduction_size * b_size * payload_size, 1},
-        0);
-    auto stamped = CubReduction(CubReductionOp::Sum, 0, DataType::FP32).stamp(permuted, stream);
+    // the payload-preserving retained-order rotation [A,B,P] -> [B,A,P] targeted by VIEW-DIRECT-2B. 1390: the reducer
+    // refuses it; the caller's dense plan reduces [A,R,BxP] over R into [A,B,P] and the dense copy writes [B,A,P].
+    StridedSpan permuted = StridedSpan(storage, 0, {reduction_size, b_size, a_size, payload_size}, {b_size * payload_size, payload_size, reduction_size * b_size * payload_size, 1});
 
-    ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
-    ASSERT_TRUE(stamped->getGeometry().payload_transpose_tiled_geometry.has_value());
-    EXPECT_FALSE(stamped->getGeometry().permutation_aware_tiled_geometry.has_value());
-    EXPECT_FALSE(stamped->getGeometry().pitched_tiled_geometry.has_value());
-    EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 0U);
 
-    const CubReductionPayloadTransposeTiledGeometry& transposed =
-        stamped->getGeometry().payload_transpose_tiled_geometry.value();
-    EXPECT_EQ(transposed.a_size, a_size);
-    EXPECT_EQ(transposed.reduction_size, reduction_size);
-    EXPECT_EQ(transposed.b_size, b_size);
-    EXPECT_EQ(transposed.payload_size, payload_size);
 
     std::vector<float> expected;
     expected.reserve(b_size * a_size * payload_size);
@@ -583,12 +552,10 @@ TEST(CubReduction, Direct2BPayloadTranspose32x33WritesLogicalBAPOrder) {
         }
     }
 
-    stamped->run();
-    stream.synchronize();
-    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
+    expectFloatVectorNear(executeRefusedViewInTwoParts(permuted, CubReductionOp::Sum, {0}, stream), expected);
 }
 
-TEST(CubReduction, Direct2BPayloadTranspose32x33SupportsPayloadTilesWiderThanOneWarp) {
+TEST(CubReduction, Direct2BViewSupportsPayloadsWiderThanOneSector) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -598,21 +565,13 @@ TEST(CubReduction, Direct2BPayloadTranspose32x33SupportsPayloadTilesWiderThanOne
     constexpr uint64_t payload_size = 37;
     constexpr uint64_t storage_elements = a_size * reduction_size * b_size * payload_size;
     Tensor storage = makeGpuTensor(std::vector<float>(storage_elements, 1.0f), {storage_elements}, stream);
-    Tensor permuted = storage.aliasView(
-        {reduction_size, b_size, a_size, payload_size},
-        {b_size * payload_size, payload_size, reduction_size * b_size * payload_size, 1},
-        0);
+    StridedSpan permuted = StridedSpan(storage, 0, {reduction_size, b_size, a_size, payload_size}, {b_size * payload_size, payload_size, reduction_size * b_size * payload_size, 1});
 
-    auto stamped = CubReduction(CubReductionOp::Sum, 0, DataType::FP32).stamp(permuted, stream);
-    ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
-    ASSERT_TRUE(stamped->getGeometry().payload_transpose_tiled_geometry.has_value());
-    stamped->run();
-    stream.synchronize();
-    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
+    expectFloatVectorNear(executeRefusedViewInTwoParts(permuted, CubReductionOp::Sum, {0}, stream),
                           std::vector<float>(b_size * a_size * payload_size, 2.0f));
 }
 
-TEST(CubReduction, Direct2BPayloadTranspose32x33SupportsEveryValueOperationThroughProductionStamp) {
+TEST(CubReduction, Direct2BViewSupportsEveryValueOperationThroughProductionStamp) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -622,10 +581,7 @@ TEST(CubReduction, Direct2BPayloadTranspose32x33SupportsEveryValueOperationThrou
     constexpr uint64_t payload_size = 5;
     constexpr uint64_t storage_elements = a_size * reduction_size * b_size * payload_size;
     Tensor storage = makeGpuTensor(std::vector<float>(storage_elements, 1.0f), {storage_elements}, stream);
-    Tensor permuted = storage.aliasView(
-        {reduction_size, b_size, a_size, payload_size},
-        {b_size * payload_size, payload_size, reduction_size * b_size * payload_size, 1},
-        0);
+    StridedSpan permuted = StridedSpan(storage, 0, {reduction_size, b_size, a_size, payload_size}, {b_size * payload_size, payload_size, reduction_size * b_size * payload_size, 1});
 
     struct OperationCase {
         CubReductionOp op;
@@ -643,20 +599,13 @@ TEST(CubReduction, Direct2BPayloadTranspose32x33SupportsEveryValueOperationThrou
     };
 
     for (const OperationCase& test_case : cases) {
-        auto stamped = CubReduction(test_case.op, 0, DataType::FP32).stamp(permuted, stream);
-        ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
-        ASSERT_TRUE(stamped->getGeometry().payload_transpose_tiled_geometry.has_value());
-        EXPECT_FALSE(stamped->getGeometry().pitched_tiled_geometry.has_value());
-        EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 0U);
 
-        stamped->run();
-        stream.synchronize();
-        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
+        expectFloatVectorNear(executeRefusedViewInTwoParts(permuted, test_case.op, {0}, stream),
                               std::vector<float>(b_size * a_size * payload_size, test_case.expected));
     }
 }
 
-TEST(CubReduction, PitchedTiledViewReducesDiagonalSlabsWithoutMaterialization) {
+TEST(CubReduction, PitchedViewIsCopiedThenReducedByTheDensePlan) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     std::vector<float> values(24);
@@ -667,33 +616,22 @@ TEST(CubReduction, PitchedTiledViewReducesDiagonalSlabsWithoutMaterialization) {
 
     // This is the collapsed repeated-label view produced by the lhs of iirk,kj->ij. The second logical i contributes
     // to the first stride (12 + 6 = 18), leaving two disjoint [reduction=2,inner=3] slabs separated by a physical gap.
-    Tensor diagonal = storage.aliasView({2, 2, 3}, {18, 3, 1}, 0);
-    auto stamped = CubReduction(CubReductionOp::Sum, 1, DataType::FP32).stamp(diagonal, stream);
+    // 1387 (the user's decision 3, 2026-11-12): the slabs are copied into a dense [2,2,3] that the dense plan reduces,
+    // until phase 7's pitch-aware passes. 1390: the reducer refuses the view; the caller copies it (copyToDenseAsync).
+    StridedSpan diagonal = StridedSpan(storage, 0, {2, 2, 3}, {18, 3, 1});
 
-    ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
-    ASSERT_TRUE(stamped->getGeometry().pitched_tiled_geometry.has_value());
-    EXPECT_FALSE(stamped->getGeometry().permutation_aware_tiled_geometry.has_value());
-    EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 0U);
-    const CubReductionPitchedTiledGeometry& pitched = stamped->getGeometry().pitched_tiled_geometry.value();
-    EXPECT_EQ(pitched.outer_size, 2U);
-    EXPECT_EQ(pitched.reduction_size, 2U);
-    EXPECT_EQ(pitched.inner_size, 3U);
-    EXPECT_EQ(pitched.outer_stride, 18U);
-    EXPECT_EQ(pitched.reduction_stride, 3U);
 
-    stamped->run();
-    stream.synchronize();
-    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
+    expectFloatVectorNear(executeRefusedViewInTwoParts(diagonal, CubReductionOp::Sum, {1}, stream),
                           {5.0f, 7.0f, 9.0f, 41.0f, 43.0f, 45.0f});
 }
 
 
-TEST(CubReduction, PitchedTiledViewSupportsEveryValueOperation) {
+TEST(CubReduction, PitchedViewSupportsEveryValueOperation) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     std::vector<float> values(106, 1.0f);
     Tensor storage = makeGpuTensor(values, {106}, stream);
-    Tensor pitched_view = storage.aliasView({3, 4, 5}, {40, 7, 1}, 0);
+    StridedSpan pitched_view = StridedSpan(storage, 0, {3, 4, 5}, {40, 7, 1});
 
     struct OperationCase {
         CubReductionOp op;
@@ -711,19 +649,13 @@ TEST(CubReduction, PitchedTiledViewSupportsEveryValueOperation) {
     };
 
     for (const OperationCase& test_case : cases) {
-        auto stamped = CubReduction(test_case.op, 1, DataType::FP32).stamp(pitched_view, stream);
-        ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
-        ASSERT_TRUE(stamped->getGeometry().pitched_tiled_geometry.has_value());
-        EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 0U);
 
-        stamped->run();
-        stream.synchronize();
-        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
+        expectFloatVectorNear(executeRefusedViewInTwoParts(pitched_view, test_case.op, {1}, stream),
                               std::vector<float>(15, test_case.expected));
     }
 }
 
-TEST(CubReduction, PitchedTiledViewSupportsLeadingReductionWithNoOuterGroup) {
+TEST(CubReduction, PitchedViewSupportsLeadingReductionWithNoOuterGroup) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     std::vector<float> values(12);
@@ -733,19 +665,11 @@ TEST(CubReduction, PitchedTiledViewSupportsLeadingReductionWithNoOuterGroup) {
     Tensor storage = makeGpuTensor(values, {2, 2, 3}, stream);
 
     // Collapsed repeated-label view from iir,j->rj: two contiguous r payloads separated by the diagonal i pitch.
-    Tensor diagonal = storage.aliasView({2, 3}, {9, 1}, 0);
-    auto stamped = CubReduction(CubReductionOp::Sum, 0, DataType::FP32).stamp(diagonal, stream);
+    StridedSpan diagonal = StridedSpan(storage, 0, {2, 3}, {9, 1});
 
-    ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
-    ASSERT_TRUE(stamped->getGeometry().pitched_tiled_geometry.has_value());
-    const CubReductionPitchedTiledGeometry& pitched = stamped->getGeometry().pitched_tiled_geometry.value();
-    EXPECT_EQ(pitched.outer_size, 1U);
-    EXPECT_EQ(pitched.outer_stride, 0U);
-    EXPECT_EQ(pitched.reduction_stride, 9U);
 
-    stamped->run();
-    stream.synchronize();
-    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {11.0f, 13.0f, 15.0f});
+    expectFloatVectorNear(executeRefusedViewInTwoParts(diagonal, CubReductionOp::Sum, {0}, stream),
+                          {11.0f, 13.0f, 15.0f});
 }
 
 TEST(CubReduction, UnsupportedViewGateRejectsProductionWhileBenchmarkLegacyHookRemainsExecutable) {
@@ -757,7 +681,7 @@ TEST(CubReduction, UnsupportedViewGateRejectsProductionWhileBenchmarkLegacyHookR
         values[i] = static_cast<float>(i + 1);
     }
     Tensor storage = makeGpuTensor(values, {13}, stream);
-    Tensor unsupported = storage.aliasView({2, 2, 3}, {1, 7, 2}, 0);
+    StridedSpan unsupported = StridedSpan(storage, 0, {2, 2, 3}, {1, 7, 2});
     CubReduction reduction(CubReductionOp::Sum, 2, DataType::FP32);
 
     EXPECT_THROW((void)CubReduction::analyzeGeometry(
@@ -774,7 +698,7 @@ TEST(CubReduction, RankOneAffineViewUsesDeviceTransformReduceWithoutGeneralIndex
                                     7.0f, 8.0f, 9.0f},
                                    {3, 3},
                                    stream);
-    Tensor diagonal = storage.aliasView({3}, {4}, 0);
+    StridedSpan diagonal = StridedSpan(storage, 0, {3}, {4});
 
     auto stamped = CubReduction(CubReductionOp::Sum, 0, DataType::FP32).stamp(diagonal, stream);
     EXPECT_EQ(stamped->getPath(), CubReductionPath::DeviceTransformReduce);
@@ -783,4 +707,27 @@ TEST(CubReduction, RankOneAffineViewUsesDeviceTransformReduceWithoutGeneralIndex
     stamped->run();
     stream.synchronize();
     expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {15.0f});
+}
+
+TEST(CubReduction, StridedSpanAtAnOffsetIsReducedInPlaceWithoutAView) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor storage = makeGpuTensor({0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f},
+                                   {13},
+                                   stream);
+    // The [4, 3] span of the storage from element 1, read transposed (rows {1, 5, 9}, {2, 6, 10}, ...): its bytes are
+    // the dense [3, 4] from element 1, reduced over the leading axis in place, with no Tensor view made of it.
+    const StridedSpan columns(storage, 1, {4, 3}, {1, 4});
+    auto stamped = CubReduction(CubReductionOp::Sum, 1, DataType::FP32).stamp(columns, stream);
+    EXPECT_EQ(stamped->getInput().getMemPtr<void>(), static_cast<void*>(storage.getMemPtr<float>() + 1));
+    stamped->run();
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {15.0f, 18.0f, 21.0f, 24.0f});
+
+    // 1390: the [3, 2] span {1, 2}, {5, 6}, {9, 10} (row pitch 4) has gaps between its rows, which the reducer
+    // refuses; a caller copies it dense first (Expression's DenseCopy stage).
+    const StridedSpan rows(storage, 1, {3, 2}, {4, 1});
+    EXPECT_THROW(static_cast<void>(CubReduction(CubReductionOp::Sum, 1, DataType::FP32).stamp(rows, stream)),
+                 NotImplementedException);
+    expectFloatVectorNear(executeRefusedViewInTwoParts(rows, CubReductionOp::Sum, {1}, stream), {3.0f, 11.0f, 19.0f});
 }

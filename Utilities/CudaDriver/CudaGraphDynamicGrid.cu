@@ -21,26 +21,25 @@ bool isSupportedCountDType(DataType dtype) {
 
 std::string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
-void validateCountTensor(const Tensor& tensor, int gpuNum, const char* label) {
+void validateCountTensor(const TensorElement& count, int gpuNum, const char* label) {
+    const Tensor& tensor = count.tensor;
     if (!tensor.isInitialized()) {
         throw std::invalid_argument(std::string("CUDA graph dynamic-grid ") + label + " tensor is not initialized.");
     }
     if (tensor.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU || tensor.getPlacement().getDeviceNum() != gpuNum) {
         throw std::invalid_argument(std::string("CUDA graph dynamic-grid ") + label + " tensor must live on the target GPU.");
     }
-    if (!tensor.isDenseContiguous()) {
-        throw std::invalid_argument(std::string("CUDA graph dynamic-grid ") + label + " tensor must be dense contiguous.");
-    }
-    if (tensor.getDimensions() != std::vector<uint64_t>{1}) {
-        throw std::invalid_argument(std::string("CUDA graph dynamic-grid ") + label + " tensor must have shape [1].");
-    }
+    count.validate(std::string("CUDA graph dynamic-grid ") + label + " count");
     if (!isSupportedCountDType(tensor.getDataType())) {
         throw std::invalid_argument(std::string("CUDA graph dynamic-grid ") + label + " tensor dtype " + dtypeName(tensor.getDataType()) +
                                     " is unsupported. Supported dtypes are uint16, uint32, and uint64.");
     }
 }
 
-void validateDescriptorCommon(const DeviceUpdatableKernelNodeDeviceHandle* targetNode, const Tensor& countTensor, Stream stream, const char* label) {
+void validateDescriptorCommon(const DeviceUpdatableKernelNodeDeviceHandle* targetNode,
+                              const TensorElement& countTensor,
+                              Stream stream,
+                              const char* label) {
     if (targetNode == nullptr || !targetNode->isInitialized()) {
         throw std::invalid_argument(std::string("CUDA graph dynamic-grid ") + label + " requires an initialized target-node device handle.");
     }
@@ -113,7 +112,7 @@ __global__ void updateDeviceGrid2DFromScalarKernel(const cudaGraphDeviceNode_t* 
 
 template <typename CountT>
 void launchUpdateDeviceGrid1DTyped(const DynamicGrid1DFromScalarDescriptor& descriptor, Stream stream) {
-    const CountT* itemCount = descriptor.itemCount.getMemPtr<CountT>();
+    const CountT* itemCount = descriptor.itemCount.pointer<CountT>();
     updateDeviceGrid1DFromScalarKernel<CountT><<<1, 1, 0, stream.getStream()>>>(descriptor.targetNode->devicePtr(),
                                                                                 itemCount,
                                                                                 descriptor.itemsPerCount,
@@ -167,6 +166,9 @@ void launchUpdateDeviceGrid1DFromScalar(const DynamicGrid1DFromScalarDescriptor&
 
 void launchUpdateDeviceGrid2DFromScalar(const DynamicGrid2DFromScalarDescriptor& descriptor, Stream stream) {
     validateDescriptorCommon(descriptor.targetNode, descriptor.rowCount, stream, "2D update");
+    if (descriptor.rowCount.getDimensions() != std::vector<uint64_t>{1}) {
+        throw std::invalid_argument("CUDA graph dynamic-grid 2D update tensor must have shape [1].");
+    }
     if (descriptor.gridDimXPerRow == 0) {
         throw std::invalid_argument("CUDA graph dynamic-grid 2D update gridDimXPerRow must be non-zero.");
     }

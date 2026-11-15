@@ -7,6 +7,7 @@
 // The executable FP32 continuation is deliberately not part of this first-stage
 // descriptor; an autotune plan must own and benchmark that continuation too.
 
+#include "DeepLearning/Implementation/Tensor/StridedSpan.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalIdentity.h"
 #include <cstdint>
@@ -35,20 +36,20 @@ namespace ThorImplementation::CubReductionInternal::Fp8RK {
 // write FP32 [outer,shards,K] partials, for a separately planned continuation.
 // No kernel selection, allocation, or synchronization in these functions.
 void launchOneWindow(const PhysicalKernel& kernel, const CubReductionStageSemantics& semantics,
-                     const Tensor& input, Tensor& output, const CubReductionGeometry& geometry,
+                     const StridedSpan& input, const StridedSpan& output, const CubReductionGeometry& geometry,
                      float output_scale, Stream& stream);
 void launchDeepRSmallK(const PhysicalKernel& kernel, const CubReductionStageSemantics& semantics,
-                       const Tensor& input, Tensor& fp32_partials, const CubReductionGeometry& geometry,
+                       const StridedSpan& input, const StridedSpan& fp32_partials, const CubReductionGeometry& geometry,
                        Stream& stream);
 void launchAlignedK(const PhysicalKernel& kernel, const CubReductionStageSemantics& semantics,
-                    const Tensor& input, Tensor& stage_output, const CubReductionGeometry& geometry,
+                    const StridedSpan& input, const StridedSpan& stage_output, const CubReductionGeometry& geometry,
                     float output_scale, Stream& stream);
 void launchRuntimeK(const PhysicalKernel& kernel, const CubReductionStageSemantics& semantics,
-                    const Tensor& input, Tensor& stage_output, const CubReductionGeometry& geometry,
+                    const StridedSpan& input, const StridedSpan& stage_output, const CubReductionGeometry& geometry,
                     float output_scale, Stream& stream);
 
 void launchPhysicalFirstStage(const PhysicalKernel& kernel, const CubReductionStageSemantics& semantics,
-                              const Tensor& input, Tensor& stage_output,
+                              const StridedSpan& input, const StridedSpan& stage_output,
                               const CubReductionGeometry& geometry, float output_scale, Stream& stream);
 
 }  // namespace ThorImplementation::CubReductionInternal::Fp8RK

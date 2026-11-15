@@ -22,7 +22,7 @@ uint32_t deepRSmallKResidency(DataType input_dtype, uint64_t k,
 }
 
 void launchDeepRSmallK(const PhysicalKernel& kernel, const CubReductionStageSemantics& semantics,
-                       const Tensor& input, Tensor& partials,
+                       const StridedSpan& input, const StridedSpan& partials,
                        const CubReductionGeometry& geometry, Stream& stream) {
     if (kernel.family != PhysicalFamily::DeepRSmallK || !kernel.staged() ||
         !structurallyValid(kernel, geometry.outer_size, geometry.reduction_size, geometry.inner_size))

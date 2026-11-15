@@ -9,6 +9,7 @@
 // subnormals, both zeros), tie-heavy rows, value and index outputs, an original-domain index stride, rows that start
 // mid-word, and uninitialized Split scratch.
 
+#include "test/Utilities/TensorOperations/OutputSpan.h"
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 #include "test/Utilities/TensorOperations/Fp8ArgReference.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
@@ -126,7 +127,7 @@ uint16_t f16Bits(float value, DataType dtype) {
 
 struct F16Input {
     Tensor storage;  // UINT8: offset + 2 * count + 4 bytes
-    Tensor input;    // the FP16 / BF16 [rows, R] view at `offset`
+    StridedSpan input;  // the FP16 / BF16 [rows, R] span of `storage`'s bytes at `offset`
     std::vector<float> values;
 };
 
@@ -141,7 +142,7 @@ F16Input uploadF16(std::vector<float> values, DataType dtype, uint64_t rows, uin
     }
     F16Input result;
     result.storage = makeGpuUnsignedTensor(padded, {padded.size()}, stream, DataType::UINT8);
-    result.input = result.storage.aliasByteStorageAs(dtype, {rows, elements}, offset);
+    result.input = StridedSpan(result.storage).bytesAs(offset, dtype, {rows, elements});
     result.values = std::move(values);
     return result;
 }
@@ -446,10 +447,10 @@ TEST(CubReductionF16KR, ValueRejectsUnsupportedInputs) {
                                           {rows, 18, 18, 1, KR::fp8KRVectorRows(18), true}, nullptr, 0, 1.0f, stream),
                  std::logic_error);
     // FP8 and FP32 input to the 2-byte launcher.
-    Tensor bytes = in.storage.aliasByteStorageAs(DataType::FP8_E4M3, {rows, 2 * elements}, 0);
+    StridedSpan bytes = StridedSpan(in.storage).bytesAs(0, DataType::FP8_E4M3, {rows, 2 * elements});
     EXPECT_THROW(launchF16KRValueSegments(semantics, bytes, output, group, nullptr, 0, 1.0f, stream),
                  std::logic_error);
-    Tensor words = in.storage.aliasByteStorageAs(DataType::FP32, {rows, elements / 2}, 0);
+    StridedSpan words = StridedSpan(in.storage).bytesAs(0, DataType::FP32, {rows, elements / 2});
     EXPECT_THROW(launchF16KRValueSegments(semantics, words, output, group, nullptr, 0, 1.0f, stream),
                  std::logic_error);
     // A Split shape without scratch.
@@ -490,7 +491,7 @@ float decodeF16Bits(uint16_t bits, DataType dtype) {
 
 struct F16BitsInput {
     Tensor storage;
-    Tensor input;
+    StridedSpan input;
     std::vector<float> values;  // decoded
 };
 
@@ -505,7 +506,7 @@ F16BitsInput uploadF16Bits(const std::vector<uint16_t>& bits, DataType dtype, ui
         result.values[i] = decodeF16Bits(bits[i], dtype);
     }
     result.storage = makeGpuUnsignedTensor(padded, {padded.size()}, stream, DataType::UINT8);
-    result.input = result.storage.aliasByteStorageAs(dtype, {rows, elements}, offset);
+    result.input = StridedSpan(result.storage).bytesAs(offset, dtype, {rows, elements});
     return result;
 }
 
@@ -586,7 +587,7 @@ TEST(CubReductionF16KR, ArgEveryPoolShapeMatchesReference) {
                         Tensor index(gpuPlacement, TensorDescriptor(index_dtype, {rows}));
                         const uint64_t stride = with_value ? 3 : 1;
                         for (int launch = 0; launch < 2; ++launch) {
-                            launchF16KRArgSegments(in.input, value ? &*value : nullptr, &index, shape,
+                            launchF16KRArgSegments(in.input, outputSpan(value), outputSpan(index), shape,
                                                    scratch ? scratch->getMemPtr<void>() : nullptr,
                                                    scratch ? scratch->getArraySizeInBytes() : 0, maximum, stride,
                                                    stream);
@@ -620,32 +621,32 @@ TEST(CubReductionF16KR, ArgRejectsUnsupportedInputs) {
     Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {rows}));
     const KR::Fp8KRSegmentShape group{rows, 2 * elements, 2 * elements, 4, 1, false};
     // A shape in elements instead of bytes; vector Pack; no outputs; a wrong output size; FP8 input.
-    EXPECT_THROW(launchF16KRArgSegments(in.input, nullptr, &index, {rows, elements, elements, 4, 1, false}, nullptr, 0,
+    EXPECT_THROW(launchF16KRArgSegments(in.input, nullptr, outputSpan(index), {rows, elements, elements, 4, 1, false}, nullptr, 0,
                                         false, 1, stream),
                  std::logic_error);
-    EXPECT_THROW(launchF16KRArgSegments(in.input, nullptr, &index, {rows, 8, 8, 1, 2, true}, nullptr, 0, false, 1,
+    EXPECT_THROW(launchF16KRArgSegments(in.input, nullptr, outputSpan(index), {rows, 8, 8, 1, 2, true}, nullptr, 0, false, 1,
                                         stream),
                  std::logic_error);
     EXPECT_THROW(launchF16KRArgSegments(in.input, nullptr, nullptr, group, nullptr, 0, false, 1, stream),
                  std::logic_error);
     Tensor short_index(gpuPlacement, TensorDescriptor(DataType::UINT32, {rows - 1}));
-    EXPECT_THROW(launchF16KRArgSegments(in.input, nullptr, &short_index, group, nullptr, 0, false, 1, stream),
+    EXPECT_THROW(launchF16KRArgSegments(in.input, nullptr, outputSpan(short_index), group, nullptr, 0, false, 1, stream),
                  std::logic_error);
-    Tensor bytes = in.storage.aliasByteStorageAs(DataType::FP8_E4M3, {rows, 2 * elements}, 0);
-    EXPECT_THROW(launchF16KRArgSegments(bytes, nullptr, &index, group, nullptr, 0, false, 1, stream),
+    StridedSpan bytes = StridedSpan(in.storage).bytesAs(0, DataType::FP8_E4M3, {rows, 2 * elements});
+    EXPECT_THROW(launchF16KRArgSegments(bytes, nullptr, outputSpan(index), group, nullptr, 0, false, 1, stream),
                  std::logic_error);
     // A UINT32 index that cannot hold row-local index * stride.
-    EXPECT_THROW(launchF16KRArgSegments(in.input, nullptr, &index, group, nullptr, 0, false, 1ULL << 31, stream),
+    EXPECT_THROW(launchF16KRArgSegments(in.input, nullptr, outputSpan(index), group, nullptr, 0, false, 1ULL << 31, stream),
                  std::logic_error);
     // A Split shape without scratch.
     const uint64_t long_elements = 8192;
     const F16BitsInput long_in = uploadF16Bits(f16ArgBits(long_elements, DataType::BF16, 8), DataType::BF16, 1,
                                                long_elements, 0, stream);
     Tensor one(gpuPlacement, TensorDescriptor(DataType::UINT32, {1}));
-    EXPECT_THROW(launchF16KRArgSegments(long_in.input, nullptr, &one,
+    EXPECT_THROW(launchF16KRArgSegments(long_in.input, nullptr, outputSpan(one),
                                         {1, 2 * long_elements, 4096, KR::FP8_KR_THREADS, 1, false}, nullptr, 0, false,
                                         1, stream),
                  std::logic_error);
-    EXPECT_NO_THROW(launchF16KRArgSegments(in.input, nullptr, &index, group, nullptr, 0, true, 1, stream));
+    EXPECT_NO_THROW(launchF16KRArgSegments(in.input, nullptr, outputSpan(index), group, nullptr, 0, true, 1, stream));
     stream.synchronize();
 }

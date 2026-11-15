@@ -1,5 +1,6 @@
 #include "Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalIdentity.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 
@@ -171,7 +172,9 @@ bool structurallyValid(const PhysicalKernel& p, uint64_t outer, uint64_t r, uint
             if (!p.c || p.c > 512 || p.d != ceilDiv(k, p.c) || !p.e || !p.f) return false;
             const RuntimeLayout layout = static_cast<RuntimeLayout>(p.a);
             if (layout == RuntimeLayout::PacketComplete) {
-                if (p.f != 1 || p.e != r || p.c < 16 || p.c > 496 ||
+                // 1379 / 1380: a tile may be narrower than a packet (any 1..496 components); the selector offers such
+                // tiles only below 16-byte alignment, where OneWindow, the aligned small-K pass, cannot run.
+                if (p.f != 1 || p.e != r || p.c < 1 || p.c > 496 ||
                     !(p.b == 1 || p.b == 2 || p.b == 4 || p.b == 8) || p.staged()) return false;
             } else if (layout == RuntimeLayout::RotatedPrefix || layout == RuntimeLayout::RotatedExact) {
                 if (p.b || p.e >= r || p.f != ceilDiv(r, p.e) ||
@@ -188,6 +191,16 @@ bool structurallyValid(const PhysicalKernel& p, uint64_t outer, uint64_t r, uint
         }
     }
     return false;
+}
+
+uint32_t fp8RKPassInputAlignment(const PhysicalKernel& kernel, uint64_t k) {
+    switch (kernel.family) {
+        case PhysicalFamily::OneWindow:
+            return kernel.a != 0 && kernel.c != 0 && k <= oneWindowUnalignedCapacity(kernel.a, kernel.c, 1) ? 1U : 16U;
+        case PhysicalFamily::AlignedK: return static_cast<uint32_t>(kernel.a);
+        case PhysicalFamily::RuntimeK: return 1U;
+        default: return 16U;
+    }
 }
 
 }  // namespace ThorImplementation::CubReductionInternal::Fp8RK

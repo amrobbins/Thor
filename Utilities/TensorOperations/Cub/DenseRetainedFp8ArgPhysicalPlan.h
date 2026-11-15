@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Implementation/Tensor/StridedSpan.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 #include "Utilities/TensorOperations/Cub/DenseReductionPhysicalSelector.h"
 #include "Utilities/TensorOperations/Cub/Fp8KR/Fp8KRSegments.h"
@@ -45,6 +46,13 @@ struct DenseRetainedFp8ArgPhysicalPlan final : DenseReductionPhysicalPlan {
     uint64_t reduction_size = 0;
     uint64_t inner_size = 0;
 };
+
+/** 1379: the input base alignment an FP8 ARG pass needs: the rotated RuntimeK passes and the R / KR passes any byte
+ *  address (each lane aligns its window down and rotates the prefix away; KR reads words on the tensor's word grid),
+ *  AlignedK its packet (2 or 8 bytes), DeepRSmallK 16 bytes. 1383: OneWindow any byte address when the plan's K fits
+ *  Fp8RK::oneWindowUnalignedCapacity and its input 2^32 - 16 bytes, else 16 bytes. 1384: the PacketComplete twin any
+ *  byte address. */
+[[nodiscard]] uint32_t retainedFp8ArgPassInputAlignment(const DenseRetainedFp8ArgPhysicalPlan& plan);
 
 /** Scratch of a packed staged twin: one uint32 lane candidate per [outer, shards, inner] partial (0 if not packed). */
 [[nodiscard]] uint64_t retainedFp8ArgScratchBytes(const DenseRetainedFp8ArgPhysicalPlan& plan);
@@ -98,9 +106,9 @@ struct RetainedFp8ArgCandidate {
 
 /** Launches one retained ARG pass (packed staged: first stage into `packed_scratch`, then the packed continuation). */
 void launchRetainedFp8ArgPlan(const DenseRetainedFp8ArgPhysicalPlan& plan,
-                              const Tensor& input,
-                              Tensor* value_output,
-                              Tensor* index_output,
+                              const StridedSpan& input,
+                              const StridedSpan* value_output,
+                              const StridedSpan* index_output,
                               const CubReductionGeometry& geometry,
                               uint32_t* packed_scratch,
                               bool maximum,

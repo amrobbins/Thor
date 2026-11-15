@@ -2,9 +2,9 @@
 #include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
+#include "Utilities/Expression/DropOutPostOp.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/FusedEquation.h"
-#include "Utilities/TensorOperations/Scalar/SetScalar.h"
 
 #include <algorithm>
 #include <cmath>
@@ -102,66 +102,6 @@ uint64_t checkedDropoutOffsetAdvance(uint64_t batch, uint64_t queryHeads, uint64
                       checkedMul(querySequence, keyValueSequence, "dropout offset score count"),
                       "dropout offset advance");
 }
-
-class SdpaDropoutRuntimeState {
-   public:
-    SdpaDropoutRuntimeState(int64_t seed, int64_t initialOffset) : seed(seed), nextOffset(initialOffset) {
-        if (initialOffset < 0) {
-            throw std::invalid_argument("ScaledDotProductAttention dropoutOffset must be non-negative when dropout is enabled.");
-        }
-    }
-
-    void setOffsetAdvance(uint64_t advance) {
-        if (advance == 0) {
-            advance = 1;
-        }
-        if (advance > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-            throw std::overflow_error("ScaledDotProductAttention dropout offset advance exceeds int64_t range.");
-        }
-        offsetAdvance = advance;
-    }
-
-    ThorImplementation::TensorScalarBinding seedBinding(ThorImplementation::TensorPlacement placement) {
-        ensureBuffer(placement);
-        return ThorImplementation::TensorScalarBinding{seedOffsetBuffer, kSeedByteOffset, DataType::INT64};
-    }
-
-    ThorImplementation::TensorScalarBinding offsetBinding(ThorImplementation::TensorPlacement placement) {
-        ensureBuffer(placement);
-        return ThorImplementation::TensorScalarBinding{seedOffsetBuffer, kOffsetByteOffset, DataType::INT64};
-    }
-
-    void uploadForForward(Stream& stream) {
-        ThorImplementation::TensorPlacement placement(ThorImplementation::TensorPlacement::MemDevices::GPU, stream.getGpuNum());
-        ensureBuffer(placement);
-
-        ThorImplementation::launchSetInt64Pair(seedOffsetBuffer.getMemPtr<int64_t>(), seed, nextOffset, stream);
-
-        const uint64_t remaining = static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - nextOffset);
-        if (offsetAdvance > remaining) {
-            throw std::overflow_error("ScaledDotProductAttention automatic dropout offset advance would exceed int64_t range.");
-        }
-        nextOffset += static_cast<int64_t>(offsetAdvance);
-    }
-
-   private:
-    static constexpr uint64_t kSeedByteOffset = 0;
-    static constexpr uint64_t kOffsetByteOffset = sizeof(int64_t);
-
-    void ensureBuffer(ThorImplementation::TensorPlacement placement) {
-        if (seedOffsetBuffer.isInitialized() && seedOffsetBuffer.getPlacement() == placement) {
-            return;
-        }
-
-        ThorImplementation::TensorDescriptor descriptor(DataType::INT64, {2});
-        seedOffsetBuffer = ThorImplementation::Tensor(placement, descriptor);
-    }
-
-    int64_t seed;
-    int64_t nextOffset;
-    uint64_t offsetAdvance = 1;
-    ThorImplementation::Tensor seedOffsetBuffer;
-};
 
 std::string attentionTensorLayoutToString(ThorImplementation::AttentionTensorLayout value) {
     switch (value) {
@@ -776,10 +716,6 @@ ThorImplementation::DynamicExpression makeAttentionExpression(bool useBias,
                 if (offsets.getDimensions() != std::vector<uint64_t>{batch + 1}) {
                     throw std::runtime_error(std::string("ScaledDotProductAttention ") + name + " must have canonical shape [batch+1].");
                 }
-                if (!offsets.isDenseContiguous() || offsets.getStorageElementOffset() != 0 || offsets.hasCustomStrides()) {
-                    throw std::runtime_error(std::string("ScaledDotProductAttention ") + name +
-                                             " must be a canonical contiguous row-partition tensor, not a view.");
-                }
                 return offsets;
             };
 
@@ -805,14 +741,14 @@ ThorImplementation::DynamicExpression makeAttentionExpression(bool useBias,
             std::unordered_map<std::string, ThorImplementation::TensorScalarBinding> tensorScalarInputs;
             std::function<void(Stream&)> preForwardHook;
             if (dropoutProbability > 0.0f) {
-                auto dropoutState = std::make_shared<SdpaDropoutRuntimeState>(dropoutSeed, dropoutOffset);
-                dropoutState->setOffsetAdvance(checkedDropoutOffsetAdvance(
+                auto dropoutState = std::make_shared<ThorImplementation::DropOutRuntimeState>(dropoutSeed, dropoutOffset, "ScaledDotProductAttention");
+                dropoutState->setSequenceAdvance(checkedDropoutOffsetAdvance(
                     batch,
                     queryLogicalDims.heads,
                     queryRagged ? queryMaxSequenceLength : queryLogicalDims.sequence,
                     keyValueRagged ? keyValueMaxSequenceLength : keyValueLogicalDims.sequence));
                 tensorScalarInputs[kDropoutSeedInputName] = dropoutState->seedBinding(query.getPlacement());
-                tensorScalarInputs[kDropoutOffsetInputName] = dropoutState->offsetBinding(query.getPlacement());
+                tensorScalarInputs[kDropoutOffsetInputName] = dropoutState->sequenceBinding(query.getPlacement());
                 preForwardHook = [dropoutState](Stream& runStream) { dropoutState->uploadForForward(runStream); };
             }
 

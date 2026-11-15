@@ -54,6 +54,13 @@ Fp8RKDeviceSelectionIdentity deviceIdentity(const Stream& stream) {
     return denseReductionDeviceIdentity(static_cast<int>(stream.getGpuNum()));
 }
 
+// 1378: the input alignment an original FP8 RK site's selection honours: the input's, at most 16 (as FP32's 1222).
+uint64_t siteAlignment(uint64_t input_alignment_bytes) {
+    if (input_alignment_bytes == 0 || (input_alignment_bytes & (input_alignment_bytes - 1)) != 0)
+        throw std::invalid_argument("FP8 RK input alignment must be a power of two");
+    return std::min<uint64_t>(input_alignment_bytes, 16);
+}
+
 const char* familyName(PhysicalFamily family) {
     switch (family) {
         case PhysicalFamily::OneWindow: return "one_window";
@@ -68,11 +75,12 @@ const char* familyName(PhysicalFamily family) {
 Fp8RKSelection autotuneIsolatedRKSite(
     const DenseReductionProblem& problem, DenseReductionSite site, CubReductionOp operation,
     uint64_t original_reduction_size, float output_scale,
-    const Tensor& representative_input, const Stream& stream, uint64_t workspace_budget_bytes,
-    CubReductionTuningDepth tuning_depth) {
+    const StridedSpan& representative_input, const Stream& stream, uint64_t workspace_budget_bytes,
+    CubReductionTuningDepth tuning_depth, uint64_t input_alignment_bytes) {
     if (representative_input.getDataType() != DataType::FP8_E4M3 &&
         representative_input.getDataType() != DataType::FP8_E5M2)
         throw std::invalid_argument("FP8 RK autotuning requires FP8 input");
+    const uint64_t alignment = siteAlignment(input_alignment_bytes);
     if (problem.input_state != DenseReductionInputState::OriginalInput)
         throw std::invalid_argument("Only the original FP8 input is supported by this tuning entry point");
     ScopedGpu scoped_gpu(stream.getGpuNum());
@@ -98,7 +106,7 @@ Fp8RKSelection autotuneIsolatedRKSite(
         shape.outer, shape.r, shape.k, device.sm_count,
         representative_input.getDataType(),
         final_site ? problem.final_output.value_dtype : DataType::FP32,
-        semantics, workspace_budget_bytes, tuning.candidates};
+        semantics, workspace_budget_bytes, tuning.candidates, alignment};
     auto ranked = selectBoundFirstStages(request, runtime);
     // A single, owning production context supplies the exact same FP32
     // occupancy and physical policy as ordinary dense planning. It remains
@@ -170,11 +178,12 @@ Fp8RKSelection autotuneIsolatedRKSite(
 // retained ARG pass is legal at this site.
 Fp8RKSelection autotuneArgRKSite(
     const DenseReductionProblem& problem, DenseReductionSite site, bool maximum,
-    uint64_t original_reduction_size, const Tensor& representative_input, const Stream& stream,
-    uint64_t workspace_budget_bytes, CubReductionTuningDepth tuning_depth) {
+    uint64_t original_reduction_size, const StridedSpan& representative_input, const Stream& stream,
+    uint64_t workspace_budget_bytes, CubReductionTuningDepth tuning_depth, uint64_t input_alignment_bytes) {
     const DataType input_dtype = representative_input.getDataType();
     if (input_dtype != DataType::FP8_E4M3 && input_dtype != DataType::FP8_E5M2)
         throw std::invalid_argument("FP8 ARG autotuning requires FP8 input");
+    const uint64_t alignment = siteAlignment(input_alignment_bytes);
     if (problem.aggregate_kind != DenseReductionAggregateKind::Arg ||
         problem.input_state != DenseReductionInputState::OriginalInput ||
         problem.runs.at(site.run_index).kind != DenseReductionRunKind::OriginalReduction ||
@@ -202,8 +211,10 @@ Fp8RKSelection autotuneArgRKSite(
     std::vector<RetainedFp8ValueSource> sources;
     for (const auto& entry : enumerateBoundInventory(request, runtime)) sources.push_back({entry.kernel, entry.local_rank});
     auto generated = retainedFp8ArgCandidates(sources, input_dtype, shape.outer, shape.r, shape.k);
+    // 1379: and only the passes that read the input's alignment (the rotated passes read any address, at every R).
     std::erase_if(generated, [&](const RetainedFp8ArgCandidate& c) {
-        return retainedFp8ArgScratchBytes(c.plan) > workspace_budget_bytes;
+        return retainedFp8ArgScratchBytes(c.plan) > workspace_budget_bytes ||
+               retainedFp8ArgPassInputAlignment(c.plan) > alignment;
     });
     Fp8RKSelection selection;
     if (generated.empty()) return selection;  // candidate_count 0: no retained ARG pass
@@ -227,12 +238,12 @@ Fp8RKSelection autotuneArgRKSite(
     if (scored.size() > tuning.candidates) scored.resize(tuning.candidates);
 
     // Outputs exactly as the stamped pass writes them: the requested outputs on the final site, else the FP32 value +
-    // carried index intermediate. One UINT8 output slot holds the value then (256-byte aligned) the index.
+    // carried index intermediate. One UINT8 output slot holds the value, then the index (at nextSliceOffset: 256-byte aligned, 128 bytes past the value).
     const DataType value_dtype = final_site ? problem.final_output.value_dtype : DataType::FP32;
     const DataType index_dtype = final_site ? problem.final_output.index_dtype : problem.carried_arg_index_dtype;
     const std::vector<uint64_t> output_dims{shape.outer, shape.k};
     const uint64_t value_bytes = produce_value ? TensorDescriptor(value_dtype, output_dims).getArraySizeInBytes() : 0;
-    const uint64_t index_offset = (value_bytes + 255) & ~uint64_t{255};
+    const uint64_t index_offset = ReductionAutotuning::nextSliceOffset(value_bytes);
     const uint64_t index_bytes = produce_index ? TensorDescriptor(index_dtype, output_dims).getArraySizeInBytes() : 0;
     const uint64_t domain_stride = denseArgOriginalIndexStride(problem.runs[site.run_index]).value_or(0);
     const CubReductionGeometry geometry = CubArgReduction::analyzeDenseGeometry({shape.outer, shape.r, shape.k}, {1});
@@ -243,12 +254,12 @@ Fp8RKSelection autotuneArgRKSite(
         ReductionAutotuning::Candidate candidate;
         candidate.name = std::string(familyName(plan->family)) + "_arg#" + std::to_string(candidates.size());
         candidate.scratch_bytes = retainedFp8ArgScratchBytes(*plan);
-        candidate.launch = [=](const Tensor& input, Tensor& output, Tensor& scratch, Stream& run_stream) {
-            Tensor site_input = input;
+        candidate.launch = [=](const StridedSpan& input, const StridedSpan& output, const StridedSpan& scratch, Stream& run_stream) {
+            StridedSpan site_input = input;
             site_input.reshape({shape.outer, shape.r, shape.k});
-            std::optional<Tensor> value, index;
-            if (produce_value) value = output.aliasByteStorageAs(value_dtype, output_dims, 0);
-            if (produce_index) index = output.aliasByteStorageAs(index_dtype, output_dims, index_offset);
+            std::optional<StridedSpan> value, index;
+            if (produce_value) value = output.bytesAs(0, value_dtype, output_dims);
+            if (produce_index) index = output.bytesAs(index_offset, index_dtype, output_dims);
             uint32_t* packed = plan->packed_partials ? static_cast<uint32_t*>(scratch.getMemPtr<void>()) : nullptr;
             launchRetainedFp8ArgPlan(*plan, site_input, value ? &*value : nullptr, index ? &*index : nullptr,
                                      geometry, packed, maximum, domain_stride, run_stream);
@@ -295,10 +306,11 @@ Shape validateDescriptorSelection(
 Fp8RKSelection selectCachedDescriptorImpl(
     const DenseReductionProblem& problem, DenseReductionSite site, CubReductionOp operation,
     uint64_t original_reduction_size, float output_scale, DataType input_dtype,
-    const Tensor* representative_input, const Stream& stream, uint64_t workspace_budget_bytes,
-    CubReductionTuningDepth tuning_depth) {
+    const StridedSpan* representative_input, const Stream& stream, uint64_t workspace_budget_bytes,
+    CubReductionTuningDepth tuning_depth, uint64_t input_alignment_bytes) {
     const Shape shape = validateDescriptorSelection(
         problem, site, input_dtype, original_reduction_size, output_scale);
+    const uint64_t alignment = siteAlignment(input_alignment_bytes);
     if (representative_input != nullptr &&
         (!representative_input->isInitialized() ||
          !representative_input->isDenseContiguous() ||
@@ -313,9 +325,10 @@ Fp8RKSelection selectCachedDescriptorImpl(
     const auto identity = deviceIdentity(stream);
     // 1171: the one dense reduction selection cache; it applies the depth rule (a deeper selection, completed or in
     // flight, answers a shallower request).
-    const auto key = toDenseReductionSelectionKey(makeFp8RKDescriptorSelectionKey(
+    auto key = toDenseReductionSelectionKey(makeFp8RKDescriptorSelectionKey(
         problem, site, operation, original_reduction_size, output_scale, input_dtype,
         identity, workspace_budget_bytes, tuning_depth));
+    key.site.push_back(alignment);  // 1378, as FP32's 1222
 
     // The cache is the allocation boundary. Only a single-flight miss leader
     // constructs benchmark input. Hits need neither Tensor nor continuation.
@@ -326,7 +339,7 @@ Fp8RKSelection selectCachedDescriptorImpl(
         if (representative_input != nullptr) {
             return autotuneIsolatedRKSite(problem, site, operation, original_reduction_size,
                                           output_scale, *representative_input, stream,
-                                          workspace_budget_bytes, tuning_depth);
+                                          workspace_budget_bytes, tuning_depth, alignment);
         }
         const TensorPlacement placement(TensorPlacement::MemDevices::GPU, stream.getGpuNum());
         Tensor temporary;
@@ -344,7 +357,7 @@ Fp8RKSelection selectCachedDescriptorImpl(
             // interleaved contest and synchronizes before returning.
             auto winner = autotuneIsolatedRKSite(problem, site, operation,
                                                  original_reduction_size, output_scale,
-                                                 temporary, stream, workspace_budget_bytes, tuning_depth);
+                                                 temporary, stream, workspace_budget_bytes, tuning_depth, alignment);
             {
                 ScopedReductionGpuMeasurement cleanup(static_cast<int>(stream.getGpuNum()));
                 temporary.dropReference();
@@ -365,29 +378,33 @@ Fp8RKSelection selectCachedDescriptorImpl(
 Fp8RKSelection selectCachedIsolatedRKSite(
     const DenseReductionProblem& problem, DenseReductionSite site, CubReductionOp operation,
     uint64_t original_reduction_size, float output_scale, DataType input_dtype,
-    const Stream& stream, uint64_t workspace_budget_bytes, CubReductionTuningDepth tuning_depth) {
+    const Stream& stream, uint64_t workspace_budget_bytes, CubReductionTuningDepth tuning_depth,
+    uint64_t input_alignment_bytes) {
     return selectCachedDescriptorImpl(problem, site, operation, original_reduction_size,
                                       output_scale, input_dtype, nullptr, stream, workspace_budget_bytes,
-                                      tuning_depth);
+                                      tuning_depth, input_alignment_bytes);
 }
 
 Fp8RKSelection selectCachedIsolatedRKSite(
     const DenseReductionProblem& problem, DenseReductionSite site, CubReductionOp operation,
-    uint64_t original_reduction_size, float output_scale, const Tensor& representative_input,
-    const Stream& stream, uint64_t workspace_budget_bytes, CubReductionTuningDepth tuning_depth) {
+    uint64_t original_reduction_size, float output_scale, const StridedSpan& representative_input,
+    const Stream& stream, uint64_t workspace_budget_bytes, CubReductionTuningDepth tuning_depth,
+    uint64_t input_alignment_bytes) {
     if (!representative_input.isInitialized())
         throw std::invalid_argument("FP8 RK cached selection requires initialized input");
     return selectCachedDescriptorImpl(problem, site, operation, original_reduction_size,
                                       output_scale, representative_input.getDataType(),
-                                      &representative_input, stream, workspace_budget_bytes, tuning_depth);
+                                      &representative_input, stream, workspace_budget_bytes, tuning_depth,
+                                      input_alignment_bytes);
 }
 
 Fp8RKSelection selectCachedArgRKSite(
     const DenseReductionProblem& problem, DenseReductionSite site, bool maximum,
     uint64_t original_reduction_size, DataType input_dtype, const Stream& stream,
-    uint64_t workspace_budget_bytes, CubReductionTuningDepth tuning_depth) {
+    uint64_t workspace_budget_bytes, CubReductionTuningDepth tuning_depth, uint64_t input_alignment_bytes) {
     if (input_dtype != DataType::FP8_E4M3 && input_dtype != DataType::FP8_E5M2)
         throw std::invalid_argument("FP8 ARG cached selection requires FP8 input");
+    const uint64_t alignment = siteAlignment(input_alignment_bytes);
     if (problem.aggregate_kind != DenseReductionAggregateKind::Arg ||
         problem.input_state != DenseReductionInputState::OriginalInput || original_reduction_size == 0)
         throw std::invalid_argument("Invalid FP8 ARG cached selection semantics");
@@ -395,9 +412,10 @@ Fp8RKSelection selectCachedArgRKSite(
     ScopedGpu scoped_gpu(stream.getGpuNum());
     const auto identity = deviceIdentity(stream);
     const CubReductionOp operation = maximum ? CubReductionOp::Max : CubReductionOp::Min;
-    const auto key = toDenseReductionSelectionKey(makeFp8RKDescriptorSelectionKey(
+    auto key = toDenseReductionSelectionKey(makeFp8RKDescriptorSelectionKey(
         problem, site, operation, original_reduction_size, 1.0f, input_dtype, identity, workspace_budget_bytes,
         tuning_depth));
+    key.site.push_back(alignment);  // 1379
     return denseReductionSelectionCache().getOrTune<Fp8RKSelection>(key, [&] {
         // As the VALUE miss path: a temporary representative input, allocated and released under the measurement
         // lock; the contest itself takes the lock separately.
@@ -412,7 +430,7 @@ Fp8RKSelection selectCachedArgRKSite(
                 fill_stream.synchronize();
             }
             auto winner = autotuneArgRKSite(problem, site, maximum, original_reduction_size, temporary, stream,
-                                            workspace_budget_bytes, tuning_depth);
+                                            workspace_budget_bytes, tuning_depth, alignment);
             {
                 ScopedReductionGpuMeasurement cleanup(static_cast<int>(stream.getGpuNum()));
                 temporary.dropReference();

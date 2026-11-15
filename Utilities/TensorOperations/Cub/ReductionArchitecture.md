@@ -137,57 +137,24 @@ The read-only census produces no kernels and does not change selection.
 
 1. Device transform-reduce when the result contains one element.
 2. CUB fixed-size segmented reduction when each reduction domain is physically contiguous (`inner_size == 1`).
-3. A tiled row-vector CUDA/CUB-warp backend when the reduced axes are one contiguous block with trailing values.
+3. The retained dense planner's R / KR / RK passes when the reduced axes are one contiguous block with trailing values
+   (`TiledFixedSegment` is that classification; the Thor tiled kernels it once named are deleted, 1393).
 4. Arbitrary ordinary-dense combinations of reduced/retained runs are structurally classified as `ComposedDense`, but VALUE execution is not a composed parent/child executor. `planDenseReduction()` selects one R/KR/RK physical pass, produces a fresh intermediate problem, and replans globally until complete. The selected passes are materialized as one flat `DenseExecutablePlan`; every non-final VALUE aggregate is FP32, only the first logical pass applies the public input transform, and only the final logical pass applies the public finalizer/output scale.
 5. Non-dense inputs remain outside the ordinary-dense planner. Proven compact/permutation/pitched layouts use their ordained view reducers; unsupported arbitrary views fail structural analysis rather than entering a generic logical-index fallback.
 
-The tiled path also accepts zero-copy logical permutations when stride analysis proves that the visible source is physically dense `[outer, reduction, inner]` storage. In that case the reducer traverses the physical source layout directly and writes the requested retained-axis dense order without materializing the permutation. Natural `[outer,inner]` output keeps the ordinary tuned store mapping. Production `[inner,outer]` output uses the shared-transpose retained writer described below so final global stores remain coalesced.
-
-For production `[inner,outer]` writes, eight physical warps reduce adjacent outer rows for one contiguous retained-component tile. Each lane owns a contiguous register packet, using the same <=16 FP32-accumulator budget and CUDA vector-packet loaders as the direct full-row family; retained widths above 512 become independent 512-component tiles rather than increasing per-thread state. Reduction state never leaves registers. Only finalized FP32 retained values are staged through a padded shared-memory tile, after which threads read that tile in transposed order and write adjacent outer coordinates contiguously in dense `[inner,outer]`. The largest retained tile is 8 x 512 values (about 16 KiB), there is no global reduction/permutation intermediate, and grid-stride iteration handles arbitrarily tall outputs without treating 65,535 as a `grid.x` architectural limit.
-
-The tiled path views the input as `[outer, reduction, inner]` and selects a layout-aware kernel by trailing width.
-For `inner <= 32`, each physical warp owns the complete trailing row and a private two-stage `cuda::memcpy_async`
-global-to-shared pipeline. The pipeline copies several complete consecutive rows as one contiguous slab and overlaps
-the next copy stage with FP32 reduction of the current stage. For `inner <= 16`, otherwise-unused lanes split reduction
-rows and CUB logical `WarpReduce` combines those row partials.
-
-For `33 <= inner < 512`, a physical warp can still own the complete trailing vector, with each lane owning 2, 4, 8, or
-16 output components. The async pipeline therefore continues to copy complete consecutive rows instead of regressing to
-per-row component-strip copies. Shared-memory consumption is striped by component round (`lane + 32 * round`) so each
-round is contiguous across the warp. A full row must fit in the warp's 2 KiB async stage; this holds through `inner=511`
-for FP32 and narrower storage, while FP64 widths above 256 intentionally retain the direct Patch-2 component-tiled
-backend. Exact widths 64, 128, 256, and 512 use a direct full-row kernel instead: each lane owns a contiguous 2/4/8/16
-component packet and loads it with CUDA-native 2/4/8/16-byte vector types or a short compile-time sequence of `uint4`
-loads, keeping all accumulation in registers with no synchronization or shared memory.
-
-Sixteen FP32 accumulators per lane are the current proven-fast register tile, while Thor keeps the complete kernel near
-an approximately 48-register/thread design budget. Wider rows first scale the same full-row engine horizontally instead
-of increasing per-thread accumulator count: 513..1024 components use 2 warps/output, 1025..2048 use 4, and 2049..4096
-use all 8 warps in the 256-thread block. For awkward widths the output group cooperatively stages complete contiguous
-rows; exact 1024/2048/4096 widths use direct vector packets with no shared memory or synchronization. FP64 may select a
-larger group for awkward widths because each warp contributes both 512 components of register ownership and 2 KiB of
-async-stage capacity.
-
-`inner > 4096` is not a performance-path limit. Different trailing components are independent reductions, so Thor
-shards one output across independent blocks without any inter-block reduction, atomics, or second pass. Exact multiples
-of 4096 retain the x16 vector-direct packet path in every block. Arbitrary widths keep the same contiguous 16-component
-per-thread ownership and use an alignment-safe global-to-register loader: each logical packet is reconstructed from an
-aligned 16-byte window, with the tensor's 128-byte trailing allocation padding making the final fixed-width packet safe
-without scalar tail loads. The host scheduler normally preserves every complete 4096-component shard and emits one
-remainder shard. For a sub-2048 remainder it borrows the final full shard and creates two ~half-block tails only when the
-smaller tail still contributes at least 512 aggregate useful warps; this avoids pathological tiny-tail launches when
-outer parallelism is plentiful without sacrificing proven 4096-component geometry at low outer parallelism. The
-arbitrary-width large-D path uses no shared memory, asynchronous-copy bookkeeping, synchronization, or inter-block
-communication. Increasing D therefore creates more independent component blocks while keeping per-thread state bounded.
-
-Aligned 4/8/16-byte async runs remain useful up through one block per output, where complete-row staging repairs awkward
-small/medium widths. Total dynamic shared allocation there stays fixed at 32 KiB/block: it is repartitioned from eight
-private one-warp pipelines into four 2-warp groups, two 4-warp groups, or one 8-warp group as D grows. Once D requires
-multiple independent component blocks, the direct striped backend removes shared memory from the scaling path entirely.
-This mirrors the reducer geometry used elsewhere in Thor:
-small widths can place multiple logical reductions in one warp, medium widths use one warp per output, large widths use
-one cooperative block per output, and very large widths use multiple independent component blocks per output. All tiled
-backends accumulate and finalize in FP32 and require no stamped dynamic workspace.
+1387: no view reaches the Thor tiled view kernels any more. 1390: the reducer refuses rotated-output
+permutations, VIEW-DIRECT-2B and VIEW-PITCHED-TILED (`analyzeGeometry` throws `NotImplementedException`), and a caller
+runs them in two parts, a dense reduction and the dense copy (`CubReduction::splitRefusedView`; the view list further
+down). The 1387 layout passes inside the reducer (`ViewLayout.h`, `CubViewLayout.cu`) are deleted. 1393 deletes the
+tiled view family itself (3.57 MB of SASS, unreachable since 1390): the direct and pitched component-tiled kernels,
+the 32x33 payload transpose, the wide shared-transpose kernels, their `cuda::memcpy_async` full-row pipeline and
+launch policy (`CubReductionTiledPolicy`), the per-operation executors over them (`CubReductionSum.cu`,
+`CubReductionSumSquares.cu`, `CubReductionMin.cu`, `CubReductionMax.cu`, `CubReductionProduct.cu`,
+`CubReductionL1Norm.cu`, and the template-free `CubReductionMean.cu` / `CubReductionL2Norm.cu`), and the reducer's
+generic per-op path (`stampPhysicalStage`, `queryPhysicalStageWorkspace`, `launchReduction`). Every value stamp is now
+a dense executable plan, StridedR or pitched PacketComplete; anything else throws `std::logic_error`.
+`CubReductionOperation.cuh` keeps the scalar transforms, finalizers, work-grid and shard helpers, and the vector-packet
+loaders the retained RK kernels and the KParallel / RCooperative / rotated sharded families share.
 
 Dense reduction rank is dynamic. Structurally `ComposedDense` VALUE reductions stamp a flat sequence of physical
 R/KR/RK passes in `DenseExecutablePlan`; there is no VALUE parent executor or child-stage continuation. `run()` launches
@@ -195,7 +162,13 @@ that ordered pass list on the caller stream with no host synchronization, alloca
 ordinary dense planning needs no per-element logical-index metadata. There is no cuDNN-derived rank-8 limit; the only
 representation bound is that axis identifiers are `uint32_t`.
 
-Value reductions support sum, product, mean, min, max, L1 norm, L2 norm, and sum-of-squares. VALUE-BINARY-CLEANUP keeps input transforms and reduction operators compile-time specialized while sharing additive finalization at output granularity: Sum, Mean, and the final composed L2 stage use one `IdentityFp32 + AdditiveFinalizeFp32` kernel matrix, while SumSquares and complete L2 use one `SquareFp32 + AdditiveFinalizeFp32` matrix. Division and optional square root are runtime finalizer data paid once per output, so L2 does not instantiate independent copies of every tiled/CUB reduction geometry. `CubReductionMean.cu` and `CubReductionL2Norm.cu` remain intentionally template-free. Dense argmin/argmax use the same geometry
+Value reductions support sum, product, mean, min, max, L1 norm, L2 norm, and sum-of-squares. VALUE-BINARY-CLEANUP keeps
+input transforms and reduction operators compile-time specialized while sharing additive finalization at output
+granularity: Sum, Mean, and the final composed L2 stage use one `IdentityFp32 + AdditiveFinalizeFp32` kernel matrix,
+while SumSquares and complete L2 use one `SquareFp32 + AdditiveFinalizeFp32` matrix. Division and optional square root
+are runtime finalizer data paid once per output, so L2 does not instantiate independent copies of every reduction
+geometry (1393: the per-op objects that carried those matrices for the tiled view kernels are deleted). Dense
+argmin/argmax use the same geometry
 classification. ARG-DIRECT-1 keeps the device-wide CUB path but narrows its candidate index to UINT32 whenever the full
 reduction domain permits it. Physically contiguous fixed segments in the normal UINT32 domain use a Thor-owned
 warp-per-segment backend: each warp peels a bounded scalar head to a 16-byte boundary, reads the segment bulk through
@@ -264,9 +237,11 @@ The same cleanup keeps the three benchmarked normal ARG fast families intact (`a
 full-row/grouped/block-sharded/alignment-safe tiled families. Exceptional wide-FP8 and true UINT64 candidate domains use
 one conservative generic tiled backend with `RowLanes=1`, so those rare cases no longer instantiate a matrix of historical
 fallback topologies. Composed UINT32 contiguous stages likewise have no CUB segmented fallback: the first stage uses the
-normal aligned contiguous kernel and every carried-index stage is FP32 by construction. The remaining CUB segmented ARG
-instantiations in the dense executor are therefore limited to genuine UINT64 *composed* contiguous stages; direct
-contiguous ARG above UINT32 is unreachable because the CUB fixed-segment API's `int` segment-size gate rejects it first.
+normal aligned contiguous kernel and every carried-index stage is FP32 by construction. No CUB segmented ARG
+instantiation remains (1373's source guard). Contiguous rows of any length, VALUE or ARG, run the retained KR families,
+whose geometry and wide ARG candidates are 64-bit; 1374 removed the old `int` segment-size gate
+(`usesCubFixedSegmentSize`), which had rejected direct contiguous rows longer than INT_MAX. A UINT32 index output still
+needs a local domain that fits (the stamp checks).
 The separate offset-segmented ARG API runs its own kernels, the ragged ARG family (see the ragged section below).
 
 ### Recursive stage-planning invariant
@@ -315,7 +290,8 @@ artificially paired first-stage/finalizer kernels.
 
 ### Low-output / deep full-row reduction sharding
 
-The direct and grouped `TiledFixedSegment` full-row kernels derive most of their launch parallelism from independent
+(Historical: these full-row kernels were deleted in 1393.) The direct and grouped `TiledFixedSegment` full-row kernels
+derive most of their launch parallelism from independent
 outer/output rows. That ownership remains the fastest strategy when many outputs are available, but it is pathological
 for shapes such as `[1, 104832, 512] -> [1, 1, 512]`: one warp (or one small cooperating warp group) otherwise scans the
 entire reduction domain while almost every SM is idle.
@@ -404,25 +380,75 @@ The view ownership census (formerly `thor_cub_reduction_benchmark --view-census`
 rather than benchmarking a generic fallback. The structured view families that Thor intentionally supports are
 assigned directly to ordained implementations:
 
-- VIEW-DIRECT-1 sends a one-to-one compact physical permutation with every logical axis reduced directly through
-  `DeviceTransformReduce`, because visitation order is irrelevant for a full value reduction.
-- VIEW-DIRECT-2A sends a compact permutation whose reduced axes form the physical suffix and whose retained physical order
-  already equals dense logical output order through `ContiguousFixedSegment`.
-- VIEW-PITCHED-TILED handles a logically contiguous `[outer..., reduction..., inner...]` view when the trailing payload is
-  physically contiguous, outer and reduction groups each flatten to one constant pitch, and adjacent slabs do not overlap.
-  Its dedicated Thor kernel addresses `outer * outer_stride + reduction * reduction_stride + inner`, so repeated-label
-  einsum diagonal pre-reductions such as `[2,2,3]` with strides `[18,3,1]` remain zero-copy and coalesced.
-- VIEW-DIRECT-2B handles a compact source collapsible to `[A,reduction,B,payload]` with dense logical output
-  `[B,A,payload]`. Its dedicated Thor kernel reduces from compact physical storage, stages finalized FP32 values through a
-  fixed `32x33` shared-memory tile, and writes dense retained order directly without a global transpose intermediate.
+- VIEW-DIRECT-1 is a one-to-one compact physical permutation with every logical axis reduced (classified
+  `DeviceTransformReduce`). Visitation order is irrelevant for a full value reduction, so since 1365 it runs the
+  retained dense planner on `StridedSpan::asDense` of its bytes, a dense `[input_elements]`: the dense tensor's kernels
+  and bits.
+- VIEW-DIRECT-2A is a compact permutation whose reduced axes form the physical suffix and whose retained physical order
+  already equals dense logical output order (classified `ContiguousFixedSegment`). Since 1365 it runs the retained dense
+  planner as a dense `[output_elements, reduction_size]` over axis 1.
+- 1376 (phase 5) generalizes both: every compact permutation whose retained axes keep their physical order runs the
+  retained dense planner on its bytes, its physical non-singleton axes collapsed into alternating retained / reduced
+  runs (`viewPhysicalDenseProblem`). That adds the natural-output permutation-aware tiled views (still classified
+  `TiledFixedSegment` with the candidate; the 1375 audit found the tiled kernel 1.04x to over 10,000x slower in every
+  cell, worst with a few outputs of long reductions) and split physical reductions, whose reduced axes are several
+  physical runs (classified `ComposedDense`; they threw before 1376).
+- A rank-1 affine view (classified `DeviceTransformReduce` with `device_transform_uses_affine_stride`) runs StridedR
+  (`StridedReduction.h`, since 1366): a stride-0 closed form in FP64, else one Split launch whose last CTA combines the
+  partials in a fixed order (1370), on a grid that follows from n (1371).
+- No view runs a CUB device reduction (1373, plans/Thor_View_Reduction_Plan_2026-11-08.md phase 4): the CUB
+  `TransformReduce`, affine `Reduce` and fixed-size `DeviceSegmentedReduce` executors are deleted, and the
+  `DeviceTransformReduce` / `ContiguousFixedSegment` paths are classifications only.
+- VIEW-PITCHED-TILED classifies a logically contiguous `[outer..., reduction..., inner...]` view when the trailing
+  payload is physically contiguous, outer and reduction groups each flatten to one constant pitch, and adjacent slabs do
+  not overlap (repeated-label einsum diagonal pre-reductions such as `[2,2,3]` with strides `[18,3,1]`, slices). 1390:
+  the reducer refuses it (`splitRefusedView` kind `PackedInput`); Expression copies the view into a dense tensor in its
+  own dtype (`copyToDenseAsync`, a DenseCopy stage) and reduces that, as it does for any view the reducer will not
+  read. That is a materialization, about 2-3x the packed bytes, chosen by the user until pitch-aware dense passes exist
+  (plans/Thor_Tiled_View_Replacement_Plan_2026-11-12.md, phase 7); the pitched kernel it replaces ran up to 22,000x
+  slower than the dense stamp of the packed rows in the 1386 audit. 1391 (phase 7 A): when the slabs have no gaps
+  between them and the view's source holds the gap after its last row, `splitRefusedView` of the span returns
+  `SlicedOutput`: the dense planner reduces the rows read at their pitch, the dense `[O, R, Sr]` from the view's first
+  element (`StridedSpan::withSourceLayout`), into `[O, Sr]`, and a DenseCopy stage writes its `[O, I]` columns. It is
+  chosen when that moves fewer bytes than the packed copy (O R Sr b + O (Sr + 2 I) c against 3 O R I b + O I c). The
+  gap columns are reduced and dropped, so what the gaps hold never reaches the output. 1392 (phase 7 C): a pitched view
+  with enough outputs is read in place, one RuntimeK PacketComplete launch (`fp8GeneralRParallelKTileP16CompleteKernel`,
+  the retained FP32 / FP16 / BF16 / FP8 Complete kernel; rows loaded at `row_stride`, slabs at `outer_stride`) over the
+  3-D span `[O, R, I]` at strides `[So, Sr, 1]`, into the dense keepdims output, with no workspace and no copy
+  (`CubReduction::pitchedCompleteLaunch`; the stamp's strategy chain `pitched_complete:w<W>_t<tile>`). The rule
+  (1392a, fitted on the 1392 audit's forced-W timings): K tiles balanced under the dtype's cap (124 / 248 / 496
+  components) and 256 bytes or more; W the most of 1 / 2 / 4 / 8 warps per `[outer, K tile]` item whose launch fits one
+  wave of resident warps (32 per SM), with at least four rows per warp; in place when that launch keeps
+  `min(items x W, 32 x SMs) x tile bytes` in flight of 4 KiB per SM where the split would be sliced (it reads the view
+  about once) or 2 KiB per SM where it would be packed (three passes over the bytes). The sliced test is the layout's
+  and dtypes' alone (the source's reach left out), so the choice follows dims, strides, dtypes and device.
+  `analyzeGeometry` still refuses the layout; `analyzeValueSpanGeometry` and `readsSpanInPlace` (each with the
+  reduction's output dtype) take the span and accept it, and `splitRefusedView` of the span then has no split (with
+  `reducer_reads_pitched` false it gives the split the view has otherwise). A view the rule refuses packs or slices as
+  above.
+- The permutation-aware tiled views with a rotated `[inner, outer]` output: the reducer refuses them (1390,
+  `splitRefusedView` kind `RotatedOutput`). Expression runs two stages: the retained dense planner reduces their bytes
+  as the dense `[outer, R, inner]` into a buffer `[outer, inner]` in the output dtype, and a DenseCopy stage reads the
+  buffer rotated (`withLayout`) and writes `[inner, outer]`. The bits are the dense tensor's, permuted. The Thor tiled
+  kernels they ran (direct with a transpose epilogue, wide shared transpose) were 6-6,000x slower in the 1386 audit.
+- 1393 deleted the rest of the Thor tiled view family and its per-op objects (see the backend list above).
+- 1385 deleted the packet-adaptive cooperative tiled kernel (`adaptiveCooperativeTiledFixedSegmentReductionKernel`,
+  216 instantiations). Its gate refused every view candidate and permuted output, and dense geometry runs the dense
+  planner before the tiled launcher, so nothing reached it.
+- VIEW-DIRECT-2B classifies a compact source collapsible to `[A,reduction,B,payload]` with dense logical output
+  `[B,A,payload]`. 1390: the same as the rotated views above, with the dense `[A, R, B x payload]` and a copy that
+  rotates payload vectors; the 32x33 payload-transpose kernel it replaces was 5-2,447x slower in the 1386 audit.
+  Rotating the reduced output costs 2 x (output dtype bytes) per output against 2 x R x (input bytes) for rotating
+  the input first, so it is the cheaper order whenever R x (input bytes) > (output bytes).
 
 DELETE removes the old arbitrary rank>1 logical-index reducer completely. There is no legacy execution-family enum,
 host/device mixed-radix indexing metadata, device logical-to-physical mapper, strided FP32 iterator, legacy 32/64-bit CUB
 segmented-reduction specialization surface, or benchmark-only resurrection hook. Unsupported arbitrary views therefore
 throw `NotImplementedException` directly from structural analysis. The final view census retains representative unsupported
-layouts—stride-2 inner payloads, zero-stride broadcasts, overlapping aliases, split physical reductions, singleton-heavy
-gapped views, and the former synthetic UINT64-index case—but reports them as `unsupported / not_implemented` without
-allocating or timing an implementation.
+layouts—stride-2 inner payloads, zero-stride broadcasts, overlapping aliases, split physical reductions whose retained
+axes are out of physical order (1376: in order, they run the dense planner), singleton-heavy gapped views, and the
+former synthetic UINT64-index case—but reports them as `unsupported / not_implemented` without allocating or timing an
+implementation.
 
 Einsum keeps repeated-label diagonal operands as zero-copy views when an ordained reducer owns their stride pattern. If an
 operand-local pre-reduction has no ordained owner, einsum materializes only that logical operand into dense order and then
@@ -494,7 +520,9 @@ and no host readback of the dynamic active extent is required.
 The test `ExpressionReductionArchitecture.ActiveSourcesDoNotUseCudnnReductionApis` prevents the retired cuDNN
 reduction descriptors, workspace queries, and execution API from being reintroduced anywhere in active Thor sources.
 The source guard `ExpressionReductionArchitecture.GeneralReductionsAreCentralizedUnderCubReduction` scans Thor's
-`Utilities`, `DeepLearning`, and `bindings` sources for direct general-purpose CUB value or arg reductions. The obsolete
+`Utilities`, `DeepLearning`, and `bindings` sources for direct general-purpose CUB value or arg reductions, and
+`ExpressionReductionArchitecture.NoReductionCallsACubDeviceReduction` (1373) rejects any `cub::DeviceReduce::` or
+`cub::DeviceSegmentedReduce::` call and the device-reduce headers everywhere, the central utility included. The obsolete
 standalone `CubDeviceReduce*` and `CubDeviceSegmentedReduce*` primitive wrappers were removed after all value and
 offset-segmented callers moved to the central utility. `FlatScatterAddKernel` still uses CUB ReduceByKey,
 which is a keyed grouping primitive rather than a tensor-axis reduction and therefore remains separate.

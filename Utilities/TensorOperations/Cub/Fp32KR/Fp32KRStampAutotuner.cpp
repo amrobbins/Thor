@@ -231,8 +231,8 @@ Fp32KRSelection selectCachedValueSite(const DenseReductionProblem& problem,
             candidate.name = "fp32_kr:" + Fp8KR::fp8KRShapeName(shape);
             candidate.scratch_bytes = Fp8KR::fp8KRScratchBytes(shape, false);
             const uint64_t scratch_bytes = candidate.scratch_bytes;
-            candidate.launch = [shape, semantics, scale, scratch_bytes](const Tensor& input, Tensor& output,
-                                                                       Tensor& scratch, Stream& run_stream) {
+            candidate.launch = [shape, semantics, scale, scratch_bytes](const StridedSpan& input, const StridedSpan& output,
+                                                                       const StridedSpan& scratch, Stream& run_stream) {
                 void* partials = scratch_bytes != 0 ? scratch.getMemPtr<void>() : nullptr;
                 launchFp32KRValueSegments(semantics, input, output, shape, partials, scratch_bytes, scale,
                                           run_stream);
@@ -272,7 +272,7 @@ Fp32KRSelection selectCachedArgSite(const DenseReductionProblem& problem,
         const DenseReductionProblem next = advanceDenseReductionProblem(problem, site, 1);
         const bool final_pass = !hasDenseReductionSites(next);
         // Outputs exactly as the stamped pass will write them: the requested outputs on the final site, else the FP32
-        // value + carried index intermediate. One UINT8 output slot holds the value, then (256-byte aligned) the index.
+        // value + carried index intermediate. One UINT8 output slot holds the value, then the index (at nextSliceOffset: 256-byte aligned, 128 bytes past the value).
         const bool produce_value = !final_pass || problem.final_output.produce_value;
         const bool produce_index = !final_pass || problem.final_output.produce_index;
         const DataType value_dtype = final_pass ? problem.final_output.value_dtype : DataType::FP32;
@@ -280,7 +280,7 @@ Fp32KRSelection selectCachedArgSite(const DenseReductionProblem& problem,
         const std::vector<uint64_t> output_dims{geometry.rows};
         const uint64_t value_bytes =
             produce_value ? TensorDescriptor(value_dtype, output_dims).getArraySizeInBytes() : 0;
-        const uint64_t index_offset = (value_bytes + 255) & ~uint64_t{255};
+        const uint64_t index_offset = ReductionAutotuning::nextSliceOffset(value_bytes);
         const uint64_t index_bytes =
             produce_index ? TensorDescriptor(index_dtype, output_dims).getArraySizeInBytes() : 0;
         const uint64_t domain_stride = denseArgOriginalIndexStride(problem.runs[site.run_index]).value_or(0);
@@ -296,10 +296,10 @@ Fp32KRSelection selectCachedArgSite(const DenseReductionProblem& problem,
             candidate.name = "fp32_arg_kr:" + Fp8KR::fp8KRShapeName(shape);
             candidate.scratch_bytes = Fp8KR::fp8KRScratchBytes(shape, true);
             const uint64_t scratch_bytes = candidate.scratch_bytes;
-            candidate.launch = [=](const Tensor& input, Tensor& output, Tensor& scratch, Stream& run_stream) {
-                std::optional<Tensor> value, index;
-                if (produce_value) value = output.aliasByteStorageAs(value_dtype, output_dims, 0);
-                if (produce_index) index = output.aliasByteStorageAs(index_dtype, output_dims, index_offset);
+            candidate.launch = [=](const StridedSpan& input, const StridedSpan& output, const StridedSpan& scratch, Stream& run_stream) {
+                std::optional<StridedSpan> value, index;
+                if (produce_value) value = output.bytesAs(0, value_dtype, output_dims);
+                if (produce_index) index = output.bytesAs(index_offset, index_dtype, output_dims);
                 void* partials = scratch_bytes != 0 ? scratch.getMemPtr<void>() : nullptr;
                 launchFp32KRArgSegments(input, value ? &*value : nullptr, index ? &*index : nullptr, shape, partials,
                                         scratch_bytes, maximum, domain_stride, run_stream);
@@ -340,7 +340,7 @@ Fp32KRSelection tuneCarriedArgContest(const DenseReductionProblem& problem, Dens
     const DataType index_dtype = final_pass ? problem.final_output.index_dtype : problem.carried_arg_index_dtype;
     const std::vector<uint64_t> output_dims{geometry.rows};
     const uint64_t value_bytes = produce_value ? TensorDescriptor(value_dtype, output_dims).getArraySizeInBytes() : 0;
-    const uint64_t index_offset = (value_bytes + 255) & ~uint64_t{255};
+    const uint64_t index_offset = ReductionAutotuning::nextSliceOffset(value_bytes);
     const uint64_t index_bytes = produce_index ? TensorDescriptor(index_dtype, output_dims).getArraySizeInBytes() : 0;
     const uint64_t row_stride = denseArgOriginalIndexStride(problem.runs[site.run_index]).value_or(0);
     const std::vector<uint64_t> input_dims{geometry.rows, geometry.row_bytes / 4};
@@ -355,12 +355,12 @@ Fp32KRSelection tuneCarriedArgContest(const DenseReductionProblem& problem, Dens
         candidate.name = "fp32_carried_arg_kr:" + Fp8KR::fp8KRShapeName(shape);
         candidate.scratch_bytes = fp32KRCarriedArgScratchBytes(shape);
         const uint64_t scratch_bytes = candidate.scratch_bytes;
-        candidate.launch = [=](const Tensor& input, Tensor& output, Tensor& scratch, Stream& run_stream) {
-            const Tensor values = layout.values(input, input_dims);
-            const Tensor carried = layout.carriedIndex(input, input_dims);
-            std::optional<Tensor> value, index;
-            if (produce_value) value = output.aliasByteStorageAs(value_dtype, output_dims, 0);
-            if (produce_index) index = output.aliasByteStorageAs(index_dtype, output_dims, index_offset);
+        candidate.launch = [=](const StridedSpan& input, const StridedSpan& output, const StridedSpan& scratch, Stream& run_stream) {
+            const StridedSpan values = layout.values(input, input_dims);
+            const StridedSpan carried = layout.carriedIndex(input, input_dims);
+            std::optional<StridedSpan> value, index;
+            if (produce_value) value = output.bytesAs(0, value_dtype, output_dims);
+            if (produce_index) index = output.bytesAs(index_offset, index_dtype, output_dims);
             void* partials = scratch_bytes != 0 ? scratch.getMemPtr<void>() : nullptr;
             launchFp32KRCarriedArgSegments(values, carried, value ? &*value : nullptr, index ? &*index : nullptr,
                                            shape, partials, scratch_bytes, maximum, row_stride, run_stream);

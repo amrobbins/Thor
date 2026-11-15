@@ -6,6 +6,7 @@
 // reference: every VALUE semantics, MIN / MAX with |x| and x^2 folds, 4-byte aligned but not 16-byte aligned inputs,
 // repeated launches on one uninitialized Split scratch, a runtime output scale and a narrow output dtype.
 
+#include "test/Utilities/TensorOperations/OutputSpan.h"
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 #include "test/Utilities/TensorOperations/Fp8ArgReference.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
@@ -105,7 +106,7 @@ namespace {
 
 struct Fp32Input {
     Tensor storage;  // UINT8: offset + 4 * count + 4 bytes
-    Tensor input;    // the FP32 [rows, R] view at `offset`
+    StridedSpan input;  // the FP32 [rows, R] span of `storage`'s bytes at `offset`
     std::vector<float> values;
 };
 
@@ -119,7 +120,7 @@ Fp32Input uploadFp32(std::vector<float> values, uint64_t rows, uint64_t elements
     }
     Fp32Input result;
     result.storage = makeGpuUnsignedTensor(padded, {padded.size()}, stream, DataType::UINT8);
-    result.input = result.storage.aliasByteStorageAs(DataType::FP32, {rows, elements}, offset);
+    result.input = StridedSpan(result.storage).bytesAs(offset, DataType::FP32, {rows, elements});
     result.values = std::move(values);
     return result;
 }
@@ -317,7 +318,7 @@ TEST(CubReductionFp32KR, ValueRejectsUnsupportedInputs) {
                                            stream),
                  std::logic_error);
     // FP8 input to the FP32 launcher.
-    Tensor bytes = in.storage.aliasByteStorageAs(DataType::FP8_E4M3, {rows, 4 * elements}, 0);
+    StridedSpan bytes = StridedSpan(in.storage).bytesAs(0, DataType::FP8_E4M3, {rows, 4 * elements});
     EXPECT_THROW(launchFp32KRValueSegments(semantics, bytes, output, group, nullptr, 0, 1.0f, stream),
                  std::logic_error);
     // A Split shape without scratch.
@@ -398,7 +399,7 @@ TEST(CubReductionFp32KR, ArgEveryPoolShapeMatchesReference) {
                     Tensor index(gpuPlacement, TensorDescriptor(index_dtype, {rows}));
                     const uint64_t stride = with_value ? 3 : 1;
                     for (int launch = 0; launch < 2; ++launch) {
-                        launchFp32KRArgSegments(in.input, value ? &*value : nullptr, &index, shape,
+                        launchFp32KRArgSegments(in.input, outputSpan(value), outputSpan(index), shape,
                                                 scratch ? scratch->getMemPtr<void>() : nullptr,
                                                 scratch ? scratch->getArraySizeInBytes() : 0, maximum, stride,
                                                 stream);
@@ -428,26 +429,26 @@ TEST(CubReductionFp32KR, ArgRejectsUnsupportedInputs) {
     Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {rows}));
     const KR::Fp8KRSegmentShape group{rows, 4 * elements, 4 * elements, 4, 1, false};
     // A shape in elements instead of bytes; no outputs; a wrong output size; FP8 input.
-    EXPECT_THROW(launchFp32KRArgSegments(in.input, nullptr, &index, {rows, elements, elements, 4, 1, false}, nullptr,
+    EXPECT_THROW(launchFp32KRArgSegments(in.input, nullptr, outputSpan(index), {rows, elements, elements, 4, 1, false}, nullptr,
                                          0, false, 1, stream),
                  std::logic_error);
     EXPECT_THROW(launchFp32KRArgSegments(in.input, nullptr, nullptr, group, nullptr, 0, false, 1, stream),
                  std::logic_error);
     Tensor short_index(gpuPlacement, TensorDescriptor(DataType::UINT32, {rows - 1}));
-    EXPECT_THROW(launchFp32KRArgSegments(in.input, nullptr, &short_index, group, nullptr, 0, false, 1, stream),
+    EXPECT_THROW(launchFp32KRArgSegments(in.input, nullptr, outputSpan(short_index), group, nullptr, 0, false, 1, stream),
                  std::logic_error);
-    Tensor bytes = in.storage.aliasByteStorageAs(DataType::FP8_E4M3, {rows, 4 * elements}, 0);
-    EXPECT_THROW(launchFp32KRArgSegments(bytes, nullptr, &index, group, nullptr, 0, false, 1, stream),
+    StridedSpan bytes = StridedSpan(in.storage).bytesAs(0, DataType::FP8_E4M3, {rows, 4 * elements});
+    EXPECT_THROW(launchFp32KRArgSegments(bytes, nullptr, outputSpan(index), group, nullptr, 0, false, 1, stream),
                  std::logic_error);
     // A UINT32 index that cannot hold row-local index * stride.
-    EXPECT_THROW(launchFp32KRArgSegments(in.input, nullptr, &index, group, nullptr, 0, false, 1ULL << 31, stream),
+    EXPECT_THROW(launchFp32KRArgSegments(in.input, nullptr, outputSpan(index), group, nullptr, 0, false, 1ULL << 31, stream),
                  std::logic_error);
     // Split chunks of more than 2^31 elements are not FP32 ARG shapes.
     EXPECT_FALSE(KR::fp32KRArgShapeLegal({1, uint64_t{1} << 36, uint64_t{1} << 34, KR::FP8_KR_THREADS, 1, false}));
     EXPECT_TRUE(KR::fp32KRArgShapeLegal({1, uint64_t{1} << 36, uint64_t{1} << 33, KR::FP8_KR_THREADS, 1, false}));
     EXPECT_TRUE(KR::retainedKRShapeLegalForElement({1, uint64_t{1} << 36, uint64_t{1} << 34, KR::FP8_KR_THREADS, 1,
                                                     false}, 4));
-    EXPECT_NO_THROW(launchFp32KRArgSegments(in.input, nullptr, &index, group, nullptr, 0, true, 1, stream));
+    EXPECT_NO_THROW(launchFp32KRArgSegments(in.input, nullptr, outputSpan(index), group, nullptr, 0, true, 1, stream));
     stream.synchronize();
 }
 
@@ -520,7 +521,7 @@ TEST(CubReductionFp32KR, CarriedArgEveryPoolShapeMatchesReference) {
                         if (with_value) value = Tensor(gpuPlacement, TensorDescriptor(DataType::FP32, {rows}));
                         Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT64, {rows}));
                         for (int launch = 0; launch < 2; ++launch) {
-                            launchFp32KRCarriedArgSegments(in.input, carried_index, value ? &*value : nullptr, &index,
+                            launchFp32KRCarriedArgSegments(in.input, carried_index, outputSpan(value), outputSpan(index),
                                                            shape, scratch ? scratch->getMemPtr<void>() : nullptr,
                                                            scratch_bytes, maximum, stride, stream);
                         }
@@ -568,27 +569,27 @@ TEST(CubReductionFp32KR, CarriedArgRejectsUnsupportedInputs) {
     Tensor scratch(gpuPlacement, TensorDescriptor(DataType::UINT8, {scratch_bytes + 256}));
     auto* scratch_base = scratch.getMemPtr<uint8_t>();
     // A carried index of another size or dtype; no outputs; a Split without, with too little or misaligned scratch.
-    EXPECT_THROW(launchFp32KRCarriedArgSegments(in.input, short_carried, nullptr, &index, group, nullptr, 0, false, 0,
+    EXPECT_THROW(launchFp32KRCarriedArgSegments(in.input, short_carried, nullptr, outputSpan(index), group, nullptr, 0, false, 0,
                                                 stream),
                  std::logic_error);
-    EXPECT_THROW(launchFp32KRCarriedArgSegments(in.input, byte_carried, nullptr, &index, group, nullptr, 0, false, 0,
+    EXPECT_THROW(launchFp32KRCarriedArgSegments(in.input, byte_carried, nullptr, outputSpan(index), group, nullptr, 0, false, 0,
                                                 stream),
                  std::logic_error);
     EXPECT_THROW(launchFp32KRCarriedArgSegments(in.input, carried, nullptr, nullptr, group, nullptr, 0, false, 0,
                                                 stream),
                  std::logic_error);
-    EXPECT_THROW(launchFp32KRCarriedArgSegments(in.input, carried, nullptr, &index, split, nullptr, 0, false, 0,
+    EXPECT_THROW(launchFp32KRCarriedArgSegments(in.input, carried, nullptr, outputSpan(index), split, nullptr, 0, false, 0,
                                                 stream),
                  std::logic_error);
-    EXPECT_THROW(launchFp32KRCarriedArgSegments(in.input, carried, nullptr, &index, split, scratch_base,
+    EXPECT_THROW(launchFp32KRCarriedArgSegments(in.input, carried, nullptr, outputSpan(index), split, scratch_base,
                                                 scratch_bytes - 1, false, 0, stream),
                  std::logic_error);
-    EXPECT_THROW(launchFp32KRCarriedArgSegments(in.input, carried, nullptr, &index, split, scratch_base + 16,
+    EXPECT_THROW(launchFp32KRCarriedArgSegments(in.input, carried, nullptr, outputSpan(index), split, scratch_base + 16,
                                                 scratch_bytes, false, 0, stream),
                  std::logic_error);
-    EXPECT_NO_THROW(launchFp32KRCarriedArgSegments(in.input, carried, nullptr, &index, group, nullptr, 0, true, 0,
+    EXPECT_NO_THROW(launchFp32KRCarriedArgSegments(in.input, carried, nullptr, outputSpan(index), group, nullptr, 0, true, 0,
                                                    stream));
-    EXPECT_NO_THROW(launchFp32KRCarriedArgSegments(in.input, carried, nullptr, &index, split, scratch_base,
+    EXPECT_NO_THROW(launchFp32KRCarriedArgSegments(in.input, carried, nullptr, outputSpan(index), split, scratch_base,
                                                    scratch_bytes, true, 0, stream));
     stream.synchronize();
 }

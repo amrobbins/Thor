@@ -487,8 +487,11 @@ struct Cell {
     uint32_t ragged_rk_ctas = 0;
     T::CubReductionInternal::RaggedLaunchParts ragged_parts = T::CubReductionInternal::RaggedLaunchParts::MainAndFinish;
     std::optional<T::Tensor> ragged_workspace;
-    std::vector<T::Tensor> inputs, offsets, outputs;
+    std::vector<T::StridedSpan> inputs, offsets, outputs;  // views of the rings (offsets: of offsets_store)
     std::optional<T::Tensor> offsets_store;  // owned by the cell: other cells' ring takes never overwrite it
+    // The production stamp's own tensors (a stamp binds whole tensors; it is then run on the views through
+    // runOnTensorsForBenchmark): an input of the cell's shape, the cell's offsets, and an output.
+    std::optional<T::Tensor> stamp_input, stamp_offsets, stamp_output;
     size_t next_input = 0, next_offsets = 0, next_output = 0;
     A::OffsetStats stats;
     uint64_t input_bytes = 0, offset_bytes = 0, output_bytes = 0, moved_bytes = 0, launches = 1;
@@ -502,32 +505,32 @@ struct Cell {
 // 1275: `full` runs both ragged kernels whatever --ragged-kr-time says (the untimed run, so a finish-only cell's
 // records are the main kernel's before it is timed).
 void runOnce(Cell& cell, Stream& stream, bool full = false) {
-    const T::Tensor& input = cell.inputs[cell.next_input];
-    const T::Tensor& offsets = cell.offsets[cell.next_offsets];
-    const T::Tensor& output = cell.outputs[cell.next_output];
+    const T::StridedSpan& input = cell.inputs[cell.next_input];
+    const T::StridedSpan& offsets = cell.offsets[cell.next_offsets];
+    const T::StridedSpan& output = cell.outputs[cell.next_output];
     cell.next_input = (cell.next_input + 1) % cell.inputs.size();
     cell.next_offsets = (cell.next_offsets + 1) % cell.offsets.size();
     cell.next_output = (cell.next_output + 1) % cell.outputs.size();
     if (cell.ragged_rk && cell.spec.op->arg) {  // 1314
-        T::Tensor out = output;
+        const T::StridedSpan& out = output;
         T::CubReductionInternal::launchRaggedRKArg(cell.spec.op->arg_op, cell.ragged_rk_shape, cell.ragged_rk_ctas,
                                                    input, offsets, out, *cell.ragged_workspace, stream,
                                                    full ? T::CubReductionInternal::RaggedLaunchParts::MainAndFinish
                                                         : cell.ragged_parts);
     } else if (cell.ragged && cell.spec.op->arg) {  // 1298
-        T::Tensor out = output;
+        const T::StridedSpan& out = output;
         T::CubReductionInternal::launchRaggedKRArg(cell.spec.op->arg_op, cell.ragged_shape, cell.ragged_grid, input,
                                                    offsets, out, *cell.ragged_workspace, stream,
                                                    full ? T::CubReductionInternal::RaggedLaunchParts::MainAndFinish
                                                         : cell.ragged_parts);
     } else if (cell.ragged_rk) {
-        T::Tensor out = output;
+        const T::StridedSpan& out = output;
         T::CubReductionInternal::launchRaggedRKValue(cell.spec.op->value_op, cell.ragged_rk_shape, cell.ragged_rk_ctas,
                                                      input, offsets, out, *cell.ragged_workspace, stream,
                                                      full ? T::CubReductionInternal::RaggedLaunchParts::MainAndFinish
                                                           : cell.ragged_parts);
     } else if (cell.ragged) {
-        T::Tensor out = output;
+        const T::StridedSpan& out = output;
         T::CubReductionInternal::launchRaggedKRValue(cell.spec.op->value_op, cell.ragged_shape, cell.ragged_grid,
                                                      input, offsets, out, *cell.ragged_workspace, stream,
                                                      full ? T::CubReductionInternal::RaggedLaunchParts::MainAndFinish
@@ -539,31 +542,46 @@ void runOnce(Cell& cell, Stream& stream, bool full = false) {
     }
 }
 
-// Runs the stamp on its bound views and checks every segment against its closed form (0.5 in every element).
+// The production stamp's own tensors (whole tensors, as a stamp binds): an input of the cell's shape (its contents are
+// never read: the stamp runs on the views), the cell's offsets (a validated stamp checks them), and an output.
+void makeStampTensors(Cell& cell, const std::vector<uint8_t>& packed_offsets, const T::TensorPlacement& placement,
+                      Stream& stream) {
+    const CellSpec& c = cell.spec;
+    cell.stamp_input.emplace(placement, T::TensorDescriptor(cell.inputs[0].getDataType(), cell.inputs[0].getDimensions()));
+    cell.stamp_output.emplace(placement,
+                              T::TensorDescriptor(cell.outputs[0].getDataType(), cell.outputs[0].getDimensions()));
+    cell.stamp_offsets.emplace(placement, T::TensorDescriptor(c.offsets->dtype, {c.segments + 1}));
+    check(cudaMemcpyAsync(cell.stamp_offsets->getMemPtr<void>(), packed_offsets.data(), packed_offsets.size(),
+                          cudaMemcpyHostToDevice, stream.getStream()),
+          "stamp offsets upload");
+    stream.synchronize();  // the upload source is the caller's
+}
+
+// Runs the stamp on the first views and checks every segment against its closed form (0.5 in every element).
 A::Verification verify(Cell& cell, const std::vector<uint64_t>& host_offsets, Stream& stream) {
     const CellSpec& c = cell.spec;
     if (cell.ragged_rk && c.op->arg) {  // 1314
-        T::Tensor out = cell.outputs[0];
+        const T::StridedSpan& out = cell.outputs[0];
         T::CubReductionInternal::launchRaggedRKArg(c.op->arg_op, cell.ragged_rk_shape, cell.ragged_rk_ctas,
                                                    cell.inputs[0], cell.offsets[0], out, *cell.ragged_workspace, stream);
     } else if (cell.ragged && c.op->arg) {  // 1298
-        T::Tensor out = cell.outputs[0];
+        const T::StridedSpan& out = cell.outputs[0];
         T::CubReductionInternal::launchRaggedKRArg(c.op->arg_op, cell.ragged_shape, cell.ragged_grid, cell.inputs[0],
                                                    cell.offsets[0], out, *cell.ragged_workspace, stream);
     } else if (cell.ragged_rk) {
-        T::Tensor out = cell.outputs[0];
+        const T::StridedSpan& out = cell.outputs[0];
         T::CubReductionInternal::launchRaggedRKValue(c.op->value_op, cell.ragged_rk_shape, cell.ragged_rk_ctas,
                                                      cell.inputs[0], cell.offsets[0], out, *cell.ragged_workspace,
                                                      stream);
     } else if (cell.ragged) {
-        T::Tensor out = cell.outputs[0];
+        const T::StridedSpan& out = cell.outputs[0];
         T::CubReductionInternal::launchRaggedKRValue(c.op->value_op, cell.ragged_shape, cell.ragged_grid,
                                                      cell.inputs[0], cell.offsets[0], out, *cell.ragged_workspace,
                                                      stream);
     } else if (cell.value_stamp) {
-        cell.value_stamp->run();
+        cell.value_stamp->runOnTensorsForBenchmark(cell.inputs[0], cell.offsets[0], cell.outputs[0], stream);
     } else {
-        cell.arg_stamp->run();
+        cell.arg_stamp->runOnTensorsForBenchmark(cell.inputs[0], cell.offsets[0], cell.outputs[0], stream);
     }
     std::vector<uint8_t> raw(cell.output_bytes);
     check(cudaMemcpyAsync(raw.data(), cell.outputs[0].getMemPtr<void>(), raw.size(), cudaMemcpyDeviceToHost,
@@ -805,7 +823,7 @@ int main(int argc, char** argv) {
                           "offsets copy");
                 for (uint64_t k = 0; k < copies; ++k)
                     cell->offsets.push_back(
-                        cell->offsets_store->aliasByteStorageAs(c.offsets->dtype, {c.segments + 1}, k * offsets_span));
+                        T::StridedSpan(*cell->offsets_store).bytesAs(k * offsets_span, c.offsets->dtype, {c.segments + 1}));
                 stream.synchronize();  // the upload source is `packed`
 
                 // Output views.
@@ -833,8 +851,6 @@ int main(int argc, char** argv) {
                     site.components = c.d;
                     site.capacity_rows = c.capacity_rows;
                     site.segments = c.segments;
-                    site.input_head =
-                        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(cell->inputs[0].getMemPtr<void>()) & 15U);
                     R::DenseReductionSelectionCache& cache = R::denseReductionSelectionCache();
                     const uint64_t attempts = cache.tuningAttempts(R::DenseReductionSelectionKind::RaggedKR) +
                                               cache.tuningAttempts(R::DenseReductionSelectionKind::RaggedRK);
@@ -859,7 +875,7 @@ int main(int argc, char** argv) {
                     cell->pass_count = 2;
                     std::cout << "# ragged_select," << c.id << ',' << c.shape_id << ','
                               << A::distributionName(c.distribution) << ',' << selection.winner_name
-                              << ",tuned=" << (tuned ? 1 : 0) << ",head=" << site.input_head << ",contest=";
+                              << ",tuned=" << (tuned ? 1 : 0) << ",contest=";
                     for (size_t i = 0; i < selection.contest_names.size(); ++i)
                         std::cout << (i ? ";" : "") << selection.contest_names[i] << ':' << selection.contest_us[i];
                     std::cout << '\n';
@@ -913,21 +929,25 @@ int main(int argc, char** argv) {
                     cell->passes = T::CubReductionInternal::raggedKRShapeName(cell->ragged_shape) + "+ragged_finish";
                     cell->pass_count = 2;
                 } else if (!c.op->arg) {
+                    makeStampTensors(*cell, packed, placement, stream);
                     const T::CubSegmentedReduction reduction(c.op->value_op, T::DataType::FP32);
                     cell->value_stamp =
                         settings.validated_stamp
-                            ? reduction.stamp(cell->inputs[0], cell->outputs[0], cell->offsets[0], stream)
-                            : reduction.stampRuntimeOffsets(cell->inputs[0], cell->outputs[0], cell->offsets[0], stream);
+                            ? reduction.stamp(*cell->stamp_input, *cell->stamp_output, *cell->stamp_offsets, stream)
+                            : reduction.stampRuntimeOffsets(*cell->stamp_input, *cell->stamp_output,
+                                                            *cell->stamp_offsets, stream);
                     for (const std::string& pass : cell->value_stamp->getPassNames()) {
                         cell->passes += (cell->passes.empty() ? "" : "+") + pass;
                         ++cell->pass_count;
                     }
                 } else {
+                    makeStampTensors(*cell, packed, placement, stream);
                     const T::CubSegmentedArgReduction reduction(c.op->arg_op, c.index_dtype);
                     cell->arg_stamp =
                         settings.validated_stamp
-                            ? reduction.stamp(cell->inputs[0], cell->outputs[0], cell->offsets[0], stream)
-                            : reduction.stampRuntimeOffsets(cell->inputs[0], cell->outputs[0], cell->offsets[0], stream);
+                            ? reduction.stamp(*cell->stamp_input, *cell->stamp_output, *cell->stamp_offsets, stream)
+                            : reduction.stampRuntimeOffsets(*cell->stamp_input, *cell->stamp_output,
+                                                            *cell->stamp_offsets, stream);
                     for (const std::string& pass : cell->arg_stamp->getPassNames()) {
                         cell->passes += (cell->passes.empty() ? "" : "+") + pass;
                         ++cell->pass_count;

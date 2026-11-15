@@ -34,7 +34,8 @@ static size_t runtimeInputScalarSizeBytes(DataType dtype) {
 void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquation,
                          const std::vector<RuntimeInputValue>& inputs,
                          const std::vector<Tensor>& outputs,
-                         Stream& stream) {
+                         Stream& stream,
+                         std::optional<uint64_t> numElements) {
     if (!compiledEquation) {
         throw std::runtime_error("EquationInstance has no compiled equation.");
     }
@@ -74,11 +75,14 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
 
     for (size_t i = 0; i < inputs.size(); ++i) {
         if (compiledEquation->input_kinds[i] == NamedInput::Kind::Tensor) {
-            if (!std::holds_alternative<Tensor>(inputs[i])) {
+            // A tensor input is a Tensor or a StridedSpan (an expression strided view, read through the strides the
+            // kernel was specialized for, from the span's first element).
+            if (!std::holds_alternative<Tensor>(inputs[i]) && !std::holds_alternative<StridedSpan>(inputs[i])) {
                 throw std::runtime_error("Fused equation expected a tensor input at slot " + std::to_string(i) + ".");
             }
 
-            const Tensor& t = std::get<Tensor>(inputs[i]);
+            const Tensor& t = std::holds_alternative<Tensor>(inputs[i]) ? std::get<Tensor>(inputs[i])
+                                                                        : std::get<StridedSpan>(inputs[i]).getSourceTensor();
             if (!t.isInitialized()) {
                 throw std::runtime_error("All input tensors must be initialized.");
             }
@@ -124,6 +128,18 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         }
     }
 
+    if (numElements.has_value()) {
+        if (is_fused_tiled_transpose_launch) {
+            throw std::runtime_error("An explicit element count applies only to flat fused kernels, not tiled transposes.");
+        }
+        for (const Tensor& output : outputs) {
+            if (numElements.value() > output.getTotalNumElements()) {
+                throw std::runtime_error("Fused equation element count " + std::to_string(numElements.value()) +
+                                         " exceeds an output's " + std::to_string(output.getTotalNumElements()) + " elements.");
+            }
+        }
+        max_numel = numElements.value();
+    }
     if (!is_fused_tiled_transpose_launch) {
         THOR_THROW_IF_FALSE(max_numel != 0);
     }
@@ -133,7 +149,11 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     scalar_inputs_fp32.reserve(inputs.size());
     for (size_t i = 0; i < inputs.size(); ++i) {
         if (compiledEquation->input_kinds[i] == NamedInput::Kind::Tensor) {
-            input_ptrs.push_back(std::get<Tensor>(inputs[i]).getMemPtr());
+            if (const StridedSpan* span = std::get_if<StridedSpan>(&inputs[i])) {
+                input_ptrs.push_back(span->getMemPtr<void>());
+            } else {
+                input_ptrs.push_back(std::get<Tensor>(inputs[i]).getMemPtr());
+            }
         } else if (compiledEquation->input_kinds[i] == NamedInput::Kind::RuntimeScalarFp32) {
             scalar_inputs_fp32.push_back(std::get<float>(inputs[i]));
             input_ptrs.push_back(&scalar_inputs_fp32.back());

@@ -9,15 +9,15 @@
 
 namespace ThorImplementation::CubReductionInternal::Fp8RK {
 namespace {
+// Each slice of the benchmark's scratch starts at `cursor` (on a 256-byte boundary) and the next one at least 128 bytes
+// past its end (ReductionAutotuning::alignedStride), as every autotuning memory range does.
 [[nodiscard]] size_t reserveBytes(size_t& cursor, size_t bytes) {
     if (!bytes) return 0;
-    if (cursor > std::numeric_limits<size_t>::max() - 31)
-        throw std::overflow_error("FP8 benchmark scratch alignment overflow");
-    cursor = (cursor + 31) & ~size_t{31};
-    if (bytes > std::numeric_limits<size_t>::max() - cursor)
+    const uint64_t stride = ReductionAutotuning::alignedStride(bytes);
+    if (stride > std::numeric_limits<size_t>::max() - cursor)
         throw std::overflow_error("FP8 benchmark scratch size overflow");
     const size_t offset = cursor;
-    cursor += bytes;
+    cursor += static_cast<size_t>(stride);
     return offset;
 }
 
@@ -87,8 +87,8 @@ SelectedIsolatedBenchmark makeSelectedIsolatedBenchmark(
     return bench;
 }
 
-void SelectedIsolatedBenchmark::launch(const Tensor& input, Tensor& output,
-                                       const Tensor& scratch, Stream& stream) const {
+void SelectedIsolatedBenchmark::launch(const StridedSpan& input, const StridedSpan& output,
+                                       const StridedSpan& scratch, Stream& stream) const {
     // 1192: FP32 first stages (element_bytes 4, the FP32 RK selector) time the same program on FP32 input.
     // 1246: FP16 / BF16 first stages (element_bytes 2, the FP16 / BF16 RK selector) likewise.
     const bool input_matches = first_physical.element_bytes == 4
@@ -105,9 +105,9 @@ void SelectedIsolatedBenchmark::launch(const Tensor& input, Tensor& output,
     if (scratch_bytes && (!scratch.isInitialized() || scratch.getDataType() != DataType::UINT8 ||
                           scratch.getArraySizeInBytes() < scratch_bytes))
         throw std::invalid_argument("Selected FP8 benchmark scratch too small");
-    Tensor first_input = input;
+    StridedSpan first_input = input;
     first_input.reshape({site.outer, site.r, site.k});
-    Tensor final_output = output;
+    StridedSpan final_output = output;
     final_output.reshape(first_geometry.output_dimensions);
     if (continuation.empty()) {
         launchPhysicalFirstStage(first_physical, site.first_stage_semantics, first_input,
@@ -115,25 +115,25 @@ void SelectedIsolatedBenchmark::launch(const Tensor& input, Tensor& output,
         return;
     }
 
-    Tensor previous = scratch.aliasByteStorageAs(DataType::FP32,
-        {site.outer, site.layout.shards, site.k}, first_partial_offset);
+    StridedSpan previous = scratch.bytesAs(first_partial_offset, DataType::FP32, {site.outer, site.layout.shards, site.k});
     launchPhysicalFirstStage(first_physical, site.first_stage_semantics, first_input,
                              previous, first_geometry, 1.0f, stream);
     for (const BenchmarkContinuationPass& pass : continuation) {
-        Tensor pass_input = previous;
+        StridedSpan pass_input = previous;
         pass_input.reshape(pass.layout.input_dimensions);
-        Tensor pass_output = pass.last_pass ? final_output : scratch.aliasByteStorageAs(
-            DataType::FP32, pass.layout.intermediate_dimensions, pass.output_offset);
+        StridedSpan pass_output = pass.last_pass
+                                      ? final_output
+                                      : scratch.bytesAs(pass.output_offset, DataType::FP32, pass.layout.intermediate_dimensions);
         if (pass.last_pass) {
             if (pass_output.getDataType() != pass.output_dtype ||
                 pass_output.getTotalNumElements() != pass.layout.geometry.output_elements)
                 throw std::logic_error("FP8 benchmark final FP32 pass output shape/dtype mismatch");
             pass_output.reshape(pass.layout.geometry.output_dimensions);
         }
-        Tensor pass_scratch = scratch;
+        StridedSpan pass_scratch = scratch;
         if (pass.physical_scratch_bytes)
-            pass_scratch = scratch.aliasByteStorageAs(DataType::UINT8,
-                {static_cast<uint64_t>(pass.physical_scratch_bytes)}, pass.physical_scratch_offset);
+            pass_scratch = scratch.bytesAs(pass.physical_scratch_offset, DataType::UINT8,
+                                           {static_cast<uint64_t>(pass.physical_scratch_bytes)});
         launchDensePhysicalPass(*pass.selected.physical_plan, pass.semantics,
                                 pass_scratch, pass.physical_scratch_bytes,
                                 pass_input, pass_output, pass.layout.geometry,
@@ -146,7 +146,8 @@ ReductionAutotuning::Candidate SelectedIsolatedBenchmark::asAutotuneCandidate(st
     ReductionAutotuning::Candidate candidate;
     candidate.name = std::move(name);
     candidate.scratch_bytes = scratch_bytes;
-    candidate.launch = [program = *this](const Tensor& input, Tensor& output, Tensor& scratch, Stream& stream) {
+    candidate.launch = [program = *this](const StridedSpan& input, const StridedSpan& output, const StridedSpan& scratch,
+                                         Stream& stream) {
         program.launch(input, output, scratch, stream);
     };
     return candidate;

@@ -15,6 +15,7 @@
 // the twins in its order with its local ranks; the ARG-only passes take the next local rank of their family, as FP8
 // ARG's candidates do.
 
+#include "DeepLearning/Implementation/Tensor/StridedSpan.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Cub/Fp32RK/Fp32RKCandidates.h"
 
@@ -49,9 +50,9 @@ struct Fp32RKArgCandidate {
  *  outer x k, index = row * domain_stride. `packed_scratch` holds fp32RKArgScratchBytes (null for a Complete pass).
  *  Throws std::logic_error for an illegal identity. */
 void launchFp32RKArgPass(const Fp8RK::PhysicalKernel& identity,
-                         const Tensor& input,
-                         Tensor* value_output,
-                         Tensor* index_output,
+                         const StridedSpan& input,
+                         const StridedSpan* value_output,
+                         const StridedSpan* index_output,
                          const CubReductionGeometry& geometry,
                          uint64_t* packed_scratch,
                          bool maximum,

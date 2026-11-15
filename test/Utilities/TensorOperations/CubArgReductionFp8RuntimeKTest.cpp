@@ -2,6 +2,7 @@
 // staged partials per shard and single-shard Complete outputs) across K tile boundaries, depths and R; the PacketComplete
 // twin across W, tiles and R; and wide-K production stamps end to end.
 
+#include "test/Utilities/TensorOperations/OutputSpan.h"
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 #include "test/Utilities/TensorOperations/Fp8ArgReference.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
@@ -79,7 +80,7 @@ TEST(CubArgReductionFp8RuntimeK, RotatedPassesMatchReference) {
                                     index = Tensor(gpuPlacement,
                                                    TensorDescriptor(mode == 2 ? DataType::UINT64 : DataType::UINT32,
                                                                     {Outer, shards, k}));
-                                launchFp8RuntimeKArgPass(input, value ? &*value : nullptr, index ? &*index : nullptr,
+                                launchFp8RuntimeKArgPass(input, outputSpan(value), outputSpan(index),
                                                          geometry, depth, packet, maximum, stride, stream);
                                 stream.synchronize();
                                 const std::vector<float> got_values =
@@ -150,7 +151,7 @@ TEST(CubArgReductionFp8RuntimeK, PacketCompleteMatchesReference) {
                                     index = Tensor(gpuPlacement, TensorDescriptor(mode == 2 ? DataType::UINT64
                                                                                             : DataType::UINT32,
                                                                                   {Outer, k}));
-                                launchFp8PacketCompleteArg(input, value ? &*value : nullptr, index ? &*index : nullptr,
+                                launchFp8PacketCompleteArg(input, outputSpan(value), outputSpan(index),
                                                            geometry, w, tile, maximum, stride, stream);
                                 stream.synchronize();
                                 const std::vector<float> got_values =

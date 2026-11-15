@@ -14,6 +14,7 @@
 
 using ThorImplementation::DataType;
 using ThorImplementation::Tensor;
+using ThorImplementation::TensorSpan;
 using ThorImplementation::TensorPlacement;
 
 namespace {
@@ -395,11 +396,11 @@ void launchForConfiguration(
     RowIndexT logicalRows,
     Tensor &destinationValues,
     const Tensor &destinationOffsets,
-    const Tensor &rowIndicesDevice,
+    const TensorSpan &rowIndicesDevice,
     uint32_t rowsPerBlockOverride,
     Stream &stream) {
     const uint8_t *records = recordStorage.getMemPtr<uint8_t>();
-    const uint64_t *rowIndices = rowIndicesDevice.getMemPtr<uint64_t>();
+    const uint64_t *rowIndices = rowIndicesDevice.data<uint64_t>();
     const OffsetT *offsets = destinationOffsets.getMemPtr<OffsetT>();
     const cudaStream_t cudaStream = stream.getStream();
 
@@ -470,7 +471,7 @@ void launchForRowIndexType(
     RowIndexT logicalRows,
     Tensor &destinationValues,
     const Tensor &destinationOffsets,
-    const Tensor &rowIndicesDevice,
+    const TensorSpan &rowIndicesDevice,
     uint32_t rowsPerBlockOverride,
     Stream &stream) {
     const uint8_t *records = recordStorage.getMemPtr<uint8_t>();
@@ -511,10 +512,10 @@ void launchTyped(
     uint64_t logicalRows,
     Tensor &destinationValues,
     const Tensor &destinationOffsets,
-    const Tensor &rowIndicesDevice,
+    const TensorSpan &rowIndicesDevice,
     uint32_t rowsPerBlockOverride,
     Stream &stream) {
-    const uint64_t batchSize = rowIndicesDevice.getDimensions().front();
+    const uint64_t batchSize = rowIndicesDevice.count;
 
     // Keep row/grid arithmetic 32-bit for normal batches. The UINT64 fallback
     // preserves the existing API range without imposing 64-bit arithmetic on
@@ -569,14 +570,14 @@ void launchValidated(
     uint64_t logicalRows,
     Tensor &destinationValues,
     const Tensor &destinationOffsets,
-    const Tensor &rowIndicesDevice,
+    const TensorSpan &rowIndicesDevice,
     uint32_t rowsPerBlockOverride,
     Stream &stream) {
     THOR_THROW_IF_FALSE(recordStorage.isInitialized());
     THOR_THROW_IF_FALSE(packedValuesStorage.isInitialized() || storedValueCount == 0);
     THOR_THROW_IF_FALSE(destinationValues.isInitialized());
     THOR_THROW_IF_FALSE(destinationOffsets.isInitialized());
-    THOR_THROW_IF_FALSE(rowIndicesDevice.isInitialized());
+    rowIndicesDevice.validate("Device resident ragged materialization row indices");
     THOR_THROW_IF_FALSE(
         recordStorage.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(!packedValuesStorage.isInitialized() ||
@@ -587,7 +588,6 @@ void launchValidated(
     THOR_THROW_IF_FALSE(recordStorage.getDataType() == DataType::UINT8);
     THOR_THROW_IF_FALSE(rowIndicesDevice.getDataType() == DataType::UINT64);
     THOR_THROW_IF_FALSE(recordStorage.getDimensions().size() == 1);
-    THOR_THROW_IF_FALSE(rowIndicesDevice.getDimensions().size() == 1);
     THOR_THROW_IF_FALSE(destinationOffsets.getDimensions().size() == 1);
     THOR_THROW_IF_FALSE(!destinationValues.getDimensions().empty());
     THOR_THROW_IF_FALSE(numExamples > 0);
@@ -602,7 +602,7 @@ void launchValidated(
     THOR_THROW_IF_FALSE(
         recordStorage.getArraySizeInBytes() == numExamples * recordSizeBytes);
 
-    const uint64_t batchSize = rowIndicesDevice.getDimensions().front();
+    const uint64_t batchSize = rowIndicesDevice.count;
     THOR_THROW_IF_FALSE(batchSize > 0);
     THOR_THROW_IF_FALSE(logicalRows >= 1 && logicalRows <= batchSize);
     THOR_THROW_IF_FALSE(rowsPerBlockOverride == 0 ||
@@ -655,7 +655,7 @@ void launchDeviceResidentRaggedMaterializationKernel(
     uint64_t logicalRows,
     Tensor &destinationValues,
     const Tensor &destinationOffsets,
-    const Tensor &rowIndicesDevice,
+    const TensorSpan &rowIndicesDevice,
     Stream &stream) {
     launchValidated(
         recordStorage,
@@ -685,7 +685,7 @@ void launchDeviceResidentRaggedMaterializationKernelWithRowsPerCtaForBenchmark(
     uint64_t logicalRows,
     Tensor &destinationValues,
     const Tensor &destinationOffsets,
-    const Tensor &rowIndicesDevice,
+    const TensorSpan &rowIndicesDevice,
     uint32_t rowsPerCta,
     Stream &stream) {
     launchValidated(

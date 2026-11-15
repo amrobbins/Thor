@@ -1,4 +1,5 @@
 #include "Utilities/TensorOperations/DeepLearning/CudnnInstanceNorm.h"
+#include "Utilities/TensorOperations/DeepLearning/CudnnTensorContract.h"
 
 #include "Utilities/Common/CudnnExecutionWorkspace.h"
 #include "Utilities/Common/CudnnFrontendPlan.h"
@@ -146,18 +147,21 @@ void requireIoTensor(const Tensor& tensor,
     requireSameGpu(tensor, gpuNum, name);
     requireDtype(tensor, expectedDtype, name);
     requireNumElements(tensor, ioElementCount(descriptor), name);
+    requireCudnnContractTensor(tensor, "cuDNN InstanceNorm", name);
 }
 
 void requireParameterTensor(const Tensor& tensor, const CudnnInstanceNormDescriptor& descriptor, int gpuNum, string_view name) {
     requireSameGpu(tensor, gpuNum, name);
     requireDtype(tensor, descriptor.parameterDataType, name);
     requireNumElements(tensor, descriptor.channelCount, name);
+    requireCudnnContractTensor(tensor, "cuDNN InstanceNorm", name);
 }
 
 void requireStatsTensor(const Tensor& tensor, const CudnnInstanceNormDescriptor& descriptor, int gpuNum, string_view name) {
     requireSameGpu(tensor, gpuNum, name);
     requireDtype(tensor, DataType::FP32, name);
     requireNumElements(tensor, statsElementCount(descriptor), name);
+    requireCudnnContractTensor(tensor, "cuDNN InstanceNorm", name);
 }
 
 void insertTensor(unordered_map<int64_t, void*>& pack, int64_t uid, const Tensor& tensor) {

@@ -693,9 +693,8 @@ RaggedExpressionRuntimeExtent RaggedExpression::makeRuntimeExtent(const Expressi
             "RaggedExpression device runtime extent cannot be sourced from HOST_EXTENT.");
     }
     RaggedExpressionRuntimeExtent extent;
-    extent.activeValueCount = source == RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT
-                                  ? partition_input
-                                  : partition_input.stridedView({1}, {1}, descriptor.getBatchSize());
+    extent.activeValueCountSource = partition_input;
+    extent.activeValueCountIndex = source == RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT ? 0 : descriptor.getBatchSize();
     extent.maxActiveValues = descriptor.getMaxTotalValues();
     extent.elementsPerValue = elementsPerValue(descriptor);
     return extent;

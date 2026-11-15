@@ -40,7 +40,7 @@ uint32_t alignedKResidency(DataType input_dtype, DataType output_dtype,
 }
 
 void launchAlignedK(const PhysicalKernel& kernel, const CubReductionStageSemantics& semantics,
-                    const Tensor& input, Tensor& stage_output,
+                    const StridedSpan& input, const StridedSpan& stage_output,
                     const CubReductionGeometry& geometry, float output_scale, Stream& stream) {
     if (kernel.family != PhysicalFamily::AlignedK ||
         !structurallyValid(kernel, geometry.outer_size, geometry.reduction_size, geometry.inner_size))

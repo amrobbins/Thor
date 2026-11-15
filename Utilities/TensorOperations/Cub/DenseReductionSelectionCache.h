@@ -49,6 +49,7 @@ enum class DenseReductionSelectionKind : uint8_t {
     F16KR = 6,   // 1236: F16KR::F16KRSelection (FP16 / BF16 R / KR sites; the key holds the input dtype)
     RaggedKR = 7,  // 1264: reserved for the ragged KR selector (plans/Thor_Ragged_Reduction_Plan_2026-11-06.md)
     RaggedRK = 8,  // 1264: reserved for the ragged RK selector
+    // 1366-1370: StridedR = 9 (the StridedR Block / Split contest); 1371 removed it with the contest.
 };
 inline constexpr size_t DenseReductionSelectionKindCount = 9;  // kinds are indexed 1..Count-1
 

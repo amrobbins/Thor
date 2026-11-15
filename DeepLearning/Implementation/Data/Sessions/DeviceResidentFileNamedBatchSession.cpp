@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/Data/Sessions/DeviceResidentFileNamedBatchSession.h"
 #include "DeepLearning/Implementation/Data/BatchCardinality.h"
 
+#include "DeepLearning/Implementation/Tensor/TensorSpan.h"
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include <algorithm>
@@ -15,26 +16,26 @@ using ThorImplementation::RowPartitionRuntime;
 using ThorImplementation::Tensor;
 using ThorImplementation::TensorDescriptor;
 using ThorImplementation::TensorPlacement;
+using ThorImplementation::TensorSpan;
 
 struct DeviceResidentFileSelectionState {
     uint64_t slotIndex = 0;
     uint32_t validExampleCount = 0;
 
-    // Batch-varying compact selection metadata is one allocation per side and
-    // therefore one H2D transfer per selected batch.  The typed row-index and
-    // window-plan tensors below are non-owning-style alias handles that share
-    // these allocations; they exist only to preserve the existing materializer
-    // interfaces and validation. Only rowIndices[0:validExampleCount) is live;
-    // the inactive portion of that capacity alias may be occupied by packed plan
-    // records. All sections are naturally 8-byte aligned.
+    // Batch-varying compact selection metadata is one UINT64 allocation per side
+    // and therefore one H2D transfer per selected batch. The row indices and each
+    // window plan are spans (element offset + count) of these allocations, not
+    // views. rowIndices spans the batchSize capacity, but only its first
+    // validExampleCount entries are live; the rest of that range may be occupied
+    // by packed plan records. Every span starts on an 8-byte boundary.
     Tensor selectionMetadataHost;
     Tensor selectionMetadataDevice;
     uint64_t selectionMetadataUploadBytes = 0;
-    Tensor rowIndicesHost;
-    Tensor rowIndicesDevice;
+    TensorSpan rowIndicesHost;
+    TensorSpan rowIndicesDevice;
     std::vector<std::string> windowPlanNames;
-    std::map<std::string, Tensor> windowPlansHost;
-    std::map<std::string, Tensor> windowPlansDevice;
+    std::map<std::string, TensorSpan> windowPlansHost;
+    std::map<std::string, TensorSpan> windowPlansDevice;
     Event rowsReadyEvent;
 };
 
@@ -129,8 +130,8 @@ class CompactResidentFieldMaterializer final : public Thor::DeviceBatchMateriali
         THOR_THROW_IF_FALSE(destination.getPlacement() == dataset->getPlacement());
         THOR_THROW_IF_FALSE(selection->rowsReadyEvent.isInitialized());
         destinationStream.waitEvent(selection->rowsReadyEvent);
-        Tensor noWindowPlan;
-        const Tensor *windowPlan = &noWindowPlan;
+        TensorSpan noWindowPlan;
+        const TensorSpan *windowPlan = &noWindowPlan;
         if (windowPlanName.has_value()) {
             windowPlan = &selection->windowPlansDevice.at(windowPlanName.value());
         }
@@ -629,13 +630,11 @@ DeviceResidentFileNamedBatchSession::allocateSelectionSlot(uint64_t slotIndex) c
         TensorPlacement(TensorPlacement::MemDevices::CPU), metadataDescriptor);
     slot->state->selectionMetadataDevice =
         Tensor(residentDataset->getPlacement(), metadataDescriptor);
-    slot->state->rowIndicesHost =
-        slot->state->selectionMetadataHost.aliasView({batchSize}, {1}, 0);
-    slot->state->rowIndicesDevice =
-        slot->state->selectionMetadataDevice.aliasView({batchSize}, {1}, 0);
+    slot->state->rowIndicesHost = TensorSpan(slot->state->selectionMetadataHost, 0, batchSize);
+    slot->state->rowIndicesDevice = TensorSpan(slot->state->selectionMetadataDevice, 0, batchSize);
     for (const std::string &planName : slot->state->windowPlanNames) {
-        slot->state->windowPlansHost.emplace(planName, Tensor());
-        slot->state->windowPlansDevice.emplace(planName, Tensor());
+        slot->state->windowPlansHost.emplace(planName, TensorSpan());
+        slot->state->windowPlansDevice.emplace(planName, TensorSpan());
     }
     return slot;
 }
@@ -696,7 +695,7 @@ void DeviceResidentFileNamedBatchSession::fillRowIndexTensor(
     THOR_THROW_IF_FALSE(validExampleCount >= 1);
     THOR_THROW_IF_FALSE(validExampleCount <= batchSize);
     selectionSlot.state->validExampleCount = validExampleCount;
-    uint64_t *rowIndices = selectionSlot.state->rowIndicesHost.getMemPtr<uint64_t>();
+    uint64_t *rowIndices = selectionSlot.state->rowIndicesHost.data<uint64_t>();
     for (uint64_t slot = 0; slot < validExampleCount; ++slot) {
         uint64_t logicalPosition = 0;
         if (runtime.randomized) {
@@ -801,7 +800,7 @@ Batch DeviceResidentFileNamedBatchSession::acquireBatch(
     runtime.nextBatchNum = (runtime.nextBatchNum + 1) % runtime.batchesPerEpoch;
     fillRowIndexTensor(runtime, *selectionSlot, validExampleCount);
 
-    // Repack the plan aliases immediately after the live row-index prefix.
+    // Repack the plan spans immediately after the live row-index prefix.
     // Inactive physical batch rows have no selection metadata and are not
     // materialized by any device-resident field path.
     uint64_t metadataWordsUsed = validExampleCount;
@@ -819,12 +818,10 @@ Batch DeviceResidentFileNamedBatchSession::acquireBatch(
         THOR_THROW_IF_FALSE(metadataWordsUsed <= metadataCapacityWords);
         THOR_THROW_IF_FALSE(planWords <= metadataCapacityWords - metadataWordsUsed);
 
-        Tensor planHost = selectionSlot->state->selectionMetadataHost.aliasView(
-            {planWords}, {1}, metadataWordsUsed);
-        Tensor planDevice = selectionSlot->state->selectionMetadataDevice.aliasView(
-            {planWords}, {1}, metadataWordsUsed);
-        selectionSlot->state->windowPlansHost.at(planName) = std::move(planHost);
-        selectionSlot->state->windowPlansDevice.at(planName) = std::move(planDevice);
+        selectionSlot->state->windowPlansHost.at(planName) =
+            TensorSpan(selectionSlot->state->selectionMetadataHost, metadataWordsUsed, planWords);
+        selectionSlot->state->windowPlansDevice.at(planName) =
+            TensorSpan(selectionSlot->state->selectionMetadataDevice, metadataWordsUsed, planWords);
         residentDataset->stageCompactWindowPlan(
             planName,
             selectionSlot->state->rowIndicesHost,
@@ -852,7 +849,7 @@ Batch DeviceResidentFileNamedBatchSession::acquireBatch(
                 directPointers.at(static_cast<size_t>(ordinal)) =
                     static_cast<uint8_t *>(directSlot->directTensors.at(spec.name).getMemPtr());
             }
-            const uint64_t *sourceRows = selectionSlot->state->rowIndicesHost.getMemPtr<uint64_t>();
+            const uint64_t *sourceRows = selectionSlot->state->rowIndicesHost.data<uint64_t>();
             THOR_THROW_IF_FALSE(runtime.readerSession != nullptr);
             for (uint64_t slot = 0; slot < validExampleCount; ++slot) {
                 runtime.readerSession->loadDirectExampleInto(

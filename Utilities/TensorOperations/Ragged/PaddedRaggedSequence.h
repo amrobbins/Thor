@@ -2,10 +2,12 @@
 
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Tensor/TensorSpan.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 
 #include <cstdint>
+#include <vector>
 
 namespace ThorImplementation {
 
@@ -38,7 +40,7 @@ struct PaddedRaggedSequencePlan {
     bool operator==(const PaddedRaggedSequencePlan& other) const = default;
 };
 
-// Prepare one compact [B,C,1,W] physical view. widthCapacity is selected by the
+// Prepare one compact [B,C,1,W] physical batch. widthCapacity is selected by the
 // caller from the finite placement-time Conv1D width-capacity family.
 // This function consumes only already-published scalar row-partition metadata;
 // it never requires a full host offsets mirror and never reads device offsets.
@@ -49,8 +51,9 @@ struct PaddedRaggedSequencePlan {
     uint64_t widthCapacity);
 
 // T8A runtime owner for one compiler-level padded ragged physical value. One
-// maximum-sized allocation is retained, while paddedTensor() exposes only the
-// selected [B,C,1,W] prefix. The active prefix of each row is semantically
+// maximum-sized allocation is retained; the dense [B,C,1,W] batch at a width W
+// is its first B*C*W elements (paddedValuesForWidth / paddedDimensionsForWidth),
+// so consumers address it without a view. The active prefix of each row is semantically
 // valid; the inactive tail is undefined by default. Consumers that require a
 // canonical zero tail must establish it explicitly for the exact physical
 // generation before use.
@@ -67,11 +70,12 @@ class PaddedRaggedSequence {
     [[nodiscard]] const PaddedRaggedSequencePlan& getPlan() const { return plan; }
     [[nodiscard]] Tensor getRowOffsets() const { return rowOffsets; }
     [[nodiscard]] Tensor getPaddedValuesStorage() const { return paddedValues; }
-    [[nodiscard]] Tensor paddedTensor() const;
-    // Placement-time view used by retained width-generic operators to pre-stamp
-    // one invocation for every allowed runtime W without mutating the current
-    // runtime plan.
-    [[nodiscard]] Tensor paddedTensorForWidth(uint64_t widthCapacity) const;
+    // The [B, C, 1, W] shape of the dense batch at width W. Retained width-generic operators use it with
+    // paddedValuesForWidth to pre-stamp one invocation for every allowed W without changing the current plan.
+    // Throws unless 0 < W <= the reserved width and the storage exists.
+    [[nodiscard]] std::vector<uint64_t> paddedDimensionsForWidth(uint64_t widthCapacity) const;
+    // The first B*C*W elements of the storage: the dense batch at width W.
+    [[nodiscard]] TensorSpan paddedValuesForWidth(uint64_t widthCapacity) const;
     [[nodiscard]] bool hasValueStorage() const { return paddedValues.isInitialized(); }
     [[nodiscard]] uint64_t valueWorkspaceBytes() const { return plan.valueBytes; }
     [[nodiscard]] uint64_t totalWorkspaceBytes() const { return plan.totalWorkspaceBytes(); }

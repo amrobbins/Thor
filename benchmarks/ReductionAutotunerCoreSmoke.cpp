@@ -60,13 +60,13 @@ int main() {
         1, 31, 32, 33, 127, 128, 129, 4095, 4096, 4097};
     for (uint64_t bytes : view_bytes) {
         const uint64_t stride = alignedStride(bytes);
-        assert(stride % TensorViewAlignmentBytes == 0);
-        assert(stride - bytes >= TensorViewPaddingBytes);
-        assert(stride == ((bytes + TensorViewPaddingBytes + TensorViewAlignmentBytes - 1) &
-                          ~(TensorViewAlignmentBytes - 1)));
+        assert(stride % SliceAlignmentBytes == 0);
+        assert(stride - bytes >= SlicePaddingBytes);
+        assert(stride == ((bytes + SlicePaddingBytes + SliceAlignmentBytes - 1) &
+                          ~(SliceAlignmentBytes - 1)));
     }
     // 1163: 256-byte starts (cudaMalloc's alignment).
-    assert(TensorViewAlignmentBytes == 256);
+    assert(SliceAlignmentBytes == 256);
     assert(alignedStride(129) == 512);
     assert(alignedStride(4096) == 4352);
     assert(alignedStride(128) == 256);

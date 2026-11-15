@@ -19,6 +19,7 @@
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 #include "Utilities/TensorOperations/Ragged/PaddedRaggedSequence.h"
+#include "Utilities/Exceptions.h"
 
 #include <cuda_runtime.h>
 
@@ -326,7 +327,10 @@ static std::optional<Tensor> allocateExpressionWorkspace(const TensorPlacement& 
     return Tensor(placement, TensorDescriptor(DataType::UINT8, {workspace_bytes}));
 }
 
-static bool runtimeInputIsTensor(const RuntimeInputValue& value) { return std::holds_alternative<Tensor>(value); }
+// A tensor value: a Tensor, or a StridedSpan (an expression strided view of another value).
+static bool runtimeInputIsTensor(const RuntimeInputValue& value) {
+    return std::holds_alternative<Tensor>(value) || std::holds_alternative<StridedSpan>(value);
+}
 static bool runtimeInputIsRuntimeScalar(const RuntimeInputValue& value) { return std::holds_alternative<float>(value); }
 static bool runtimeInputIsTensorScalarBinding(const RuntimeInputValue& value) { return std::holds_alternative<TensorScalarBinding>(value); }
 
@@ -339,7 +343,7 @@ static const TensorScalarBinding& runtimeInputTensorScalarBinding(const RuntimeI
 
 static bool optionalRuntimeInputIsTensorLike(const std::optional<RuntimeInputValue>& value) {
     return value.has_value() &&
-           (std::holds_alternative<Tensor>(value.value()) || std::holds_alternative<TensorScalarBinding>(value.value()));
+           (runtimeInputIsTensor(value.value()) || std::holds_alternative<TensorScalarBinding>(value.value()));
 }
 
 static size_t dataTypeSizeBytes(DataType dtype) {
@@ -377,35 +381,35 @@ static size_t dataTypeSizeBytes(DataType dtype) {
     }
 }
 
-static const Tensor& runtimeInputTensor(const RuntimeInputValue& value) {
+// The value as a Tensor, for a consumer of dense storage. Such a consumer never receives a span: the stage-input gather
+// hands it the span's dense copy (denseTensorForValue in stampEquation).
+static Tensor runtimeInputTensor(const RuntimeInputValue& value) {
+    if (std::holds_alternative<StridedSpan>(value)) {
+        throw std::logic_error("A strided span reached a consumer of dense storage without its dense copy.");
+    }
     if (!std::holds_alternative<Tensor>(value)) {
         throw std::runtime_error("Expected tensor runtime input.");
     }
     return std::get<Tensor>(value);
 }
 
-static Tensor groupedMatmulBatchView(const Tensor& tensor,
-                                     uint64_t batch_count,
-                                     uint64_t batch_stride_elements,
-                                     uint64_t relative_element_offset,
-                                     const char* role) {
-    const std::vector<uint64_t> dims = tensor.getDimensions();
-    const std::vector<uint64_t> strides = tensor.getStridesElements();
-    if (dims.size() < 2 || strides.size() != dims.size()) {
-        throw std::runtime_error(std::string("Grouped MATMUL ") + role + " requires a rank >= 2 tensor with valid strides.");
+// The value as a StridedSpan, for the consumers that read strides in place (fused kernels, matmul operands): a whole
+// Tensor converts with its own layout.
+static StridedSpan runtimeInputStridedSpan(const RuntimeInputValue& value) {
+    if (const StridedSpan* span = std::get_if<StridedSpan>(&value)) {
+        return *span;
     }
-    if (batch_count == 0) {
-        throw std::runtime_error(std::string("Grouped MATMUL ") + role + " requires a non-zero batch count.");
+    if (!std::holds_alternative<Tensor>(value)) {
+        throw std::runtime_error("Expected tensor runtime input.");
     }
-
-    return tensor.aliasView({batch_count, dims[dims.size() - 2], dims[dims.size() - 1]},
-                            {batch_stride_elements, strides[strides.size() - 2], strides[strides.size() - 1]},
-                            relative_element_offset);
+    return StridedSpan(std::get<Tensor>(value));
 }
 
-static Tensor runtimeInputTensorScalarView(const RuntimeInputValue& value, const char* label) {
-    if (std::holds_alternative<Tensor>(value)) {
-        return std::get<Tensor>(value);
+// The cuDNN [1,1,1,1] tensor for a tensor-or-tensor-runtime-scalar input. A scalar binding must be its own
+// one-element allocation (byte offset 0): cuDNN gets a real Thor tensor, never a view into a larger buffer.
+static Tensor runtimeInputCudnnScalarTensor(const RuntimeInputValue& value, const char* label) {
+    if (runtimeInputIsTensor(value)) {
+        return runtimeInputTensor(value);
     }
     if (!std::holds_alternative<TensorScalarBinding>(value)) {
         throw std::runtime_error(std::string("Expected tensor or tensor-runtime-scalar runtime input for ") + label + ".");
@@ -419,21 +423,22 @@ static Tensor runtimeInputTensorScalarView(const RuntimeInputValue& value, const
         throw std::runtime_error(std::string("Tensor-runtime-scalar binding for ") + label +
                                  " must use a backing buffer with the same dtype as the scalar source dtype.");
     }
-
-    const size_t elem_bytes = dataTypeSizeBytes(binding.sourceDType);
-    if (elem_bytes == 0 || binding.byteOffset % elem_bytes != 0) {
-        throw std::runtime_error(std::string("Tensor-runtime-scalar binding byte offset is not element-aligned for ") + label + ".");
-    }
-    if (binding.byteOffset + elem_bytes > binding.buffer.getArraySizeInBytes()) {
-        throw std::runtime_error(std::string("Tensor-runtime-scalar binding exceeds backing buffer size for ") + label + ".");
+    if (binding.byteOffset != 0 || binding.buffer.getTotalNumElements() != 1) {
+        throw std::runtime_error(std::string("Tensor-runtime-scalar binding for ") + label +
+                                 " must be a one-element tensor of its own (byte offset 0): cuDNN takes it as a tensor.");
     }
 
-    return binding.buffer.aliasView({1, 1, 1, 1}, {1, 1, 1, 1}, binding.byteOffset / elem_bytes);
+    Tensor scalar = binding.buffer;
+    scalar.reshape({1, 1, 1, 1});
+    return scalar;
 }
 
 static std::vector<uint64_t> runtimeInputDims(const RuntimeInputValue& value) {
     if (std::holds_alternative<Tensor>(value)) {
         return std::get<Tensor>(value).getDimensions();
+    }
+    if (const StridedSpan* span = std::get_if<StridedSpan>(&value)) {
+        return span->getDimensions();
     }
     if (std::holds_alternative<TensorScalarBinding>(value)) {
         return {1};
@@ -445,6 +450,9 @@ static std::vector<uint64_t> runtimeInputStridesForShapeKey(const RuntimeInputVa
     if (std::holds_alternative<Tensor>(value)) {
         return std::get<Tensor>(value).getStridesElements();
     }
+    if (const StridedSpan* span = std::get_if<StridedSpan>(&value)) {
+        return span->getStridesElements();
+    }
     if (std::holds_alternative<TensorScalarBinding>(value)) {
         return {1};
     }
@@ -452,6 +460,9 @@ static std::vector<uint64_t> runtimeInputStridesForShapeKey(const RuntimeInputVa
 }
 
 static bool runtimeInputIsNonDenseTensorView(const RuntimeInputValue& value) {
+    if (const StridedSpan* span = std::get_if<StridedSpan>(&value)) {
+        return !span->isDenseContiguous();
+    }
     return std::holds_alternative<Tensor>(value) && !std::get<Tensor>(value).isDenseContiguous();
 }
 
@@ -459,6 +470,76 @@ static bool anyRuntimeInputIsNonDenseTensorView(const std::vector<RuntimeInputVa
     return std::any_of(values.begin(), values.end(), [](const RuntimeInputValue& value) {
         return runtimeInputIsNonDenseTensorView(value);
     });
+}
+
+static std::vector<uint32_t> narrowedReductionAxes(const std::vector<uint64_t>& axes) {
+    std::vector<uint32_t> narrowed;
+    narrowed.reserve(axes.size());
+    for (uint64_t axis : axes) {
+        if (axis > std::numeric_limits<uint32_t>::max()) {
+            throw std::runtime_error("Reduction axis exceeds UINT32_MAX.");
+        }
+        narrowed.push_back(static_cast<uint32_t>(axis));
+    }
+    return narrowed;
+}
+
+// 1390 (plans/Thor_Tiled_View_Replacement_Plan_2026-11-12.md): how a value-reduction stage runs `span`. The reducer
+// reads its input and writes its output in physical order, and refuses a view whose retained axes are permuted (F / G)
+// or whose rows have gaps (H). A rotated view, and (1391, phase 7 A) a pitched view whose rows read at their pitch
+// cost less than its packed copy, run in two parts: the reduction of the bytes, then the dense copy of its output
+// (CubReductionViewSplit::copiesOutput). Any other view the reducer does not run reads its dense copy, in its own
+// dtype (stageInputTakesStridedSpan).
+static std::optional<CubReductionViewSplit> outputCopyReductionSplit(const CompiledReduction& reduction,
+                                                                     const StridedSpan& span) {
+    if (span.isDenseContiguous()) {
+        return std::nullopt;
+    }
+    std::optional<CubReductionViewSplit> split = CubReduction::splitRefusedView(
+        span, narrowedReductionAxes(reduction.reduction_axes), reduction.output_dtype);
+    if (!split.has_value() || !split->copiesOutput()) {
+        return std::nullopt;
+    }
+    return split;
+}
+
+static bool reductionReadsSpanInPlace(const CompiledExecutionStage& stage, const StridedSpan& span) {
+    if (!stage.reduction || span.isDenseContiguous()) {
+        return true;
+    }
+    // 1392: CubReduction::readsSpanInPlace also takes a pitched view the reducer reads at its row and slab pitches.
+    if (CubReduction::readsSpanInPlace(
+            span, narrowedReductionAxes(stage.reduction->reduction_axes), stage.reduction->output_dtype)) {
+        return true;
+    }
+    return outputCopyReductionSplit(*stage.reduction, span).has_value();
+}
+
+// Whether an input reads `span` in place: every fused-kernel input (its index math reads the span's strides), the
+// operands of a plain, unpacked MATMUL (the layout planner and cuBLASLt), the input of a value reduction that the
+// reducer runs on it, alone or as the first of two parts (reductionReadsSpanInPlace), and the input of an
+// arg-reduction or a dense reduce-min/max backward when the span is dense (those read dense input, which may start
+// partway into its storage). Every other input reads dense storage and receives the span's dense copy.
+static bool stageInputTakesStridedSpan(const CompiledExecutionStage& stage, size_t input_idx, const StridedSpan& span) {
+    switch (stage.kind) {
+        case CompiledExecutionStage::Kind::FusedKernel:
+            return true;
+        case CompiledExecutionStage::Kind::Reduction:
+            return input_idx == 0 && reductionReadsSpanInPlace(stage, span);
+        case CompiledExecutionStage::Kind::ArgMinMax:
+            return input_idx == 0 && span.isDenseContiguous();
+        case CompiledExecutionStage::Kind::ReduceMinMaxBackward:
+            // [input, grad_output]; a third (offsets) input makes it segmented, which reads a dense tensor.
+            return input_idx == 0 && stage.input_value_ids.size() == 2 && span.isDenseContiguous();
+        case CompiledExecutionStage::Kind::Matmul:
+            return input_idx < 2 && stage.matmul && stage.matmul->op == ExprOp::MATMUL &&
+                   stage.matmul->epilogue == MatmulEpilogue::Default &&
+                   stage.matmul->backward_epilogue == MatmulBackwardEpilogue::Default &&
+                   !stage.matmul->bgrad_output_dtype.has_value() &&
+                   stage.matmul->packed_row_binding == MatmulPackedRowBinding::None;
+        default:
+            return false;
+    }
 }
 
 static constexpr uint64_t EXPRESSION_COPY_DIM = 0;
@@ -580,6 +661,23 @@ static void applyAvailableValueAliases(const std::vector<CompiledValueAlias>& al
     }
 }
 
+// True when `strides` lay `dims` out densely row-major, apart from the stride of any extent-one axis: such an axis is
+// never stepped, so its stride does not change which elements are read or where (einsum gives an absent matrix row or
+// column group stride 0 or 1).
+static bool stridesAreDenseApartFromUnitAxes(const std::vector<uint64_t>& dims, const std::vector<uint64_t>& strides) {
+    if (dims.size() != strides.size()) {
+        throw std::runtime_error("Tensor dimensions and strides must have the same rank.");
+    }
+    uint64_t dense_stride = 1;
+    for (size_t axis = dims.size(); axis-- > 0;) {
+        if (dims[axis] != 1 && strides[axis] != dense_stride) {
+            return false;
+        }
+        dense_stride *= dims[axis];
+    }
+    return true;
+}
+
 static void applyAvailableValueAliases(const std::vector<CompiledValueAlias>& aliases,
                                        std::unordered_map<uint32_t, RuntimeInputValue>& values,
                                        std::unordered_map<uint32_t, uint32_t>* producer_stage_by_value_id = nullptr) {
@@ -594,19 +692,45 @@ static void applyAvailableValueAliases(const std::vector<CompiledValueAlias>& al
             if (source_it == values.end()) {
                 continue;
             }
-            Tensor tensor = runtimeInputTensor(source_it->second);
-            std::vector<uint64_t> resolved_alias_dims = resolveRuntimeStorageAliasDims(tensor.getDimensions(), alias);
+            const RuntimeInputValue& source = source_it->second;
+            if (!runtimeInputIsTensor(source)) {
+                throw std::runtime_error("Runtime storage alias source must be a tensor value.");
+            }
+            std::vector<uint64_t> resolved_alias_dims = resolveRuntimeStorageAliasDims(runtimeInputDims(source), alias);
+            const bool source_is_dense = !runtimeInputIsNonDenseTensorView(source);
+            // A span of a span is a span of the same source: offsets add, and alias strides are in the source's
+            // storage elements already.
+            const StridedSpan* source_span = std::get_if<StridedSpan>(&source);
+            const Tensor base = source_span != nullptr ? source_span->getSourceTensor() : std::get<Tensor>(source);
+            const uint64_t base_offset = source_span != nullptr ? source_span->getStorage().offset : 0;
+            RuntimeInputValue aliased;
             if (alias.strides.empty()) {
-                if (!tensor.isDenseContiguous()) {
+                if (!source_is_dense) {
                     throw std::runtime_error(
                         "Runtime dense reshape alias cannot be applied to a non-dense tensor view; "
                         "materialize the view or use an explicit strided/unsqueeze/squeeze alias.");
                 }
-                tensor.reshape(resolved_alias_dims);
+                if (source_span != nullptr) {
+                    aliased = StridedSpan(base, base_offset, resolved_alias_dims, StridedSpan::denseStrides(resolved_alias_dims));
+                } else {
+                    Tensor reshaped = base;
+                    reshaped.reshape(resolved_alias_dims);
+                    aliased = reshaped;
+                }
+            } else if (source_span == nullptr && alias.element_offset == 0 && source_is_dense &&
+                       stridesAreDenseApartFromUnitAxes(resolved_alias_dims, alias.strides) &&
+                       dimsNumelForRuntimeAlias(resolved_alias_dims, "Runtime strided alias") == base.getTotalNumElements()) {
+                // The strided view is the source's own dense layout under new dimensions (extent-one axes may carry
+                // any stride): a reshape of the handle, not a view, so no consumer (or caller) sees a view and
+                // nothing is ever copied for it.
+                Tensor reshaped = base;
+                reshaped.reshape(resolved_alias_dims);
+                aliased = reshaped;
             } else {
-                tensor = tensor.aliasView(resolved_alias_dims, alias.strides, alias.element_offset);
+                // A strided view is a span of its source's storage, never a Tensor view.
+                aliased = StridedSpan(base, base_offset + alias.element_offset, resolved_alias_dims, alias.strides);
             }
-            values.emplace(alias.value_id, tensor);
+            values.emplace(alias.value_id, std::move(aliased));
             if (producer_stage_by_value_id != nullptr) {
                 auto producer_it = producer_stage_by_value_id->find(alias.source_value_id);
                 if (producer_it != producer_stage_by_value_id->end()) {
@@ -621,6 +745,9 @@ static void applyAvailableValueAliases(const std::vector<CompiledValueAlias>& al
 static DataType runtimeInputDType(const RuntimeInputValue& value) {
     if (std::holds_alternative<Tensor>(value)) {
         return std::get<Tensor>(value).getDataType();
+    }
+    if (const StridedSpan* span = std::get_if<StridedSpan>(&value)) {
+        return span->getDataType();
     }
     if (std::holds_alternative<TensorScalarBinding>(value)) {
         return std::get<TensorScalarBinding>(value).sourceDType;
@@ -732,6 +859,9 @@ static std::vector<uint64_t> applyNormalizedUnsqueezeDims(const std::vector<uint
 static const std::optional<TensorPlacement> runtimeInputPlacementOrNull(const RuntimeInputValue& value) {
     if (std::holds_alternative<Tensor>(value)) {
         return std::get<Tensor>(value).getPlacement();
+    }
+    if (const StridedSpan* span = std::get_if<StridedSpan>(&value)) {
+        return span->getPlacement();
     }
     if (std::holds_alternative<TensorScalarBinding>(value)) {
         return std::get<TensorScalarBinding>(value).buffer.getPlacement();
@@ -7475,9 +7605,8 @@ static std::vector<uint64_t> computeRuntimeInputStridesForBroadcast(const Runtim
         return computeInputPackedStridesForBroadcast(effective_dims, output_dims);
     }
 
-    const Tensor& tensor = runtimeInputTensor(input);
     const std::vector<uint64_t> effective_strides = mapNonDenseVisibleStridesThroughSingletonShapeChange(
-        tensor.getDimensions(), tensor.getStridesElements(), effective_dims);
+        runtimeInputDims(input), runtimeInputStridesForShapeKey(input), effective_dims);
     return computeInputStridesForBroadcastFromVisibleLayout(effective_dims, effective_strides, output_dims);
 }
 
@@ -9215,11 +9344,11 @@ std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_
             if (!runtimeInputIsTensor(inputs[i])) {
                 throw std::runtime_error("FusedEquation::stampEquation expected tensor input at slot " + std::to_string(i) + ".");
             }
-            const Tensor& input = runtimeInputTensor(inputs[i]);
+            const StridedSpan input = runtimeInputStridedSpan(inputs[i]);
             if (!input.isInitialized()) {
                 throw std::runtime_error("Input tensor is not initialized.");
             }
-            if (input.getDescriptor().getDataType() != compiledEquation->input_dtypes[i]) {
+            if (input.getDataType() != compiledEquation->input_dtypes[i]) {
                 throw std::runtime_error("Input tensor data type mismatch.");
             }
             if (input.getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
@@ -9274,14 +9403,14 @@ std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_
 }
 
 std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::shared_ptr<CompiledReduction>& compiledReduction,
-                                                                Tensor& input,
+                                                                const StridedSpan& input,
                                                                 const Stream& stream,
                                                                 const std::vector<uint64_t>& requested_output_shape) const {
     return stampReduction(compiledReduction, input, std::nullopt, stream, requested_output_shape);
 }
 
 std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::shared_ptr<CompiledReduction>& compiledReduction,
-                                                                Tensor& input,
+                                                                const StridedSpan& input,
                                                                 const std::optional<Tensor>& preallocatedOutput,
                                                                 const Stream& stream,
                                                                 const std::vector<uint64_t>& requested_output_shape) const {
@@ -9331,14 +9460,14 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
 }
 
 std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::shared_ptr<CompiledArgMinMax>& compiledStage,
-                                                                Tensor& input,
+                                                                const StridedSpan& input,
                                                                 const Stream& stream,
                                                                 const std::vector<uint64_t>& requested_output_shape) const {
     return stampArgMinMax(compiledStage, input, std::nullopt, stream, requested_output_shape);
 }
 
 std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::shared_ptr<CompiledArgMinMax>& compiledStage,
-                                                                Tensor& input,
+                                                                const StridedSpan& input,
                                                                 const std::optional<Tensor>& preallocatedOutput,
                                                                 const Stream& stream,
                                                                 const std::vector<uint64_t>& requested_output_shape) const {
@@ -9761,8 +9890,8 @@ std::shared_ptr<StampedConvolutionBackward> FusedEquation::stampConvolutionBackw
 }
 
 std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
-                                                          Tensor& lhs,
-                                                          Tensor& rhs,
+                                                          const StridedSpan& lhs,
+                                                          const StridedSpan& rhs,
                                                           const std::optional<Tensor>& preallocatedOutput,
                                                           const Stream& stream,
                                                           const std::optional<RuntimeInputValue>& alpha_input,
@@ -9772,12 +9901,16 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                                           const std::optional<Tensor>& epilogue_aux,
                                                           const std::optional<Tensor>& preallocatedBgradOutput,
                                                           const std::optional<Tensor>& rowPartitionOffsets,
-                                                          bool packedTailsPreparedExternally) const {
+                                                          bool packedTailsPreparedExternally,
+                                                          const std::optional<MatmulOperands>& group) const {
     if (!compiledStage) {
         throw std::runtime_error("stampMatmul requires non-null compiled stage.");
     }
     if (compiledStage->op != ExprOp::MATMUL) {
         throw std::runtime_error("stampMatmul(lhs, rhs, ...) called for a non-matmul stage.");
+    }
+    if (group.has_value() && !preallocatedOutput.has_value()) {
+        throw std::runtime_error("stampMatmul for one grouped MATMUL group requires the whole output tensor it writes into.");
     }
 
     if (lhs.getDataType() != compiledStage->lhs_dtype) {
@@ -9879,7 +10012,8 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                                                       output,
                                                                       lhs.getPlacement().getDeviceNum(),
                                                                       effective_epilogue_aux,
-                                                                      bgrad_output);
+                                                                      bgrad_output,
+                                                                      group);
 
     std::optional<Tensor> workspace = allocateExpressionWorkspace(
         lhs.getPlacement(),
@@ -9907,7 +10041,8 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                       effective_epilogue_aux,
                                       bgrad_output,
                                       rowPartitionOffsets,
-                                      packedTailsPreparedExternally);
+                                      packedTailsPreparedExternally,
+                                      group);
 }
 
 std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
@@ -10639,13 +10774,13 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
 }
 
 std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
-    const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage, Tensor& input, Tensor& grad_output, const Stream& stream) const {
+    const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage, const StridedSpan& input, Tensor& grad_output, const Stream& stream) const {
     return stampReduceMinMaxBackward(compiledStage, input, grad_output, std::nullopt, std::nullopt, stream);
 }
 
 std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
     const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage,
-    Tensor& input,
+    const StridedSpan& input,
     Tensor& grad_output,
     const std::optional<Tensor>& preallocatedOutput,
     const Stream& stream) const {
@@ -10654,7 +10789,7 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
 
 std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
     const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage,
-    Tensor& input,
+    const StridedSpan& input,
     Tensor& grad_output,
     const std::optional<Tensor>& offsets,
     const std::optional<Tensor>& preallocatedOutput,
@@ -10725,8 +10860,12 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
         Tensor indices(input.getPlacement(), TensorDescriptor(winner_index_dtype, grad_output.getDimensions()));
         const CubArgReductionOp arg_op =
             compiledStage->op == ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD ? CubArgReductionOp::ArgMin : CubArgReductionOp::ArgMax;
+        // The segmented scatter reads dense storage: its input is a whole tensor (a span's dense copy).
+        if (!input.isWholeTensor()) {
+            throw std::invalid_argument("Segmented reduce-min/max backward requires a dense tensor input.");
+        }
         return make_shared<StampedReduceMinMaxBackward>(
-            arg_op, input, grad_output, output, indices, offsets.value(), stream);
+            arg_op, input.getSourceTensor(), grad_output, output, indices, offsets.value(), stream);
     }
 
     if (offsets.has_value()) {
@@ -11714,6 +11853,9 @@ StampedExecutionPlan FusedEquation::stampImpl(
         if (const Tensor* tensor = std::get_if<Tensor>(&value)) {
             return tensor->getTensorId();
         }
+        if (const StridedSpan* span = std::get_if<StridedSpan>(&value)) {
+            return span->getSourceTensor().getTensorId();  // reading a span reads its source
+        }
         if (const TensorScalarBinding* binding = std::get_if<TensorScalarBinding>(&value)) {
             return binding->buffer.getTensorId();
         }
@@ -11743,6 +11885,65 @@ StampedExecutionPlan FusedEquation::stampImpl(
             aliased_preallocated_tensor_ids.insert(tensor_id);
         }
     }
+
+    // A span value that a consumer of dense storage reads (every consumer but fused kernels, plain MATMUL operands and
+    // reductions) is copied once into a dense tensor of its own, which all such consumers then read; the layers are
+    // not taught strides. A span that is its whole source in the source's dense layout is the source, reshaped: no copy.
+    struct DenseValue {
+        Tensor tensor;
+        // The stage a consumer depends on for it: the copy, else the value's producer (none for a root input).
+        std::optional<uint32_t> stage_index;
+    };
+    std::unordered_map<uint32_t, DenseValue> dense_copy_by_value_id;
+    auto denseTensorForValue = [&](uint32_t value_id) -> DenseValue {
+        auto value_it = values.find(value_id);
+        if (value_it == values.end()) {
+            throw std::runtime_error("Missing value for a dense-storage consumer.");
+        }
+        std::optional<uint32_t> producer_stage_idx;
+        auto producer_it = producer_stage_by_value_id.find(value_id);
+        if (producer_it != producer_stage_by_value_id.end()) {
+            producer_stage_idx = producer_it->second;
+        }
+        if (const Tensor* tensor = std::get_if<Tensor>(&value_it->second)) {
+            return DenseValue{*tensor, producer_stage_idx};
+        }
+        const StridedSpan* span = std::get_if<StridedSpan>(&value_it->second);
+        if (span == nullptr) {
+            throw std::runtime_error("A dense-storage consumer expected a tensor value.");
+        }
+        const Tensor& source = span->getSourceTensor();
+        if (span->isDenseContiguous() && span->getStorage().offset == 0 &&
+            span->getTotalNumElements() == source.getTotalNumElements()) {
+            Tensor reshaped = source;
+            reshaped.reshape(span->getDimensions());
+            return DenseValue{reshaped, producer_stage_idx};
+        }
+        auto copy_it = dense_copy_by_value_id.find(value_id);
+        if (copy_it != dense_copy_by_value_id.end()) {
+            return copy_it->second;
+        }
+
+        Tensor dense(span->getPlacement(), span->getDescriptor());
+        const uint32_t copy_stage_idx = static_cast<uint32_t>(stampedStages.size());
+        std::vector<uint32_t> copy_dependencies;
+        if (producer_stage_idx.has_value()) {
+            copy_dependencies.push_back(producer_stage_idx.value());
+        }
+        stampedStages.emplace_back(std::make_shared<StampedDenseCopy>(*span, dense, stream), std::move(copy_dependencies));
+        if (!aliased_preallocated_tensor_ids.empty()) {
+            while (external_read_tensor_ids_by_stage.size() < stampedStages.size()) {
+                external_read_tensor_ids_by_stage.emplace_back();
+                preallocated_write_tensor_ids_by_stage.emplace_back();
+            }
+            if (!producer_stage_idx.has_value() && aliased_preallocated_tensor_ids.contains(source.getTensorId())) {
+                appendUniqueTensorId(external_read_tensor_ids_by_stage[copy_stage_idx], source.getTensorId());
+            }
+        }
+        DenseValue copied{dense, copy_stage_idx};
+        dense_copy_by_value_id.emplace(value_id, copied);
+        return copied;
+    };
 
     std::unordered_map<uint32_t, std::shared_ptr<AttentionForwardState>> attention_forward_state_by_stage_idx;
     attention_forward_state_by_stage_idx.reserve(compiled_outputs->stages.size());
@@ -11890,7 +12091,9 @@ StampedExecutionPlan FusedEquation::stampImpl(
         if (packed_it == values.end() || !runtimeInputIsTensor(packed_it->second)) {
             throw std::runtime_error("T8B padded-region entry requires a materialized packed tensor value.");
         }
-        Tensor packed_values = runtimeInputTensor(packed_it->second);
+        // The pack reads dense storage: a span value enters through its dense copy.
+        const DenseValue packed_dense = denseTensorForValue(value_id);
+        Tensor packed_values = packed_dense.tensor;
         const std::vector<uint64_t> expected_dims{representation.layout.max_total_values,
                                                   representation.layout.channels};
         if (packed_values.getDataType() != representation.layout.values_dtype ||
@@ -11901,9 +12104,8 @@ StampedExecutionPlan FusedEquation::stampImpl(
             makePaddedRaggedValue(representation, offsets_tensor, packed_values.getPlacement());
 
         std::vector<uint32_t> dependencies;
-        auto packed_producer_it = producer_stage_by_value_id.find(value_id);
-        if (packed_producer_it != producer_stage_by_value_id.end()) {
-            dependencies.push_back(packed_producer_it->second);
+        if (packed_dense.stage_index.has_value()) {
+            dependencies.push_back(packed_dense.stage_index.value());
         }
         auto offsets_producer_it = producer_stage_by_value_id.find(representation.offsets_value_id);
         if (offsets_producer_it != producer_stage_by_value_id.end() &&
@@ -11928,7 +12130,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
         padded_producer_stage_by_key[key] = pack_stage_idx;
 
         if (!aliased_preallocated_tensor_ids.empty() &&
-            !producer_stage_by_value_id.contains(value_id) &&
+            !packed_dense.stage_index.has_value() &&
             aliased_preallocated_tensor_ids.contains(packed_values.getTensorId())) {
             while (external_read_tensor_ids_by_stage.size() < stampedStages.size()) {
                 external_read_tensor_ids_by_stage.emplace_back();
@@ -11943,10 +12145,8 @@ StampedExecutionPlan FusedEquation::stampImpl(
 
     struct PackedTailSanitizationBinding {
         uint64_t tensor_id = 0;
-        uint64_t storage_element_offset = 0;
         uint64_t total_num_elements = 0;
         uint64_t offsets_tensor_id = 0;
-        uint64_t offsets_storage_element_offset = 0;
         uint64_t offsets_total_num_elements = 0;
         uint64_t producer_generation = 0;
         uint64_t ragged_batch_size = 0;
@@ -11973,14 +12173,12 @@ StampedExecutionPlan FusedEquation::stampImpl(
         for (const PackedTailSanitizationBinding& binding : packed_tail_sanitizations) {
             const bool same_physical_generation =
                 binding.tensor_id == tensor.getTensorId() &&
-                binding.storage_element_offset == tensor.getStorageElementOffset() &&
                 binding.total_num_elements == tensor.getTotalNumElements() &&
                 binding.producer_generation == producer_generation;
             if (!same_physical_generation) {
                 continue;
             }
             if (binding.offsets_tensor_id != offsets.getTensorId() ||
-                binding.offsets_storage_element_offset != offsets.getStorageElementOffset() ||
                 binding.offsets_total_num_elements != offsets.getTotalNumElements() ||
                 binding.ragged_batch_size != ragged_batch_size ||
                 binding.packed_row_capacity != packed_row_capacity) {
@@ -12012,10 +12210,8 @@ StampedExecutionPlan FusedEquation::stampImpl(
         stampedStages.emplace_back(sanitize, std::move(sanitize_dependencies));
         packed_tail_sanitizations.push_back(PackedTailSanitizationBinding{
             .tensor_id = tensor.getTensorId(),
-            .storage_element_offset = tensor.getStorageElementOffset(),
             .total_num_elements = tensor.getTotalNumElements(),
             .offsets_tensor_id = offsets.getTensorId(),
-            .offsets_storage_element_offset = offsets.getStorageElementOffset(),
             .offsets_total_num_elements = offsets.getTotalNumElements(),
             .producer_generation = producer_generation,
             .ragged_batch_size = ragged_batch_size,
@@ -12031,10 +12227,8 @@ StampedExecutionPlan FusedEquation::stampImpl(
 
     struct PaddedTailSanitizationBinding {
         uint64_t tensor_id = 0;
-        uint64_t storage_element_offset = 0;
         uint64_t total_num_elements = 0;
         uint64_t offsets_tensor_id = 0;
-        uint64_t offsets_storage_element_offset = 0;
         uint64_t offsets_total_num_elements = 0;
         uint32_t producer_stage_index = UINT32_MAX;
         CompiledPaddedRaggedSequenceLayout layout;
@@ -12063,7 +12257,6 @@ StampedExecutionPlan FusedEquation::stampImpl(
         const PaddedRaggedSequencePlan& plan = padded_value->getPlan();
         const CompiledPaddedRaggedSequenceLayout& layout = representation.layout;
         if (canonical_offsets.getTensorId() != offsets.getTensorId() ||
-            canonical_offsets.getStorageElementOffset() != offsets.getStorageElementOffset() ||
             canonical_offsets.getTotalNumElements() != offsets.getTotalNumElements()) {
             throw std::runtime_error(
                 "SANITIZE_PADDED_RAGGED_TAIL padded value does not use the requested canonical offsets slice.");
@@ -12081,14 +12274,12 @@ StampedExecutionPlan FusedEquation::stampImpl(
         for (const PaddedTailSanitizationBinding& binding : padded_tail_sanitizations) {
             const bool same_physical_generation =
                 binding.tensor_id == storage.getTensorId() &&
-                binding.storage_element_offset == storage.getStorageElementOffset() &&
                 binding.total_num_elements == storage.getTotalNumElements() &&
                 binding.producer_stage_index == producer_stage_index;
             if (!same_physical_generation) {
                 continue;
             }
             if (binding.offsets_tensor_id != offsets.getTensorId() ||
-                binding.offsets_storage_element_offset != offsets.getStorageElementOffset() ||
                 binding.offsets_total_num_elements != offsets.getTotalNumElements() || binding.layout != layout ||
                 binding.width_capacities != representation.width_capacities) {
                 throw std::runtime_error(
@@ -12116,10 +12307,8 @@ StampedExecutionPlan FusedEquation::stampImpl(
         stampedStages.emplace_back(sanitize, std::move(sanitize_dependencies));
         padded_tail_sanitizations.push_back(PaddedTailSanitizationBinding{
             .tensor_id = storage.getTensorId(),
-            .storage_element_offset = storage.getStorageElementOffset(),
             .total_num_elements = storage.getTotalNumElements(),
             .offsets_tensor_id = offsets.getTensorId(),
-            .offsets_storage_element_offset = offsets.getStorageElementOffset(),
             .offsets_total_num_elements = offsets.getTotalNumElements(),
             .producer_stage_index = producer_stage_index,
             .layout = layout,
@@ -12195,10 +12384,11 @@ StampedExecutionPlan FusedEquation::stampImpl(
             const uint32_t offsets_value_id = t8b_stage_it->second;
             ensurePackedValue(offsets_value_id);
             auto offsets_it = values.find(offsets_value_id);
-            if (offsets_it == values.end() || !runtimeInputIsTensor(offsets_it->second)) {
-                throw std::runtime_error("T8B padded-ragged pointwise stage is missing canonical row offsets.");
+            if (offsets_it == values.end() || !std::holds_alternative<Tensor>(offsets_it->second)) {
+                throw std::runtime_error(
+                    "T8B padded-ragged pointwise stage is missing canonical row offsets (a tensor, not a strided view).");
             }
-            Tensor offsets_tensor = runtimeInputTensor(offsets_it->second);
+            Tensor offsets_tensor = std::get<Tensor>(offsets_it->second);
 
             const auto first_output_rep_it = compiled_outputs->padded_ragged_values.find(
                 paddedRaggedRepresentationKey(stage.outputs.front().value_id, offsets_value_id));
@@ -12266,11 +12456,12 @@ StampedExecutionPlan FusedEquation::stampImpl(
 
                 ensurePackedValue(value_id);
                 auto value_it = values.find(value_id);
-                if (value_it == values.end() || !runtimeInputIsTensor(value_it->second)) {
+                // A strided span takes the ordinary fused path, which reads its strides in place.
+                if (value_it == values.end() || !std::holds_alternative<Tensor>(value_it->second)) {
                     padded_compatible = false;
                     break;
                 }
-                Tensor tensor = runtimeInputTensor(value_it->second);
+                Tensor tensor = std::get<Tensor>(value_it->second);
                 if (tensor.getDataType() != stage.flat->input_dtypes[input_idx]) {
                     padded_compatible = false;
                     break;
@@ -12338,8 +12529,8 @@ StampedExecutionPlan FusedEquation::stampImpl(
                         if (std::find(dependencies.begin(), dependencies.end(), producer_it->second) == dependencies.end()) {
                             dependencies.push_back(producer_it->second);
                         }
-                    } else if (runtimeInputIsTensor(static_inputs[input_idx])) {
-                        const uint64_t tensor_id = runtimeInputTensor(static_inputs[input_idx]).getTensorId();
+                    } else if (std::holds_alternative<Tensor>(static_inputs[input_idx])) {
+                        const uint64_t tensor_id = std::get<Tensor>(static_inputs[input_idx]).getTensorId();
                         if (aliased_preallocated_tensor_ids.contains(tensor_id)) {
                             appendUniqueTensorId(external_reads, tensor_id);
                         }
@@ -12573,15 +12764,25 @@ StampedExecutionPlan FusedEquation::stampImpl(
                 throw std::runtime_error("Missing input value for staged execution plan.");
             }
 
-            stageInputs.push_back(it->second);
-
-            auto producer_it = producer_stage_by_value_id.find(value_id);
-            if (producer_it != producer_stage_by_value_id.end()) {
-                const uint32_t dep_stage_idx = producer_it->second;
-                if (std::find(dependency_stage_indices.begin(), dependency_stage_indices.end(), dep_stage_idx) ==
-                    dependency_stage_indices.end()) {
-                    dependency_stage_indices.push_back(dep_stage_idx);
+            std::optional<uint32_t> dep_stage_idx;
+            const StridedSpan* span_value = std::get_if<StridedSpan>(&it->second);
+            if (span_value != nullptr && !stageInputTakesStridedSpan(stage, input_idx, *span_value)) {
+                // A consumer of dense storage reads the span's dense copy (or its source, when that is the same
+                // layout) and depends on the copy.
+                DenseValue dense = denseTensorForValue(value_id);
+                stageInputs.push_back(dense.tensor);
+                dep_stage_idx = dense.stage_index;
+            } else {
+                stageInputs.push_back(it->second);
+                auto producer_it = producer_stage_by_value_id.find(value_id);
+                if (producer_it != producer_stage_by_value_id.end()) {
+                    dep_stage_idx = producer_it->second;
                 }
+            }
+            if (dep_stage_idx.has_value() &&
+                std::find(dependency_stage_indices.begin(), dependency_stage_indices.end(), dep_stage_idx.value()) ==
+                    dependency_stage_indices.end()) {
+                dependency_stage_indices.push_back(dep_stage_idx.value());
             }
         }
 
@@ -12592,7 +12793,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
         for (const RuntimeInputValue& input : stageInputs) {
             stage_input_dims.push_back(runtimeInputDims(input));
             if (runtimeInputIsTensor(input)) {
-                stage_input_dtypes.push_back(runtimeInputTensor(input).getDataType());
+                stage_input_dtypes.push_back(runtimeInputDType(input));
             } else if (runtimeInputIsTensorScalarBinding(input)) {
                 stage_input_dtypes.push_back(runtimeInputTensorScalarBinding(input).sourceDType);
             } else {
@@ -12899,7 +13100,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                 if (stageInputs.size() != 1) {
                     throw std::runtime_error("Reduction stage expects exactly one input.");
                 }
-                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
+                const StridedSpan inputSpan = runtimeInputStridedSpan(stageInputs[0]);
                 if (stage.outputs.size() != 1) {
                     throw std::runtime_error("Reduction stage expects exactly one output.");
                 }
@@ -12918,11 +13119,43 @@ StampedExecutionPlan FusedEquation::stampImpl(
                     outputTensor = preallocated_it->second;
                 } else {
                     TensorDescriptor outputDescriptor(stage.reduction->output_dtype, output_dims);
-                    outputTensor = Tensor(inputTensor.getPlacement(), outputDescriptor);
+                    outputTensor = Tensor(inputSpan.getPlacement(), outputDescriptor);
+                }
+
+                // 1390: a rotated view (F / G) in two parts: the reduction of its bytes in physical order into a
+                // dense [a, b x p], then the dense copy of that read as the output's [b, a, p]. 1391: a sliced
+                // pitched view (H) the same way: [O, R, Sr] into [O, Sr], then the copy of its [O, I] columns.
+                if (const std::optional<CubReductionViewSplit> split =
+                        outputCopyReductionSplit(*stage.reduction, inputSpan);
+                    split.has_value()) {
+                    std::vector<uint64_t> physical_axes(split->dense_axes.begin(), split->dense_axes.end());
+                    auto physical = std::make_shared<CompiledReduction>(stage.reduction->op,
+                                                                        physical_axes,
+                                                                        physical_axes,
+                                                                        stage.reduction->input_dtype,
+                                                                        stage.reduction->output_dtype,
+                                                                        stage.reduction->compute_dtype);
+                    const std::vector<uint64_t>& physical_output_dims = split->buffer_dimensions;
+                    Tensor physical_output(inputSpan.getPlacement(),
+                                           TensorDescriptor(stage.reduction->output_dtype, physical_output_dims));
+                    std::shared_ptr<StampedReduction> stampedReduction = stampReduction(
+                        physical, split->reducedInput(inputSpan), physical_output, stream, physical_output_dims);
+                    const uint32_t reduction_stage_idx = static_cast<uint32_t>(stampedStages.size());
+                    stampedStages.emplace_back(
+                        stampedReduction, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
+
+                    Tensor copied_output = outputTensor;
+                    copied_output.reshape(split->copy_dimensions);
+                    values[stageOutput.value_id] = outputTensor;
+                    producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                    stampedStages.emplace_back(
+                        std::make_shared<StampedDenseCopy>(split->copySource(physical_output), copied_output, stream),
+                        std::vector<uint32_t>{reduction_stage_idx});
+                    break;
                 }
 
                 std::shared_ptr<StampedReduction> stampedReduction =
-                    stampReduction(stage.reduction, inputTensor, outputTensor, stream, output_dims);
+                    stampReduction(stage.reduction, inputSpan, outputTensor, stream, output_dims);
 
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
@@ -12936,7 +13169,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                 if (stageInputs.size() != 1) {
                     throw std::runtime_error("Argmin/argmax stage expects exactly one input.");
                 }
-                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
+                const StridedSpan inputSpan = runtimeInputStridedSpan(stageInputs[0]);
                 if (stage.outputs.size() != 1) {
                     throw std::runtime_error("Argmin/argmax stage expects exactly one output.");
                 }
@@ -12955,11 +13188,11 @@ StampedExecutionPlan FusedEquation::stampImpl(
                     outputTensor = preallocated_it->second;
                 } else {
                     TensorDescriptor outputDescriptor(stage.arg_minmax->output_dtype, output_dims);
-                    outputTensor = Tensor(inputTensor.getPlacement(), outputDescriptor);
+                    outputTensor = Tensor(inputSpan.getPlacement(), outputDescriptor);
                 }
 
                 std::shared_ptr<StampedArgMinMax> stampedArgMinMax =
-                    stampArgMinMax(stage.arg_minmax, inputTensor, outputTensor, stream, output_dims);
+                    stampArgMinMax(stage.arg_minmax, inputSpan, outputTensor, stream, output_dims);
 
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
@@ -13099,14 +13332,15 @@ StampedExecutionPlan FusedEquation::stampImpl(
                     if (packed_it == values.end()) {
                         throw std::runtime_error("T8A could not materialize a packed value at a padded-region entry.");
                     }
-                    Tensor packedValues = runtimeInputTensor(packed_it->second);
+                    // The pack reads dense storage: a span value enters through its dense copy.
+                    const DenseValue packedValues_dense = denseTensorForValue(input_value_id);
+                    Tensor packedValues = packedValues_dense.tensor;
                     std::shared_ptr<PaddedRaggedSequence> padded_input =
                         makePaddedRaggedValue(input_representation, offsetsTensor, packedValues.getPlacement());
 
                     std::vector<uint32_t> pack_dependencies;
-                    auto packed_producer_it = producer_stage_by_value_id.find(input_value_id);
-                    if (packed_producer_it != producer_stage_by_value_id.end()) {
-                        pack_dependencies.push_back(packed_producer_it->second);
+                    if (packedValues_dense.stage_index.has_value()) {
+                        pack_dependencies.push_back(packedValues_dense.stage_index.value());
                     } else if (aliased_preallocated_tensor_ids.contains(packedValues.getTensorId())) {
                         appendUniqueTensorId(external_read_tensor_ids, packedValues.getTensorId());
                     }
@@ -13236,13 +13470,14 @@ StampedExecutionPlan FusedEquation::stampImpl(
                     if (packed_it == values.end()) {
                         throw std::runtime_error("T9A could not materialize packed dY at a padded-region entry.");
                     }
-                    Tensor packed_dy = runtimeInputTensor(packed_it->second);
+                    // The pack reads dense storage: a span value enters through its dense copy.
+                    const DenseValue packed_dy_dense = denseTensorForValue(grad_output_value_id);
+                    Tensor packed_dy = packed_dy_dense.tensor;
                     std::shared_ptr<PaddedRaggedSequence> padded_dy =
                         makePaddedRaggedValue(dy_representation, offsetsTensor, packed_dy.getPlacement());
                     std::vector<uint32_t> pack_dependencies;
-                    auto packed_producer_it = producer_stage_by_value_id.find(grad_output_value_id);
-                    if (packed_producer_it != producer_stage_by_value_id.end()) {
-                        pack_dependencies.push_back(packed_producer_it->second);
+                    if (packed_dy_dense.stage_index.has_value()) {
+                        pack_dependencies.push_back(packed_dy_dense.stage_index.value());
                     } else if (aliased_preallocated_tensor_ids.contains(packed_dy.getTensorId())) {
                         appendUniqueTensorId(external_read_tensor_ids, packed_dy.getTensorId());
                     }
@@ -13355,13 +13590,14 @@ StampedExecutionPlan FusedEquation::stampImpl(
                             throw std::runtime_error(std::string("T9B could not materialize packed ") + label +
                                                      " at a padded-region entry.");
                         }
-                        Tensor packed = runtimeInputTensor(packed_it->second);
+                        // The pack reads dense storage: a span value enters through its dense copy.
+                        const DenseValue packed_dense = denseTensorForValue(value_id);
+                        Tensor packed = packed_dense.tensor;
                         std::shared_ptr<PaddedRaggedSequence> padded =
                             makePaddedRaggedValue(representation, offsetsTensor, packed.getPlacement());
                         std::vector<uint32_t> pack_dependencies;
-                        auto packed_producer_it = producer_stage_by_value_id.find(value_id);
-                        if (packed_producer_it != producer_stage_by_value_id.end()) {
-                            pack_dependencies.push_back(packed_producer_it->second);
+                        if (packed_dense.stage_index.has_value()) {
+                            pack_dependencies.push_back(packed_dense.stage_index.value());
                         } else if (aliased_preallocated_tensor_ids.contains(packed.getTensorId())) {
                             appendUniqueTensorId(external_read_tensor_ids, packed.getTensorId());
                         }
@@ -13913,9 +14149,13 @@ StampedExecutionPlan FusedEquation::stampImpl(
                     if (stageInputs.size() < 2) {
                         throw std::runtime_error("Matmul stage expects at least two inputs.");
                     }
-                    Tensor lhsTensor = runtimeInputTensor(stageInputs[0]);
-                    Tensor rhsTensor = runtimeInputTensor(stageInputs[1]);
-                    preparePackedMatmulTails(lhsTensor, rhsTensor);
+                    // A plain, unpacked MATMUL reads strided operands in place (spans of their sources); every other
+                    // matmul receives dense tensors here (a span's dense copy; see stageInputTakesStridedSpan).
+                    const StridedSpan lhsOperand = runtimeInputStridedSpan(stageInputs[0]);
+                    const StridedSpan rhsOperand = runtimeInputStridedSpan(stageInputs[1]);
+                    if (stage.matmul->packed_row_binding != MatmulPackedRowBinding::None) {
+                        preparePackedMatmulTails(runtimeInputTensor(stageInputs[0]), runtimeInputTensor(stageInputs[1]));
+                    }
 
                     const bool plain_groupable_matmul =
                         stage.matmul->epilogue == MatmulEpilogue::Default &&
@@ -13925,7 +14165,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                         Tensor fullOutput;
                         if (preallocated.has_value()) {
                             fullOutput = preallocated.value();
-                            if (fullOutput.getPlacement() != lhsTensor.getPlacement()) {
+                            if (fullOutput.getPlacement() != lhsOperand.getPlacement()) {
                                 throw std::runtime_error(
                                     "Preallocated grouped matmul output tensor placement does not match the input placement.");
                             }
@@ -13939,12 +14179,12 @@ StampedExecutionPlan FusedEquation::stampImpl(
                             }
                         } else {
                             fullOutput =
-                                Tensor(lhsTensor.getPlacement(), TensorDescriptor(stage.matmul->output_dtype, output_dims));
+                                Tensor(lhsOperand.getPlacement(), TensorDescriptor(stage.matmul->output_dtype, output_dims));
                         }
 
                         const BatchedMatmulLayoutPlan layoutPlan =
-                            planBatchedMatmulLayout(lhsTensor,
-                                                   rhsTensor,
+                            planBatchedMatmulLayout(lhsOperand,
+                                                   rhsOperand,
                                                    fullOutput,
                                                    stage.matmul->transpose_lhs,
                                                    stage.matmul->transpose_rhs);
@@ -13967,27 +14207,13 @@ StampedExecutionPlan FusedEquation::stampImpl(
                             std::vector<uint32_t> group_stage_indices;
                             group_stage_indices.reserve(groups.size());
                             for (const MatmulBatchGroup& group : groups) {
-                                Tensor lhsGroup = groupedMatmulBatchView(lhsTensor,
-                                                                        group.batch_count,
-                                                                        group.lhs_batch_stride_elements,
-                                                                        group.lhs_relative_element_offset,
-                                                                        "lhs");
-                                Tensor rhsGroup = groupedMatmulBatchView(rhsTensor,
-                                                                        group.batch_count,
-                                                                        group.rhs_batch_stride_elements,
-                                                                        group.rhs_relative_element_offset,
-                                                                        "rhs");
-                                Tensor outputGroup = groupedMatmulBatchView(fullOutput,
-                                                                           group.batch_count,
-                                                                           group.output_batch_stride_elements,
-                                                                           group.output_relative_element_offset,
-                                                                           "output");
-
+                                // Each group reads and writes spans of the whole operands, addressed with the group's
+                                // own [batch, rows, cols] layout: no view and no copy.
                                 std::shared_ptr<StampedMatmul> groupMatmul =
                                     stampMatmul(stage.matmul,
-                                                lhsGroup,
-                                                rhsGroup,
-                                                std::optional<Tensor>(outputGroup),
+                                                lhsOperand,
+                                                rhsOperand,
+                                                std::optional<Tensor>(fullOutput),
                                                 stream,
                                                 alpha_input,
                                                 beta_input,
@@ -13996,10 +14222,10 @@ StampedExecutionPlan FusedEquation::stampImpl(
                                                 epilogue_aux,
                                                 std::nullopt,
                                                 rowPartitionOffsets,
-                                                packedTailsPreparedExternally);
-                                if (groupMatmul->getOutputTensor().getDimensions() != outputGroup.getDimensions()) {
-                                    throw std::runtime_error(
-                                        "Grouped MATMUL stamped output dimensions do not match the planned output view.");
+                                                packedTailsPreparedExternally,
+                                                matmulGroupOperands(lhsOperand, rhsOperand, fullOutput, group));
+                                if (!(groupMatmul->getOutputTensor() == fullOutput)) {
+                                    throw std::runtime_error("Grouped MATMUL group did not write into the planned output tensor.");
                                 }
 
                                 const uint32_t group_stage_idx = static_cast<uint32_t>(stampedStages.size());
@@ -14009,7 +14235,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
 
                             const uint32_t barrier_stage_idx = static_cast<uint32_t>(stampedStages.size());
                             stampedStages.emplace_back(StampedExecutionStage::dependencyBarrier(
-                                lhsTensor.getPlacement().getDeviceNum(),
+                                lhsOperand.getPlacement().getDeviceNum(),
                                 std::move(group_stage_indices),
                                 logical_stage_bytes));
 
@@ -14020,8 +14246,8 @@ StampedExecutionPlan FusedEquation::stampImpl(
                     }
 
                     stampedMatmul = stampMatmul(stage.matmul,
-                                                lhsTensor,
-                                                rhsTensor,
+                                                lhsOperand,
+                                                rhsOperand,
                                                 preallocated,
                                                 stream,
                                                 alpha_input,
@@ -14168,8 +14394,8 @@ StampedExecutionPlan FusedEquation::stampImpl(
                 std::optional<Tensor> dropoutSeedTensor = std::nullopt;
                 std::optional<Tensor> dropoutOffsetTensor = std::nullopt;
                 if (stage.attention->dropout_probability > 0.0f) {
-                    dropoutSeedTensor = runtimeInputTensorScalarView(stageInputs[next_attention_input++], "attention dropout seed");
-                    dropoutOffsetTensor = runtimeInputTensorScalarView(stageInputs[next_attention_input++], "attention dropout offset");
+                    dropoutSeedTensor = runtimeInputCudnnScalarTensor(stageInputs[next_attention_input++], "attention dropout seed");
+                    dropoutOffsetTensor = runtimeInputCudnnScalarTensor(stageInputs[next_attention_input++], "attention dropout offset");
                 }
                 std::optional<Tensor> descaleQTensor = std::nullopt;
                 std::optional<Tensor> descaleKTensor = std::nullopt;
@@ -14271,9 +14497,9 @@ StampedExecutionPlan FusedEquation::stampImpl(
                 std::optional<Tensor> dropoutOffsetTensor = std::nullopt;
                 if (stage.attention_backward && stage.attention_backward->dropout_probability > 0.0f) {
                     dropoutSeedTensor =
-                        runtimeInputTensorScalarView(stageInputs[next_attention_backward_input++], "attention-backward dropout seed");
+                        runtimeInputCudnnScalarTensor(stageInputs[next_attention_backward_input++], "attention-backward dropout seed");
                     dropoutOffsetTensor =
-                        runtimeInputTensorScalarView(stageInputs[next_attention_backward_input++], "attention-backward dropout offset");
+                        runtimeInputCudnnScalarTensor(stageInputs[next_attention_backward_input++], "attention-backward dropout offset");
                 }
 
                 std::vector<std::optional<Tensor>> preallocated(4, std::nullopt);
@@ -14440,7 +14666,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                     throw std::runtime_error(
                         "Reduce-min/max-backward stage expects input, grad, and optional offsets inputs.");
                 }
-                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
+                const StridedSpan inputSpan = runtimeInputStridedSpan(stageInputs[0]);
                 Tensor gradOutputTensor = runtimeInputTensor(stageInputs[1]);
                 std::optional<Tensor> offsetsTensor = std::nullopt;
                 if (stage.reduce_minmax_backward->segmented_by_offsets) {
@@ -14457,11 +14683,11 @@ StampedExecutionPlan FusedEquation::stampImpl(
                     outputTensor = preallocated_it->second;
                 } else {
                     TensorDescriptor outputDescriptor(stage.reduce_minmax_backward->output_dtype, output_dims);
-                    outputTensor = Tensor(inputTensor.getPlacement(), outputDescriptor);
+                    outputTensor = Tensor(inputSpan.getPlacement(), outputDescriptor);
                 }
                 std::shared_ptr<StampedReduceMinMaxBackward> stampedReduceMinMaxBackward =
                     stampReduceMinMaxBackward(
-                        stage.reduce_minmax_backward, inputTensor, gradOutputTensor, offsetsTensor, outputTensor, stream);
+                        stage.reduce_minmax_backward, inputSpan, gradOutputTensor, offsetsTensor, outputTensor, stream);
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
                 stampedStages.emplace_back(stampedReduceMinMaxBackward, std::move(dependency_stage_indices), stage_flops, logical_stage_bytes);
@@ -14706,7 +14932,26 @@ StampedExecutionPlan FusedEquation::stampImpl(
             throw std::runtime_error("Missing final output tensor for output: " + final_output.name);
         }
 
-        Tensor produced = runtimeInputTensor(it->second);
+        // A span (a strided view of another value) is never handed out: its value is copied into a dense tensor, the
+        // caller's preallocated destination when there is one, after the stages run.
+        Tensor produced;
+        bool produced_by_copy = false;
+        if (const StridedSpan* span = std::get_if<StridedSpan>(&it->second)) {
+            auto destinationIt = preallocated_outputs.find(final_output.name);
+            const bool to_caller_destination = destinationIt != preallocated_outputs.end() &&
+                                               !retained_forward_node_by_hidden_output_name.contains(final_output.name);
+            if (to_caller_destination && (destinationIt->second.getDescriptor() != span->getDescriptor() ||
+                                          destinationIt->second.getPlacement() != span->getPlacement())) {
+                throw std::runtime_error("Preallocated final output descriptor or placement does not match expression output for '" +
+                                         final_output.name + "'. Produced " + span->getDescriptor().toString() +
+                                         ", destination " + destinationIt->second.getDescriptor().toString() + ".");
+            }
+            produced = to_caller_destination ? destinationIt->second : Tensor(span->getPlacement(), span->getDescriptor());
+            outputMaterializations.push_back(StampedOutputMaterialization{*span, produced});
+            produced_by_copy = true;
+        } else {
+            produced = runtimeInputTensor(it->second);
+        }
         auto hidden_retained_it = retained_forward_node_by_hidden_output_name.find(final_output.name);
         if (hidden_retained_it != retained_forward_node_by_hidden_output_name.end()) {
             auto [existing_it, inserted] = retained_forward_values.emplace(hidden_retained_it->second, produced);
@@ -14759,10 +15004,11 @@ StampedExecutionPlan FusedEquation::stampImpl(
                 }
                 resolved.result = destination;
             }
-        } else if (contract.require_distinct_storage) {
+        } else if (contract.require_distinct_storage && !produced_by_copy) {
             // Distinct output ownership is a stamping/materialization concern. Allocate the
             // public destination now and copy the logical value after execution; do not add
-            // a fake mathematical node merely to obtain another tensor allocation.
+            // a fake mathematical node merely to obtain another tensor allocation. (A span's copy already has storage
+            // of its own.)
             Tensor destination(produced.getPlacement(), produced.getDescriptor());
             outputMaterializations.push_back(StampedOutputMaterialization{produced, destination});
             resolved.result = destination;
@@ -14965,12 +15211,8 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
         }
     }
     for (const auto& [name, tensor] : outputs) {
-        (void)name;
         if (tensor.getPlacement().getDeviceNum() != gpu_num) {
             throw std::runtime_error("FusedEquation::run requires all outputs to be on the same GPU.");
-        }
-        if (!tensor.isDenseContiguous()) {
-            throw std::runtime_error("FusedEquation::run convenience outputs must be dense contiguous tensors.");
         }
     }
 

@@ -77,7 +77,8 @@ BucketedCublasGemm BucketedCublasGemm::build(int gpuNum,
                                               BucketedCublasGemmShape fullCapacityShape,
                                               BucketedCublasGemmRowBinding rowBinding,
                                               CublasMatrixMultiply::MatmulDataTypes dataTypes,
-                                              bool printResults) {
+                                              bool printResults,
+                                              CublasOperandAlignment alignment) {
     validateBuildArguments(fullCapacityRows, fullCapacityShape, rowBinding);
 
     BucketedCublasGemm built;
@@ -131,7 +132,8 @@ BucketedCublasGemm BucketedCublasGemm::build(int gpuNum,
                                        shape.transposeB,
                                        shape.transposeC,
                                        dataTypes,
-                                       printResults);
+                                       printResults,
+                                       alignment);
 
         CublasKernel kernel = cublas.materializeSelectedGemmKernel(gpuNum,
                                                          shape.rowsA,
@@ -146,7 +148,9 @@ BucketedCublasGemm BucketedCublasGemm::build(int gpuNum,
                                                          shape.transposeB,
                                                          shape.transposeC,
                                                          dataTypes,
-                                                         true);
+                                                         true,
+                                                         CublasStridedBatchConfig::single(),
+                                                         alignment);
 
         const uint64_t bucketWorkspaceBytes = kernel.getWorkspaceSizeInBytes(gpuNum);
         built.workspaceSizeInBytes = std::max<uint64_t>(built.workspaceSizeInBytes, bucketWorkspaceBytes);
@@ -220,6 +224,12 @@ CublasKernelSelection BucketedCublasGemm::getSelectedKernelSelectionForTests(uin
 
 uintptr_t BucketedCublasGemm::getSelectedExecutionStateIdForTests(uint64_t activeRows) const {
     return selectBucket(activeRows).kernel.executionStateId();
+}
+
+void BucketedCublasGemm::requireOperandAlignment(const Tensor &A, const Tensor &B, const Tensor &C, const Tensor &D) const {
+    for (const Bucket &bucket : buckets) {
+        bucket.kernel.requireOperandAlignment(A, B, C, D);
+    }
 }
 
 cublasStatus_t BucketedCublasGemm::launchUncheckedPrevalidated(uint64_t activeRows,

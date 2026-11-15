@@ -13,6 +13,7 @@
 // Staged passes write wide partials (fp32ArgWideScratchBytes) and finish them in the same call. The identities are
 // FP32 RK ARG's (Fp32RKArgCandidates.h); carried-ness is the site's input state, not the identity's.
 
+#include "DeepLearning/Implementation/Tensor/StridedSpan.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Cub/Fp32RK/Fp32RKArgCandidates.h"
 
@@ -41,10 +42,10 @@ namespace ThorImplementation::CubReductionInternal::Fp32RK {
  *  holds fp32RKCarriedArgScratchBytes, 256-byte aligned (null for a Complete pass). Throws std::logic_error for an
  *  illegal identity. */
 void launchFp32RKCarriedArgPass(const Fp8RK::PhysicalKernel& identity,
-                                const Tensor& input,
-                                const Tensor& carried_index,
-                                Tensor* value_output,
-                                Tensor* index_output,
+                                const StridedSpan& input,
+                                const StridedSpan& carried_index,
+                                const StridedSpan* value_output,
+                                const StridedSpan* index_output,
                                 const CubReductionGeometry& geometry,
                                 void* wide_scratch,
                                 bool maximum,

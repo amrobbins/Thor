@@ -52,7 +52,7 @@ uint32_t runtimeKResidency(DataType input_dtype,
 }
 
 void launchRuntimeK(const PhysicalKernel& kernel, const CubReductionStageSemantics& semantics,
-                    const Tensor& input, Tensor& stage_output,
+                    const StridedSpan& input, const StridedSpan& stage_output,
                     const CubReductionGeometry& geometry, float output_scale, Stream& stream) {
     if (kernel.family != PhysicalFamily::RuntimeK ||
         !structurallyValid(kernel, geometry.outer_size, geometry.reduction_size, geometry.inner_size))

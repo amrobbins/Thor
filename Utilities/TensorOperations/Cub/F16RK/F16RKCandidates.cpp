@@ -36,17 +36,20 @@ PhysicalKernel f16Kernel(PhysicalFamily family) {
 
 std::vector<PhysicalKernel> oneWindowKernels(const F16RKSite& site) {
     std::vector<PhysicalKernel> kernels;
-    // The kernel's offsets are 32-bit byte offsets (f16OneWindowFitsIndexing).
+    // The kernel's offsets are 32-bit byte offsets (f16OneWindowFitsIndexing). 1381: a base off a 16-byte boundary
+    // (the VALUE kernel reads it) starts them up to 15 bytes early and puts a prefix on every row group.
+    const bool aligned_base = site.input_alignment_bytes >= 16;
     uint64_t elements = 0;
     if (!checkedMul(site.outer, site.r, elements) || !checkedMul(elements, site.k, elements) ||
-        elements > std::numeric_limits<uint32_t>::max() / 2)
+        elements > (std::numeric_limits<uint32_t>::max() - (aligned_base ? 0u : 15u)) / 2)
         return kernels;
     for (uint32_t outputs : {1u, 2u, 4u, 8u}) {
         for (uint32_t warps : {1u, 2u, 4u, 8u}) {
             if ((outputs > 1 && warps > 1) || warps > site.r) continue;
             // The window holds (32 / O) * 8 components less a 0..7 prefix (any aligned K fills it). The residency
             // query excludes an ownership without a 2-byte unit at K (O4 below K 9, O8 above K 16).
-            const uint64_t capacity = (32 / outputs) * 8 - (site.k % 8 == 0 ? 0 : 7);
+            const uint64_t capacity = aligned_base ? (32 / outputs) * 8 - (site.k % 8 == 0 ? 0 : 7)
+                                                   : Fp8RK::oneWindowUnalignedCapacity(outputs, 16, 2);
             if (site.k > capacity) continue;
             PhysicalKernel kernel = f16Kernel(PhysicalFamily::OneWindow);
             kernel.a = outputs;
@@ -75,7 +78,8 @@ std::vector<PhysicalKernel> deepRSmallKKernels(const F16RKSite& site) {
 }
 
 // AlignedK: 16-, 8- then 4-byte packets, CTA 32 / 64 / 128, Complete then FP8's two staged shard targets (32 and 128
-// rows); and the 2-byte packet at odd K, where no wider packet is legal (FP32's 4-byte rule, 1228).
+// rows); and the 2-byte packet at odd K, where no wider packet is legal (FP32's 4-byte rule, 1228). 1379: and at even
+// K on a 2-byte aligned base, which no wider packet can read.
 std::vector<PhysicalKernel> alignedKKernels(const F16RKSite& site) {
     std::vector<PhysicalKernel> kernels;
     std::vector<uint64_t> shard_counts{1};
@@ -87,7 +91,7 @@ std::vector<PhysicalKernel> alignedKKernels(const F16RKSite& site) {
         }
     }
     for (uint32_t packet : {16u, 8u, 4u, 2u}) {
-        if (packet == 2 && site.k % 2 == 0) continue;
+        if (packet == 2 && site.k % 2 == 0 && site.input_alignment_bytes >= 4) continue;
         for (uint32_t threads : {32u, 64u, 128u}) {
             for (uint64_t shards : shard_counts) {
                 if (!f16AlignedKSupports(site.outer, site.r, site.k, packet, threads, shards)) continue;
@@ -272,11 +276,22 @@ std::vector<PhysicalKernel> f16RKRankedKernels(const std::vector<F16RKPoolEntry>
     return kernels;
 }
 
+uint32_t f16RKPassInputAlignmentAtK(const PhysicalKernel& kernel, uint64_t k) {
+    if (kernel.family == PhysicalFamily::OneWindow && kernel.a != 0 && kernel.c != 0 &&
+        k <= Fp8RK::oneWindowUnalignedCapacity(kernel.a, kernel.c, 2))
+        return 2U;
+    return f16RKPassInputAlignment(kernel);
+}
+
 uint32_t f16RKPassInputAlignment(const PhysicalKernel& kernel) {
     switch (kernel.family) {
         case PhysicalFamily::AlignedK: return static_cast<uint32_t>(kernel.a);
         case PhysicalFamily::RuntimeK:
-            return static_cast<RuntimeLayout>(kernel.a) == RuntimeLayout::RotatedPrefix ? 2U : 16U;
+            // 1384: PacketComplete too (VALUE since 1379, its ARG twin since 1384): any element address.
+            return static_cast<RuntimeLayout>(kernel.a) == RuntimeLayout::RotatedPrefix ||
+                           static_cast<RuntimeLayout>(kernel.a) == RuntimeLayout::PacketComplete
+                       ? 2U
+                       : 16U;
         default: return 16U;
     }
 }

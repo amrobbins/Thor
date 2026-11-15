@@ -81,7 +81,7 @@ inline bool legal(const Candidate& c, uint64_t outer, uint64_t r, uint64_t k,
     } else {
         if ((v.warps_per_output != 1 && v.warps_per_output != 2 &&
              v.warps_per_output != 4 && v.warps_per_output != 8) ||
-            v.tile_components > 496 || v.tile_components < 16 ||
+            v.tile_components > 496 ||  // 1380: any tile of 1..496 components (narrow ones only below 16 bytes)
             (v.layout == Layout::PacketComplete &&
              (v.shards_per_output != 1 || v.rows_per_shard != r)) ||
             (v.layout == Layout::PacketStaged &&

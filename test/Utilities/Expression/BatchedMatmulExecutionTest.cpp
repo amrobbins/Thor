@@ -220,12 +220,16 @@ TEST(ExpressionBatchedMatmulExecution, PhysicallyTransposedMatrixViewUsesBackend
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
+    // lhs is the transpose of each stored [3, 2] matrix, taken inside the expression (a span of the stored tensor).
     Tensor lhs_storage = makeGpuTensor({2, 3, 2}, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, stream);
-    Tensor lhs = lhs_storage.aliasView({2, 2, 3}, {6, 1, 2});
     Tensor rhs = makeGpuTensor({2, 3, 2}, {1, 0, 0, 1, 1, 1, 2, 1, 1, 0, 0, 1}, stream);
 
-    FusedEquation equation = compileMatmul();
-    StampedExecutionPlan plan = equation.stamp({{"lhs", lhs}, {"rhs", rhs}}, stream);
+    const Expression lhs = Expression::input("lhs", DataType::FP32, DataType::FP32).stridedView({2, 2, 3}, {6, 1, 2}, 0);
+    const Expression y = Expression::matmul(
+        lhs, Expression::input("rhs", DataType::FP32, DataType::FP32), false, false, DataType::FP32, DataType::FP32);
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp({{"lhs", lhs_storage}, {"rhs", rhs}}, stream);
+    EXPECT_EQ(plan.stageKindNames(), (std::vector<std::string>{"Matmul"}));
     plan.run();
 
     expectValues(copyToCpu(plan.output("y"), stream), {6, 8, 8, 10, 23, 18, 26, 20});
@@ -257,6 +261,105 @@ TEST(ExpressionBatchedMatmulExecution, IrregularCrossBroadcastLowersToIndependen
                   76, 100, 103, 136,
                   220, 244, 301, 334,
                   364, 388, 499, 532});
+}
+
+TEST(ExpressionBatchedMatmulExecution, GroupedMatmulReadsAStridedOperandThroughSpansWithoutMaterialization) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    // lhs [2, 1, 2, 3] x rhs [1, 3, 3, 2] cross-broadcasts into two strided-batched groups. rhs is a transposed view
+    // (each 3x2 matrix stored as 2x3), as an einsum operand permutation produces: each group's rhs is a span of that
+    // strided tensor's storage, read with backend transpose.
+    const std::vector<float> lhs_values = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    std::vector<float> rhs_logical(18);
+    for (size_t i = 0; i < rhs_logical.size(); ++i) rhs_logical[i] = static_cast<float>(i + 1);
+    std::vector<float> rhs_stored(18);
+    for (uint64_t c = 0; c < 3; ++c)
+        for (uint64_t k = 0; k < 3; ++k)
+            for (uint64_t n = 0; n < 2; ++n) rhs_stored[c * 6 + n * 3 + k] = rhs_logical[(c * 3 + k) * 2 + n];
+
+    Tensor lhs = makeGpuTensor({2, 1, 2, 3}, lhs_values, stream);
+    Tensor rhs_storage = makeGpuTensor({1, 3, 2, 3}, rhs_stored, stream);
+
+    const Expression rhs = Expression::input("rhs", DataType::FP32, DataType::FP32).stridedView({1, 3, 3, 2}, {18, 6, 1, 3}, 0);
+    const Expression y = Expression::matmul(
+        Expression::input("lhs", DataType::FP32, DataType::FP32), rhs, false, false, DataType::FP32, DataType::FP32);
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp({{"lhs", lhs}, {"rhs", rhs_storage}}, stream);
+    EXPECT_EQ(plan.stageKindNames(), (std::vector<std::string>{"Matmul", "Matmul", "DependencyBarrier"}));
+    plan.run();
+
+    std::vector<float> expected(24, 0.0f);
+    for (uint64_t b = 0; b < 2; ++b)
+        for (uint64_t c = 0; c < 3; ++c)
+            for (uint64_t m = 0; m < 2; ++m)
+                for (uint64_t n = 0; n < 2; ++n)
+                    for (uint64_t k = 0; k < 3; ++k)
+                        expected[((b * 3 + c) * 2 + m) * 2 + n] += lhs_values[(b * 2 + m) * 3 + k] * rhs_logical[(c * 3 + k) * 2 + n];
+    expectValues(copyToCpu(plan.output("y"), stream), expected);
+}
+
+TEST(ExpressionBatchedMatmulExecution, ExpressionStridedViewOperandIsReadInPlaceByThePlainMatmul) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    // lhs is an expression strided view (the transpose of a stored [3, 2] matrix): the matmul stage receives it as a
+    // span of x and reads it with backend transpose, without a view or a copy.
+    Tensor x = makeGpuTensor({3, 2}, {1, 2, 3, 4, 5, 6}, stream);
+    Tensor rhs = makeGpuTensor({3, 2}, {1, 0, 0, 1, 1, 1}, stream);
+
+    const Expression lhs_view = Expression::input("x", DataType::FP32, DataType::FP32).stridedView({2, 3}, {1, 2}, 0);
+    const Expression rhs_input = Expression::input("rhs", DataType::FP32, DataType::FP32);
+    const Expression y = Expression::matmul(lhs_view, rhs_input, false, false, DataType::FP32, DataType::FP32);
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp({{"x", x}, {"rhs", rhs}}, stream);
+    EXPECT_EQ(plan.stageKindNames(), (std::vector<std::string>{"Matmul"}));
+    plan.run();
+
+    // lhs = [[1, 3, 5], [2, 4, 6]].
+    expectValues(copyToCpu(plan.output("y"), stream), {6, 8, 8, 10});
+}
+
+TEST(ExpressionBatchedMatmulExecution, StridedOperandViewingARankOneSourceIsReadInPlaceByThePlainMatmul) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    // lhs is a [2, 3] strided view of a [6] vector: the operand's rank is 2 although its source's is 1.
+    Tensor x = makeGpuTensor({6}, {1, 2, 3, 4, 5, 6}, stream);
+    Tensor rhs = makeGpuTensor({3, 2}, {1, 0, 0, 1, 1, 1}, stream);
+
+    const Expression lhs_view = Expression::input("x", DataType::FP32, DataType::FP32).stridedView({2, 3}, {1, 2}, 0);
+    const Expression rhs_input = Expression::input("rhs", DataType::FP32, DataType::FP32);
+    const Expression y = Expression::matmul(lhs_view, rhs_input, false, false, DataType::FP32, DataType::FP32);
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp({{"x", x}, {"rhs", rhs}}, stream);
+    EXPECT_EQ(plan.stageKindNames(), (std::vector<std::string>{"Matmul"}));
+    plan.run();
+
+    // lhs = [[1, 3, 5], [2, 4, 6]].
+    expectValues(copyToCpu(plan.output("y"), stream), {6, 8, 8, 10});
+}
+
+TEST(ExpressionBatchedMatmulExecution, GluHalvesOfAMatmulOutputAreReadInPlaceByTheFusedStage) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    // y = a @ b is [2, 4]; value = y[:, 0:2] and gate = y[:, 2:4] are strided views of the matmul's output, read by
+    // the fused multiply through their row stride 4.
+    Tensor a = makeGpuTensor({2, 3}, {1, 2, 3, 4, 5, 6}, stream);
+    Tensor b = makeGpuTensor({3, 4}, {1, 0, 2, 1, 0, 1, 1, 2, 1, 1, 0, 1}, stream);
+
+    const Expression ea = Expression::input("a", DataType::FP32, DataType::FP32);
+    const Expression eb = Expression::input("b", DataType::FP32, DataType::FP32);
+    const Expression y = Expression::matmul(ea, eb, false, false, DataType::FP32, DataType::FP32);
+    const Expression value = y.stridedView({2, 2}, {4, 1}, 0);
+    const Expression gate = y.stridedView({2, 2}, {4, 1}, 2);
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"z", value * gate}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp({{"a", a}, {"b", b}}, stream);
+    plan.run();
+
+    // y = [[4, 5, 4, 8], [10, 11, 13, 20]]; z = value * gate.
+    expectValues(copyToCpu(plan.output("z"), stream), {16, 40, 130, 220});
 }
 
 TEST(ExpressionBatchedMatmulExecution, GroupedMatmulDependencyBarrierFeedsDownstreamExpressionStage) {

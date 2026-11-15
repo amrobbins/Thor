@@ -48,9 +48,7 @@ void validateOffsetsForRuntimeExtent(const Tensor& offsets, uint64_t batch_size)
 }
 
 void validateRuntimeExtent(const RaggedRuntimeExtent& extent) {
-    if (!extent.activeValueCount.isInitialized()) {
-        throw std::invalid_argument("ragged runtime extent activeValueCount tensor is not initialized.");
-    }
+    extent.activeValueCount.validate("ragged runtime extent activeValueCount");
     if (extent.maxActiveValues == 0) {
         throw std::invalid_argument("ragged runtime extent maxActiveValues must be non-zero.");
     }
@@ -59,12 +57,6 @@ void validateRuntimeExtent(const RaggedRuntimeExtent& extent) {
     }
     if (extent.activeValueCount.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
         throw std::invalid_argument("ragged runtime extent activeValueCount tensor must live on GPU memory.");
-    }
-    if (!extent.activeValueCount.isDenseContiguous()) {
-        throw std::invalid_argument("ragged runtime extent activeValueCount tensor must be dense contiguous.");
-    }
-    if (extent.activeValueCount.getDimensions() != std::vector<uint64_t>{1}) {
-        throw std::invalid_argument("ragged runtime extent activeValueCount tensor must have shape [1].");
     }
     if (!isRowPartitionOffsetDTypeSupported(extent.activeValueCount.getDataType())) {
         throw std::invalid_argument("ragged runtime extent activeValueCount dtype must be UINT32 or UINT64.");
@@ -87,11 +79,6 @@ uint32_t RaggedRuntimeExtent::maxGridDimX(uint32_t blockDimX) const {
     return static_cast<uint32_t>(grid64);
 }
 
-Tensor rowPartitionActiveValueCount(const Tensor& offsets, uint64_t batch_size) {
-    validateOffsetsForRuntimeExtent(offsets, batch_size);
-    return offsets.aliasView({1}, {1}, batch_size);
-}
-
 RaggedRuntimeExtent raggedRuntimeExtentFromOffsets(const Tensor& offsets,
                                                   uint64_t batch_size,
                                                   uint64_t max_total_values,
@@ -103,7 +90,8 @@ RaggedRuntimeExtent raggedRuntimeExtentFromOffsets(const Tensor& offsets,
         throw std::invalid_argument("ragged runtime extent elements_per_value must be non-zero.");
     }
     RaggedRuntimeExtent extent;
-    extent.activeValueCount = rowPartitionActiveValueCount(offsets, batch_size);
+    validateOffsetsForRuntimeExtent(offsets, batch_size);
+    extent.activeValueCount = TensorElement(offsets, batch_size);
     extent.maxActiveValues = max_total_values;
     extent.elementsPerValue = elements_per_value;
     return extent;
@@ -113,7 +101,10 @@ RaggedRuntimeExtent raggedRuntimeExtentFromActiveValueCount(const Tensor& active
                                                                   uint64_t max_total_values,
                                                                   uint64_t elements_per_value) {
     RaggedRuntimeExtent extent;
-    extent.activeValueCount = active_value_count;
+    if (active_value_count.isInitialized() && active_value_count.getDimensions() != std::vector<uint64_t>{1}) {
+        throw std::invalid_argument("ragged runtime extent activeValueCount tensor must have shape [1].");
+    }
+    extent.activeValueCount = TensorElement(active_value_count, 0);
     extent.maxActiveValues = max_total_values;
     extent.elementsPerValue = elements_per_value;
     validateRuntimeExtent(extent);

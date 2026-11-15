@@ -9,10 +9,10 @@
 
 namespace ThorImplementation {
 
-// Small tensor-backed Philox state shared by expression-backed dropout users.
-// The forward pass uploads (seed, sequence), then advances sequence so backward
-// can deterministically regenerate that forward mask from the device scalar values,
-// which remain unchanged until the next forward on this physical layer.
+// The one tensor-backed Philox state for every dropout user: the dropout post-op's fused kernel and cuDNN
+// attention (where the sequence is cuDNN's dropout offset). The forward pass uploads (seed, sequence), then
+// advances sequence so backward can deterministically regenerate that forward mask from the device scalar
+// values, which remain unchanged until the next forward on this physical layer.
 class DropOutRuntimeState {
    public:
     DropOutRuntimeState(int64_t seed, int64_t initialSequence, std::string ownerName);
@@ -23,16 +23,15 @@ class DropOutRuntimeState {
     void uploadForForward(Stream& stream);
 
    private:
-    static constexpr uint64_t kSeedByteOffset = 0;
-    static constexpr uint64_t kSequenceByteOffset = sizeof(int64_t);
-
+    // The seed and sequence are separate one-element tensors; one launch writes both every forward.
     void ensureBuffer(TensorPlacement placement);
 
     int64_t seed;
     int64_t nextSequence;
     uint64_t sequenceAdvance = 1;
     std::string ownerName;
-    Tensor seedSequenceBuffer;
+    Tensor seedTensor;
+    Tensor sequenceTensor;
 };
 
 // Build a pointwise post-op with exact semantics:

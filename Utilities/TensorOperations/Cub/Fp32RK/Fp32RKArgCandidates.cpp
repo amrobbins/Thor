@@ -120,8 +120,8 @@ std::vector<Fp32RKPoolEntry> fp32RKArgRankerPool(const std::vector<Fp32RKArgCand
     return pool;
 }
 
-void launchFp32RKArgPass(const PhysicalKernel& identity, const Tensor& input, Tensor* value_output,
-                         Tensor* index_output, const CubReductionGeometry& geometry, uint64_t* packed_scratch,
+void launchFp32RKArgPass(const PhysicalKernel& identity, const StridedSpan& input, const StridedSpan* value_output,
+                         const StridedSpan* index_output, const CubReductionGeometry& geometry, uint64_t* packed_scratch,
                          bool maximum, uint64_t domain_stride, Stream& stream) {
     const uint64_t outer = geometry.outer_size, r = geometry.reduction_size, k = geometry.inner_size;
     if (!fp32RKArgPassLegal(identity, outer, r, k))

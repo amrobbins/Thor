@@ -74,10 +74,10 @@ uint32_t raggedKRArgGrid(const RaggedKRShape& shape, DataType input_dtype, int g
 void launchRaggedKRArg(CubArgReductionOp op,
                        const RaggedKRShape& shape,
                        uint32_t grid,
-                       const Tensor& input,
-                       const Tensor& offsets,
-                       Tensor& index_output,
-                       Tensor& workspace,
+                       const StridedSpan& input,
+                       const StridedSpan& offsets,
+                       const StridedSpan& index_output,
+                       const StridedSpan& workspace,
                        Stream& stream,
                        RaggedLaunchParts parts) {
     const auto fail = [](const std::string& what) { throw std::invalid_argument("launchRaggedKRArg: " + what); };

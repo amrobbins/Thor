@@ -334,7 +334,7 @@ TEST(CudaGraphTest, DeviceUpdatedGridCanUseRaggedOffsetsLastElementAlias) {
     stream.synchronize();
 
     RaggedRuntimeExtent extent = raggedRuntimeExtentFromOffsets(offsets, /*batch_size=*/3, /*max_total_values=*/8);
-    EXPECT_EQ(extent.activeValueCount.getMemPtr<uint32_t>(), offsets.getMemPtr<uint32_t>() + 3);
+    EXPECT_EQ(extent.activeValueCount.pointer<uint32_t>(), offsets.getMemPtr<uint32_t>() + 3);
 
     void* outPtr = out.getMemPtr();
     void* args[] = {&outPtr};

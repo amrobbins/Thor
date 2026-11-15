@@ -2,6 +2,7 @@
 // warps-per-output, across K buckets, R (including R smaller than the R workers), both formats and operations, and
 // value/index output storage. Index = row * domain_stride.
 
+#include "test/Utilities/TensorOperations/OutputSpan.h"
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 #include "test/Utilities/TensorOperations/Fp8ArgReference.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
@@ -78,8 +79,8 @@ TEST(CubArgReductionFp8OneWindow, EveryUnitMatchesReference) {
                                     index = Tensor(gpuPlacement, TensorDescriptor(mode == 2 ? DataType::UINT64
                                                                                             : DataType::UINT32,
                                                                                   {Outer, k}));
-                                launchFp8OneWindowArgComplete(input, value ? &*value : nullptr,
-                                                              index ? &*index : nullptr, geometry, unit, w, maximum,
+                                launchFp8OneWindowArgComplete(input, outputSpan(value),
+                                                              outputSpan(index), geometry, unit, w, maximum,
                                                               stride, stream);
                                 stream.synchronize();
                                 const std::vector<float> values =

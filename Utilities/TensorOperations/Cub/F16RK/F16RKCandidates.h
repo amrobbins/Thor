@@ -31,6 +31,10 @@ struct F16RKSite {
     DataType input_dtype = DataType::FP16;  // FP16 or BF16
     CubReductionStageSemantics semantics{};
     uint64_t scratch_budget_bytes = std::numeric_limits<uint64_t>::max();
+    // 1379: the input base alignment the site reads (2, 4, 8 or 16). At 2 the 2-byte AlignedK packet is offered at even
+    // K too: no wider packet reads that base, and the rotated pass needs R > 32. 1381: below 16 the OneWindow kernels
+    // are those whose window holds K and a prefix.
+    uint64_t input_alignment_bytes = 16;
 };
 
 struct F16RKPoolEntry {
@@ -49,8 +53,13 @@ using F16RKResidency = std::function<uint32_t(const Fp8RK::PhysicalKernel&)>;
                                               const CubReductionStageSemantics& semantics);
 
 /** The input base alignment (bytes) the 2-byte RK pass `kernel` requires: 2 (any FP16 / BF16 address) for the rotated
- *  RuntimeK pass, the packet for AlignedK, 16 for OneWindow, DeepRSmallK and RuntimeK PacketComplete. */
+ *  RuntimeK pass and (1384) RuntimeK PacketComplete, the packet for AlignedK, 16 for OneWindow and DeepRSmallK (see
+ *  f16RKPassInputAlignmentAtK for OneWindow). */
 [[nodiscard]] uint32_t f16RKPassInputAlignment(const Fp8RK::PhysicalKernel& kernel);
+
+/** 1381: the same for an original-input stage at inner size `k`: the OneWindow kernel reads any FP16 / BF16 address
+ *  (2) when K fits its window less a prefix (Fp8RK::oneWindowUnalignedCapacity). 1383: its ARG twin too. */
+[[nodiscard]] uint32_t f16RKPassInputAlignmentAtK(const Fp8RK::PhysicalKernel& kernel, uint64_t k);
 
 /** The pool at `site`, families interleaved by local rank (OneWindow, DeepRSmallK, AlignedK, RuntimeK). Every entry
  *  satisfies Fp8RK::structurallyValid and the family's 2-byte launch limits. */

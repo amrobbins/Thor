@@ -341,7 +341,7 @@ every dtype finishes in FP32. The plan, its measurements and its decisions are i
 - **The old families stay until the last dtype that runs them converts** (user, 2026-11-04). FP32 no longer reaches
   `ReducersDenseR / KR / RK` or the direct ARG adapter, but their FP32 code is deleted with FP16 / BF16's conversion
   rather than cut out of shared kernels now (done in 1258-1261, section 9.3). Non-dense views (permuted, strided)
-  keep their tiled and CUB paths for every dtype.
+  kept their tiled and CUB paths for every dtype (until 1373; see section 9.3).
 
 ### 8.3 Open items left by FP32
 
@@ -415,8 +415,9 @@ The plan, its measurements and its decisions are in the project's FP16 / BF16 pl
   code.
 - **1261:** the interval-composition planner (VALUE and ARG), the composed and direct CUB ARG executors with their
   public API (`stampComposedDense*`, `analyzeDenseCompositionPlan*`), and `CubArgReductionMin / Max.cu`.
-- Non-dense views (permuted, strided, rank-1 affine) keep their tiled and CUB paths for every dtype. Whether CUB stays
-  for those is a separate decision, outside the dense pattern.
+- Non-dense views (permuted, strided, rank-1 affine) kept their tiled and CUB paths for every dtype. The CUB ones are
+  gone since 1373 (plans/Thor_View_Reduction_Plan_2026-11-08.md): compact permutations run this pattern's retained
+  planner on their bytes (1365), rank-1 views run StridedR (1366-1371). The Thor tiled view kernels remain.
 
 ### 9.4 Open items left by FP16 / BF16
 
@@ -468,8 +469,8 @@ logs and its decisions are in the project (`plans/Thor_Ragged_Reduction_Plan_202
   kernels, are 0.83-0.85x of legacy at the median; keeping legacy for them would have kept 1000x losses elsewhere.
 - **Limits are the kernels' integer widths, not round numbers.** The RK row limit went from 64 MiB to 2 GiB (1329)
   once the 32-bit row and K tile arithmetic was checked; a site past it is an error, not a fallback.
-- **Typed views of byte storage need a flat UINT8 source** (`aliasByteStorageAs`), which the selector's contest
-  input and the misaligned-base tests both use.
+- **Typed spans of byte storage** are `StridedSpan(bytes).bytesAs(offset, dtype, dims)` (item 11 removed Tensor
+  views); the misaligned-base kernel tests use them. The selector's contest input is a typed tensor of its own.
 
 ### 10.3 Cleanup (phase 9, 1330)
 

@@ -110,6 +110,8 @@ class CublasMatrixMultiply {
         cublasLtMatrixLayout_t c_desc = nullptr;
         cublasLtMatrixLayout_t d_desc = nullptr;
         LtMatmulAlgorithmSelection algorithm;
+        // The operand pointer alignment the algorithm needs, in Thor operand order (A = lhs).
+        CublasOperandAlignment algorithm_alignment;
         bool forward_epilogue_aux = false;
 
         LtMatmulPlan() = default;
@@ -123,6 +125,10 @@ class CublasMatrixMultiply {
         [[nodiscard]] uintptr_t executionStateId() const {
             return reinterpret_cast<uintptr_t>(operation_desc_host);
         }
+
+        // Throws unless the operands are as aligned as the algorithm needs; cuBLASLt does not check
+        // pointer alignment at launch. C is the addend matrix, or D when there is none.
+        void requireOperandAlignment(const Tensor &A, const Tensor &B, const Tensor &C, const Tensor &D) const;
 
         cublasLtMatmulDesc_t operationDesc(CublasScalarPointerMode pointerMode) const {
             return (pointerMode == CublasScalarPointerMode::Device) ? operation_desc_device : operation_desc_host;
@@ -158,10 +164,11 @@ class CublasMatrixMultiply {
     // broadcast one matrix across the batch; D must use distinct storage for each batch item.
     // The caller must first populate the matching optimal-kernel cache entry with
     // chooseOptimalStridedBatchedGemmKernel(...).
-    void stridedBatchedGemm(Tensor A,
-                            Tensor B,
-                            Tensor C,
-                            Tensor D,
+    // A, B, C and D are each the storage their strided batches reach (a whole Tensor converts).
+    void stridedBatchedGemm(const TensorSpan &A,
+                            const TensorSpan &B,
+                            const TensorSpan &C,
+                            const TensorSpan &D,
                             std::optional<Tensor> workspace,
                             const int32_t A_rows,
                             const int32_t A_cols,
@@ -435,7 +442,8 @@ class CublasMatrixMultiply {
         bool addendIsBiasVector,
         std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt,
         bool produceEpilogueAux = false,
-        int64_t epilogueAuxLd = 0);
+        int64_t epilogueAuxLd = 0,
+        CublasOperandAlignment alignment = {});
 
     std::unique_ptr<LtMatmulPlan> buildGemmWithEpiloguePlan(int gpuNum,
                                                             const int32_t A_rows,
@@ -454,7 +462,8 @@ class CublasMatrixMultiply {
                                                             bool addendIsBiasVector,
                                                             std::optional<LtMatmulAlgorithmSelection> selectedAlgorithm = std::nullopt,
                                                             std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt,
-                                                            std::optional<Tensor> forwardEpilogueAux = std::nullopt);
+                                                            std::optional<Tensor> forwardEpilogueAux = std::nullopt,
+                                                            CublasOperandAlignment alignment = {});
 
     void runGemmWithEpiloguePlan(Tensor A,
                                  Tensor B,
@@ -484,7 +493,8 @@ class CublasMatrixMultiply {
                                                      EpilogueFusion epilogue,
                                                      bool hasAddend,
                                                      bool addendIsBiasVector,
-                                                     bool &kernelWillRunOnGpu);
+                                                     bool &kernelWillRunOnGpu,
+                                                     CublasOperandAlignment alignment = {});
 
     std::optional<LtMatmulAlgorithmSelection> selectGemmWithBackwardEpilogueAlgorithm(
         int gpuNum,
@@ -503,7 +513,8 @@ class CublasMatrixMultiply {
         bool hasAddend,
         bool hasBiasGradient,
         int64_t epilogueAuxLd,
-        std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
+        std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt,
+        CublasOperandAlignment alignment = {});
 
     std::unique_ptr<LtMatmulPlan> buildGemmWithBackwardEpiloguePlan(
         int gpuNum,
@@ -523,7 +534,8 @@ class CublasMatrixMultiply {
         Tensor epilogueAux,
         std::optional<Tensor> biasGradient,
         std::optional<LtMatmulAlgorithmSelection> selectedAlgorithm = std::nullopt,
-        std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
+        std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt,
+        CublasOperandAlignment alignment = {});
 
     void runGemmWithBackwardEpiloguePlan(Tensor A,
                                          Tensor B,
@@ -553,7 +565,8 @@ class CublasMatrixMultiply {
                                                              bool hasAddend,
                                                              bool hasBiasGradient,
                                                              int64_t epilogueAuxLd,
-                                                             bool &kernelWillRunOnGpu);
+                                                             bool &kernelWillRunOnGpu,
+                                                             CublasOperandAlignment alignment = {});
 
     // Non-hot-path legacy/debug API: this helper may construct cuBLASLt descriptors/layouts and run
     // heuristic selection in the call path. Stamped/layer code must use a prebuilt LtMatmulPlan instead.
@@ -812,10 +825,11 @@ class CublasMatrixMultiply {
                                                   bool transposeA,
                                                   bool transposeB,
                                                   MatmulDataTypes dataTypes,
-                                                  bool printResults = false) {
+                                                  bool printResults = false,
+                                                  CublasOperandAlignment alignment = {}) {
         int ldD = ldC;
         chooseOptimalGemmKernel(
-            gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, false, dataTypes, printResults);
+            gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, false, dataTypes, printResults, alignment);
     }
 
     // Select and cache optimal cuBLASLt kernels for one fixed strided-batched GEMM shape.
@@ -835,7 +849,8 @@ class CublasMatrixMultiply {
                                                const bool transposeC,
                                                const MatmulDataTypes dataTypes,
                                                const CublasStridedBatchConfig batchConfig,
-                                               const bool printResults = false);
+                                               const bool printResults = false,
+                                               const CublasOperandAlignment alignment = {});
 
     unsigned int getStridedBatchedGemmWorkspaceSizeInBytes(int gpuNum,
                                                             int rowsA,
@@ -898,7 +913,8 @@ class CublasMatrixMultiply {
                                  const bool transposeB,
                                  const bool transposeC,
                                  const MatmulDataTypes dataTypes,
-                                 const bool printResults = false);
+                                 const bool printResults = false,
+                                 const CublasOperandAlignment alignment = {});
     void chooseOptimalGemmKernel(const int gpuNum,
                                  const int rowsA,
                                  const int colsA,
@@ -913,7 +929,8 @@ class CublasMatrixMultiply {
                                  const bool transposeC,
                                  const MatmulDataTypes dataTypes,
                                  const Fp8MatmulScales fp8Scales,
-                                 const bool printResults = false);
+                                 const bool printResults = false,
+                                 const CublasOperandAlignment alignment = {});
 
     inline unsigned int getMatrixMultiplyWorkspaceSizeInBytes(int gpuNum,
                                                               int rowsA,
@@ -962,7 +979,8 @@ class CublasMatrixMultiply {
                                      bool transposeC,
                                      MatmulDataTypes dataTypes,
                                      bool workspaceAllowed,
-                                     CublasStridedBatchConfig batchConfig = CublasStridedBatchConfig::single());
+                                     CublasStridedBatchConfig batchConfig = CublasStridedBatchConfig::single(),
+                                     CublasOperandAlignment alignment = {});
 
     unsigned int getGemmWorkspaceSizeInBytes(int gpuNum,
                                              int rowsA,
@@ -1133,7 +1151,8 @@ class CublasMatrixMultiply {
                                  Fp8MatmulScales fp8Scales,
                                  bool allowWorkspaces,
                                  bool printResults,
-                                 CublasStridedBatchConfig batchConfig = CublasStridedBatchConfig::single());
+                                 CublasStridedBatchConfig batchConfig = CublasStridedBatchConfig::single(),
+                                 CublasOperandAlignment alignment = {});
 
     void getSupportedCublasAlgorithms(const OperationType &operationType,
                                       std::vector<cublasLtMatmulAlgo_t> &supportedAlgorithms,
@@ -1166,7 +1185,8 @@ class CublasMatrixMultiply {
                                                       const float maxWaves,
                                                       const MatmulDataTypes dataTypes,
                                                       const Fp8MatmulScales fp8Scales,
-                                                      const CublasStridedBatchConfig batchConfig = CublasStridedBatchConfig::single());
+                                                      const CublasStridedBatchConfig batchConfig = CublasStridedBatchConfig::single(),
+                                                      const CublasOperandAlignment alignment = {});
 
    private:
     inline std::vector<CublasKernel> getHeuristicMatrixMultiplyKernels(int numChoices,

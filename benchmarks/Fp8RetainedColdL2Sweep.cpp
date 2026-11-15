@@ -1,8 +1,10 @@
 // Retained-only FP8 dense RK cold-L2 census. No experimental CUDA kernels.
 // This is deliberately separate from production stamping and from the older
 // calibration benchmark that was deleted in the cleanup.
+#include "test/Utilities/TensorOperations/OutputSpan.h"
 #include "benchmarks/Fp8BenchmarkArenaCursor.h"
 #include "benchmarks/ColdTiming.h"
+#include "Utilities/TensorOperations/Cub/ReductionAutotunerCore.h"
 #include "benchmarks/Fp8OracleBatchQueue.h"
 #include "Utilities/TensorOperations/Cub/F16RK/F16RKArgCandidates.h"
 #include "Utilities/TensorOperations/Cub/F16RK/F16RKCandidates.h"
@@ -470,13 +472,13 @@ public:
         check(cudaMemsetAsync(bytes_.getMemPtr<void>(), 0x30, bytes, stream.getStream()), "cold arena initialization");
         stream.synchronize();
     }
-    T::Tensor input(T::DataType dtype, uint64_t outer, uint64_t r, uint64_t k) {
+    T::StridedSpan input(T::DataType dtype, uint64_t outer, uint64_t r, uint64_t k) {
         const std::vector<uint64_t> dims{outer,r,k};
         const T::TensorDescriptor d(dtype,dims);
         auto view = cursor_.getBenchmarkTensorView(d.getArraySizeInBytes(), B::Fp8BenchmarkArenaCursor::Lifetime::StreamingInput);
-        return bytes_.aliasByteStorageAs(dtype, dims, view.offset);
+        return T::StridedSpan(bytes_).bytesAs(view.offset, dtype, dims);
     }
-    [[nodiscard]] std::pair<T::Tensor,T::Tensor> outputAndScratch(
+    [[nodiscard]] std::pair<T::StridedSpan,T::StridedSpan> outputAndScratch(
         T::DataType output_dtype, uint64_t outer, uint64_t k, uint64_t scratch_bytes) const {
         const std::vector<uint64_t> dims{outer,k};
         const uint64_t output_bytes=T::TensorDescriptor(output_dtype,dims).getArraySizeInBytes();
@@ -485,17 +487,16 @@ public:
         if (scratch_offset > workspace_.getArraySizeInBytes()-128 ||
             scratch_bytes > workspace_.getArraySizeInBytes()-scratch_offset-128)
             throw std::runtime_error("Retained FP8 cold-L2 output/scratch exceeds 2 GiB workspace");
-        T::Tensor out=workspace_.aliasByteStorageAs(output_dtype,dims,0);
-        T::Tensor scratch;
-        if (scratch_bytes) scratch=workspace_.aliasByteStorageAs(
-            T::DataType::UINT8,{scratch_bytes},scratch_offset);
+        T::StridedSpan out=T::StridedSpan(workspace_).bytesAs(0, output_dtype, dims);
+        T::StridedSpan scratch;
+        if (scratch_bytes) scratch=T::StridedSpan(workspace_).bytesAs(scratch_offset, T::DataType::UINT8, {scratch_bytes});
         return {std::move(out),std::move(scratch)};
     }
     // ARG outputs: value (when produced) at the start of the workspace, the UINT32 index after it, then scratch, with
     // the same 256-byte starts (1163; 32 before) and 128-byte gaps as outputAndScratch.
     struct ArgOutputs {
-        std::optional<T::Tensor> value, index;
-        T::Tensor scratch;
+        std::optional<T::StridedSpan> value, index;
+        T::StridedSpan scratch;
     };
     [[nodiscard]] ArgOutputs argOutputs(std::optional<T::DataType> value_dtype, uint64_t outer, uint64_t k,
                                         uint64_t scratch_bytes) const {
@@ -509,20 +510,20 @@ public:
             scratch_bytes > workspace_.getArraySizeInBytes()-scratch_offset-128)
             throw std::runtime_error("Retained FP8 cold-L2 ARG outputs/scratch exceed 2 GiB workspace");
         ArgOutputs result;
-        if (value_dtype) result.value=workspace_.aliasByteStorageAs(*value_dtype,dims,0);
-        result.index=workspace_.aliasByteStorageAs(T::DataType::UINT32,dims,index_offset);
-        if (scratch_bytes) result.scratch=workspace_.aliasByteStorageAs(T::DataType::UINT8,{scratch_bytes},scratch_offset);
+        if (value_dtype) result.value=T::StridedSpan(workspace_).bytesAs(0, *value_dtype, dims);
+        result.index=T::StridedSpan(workspace_).bytesAs(index_offset, T::DataType::UINT32, dims);
+        if (scratch_bytes) result.scratch=T::StridedSpan(workspace_).bytesAs(scratch_offset, T::DataType::UINT8, {scratch_bytes});
         return result;
     }
     // ARG staged twins: FP32 value + UINT32 index partials [outer, shards, k] in a separate 1 GiB buffer.
-    [[nodiscard]] std::pair<T::Tensor,T::Tensor> argPartials(uint64_t outer, uint64_t shards, uint64_t k) const {
+    [[nodiscard]] std::pair<T::StridedSpan,T::StridedSpan> argPartials(uint64_t outer, uint64_t shards, uint64_t k) const {
         const std::vector<uint64_t> dims{outer,shards,k};
         const uint64_t value_bytes=T::TensorDescriptor(T::DataType::FP32,dims).getArraySizeInBytes();
         const uint64_t index_offset=(value_bytes+128+255)&~255ULL;  // 1163: 256-byte starts
         if (index_offset+value_bytes+128 > partials_.getArraySizeInBytes())
             throw std::runtime_error("ARG partials exceed the 1 GiB partial buffer");
-        return {partials_.aliasByteStorageAs(T::DataType::FP32,dims,0),
-                partials_.aliasByteStorageAs(T::DataType::UINT32,dims,index_offset)};
+        return {T::StridedSpan(partials_).bytesAs(0, T::DataType::FP32, dims),
+                T::StridedSpan(partials_).bytesAs(index_offset, T::DataType::UINT32, dims)};
     }
     // Packed ARG partials (4 bytes per [outer, shards, k] lane candidate) in the 1 GiB partial buffer; null for 0 bytes.
     [[nodiscard]] void* packedArgScratch(uint64_t bytes) {
@@ -553,30 +554,30 @@ struct Event {
 struct Timed {
     std::string family;
     std::optional<F::SelectedIsolatedBenchmark> executable;  // production retained candidate
-    std::function<void(const T::Tensor&,T::Tensor&,Stream&)> direct;  // bucketed OneWindow (no continuation)
+    std::function<void(const T::StridedSpan&,T::StridedSpan&,Stream&)> direct;  // bucketed OneWindow (no continuation)
     std::string name;
     size_t rank = 0;  // 0: not in the learned ranking
     std::array<double,Passes> milliseconds{};
     // 1211: a carried-index pass (values, carried index, outputs); last, so the aggregate initializers above stand.
-    std::function<void(const T::Tensor&,const T::Tensor&,T::Tensor&,Stream&)> direct_carried;
+    std::function<void(const T::StridedSpan&,const T::StridedSpan&,T::StridedSpan&,Stream&)> direct_carried;
 };
 struct Cell {
-    T::Tensor input,output,scratch;
+    T::StridedSpan input,output,scratch;
     // 1211: a carried-index cell streams a second cold view, the carried index, next to its values.
     std::optional<T::DataType> carried_dtype;
-    T::Tensor carried;
+    T::StridedSpan carried;
     std::vector<Timed> candidates;
     std::vector<Event> starts, stops;
     // 1164 (--training): rotating output views (empty: the shared `output`) and, per candidate, the launches per sample
     // and the probe time (empty: one launch per sample, as --continuation-audit still times).
-    std::vector<T::Tensor> outputs;
+    std::vector<T::StridedSpan> outputs;
     size_t next_output = 0;
     std::vector<uint64_t> launches;
     std::vector<double> probe_ms;
     T::DataType dtype;
     uint64_t outer,r,k;
     std::string operation;
-    explicit Cell(T::Tensor input_, T::DataType dtype_, uint64_t o, uint64_t rr, uint64_t kk,
+    explicit Cell(T::StridedSpan input_, T::DataType dtype_, uint64_t o, uint64_t rr, uint64_t kk,
                   std::string op) : input(std::move(input_)), dtype(dtype_),outer(o),r(rr),k(kk),operation(std::move(op)) {}
 };
 
@@ -791,7 +792,7 @@ void run(const Settings& settings) {
                                     std::to_string(unit.packet_bytes)+"_c"+std::to_string(unit.max_components_per_lane)+
                                     (unit.load_ahead?"_la":"");
                                 cell->candidates.push_back({"one_window_rk",std::nullopt,
-                                    [geometry,unit,w,semantics](const T::Tensor& in,T::Tensor& out,Stream& s) {
+                                    [geometry,unit,w,semantics](const T::StridedSpan& in,T::StridedSpan& out,Stream& s) {
                                         C::launchFp8OneWindowRuntimeKComplete(in,out,geometry,unit,w,s,semantics,1.0f);
                                     },name,0,{}});
                             }
@@ -832,13 +833,17 @@ void run(const Settings& settings) {
                     auto out=arena.argOutputs(value_dtype,outer,k,0);
                     auto cell=std::make_shared<Cell>(arena.input(dtype,outer,r,k),dtype,outer,r,k,op.name);
                     if (out.value) cell->output=*out.value;
-                    // Production: stamp once (selection/autotune happen here, outside timing) on preallocated outputs.
-                    auto stamped=reduction.stamp(cell->input,out.value,out.index,stream);
+                    // Production: stamp once (selection/autotune happen here, outside timing) on preallocated outputs
+                    // of its own (a stamp binds whole tensors; runOnInputForBenchmark writes them).
+                    std::optional<T::Tensor> stamp_value,stamp_index;
+                    if (out.value) stamp_value.emplace(placement,T::TensorDescriptor(out.value->getDataType(),{outer,k}));
+                    stamp_index.emplace(placement,T::TensorDescriptor(out.index->getDataType(),{outer,k}));
+                    auto stamped=reduction.stamp(cell->input,stamp_value,stamp_index,stream);
                     std::string name;
                     for (const std::string& pass : stamped->getPlannedPassNames()) name+=(name.empty()?"":"+")+pass;
                     if (name.empty()) throw std::logic_error("FP8 ARG production stamp has no planned passes");
                     cell->candidates.push_back({"arg_production",std::nullopt,
-                        [stamped](const T::Tensor& in,T::Tensor&,Stream& s) { stamped->runOnInputForBenchmark(in,s); },
+                        [stamped](const T::StridedSpan& in,T::StridedSpan&,Stream& s) { stamped->runOnInputForBenchmark(in,s); },
                         std::move(name),0,{}});
                     const bool maximum=op.operation==T::CubArgReductionOp::ArgMax;
                     if (settings.onewindow_runtime_k) {
@@ -851,8 +856,8 @@ void run(const Settings& settings) {
                                     std::to_string(unit.max_components_per_lane)+(unit.load_ahead?"_la":"");
                                 cell->candidates.push_back({"one_window_arg",std::nullopt,
                                     [geometry,unit,w,maximum,value=out.value,index=out.index]
-                                    (const T::Tensor& in,T::Tensor&,Stream& s) mutable {
-                                        C::launchFp8OneWindowArgComplete(in,value?&*value:nullptr,index?&*index:nullptr,
+                                    (const T::StridedSpan& in,T::StridedSpan&,Stream& s) mutable {
+                                        C::launchFp8OneWindowArgComplete(in,outputSpan(value),outputSpan(index),
                                                                          geometry,unit,w,maximum,1,s);
                                     },unit_name,0,{}});
                             }
@@ -865,10 +870,10 @@ void run(const Settings& settings) {
                             uint32_t* packed=static_cast<uint32_t*>(arena.argPartials(outer,shards,k).first.getMemPtr<void>());
                             cell->candidates.push_back({"deep_r_small_k_arg",std::nullopt,
                                 [geometry,outer,r,k,rows,shards,maximum,packed,
-                                 value=out.value,index=out.index](const T::Tensor& in,T::Tensor&,Stream& s) mutable {
+                                 value=out.value,index=out.index](const T::StridedSpan& in,T::StridedSpan&,Stream& s) mutable {
                                     C::launchFp8DeepRSmallKArgFirstStagePacked(in,packed,geometry,rows,shards,maximum,s);
-                                    C::launchFp8ArgPackedContinuation(packed,value?&*value:nullptr,
-                                        index?&*index:nullptr,in.getDataType(),outer,r,k,shards,rows,maximum,1,s);
+                                    C::launchFp8ArgPackedContinuation(packed,outputSpan(value),
+                                        outputSpan(index),in.getDataType(),outer,r,k,shards,rows,maximum,1,s);
                                 },"p16_rows"+std::to_string(rows),0,{}});
                         }
                         // RuntimeK ARG: the PacketComplete twin at W 1/2/4/8 (tile: VALUE's fewest-tile width,
@@ -881,8 +886,8 @@ void run(const Settings& settings) {
                                 if (w>r || !C::fp8PacketCompleteArgSupports(outer,r,k,w,tile)) continue;
                                 cell->candidates.push_back({"runtime_k_arg",std::nullopt,
                                     [geometry,w,tile,maximum,value=out.value,index=out.index]
-                                    (const T::Tensor& in,T::Tensor&,Stream& s) mutable {
-                                        C::launchFp8PacketCompleteArg(in,value?&*value:nullptr,index?&*index:nullptr,
+                                    (const T::StridedSpan& in,T::StridedSpan&,Stream& s) mutable {
+                                        C::launchFp8PacketCompleteArg(in,outputSpan(value),outputSpan(index),
                                                                       geometry,w,tile,maximum,1,s);
                                     },"packet_complete_w"+std::to_string(w)+"_tile"+std::to_string(tile),0,{}});
                             }
@@ -901,8 +906,8 @@ void run(const Settings& settings) {
                                 if (shards==1) {
                                     cell->candidates.push_back({"runtime_k_arg",std::nullopt,
                                         [geometry,rows,packet,maximum,value=out.value,index=out.index]
-                                        (const T::Tensor& in,T::Tensor&,Stream& s) mutable {
-                                            C::launchFp8RuntimeKArgPass(in,value?&*value:nullptr,index?&*index:nullptr,
+                                        (const T::StridedSpan& in,T::StridedSpan&,Stream& s) mutable {
+                                            C::launchFp8RuntimeKArgPass(in,outputSpan(value),outputSpan(index),
                                                                         geometry,rows,packet,maximum,1,s);
                                         },unit_name,0,{}});
                                     continue;
@@ -910,11 +915,11 @@ void run(const Settings& settings) {
                                 uint32_t* packed=static_cast<uint32_t*>(arena.argPartials(outer,shards,k).first.getMemPtr<void>());
                                 cell->candidates.push_back({"runtime_k_arg",std::nullopt,
                                     [geometry,outer,r,k,rows,shards,packet,maximum,packed,
-                                     value=out.value,index=out.index](const T::Tensor& in,T::Tensor&,Stream& s) mutable {
+                                     value=out.value,index=out.index](const T::StridedSpan& in,T::StridedSpan&,Stream& s) mutable {
                                         C::launchFp8RuntimeKArgPass(in,nullptr,nullptr,geometry,rows,packet,maximum,1,s,
                                                                     packed);
-                                        C::launchFp8ArgPackedContinuation(packed,value?&*value:nullptr,
-                                            index?&*index:nullptr,in.getDataType(),outer,r,k,shards,rows,maximum,1,s);
+                                        C::launchFp8ArgPackedContinuation(packed,outputSpan(value),
+                                            outputSpan(index),in.getDataType(),outer,r,k,shards,rows,maximum,1,s);
                                     },unit_name,0,{}});
                             }
                         }
@@ -928,8 +933,8 @@ void run(const Settings& settings) {
                             if (shards==1) {
                                 cell->candidates.push_back({"aligned_k_arg",std::nullopt,
                                     [geometry,packet,threads,maximum,value=out.value,index=out.index]
-                                    (const T::Tensor& in,T::Tensor&,Stream& s) mutable {
-                                        C::launchFp8AlignedKArgPass(in,value?&*value:nullptr,index?&*index:nullptr,
+                                    (const T::StridedSpan& in,T::StridedSpan&,Stream& s) mutable {
+                                        C::launchFp8AlignedKArgPass(in,outputSpan(value),outputSpan(index),
                                                                     geometry,packet,threads,1,maximum,1,s);
                                     },unit_name,0,{}});
                                 continue;
@@ -937,11 +942,11 @@ void run(const Settings& settings) {
                             uint32_t* packed=static_cast<uint32_t*>(arena.argPartials(outer,shards,k).first.getMemPtr<void>());
                             cell->candidates.push_back({"aligned_k_arg",std::nullopt,
                                 [geometry,outer,r,k,packet,threads,shards,maximum,packed,
-                                 value=out.value,index=out.index](const T::Tensor& in,T::Tensor&,Stream& s) mutable {
+                                 value=out.value,index=out.index](const T::StridedSpan& in,T::StridedSpan&,Stream& s) mutable {
                                     C::launchFp8AlignedKArgPass(in,nullptr,nullptr,geometry,packet,threads,shards,
                                                                 maximum,1,s,packed);
-                                    C::launchFp8ArgPackedContinuation(packed,value?&*value:nullptr,
-                                        index?&*index:nullptr,in.getDataType(),outer,r,k,shards,0,maximum,1,s);
+                                    C::launchFp8ArgPackedContinuation(packed,outputSpan(value),
+                                        outputSpan(index),in.getDataType(),outer,r,k,shards,0,maximum,1,s);
                                 },unit_name,0,{}});
                         }
                     }
@@ -1132,7 +1137,7 @@ struct RecordQueue {
     void launchOnce(Cell& cell, size_t index) {
         cell.input=arena.input(cell.dtype,cell.outer,cell.r,cell.k);
         if (cell.carried_dtype) cell.carried=arena.input(*cell.carried_dtype,cell.outer,cell.r,cell.k);
-        T::Tensor& out=cell.outputs.empty()?cell.output:cell.outputs[cell.next_output++%cell.outputs.size()];
+        T::StridedSpan& out=cell.outputs.empty()?cell.output:cell.outputs[cell.next_output++%cell.outputs.size()];
         auto& candidate=cell.candidates[index];
         if (candidate.direct_carried) candidate.direct_carried(cell.input,cell.carried,out,stream);
         else if (candidate.direct) candidate.direct(cell.input,out,stream);
@@ -1473,7 +1478,7 @@ void runTraining(const Settings& settings) {
             const std::vector<uint64_t> out_dims{outer,k};
             const uint64_t value_bytes=
                 produce_value?T::TensorDescriptor(T::DataType::FP32,out_dims).getArraySizeInBytes():0;
-            const uint64_t index_offset=CT::align256(value_bytes);
+            const uint64_t index_offset=T::ReductionAutotuning::nextSliceOffset(value_bytes);
             const uint64_t index_bytes=T::TensorDescriptor(T::DataType::UINT32,out_dims).getArraySizeInBytes();
             auto cell=std::make_shared<Cell>(arena.input(dtype,outer,r,k),dtype,outer,r,k,op.name);
             cell->carried_dtype=carried_dtype;
@@ -1486,11 +1491,11 @@ void runTraining(const Settings& settings) {
                 Timed timed;
                 timed.family=familyName(identity.family);
                 timed.direct_carried=[identity,geometry,wide,maximum,produce_value,out_dims,index_offset]
-                    (const T::Tensor& in,const T::Tensor& carried,T::Tensor& out,Stream& s) {
-                        std::optional<T::Tensor> value;
-                        if (produce_value) value=out.aliasByteStorageAs(T::DataType::FP32,out_dims,0);
-                        T::Tensor index=out.aliasByteStorageAs(T::DataType::UINT32,out_dims,index_offset);
-                        C::Fp32RK::launchFp32RKCarriedArgPass(identity,in,carried,value?&*value:nullptr,&index,
+                    (const T::StridedSpan& in,const T::StridedSpan& carried,T::StridedSpan& out,Stream& s) {
+                        std::optional<T::StridedSpan> value;
+                        if (produce_value) value=T::StridedSpan(out).bytesAs(0, T::DataType::FP32, out_dims);
+                        T::StridedSpan index=T::StridedSpan(out).bytesAs(index_offset, T::DataType::UINT32, out_dims);
+                        C::Fp32RK::launchFp32RKCarriedArgPass(identity,in,carried,outputSpan(value),outputSpan(index),
                                                               geometry,wide,maximum,1,s);
                     };
                 timed.name=Training::recordPrefix(spec,op.name,familyName(identity.family),physicalName(identity),
@@ -1540,7 +1545,7 @@ void runTraining(const Settings& settings) {
             const std::vector<uint64_t> out_dims{outer,k};
             const uint64_t value_bytes=
                 produce_value?T::TensorDescriptor(T::DataType::FP32,out_dims).getArraySizeInBytes():0;
-            const uint64_t index_offset=CT::align256(value_bytes);
+            const uint64_t index_offset=T::ReductionAutotuning::nextSliceOffset(value_bytes);
             const uint64_t index_bytes=T::TensorDescriptor(T::DataType::UINT32,out_dims).getArraySizeInBytes();
             auto cell=std::make_shared<Cell>(arena.input(dtype,outer,r,k),dtype,outer,r,k,op.name);
             outputViews(*cell,T::DataType::UINT8,{index_offset+index_bytes});
@@ -1551,11 +1556,11 @@ void runTraining(const Settings& settings) {
                 const F::PhysicalKernel identity=candidate.identity;
                 cell->candidates.push_back({familyName(identity.family),std::nullopt,
                     [identity,geometry,packed,maximum,produce_value,out_dims,index_offset]
-                    (const T::Tensor& in,T::Tensor& out,Stream& s) {
-                        std::optional<T::Tensor> value;
-                        if (produce_value) value=out.aliasByteStorageAs(T::DataType::FP32,out_dims,0);
-                        T::Tensor index=out.aliasByteStorageAs(T::DataType::UINT32,out_dims,index_offset);
-                        C::F16RK::launchF16RKArgPass(identity,in,value?&*value:nullptr,&index,geometry,packed,
+                    (const T::StridedSpan& in,T::StridedSpan& out,Stream& s) {
+                        std::optional<T::StridedSpan> value;
+                        if (produce_value) value=T::StridedSpan(out).bytesAs(0, T::DataType::FP32, out_dims);
+                        T::StridedSpan index=T::StridedSpan(out).bytesAs(index_offset, T::DataType::UINT32, out_dims);
+                        C::F16RK::launchF16RKArgPass(identity,in,outputSpan(value),outputSpan(index),geometry,packed,
                                                      maximum,1,s);
                     },
                     Training::recordPrefix(spec,op.name,familyName(identity.family),physicalName(identity),
@@ -1598,7 +1603,7 @@ void runTraining(const Settings& settings) {
             const std::vector<uint64_t> out_dims{outer,k};
             const uint64_t value_bytes=
                 produce_value?T::TensorDescriptor(T::DataType::FP32,out_dims).getArraySizeInBytes():0;
-            const uint64_t index_offset=CT::align256(value_bytes);
+            const uint64_t index_offset=T::ReductionAutotuning::nextSliceOffset(value_bytes);
             const uint64_t index_bytes=T::TensorDescriptor(T::DataType::UINT32,out_dims).getArraySizeInBytes();
             auto cell=std::make_shared<Cell>(arena.input(dtype,outer,r,k),dtype,outer,r,k,op.name);
             outputViews(*cell,T::DataType::UINT8,{index_offset+index_bytes});
@@ -1609,11 +1614,11 @@ void runTraining(const Settings& settings) {
                 const F::PhysicalKernel identity=candidate.identity;
                 cell->candidates.push_back({familyName(identity.family),std::nullopt,
                     [identity,geometry,packed,maximum,produce_value,out_dims,index_offset]
-                    (const T::Tensor& in,T::Tensor& out,Stream& s) {
-                        std::optional<T::Tensor> value;
-                        if (produce_value) value=out.aliasByteStorageAs(T::DataType::FP32,out_dims,0);
-                        T::Tensor index=out.aliasByteStorageAs(T::DataType::UINT32,out_dims,index_offset);
-                        C::Fp32RK::launchFp32RKArgPass(identity,in,value?&*value:nullptr,&index,geometry,packed,
+                    (const T::StridedSpan& in,T::StridedSpan& out,Stream& s) {
+                        std::optional<T::StridedSpan> value;
+                        if (produce_value) value=T::StridedSpan(out).bytesAs(0, T::DataType::FP32, out_dims);
+                        T::StridedSpan index=T::StridedSpan(out).bytesAs(index_offset, T::DataType::UINT32, out_dims);
+                        C::Fp32RK::launchFp32RKArgPass(identity,in,outputSpan(value),outputSpan(index),geometry,packed,
                                                        maximum,1,s);
                     },
                     Training::recordPrefix(spec,op.name,familyName(identity.family),physicalName(identity),
@@ -1649,11 +1654,12 @@ void runTraining(const Settings& settings) {
         }
         const std::vector<uint64_t> dims{outer,r,k};
         const T::CubReductionGeometry geometry=T::CubArgReduction::analyzeDenseGeometry(dims,{1});
-        // 1164: one rotating UINT8 output view per launch holds the FP32 value (when produced) and, 256-byte aligned
-        // after it, the UINT32 index, as production's ARG contest lays them out.
+        // 1164: one rotating UINT8 output view per launch holds the FP32 value (when produced) and, at nextSliceOffset
+        // after it (256-byte aligned, at least 128 bytes past the value), the UINT32 index, as production's ARG contest
+        // lays them out.
         const std::vector<uint64_t> out_dims{outer,k};
         const uint64_t value_bytes=produce_value?T::TensorDescriptor(T::DataType::FP32,out_dims).getArraySizeInBytes():0;
-        const uint64_t index_offset=CT::align256(value_bytes);
+        const uint64_t index_offset=T::ReductionAutotuning::nextSliceOffset(value_bytes);
         const uint64_t index_bytes=T::TensorDescriptor(T::DataType::UINT32,out_dims).getArraySizeInBytes();
         auto cell=std::make_shared<Cell>(arena.input(dtype,outer,r,k),dtype,outer,r,k,op.name);
         outputViews(*cell,T::DataType::UINT8,{index_offset+index_bytes});
@@ -1667,11 +1673,11 @@ void runTraining(const Settings& settings) {
             auto plan=std::make_shared<const C::DenseRetainedFp8ArgPhysicalPlan>(candidate.plan);
             cell->candidates.push_back({familyName(candidate.plan.family),std::nullopt,
                 [plan,geometry,packed,maximum,produce_value,out_dims,index_offset]
-                (const T::Tensor& in,T::Tensor& out,Stream& s) {
-                    std::optional<T::Tensor> value;
-                    if (produce_value) value=out.aliasByteStorageAs(T::DataType::FP32,out_dims,0);
-                    T::Tensor index=out.aliasByteStorageAs(T::DataType::UINT32,out_dims,index_offset);
-                    C::launchRetainedFp8ArgPlan(*plan,in,value?&*value:nullptr,&index,geometry,packed,maximum,1,s);
+                (const T::StridedSpan& in,T::StridedSpan& out,Stream& s) {
+                    std::optional<T::StridedSpan> value;
+                    if (produce_value) value=T::StridedSpan(out).bytesAs(0, T::DataType::FP32, out_dims);
+                    T::StridedSpan index=T::StridedSpan(out).bytesAs(index_offset, T::DataType::UINT32, out_dims);
+                    C::launchRetainedFp8ArgPlan(*plan,in,outputSpan(value),outputSpan(index),geometry,packed,maximum,1,s);
                 },
                 Training::recordPrefix(spec,op.name,familyName(candidate.plan.family),
                                        Training::argPlanName(candidate.plan,candidate.identity),candidate.local_rank,
@@ -1788,21 +1794,20 @@ void runContinuationAudit(const Settings& settings) {
                 const uint64_t partial_bytes=outer*shards*k*sizeof(float);
                 const std::string continuation=continuationName(executable);
                 auto shared=std::make_shared<const F::SelectedIsolatedBenchmark>(executable);
-                const auto first=[shared,raw,shards](const T::Tensor& in,Stream& s) {
-                    T::Tensor first_input=in;
+                const auto first=[shared,raw,shards](const T::StridedSpan& in,Stream& s) {
+                    T::StridedSpan first_input=in;
                     first_input.reshape({shared->site.outer,shared->site.r,shared->site.k});
-                    T::Tensor partials=raw->scratch.aliasByteStorageAs(T::DataType::FP32,
-                        {shared->site.outer,shards,shared->site.k},shared->first_partial_offset);
+                    T::StridedSpan partials=T::StridedSpan(raw->scratch).bytesAs(shared->first_partial_offset, T::DataType::FP32, {shared->site.outer,shards,shared->site.k});
                     F::launchPhysicalFirstStage(shared->first_physical,shared->site.first_stage_semantics,first_input,
                                                 partials,shared->first_geometry,1.0f,s);
                 };
-                cell->candidates.push_back({family,std::nullopt,[first](const T::Tensor& in,T::Tensor&,Stream& s){first(in,s);},
+                cell->candidates.push_back({family,std::nullopt,[first](const T::StridedSpan& in,T::StridedSpan&,Stream& s){first(in,s);},
                     prefix("value",family,configuration,shards,partial_bytes,continuation,"first"),0,{}});
                 cell->candidates.push_back({family,std::move(executable),{},
                     prefix("value",family,configuration,shards,partial_bytes,continuation,"full"),0,{}});
                 if (partial_bytes<=(1ULL<<30))
                     cell->candidates.push_back({family,std::nullopt,
-                        [first,shared,raw,partial_bytes,partials_base](const T::Tensor& in,T::Tensor&,Stream& s){
+                        [first,shared,raw,partial_bytes,partials_base](const T::StridedSpan& in,T::StridedSpan&,Stream& s){
                             first(in,s);
                             check(cudaMemcpyAsync(partials_base,raw->scratch.getMemPtr<uint8_t>()+shared->first_partial_offset,
                                                   partial_bytes,cudaMemcpyDeviceToDevice,s.getStream()),"partials copy");
@@ -1834,8 +1839,8 @@ void runContinuationAudit(const Settings& settings) {
                 const char* family=familyName(plan->family);
                 const std::string configuration=Training::argPlanName(*plan,candidate.identity);
                 auto full=[plan,geometry,packed,maximum,value=out.value,index=out.index]
-                          (const T::Tensor& in,T::Tensor&,Stream& s) mutable {
-                    C::launchRetainedFp8ArgPlan(*plan,in,value?&*value:nullptr,index?&*index:nullptr,geometry,packed,
+                          (const T::StridedSpan& in,T::StridedSpan&,Stream& s) mutable {
+                    C::launchRetainedFp8ArgPlan(*plan,in,outputSpan(value),outputSpan(index),geometry,packed,
                                                 maximum,1,s);
                 };
                 if (!plan->packed_partials) {
@@ -1844,7 +1849,7 @@ void runContinuationAudit(const Settings& settings) {
                     continue;
                 }
                 // The packed first stage alone: launchRetainedFp8ArgPlan's staged branch without the continuation.
-                const auto first=[plan,geometry,packed,maximum](const T::Tensor& in,Stream& s) {
+                const auto first=[plan,geometry,packed,maximum](const T::StridedSpan& in,Stream& s) {
                     if (plan->family==F::PhysicalFamily::DeepRSmallK)
                         C::launchFp8DeepRSmallKArgFirstStagePacked(in,packed,geometry,plan->rows_per_shard,plan->shards,
                                                                    maximum,s);
@@ -1855,12 +1860,12 @@ void runContinuationAudit(const Settings& settings) {
                         C::launchFp8AlignedKArgPass(in,nullptr,nullptr,geometry,plan->packet_bytes,plan->cta_threads,
                                                     plan->shards,maximum,1,s,packed);
                 };
-                cell->candidates.push_back({family,std::nullopt,[first](const T::Tensor& in,T::Tensor&,Stream& s){first(in,s);},
+                cell->candidates.push_back({family,std::nullopt,[first](const T::StridedSpan& in,T::StridedSpan&,Stream& s){first(in,s);},
                     prefix("arg",family,configuration,plan->shards,partial_bytes,"packed","first"),0,{}});
                 cell->candidates.push_back({family,std::nullopt,full,
                     prefix("arg",family,configuration,plan->shards,partial_bytes,"packed","full"),0,{}});
                 cell->candidates.push_back({family,std::nullopt,
-                    [first,packed,partial_bytes,copy_target](const T::Tensor& in,T::Tensor&,Stream& s){
+                    [first,packed,partial_bytes,copy_target](const T::StridedSpan& in,T::StridedSpan&,Stream& s){
                         first(in,s);
                         check(cudaMemcpyAsync(copy_target,packed,partial_bytes,cudaMemcpyDeviceToDevice,s.getStream()),
                               "packed partials copy");

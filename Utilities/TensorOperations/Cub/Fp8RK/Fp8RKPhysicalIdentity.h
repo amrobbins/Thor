@@ -35,4 +35,20 @@ struct PhysicalKernel {
 [[nodiscard]] bool structurallyValid(const PhysicalKernel& kernel,
                                       uint64_t outer, uint64_t r, uint64_t k);
 
+/** 1381: the largest K (elements) a VALUE OneWindow pass of this ownership reads at an input base off its packet
+ *  boundary. The kernel's windows follow the address, so every row group then carries a prefix of up to a packet less
+ *  one element, at any K: the lane subgroup's window less that. (At an aligned base, K a multiple of the packet has no
+ *  prefix and may fill the window.) */
+[[nodiscard]] constexpr uint64_t oneWindowUnalignedCapacity(uint64_t outputs_per_warp, uint64_t packet_bytes,
+                                                            uint64_t element_bytes) {
+    const uint64_t packet_elements = packet_bytes / element_bytes;
+    return (32 / outputs_per_warp) * packet_elements - (packet_elements - 1);
+}
+
+/** 1378: the input base alignment an FP8 RK VALUE pass needs at inner size `k`: the RuntimeK passes any byte address
+ *  (the rotated lanes align their windows down and rotate the prefix away; 1379: PacketComplete takes its prefixes
+ *  from the base address), AlignedK its packet (2 or 8 bytes), DeepRSmallK 16 bytes. 1381: OneWindow any byte address
+ *  when K fits oneWindowUnalignedCapacity, else 16 bytes. */
+[[nodiscard]] uint32_t fp8RKPassInputAlignment(const PhysicalKernel& kernel, uint64_t k);
+
 }  // namespace ThorImplementation::CubReductionInternal::Fp8RK

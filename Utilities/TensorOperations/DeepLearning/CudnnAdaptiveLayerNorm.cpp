@@ -1,4 +1,5 @@
 #include "Utilities/TensorOperations/DeepLearning/CudnnAdaptiveLayerNorm.h"
+#include "Utilities/TensorOperations/DeepLearning/CudnnTensorContract.h"
 
 #include "Utilities/Common/CudnnExecutionWorkspace.h"
 
@@ -147,18 +148,21 @@ void requireIoTensor(const Tensor& tensor,
     requireSameGpu(tensor, gpuNum, name);
     requireDtype(tensor, expectedDtype, name);
     requireNumElements(tensor, ioElementCount(descriptor), name);
+    requireCudnnContractTensor(tensor, "cuDNN AdaptiveLayerNorm", name);
 }
 
 void requireScaleBiasTensor(const Tensor& tensor, const CudnnAdaptiveLayerNormDescriptor& descriptor, int gpuNum, string_view name) {
     requireSameGpu(tensor, gpuNum, name);
     requireDtype(tensor, descriptor.scaleBiasDataType, name);
     requireNumElements(tensor, scaleBiasElementCount(descriptor), name);
+    requireCudnnContractTensor(tensor, "cuDNN AdaptiveLayerNorm", name);
 }
 
 void requireStatsTensor(const Tensor& tensor, const CudnnAdaptiveLayerNormDescriptor& descriptor, int gpuNum, string_view name) {
     requireSameGpu(tensor, gpuNum, name);
     requireDtype(tensor, DataType::FP32, name);
     requireNumElements(tensor, statsElementCount(descriptor), name);
+    requireCudnnContractTensor(tensor, "cuDNN AdaptiveLayerNorm", name);
 }
 
 void insertTensor(unordered_map<int64_t, void*>& pack, int64_t uid, const Tensor& tensor) {

@@ -227,7 +227,7 @@ void launchComputeBinaryAccuracy(ThorImplementation::Tensor accuracy_d,
 
     THOR_THROW_IF_FALSE(reduction != nullptr);
     THOR_THROW_IF_FALSE(reduction->gpuNum() == static_cast<uint32_t>(stream.getGpuNum()));
-    THOR_THROW_IF_FALSE(reduction->getInputTensor() == workspace_d);
+    THOR_THROW_IF_FALSE(reduction->getInput().isWholeTensor() && reduction->getInput().getSourceTensor() == workspace_d);
     THOR_THROW_IF_FALSE(reduction->getOutputTensor() == accuracy_d);
     reduction->runOn(stream);
 }

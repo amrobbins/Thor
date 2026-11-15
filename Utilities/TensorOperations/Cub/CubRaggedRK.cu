@@ -132,10 +132,10 @@ void raggedRKSetProbe(unsigned long long* probe) { g_ragged_rk_probe = probe; }
 void launchRaggedRKValue(CubReductionOp op,
                          const RaggedRKShape& shape,
                          uint32_t ctas,
-                         const Tensor& input,
-                         const Tensor& offsets,
-                         Tensor& output,
-                         Tensor& workspace,
+                         const StridedSpan& input,
+                         const StridedSpan& offsets,
+                         const StridedSpan& output,
+                         const StridedSpan& workspace,
                          Stream& stream,
                          RaggedLaunchParts parts) {
     const auto fail = [](const std::string& what) { throw std::invalid_argument("launchRaggedRKValue: " + what); };

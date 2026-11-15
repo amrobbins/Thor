@@ -50,7 +50,7 @@ uint32_t oneWindowResidency(DataType input_dtype, uint64_t k,
 }
 
 void launchOneWindow(const PhysicalKernel& kernel, const CubReductionStageSemantics& semantics,
-                     const Tensor& input, Tensor& output,
+                     const StridedSpan& input, const StridedSpan& output,
                      const CubReductionGeometry& geometry, float output_scale, Stream& stream) {
     if (kernel.family != PhysicalFamily::OneWindow || kernel.staged() ||
         !structurallyValid(kernel, geometry.outer_size, geometry.reduction_size, geometry.inner_size))

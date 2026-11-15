@@ -11,6 +11,7 @@
 // 2-byte RK ARG twins (F16RK::launchF16RKArgPass) or the 2-byte R / KR ARG shapes (launchF16KRArgSegments), with the
 // same outputs and intermediates (the retained FP16 / BF16 routing).
 
+#include "DeepLearning/Implementation/Tensor/StridedSpan.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 #include "Utilities/TensorOperations/Cub/DenseReductionPhysicalSelector.h"
 #include "Utilities/TensorOperations/Cub/Fp8KR/Fp8KRSegments.h"
@@ -64,10 +65,10 @@ struct DenseRetainedFp32ArgPhysicalPlan final : DenseReductionPhysicalPlan {
 /** Runs the pass: `carried_index` is the carried index tensor at a carried site (else null); `scratch` holds
  *  plan.scratch_bytes (null for none, else 256-byte aligned). */
 void launchRetainedFp32ArgPlan(const DenseRetainedFp32ArgPhysicalPlan& plan,
-                               const Tensor& input,
-                               const Tensor* carried_index,
-                               Tensor* value_output,
-                               Tensor* index_output,
+                               const StridedSpan& input,
+                               const StridedSpan* carried_index,
+                               const StridedSpan* value_output,
+                               const StridedSpan* index_output,
                                const CubReductionGeometry& geometry,
                                void* scratch,
                                bool maximum,

@@ -124,18 +124,18 @@ void DropOutRuntimeState::setSequenceAdvance(uint64_t advance) {
 
 TensorScalarBinding DropOutRuntimeState::seedBinding(TensorPlacement placement) {
     ensureBuffer(placement);
-    return TensorScalarBinding{seedSequenceBuffer, kSeedByteOffset, DataType::INT64};
+    return TensorScalarBinding{seedTensor, 0, DataType::INT64};
 }
 
 TensorScalarBinding DropOutRuntimeState::sequenceBinding(TensorPlacement placement) {
     ensureBuffer(placement);
-    return TensorScalarBinding{seedSequenceBuffer, kSequenceByteOffset, DataType::INT64};
+    return TensorScalarBinding{sequenceTensor, 0, DataType::INT64};
 }
 
 void DropOutRuntimeState::uploadForForward(Stream& stream) {
     TensorPlacement placement(TensorPlacement::MemDevices::GPU, stream.getGpuNum());
     ensureBuffer(placement);
-    launchSetInt64Pair(seedSequenceBuffer.getMemPtr<int64_t>(), seed, nextSequence, stream);
+    launchSetInt64Pair(seedTensor.getMemPtr<int64_t>(), seed, sequenceTensor.getMemPtr<int64_t>(), nextSequence, stream);
 
     const uint64_t remaining = static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - nextSequence);
     if (sequenceAdvance > remaining) {
@@ -145,9 +145,10 @@ void DropOutRuntimeState::uploadForForward(Stream& stream) {
 }
 
 void DropOutRuntimeState::ensureBuffer(TensorPlacement placement) {
-    if (seedSequenceBuffer.isInitialized() && seedSequenceBuffer.getPlacement() == placement) return;
-    TensorDescriptor descriptor(DataType::INT64, {2});
-    seedSequenceBuffer = Tensor(placement, descriptor);
+    if (seedTensor.isInitialized() && seedTensor.getPlacement() == placement) return;
+    const TensorDescriptor descriptor(DataType::INT64, {1});
+    seedTensor = Tensor(placement, descriptor);
+    sequenceTensor = Tensor(placement, descriptor);
 }
 
 CudaKernelExpression makeDropOutPostOpKernel(DataType dataType,

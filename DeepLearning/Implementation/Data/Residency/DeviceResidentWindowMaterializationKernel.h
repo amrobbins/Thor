@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Tensor/TensorSpan.h"
 #include "Utilities/Common/Stream.h"
 
 #include <cstdint>
@@ -33,7 +34,7 @@ struct DeviceResidentWindowMaterializationSpec {
 
 void launchDeviceResidentWindowMaterializationKernel(
     const ThorImplementation::Tensor &sourceStorage,
-    const ThorImplementation::Tensor &rowPlans,
+    const ThorImplementation::TensorSpan &rowPlans,
     uint64_t logicalRows,
     const DeviceResidentWindowMaterializationSpec &spec,
     ThorImplementation::Tensor &destination,
@@ -42,7 +43,7 @@ void launchDeviceResidentWindowMaterializationKernel(
 /** Benchmark-only launch hook that forces a specific rows-per-CTA specialization. */
 void launchDeviceResidentWindowMaterializationKernelWithRowsPerCtaForBenchmark(
     const ThorImplementation::Tensor &sourceStorage,
-    const ThorImplementation::Tensor &rowPlans,
+    const ThorImplementation::TensorSpan &rowPlans,
     uint64_t logicalRows,
     const DeviceResidentWindowMaterializationSpec &spec,
     ThorImplementation::Tensor &destination,

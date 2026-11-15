@@ -96,13 +96,6 @@ TEST(CubReductionViewGate, UnsupportedRankGreaterThanOneViewsAreRejectedAfterDel
         {"gapped_storage", {2, 2, 3}, {1, 7, 2}, {2}, std::nullopt, false},
         {"overlapping_storage", {2, 2, 3}, {1, 1, 2}, {2}, std::nullopt, false},
         {"broadcast_zero_stride", {2, 2, 3}, {0, 6, 2}, {2}, std::nullopt, false},
-        // Physical order is [2,0,1,3]. Reduction axes {1,2} are split by retained axis 0 in physical order.
-        {"dense_permutation_split_reduction",
-         {3, 5, 2, 7},
-         {35, 7, 105, 1},
-         {1, 2},
-         std::nullopt,
-         true},
         // Physical order is [1,0,2]. The reduced axis is physically trailing, but retained physical order [1,0]
         // differs from logical output order [0,1]. This is not the middle-reduction [A,R,B,P] rotation owned by 2B.
         {"dense_permutation_physically_trailing_output_reorder",
@@ -131,6 +124,12 @@ TEST(CubReductionViewGate, UnsupportedRankGreaterThanOneViewsAreRejectedAfterDel
         SCOPED_TRACE(test_case.name);
         expectPathForEveryValueOperation(test_case);
     }
+
+    // 1376: a split physical reduction whose retained axes keep their physical order is the dense tensor of its bytes
+    // over disjoint runs. Physical order is [2,0,1,3]; reduction axes {1,2} are split by retained axis 0.
+    expectPathForEveryValueOperation(
+        {"dense_permutation_split_reduction", {3, 5, 2, 7}, {35, 7, 105, 1}, {1, 2}, CubReductionPath::ComposedDense,
+         true});
 }
 
 TEST(CubReductionViewGate, ExistingOrdainedViewAndDensePathsRetainTheirOwnersAfterDelete) {
@@ -161,8 +160,9 @@ TEST(CubReductionViewGate, ExistingOrdainedViewAndDensePathsRetainTheirOwnersAft
          CubReductionPath::ContiguousFixedSegment,
          true,
          true},
-        // Logical [K,I,J] over physical [I,J,K]; reducing J is supported by permutation-aware TiledFixedSegment.
-        {"supported_dense_permutation", {32, 7, 5}, {1, 160, 32}, {2}, CubReductionPath::TiledFixedSegment, true},
+        // Logical [J,I,K] over physical [I,J,K]; reducing J leaves the natural output order (the dense planner on the
+        // view's bytes since 1376). 1390: [K,I,J] reducing J, with the output rotated, is refused (the test below).
+        {"natural_dense_permutation", {5, 7, 32}, {32, 160, 1}, {0}, CubReductionPath::TiledFixedSegment, true},
         // Ordinary dense disjoint reductions are already classified as ComposedDense by analyzeGeometry().
         {"ordinary_dense_disjoint",
          {31, 17, 29, 19, 23},
@@ -179,97 +179,82 @@ TEST(CubReductionViewGate, ExistingOrdainedViewAndDensePathsRetainTheirOwnersAft
 }
 
 
-TEST(CubReductionViewGate, Direct2BPayloadTransposeOwnsOnlyThePayloadPreservingRetainedRotation) {
+// 1390: the reducer refuses the rotated-output views (F and VIEW-DIRECT-2B) and the pitched views (H); a caller runs
+// them in two parts (CubReduction::splitRefusedView, CubReductionViewSplitTest).
+static void expectRefusedForEveryValueOperation(const std::vector<uint64_t>& dimensions,
+                                                const std::vector<uint64_t>& strides,
+                                                const std::vector<uint32_t>& axes) {
+    expectPathForEveryValueOperation({"refused", dimensions, strides, axes, std::nullopt});
+}
+
+TEST(CubReductionViewGate, RotatedOutputViewsAreRefusedAndSplitAsADenseReductionThenARotation) {
+    // F: logical [K,I,J] over physical [I,J,K], reducing J: the output [K, I] is the rotation of the dense [I, K].
+    expectRefusedForEveryValueOperation({32, 7, 5}, {1, 160, 32}, {2});
+    std::optional<CubReductionViewSplit> split = CubReduction::splitRefusedView({32, 7, 5}, {1, 160, 32}, {2});
+    ASSERT_TRUE(split.has_value());
+    EXPECT_EQ(split->kind, CubReductionViewSplit::Kind::RotatedOutput);
+    EXPECT_EQ(split->dense_dimensions, (std::vector<uint64_t>{7, 5, 32}));
+    EXPECT_EQ(split->a, 7U);
+    EXPECT_EQ(split->b, 32U);
+    EXPECT_EQ(split->p, 1U);
+
+    // VIEW-DIRECT-2B: physical [A 2, R 3, B 5, P 7] read as [3, 5, 2, 7] (logical axes R, B, A, P), reducing R: the
+    // output [B, A, P] is the rotation of payload vectors of the dense [A, B x P].
     const std::vector<uint64_t> dimensions = {3, 5, 2, 7};
     const std::vector<uint64_t> strides = {35, 7, 105, 1};
-    const std::vector<uint32_t> axes = {0};
+    expectRefusedForEveryValueOperation(dimensions, strides, {0});
+    split = CubReduction::splitRefusedView(dimensions, strides, {0});
+    ASSERT_TRUE(split.has_value());
+    EXPECT_EQ(split->kind, CubReductionViewSplit::Kind::RotatedOutput);
+    EXPECT_EQ(split->dense_dimensions, (std::vector<uint64_t>{2, 3, 35}));
+    EXPECT_EQ(split->dense_axes, std::vector<uint32_t>{1});
+    EXPECT_EQ(split->a, 2U);
+    EXPECT_EQ(split->b, 5U);
+    EXPECT_EQ(split->p, 7U);
 
-    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(dimensions, strides, axes);
-    ASSERT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
-    ASSERT_TRUE(geometry.payload_transpose_tiled_geometry.has_value());
-    EXPECT_FALSE(geometry.permutation_aware_contiguous_segments);
-    EXPECT_FALSE(geometry.permutation_aware_tiled_geometry.has_value());
-    EXPECT_FALSE(geometry.pitched_tiled_geometry.has_value());
-
-    const CubReductionPayloadTransposeTiledGeometry& transposed =
-        geometry.payload_transpose_tiled_geometry.value();
-    EXPECT_EQ(transposed.physical_a_axes, (std::vector<uint32_t>{2}));
-    EXPECT_EQ(transposed.physical_reduction_axes, (std::vector<uint32_t>{0}));
-    EXPECT_EQ(transposed.physical_b_axes, (std::vector<uint32_t>{1}));
-    EXPECT_EQ(transposed.physical_payload_axes, (std::vector<uint32_t>{3}));
-    EXPECT_EQ(transposed.a_size, 2U);
-    EXPECT_EQ(transposed.reduction_size, 3U);
-    EXPECT_EQ(transposed.b_size, 5U);
-    EXPECT_EQ(transposed.payload_size, 7U);
-
-    for (CubReductionOp op : ALL_VALUE_OPERATIONS) {
-        SCOPED_TRACE(valueOperationName(op));
-        const CubReductionGeometry value = CubReduction::analyzeValueGeometry(op, dimensions, strides, axes);
-        EXPECT_EQ(value.path, CubReductionPath::TiledFixedSegment);
-        EXPECT_TRUE(value.payload_transpose_tiled_geometry.has_value());
-    }
-
-    // Split physical reductions still require a genuinely different execution strategy and are explicitly unsupported.
-    EXPECT_THROW((void)CubReduction::analyzeGeometry({3, 5, 2, 7}, {35, 7, 105, 1}, {1, 2}),
-                 NotImplementedException);
+    // 1376: a split physical reduction with the retained axes in physical order is ComposedDense (the dense planner on
+    // its bytes), not a 2B rotation.
+    EXPECT_EQ(CubReduction::analyzeGeometry({3, 5, 2, 7}, {35, 7, 105, 1}, {1, 2}).path,
+              CubReductionPath::ComposedDense);
 
     // A physically trailing reduction with retained-order mismatch is not [A,R,B,P] and remains explicitly unsupported.
     EXPECT_THROW((void)CubReduction::analyzeGeometry({2, 3, 4}, {4, 8, 1}, {2}),
                  NotImplementedException);
+    EXPECT_FALSE(CubReduction::splitRefusedView({2, 3, 4}, {4, 8, 1}, {2}).has_value());
 }
 
-TEST(CubReductionViewGate, PitchedTiledOwnsNonOverlappingAffineSlabsWithoutBroadeningUnsupportedViews) {
+TEST(CubReductionViewGate, PitchedViewsOfNonOverlappingAffineSlabsAreRefusedAndSplitAsACopyThenADenseReduction) {
     struct PitchedCase {
         const char* name;
         std::vector<uint64_t> dimensions;
         std::vector<uint64_t> strides;
         std::vector<uint32_t> axes;
-        uint64_t outer_size;
-        uint64_t reduction_size;
-        uint64_t inner_size;
-        uint64_t outer_stride;
-        uint64_t reduction_stride;
     };
 
     const std::vector<PitchedCase> cases = {
         // Collapsed repeated-label view from iirk,kj->ij.
-        {"einsum_diagonal_pre_gemm", {2, 2, 3}, {18, 3, 1}, {1}, 2, 2, 3, 18, 3},
+        {"einsum_diagonal_pre_gemm", {2, 2, 3}, {18, 3, 1}, {1}},
         // Collapsed repeated-label view from iir,j->rj.
-        {"einsum_diagonal_pair_product", {2, 3}, {9, 1}, {0}, 1, 2, 3, 0, 9},
+        {"einsum_diagonal_pair_product", {2, 3}, {9, 1}, {0}},
         // Multiple adjacent reduced axes flatten to one pitched reduction coordinate.
-        {"multi_axis_pitched", {2, 2, 3, 4}, {100, 12, 4, 1}, {1, 2}, 2, 6, 4, 100, 4},
+        {"multi_axis_pitched", {2, 2, 3, 4}, {100, 12, 4, 1}, {1, 2}},
         // Multiple outer axes may also flatten as long as that group is internally row-major affine.
-        {"multi_outer_pitched", {2, 3, 2, 4}, {300, 100, 4, 1}, {2}, 6, 2, 4, 100, 4},
+        {"multi_outer_pitched", {2, 3, 2, 4}, {300, 100, 4, 1}, {2}},
     };
 
     for (const PitchedCase& test_case : cases) {
         SCOPED_TRACE(test_case.name);
-        const CubReductionGeometry geometry =
-            CubReduction::analyzeGeometry(test_case.dimensions, test_case.strides, test_case.axes);
-        ASSERT_EQ(geometry.path, CubReductionPath::TiledFixedSegment);
-        ASSERT_TRUE(geometry.pitched_tiled_geometry.has_value());
-        EXPECT_FALSE(geometry.permutation_aware_tiled_geometry.has_value());
-        EXPECT_FALSE(geometry.tiled_output_permuted);
-        EXPECT_FALSE(geometry.tiled_output_shared_transpose);
-
-        const CubReductionPitchedTiledGeometry& pitched = geometry.pitched_tiled_geometry.value();
-        EXPECT_EQ(pitched.outer_size, test_case.outer_size);
-        EXPECT_EQ(pitched.reduction_size, test_case.reduction_size);
-        EXPECT_EQ(pitched.inner_size, test_case.inner_size);
-        EXPECT_EQ(pitched.outer_stride, test_case.outer_stride);
-        EXPECT_EQ(pitched.reduction_stride, test_case.reduction_stride);
-        EXPECT_EQ(geometry.tiled_output_outer_stride, test_case.inner_size);
-        EXPECT_EQ(geometry.tiled_output_inner_stride, 1U);
-
-        for (CubReductionOp op : ALL_VALUE_OPERATIONS) {
-            SCOPED_TRACE(valueOperationName(op));
-            const CubReductionGeometry value =
-                CubReduction::analyzeValueGeometry(op, test_case.dimensions, test_case.strides, test_case.axes);
-            EXPECT_EQ(value.path, CubReductionPath::TiledFixedSegment);
-            EXPECT_TRUE(value.pitched_tiled_geometry.has_value());
-        }
+        // 1390: refused, and split as the dense copy of the view's rows, then the reduction of the copy.
+        expectRefusedForEveryValueOperation(test_case.dimensions, test_case.strides, test_case.axes);
+        const std::optional<CubReductionViewSplit> split =
+            CubReduction::splitRefusedView(test_case.dimensions, test_case.strides, test_case.axes);
+        ASSERT_TRUE(split.has_value());
+        EXPECT_EQ(split->kind, CubReductionViewSplit::Kind::PackedInput);
+        EXPECT_EQ(split->dense_dimensions, test_case.dimensions);
+        EXPECT_EQ(split->dense_axes, test_case.axes);
     }
 
+    // Views the pitched classification excludes have no split either: no reducer and no caller owns them.
     const std::vector<ViewPathCase> exclusions = {
         // A non-contiguous trailing payload would turn adjacent component lanes into strided scalar traffic.
         {"noncontiguous_inner_payload",
@@ -296,6 +281,8 @@ TEST(CubReductionViewGate, PitchedTiledOwnsNonOverlappingAffineSlabsWithoutBroad
     for (const ViewPathCase& test_case : exclusions) {
         SCOPED_TRACE(test_case.name);
         expectPathForEveryValueOperation(test_case);
+        EXPECT_FALSE(
+            CubReduction::splitRefusedView(test_case.dimensions, test_case.strides, test_case.axes).has_value());
     }
 }
 

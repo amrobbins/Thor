@@ -59,13 +59,16 @@ struct CudnnLayerNormDescriptor {
     std::string cacheKey(std::string_view passName, int gpuNum) const;
 };
 
+// x, y, dy, dx, mean and invVariance may hold more rows than descriptor.outerSize (a capacity-sized
+// buffer running a smaller bucket's plan): the plan uses only the leading rows. Not with an explicit
+// physical layout, where every count must match exactly.
 struct CudnnLayerNormForwardArgs {
     Tensor x;
     Tensor scale;
     Tensor bias;
     Tensor y;
 
-    // Required when descriptor.training is true. FP32 tensors with outerSize elements.
+    // Required when descriptor.training is true. FP32 tensors with (at least) outerSize elements.
     std::optional<Tensor> mean;
     std::optional<Tensor> invVariance;
 };

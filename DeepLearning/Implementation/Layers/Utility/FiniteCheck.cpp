@@ -248,8 +248,7 @@ void FiniteCheck::validateRaggedInputs() const {
     const TensorDescriptor partitionCarrierDescriptor = rowPartitionInput->getDescriptor();
     const std::vector<uint64_t> carrierDimensions = partitionCarrierDescriptor.getDimensions();
     if (carrierDimensions != std::vector<uint64_t>{1} ||
-        partitionCarrierDescriptor.getDataType() != config.offsetsDataType ||
-        !rowPartitionInput->isDenseContiguous() || rowPartitionInput->getStorageElementOffset() != 0) {
+        partitionCarrierDescriptor.getDataType() != config.offsetsDataType) {
         throw std::runtime_error(
             "Ragged FiniteCheck partition carrier must be the managed [1] active-count tensor with the canonical partition dtype.");
     }

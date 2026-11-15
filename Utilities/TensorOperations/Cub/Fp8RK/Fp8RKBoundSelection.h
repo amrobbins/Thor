@@ -22,6 +22,9 @@ struct BoundSelectionRequest {
     uint64_t first_stage_scratch_budget_bytes = 0;
     // 1141: how many ranked first stages to return (fp8RKTuningPlan(depth).candidates).
     size_t max_candidates = 12;
+    // 1378: the input base alignment (a power of two, at most 16). Only passes that read at it are listed
+    // (fp8RKPassInputAlignment); at 16 every pass is.
+    uint64_t input_alignment_bytes = 16;
 };
 
 // RuntimeK physical proposals must be supplied by a compiled inventory, never

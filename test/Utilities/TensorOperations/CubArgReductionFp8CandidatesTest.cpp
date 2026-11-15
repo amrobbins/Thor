@@ -3,6 +3,7 @@
 // identity family is checked against the FP32 ARG reference (value + index and index only), and rankerPlanForKernel is
 // checked to invert the shortlist binding.
 
+#include "test/Utilities/TensorOperations/OutputSpan.h"
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 #include "test/Utilities/TensorOperations/Fp8ArgReference.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
@@ -263,7 +264,7 @@ TEST(CubArgReductionFp8Candidates, EveryCandidateMatchesReference) {
                         std::optional<Tensor> value;
                         if (with_value) value = Tensor(gpuPlacement, TensorDescriptor(DataType::FP32, {Outer, k}));
                         Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {Outer, k}));
-                        launchRetainedFp8ArgPlan(candidate.plan, input, value ? &*value : nullptr, &index, geometry,
+                        launchRetainedFp8ArgPlan(candidate.plan, input, outputSpan(value), outputSpan(index), geometry,
                                                  packed, maximum, 1, stream);
                         stream.synchronize();
                         const std::vector<uint64_t> got_indices = copyGpuTensorAsUnsigned(index, stream);

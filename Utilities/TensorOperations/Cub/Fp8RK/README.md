@@ -34,6 +34,44 @@ Unsupported geometries still reject rather than invoke a legacy FP8
 fallback. Other ARG, view, and non-FP8 reduction paths have independent
 dispatch.
 
+1378: the selection honours the input's base alignment, as FP32 (1222) and
+FP16 / BF16 (1254) do; the alignment is part of the cache key. A pass names
+the alignment it reads (`fp8RKPassInputAlignment`): the RuntimeK passes any
+byte address, AlignedK its 2- or 8-byte packet, OneWindow and DeepRSmallK 16
+bytes. Below 16 bytes only the tolerant passes enter the per-family
+shortlists, and a one-time warning names the slower path. 1379: RuntimeK
+PacketComplete takes its row prefixes from the base address (the kernel
+aligns its base down to a 16-byte packet and adds the offset to every
+prefix), so it reads any address at any R and K and every site has a
+Complete pass at every alignment. Below 16 bytes its tile may be narrower
+than a packet (1380: whatever split of K the proposal makes, e.g. 9 of K = 17),
+the small-K job OneWindow does at 16 bytes; aligned inventories are unchanged.
+1381: the VALUE OneWindow kernel takes its windows from the base address the
+same way (byte offsets count from the 16-byte boundary at or below the base),
+so it reads any address when K fits a window that also holds a prefix
+(`oneWindowUnalignedCapacity`: K <= 497 / 241 / 113 / 49 at O1 / O2 / O4 / O8),
+and `fp8RKPassInputAlignment(kernel, k)` names 1 byte for it there, 16 past
+that. Off a 16-byte boundary the launcher plans rows per group with that
+capacity and the input holds at most 2^32 - 16 bytes. The FP32 and FP16 / BF16
+OneWindow VALUE launchers share the kernel and read any element-aligned base
+(`fp32RKPassInputAlignmentAtK`, `f16RKPassInputAlignmentAtK`).
+ARG selection filters its passes the same way (`retainedFp8ArgPassInputAlignment`: the rotated ARG passes and R / KR
+any address, AlignedK its packet, the rest 16), and the rotated ARG passes
+cover every R. The 1378 one-shard rotated pass is gone.
+1383: the ARG OneWindow twins (`fp8OneWindowArgCompleteKernel`, and
+`fp32OneWindowArgKernel` for FP32 and FP16 / BF16) take their windows from the
+base address like the VALUE kernel, under the same K limit and byte cap, so a
+misaligned short-R, small-K ARG site no longer falls to the single-shard
+rotated ARG pass (measured 5-45x slower in 1382). The keys carry rows, so the
+indices do not change. The FP32 carried-index twin reads fresh 16-byte aligned
+intermediates only and is unchanged; the ARG DeepRSmallK twin still needs 16
+bytes. 1384: the ARG PacketComplete twins (`fp8PacketCompleteArgKernel`, and
+`fp32PacketCompleteArgKernel` for FP32 and FP16 / BF16) take their row prefixes
+from the base address as the VALUE kernel does since 1379, so they read any
+element address at any K. That also frees FP32 and FP16 / BF16 VALUE
+PacketComplete below 16 bytes: it shares its selection identity with the ARG
+twin, so it was filtered out there until both read any address.
+
 ## Retained FP8 R / KR (1146-1148, `../Fp8KR/`)
 
 Original-input FP8 R and KR sites (the reduced run is innermost, so each output
@@ -701,7 +739,7 @@ q * 128 + 4L .. +3 for quads q = 0, 1, so each key word is two LDS.32 and one fu
 warp-uniform). `fp8PacketCompleteArgTileComponents` keeps VALUE's tile (capped at 256 and K) unless a 256-component
 tile needs fewer key words per row (sum over tiles of ceil(tile / 128); 256 always reaches ceil(K / 128)). Host-checked
 against the per-byte reference (1.05 M components, random K, tiles, prefixes); results are identical. The input base
-must be 16-byte aligned, as for the VALUE kernel.
+must be 16-byte aligned (the VALUE kernel reads any address since 1379).
 1127 GPU (index-only vs 1126, production PacketComplete cells): 0.79-0.99 on 21 of 26 cells (K = 513 R = 16 1.41 ->
 1.13x VALUE, K = 510 R = 8 1.43 -> 1.14x); two 24 MiB R = 4 cells slower (1.16, 1.20; small-cell noise is up to ~12%).
 PacketComplete 55 registers. ARG SASS 520,960 -> 505,856 bytes. Overall 1.065 -> 1.062.

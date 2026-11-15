@@ -21,7 +21,9 @@
 #include "Utilities/CudaDriver/CudaGraph.h"
 
 #include "Utilities/Cache/LruCache.h"
+#include "Utilities/Expression/BatchedMatmulPlan.h"
 #include "Utilities/Expression/CompiledEquation.h"
+#include "Utilities/Expression/ConvolutionOperand.h"
 #include "Utilities/Expression/InPlaceRopeKernel.h"
 #include "Utilities/Expression/FlatScatterAddKernel.h"
 #include "Utilities/Expression/ExecutionDiagnostics.h"
@@ -32,6 +34,7 @@
 #include "Utilities/TensorOperations/Embedding/EmbeddingKernels.h"
 #include "Utilities/TensorOperations/Cub/CubDevicePrimitives.h"
 #include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
+#include "Utilities/TensorOperations/Copy/StridedCopy.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/BucketedCublasGemm.h"
@@ -271,7 +274,12 @@ struct CompiledRmsNorm {
                                                        : RaggedPartitionRequirement::NONE;
     }
 
-    [[nodiscard]] CudnnRmsNormDescriptor descriptorFor(const Tensor& input, const Tensor& scale, const Tensor& output) const;
+    // leading_outer: build the descriptor for only the first leading_outer rows (a capacity bucket run
+    // on the full-capacity tensors); all rows when unset.
+    [[nodiscard]] CudnnRmsNormDescriptor descriptorFor(const Tensor& input,
+                                                       const Tensor& scale,
+                                                       const Tensor& output,
+                                                       std::optional<uint64_t> leading_outer = std::nullopt) const;
 };
 
 struct CompiledLayerNorm {
@@ -294,10 +302,13 @@ struct CompiledLayerNorm {
                                                        : RaggedPartitionRequirement::NONE;
     }
 
+    // leading_outer: build the descriptor for only the first leading_outer rows (a capacity bucket run
+    // on the full-capacity tensors); all rows when unset.
     [[nodiscard]] CudnnLayerNormDescriptor descriptorFor(const Tensor& input,
                                                          const Tensor& scale,
                                                          const Tensor& bias,
-                                                         const Tensor& output) const;
+                                                         const Tensor& output,
+                                                         std::optional<uint64_t> leading_outer = std::nullopt) const;
 };
 
 // Immutable expression/descriptor contract for one LayerNorm backward pass.
@@ -359,11 +370,14 @@ struct CompiledRmsNormBackward {
                                                        : RaggedPartitionRequirement::NONE;
     }
 
+    // leading_outer: build the descriptor for only the first leading_outer rows (a capacity bucket run
+    // on the full-capacity tensors); all rows when unset.
     [[nodiscard]] CudnnRmsNormDescriptor descriptorFor(const Tensor& input,
                                                        const Tensor& scale,
                                                        const Tensor& dy,
                                                        const Tensor& dx,
-                                                       const Tensor& dscale) const;
+                                                       const Tensor& dscale,
+                                                       std::optional<uint64_t> leading_outer = std::nullopt) const;
     [[nodiscard]] DataType outputDTypeFor(ExprOp op) const;
 };
 
@@ -525,16 +539,19 @@ void clearCudnnFrontendConvolutionSelectionCacheForTests();
 
 class StampedEquation {
    public:
+    // numElements: the element count the kernel covers, by default every output element (see EquationRunner::run).
     StampedEquation(std::shared_ptr<CompiledEquation> compiledEquation,
                     std::vector<std::string> inputNames,
                     const std::vector<RuntimeInputValue>& inputs,
                     const std::vector<Tensor>& outputs,
-                    const Stream& stream)
+                    const Stream& stream,
+                    std::optional<uint64_t> numElements = std::nullopt)
         : compiledEquation(std::move(compiledEquation)),
           inputNames(std::move(inputNames)),
           inputs(inputs),
           outputs(outputs),
-          stream(stream) {
+          stream(stream),
+          numElements(numElements) {
         if (this->compiledEquation == nullptr) {
             throw std::invalid_argument("StampedEquation requires a compiled equation.");
         }
@@ -558,6 +575,9 @@ class StampedEquation {
         for (const RuntimeInputValue& input : inputs) {
             if (std::holds_alternative<Tensor>(input)) {
                 return std::get<Tensor>(input).getPlacement().getDeviceNum();
+            }
+            if (const StridedSpan* span = std::get_if<StridedSpan>(&input)) {
+                return span->getPlacement().getDeviceNum();
             }
         }
         throw std::runtime_error("StampedEquation::gpuNum() requires at least one input or output tensor.");
@@ -588,7 +608,7 @@ class StampedEquation {
                                                             const std::vector<uint64_t>& squeeze_axes);
 
     static std::shared_ptr<BuiltReduction> buildReduction(const std::shared_ptr<CompiledReduction>& compiled_reduction,
-                                                          const Tensor& input,
+                                                          const StridedSpan& input,
                                                           int device_num);
 
     static std::shared_ptr<BuiltReduction> buildReduction(ExprOp op,
@@ -598,33 +618,37 @@ class StampedEquation {
                                                           DataType output_dtype,
                                                           DataType compute_dtype,
                                                           ReductionResultKind result_kind,
-                                                          const Tensor& input,
+                                                          const StridedSpan& input,
                                                           int device_num);
 
     static std::unique_ptr<BuiltSoftmax> buildSoftmax(const std::shared_ptr<CompiledSoftmax>& compiled_softmax,
                                                       const Tensor& input,
                                                       const Tensor& output);
 
+    // lhs / rhs: whole tensors (which convert) or, for a plain MATMUL, strided spans of them.
     static std::unique_ptr<BuiltMatmul> buildMatmul(const std::shared_ptr<CompiledMatmul>& compiled_matmul,
-                                                    const Tensor& lhs,
-                                                    const Tensor& rhs,
+                                                    const StridedSpan& lhs,
+                                                    const StridedSpan& rhs,
                                                     const std::optional<Tensor>& addend,
                                                     const Tensor& output,
                                                     int device_num,
                                                     const std::optional<Tensor>& epilogue_aux = std::nullopt,
-                                                    const std::optional<Tensor>& bgrad_output = std::nullopt);
+                                                    const std::optional<Tensor>& bgrad_output = std::nullopt,
+                                                    const std::optional<MatmulOperands>& group = std::nullopt);
 
+    // The cuDNN graph and its autotune buffers use each operand's dims; the autotuner's real-memory run uses its
+    // storage. A whole Tensor converts to an operand.
     static std::shared_ptr<BuiltConvolution> buildConvolution(const std::shared_ptr<CompiledConvolution>& compiled_convolution,
-                                                              const Tensor& input,
-                                                              const Tensor& filter,
-                                                              const Tensor& output,
+                                                              const ConvolutionOperand& input,
+                                                              const ConvolutionOperand& filter,
+                                                              const ConvolutionOperand& output,
                                                               const Stream& stream,
                                                               int device_num);
     static std::shared_ptr<BuiltConvolution> buildConvolutionBackward(
         const std::shared_ptr<CompiledConvolutionBackward>& compiled_convolution_backward,
-        const Tensor& input,
-        const Tensor& grad_output,
-        const Tensor& output,
+        const ConvolutionOperand& input,
+        const ConvolutionOperand& grad_output,
+        const ConvolutionOperand& output,
         const Stream& stream,
         int device_num);
 
@@ -638,6 +662,7 @@ class StampedEquation {
     std::vector<RuntimeInputValue> inputs;
     std::vector<Tensor> outputs;
     Stream stream;
+    std::optional<uint64_t> numElements;
 };
 
 class StampedCudaKernel {
@@ -702,7 +727,7 @@ class StampedReduction {
     }
 
     StampedReduction(std::shared_ptr<BuiltReduction> built,
-                     const Tensor& input,
+                     const StridedSpan& input,
                      const Tensor& output,
                      const Stream& stream);
 
@@ -723,7 +748,7 @@ class StampedArgMinMax {
     Tensor getOutputTensor() const { return output; }
 
     StampedArgMinMax(std::shared_ptr<BuiltReduction> built,
-                     const Tensor& input,
+                     const StridedSpan& input,
                      const Tensor& output,
                      const Stream& stream);
 
@@ -1241,6 +1266,26 @@ class StampedSanitizePackedTail {
     Stream stream;
 };
 
+// Copies a strided span into a dense tensor of its own, for a consumer that reads dense storage (every stage but fused
+// kernels, plain MATMUL operands and reductions). Expression inserts one per span value that such a consumer reads, and
+// shares it among them.
+class StampedDenseCopy {
+   public:
+    StampedDenseCopy(const StridedSpan& source, const Tensor& destination, const Stream& stream);
+
+    void run() { runOn(stream); }
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const { return destination.getPlacement().getDeviceNum(); }
+    Tensor getOutputTensor() const { return destination; }
+
+   private:
+    const StridedSpan source;
+    Tensor destination;
+    Stream stream;
+    DenseCopyPlan plan;  // 1388: stamped once (StridedCopy.h)
+};
+
 class StampedRmsNorm {
    public:
     void run();
@@ -1391,10 +1436,11 @@ class StampedMatmul {
     std::optional<Tensor> getEpilogueAuxTensor() const { return epilogue_aux; }
     std::optional<Tensor> getBiasGradientTensor() const { return bgrad_output; }
 
+    // lhs / rhs: whole tensors (which convert) or, for a plain cuBLASLt MATMUL, strided spans of them.
     StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
                   std::unique_ptr<BuiltMatmul> built,
-                  const Tensor& lhs,
-                  const Tensor& rhs,
+                  const StridedSpan& lhs,
+                  const StridedSpan& rhs,
                   const std::optional<Tensor>& addend,
                   const Tensor& output,
                   const Stream& stream,
@@ -1410,7 +1456,8 @@ class StampedMatmul {
                   std::optional<Tensor> epilogue_aux = std::nullopt,
                   std::optional<Tensor> bgrad_output = std::nullopt,
                   std::optional<Tensor> row_partition_offsets = std::nullopt,
-                  bool packed_tails_prepared_externally = false);
+                  bool packed_tails_prepared_externally = false,
+                  const std::optional<MatmulOperands>& group = std::nullopt);
 
     [[nodiscard]] std::optional<std::string> alphaRuntimeName() const { return alpha_runtime_name; }
     [[nodiscard]] std::optional<std::string> betaRuntimeName() const { return beta_runtime_name; }
@@ -1434,6 +1481,13 @@ class StampedMatmul {
     const Tensor rhs;
     const std::optional<Tensor> addend;
     Tensor output;
+    // What cuBLASLt is launched on: the whole lhs, rhs, C (the matrix addend, else the output) and output tensors, or,
+    // for one group of a grouped MATMUL, the spans of them the group addresses (lhs/rhs/output above stay the whole
+    // tensors). Built once here so a launch converts nothing.
+    const TensorSpan lhs_operand;
+    const TensorSpan rhs_operand;
+    const TensorSpan output_operand;
+    const TensorSpan c_operand;
     const std::optional<Tensor> epilogue_aux;
     const std::optional<Tensor> bgrad_output;
     const std::optional<Tensor> row_partition_offsets;
@@ -1677,23 +1731,23 @@ class StampedConvolution {
 
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
-    Tensor getOutputTensor() const { return output; }
+    Tensor getOutputTensor() const { return output.storage.tensor; }
     [[nodiscard]] CudnnFrontendConvolutionOwnershipDiagnostic ownershipDiagnostic() const;
 
     StampedConvolution(std::shared_ptr<CompiledConvolution> compiled,
                        std::shared_ptr<BuiltConvolution> built,
-                       const Tensor& input,
-                       const Tensor& filter,
-                       const Tensor& output,
+                       const ConvolutionOperand& input,
+                       const ConvolutionOperand& filter,
+                       const ConvolutionOperand& output,
                        const Stream& stream,
                        std::optional<Tensor> workspace);
 
    private:
     const std::shared_ptr<CompiledConvolution> compiled_convolution;
     const std::shared_ptr<BuiltConvolution> built_convolution;
-    const Tensor input;
-    const Tensor filter;
-    Tensor output;
+    const ConvolutionOperand input;
+    const ConvolutionOperand filter;
+    const ConvolutionOperand output;
     Stream stream;
     const std::optional<Tensor> workspace;
 };
@@ -1705,23 +1759,23 @@ class StampedConvolutionBackward {
 
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
-    Tensor getOutputTensor() const { return output; }
+    Tensor getOutputTensor() const { return output.storage.tensor; }
     [[nodiscard]] CudnnFrontendConvolutionOwnershipDiagnostic ownershipDiagnostic() const;
 
     StampedConvolutionBackward(std::shared_ptr<CompiledConvolutionBackward> compiled,
                                std::shared_ptr<BuiltConvolution> built,
-                               const Tensor& input,
-                               const Tensor& grad_output,
-                               const Tensor& output,
+                               const ConvolutionOperand& input,
+                               const ConvolutionOperand& grad_output,
+                               const ConvolutionOperand& output,
                                const Stream& stream,
                                std::optional<Tensor> workspace);
 
    private:
     const std::shared_ptr<CompiledConvolutionBackward> compiled_convolution_backward;
     const std::shared_ptr<BuiltConvolution> built_convolution;
-    const Tensor input;
-    const Tensor grad_output;
-    Tensor output;
+    const ConvolutionOperand input;
+    const ConvolutionOperand grad_output;
+    const ConvolutionOperand output;
     Stream stream;
     const std::optional<Tensor> workspace;
 };
@@ -1770,7 +1824,7 @@ class StampedReduceMinMaxBackward {
     [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
 
     StampedReduceMinMaxBackward(std::shared_ptr<BuiltReduction> built,
-                                const Tensor& input,
+                                const StridedSpan& input,
                                 const Tensor& grad_output,
                                 const Tensor& output,
                                 const Tensor& indices,
@@ -1786,7 +1840,9 @@ class StampedReduceMinMaxBackward {
 
    private:
     const std::shared_ptr<BuiltReduction> built_reduction;
-    const Tensor input;
+    // The dense variant re-reduces its forward input in place (a span reads like a tensor); the segmented one reads a
+    // dense tensor.
+    const StridedSpan input;
     const Tensor grad_output;
     Tensor output;
     const Tensor indices;
@@ -1945,7 +2001,8 @@ struct StampedExecutionStage {
         ReduceMinMaxBackward,
         ScanMinMaxBackward,
         Conditional,
-        RaggedConv1dCausalBackwardFilter
+        RaggedConv1dCausalBackwardFilter,
+        DenseCopy
     };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
@@ -2011,6 +2068,8 @@ struct StampedExecutionStage {
                 return "ScanMinMaxBackward";
             case Kind::Conditional:
                 return "Conditional";
+            case Kind::DenseCopy:
+                return "DenseCopy";
         }
         return "<unknown>";
     }
@@ -2077,6 +2136,7 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedReduceMinMaxBackward> reduce_minmax_backward = nullptr;
     const std::shared_ptr<StampedScanMinMaxBackward> scan_minmax_backward = nullptr;
     const std::shared_ptr<StampedConditional> conditional = nullptr;
+    const std::shared_ptr<StampedDenseCopy> dense_copy = nullptr;
 
     explicit StampedExecutionStage(
         const std::shared_ptr<StampedEquation>& fused,
@@ -2249,6 +2309,13 @@ struct StampedExecutionStage {
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(sanitize_padded_ragged_tail->gpuNum()),
           sanitize_padded_ragged_tail(sanitize_padded_ragged_tail) {}
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedDenseCopy>& dense_copy,
+                                   std::vector<uint32_t> dependency_stage_indices = {})
+        : kind(Kind::DenseCopy),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(dense_copy->gpuNum()),
+          dense_copy(dense_copy) {}
 
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedRmsNorm>& rms_norm,
@@ -2885,6 +2952,9 @@ struct StampedExecutionStage {
         } else if (kind == Kind::ScanMinMaxBackward) {
             THOR_THROW_IF_FALSE(scan_minmax_backward != nullptr);
             scan_minmax_backward->runOn(run_stream);
+        } else if (kind == Kind::DenseCopy) {
+            THOR_THROW_IF_FALSE(dense_copy != nullptr);
+            dense_copy->runOn(run_stream);
         } else if (kind == Kind::Conditional) {
             THOR_THROW_IF_FALSE(conditional != nullptr);
             if (runtime_scalars.empty())
@@ -2920,8 +2990,9 @@ struct StampedExecutionSchedule {
 // explicit output-ownership requirement. When a producer cannot write that
 // destination directly, materialize the logical value after all stages complete.
 struct StampedOutputMaterialization {
-    Tensor source;
+    StridedSpan source;
     Tensor destination;
+    DenseCopyPlan plan = {};  // 1388: stamped by StampedExecutionPlan (StridedCopy.h)
 };
 
 class StampedExecutionPlan {
@@ -2939,7 +3010,10 @@ class StampedExecutionPlan {
           retained_forward_values(std::move(retained_forward_values)),
           retained_forward_epilogue_aux_values(std::move(retained_forward_epilogue_aux_values)),
           execution_schedule(
-              detail::buildStampedExecutionSchedule(this->steps, static_cast<uint32_t>(stream.getGpuNum()))) {}
+              detail::buildStampedExecutionSchedule(this->steps, static_cast<uint32_t>(stream.getGpuNum()))) {
+        for (StampedOutputMaterialization& materialization : this->output_materializations)
+            materialization.plan = planCopyToDense(materialization.source, materialization.destination);
+    }
 
     void run();
     void run(const std::unordered_map<std::string, float>& runtime_scalars);

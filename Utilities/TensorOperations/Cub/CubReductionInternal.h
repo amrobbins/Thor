@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Implementation/Tensor/StridedSpan.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Cub/CubReductionStageSemantics.h"
 #include "Utilities/TensorOperations/Cub/Fp8KR/Fp8KRSegments.h"
@@ -68,8 +69,8 @@ struct CubKernelOccupancyInfo {
  * P8/CTA64. ABS/Square compositions use the typed packet kernel, minus the accepted pruned specializations.
  */
 void launchKParallelTiledStage(const CubReductionStageSemantics& semantics,
-                               const Tensor& input,
-                               Tensor& stage_output,
+                               const StridedSpan& input,
+                               const StridedSpan& stage_output,
                                const CubReductionGeometry& geometry,
                                const KParallelTiledStagePlan& plan,
                                float output_scale,
@@ -102,8 +103,8 @@ void launchKParallelTiledStage(const CubReductionStageSemantics& semantics,
                                         uint32_t packet_bytes, uint32_t block_threads, uint64_t shards_per_output);
 
 void launchFp32AlignedKStage(const CubReductionStageSemantics& semantics,
-                             const Tensor& input,
-                             Tensor& stage_output,
+                             const StridedSpan& input,
+                             const StridedSpan& stage_output,
                              const CubReductionGeometry& geometry,
                              uint32_t packet_bytes,
                              uint32_t block_threads,
@@ -122,8 +123,8 @@ void launchFp32AlignedKStage(const CubReductionStageSemantics& semantics,
                                        uint32_t packet_bytes, uint32_t block_threads, uint64_t shards_per_output);
 
 void launchF16AlignedKStage(const CubReductionStageSemantics& semantics,
-                            const Tensor& input,
-                            Tensor& stage_output,
+                            const StridedSpan& input,
+                            const StridedSpan& stage_output,
                             const CubReductionGeometry& geometry,
                             uint32_t packet_bytes,
                             uint32_t block_threads,
@@ -146,9 +147,9 @@ void launchF16AlignedKStage(const CubReductionStageSemantics& semantics,
 
 [[nodiscard]] uint64_t fp32ArgPackedScratchBytes(uint64_t outer_size, uint64_t shards, uint64_t inner_size);
 
-void launchFp32AlignedKArg(const Tensor& input,
-                           Tensor* value_output,
-                           Tensor* index_output,
+void launchFp32AlignedKArg(const StridedSpan& input,
+                           const StridedSpan* value_output,
+                           const StridedSpan* index_output,
                            const CubReductionGeometry& geometry,
                            uint32_t packet_bytes,
                            uint32_t block_threads,
@@ -168,9 +169,9 @@ void launchFp32AlignedKArg(const Tensor& input,
 [[nodiscard]] bool f16AlignedKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
                                           uint32_t packet_bytes, uint32_t block_threads, uint64_t shards_per_output);
 
-void launchF16AlignedKArg(const Tensor& input,
-                          Tensor* value_output,
-                          Tensor* index_output,
+void launchF16AlignedKArg(const StridedSpan& input,
+                          const StridedSpan* value_output,
+                          const StridedSpan* index_output,
                           const CubReductionGeometry& geometry,
                           uint32_t packet_bytes,
                           uint32_t block_threads,
@@ -187,8 +188,8 @@ void launchF16AlignedKArg(const Tensor& input,
  *  begins at s * uniform_rows_per_shard, or with 0 at the balanced split of R into `shards`. FP8's per-output kernel,
  *  or its shard-split kernel for few outputs with many shards (fp8ArgPackedContinuationSplitsShards). */
 void launchFp32ArgPackedContinuation(const uint64_t* packed_partials,
-                                     Tensor* value_output,
-                                     Tensor* index_output,
+                                     const StridedSpan* value_output,
+                                     const StridedSpan* index_output,
                                      uint64_t outer_size,
                                      uint64_t reduction_size,
                                      uint64_t inner_size,
@@ -207,8 +208,8 @@ void launchFp32ArgPackedContinuation(const uint64_t* packed_partials,
 [[nodiscard]] uint64_t fp32ArgWideScratchBytes(uint64_t outer_size, uint64_t shards, uint64_t inner_size);
 
 void launchFp32ArgWideContinuation(void* wide_scratch,
-                                   Tensor* value_output,
-                                   Tensor* index_output,
+                                   const StridedSpan* value_output,
+                                   const StridedSpan* index_output,
                                    uint64_t outer_size,
                                    uint64_t shards,
                                    uint64_t inner_size,
@@ -217,10 +218,10 @@ void launchFp32ArgWideContinuation(void* wide_scratch,
 
 /** 1208: the carried-index AlignedK ARG twin: launchFp32AlignedKArg's configurations (fp32AlignedKSupports), the carried
  *  index aligned like its packets (at most 16 bytes). */
-void launchFp32AlignedKCarriedArg(const Tensor& input,
-                                  const Tensor& carried_index,
-                                  Tensor* value_output,
-                                  Tensor* index_output,
+void launchFp32AlignedKCarriedArg(const StridedSpan& input,
+                                  const StridedSpan& carried_index,
+                                  const StridedSpan* value_output,
+                                  const StridedSpan* index_output,
                                   const CubReductionGeometry& geometry,
                                   uint32_t packet_bytes,
                                   uint32_t block_threads,
@@ -241,8 +242,8 @@ void launchFp32AlignedKCarriedArg(const Tensor& input,
  * Any other row depth is not compiled and fails with std::logic_error (occupancy: absent candidate).
  */
 void launchFp8GeneralRParallelKTileRotatedCalibrationFirstStage(
-    const Tensor& input,
-    Tensor& fp32_partials,
+    const StridedSpan& input,
+    const StridedSpan& fp32_partials,
     const CubReductionGeometry& geometry,
     bool exact_tile,
     uint64_t rows_per_shard,
@@ -266,8 +267,8 @@ inline constexpr uint32_t FP32_RUNTIME_K_ROTATED_TILE_COMPONENTS = 125;
 [[nodiscard]] bool fp32RuntimeKRotatedSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
                                                uint64_t rows_per_shard);
 
-void launchFp32RuntimeKRotatedFirstStage(const Tensor& input,
-                                         Tensor& fp32_partials,
+void launchFp32RuntimeKRotatedFirstStage(const StridedSpan& input,
+                                         const StridedSpan& fp32_partials,
                                          const CubReductionGeometry& geometry,
                                          uint64_t rows_per_shard,
                                          uint64_t shards_per_output,
@@ -285,9 +286,9 @@ void launchFp32RuntimeKRotatedFirstStage(const Tensor& input,
 [[nodiscard]] bool fp32RuntimeKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
                                            uint64_t rows_per_shard);
 
-void launchFp32RuntimeKArg(const Tensor& input,
-                           Tensor* value_output,
-                           Tensor* index_output,
+void launchFp32RuntimeKArg(const StridedSpan& input,
+                           const StridedSpan* value_output,
+                           const StridedSpan* index_output,
                            const CubReductionGeometry& geometry,
                            uint64_t rows_per_shard,
                            uint64_t* packed_scratch,
@@ -304,9 +305,9 @@ void launchFp32RuntimeKArg(const Tensor& input,
 [[nodiscard]] bool f16RuntimeKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
                                           uint64_t rows_per_shard);
 
-void launchF16RuntimeKArg(const Tensor& input,
-                          Tensor* value_output,
-                          Tensor* index_output,
+void launchF16RuntimeKArg(const StridedSpan& input,
+                          const StridedSpan* value_output,
+                          const StridedSpan* index_output,
                           const CubReductionGeometry& geometry,
                           uint64_t rows_per_shard,
                           uint64_t* packed_scratch,
@@ -322,10 +323,10 @@ void launchF16RuntimeKArg(const Tensor& input,
 [[nodiscard]] bool fp32RuntimeKCarriedArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
                                                   uint64_t rows_per_shard);
 
-void launchFp32RuntimeKCarriedArg(const Tensor& input,
-                                  const Tensor& carried_index,
-                                  Tensor* value_output,
-                                  Tensor* index_output,
+void launchFp32RuntimeKCarriedArg(const StridedSpan& input,
+                                  const StridedSpan& carried_index,
+                                  const StridedSpan* value_output,
+                                  const StridedSpan* index_output,
                                   const CubReductionGeometry& geometry,
                                   uint64_t rows_per_shard,
                                   void* wide_scratch,
@@ -350,8 +351,8 @@ inline constexpr uint32_t F16_RUNTIME_K_ROTATED_TILE_COMPONENTS = 249;
 [[nodiscard]] bool f16RuntimeKRotatedSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
                                               uint64_t rows_per_shard);
 
-void launchF16RuntimeKRotatedFirstStage(const Tensor& input,
-                                        Tensor& fp32_partials,
+void launchF16RuntimeKRotatedFirstStage(const StridedSpan& input,
+                                        const StridedSpan& fp32_partials,
                                         const CubReductionGeometry& geometry,
                                         uint64_t rows_per_shard,
                                         uint64_t shards_per_output,
@@ -372,7 +373,7 @@ void launchF16RuntimeKRotatedFirstStage(const Tensor& input,
  * This does not change the existing production planner or selector.
  */
 void launchFp8DeepRSmallKRetainedFirstStage(
-    const CubReductionStageSemantics& semantics, const Tensor& input, Tensor& fp32_partials,
+    const CubReductionStageSemantics& semantics, const StridedSpan& input, const StridedSpan& fp32_partials,
     const CubReductionGeometry& geometry, uint64_t rows_per_shard, uint64_t shards_per_output,
     Stream& stream);
 
@@ -388,7 +389,7 @@ void launchFp8DeepRSmallKRetainedFirstStage(
                                            uint64_t rows_per_shard);
 
 void launchFp32DeepRSmallKRetainedFirstStage(
-    const CubReductionStageSemantics& semantics, const Tensor& input, Tensor& fp32_partials,
+    const CubReductionStageSemantics& semantics, const StridedSpan& input, const StridedSpan& fp32_partials,
     const CubReductionGeometry& geometry, uint64_t rows_per_shard, uint64_t shards_per_output,
     Stream& stream);
 
@@ -403,7 +404,7 @@ void launchFp32DeepRSmallKRetainedFirstStage(
                                           uint64_t rows_per_shard);
 
 void launchF16DeepRSmallKRetainedFirstStage(
-    const CubReductionStageSemantics& semantics, const Tensor& input, Tensor& fp32_partials,
+    const CubReductionStageSemantics& semantics, const StridedSpan& input, const StridedSpan& fp32_partials,
     const CubReductionGeometry& geometry, uint64_t rows_per_shard, uint64_t shards_per_output,
     Stream& stream);
 
@@ -420,8 +421,8 @@ void launchF16DeepRSmallKRetainedFirstStage(
  * Since P5-J2 it runs the bucketed unit for (outputs per warp, packet bytes, K's
  * bucket): only packet_bytes 16 has units, and a request without one throws. */
 void launchFp8GeneralRParallelRCooperativeCalibrationComplete(
-    const Tensor& input,
-    Tensor& output,
+    const StridedSpan& input,
+    const StridedSpan& output,
     const CubReductionGeometry& geometry,
     uint32_t outputs_per_warp,
     uint32_t warps_per_output,
@@ -442,7 +443,10 @@ void launchFp8GeneralRParallelRCooperativeCalibrationComplete(
  * through launchFp8GeneralRParallelRCooperativeCalibrationComplete). A unit is one compiled kernel shape: outputs per
  * warp (1/2/4/8), packet bytes (16), components-per-lane bucket (1/2/4/8/16) and group loop form.
  * fp8OneWindowRuntimeKUnits(K) lists the compiled units whose bucket holds K. warps_per_output is 1/2/4/8 for O1
- * and 1 otherwise. Output must hold outer x K elements (any dims). */
+ * and 1 otherwise. Output must hold outer x K elements (any dims).
+ * 1381: the VALUE launchers (FP8, FP32, FP16 / BF16) read any element-aligned input base. Off a 16-byte boundary every
+ * row group carries a prefix, so K is at most the window less the worst prefix (Fp8RK::oneWindowUnalignedCapacity) and
+ * the input at most 2^32 - 16 bytes; the launch throws otherwise. */
 struct Fp8OneWindowRuntimeKUnit {
     uint32_t outputs_per_warp;
     uint32_t packet_bytes;
@@ -453,8 +457,8 @@ struct Fp8OneWindowRuntimeKUnit {
 
 [[nodiscard]] std::vector<Fp8OneWindowRuntimeKUnit> fp8OneWindowRuntimeKUnits(uint64_t inner_size);
 
-void launchFp8OneWindowRuntimeKComplete(const Tensor& input,
-                                        Tensor& output,
+void launchFp8OneWindowRuntimeKComplete(const StridedSpan& input,
+                                        const StridedSpan& output,
                                         const CubReductionGeometry& geometry,
                                         const Fp8OneWindowRuntimeKUnit& unit,
                                         uint32_t warps_per_output,
@@ -472,11 +476,11 @@ void launchFp8OneWindowRuntimeKComplete(const Tensor& input,
 /** 1185: the OneWindow kernel on FP32 input (plans/Thor_FP32_Dense_Reduction_Plan, phase 5). The
  *  units are FP8's whose components-per-lane bucket FP32 reaches (<= 4: a 16-byte lane packet holds 4 FP32), so K <=
  *  125 / 61 / 29 / 13 at O1 / O2 / O4 / O8. fp32OneWindowRuntimeKUnits(K) lists the units whose bucket holds K. The
- *  input is 16-byte aligned and at most 2^32 - 1 bytes; MIN / MAX fold with the FP32 masks. */
+ *  input is at most 2^32 - 1 bytes (1381: any 4-byte aligned base, see above); MIN / MAX fold with the FP32 masks. */
 [[nodiscard]] std::vector<Fp8OneWindowRuntimeKUnit> fp32OneWindowRuntimeKUnits(uint64_t inner_size);
 
-void launchFp32OneWindowRuntimeKComplete(const Tensor& input,
-                                         Tensor& output,
+void launchFp32OneWindowRuntimeKComplete(const StridedSpan& input,
+                                         const StridedSpan& output,
                                          const CubReductionGeometry& geometry,
                                          const Fp8OneWindowRuntimeKUnit& unit,
                                          uint32_t warps_per_output,
@@ -492,12 +496,13 @@ void launchFp32OneWindowRuntimeKComplete(const Tensor& input,
 
 /** 1240: the OneWindow kernel on FP16 / BF16 input (plans/Thor_FP16_BF16_Dense_Reduction_Plan, phase 5). The units
  *  are FP8's whose bucket the 2-byte formats reach (<= 8: a 16-byte lane packet holds 8 elements; 14 units), so K <=
- *  249 / 121 / 57 / 25 at O1 / O2 / O4 / O8, and the 8-element multiples 256 / 128 / 64 / 32. The input is 16-byte
- *  aligned and at most 2^32 - 1 bytes; MIN / MAX fold with the 2-byte masks (fp16CompleteExtremumFold). Not routed. */
+ *  249 / 121 / 57 / 25 at O1 / O2 / O4 / O8, and the 8-element multiples 256 / 128 / 64 / 32 (a 16-byte aligned base
+ *  only). The input is at most 2^32 - 1 bytes (1381: any 2-byte aligned base, see above); MIN / MAX fold with the
+ *  2-byte masks (fp16CompleteExtremumFold). */
 [[nodiscard]] std::vector<Fp8OneWindowRuntimeKUnit> f16OneWindowRuntimeKUnits(uint64_t inner_size);
 
-void launchF16OneWindowRuntimeKComplete(const Tensor& input,
-                                        Tensor& output,
+void launchF16OneWindowRuntimeKComplete(const StridedSpan& input,
+                                        const StridedSpan& output,
                                         const CubReductionGeometry& geometry,
                                         const Fp8OneWindowRuntimeKUnit& unit,
                                         uint32_t warps_per_output,
@@ -520,9 +525,9 @@ void launchF16OneWindowRuntimeKComplete(const Tensor& input,
 [[nodiscard]] bool fp32DeepRSmallKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
                                               uint64_t rows_per_shard);
 
-void launchFp32DeepRSmallKArg(const Tensor& input,
-                              Tensor* value_output,
-                              Tensor* index_output,
+void launchFp32DeepRSmallKArg(const StridedSpan& input,
+                              const StridedSpan* value_output,
+                              const StridedSpan* index_output,
                               const CubReductionGeometry& geometry,
                               uint64_t rows_per_shard,
                               uint64_t* packed_scratch,
@@ -539,9 +544,9 @@ void launchFp32DeepRSmallKArg(const Tensor& input,
 [[nodiscard]] bool f16DeepRSmallKArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
                                              uint64_t rows_per_shard);
 
-void launchF16DeepRSmallKArg(const Tensor& input,
-                             Tensor* value_output,
-                             Tensor* index_output,
+void launchF16DeepRSmallKArg(const StridedSpan& input,
+                             const StridedSpan* value_output,
+                             const StridedSpan* index_output,
                              const CubReductionGeometry& geometry,
                              uint64_t rows_per_shard,
                              uint64_t* packed_scratch,
@@ -555,10 +560,10 @@ void launchF16DeepRSmallKArg(const Tensor& input,
  *  launchFp32DeepRSmallKArg's kernels, ownership and depths (fp32DeepRSmallKSupports: a retained depth with R > depth),
  *  the input and the carried index 16-byte aligned. Wide partials go to `wide_scratch` (fp32ArgWideScratchBytes with
  *  ceil(R / depth) shards, 256-byte aligned) and launchFp32ArgWideContinuation finishes them in the same call. */
-void launchFp32DeepRSmallKCarriedArg(const Tensor& input,
-                                     const Tensor& carried_index,
-                                     Tensor* value_output,
-                                     Tensor* index_output,
+void launchFp32DeepRSmallKCarriedArg(const StridedSpan& input,
+                                     const StridedSpan& carried_index,
+                                     const StridedSpan* value_output,
+                                     const StridedSpan* index_output,
                                      const CubReductionGeometry& geometry,
                                      uint64_t rows_per_shard,
                                      void* wide_scratch,
@@ -571,17 +576,18 @@ void launchFp32DeepRSmallKCarriedArg(const Tensor& input,
 
 /** 1202: the FP32 RK ARG OneWindow twin (phase 6): launchFp32OneWindowRuntimeKComplete's units and
  *  ownership (O1 W1/W2/W4/W8, O2/O4/O8 W1; K <= 125 / 61 / 29 / 13) with one ARG candidate per owned component; Complete
- *  only, R <= 2^31 - 1, input at most 2^32 - 1 bytes and 16-byte aligned. Outputs as launchFp32AlignedKArg's. Not
- *  behind THOR_CUB_ENABLE_FP8_TYPES (its kernel is FP32-only). */
+ *  only, R <= 2^31 - 1, input at most 2^32 - 1 bytes. 1383: any 4-byte aligned base, as the VALUE launcher (off a
+ *  16-byte boundary K is at most Fp8RK::oneWindowUnalignedCapacity and the input 2^32 - 16 bytes; the launch throws
+ *  otherwise). Outputs as launchFp32AlignedKArg's. Not behind THOR_CUB_ENABLE_FP8_TYPES (its kernel is FP32-only). */
 [[nodiscard]] bool fp32OneWindowArgSupports(uint64_t outer_size,
                                             uint64_t reduction_size,
                                             uint64_t inner_size,
                                             const Fp8OneWindowRuntimeKUnit& unit,
                                             uint32_t warps_per_output);
 
-void launchFp32OneWindowArg(const Tensor& input,
-                            Tensor* value_output,
-                            Tensor* index_output,
+void launchFp32OneWindowArg(const StridedSpan& input,
+                            const StridedSpan* value_output,
+                            const StridedSpan* index_output,
                             const CubReductionGeometry& geometry,
                             const Fp8OneWindowRuntimeKUnit& unit,
                             uint32_t warps_per_output,
@@ -595,13 +601,14 @@ void launchFp32OneWindowArg(const Tensor& input,
 
 /** 1250: the OneWindow ARG twin on FP16 / BF16 input (plans/Thor_FP16_BF16_Dense_Reduction_Plan, phase 6; not routed
  *  yet): the 2-byte OneWindow units (f16OneWindowRuntimeKUnits), each element widened to FP32 and given the FP32 key;
- *  Complete, R <= 2^31 - 1, a 16-byte aligned input; outputs as launchFp32OneWindowArg's. */
+ *  Complete, R <= 2^31 - 1; 1383: any 2-byte aligned base, as launchFp32OneWindowArg; outputs as
+ *  launchFp32OneWindowArg's. */
 [[nodiscard]] bool f16OneWindowArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
                                            const Fp8OneWindowRuntimeKUnit& unit, uint32_t warps_per_output);
 
-void launchF16OneWindowArg(const Tensor& input,
-                           Tensor* value_output,
-                           Tensor* index_output,
+void launchF16OneWindowArg(const StridedSpan& input,
+                           const StridedSpan* value_output,
+                           const StridedSpan* index_output,
                            const CubReductionGeometry& geometry,
                            const Fp8OneWindowRuntimeKUnit& unit,
                            uint32_t warps_per_output,
@@ -622,10 +629,10 @@ void launchF16OneWindowArg(const Tensor& input,
                                                    const Fp8OneWindowRuntimeKUnit& unit,
                                                    uint32_t warps_per_output);
 
-void launchFp32OneWindowCarriedArg(const Tensor& input,
-                                   const Tensor& carried_index,
-                                   Tensor* value_output,
-                                   Tensor* index_output,
+void launchFp32OneWindowCarriedArg(const StridedSpan& input,
+                                   const StridedSpan& carried_index,
+                                   const StridedSpan* value_output,
+                                   const StridedSpan* index_output,
                                    const CubReductionGeometry& geometry,
                                    const Fp8OneWindowRuntimeKUnit& unit,
                                    uint32_t warps_per_output,
@@ -642,7 +649,9 @@ void launchFp32OneWindowCarriedArg(const Tensor& input,
  * runtime). Complete only: writes the winning value (FP8/FP16/BF16/FP32 storage, optional) and the index
  * row * domain_stride (UINT32/UINT64, optional) for each of outer x K outputs. NaN propagates; the lowest row wins
  * ties, -0 ties +0. fp8OneWindowArgSupports() is the legality rule shared by selection and launch
- * (R < 2^23, UINT32 element indexing, a compiled unit whose bucket holds K). */
+ * (R < 2^23, UINT32 element indexing, a compiled unit whose bucket holds K). 1383: the launch reads any byte address;
+ * off a 16-byte boundary K is at most Fp8RK::oneWindowUnalignedCapacity and the input 2^32 - 16 bytes (it throws
+ * otherwise; selection: retainedFp8ArgPassInputAlignment). */
 [[nodiscard]] bool fp8OneWindowArgSupports(uint64_t outer_size,
                                            uint64_t reduction_size,
                                            uint64_t inner_size,
@@ -652,16 +661,16 @@ void launchFp32OneWindowCarriedArg(const Tensor& input,
 /** ARG-A3: the RuntimeK PacketComplete argmin/argmax twin: VALUE's persistent [outer, K tile] work items with 1/2/4/8
  * warps per item over R, at most 256 components per tile (8 per lane; fp8PacketCompleteArgTileComponents keeps VALUE's
  * tile up to 256 unless a 256-component tile needs fewer key words per row). Complete: any supported value storage,
- * UINT32/UINT64 index. Requires a 16-byte aligned input base (as the VALUE kernel). */
+ * UINT32/UINT64 index. 1384: any byte address, as the VALUE kernel since 1379 (the row prefixes follow the address). */
 [[nodiscard]] uint32_t fp8PacketCompleteArgTileComponents(uint64_t inner_size, uint32_t value_tile_components);
 [[nodiscard]] bool fp8PacketCompleteArgSupports(uint64_t outer_size,
                                                 uint64_t reduction_size,
                                                 uint64_t inner_size,
                                                 uint32_t warps_per_output,
                                                 uint32_t tile_components);
-void launchFp8PacketCompleteArg(const Tensor& input,
-                                Tensor* value_output,
-                                Tensor* index_output,
+void launchFp8PacketCompleteArg(const StridedSpan& input,
+                                const StridedSpan* value_output,
+                                const StridedSpan* index_output,
                                 const CubReductionGeometry& geometry,
                                 uint32_t warps_per_output,
                                 uint32_t tile_components,
@@ -678,9 +687,9 @@ void launchFp8PacketCompleteArg(const Tensor& input,
                                           uint32_t packet_bytes,
                                           uint32_t cta_threads,
                                           uint64_t shards);
-void launchFp8AlignedKArgPass(const Tensor& input,
-                              Tensor* value_output,
-                              Tensor* index_output,
+void launchFp8AlignedKArgPass(const StridedSpan& input,
+                              const StridedSpan* value_output,
+                              const StridedSpan* index_output,
                               const CubReductionGeometry& geometry,
                               uint32_t packet_bytes,
                               uint32_t cta_threads,
@@ -694,7 +703,7 @@ void launchFp8AlignedKArgPass(const Tensor& input,
  * candidate per partial (key << 24 | shard row << 1 | negative zero, 4 bytes) instead of FP32 value + carried index
  * (8 bytes); launchFp8ArgPackedContinuation reduces them over shards into the requested outputs. Shard s begins at
  * s * uniform_rows_per_shard, or at VALUE's balanced split when uniform_rows_per_shard is 0 (AlignedK). */
-void launchFp8DeepRSmallKArgFirstStagePacked(const Tensor& input,
+void launchFp8DeepRSmallKArgFirstStagePacked(const StridedSpan& input,
                                              uint32_t* packed_partials,
                                              const CubReductionGeometry& geometry,
                                              uint64_t rows_per_shard,
@@ -721,8 +730,8 @@ struct Fp8ArgPackedSplitLayout {
 };
 [[nodiscard]] Fp8ArgPackedSplitLayout fp8ArgPackedSplitLayout(uint64_t inner_size, uint64_t shards);
 void launchFp8ArgPackedContinuation(const uint32_t* packed_partials,
-                                    Tensor* value_output,
-                                    Tensor* index_output,
+                                    const StridedSpan* value_output,
+                                    const StridedSpan* index_output,
                                     DataType input_dtype,
                                     uint64_t outer_size,
                                     uint64_t reduction_size,
@@ -743,9 +752,9 @@ void launchFp8ArgPackedContinuation(const uint32_t* packed_partials,
                                           uint64_t inner_size,
                                           uint64_t rows_per_shard,
                                           uint32_t packet_bytes);
-void launchFp8RuntimeKArgPass(const Tensor& input,
-                              Tensor* value_output,
-                              Tensor* index_output,
+void launchFp8RuntimeKArgPass(const StridedSpan& input,
+                              const StridedSpan* value_output,
+                              const StridedSpan* index_output,
                               const CubReductionGeometry& geometry,
                               uint64_t rows_per_shard,
                               uint32_t packet_bytes,
@@ -761,9 +770,9 @@ void launchFp8RuntimeKArgPass(const Tensor& input,
                                              uint64_t inner_size,
                                              uint64_t rows_per_shard);
 
-void launchFp8DeepRSmallKArgFirstStage(const Tensor& input,
-                                       Tensor& value_partials,
-                                       Tensor& index_partials,
+void launchFp8DeepRSmallKArgFirstStage(const StridedSpan& input,
+                                       const StridedSpan& value_partials,
+                                       const StridedSpan& index_partials,
                                        const CubReductionGeometry& geometry,
                                        uint64_t rows_per_shard,
                                        uint64_t shards,
@@ -771,9 +780,9 @@ void launchFp8DeepRSmallKArgFirstStage(const Tensor& input,
                                        uint64_t domain_stride,
                                        Stream& stream);
 
-void launchFp8OneWindowArgComplete(const Tensor& input,
-                                   Tensor* value_output,
-                                   Tensor* index_output,
+void launchFp8OneWindowArgComplete(const StridedSpan& input,
+                                   const StridedSpan* value_output,
+                                   const StridedSpan* index_output,
                                    const CubReductionGeometry& geometry,
                                    const Fp8OneWindowRuntimeKUnit& unit,
                                    uint32_t warps_per_output,
@@ -785,8 +794,8 @@ void launchFp8OneWindowArgComplete(const Tensor& input,
 /** Retained RuntimeK PacketP16 Complete kernel. K tiles and warp ownership are
  * runtime geometry; finalizer, scale, and output conversion occur on the completed result. */
 void launchFp8GeneralRParallelKTileRCooperativeCalibrationComplete(
-    const Tensor& input,
-    Tensor& output,
+    const StridedSpan& input,
+    const StridedSpan& output,
     const CubReductionGeometry& geometry,
     uint32_t warps_per_output,
     uint32_t tile_components,
@@ -808,8 +817,8 @@ inline constexpr uint32_t FP32_PACKET_COMPLETE_MAX_TILE_COMPONENTS = 124;
 [[nodiscard]] bool fp32PacketCompleteSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
                                               uint32_t warps_per_output, uint32_t tile_components);
 
-void launchFp32PacketComplete(const Tensor& input,
-                              Tensor& output,
+void launchFp32PacketComplete(const StridedSpan& input,
+                              const StridedSpan& output,
                               const CubReductionGeometry& geometry,
                               uint32_t warps_per_output,
                               uint32_t tile_components,
@@ -818,14 +827,14 @@ void launchFp32PacketComplete(const Tensor& input,
                               float output_scale = 1.0f);
 
 /** 1201: the FP32 RK ARG PacketComplete twin (phase 6): launchFp32PacketComplete's topology (W1/W2/W4/W8
- *  warps per [outer, K tile] item, tiles of 1..124 components, a 16-byte aligned input) with one ARG candidate per
- *  component; Complete only, R <= 2^31 - 1. Outputs as launchFp32AlignedKArg's. */
+ *  warps per [outer, K tile] item, tiles of 1..124 components; 1384: any 4-byte aligned base, as the VALUE kernel) with
+ *  one ARG candidate per component; Complete only, R <= 2^31 - 1. Outputs as launchFp32AlignedKArg's. */
 [[nodiscard]] bool fp32PacketCompleteArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
                                                  uint32_t warps_per_output, uint32_t tile_components);
 
-void launchFp32PacketCompleteArg(const Tensor& input,
-                                 Tensor* value_output,
-                                 Tensor* index_output,
+void launchFp32PacketCompleteArg(const StridedSpan& input,
+                                 const StridedSpan* value_output,
+                                 const StridedSpan* index_output,
                                  const CubReductionGeometry& geometry,
                                  uint32_t warps_per_output,
                                  uint32_t tile_components,
@@ -836,14 +845,15 @@ void launchFp32PacketCompleteArg(const Tensor& input,
 [[nodiscard]] CubKernelOccupancyInfo queryFp32PacketCompleteArgOccupancy();
 
 /** 1249: the PacketComplete ARG twin on FP16 / BF16 input (plans/Thor_FP16_BF16_Dense_Reduction_Plan, phase 6; not
- *  routed yet): launchF16PacketComplete's ownership (tiles of 1..248 components, a 16-byte aligned input), each element
- *  widened to FP32 and given the FP32 key; Complete only, R <= 2^31 - 1; outputs as launchFp32PacketCompleteArg's. */
+ *  routed yet): launchF16PacketComplete's ownership (tiles of 1..248 components; 1384: any 2-byte aligned base), each
+ *  element widened to FP32 and given the FP32 key; Complete only, R <= 2^31 - 1; outputs as
+ *  launchFp32PacketCompleteArg's. */
 [[nodiscard]] bool f16PacketCompleteArgSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
                                                 uint32_t warps_per_output, uint32_t tile_components);
 
-void launchF16PacketCompleteArg(const Tensor& input,
-                                Tensor* value_output,
-                                Tensor* index_output,
+void launchF16PacketCompleteArg(const StridedSpan& input,
+                                const StridedSpan* value_output,
+                                const StridedSpan* index_output,
                                 const CubReductionGeometry& geometry,
                                 uint32_t warps_per_output,
                                 uint32_t tile_components,
@@ -866,8 +876,8 @@ inline constexpr uint32_t F16_PACKET_COMPLETE_MAX_TILE_COMPONENTS = 248;
 [[nodiscard]] bool f16PacketCompleteSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size,
                                              uint32_t warps_per_output, uint32_t tile_components);
 
-void launchF16PacketComplete(const Tensor& input,
-                             Tensor& output,
+void launchF16PacketComplete(const StridedSpan& input,
+                             const StridedSpan& output,
                              const CubReductionGeometry& geometry,
                              uint32_t warps_per_output,
                              uint32_t tile_components,
@@ -879,167 +889,9 @@ void launchF16PacketComplete(const Tensor& input,
     DataType input_dtype, CubReductionStageInputTransform transform = CubReductionStageInputTransform::Identity,
     CubReductionStageCombine combine = CubReductionStageCombine::Sum);
 
-size_t querySumReductionBytes(DataType input_dtype,
-                              const void* input,
-                              uint64_t input_elements,
-                              DataType output_dtype,
-                              void* output,
-                              const CubReductionGeometry& geometry,
-                              float output_scale,
-                              const Stream& stream);
-void launchSumReduction(const Tensor& temp_storage,
-                        size_t temp_storage_bytes,
-                        const Tensor& input,
-                        Tensor& output,
-                        const CubReductionGeometry& geometry,
-                        float output_scale,
-                        Stream& stream);
-
-size_t querySumDivideReductionBytes(DataType input_dtype,
-                                    const void* input,
-                                    uint64_t input_elements,
-                                    DataType output_dtype,
-                                    void* output,
-                                    const CubReductionGeometry& geometry,
-                                    uint64_t divisor,
-                                    float output_scale,
-                                    const Stream& stream);
-void launchSumDivideReduction(const Tensor& temp_storage,
-                              size_t temp_storage_bytes,
-                              const Tensor& input,
-                              Tensor& output,
-                              const CubReductionGeometry& geometry,
-                              uint64_t divisor,
-                              float output_scale,
-                              Stream& stream);
-
-size_t querySumSqrtReductionBytes(DataType input_dtype,
-                                  const void* input,
-                                  uint64_t input_elements,
-                                  DataType output_dtype,
-                                  void* output,
-                                  const CubReductionGeometry& geometry,
-                                  float output_scale,
-                                  const Stream& stream);
-void launchSumSqrtReduction(const Tensor& temp_storage,
-                            size_t temp_storage_bytes,
-                            const Tensor& input,
-                            Tensor& output,
-                            const CubReductionGeometry& geometry,
-                            float output_scale,
-                            Stream& stream);
-
-size_t queryProductReductionBytes(DataType input_dtype,
-                              const void* input,
-                              uint64_t input_elements,
-                              DataType output_dtype,
-                              void* output,
-                              const CubReductionGeometry& geometry,
-                              float output_scale,
-                              const Stream& stream);
-void launchProductReduction(const Tensor& temp_storage,
-                        size_t temp_storage_bytes,
-                        const Tensor& input,
-                        Tensor& output,
-                        const CubReductionGeometry& geometry,
-                        float output_scale,
-                        Stream& stream);
-
-size_t queryMeanReductionBytes(DataType input_dtype,
-                              const void* input,
-                              uint64_t input_elements,
-                              DataType output_dtype,
-                              void* output,
-                              const CubReductionGeometry& geometry,
-                              float output_scale,
-                              const Stream& stream);
-void launchMeanReduction(const Tensor& temp_storage,
-                        size_t temp_storage_bytes,
-                        const Tensor& input,
-                        Tensor& output,
-                        const CubReductionGeometry& geometry,
-                        float output_scale,
-                        Stream& stream);
-
-size_t queryL1NormReductionBytes(DataType input_dtype,
-                              const void* input,
-                              uint64_t input_elements,
-                              DataType output_dtype,
-                              void* output,
-                              const CubReductionGeometry& geometry,
-                              float output_scale,
-                              const Stream& stream);
-void launchL1NormReduction(const Tensor& temp_storage,
-                        size_t temp_storage_bytes,
-                        const Tensor& input,
-                        Tensor& output,
-                        const CubReductionGeometry& geometry,
-                        float output_scale,
-                        Stream& stream);
-
-size_t queryL2NormReductionBytes(DataType input_dtype,
-                              const void* input,
-                              uint64_t input_elements,
-                              DataType output_dtype,
-                              void* output,
-                              const CubReductionGeometry& geometry,
-                              float output_scale,
-                              const Stream& stream);
-void launchL2NormReduction(const Tensor& temp_storage,
-                        size_t temp_storage_bytes,
-                        const Tensor& input,
-                        Tensor& output,
-                        const CubReductionGeometry& geometry,
-                        float output_scale,
-                        Stream& stream);
-
-size_t querySumSquaresReductionBytes(DataType input_dtype,
-                                     const void* input,
-                                     uint64_t input_elements,
-                                     DataType output_dtype,
-                                     void* output,
-                                     const CubReductionGeometry& geometry,
-                                     float output_scale,
-                                     const Stream& stream);
-void launchSumSquaresReduction(const Tensor& temp_storage,
-                               size_t temp_storage_bytes,
-                               const Tensor& input,
-                               Tensor& output,
-                               const CubReductionGeometry& geometry,
-                               float output_scale,
-                               Stream& stream);
-
-size_t queryMinReductionBytes(DataType input_dtype,
-                              const void* input,
-                              uint64_t input_elements,
-                              DataType output_dtype,
-                              void* output,
-                              const CubReductionGeometry& geometry,
-                              float output_scale,
-                              const Stream& stream);
-void launchMinReduction(const Tensor& temp_storage,
-                        size_t temp_storage_bytes,
-                        const Tensor& input,
-                        Tensor& output,
-                        const CubReductionGeometry& geometry,
-                        float output_scale,
-                        Stream& stream);
-
-size_t queryMaxReductionBytes(DataType input_dtype,
-                              const void* input,
-                              uint64_t input_elements,
-                              DataType output_dtype,
-                              void* output,
-                              const CubReductionGeometry& geometry,
-                              float output_scale,
-                              const Stream& stream);
-void launchMaxReduction(const Tensor& temp_storage,
-                        size_t temp_storage_bytes,
-                        const Tensor& input,
-                        Tensor& output,
-                        const CubReductionGeometry& geometry,
-                        float output_scale,
-                        Stream& stream);
+// 1393: the per-operation tiled view executors (query / launch Sum, SumDivide, SumSqrt, Product, Mean, L1, L2,
+// SumSquares, Min, Max over the Thor tiled view kernels of CubReductionOperation.cuh, in CubReductionSum.cu and the
+// five other per-op objects) are deleted with those kernels; no stamp has reached them since 1390.
 
 // 1330 (ragged phase 9): the legacy offset-segmented VALUE and ARG kernels, with their query, launch and backend-name
 // functions, are deleted; every segmented stamp runs the ragged kernels (RaggedStampAutotuner.h, raggedRouteSegmented).
@@ -1060,8 +912,8 @@ void launchMaxReduction(const Tensor& temp_storage,
 [[nodiscard]] bool fp8KRValueSupports(const CubReductionStageSemantics& semantics);
 
 void launchFp8KRValueSegments(const CubReductionStageSemantics& semantics,
-                              const Tensor& input,
-                              Tensor& output,
+                              const StridedSpan& input,
+                              const StridedSpan& output,
                               const Fp8KR::Fp8KRSegmentShape& shape,
                               void* scratch,
                               uint64_t scratch_bytes,
@@ -1074,8 +926,8 @@ void launchFp8KRValueSegments(const CubReductionStageSemantics& semantics,
  *  (Fp8KR::retainedKRShapeLegalForElement: no vector Pack); the input must be 4-byte aligned. The FP32 KR
  *  selector picks the shape (plans/Thor_FP32_Dense_Reduction_Plan). */
 void launchFp32KRValueSegments(const CubReductionStageSemantics& semantics,
-                               const Tensor& input,
-                               Tensor& output,
+                               const StridedSpan& input,
+                               const StridedSpan& output,
                                const Fp8KR::Fp8KRSegmentShape& shape,
                                void* scratch,
                                uint64_t scratch_bytes,
@@ -1088,8 +940,8 @@ void launchFp32KRValueSegments(const CubReductionStageSemantics& semantics,
  *  elements per row) and legal for element size 2 (Fp8KR::retainedKRShapeLegalForElement: no vector Pack); the input
  *  must be 2-byte aligned. Not routed in production yet (plans/Thor_FP16_BF16_Dense_Reduction_Plan, phase 2). */
 void launchF16KRValueSegments(const CubReductionStageSemantics& semantics,
-                              const Tensor& input,
-                              Tensor& output,
+                              const StridedSpan& input,
+                              const StridedSpan& output,
                               const Fp8KR::Fp8KRSegmentShape& shape,
                               void* scratch,
                               uint64_t scratch_bytes,
@@ -1102,9 +954,9 @@ void launchF16KRValueSegments(const CubReductionStageSemantics& semantics,
  *  `shape` is in bytes and legal for it (Fp8KR::f16KRArgShapeLegal: no vector Pack); the input is 2-byte aligned;
  *  Split partials take fp8KRScratchBytes(shape, true) bytes. Index = row-local index * domain_stride. Not routed
  *  yet. */
-void launchF16KRArgSegments(const Tensor& input,
-                            Tensor* value_output,
-                            Tensor* index_output,
+void launchF16KRArgSegments(const StridedSpan& input,
+                            const StridedSpan* value_output,
+                            const StridedSpan* index_output,
                             const Fp8KR::Fp8KRSegmentShape& shape,
                             void* scratch,
                             uint64_t scratch_bytes,
@@ -1117,9 +969,9 @@ void launchF16KRArgSegments(const Tensor& input,
  *  key and a 64-bit row-local index). `shape` is in bytes and legal for it (Fp8KR::fp32KRArgShapeLegal); the input is
  *  4-byte aligned; Split partials take fp8KRScratchBytes(shape, true) bytes. Index = row-local index * domain_stride.
  *  (plans/Thor_FP32_Dense_Reduction_Plan). */
-void launchFp32KRArgSegments(const Tensor& input,
-                             Tensor* value_output,
-                             Tensor* index_output,
+void launchFp32KRArgSegments(const StridedSpan& input,
+                             const StridedSpan* value_output,
+                             const StridedSpan* index_output,
                              const Fp8KR::Fp8KRSegmentShape& shape,
                              void* scratch,
                              uint64_t scratch_bytes,
@@ -1137,10 +989,10 @@ void launchFp32KRArgSegments(const Tensor& input,
  *  element count, naturally aligned). The index output holds the composed index carried + row-local position *
  *  row_stride. A Split pass writes wide partials to `scratch` (fp32KRCarriedArgScratchBytes, 256-byte aligned) and
  *  finishes them in the same call (unless PartialsOnly). */
-void launchFp32KRCarriedArgSegments(const Tensor& input,
-                                    const Tensor& carried_index,
-                                    Tensor* value_output,
-                                    Tensor* index_output,
+void launchFp32KRCarriedArgSegments(const StridedSpan& input,
+                                    const StridedSpan& carried_index,
+                                    const StridedSpan* value_output,
+                                    const StridedSpan* index_output,
                                     const Fp8KR::Fp8KRSegmentShape& shape,
                                     void* scratch,
                                     uint64_t scratch_bytes,
@@ -1151,9 +1003,9 @@ void launchFp32KRCarriedArgSegments(const Tensor& input,
 
 /** 1146-1148: retained FP8 R / KR argmin/argmax pass (same families; Split partials are 64-bit wide candidates in
  *  `scratch`, fp8KRScratchBytes(shape, true) bytes). Index = row-local index * domain_stride. */
-void launchFp8KRArgSegments(const Tensor& input,
-                            Tensor* value_output,
-                            Tensor* index_output,
+void launchFp8KRArgSegments(const StridedSpan& input,
+                            const StridedSpan* value_output,
+                            const StridedSpan* index_output,
                             const Fp8KR::Fp8KRSegmentShape& shape,
                             void* scratch,
                             uint64_t scratch_bytes,

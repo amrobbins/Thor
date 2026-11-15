@@ -8,7 +8,6 @@
 #include "Utilities/Common/Stream.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
 #include "Utilities/TensorOperations/DataTypeConversions/TypeConverter.h"
-#include "Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTranspose.h"
 #include "Utilities/WorkQueue/WorkQueueUnordered.h"
 
 #include <algorithm>
@@ -47,8 +46,13 @@ class RowPartitionRuntime;
  * Tensor handle objects may be copied, assigned, reset, and destroyed
  * concurrently while sharing one allocation. Concurrent mutation of the same
  * Tensor handle object requires external synchronization, matching the
- * SharedOwnership.h contract. View metadata (descriptor, offset, and strides)
- * belongs to each Tensor handle while BackingMemory owns the allocation.
+ * SharedOwnership.h contract. The descriptor belongs to each Tensor handle
+ * while BackingMemory owns the allocation.
+ *
+ * A Tensor is always dense: it starts at its allocation's first element and its
+ * strides are the dense row-major strides of its dimensions. There are no Tensor
+ * views. Part of a tensor is addressed as a TensorSpan (consecutive elements) or a
+ * StridedSpan (dimensions with strides, or bytes read as another dtype).
  */
 
 class Tensor {
@@ -94,6 +98,9 @@ class Tensor {
     uint64_t getTensorId() const { return isInitialized() ? instanceId : 0; }
 
     void copyFromAsync(Tensor source, Stream stream);
+    // Copies the first numElements of source into the first numElements of this tensor. Both must have the same data
+    // type and hold at least numElements.
+    void copyElementsFromAsync(Tensor source, uint64_t numElements, Stream stream);
 
     void downloadSection(Tensor &source, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes);
     void uploadSection(Tensor &dest, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes);
@@ -109,6 +116,9 @@ class Tensor {
     // however the memory is set per byte like other versions of memset. To make this clear, value is int8_t.
     void memset(int8_t value, uint64_t numElements = 0);
     void memsetAsync(Stream stream, int8_t value, uint64_t numElements = 0);
+    // Sets every byte of elements [firstElement, firstElement + numElements) to value, in storage order. The range
+    // must lie inside the tensor.
+    void memsetElementsAsync(Stream stream, int8_t value, uint64_t firstElement, uint64_t numElements);
 
     // Convert this tensor to refer to an uninitialized tensor
     // If this is the only reference to this tensor, its resources (memory) will be freed
@@ -143,26 +153,14 @@ class Tensor {
     void fillZero(Stream dataStream);
 
     void reshape(std::vector<uint64_t> dimensions);
-    [[nodiscard]] Tensor aliasView(std::vector<uint64_t> dimensions,
-                                   std::vector<uint64_t> strides_elements,
-                                   uint64_t element_offset = 0) const;
-    // Reinterpret bytes in a contiguous, flat UINT8 Tensor as a typed view.
-    // byte_offset is relative to the source Tensor's visible byte range,
-    // including when the source is itself an alias of a larger allocation.
-    // The returned view shares backing ownership and allocates no storage.
-    // Both visible-view bounds and typed element alignment are checked;
-    // callers are responsible for preventing overlapping live writes.
-    [[nodiscard]] Tensor aliasByteStorageAs(DataType data_type,
-                                            std::vector<uint64_t> dimensions,
-                                            uint64_t byte_offset) const;
-    [[nodiscard]] bool hasCustomStrides() const { return !customStridesElements.empty(); }
+    // Always true: every Tensor is dense. Kept so that code reads a Tensor and a StridedSpan through the same names.
     [[nodiscard]] bool isDenseContiguous() const;
-    /** 1222: true when the visible data (getMemPtr(), the view offset included) starts on a multiple of `bytes`, a
-     *  power of two. A reduction picks its fastest kernels only on 16-byte aligned inputs. */
+    /** 1222: true when the data (getMemPtr()) starts on a multiple of `bytes`, a power of two. A reduction picks its
+     *  fastest kernels only on 16-byte aligned inputs. */
     [[nodiscard]] bool isAligned(uint64_t bytes) const;
-    /** 1222: the largest power of two, at most `limit` (a power of two), dividing the visible data's address. */
+    /** 1222: the largest power of two, at most `limit` (a power of two), dividing the data's address. */
     [[nodiscard]] uint64_t alignmentBytes(uint64_t limit = 256) const;
-    [[nodiscard]] uint64_t getStorageElementOffset() const { return storageElementOffset; }
+    // The dense row-major strides of the dimensions, in elements (as StridedSpan::getStridesElements).
     [[nodiscard]] std::vector<uint64_t> getStridesElements() const;
     // void concatenateFrom(std::vector<Tensor> sources);
     // void splitInto(std::vector<Tensor> destinations);
@@ -362,9 +360,6 @@ class Tensor {
     };
 
     std::shared_ptr<BackingMemory> backingMemory;
-    uint64_t storageElementOffset = 0;
-    uint64_t storageNumElements = 0;
-    std::vector<uint64_t> customStridesElements;
 
     uint64_t instanceId = 0;
 

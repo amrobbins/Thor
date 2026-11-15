@@ -1,4 +1,5 @@
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
+#include "test/Utilities/TensorOperations/GpuAttention/AttentionSpecTestTensor.h"
 
 #include "gtest/gtest.h"
 
@@ -37,15 +38,6 @@ std::optional<Tensor> allocateAttentionWorkspace(const CudnnAttentionDescriptor&
     return Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {bytes}), 256);
 }
 
-std::vector<uint64_t> asUint64(const std::vector<int64_t>& values) {
-    std::vector<uint64_t> converted;
-    converted.reserve(values.size());
-    for (int64_t value : values) {
-        converted.push_back(static_cast<uint64_t>(value));
-    }
-    return converted;
-}
-
 uint64_t storageElements(const AttentionTensorSpec& spec) {
     uint64_t maxOffset = 0;
     for (size_t i = 0; i < spec.dimensions.size(); ++i) {
@@ -64,15 +56,13 @@ Tensor makeHalfTensorWithSpec(const AttentionTensorSpec& spec, const std::vector
         cpuValues[i] = __float2half(values[i]);
     }
 
-    Tensor gpuStorage(gpuPlacement, TensorDescriptor(DataType::FP16, {storageSize}));
-    gpuStorage.copyFromAsync(cpu, stream);
-    return gpuStorage.aliasView(asUint64(spec.dimensions), asUint64(spec.strides));
+    Tensor gpu(gpuPlacement, TensorDescriptor(DataType::FP16, physicalDimensionsForAttentionSpec(spec)));
+    gpu.copyFromAsync(cpu, stream);
+    return gpu;
 }
 
 Tensor makeEmptyHalfTensorWithSpec(const AttentionTensorSpec& spec) {
-    const uint64_t storageSize = storageElements(spec);
-    Tensor gpuStorage(gpuPlacement, TensorDescriptor(DataType::FP16, {storageSize}));
-    return gpuStorage.aliasView(asUint64(spec.dimensions), asUint64(spec.strides));
+    return Tensor(gpuPlacement, TensorDescriptor(DataType::FP16, physicalDimensionsForAttentionSpec(spec)));
 }
 
 Tensor makePackedHalfTensor(uint64_t tokens, uint64_t heads, uint64_t dim, const std::vector<float>& values, Stream& stream) {
@@ -117,9 +107,8 @@ Tensor makeUint32Tensor(const std::vector<uint32_t>& values, Stream& stream) {
 }
 
 std::vector<float> copyHalfStorage(const Tensor& tensor, uint64_t storageSize, Stream& stream) {
-    Tensor raw = tensor.aliasView({storageSize}, {1});
     Tensor cpu(cpuPlacement, TensorDescriptor(DataType::FP16, {storageSize}));
-    cpu.copyFromAsync(raw, stream);
+    cpu.copyFromAsync(tensor, stream);
     stream.synchronize();
 
     std::vector<float> values(storageSize);
@@ -133,8 +122,7 @@ std::vector<float> copyHalfStorage(const Tensor& tensor, uint64_t storageSize, S
 std::vector<float> copyFloatStorage(const Tensor& tensor, Stream& stream) {
     const uint64_t count = tensor.getTotalNumElements();
     Tensor cpu(cpuPlacement, TensorDescriptor(DataType::FP32, {count}));
-    Tensor raw = tensor.aliasView({count}, {1});
-    cpu.copyFromAsync(raw, stream);
+    cpu.copyFromAsync(tensor, stream);
     stream.synchronize();
 
     const float* ptr = cpu.getMemPtr<float>();
@@ -144,8 +132,7 @@ std::vector<float> copyFloatStorage(const Tensor& tensor, Stream& stream) {
 std::vector<int32_t> copyInt32Storage(const Tensor& tensor, Stream& stream) {
     const uint64_t count = tensor.getTotalNumElements();
     Tensor cpu(cpuPlacement, TensorDescriptor(DataType::INT32, {count}));
-    Tensor raw = tensor.aliasView({count}, {1});
-    cpu.copyFromAsync(raw, stream);
+    cpu.copyFromAsync(tensor, stream);
     stream.synchronize();
 
     const int32_t* ptr = cpu.getMemPtr<int32_t>();

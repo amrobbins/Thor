@@ -12,7 +12,6 @@
 #include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/DropOutPostOp.h"
 #include "Utilities/Expression/ExpressionInternal.h"
-#include "Utilities/TensorOperations/Scalar/SetScalar.h"
 
 #include <algorithm>
 #include <cmath>
@@ -349,66 +348,6 @@ uint64_t checkedDropoutOffsetAdvance(uint64_t batch, uint32_t numHeads, uint64_t
                       checkedMul(querySequenceLength, keyValueSequenceLength, "dropout offset score count"),
                       "dropout offset advance");
 }
-
-class AttentionDropoutRuntimeState {
-   public:
-    AttentionDropoutRuntimeState(int64_t seed, int64_t initialOffset) : seed(seed), nextOffset(initialOffset) {
-        if (initialOffset < 0) {
-            throw std::invalid_argument("Attention sdpaDropoutOffset must be non-negative when SDPA dropout is enabled.");
-        }
-    }
-
-    void setOffsetAdvance(uint64_t advance) {
-        if (advance == 0) {
-            advance = 1;
-        }
-        if (advance > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-            throw std::overflow_error("Attention dropout offset advance exceeds int64_t range.");
-        }
-        offsetAdvance = advance;
-    }
-
-    ThorImplementation::TensorScalarBinding seedBinding(ThorImplementation::TensorPlacement placement) {
-        ensureBuffer(placement);
-        return ThorImplementation::TensorScalarBinding{seedOffsetBuffer, kSeedByteOffset, DataType::INT64};
-    }
-
-    ThorImplementation::TensorScalarBinding offsetBinding(ThorImplementation::TensorPlacement placement) {
-        ensureBuffer(placement);
-        return ThorImplementation::TensorScalarBinding{seedOffsetBuffer, kOffsetByteOffset, DataType::INT64};
-    }
-
-    void uploadForForward(Stream& stream) {
-        ThorImplementation::TensorPlacement placement(ThorImplementation::TensorPlacement::MemDevices::GPU, stream.getGpuNum());
-        ensureBuffer(placement);
-
-        ThorImplementation::launchSetInt64Pair(seedOffsetBuffer.getMemPtr<int64_t>(), seed, nextOffset, stream);
-
-        const uint64_t remaining = static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - nextOffset);
-        if (offsetAdvance > remaining) {
-            throw std::overflow_error("Attention automatic dropout offset advance would exceed int64_t range.");
-        }
-        nextOffset += static_cast<int64_t>(offsetAdvance);
-    }
-
-   private:
-    static constexpr uint64_t kSeedByteOffset = 0;
-    static constexpr uint64_t kOffsetByteOffset = sizeof(int64_t);
-
-    void ensureBuffer(ThorImplementation::TensorPlacement placement) {
-        if (seedOffsetBuffer.isInitialized() && seedOffsetBuffer.getPlacement() == placement) {
-            return;
-        }
-
-        ThorImplementation::TensorDescriptor descriptor(DataType::INT64, {2});
-        seedOffsetBuffer = ThorImplementation::Tensor(placement, descriptor);
-    }
-
-    int64_t seed;
-    int64_t nextOffset;
-    uint64_t offsetAdvance = 1;
-    ThorImplementation::Tensor seedOffsetBuffer;
-};
 
 std::shared_ptr<Thor::ParameterSpecification> makeParameter(const std::string& name,
                                                             const std::vector<uint64_t>& shape,
@@ -1450,14 +1389,14 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t modelQuer
                 };
             };
             if (sdpaDropoutProbability > 0.0f) {
-                auto dropoutState = std::make_shared<AttentionDropoutRuntimeState>(dropoutSeed, dropoutOffset);
-                dropoutState->setOffsetAdvance(checkedDropoutOffsetAdvance(
+                auto dropoutState = std::make_shared<ThorImplementation::DropOutRuntimeState>(dropoutSeed, dropoutOffset, "Attention SDPA");
+                dropoutState->setSequenceAdvance(checkedDropoutOffsetAdvance(
                     batch,
                     numHeads,
                     queryRagged ? queryMaxSequenceLength : querySequenceLength,
                     keyValueRagged ? keyValueMaxSequenceLength : keyValueSequenceLength));
                 tensorScalarInputs[kAttentionDropoutSeedInputName] = dropoutState->seedBinding(queryInput.getPlacement());
-                tensorScalarInputs[kAttentionDropoutOffsetInputName] = dropoutState->offsetBinding(queryInput.getPlacement());
+                tensorScalarInputs[kAttentionDropoutOffsetInputName] = dropoutState->sequenceBinding(queryInput.getPlacement());
                 appendPreForwardHook([dropoutState](Stream& runStream) { dropoutState->uploadForForward(runStream); });
             }
             if (outputDropoutProbability > 0.0f) {

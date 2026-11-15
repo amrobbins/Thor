@@ -1017,7 +1017,7 @@ foreach (_thor_cub_cuda_source IN LISTS THOR_CUB_CUDA_SELF_CONTAINED_SOURCES)
         message(FATAL_ERROR "Thor Cub CUDA source selected for self-contained compilation is missing: ${_thor_cub_cuda_source}")
     endif ()
 endforeach ()
-# 1275: line tables for the ragged kernels (1284: every dtype's object), so Nsight Compute attributes instructions to source lines. -lineinfo
+# 1275: line tables for the ragged kernels (1284: every dtype's object; 1366: StridedR's), so Nsight Compute attributes instructions to source lines. -lineinfo
 # adds debug sections only; the generated code does not change.
 set_source_files_properties(
         "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedKRFp8.cu"
@@ -1040,6 +1040,7 @@ set_source_files_properties(
         "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedFinishArgWide.cu"
         "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedRKArgFp32.cu"
         "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedFinishArgPairWide.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubStridedR.cu"
         PROPERTIES COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>"
 )
 
@@ -2287,6 +2288,24 @@ add_executable(thor_ragged_reduction_audit EXCLUDE_FROM_ALL
 thor_apply_linker_settings(thor_ragged_reduction_audit)
 target_link_libraries(thor_ragged_reduction_audit PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
 target_include_directories(thor_ragged_reduction_audit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# 1335: production CubReduction stamps of non-dense views (the three classes that run CUB device reductions), timed
+# cold against the copy curve and the dense stamp of the same bytes or a gather reference kernel. Phase 0 of
+# plans/Thor_View_Reduction_Plan_2026-11-08.md.
+add_executable(thor_view_reduction_audit EXCLUDE_FROM_ALL
+        benchmarks/ViewReductionAudit.cu)
+thor_apply_linker_settings(thor_view_reduction_audit)
+set_target_properties(thor_view_reduction_audit PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
+target_link_libraries(thor_view_reduction_audit PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_include_directories(thor_view_reduction_audit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# 1388: Thor's dense copy of strided spans per layout class (benchmarks/DenseCopyAudit.cu, dense_copy_audit.py).
+add_executable(thor_dense_copy_audit EXCLUDE_FROM_ALL
+        benchmarks/DenseCopyAudit.cu)
+thor_apply_linker_settings(thor_dense_copy_audit)
+set_target_properties(thor_dense_copy_audit PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
+target_link_libraries(thor_dense_copy_audit PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_include_directories(thor_dense_copy_audit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_executable(thor_fp8_rk_stamp_autotuner_smoke EXCLUDE_FROM_ALL
         benchmarks/Fp8RKStampAutotunerSmoke.cpp)

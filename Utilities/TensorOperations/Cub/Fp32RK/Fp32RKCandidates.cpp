@@ -36,16 +36,19 @@ PhysicalKernel fp32Kernel(PhysicalFamily family) {
 
 std::vector<PhysicalKernel> oneWindowKernels(const Fp32RKSite& site) {
     std::vector<PhysicalKernel> kernels;
-    // The kernel's offsets are 32-bit byte offsets (fp32OneWindowFitsIndexing).
+    // The kernel's offsets are 32-bit byte offsets (fp32OneWindowFitsIndexing). 1381: a base off a 16-byte boundary
+    // (the VALUE kernel reads it) starts them up to 15 bytes early and puts a prefix on every row group.
+    const bool aligned_base = site.input_alignment_bytes >= 16;
     uint64_t elements = 0;
     if (!checkedMul(site.outer, site.r, elements) || !checkedMul(elements, site.k, elements) ||
-        elements > std::numeric_limits<uint32_t>::max() / 4)
+        elements > (std::numeric_limits<uint32_t>::max() - (aligned_base ? 0u : 15u)) / 4)
         return kernels;
     for (uint32_t outputs : {1u, 2u, 4u, 8u}) {
         for (uint32_t warps : {1u, 2u, 4u, 8u}) {
             if ((outputs > 1 && warps > 1) || warps > site.r) continue;
-            // The window holds (32 / O) * 4 components less a 0..3 prefix (any aligned K fills it).
-            const uint64_t capacity = (32 / outputs) * 4 - (site.k % 4 == 0 ? 0 : 3);
+            // The window holds (32 / O) * 4 components less a 0..3 prefix (any aligned K fills it at an aligned base).
+            const uint64_t capacity = aligned_base ? (32 / outputs) * 4 - (site.k % 4 == 0 ? 0 : 3)
+                                                   : Fp8RK::oneWindowUnalignedCapacity(outputs, 16, 4);
             if (site.k > capacity) continue;
             PhysicalKernel kernel = fp32Kernel(PhysicalFamily::OneWindow);
             kernel.a = outputs;
@@ -75,7 +78,8 @@ std::vector<PhysicalKernel> deepRSmallKKernels(const Fp32RKSite& site) {
 
 // AlignedK: 16- then 8-byte packets, CTA 32 / 64 / 128, Complete then FP8's two staged shard targets (32 and 128 rows).
 // 1228: and the 4-byte packet at odd K, where no wider packet is legal (the retired KParallel's scalar-packet regime;
-// at even K the 8-byte packet does the same work in half the loads).
+// at even K the 8-byte packet does the same work in half the loads). 1379: and at even K on a 4-byte aligned base,
+// which the 8-byte packet cannot read.
 std::vector<PhysicalKernel> alignedKKernels(const Fp32RKSite& site) {
     std::vector<PhysicalKernel> kernels;
     std::vector<uint64_t> shard_counts{1};
@@ -87,7 +91,7 @@ std::vector<PhysicalKernel> alignedKKernels(const Fp32RKSite& site) {
         }
     }
     for (uint32_t packet : {16u, 8u, 4u}) {
-        if (packet == 4 && site.k % 2 == 0) continue;
+        if (packet == 4 && site.k % 2 == 0 && site.input_alignment_bytes >= 8) continue;
         for (uint32_t threads : {32u, 64u, 128u}) {
             for (uint64_t shards : shard_counts) {
                 if (!fp32AlignedKSupports(site.outer, site.r, site.k, packet, threads, shards)) continue;
@@ -269,11 +273,22 @@ std::vector<PhysicalKernel> fp32RKRankedKernels(const std::vector<Fp32RKPoolEntr
     return kernels;
 }
 
+uint32_t fp32RKPassInputAlignmentAtK(const Fp8RK::PhysicalKernel& kernel, uint64_t k) {
+    if (kernel.family == PhysicalFamily::OneWindow && kernel.a != 0 && kernel.c != 0 &&
+        k <= Fp8RK::oneWindowUnalignedCapacity(kernel.a, kernel.c, 4))
+        return 4U;
+    return fp32RKPassInputAlignment(kernel);
+}
+
 uint32_t fp32RKPassInputAlignment(const Fp8RK::PhysicalKernel& kernel) {
     switch (kernel.family) {
         case PhysicalFamily::AlignedK: return static_cast<uint32_t>(kernel.a);
         case PhysicalFamily::RuntimeK:
-            return static_cast<RuntimeLayout>(kernel.a) == RuntimeLayout::RotatedPrefix ? 4U : 16U;
+            // 1384: PacketComplete too (VALUE since 1379, its ARG twin since 1384): any element address.
+            return static_cast<RuntimeLayout>(kernel.a) == RuntimeLayout::RotatedPrefix ||
+                           static_cast<RuntimeLayout>(kernel.a) == RuntimeLayout::PacketComplete
+                       ? 4U
+                       : 16U;
         default: return 16U;
     }
 }

@@ -102,10 +102,10 @@ RaggedMergePath::PathWeights raggedRKArgWeights(const RaggedRKShape& shape, Data
 void launchRaggedRKArg(CubArgReductionOp op,
                        const RaggedRKShape& shape,
                        uint32_t ctas,
-                       const Tensor& input,
-                       const Tensor& offsets,
-                       Tensor& index_output,
-                       Tensor& workspace,
+                       const StridedSpan& input,
+                       const StridedSpan& offsets,
+                       const StridedSpan& index_output,
+                       const StridedSpan& workspace,
                        Stream& stream,
                        RaggedLaunchParts parts) {
     const auto fail = [](const std::string& what) { throw std::invalid_argument("launchRaggedRKArg: " + what); };

@@ -1574,34 +1574,52 @@ def test_attention_forward_ragged_offsets_plans_single_stage_and_validates_shape
 
 
 @pytest.mark.cuda
-def test_attention_rejects_tensor_view_operands():
-    # q/k/v sliced out of one packed buffer are strided views. cuDNN attention would read them, and
-    # write dQ/dK/dV, with the view's row pitch, so attention operands must be dense tensors.
+def test_attention_reads_strided_view_operands_through_dense_copies():
+    # q/k/v sliced out of one packed buffer are strided views. cuDNN attention reads (and its backward writes)
+    # operands through the strides it is given, so each view reaches it as a dense copy of its own, never as a view;
+    # the result matches attention on separate dense q/k/v.
     dtype = thor.DataType.fp16
     batch, sequence, heads, head_dim = 2, 8, 2, 16
     width = 3 * heads * head_dim
+    rng = np.random.default_rng(2026)
+
+    def attention(q, k, v):
+        return ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            q_layout=AttentionTensorLayout.bshd,
+            k_layout=AttentionTensorLayout.bshd,
+            v_layout=AttentionTensorLayout.bshd,
+            o_layout=AttentionTensorLayout.bshd,
+            output_dtype=dtype,
+            compute_dtype=thor.DataType.fp32,
+        )
 
     qkv = ex.input("qkv")
     views = [
         qkv.strided_view([batch, sequence, heads, head_dim], [sequence * width, width, head_dim, 1], i * heads * head_dim)
         for i in range(3)
     ]
-    attn = ex.scaled_dot_product_attention(
-        *views,
-        q_layout=AttentionTensorLayout.bshd,
-        k_layout=AttentionTensorLayout.bshd,
-        v_layout=AttentionTensorLayout.bshd,
-        o_layout=AttentionTensorLayout.bshd,
-        output_dtype=dtype,
-        compute_dtype=thor.DataType.fp32,
-    )
-    eq = ex.compile(attn, device_num=0)
+    eq = ex.compile(attention(*views), device_num=0)
 
     stream = Stream(gpu_num=0)
-    qkv_np = np.zeros((batch * sequence, width), dtype=_numpy_storage_dtype(dtype))
-    inputs_gpu = {"qkv": _host_to_gpu(qkv_np, dtype, stream)}
-    with pytest.raises(RuntimeError, match="must be a dense, 16-byte-aligned tensor"):
-        eq.stamp(inputs_gpu, stream)
+    qkv_np = (rng.standard_normal((batch * sequence, width)) * 0.5).astype(_numpy_storage_dtype(dtype))
+    stamped = eq.stamp({"qkv": _host_to_gpu(qkv_np, dtype, stream)}, stream)
+    assert stamped._debug_stage_kinds().count("DenseCopy") == 3
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+
+    parts = qkv_np.reshape(batch, sequence, 3, heads, head_dim)
+    dense_eq = ex.compile(attention(ex.input("q"), ex.input("k"), ex.input("v")), device_num=0)
+    dense_inputs = {
+        name: _host_to_gpu(np.ascontiguousarray(parts[:, :, i]), dtype, stream) for i, name in enumerate(["q", "k", "v"])
+    }
+    dense_stamped = dense_eq.stamp(dense_inputs, stream)
+    dense_stamped.run()
+    expected = _copy_to_host(dense_stamped.output(), dtype, stream)
+
+    np.testing.assert_allclose(got.astype(np.float32), expected.astype(np.float32), rtol=1e-3, atol=1e-3)
 
 
 @pytest.mark.cuda

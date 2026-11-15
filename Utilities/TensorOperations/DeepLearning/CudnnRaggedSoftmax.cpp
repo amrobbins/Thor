@@ -1,4 +1,5 @@
 #include "Utilities/TensorOperations/DeepLearning/CudnnRaggedSoftmax.h"
+#include "Utilities/TensorOperations/DeepLearning/CudnnTensorContract.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/CudnnHelper.h"
@@ -69,9 +70,7 @@ void requireGpuTensor(const Tensor& tensor, int gpuNum, DataType dtype, const ve
     if (tensor.getDataType() != dtype) {
         throw invalid_argument(string("cuDNN ragged Softmax tensor '") + string(name) + "' has the wrong dtype.");
     }
-    if (!tensor.isDenseContiguous()) {
-        throw invalid_argument(string("cuDNN ragged Softmax tensor '") + string(name) + "' must be dense contiguous.");
-    }
+    requireCudnnContractTensor(tensor, "cuDNN ragged Softmax", name);
     if (tensor.getDimensions() != dimensions) {
         throw invalid_argument(string("cuDNN ragged Softmax tensor '") + string(name) + "' has the wrong packed dimensions.");
     }

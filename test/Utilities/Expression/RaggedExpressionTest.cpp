@@ -979,11 +979,9 @@ TEST(RaggedExpression, WrapsValuesOffsetsAndBuildsRuntimeExtentAlias) {
     EXPECT_EQ(extent.elementsPerValue, 8);
     EXPECT_EQ(extent.maxLaunchElements(), 17 * 8);
 
-    const ExprNode activeCountNode = outputNode(extent.activeValueCount);
-    EXPECT_EQ(activeCountNode.op, ExprOp::STRIDED_VIEW);
-    EXPECT_EQ(activeCountNode.view_dims, std::vector<uint64_t>{1});
-    EXPECT_EQ(activeCountNode.view_strides, std::vector<uint64_t>{1});
-    EXPECT_EQ(activeCountNode.view_element_offset, descriptor.getBatchSize());
+    // The active count is offsets[B], addressed by index: no strided-view expression.
+    EXPECT_TRUE(extent.activeValueCountSource.isSameLogicalNode(offsets));
+    EXPECT_EQ(extent.activeValueCountIndex, descriptor.getBatchSize());
 }
 
 
@@ -1000,7 +998,8 @@ TEST(RaggedExpression, ActiveCountCarrierMarksRuntimeExtentWithoutOffsetsIndexin
     EXPECT_EQ(marked.marker.ragged_runtime_batch_size, descriptor.getBatchSize());
     EXPECT_EQ(marked.marker.ragged_runtime_max_active_values, descriptor.getMaxTotalValues());
 
-    const PhysicalExpression activeCountPhysical = ragged.getRuntimeExtent().activeValueCount.expression();
+    EXPECT_EQ(ragged.getRuntimeExtent().activeValueCountIndex, 0ULL);
+    const PhysicalExpression activeCountPhysical = ragged.getRuntimeExtent().activeValueCountSource.expression();
     const ExprNode& activeCountNode = activeCountPhysical.nodes.at(activeCountPhysical.output_node);
     EXPECT_EQ(activeCountNode.op, ExprOp::INPUT);
     ASSERT_LT(activeCountNode.input_slot, activeCountPhysical.inputs.size());
@@ -1034,7 +1033,8 @@ TEST(RaggedExpression, UnaryValuewiseOpPreservesOffsetsAndRuntimeExtent) {
     const RaggedExpression result = ragged.abs();
 
     EXPECT_TRUE(result.getOffsets().isSameLogicalNode(ragged.getOffsets()));
-    EXPECT_TRUE(result.getRuntimeExtent().activeValueCount.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCount));
+    EXPECT_TRUE(result.getRuntimeExtent().activeValueCountSource.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCountSource));
+    EXPECT_EQ(result.getRuntimeExtent().activeValueCountIndex, ragged.getRuntimeExtent().activeValueCountIndex);
     EXPECT_EQ(result.getRuntimeExtent().maxActiveValues, ragged.getRuntimeExtent().maxActiveValues);
     EXPECT_EQ(result.getRuntimeExtent().elementsPerValue, ragged.getRuntimeExtent().elementsPerValue);
     EXPECT_EQ(result.getDescriptor(), ragged.getDescriptor());
@@ -1051,7 +1051,8 @@ TEST(RaggedExpression, CastChangesValuesDTypeButPreservesOffsetsMetadataAndExten
     EXPECT_EQ(result.getOffsetsDataType(), DataType::UINT64);
     EXPECT_EQ(result.getValuesDimensions(), ragged.getValuesDimensions());
     EXPECT_TRUE(result.getOffsets().isSameLogicalNode(ragged.getOffsets()));
-    EXPECT_TRUE(result.getRuntimeExtent().activeValueCount.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCount));
+    EXPECT_TRUE(result.getRuntimeExtent().activeValueCountSource.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCountSource));
+    EXPECT_EQ(result.getRuntimeExtent().activeValueCountIndex, ragged.getRuntimeExtent().activeValueCountIndex);
     EXPECT_EQ(markedValueNodes(result.getValues()).values.op, ExprOp::CAST);
 }
 
@@ -1063,7 +1064,8 @@ TEST(RaggedExpression, WithValuesCanChangeTrailingShapeAndRecomputesRuntimeWidth
 
     EXPECT_EQ(result.getTrailingDimensions(), std::vector<uint64_t>({3}));
     EXPECT_TRUE(result.getOffsets().isSameLogicalNode(ragged.getOffsets()));
-    EXPECT_TRUE(result.getRuntimeExtent().activeValueCount.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCount));
+    EXPECT_TRUE(result.getRuntimeExtent().activeValueCountSource.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCountSource));
+    EXPECT_EQ(result.getRuntimeExtent().activeValueCountIndex, ragged.getRuntimeExtent().activeValueCountIndex);
     EXPECT_EQ(result.getRuntimeExtent().maxActiveValues, 12ULL);
     EXPECT_EQ(result.getRuntimeExtent().elementsPerValue, 3ULL);
     EXPECT_EQ(result.getRuntimeExtent().maxLaunchElements(), 36ULL);
@@ -1078,7 +1080,8 @@ TEST(RaggedExpression, TrailingSlicePreservesPartitionAndUsesSourceStrides) {
     EXPECT_EQ(result.getValuesDimensions(), std::vector<uint64_t>({9, 3}));
     EXPECT_EQ(result.getTrailingDimensions(), std::vector<uint64_t>({3}));
     EXPECT_TRUE(result.getOffsets().isSameLogicalNode(ragged.getOffsets()));
-    EXPECT_TRUE(result.getRuntimeExtent().activeValueCount.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCount));
+    EXPECT_TRUE(result.getRuntimeExtent().activeValueCountSource.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCountSource));
+    EXPECT_EQ(result.getRuntimeExtent().activeValueCountIndex, ragged.getRuntimeExtent().activeValueCountIndex);
     EXPECT_EQ(result.getRuntimeExtent().elementsPerValue, 3ULL);
 
     const MarkedValueNodes marked = markedValueNodes(result.getValues());
@@ -1186,7 +1189,8 @@ TEST(RaggedExpression, BinaryOpWithSameOffsetsSucceeds) {
     const RaggedExpression result = lhs + rhs;
 
     EXPECT_TRUE(result.getOffsets().isSameLogicalNode(offsets));
-    EXPECT_TRUE(result.getRuntimeExtent().activeValueCount.isSameLogicalNode(lhs.getRuntimeExtent().activeValueCount));
+    EXPECT_TRUE(result.getRuntimeExtent().activeValueCountSource.isSameLogicalNode(lhs.getRuntimeExtent().activeValueCountSource));
+    EXPECT_EQ(result.getRuntimeExtent().activeValueCountIndex, lhs.getRuntimeExtent().activeValueCountIndex);
     EXPECT_EQ(result.getDescriptor(), lhs.getDescriptor());
     EXPECT_EQ(markedValueNodes(result.getValues()).values.op, ExprOp::ADD);
 }
@@ -1357,7 +1361,8 @@ TEST(RaggedExpression, OrdinarySoftmaxAndLogSoftmaxNormalizeFinalTrailingDimensi
 
         const RaggedExpression ordinary = ragged.softmax();
         EXPECT_TRUE(ordinary.getOffsets().isSameLogicalNode(ragged.getOffsets()));
-        EXPECT_TRUE(ordinary.getRuntimeExtent().activeValueCount.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCount));
+        EXPECT_TRUE(ordinary.getRuntimeExtent().activeValueCountSource.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCountSource));
+        EXPECT_EQ(ordinary.getRuntimeExtent().activeValueCountIndex, ragged.getRuntimeExtent().activeValueCountIndex);
         EXPECT_EQ(ordinary.getDescriptor(), ragged.getDescriptor());
 
         const PhysicalExpression ordinary_physical = ordinary.getValues().expression();
@@ -2360,7 +2365,8 @@ TEST(RaggedExpression, SegmentSoftmaxPreservesOffsetsAndRuntimeExtentForScalarVa
     const RaggedExpression result = ragged.segment_softmax();
 
     EXPECT_TRUE(result.getOffsets().isSameLogicalNode(ragged.getOffsets()));
-    EXPECT_TRUE(result.getRuntimeExtent().activeValueCount.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCount));
+    EXPECT_TRUE(result.getRuntimeExtent().activeValueCountSource.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCountSource));
+    EXPECT_EQ(result.getRuntimeExtent().activeValueCountIndex, ragged.getRuntimeExtent().activeValueCountIndex);
     EXPECT_EQ(result.getDescriptor(), ragged.getDescriptor());
     EXPECT_EQ(markedValueNodes(result.getValues()).values.op, ExprOp::DIV);
 }
@@ -2371,7 +2377,8 @@ TEST(RaggedExpression, SegmentLogSoftmaxPreservesOffsetsAndRuntimeExtentForScala
     const RaggedExpression result = ragged.segment_log_softmax();
 
     EXPECT_TRUE(result.getOffsets().isSameLogicalNode(ragged.getOffsets()));
-    EXPECT_TRUE(result.getRuntimeExtent().activeValueCount.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCount));
+    EXPECT_TRUE(result.getRuntimeExtent().activeValueCountSource.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCountSource));
+    EXPECT_EQ(result.getRuntimeExtent().activeValueCountIndex, ragged.getRuntimeExtent().activeValueCountIndex);
     EXPECT_EQ(result.getDescriptor(), ragged.getDescriptor());
     EXPECT_EQ(markedValueNodes(result.getValues()).values.op, ExprOp::SUB);
 }
@@ -9139,7 +9146,8 @@ TEST(RaggedExpression, TrailingTransposePreservesPartitionAndUsesPermutationStri
     EXPECT_EQ(result.getValuesDimensions(), std::vector<uint64_t>({9, 2, 4, 3}));
     EXPECT_EQ(result.getTrailingDimensions(), std::vector<uint64_t>({2, 4, 3}));
     EXPECT_TRUE(result.getOffsets().isSameLogicalNode(ragged.getOffsets()));
-    EXPECT_TRUE(result.getRuntimeExtent().activeValueCount.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCount));
+    EXPECT_TRUE(result.getRuntimeExtent().activeValueCountSource.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCountSource));
+    EXPECT_EQ(result.getRuntimeExtent().activeValueCountIndex, ragged.getRuntimeExtent().activeValueCountIndex);
     EXPECT_EQ(result.getRuntimeExtent().elementsPerValue, 24ULL);
 
     const MarkedValueNodes marked = markedValueNodes(result.getValues());

@@ -204,7 +204,7 @@ TEST(Fp32RKCandidates, RuntimeKProposalsAtEachElementWidth) {
             EXPECT_TRUE(Fp8RK::structurallyValid(p, outer, r, k));
             const auto layout = static_cast<RuntimeLayout>(p.a);
             if (layout == RuntimeLayout::PacketComplete) {
-                EXPECT_GE(p.c, 16u);
+                EXPECT_GE(p.c, 1u);  // 1380: tiles narrower than a packet are legal (selected below 16 bytes only)
                 EXPECT_LE(p.c, 496u);
             } else {
                 EXPECT_EQ(layout == RuntimeLayout::RotatedExact ? 512u : 497u, p.c);

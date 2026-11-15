@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Tensor/TensorSpan.h"
 #include "Utilities/Common/Stream.h"
 
 #include <cstdint>
@@ -25,7 +26,7 @@ void launchDeviceResidentRaggedMaterializationKernel(
     uint64_t logicalRows,
     ThorImplementation::Tensor &destinationValues,
     const ThorImplementation::Tensor &destinationOffsets,
-    const ThorImplementation::Tensor &rowIndicesDevice,
+    const ThorImplementation::TensorSpan &rowIndicesDevice,
     Stream &stream);
 
 /** Benchmark-only launch hook that forces a specific rows-per-CTA specialization. */
@@ -40,6 +41,6 @@ void launchDeviceResidentRaggedMaterializationKernelWithRowsPerCtaForBenchmark(
     uint64_t logicalRows,
     ThorImplementation::Tensor &destinationValues,
     const ThorImplementation::Tensor &destinationOffsets,
-    const ThorImplementation::Tensor &rowIndicesDevice,
+    const ThorImplementation::TensorSpan &rowIndicesDevice,
     uint32_t rowsPerCta,
     Stream &stream);

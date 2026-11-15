@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Tensor/TensorSpan.h"
 #include "Utilities/Common/Stream.h"
 
 /**
@@ -14,7 +15,7 @@
  */
 void launchDeviceResidentNamedGatherKernel(const ThorImplementation::Tensor &source,
                                            ThorImplementation::Tensor &destination,
-                                           const ThorImplementation::Tensor &rowIndicesDevice,
+                                           const ThorImplementation::TensorSpan &rowIndicesDevice,
                                            uint64_t logicalRows,
                                            Stream &stream);
 
@@ -22,7 +23,7 @@ void launchDeviceResidentNamedGatherKernel(const ThorImplementation::Tensor &sou
 void launchDeviceResidentNamedGatherKernelWithRowsPerCtaForBenchmark(
     const ThorImplementation::Tensor &source,
     ThorImplementation::Tensor &destination,
-    const ThorImplementation::Tensor &rowIndicesDevice,
+    const ThorImplementation::TensorSpan &rowIndicesDevice,
     uint64_t logicalRows,
     uint32_t rowsPerCta,
     Stream &stream);

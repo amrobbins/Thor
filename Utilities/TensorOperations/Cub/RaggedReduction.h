@@ -11,6 +11,7 @@
 // CubSegmentedReduction still runs the legacy kernels; tests and the ragged audit call these launchers directly.
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
+#include "DeepLearning/Implementation/Tensor/StridedSpan.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Cub/RaggedKRWalk.h"
 #include "Utilities/TensorOperations/Cub/RaggedRKWalk.h"
@@ -122,10 +123,10 @@ enum class RaggedLaunchParts : uint8_t { MainAndFinish, MainOnly, FinishOnly };
 void launchRaggedKRValue(CubReductionOp op,
                          const RaggedKRShape& shape,
                          uint32_t grid,
-                         const Tensor& input,
-                         const Tensor& offsets,
-                         Tensor& output,
-                         Tensor& workspace,
+                         const StridedSpan& input,
+                         const StridedSpan& offsets,
+                         const StridedSpan& output,
+                         const StridedSpan& workspace,
                          Stream& stream,
                          RaggedLaunchParts parts = RaggedLaunchParts::MainAndFinish);
 
@@ -178,10 +179,10 @@ void raggedRKSetProbe(unsigned long long* probe);
 void launchRaggedRKValue(CubReductionOp op,
                          const RaggedRKShape& shape,
                          uint32_t ctas,
-                         const Tensor& input,
-                         const Tensor& offsets,
-                         Tensor& output,
-                         Tensor& workspace,
+                         const StridedSpan& input,
+                         const StridedSpan& offsets,
+                         const StridedSpan& output,
+                         const StridedSpan& workspace,
                          Stream& stream,
                          RaggedLaunchParts parts = RaggedLaunchParts::MainAndFinish);
 
@@ -211,10 +212,10 @@ void launchRaggedRKValue(CubReductionOp op,
 void launchRaggedRKArg(CubArgReductionOp op,
                        const RaggedRKShape& shape,
                        uint32_t ctas,
-                       const Tensor& input,
-                       const Tensor& offsets,
-                       Tensor& index_output,
-                       Tensor& workspace,
+                       const StridedSpan& input,
+                       const StridedSpan& offsets,
+                       const StridedSpan& index_output,
+                       const StridedSpan& workspace,
                        Stream& stream,
                        RaggedLaunchParts parts = RaggedLaunchParts::MainAndFinish);
 
@@ -269,10 +270,10 @@ void launchRaggedFinishValue(int fixed_op,
 void launchRaggedKRArg(CubArgReductionOp op,
                        const RaggedKRShape& shape,
                        uint32_t grid,
-                       const Tensor& input,
-                       const Tensor& offsets,
-                       Tensor& index_output,
-                       Tensor& workspace,
+                       const StridedSpan& input,
+                       const StridedSpan& offsets,
+                       const StridedSpan& index_output,
+                       const StridedSpan& workspace,
                        Stream& stream,
                        RaggedLaunchParts parts = RaggedLaunchParts::MainAndFinish);
 

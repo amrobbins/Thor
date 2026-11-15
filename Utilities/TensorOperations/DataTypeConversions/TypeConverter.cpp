@@ -94,8 +94,9 @@ void TypeConverter::convertType(const Tensor &source,
     if (numElements == 0)
         return;
 
-    void *sourceMem = source.getBaseMemPtr();
-    void *destMem = dest.getBaseMemPtr();
+    // The tensors' own starts (a view's offset included), not their allocations'.
+    void *sourceMem = const_cast<void *>(source.getMemPtr<void>());
+    void *destMem = const_cast<void *>(dest.getMemPtr<void>());
     auto args = make_unique<TensorArgs>(source, dest, sourceMem, destMem, sourceDataType, destDataType, numElements);
     stream.enqueueHostFunction(cpuConvertType, std::move(args));
 }

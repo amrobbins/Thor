@@ -11,6 +11,7 @@
 // must enqueue work only: no cudaDevice/Stream/Event synchronization inside.
 
 #include "Utilities/TensorOperations/Cub/ReductionAutotunerCore.h"
+#include "DeepLearning/Implementation/Tensor/StridedSpan.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/ScopedGpu.h"
 
@@ -30,13 +31,16 @@
 namespace ThorImplementation::ReductionAutotuning {
 
 // The candidate's callback must write every output element it will later read.
-// scratch is an empty Tensor if scratch_bytes==0. Output and scratch are
-// separate rotating tensors; scratch bytes are for the WHOLE execution plan.
-// Both complete and staged plans share the same logical input and output.
+// input, output and scratch are one cold slot of each ring: dense spans of the ring's storage (no tensor views), each
+// starting on a 256-byte boundary with at least 128 bytes before the next slot. scratch is an empty span if
+// scratch_bytes==0. Output and scratch rotate separately; scratch bytes are for the WHOLE execution plan.
+// Both complete and staged plans share the same logical input and output. A candidate that reads or writes several
+// tensors through one slot takes them as slices of it (StridedSpan::bytesAs at nextSliceOffset offsets).
 struct Candidate {
     std::string name;
     uint64_t scratch_bytes = 0;
-    std::function<void(const Tensor& input, Tensor& output, Tensor& scratch, Stream& stream)> launch;
+    std::function<void(const StridedSpan& input, const StridedSpan& output, const StridedSpan& scratch, Stream& stream)>
+        launch;
 };
 
 struct Options {
@@ -106,9 +110,9 @@ inline uint64_t checkedMultiply(uint64_t a, uint64_t b) {
     return a * b;
 }
 
-// A single owning Tensor is split into dense views, each starting on a
-// 32-byte boundary with >=128 bytes of padding after its logical data.
-// Each slot is physically disjoint and uses the same TensorDescriptor.
+// A single owning UINT8 Tensor is split into slots, dense spans of it, each starting on a 256-byte boundary with
+// >=128 bytes of padding after its logical data (alignedStride). Each slot is physically disjoint and reads as the
+// ring's TensorDescriptor.
 class TensorRing {
 public:
     TensorRing(TensorPlacement placement, TensorDescriptor descriptor, size_t slots)
@@ -118,12 +122,12 @@ public:
         const uint64_t bytes = checkedMultiply(stride_, static_cast<uint64_t>(slots));
         storage_ = Tensor(placement, TensorDescriptor(DataType::UINT8, {bytes}));
     }
-    // View handles are cheap; do not allocate a potentially huge vector of
-    // handles when a tiny tensor requires hundreds of thousands of cold slots.
-    [[nodiscard]] Tensor at(size_t slot) const {
+    // Spans are cheap; do not allocate a potentially huge vector of them when a tiny tensor requires hundreds of
+    // thousands of cold slots.
+    [[nodiscard]] StridedSpan at(size_t slot) const {
         if (slot >= count_) throw std::out_of_range("Reduction autotuner slot out of range");
-        return storage_.aliasByteStorageAs(descriptor_.getDataType(), descriptor_.getDimensions(),
-                                           static_cast<uint64_t>(slot) * stride_);
+        return StridedSpan(storage_).bytesAs(static_cast<uint64_t>(slot) * stride_, descriptor_.getDataType(),
+                                             descriptor_.getDimensions());
     }
     [[nodiscard]] uint64_t stride() const { return stride_; }
     [[nodiscard]] size_t count() const { return count_; }
@@ -144,7 +148,7 @@ private:
 // Caller must provide a contiguous GPU input on the same device as stream.
 // Device data is cloned into the cold ring before any timed launches.
 inline RunResult autotune(const std::vector<Candidate>& candidates,
-                          const Tensor& representative_input,
+                          const StridedSpan& representative_input,
                           const TensorDescriptor& output_descriptor,
                           Stream& stream,
                           Options options = {}) {
@@ -226,19 +230,19 @@ inline RunResult autotune(const std::vector<Candidate>& candidates,
         const bool timed = start != nullptr;
         const size_t slot = static_cast<size_t>(cursor++ % slots);
         const Candidate& candidate = candidates[candidate_index];
-        Tensor input_view = inputs.at(slot);
-        Tensor output_view = outputs.at(slot);
-        // Scratch is an aligned allocation of at least scratch_bytes; a
+        const StridedSpan input_slot = inputs.at(slot);
+        const StridedSpan output_slot = outputs.at(slot);
+        // Scratch is an aligned slot of at least scratch_bytes; a
         // candidate must only access its declared scratch_bytes prefix.
-        Tensor scratch_view = candidate.scratch_bytes ? scratch->at(slot) : Tensor();
+        const StridedSpan scratch_slot = candidate.scratch_bytes ? scratch->at(slot) : StridedSpan();
         if (timed) detail::checkCuda(cudaEventRecord(start, stream.getStream()), "cudaEventRecord(start)");
-        candidate.launch(input_view, output_view, scratch_view, stream);
+        candidate.launch(input_slot, output_slot, scratch_slot, stream);
         detail::checkCuda(cudaPeekAtLastError(), "candidate launch");
         for (size_t extra = 1; timed && extra < count; ++extra) {
             const size_t next = static_cast<size_t>(cursor++ % slots);
-            Tensor next_input = inputs.at(next);
-            Tensor next_output = outputs.at(next);
-            Tensor next_scratch = candidate.scratch_bytes ? scratch->at(next) : Tensor();
+            const StridedSpan next_input = inputs.at(next);
+            const StridedSpan next_output = outputs.at(next);
+            const StridedSpan next_scratch = candidate.scratch_bytes ? scratch->at(next) : StridedSpan();
             candidate.launch(next_input, next_output, next_scratch, stream);
             detail::checkCuda(cudaPeekAtLastError(), "candidate launch");
         }

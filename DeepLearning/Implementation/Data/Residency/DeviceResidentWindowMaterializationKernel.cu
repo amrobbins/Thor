@@ -17,6 +17,7 @@
 
 using ThorImplementation::DataType;
 using ThorImplementation::Tensor;
+using ThorImplementation::TensorSpan;
 using ThorImplementation::TensorPlacement;
 
 namespace {
@@ -516,19 +517,18 @@ void validateTensor(const Tensor &tensor, TensorPlacement placement, const char 
 
 void launchDeviceResidentWindowMaterializationKernelWithRowsPerCtaForBenchmark(
     const Tensor &sourceStorage,
-    const Tensor &rowPlans,
+    const TensorSpan &rowPlans,
     uint64_t logicalRows,
     const DeviceResidentWindowMaterializationSpec &spec,
     Tensor &destination,
     uint32_t rowsPerCta,
     Stream &stream) {
     THOR_THROW_IF_FALSE(destination.isInitialized());
-    THOR_THROW_IF_FALSE(rowPlans.isInitialized());
+    rowPlans.validate("Compact resident window row-plan");
     const TensorPlacement placement = destination.getPlacement();
-    validateTensor(rowPlans, placement, "window row-plan");
-    // Session-owned plans may be UINT64 alias views into the consolidated
-    // selection-metadata upload allocation.  Direct kernel tests and standalone
-    // callers may continue to provide byte tensors.
+    validateTensor(rowPlans.tensor, placement, "window row-plan");
+    // Session-owned plans are a UINT64 span of the consolidated selection-metadata upload allocation, placed on an
+    // 8-byte boundary after the row indices. Direct kernel tests and standalone callers may pass whole byte tensors.
     THOR_THROW_IF_FALSE(
         rowPlans.getDataType() == DataType::UINT8 ||
         rowPlans.getDataType() == DataType::UINT64);
@@ -562,7 +562,7 @@ void launchDeviceResidentWindowMaterializationKernelWithRowsPerCtaForBenchmark(
                                          : sizeof(DeviceResidentWindowRowPlan64);
     THOR_THROW_IF_FALSE(
         logicalRows == 0 || planBytes <= std::numeric_limits<uint64_t>::max() / logicalRows);
-    THOR_THROW_IF_FALSE(rowPlans.getArraySizeInBytes() == logicalRows * planBytes);
+    THOR_THROW_IF_FALSE(rowPlans.bytes() == logicalRows * planBytes);
     if (logicalRows == 0) return;
 
     const uint64_t elementBytes = dataTypeBytes(spec.dataType);
@@ -610,11 +610,11 @@ void launchDeviceResidentWindowMaterializationKernelWithRowsPerCtaForBenchmark(
     if (usePlan32) {
         THOR_LAUNCH_PLAN(
             DeviceResidentWindowRowPlan32,
-            reinterpret_cast<const DeviceResidentWindowRowPlan32 *>(rowPlans.getMemPtr()));
+            reinterpret_cast<const DeviceResidentWindowRowPlan32 *>(rowPlans.address()));
     } else {
         THOR_LAUNCH_PLAN(
             DeviceResidentWindowRowPlan64,
-            reinterpret_cast<const DeviceResidentWindowRowPlan64 *>(rowPlans.getMemPtr()));
+            reinterpret_cast<const DeviceResidentWindowRowPlan64 *>(rowPlans.address()));
     }
 #undef THOR_LAUNCH_PLAN
 }
@@ -622,7 +622,7 @@ void launchDeviceResidentWindowMaterializationKernelWithRowsPerCtaForBenchmark(
 
 void launchDeviceResidentWindowMaterializationKernel(
     const Tensor &sourceStorage,
-    const Tensor &rowPlans,
+    const TensorSpan &rowPlans,
     uint64_t logicalRows,
     const DeviceResidentWindowMaterializationSpec &spec,
     Tensor &destination,

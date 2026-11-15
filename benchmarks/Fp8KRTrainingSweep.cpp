@@ -75,6 +75,7 @@
 //   ./thor_fp8_kr_training_sweep --max-cells=400 2> kr-training.log | gzip -1 > kr-training.csv.gz
 //   python3 ../benchmarks/fp8_kr_training.py kr-training.csv.gz [--compare=kr-training-2.csv.gz]
 #include "benchmarks/ColdTiming.h"
+#include "Utilities/TensorOperations/Cub/ReductionAutotunerCore.h"
 #include "benchmarks/Fp8OracleBatchQueue.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
@@ -477,7 +478,7 @@ std::vector<Candidate> candidates(uint64_t rows, uint64_t row_bytes, uint32_t el
 }
 
 uint64_t outputFootprint(Kind kind, uint64_t rows) {
-    return producesValue(kind) ? align256(4 * rows) + 4 * rows : 4 * rows;
+    return producesValue(kind) ? T::ReductionAutotuning::nextSliceOffset(4 * rows) + 4 * rows : 4 * rows;
 }
 
 // The Split scratch a shape needs at a cell of this kind (1217: carried shapes write wide partials).
@@ -496,9 +497,9 @@ struct Timed {
 
 struct Cell {
     CellSpec spec;
-    std::vector<T::Tensor> inputs;
-    std::vector<T::Tensor> carried;  // 1217: one carried index view per input view (carried cells)
-    std::vector<std::optional<T::Tensor>> values, indices;
+    std::vector<T::StridedSpan> inputs;   // views of the input ring
+    std::vector<T::StridedSpan> carried;  // 1217: one carried index view per input view (carried cells)
+    std::vector<std::optional<T::StridedSpan>> values, indices;  // views of the output ring
     std::optional<C::CubReductionStageSemantics> semantics;
     bool maximum = false;
     size_t next_input = 0, next_output = 0;
@@ -609,11 +610,11 @@ int main(int argc, char** argv) {
             const uint64_t scratch_bytes = scratchBytes(shape, cell.spec.kind);
             void* partials = scratch_bytes != 0 ? scratch_ptr : nullptr;
             const size_t view = cell.next_input++ % cell.inputs.size();
-            const T::Tensor& in = cell.inputs[view];
+            const T::StridedSpan& in = cell.inputs[view];
             const size_t out = cell.next_output++ % cell.values.size();
             if (isCarried(cell.spec.kind)) {
                 C::launchFp32KRCarriedArgSegments(in, cell.carried[view],
-                                                  cell.values[out] ? &*cell.values[out] : nullptr,
+                                                  (cell.values[out] ? &*cell.values[out] : nullptr),
                                                   &*cell.indices[out], shape, partials, scratch_bytes, cell.maximum, 1,
                                                   stream, stages);
             } else if (is_value && cell.spec.dtype == T::DataType::FP32) {
@@ -626,13 +627,13 @@ int main(int argc, char** argv) {
                 C::launchFp8KRValueSegments(*cell.semantics, in, *cell.values[out], shape, partials, scratch_bytes,
                                             1.0f, stream, stages);
             } else if (isF16(cell.spec.dtype)) {
-                C::launchF16KRArgSegments(in, cell.values[out] ? &*cell.values[out] : nullptr, &*cell.indices[out],
+                C::launchF16KRArgSegments(in, (cell.values[out] ? &*cell.values[out] : nullptr), &*cell.indices[out],
                                           shape, partials, scratch_bytes, cell.maximum, 1, stream, stages);
             } else if (cell.spec.dtype == T::DataType::FP32) {
-                C::launchFp32KRArgSegments(in, cell.values[out] ? &*cell.values[out] : nullptr, &*cell.indices[out],
+                C::launchFp32KRArgSegments(in, (cell.values[out] ? &*cell.values[out] : nullptr), &*cell.indices[out],
                                            shape, partials, scratch_bytes, cell.maximum, 1, stream, stages);
             } else {
-                C::launchFp8KRArgSegments(in, cell.values[out] ? &*cell.values[out] : nullptr, &*cell.indices[out],
+                C::launchFp8KRArgSegments(in, (cell.values[out] ? &*cell.values[out] : nullptr), &*cell.indices[out],
                                           shape, partials, scratch_bytes, cell.maximum, 1, stream, stages);
             }
         };
@@ -713,7 +714,8 @@ int main(int argc, char** argv) {
             try {
                 // Views: inputs spanning >= 2 GiB, outputs spanning >= 1 GiB (fewer when one alone is that big).
                 const uint64_t footprint = outputFootprint(spec.kind, rows);
-                const uint64_t index_offset = producesValue(spec.kind) ? align256(4 * rows) : 0;
+                const uint64_t index_offset =
+                    producesValue(spec.kind) ? T::ReductionAutotuning::nextSliceOffset(4 * rows) : 0;
                 for (uint64_t v = 0, count = viewCount(bytes + carried_bytes, INPUT_REUSE_BYTES, inputs.bytes());
                      v < count; ++v) {
                     const uint64_t offset = inputs.take(bytes);
@@ -728,9 +730,9 @@ int main(int argc, char** argv) {
                      ++v) {
                     const uint64_t base = outputs.take(footprint);
                     cell->values.push_back(is_value || producesValue(spec.kind)
-                        ? std::optional<T::Tensor>(outputs.view(T::DataType::FP32, {rows}, base)) : std::nullopt);
+                        ? std::optional<T::StridedSpan>(outputs.view(T::DataType::FP32, {rows}, base)) : std::nullopt);
                     cell->indices.push_back(!is_value
-                        ? std::optional<T::Tensor>(outputs.view(T::DataType::UINT32, {rows}, base + index_offset))
+                        ? std::optional<T::StridedSpan>(outputs.view(T::DataType::UINT32, {rows}, base + index_offset))
                         : std::nullopt);
                 }
                 if (is_value) {
@@ -758,7 +760,7 @@ int main(int argc, char** argv) {
                 if (settings.production && !carried) {
                     const bool is_r = rows == 1;
                     const std::vector<uint64_t> dims = is_r ? std::vector<uint64_t>{r} : std::vector<uint64_t>{rows, r};
-                    const T::Tensor site = inputs.view(spec.dtype, dims, cell->first_input);
+                    const T::StridedSpan site = inputs.view(spec.dtype, dims, cell->first_input);
                     const uint32_t axis = is_r ? 0 : 1;
                     const auto stamp_start = std::chrono::steady_clock::now();
                     std::string passes_name;

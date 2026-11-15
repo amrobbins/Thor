@@ -210,7 +210,7 @@ PrimitiveSample runMaterializationCase(uint64_t elements, Stream& stream) {
     sample.shape = "elements=" + std::to_string(elements);
     sample.work_units = elements;
     sample.logical_bytes = checkedMultiply(elements, 2 * sizeof(float), "materialization logical bytes");
-    sample.timing = timeLaunch([&] { materializeTensorViewAsync(source, destination, stream); }, stream);
+    sample.timing = timeLaunch([&] { copyToDenseAsync(source, destination, stream); }, stream);
     return sample;
 }
 

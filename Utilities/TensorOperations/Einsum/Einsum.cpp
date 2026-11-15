@@ -4,7 +4,6 @@
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/StampedEquation.h"
-#include "Utilities/Exceptions.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -248,46 +247,6 @@ void markLogicalOperandPreReduced(LogicalEinsumOperand& operand,
     operand.dense_storage = true;
 }
 
-[[nodiscard]] bool reductionHasOrdainedValuePath(const LogicalEinsumOperand& operand,
-                                                   const std::vector<uint64_t>& reduction_axes) {
-    std::vector<uint32_t> narrowed_axes;
-    narrowed_axes.reserve(reduction_axes.size());
-    for (uint64_t axis : reduction_axes) {
-        if (axis > UINT32_MAX) {
-            throw std::runtime_error("Einsum reduction axis exceeds UINT32_MAX.");
-        }
-        narrowed_axes.push_back(static_cast<uint32_t>(axis));
-    }
-
-    try {
-        static_cast<void>(CubReduction::analyzeGeometry(operand.dimensions, operand.strides, narrowed_axes));
-        return true;
-    } catch (const NotImplementedException&) {
-        return false;
-    }
-}
-
-void materializeLogicalOperandForReduction(LogicalEinsumOperand& operand, DataType output_dtype) {
-    // UNSUPPORTED-VIEW-GATE intentionally removed the arbitrary logical-index
-    // mapper from production. Repeated-label einsum diagonals are still kept
-    // zero-copy whenever an ordained reducer owns their real stride pattern
-    // (for example VIEW-PITCHED-TILED). A rarer diagonal can expose internal
-    // gaps in the retained payload, though, and no reduction kernel should be
-    // generalized merely to recover that theoretical view. Materialize only
-    // that operand into dense logical order, then let the ordinary dense
-    // reduction paths take over.
-    //
-    // The cast is an intentional Expression stage boundary, as in matrix-operand
-    // materialization below. Matrix lowering normally requests the existing
-    // storage dtype. Pair-product lowering requests FP32; in that case widening
-    // before the reduction is semantically equivalent to the reduction's
-    // existing FP32 input conversion and keeps the resulting temporary in the
-    // dtype already required downstream.
-    operand.expression = operand.expression.cast(output_dtype);
-    operand.strides = denseStrides(operand.dimensions);
-    operand.dense_storage = true;
-}
-
 [[nodiscard]] LogicalEinsumOperand preReduceLogicalOperand(LogicalEinsumOperand operand,
                                                               const std::vector<int32_t>& reduction_labels,
                                                               DataType output_dtype) {
@@ -296,15 +255,11 @@ void materializeLogicalOperandForReduction(LogicalEinsumOperand& operand, DataTy
         return operand;
     }
 
-    // Prefer the zero-copy logical view when one of Thor's ordained value
-    // reducers can consume it directly. If UNSUPPORTED-VIEW-GATE says the view
-    // has no ordained reducer after DELETE, materialize only this operand
-    // before the local reduction. This keeps the production reduction gate
-    // strict while preserving the full einsum surface, including repeated-label
-    // diagonals whose retained axes contain internal storage gaps.
-    if (!operand.dense_storage && !reductionHasOrdainedValuePath(operand, reduction_axes)) {
-        materializeLogicalOperandForReduction(operand, output_dtype);
-    }
+    // The operand stays its zero-copy logical view. 1390: Expression's reduction stage runs any view: in place when
+    // the reducer owns its layout, in two parts when its retained axes are permuted (the reduction in physical order,
+    // then the dense copy of its output), else on the view's dense copy in its own dtype (repeated-label diagonals
+    // with gaps, retained payloads with internal gaps). Through 1389 Einsum materialized a refused view itself, by a
+    // cast to the reduction's output dtype.
 
     // Accumulate through centralized CubReduction in FP32 and store in the
     // dtype requested by the downstream lowering. Matrix lowering requests the

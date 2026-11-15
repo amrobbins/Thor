@@ -164,20 +164,21 @@ inline TuningResult chooseWinner(const std::vector<Measurements>& observations, 
     return result;
 }
 
-// Each view starts on a 256-byte boundary and has at least 128 bytes of
-// unused space before the next view. Merely rounding the tensor's size up to
-// an alignment would NOT guarantee this padding (e.g. a 4096-byte view).
+// Every autotuning memory range (a ring slot, and each slice inside a slot: an ARG output's value then index, a carried
+// contest input's values then carried index) starts on a 256-byte boundary and has at least 128 bytes of unused space
+// before the next range's byte offset. Merely rounding a range's size up to an alignment would NOT guarantee this
+// padding (e.g. a 4096-byte range).
 // Reuse distance is at least slot_count * slot bytes; the CUDA runner
 // chooses slot_count based on L2 capacity.
 // 1163: 256 bytes, cudaMalloc's alignment, so every timed launch reads an input aligned as a real tensor's is. With
 // 32-byte starts a ring slot sat at a different offset mod 256 from the next (a 256 MiB input alternated 0 and 128), and
 // the FP8 RK contest and sweep disagreed by up to 14% at 64-256 MiB where the losing shapes ran ~10% faster in one
 // sample of five: the cue of an alignment-sensitive kernel timed at mixed alignments.
-inline constexpr uint64_t TensorViewAlignmentBytes = 256;
-inline constexpr uint64_t TensorViewPaddingBytes = 128;
+inline constexpr uint64_t SliceAlignmentBytes = 256;
+inline constexpr uint64_t SlicePaddingBytes = 128;
 inline uint64_t alignedStride(uint64_t bytes) {
-    constexpr uint64_t alignment = TensorViewAlignmentBytes;
-    constexpr uint64_t padding = TensorViewPaddingBytes;
+    constexpr uint64_t alignment = SliceAlignmentBytes;
+    constexpr uint64_t padding = SlicePaddingBytes;
     if (bytes == 0 ||
         bytes > std::numeric_limits<uint64_t>::max() - padding - (alignment - 1)) {
         throw std::invalid_argument("Invalid reduction autotuner tensor stride");
@@ -185,6 +186,10 @@ inline uint64_t alignedStride(uint64_t bytes) {
     const uint64_t padded_bytes = bytes + padding;
     return (padded_bytes + alignment - 1) & ~(alignment - 1);
 }
+
+// The byte offset of the slice after one of `bytes` that starts at offset 0: 0 when there is no such slice (bytes 0),
+// else alignedStride(bytes).
+inline uint64_t nextSliceOffset(uint64_t bytes) { return bytes == 0 ? 0 : alignedStride(bytes); }
 
 // 1161: slot_bytes is everything one launch touches in its slot (input + output + scratch strides), so the reuse
 // distance counts all the traffic that evicts a slot's input from L2, and the rings together stay near

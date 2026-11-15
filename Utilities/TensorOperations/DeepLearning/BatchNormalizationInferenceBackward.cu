@@ -81,8 +81,6 @@ void validate(const Tensor& errorInput,
     THOR_THROW_IF_FALSE(runningVariance.getPlacement() == errorInput.getPlacement());
     THOR_THROW_IF_FALSE(stream.getGpuNum() == errorInput.getPlacement().getDeviceNum());
     THOR_THROW_IF_FALSE(errorOutput.getDescriptor() == errorInput.getDescriptor());
-    THOR_THROW_IF_FALSE(!errorInput.hasCustomStrides());
-    THOR_THROW_IF_FALSE(!errorOutput.hasCustomStrides());
     THOR_THROW_IF_FALSE(errorInput.isDenseContiguous());
     THOR_THROW_IF_FALSE(errorOutput.isDenseContiguous());
     THOR_THROW_IF_FALSE(scale.getDataType() == DataType::FP32);

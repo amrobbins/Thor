@@ -4,6 +4,7 @@
 #include <limits>
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Tensor/TensorElement.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/CudaDriver/CudaGraph.h"
 
@@ -11,7 +12,8 @@ namespace ThorImplementation {
 
 struct DynamicGrid1DFromScalarDescriptor {
     const DeviceUpdatableKernelNodeDeviceHandle* targetNode = nullptr;
-    Tensor itemCount;
+    // The device count: a one-element tensor, or one element of a larger one (e.g. offsets[B]).
+    TensorElement itemCount;
     uint64_t itemsPerCount = 1;
     uint32_t targetBlockDimX = 256;
     uint32_t minGridDimX = 1;

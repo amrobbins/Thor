@@ -56,18 +56,18 @@ int main() {
     try {
         const TensorPlacement gpu(TensorPlacement::MemDevices::GPU, 0);
         Stream stream(gpu);
-        // Verify the actual CUDA-backed view pointers for all three ring uses.
+        // Verify the actual CUDA-backed slot pointers for all three ring uses.
         // Aligned logical sizes must still have a full 128-byte guard region.
         auto checkRing = [&](const char* label, const TensorDescriptor& descriptor) {
             detail::TensorRing ring(gpu, descriptor, 3);
             const uint64_t logical_bytes = descriptor.getArraySizeInBytes();
             uintptr_t previous = 0;
             for (size_t i = 0; i < 3; ++i) {
-                Tensor view = ring.at(i);
-                const uintptr_t address = reinterpret_cast<uintptr_t>(view.getMemPtr<void>());
-                if (address % TensorViewAlignmentBytes != 0 ||
-                    (i != 0 && address - previous < logical_bytes + TensorViewPaddingBytes)) {
-                    throw std::runtime_error(std::string(label) + " ring view alignment/padding failed");
+                const StridedSpan slot = ring.at(i);
+                const uintptr_t address = reinterpret_cast<uintptr_t>(slot.getMemPtr<void>());
+                if (address % SliceAlignmentBytes != 0 ||
+                    (i != 0 && address - previous < logical_bytes + SlicePaddingBytes)) {
+                    throw std::runtime_error(std::string(label) + " ring slot alignment/padding failed");
                 }
                 previous = address;
             }
@@ -79,16 +79,16 @@ int main() {
         input.memsetAsync(stream, 1);
         const TensorDescriptor output_type(DataType::FP32, {Blocks});
         std::vector<Candidate> candidates;
-        candidates.push_back({"complete_fast", 0, [](const Tensor& x, Tensor& y, Tensor&, Stream& s) {
+        candidates.push_back({"complete_fast", 0, [](const StridedSpan& x, const StridedSpan& y, const StridedSpan&, Stream& s) {
             probeReduce<<<Blocks, BlockThreads, 0, s.getStream()>>>(x.getMemPtr<uint8_t>(), y.getMemPtr<float>(), 1);
         }});
         candidates.push_back({"staged_fp32_continuation", Blocks * sizeof(float),
-                              [](const Tensor& x, Tensor& y, Tensor& scratch, Stream& s) {
+                              [](const StridedSpan& x, const StridedSpan& y, const StridedSpan& scratch, Stream& s) {
             auto* partials = static_cast<float*>(scratch.getMemPtr<void>());
             probeReduce<<<Blocks, BlockThreads, 0, s.getStream()>>>(x.getMemPtr<uint8_t>(), partials, 1);
             copyPartials<<<(Blocks + 255) / 256, 256, 0, s.getStream()>>>(partials, y.getMemPtr<float>(), Blocks);
         }});
-        candidates.push_back({"complete_slow", 0, [](const Tensor& x, Tensor& y, Tensor&, Stream& s) {
+        candidates.push_back({"complete_slow", 0, [](const StridedSpan& x, const StridedSpan& y, const StridedSpan&, Stream& s) {
             probeReduce<<<Blocks, BlockThreads, 0, s.getStream()>>>(x.getMemPtr<uint8_t>(), y.getMemPtr<float>(), 16);
         }});
         Options options;

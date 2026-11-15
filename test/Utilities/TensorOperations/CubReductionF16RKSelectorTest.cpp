@@ -9,6 +9,7 @@
 // VALUE and per format, an input of lower alignment selects only the passes that run at it, and the winner computes
 // the value and index. Every ARG candidate computing is CubReductionF16RK.ArgCandidatesRunThroughThePassLauncher.
 
+#include "test/Utilities/TensorOperations/OutputSpan.h"
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 #include "Utilities/TensorOperations/Cub/CubReductionStageSemantics.h"
@@ -130,7 +131,7 @@ void expectArgWinnerComputes(const PhysicalKernel& physical, DataType dtype, boo
     uint64_t* packed = scratch ? static_cast<uint64_t*>(scratch->getMemPtr<void>()) : nullptr;
     Tensor value(gpuPlacement, TensorDescriptor(DataType::FP32, {outer, k}));
     Tensor index(gpuPlacement, TensorDescriptor(DataType::UINT32, {outer, k}));
-    F16RK::launchF16RKArgPass(physical, input, produce_value ? &value : nullptr, &index, geometry, packed, maximum, 1,
+    F16RK::launchF16RKArgPass(physical, input, produce_value ? outputSpan(value) : OutputSpan(), outputSpan(index), geometry, packed, maximum, 1,
                               stream);
     stream.synchronize();
     const auto got_index = copyGpuTensorAsUnsigned(index, stream);
@@ -277,7 +278,8 @@ TEST(CubReductionF16RKSelector, SelectsCachesAndComputes) {
 
 // An input of lower alignment (Tensor::alignmentBytes) is another entry, and its winner runs at that alignment: at 2
 // bytes, the 2-byte AlignedK packet (odd K) or the rotated RuntimeK pass; at 4 bytes, AlignedK packets of at most 4
-// bytes or rotated. Each winner computes the reduction (on an aligned input; the pass is alignment-tolerant).
+// bytes or rotated; 1381: or the VALUE OneWindow kernel when K fits its window less a prefix. Each winner computes the
+// reduction (on an aligned input; the pass is alignment-tolerant).
 TEST(CubReductionF16RKSelector, AlignmentSelectsTolerantPasses) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -295,7 +297,7 @@ TEST(CubReductionF16RKSelector, AlignmentSelectsTolerantPasses) {
         const auto tolerant = F16RK::selectCachedValueSite(problem, site, DataType::BF16, CubReductionOp::Sum, r, 1.0f,
                                                            stream, max, CubReductionTuningDepth::Quick, alignment);
         EXPECT_EQ(before + 2, attempts());
-        EXPECT_LE(F16RK::f16RKPassInputAlignment(tolerant.physical), alignment);
+        EXPECT_LE(F16RK::f16RKPassInputAlignmentAtK(tolerant.physical, k), alignment);
         static_cast<void>(aligned);
         expectWinnerComputes(problem, site, DataType::BF16, CubReductionOp::Sum, tolerant.physical, outer, r, k,
                              stream);
@@ -415,8 +417,8 @@ TEST(CubReductionF16RKSelector, ArgSelectsCachesAndComputes) {
     EXPECT_EQ(before + 6, attempts());
 }
 
-// An ARG input of lower alignment is another entry, and its winner runs at that alignment: at 2 bytes only the rotated
-// pass; at 4 bytes AlignedK's 4-byte packet or rotated.
+// An ARG input of lower alignment is another entry, and its winner runs at that alignment: at 2 bytes the rotated
+// pass (1383: or OneWindow where K fits its window with a prefix); at 4 bytes also AlignedK's 4-byte packet.
 TEST(CubReductionF16RKSelector, ArgAlignmentSelectsTolerantPasses) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -434,7 +436,7 @@ TEST(CubReductionF16RKSelector, ArgAlignmentSelectsTolerantPasses) {
         const auto tolerant = F16RK::selectCachedArgSite(problem, site, DataType::BF16, true, r, stream, max,
                                                          CubReductionTuningDepth::Quick, alignment);
         EXPECT_EQ(before + 2, attempts());
-        EXPECT_LE(F16RK::f16RKPassInputAlignment(tolerant.physical), alignment);
+        EXPECT_LE(F16RK::f16RKPassInputAlignmentAtK(tolerant.physical, k), alignment);
         expectArgWinnerComputes(tolerant.physical, DataType::BF16, true, true, outer, r, k, stream);
     }
 }

@@ -472,9 +472,7 @@ class DropOut : public Layer, public TrainingDropoutControllable {
 
     static void copyActivePrefix(const Tensor& source, Tensor destination, uint64_t activeElements, Stream stream) {
         if (activeElements == 0 || source == destination) return;
-        Tensor sourcePrefix = source.aliasView({activeElements}, {1}, 0);
-        Tensor destinationPrefix = destination.aliasView({activeElements}, {1}, 0);
-        destinationPrefix.copyFromAsync(sourcePrefix, stream);
+        destination.copyElementsFromAsync(source, activeElements, stream);
     }
 
     void fuseBackwardIdentityAlias() {

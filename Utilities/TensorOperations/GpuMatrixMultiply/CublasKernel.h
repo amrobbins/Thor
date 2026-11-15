@@ -4,11 +4,13 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Tensor/TensorSpan.h"
 #include "Utilities/Common/AcceleratorBackendCachePolicy.h"
 #include "Utilities/Common/SharedOwnership.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernelOptions.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernelRequirement.h"
-#include "Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTranspose.h"
+#include "DeepLearning/Implementation/Tensor/StridedSpan.h"
+#include "Utilities/TensorOperations/Copy/StridedCopy.h"
 
 #include <cublasLt.h>
 #include <cuda.h>
@@ -57,6 +59,8 @@ class CublasKernel final : public AcceleratorBackendLocalExecutionStateTag {
 
         CublasKernelRequirement cublasKernelRequirement;
         CublasKernelOptions cublasKernelOptions;
+        // The operand pointer alignment the chosen algorithm needs (CUBLASLT_ALGO_CAP_MIN_ALIGNMENT_*).
+        CublasOperandAlignment algorithmAlignment;
 
         cublasLtMatmulDesc_t operationDescHost = nullptr;
         cublasLtMatmulDesc_t operationDescDevice = nullptr;
@@ -187,6 +191,29 @@ class CublasKernel final : public AcceleratorBackendLocalExecutionStateTag {
                       fp8Scales);
     }
 
+    // The alignment the operands' base pointers actually have (see CublasOperandAlignment). An operand is a whole
+    // tensor or, for one group of a grouped matmul, the span of the tensor that group addresses.
+    static CublasOperandAlignment operandAlignmentOf(const TensorSpan &A, const TensorSpan &B, const TensorSpan &C, const TensorSpan &D) {
+        auto alignmentOf = [](const TensorSpan &operand) { return CublasOperandAlignment::of(reinterpret_cast<uintptr_t>(operand.address())); };
+        return CublasOperandAlignment{alignmentOf(A), alignmentOf(B), alignmentOf(C), alignmentOf(D)};
+    }
+
+    // The operand pointer alignment the chosen algorithm needs. Never more than the alignment it was
+    // selected for (kernelRequirement.alignment), since cuBLASLt only returns algorithms that fit it.
+    const CublasOperandAlignment &getAlgorithmAlignment() const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        return state->algorithmAlignment;
+    }
+
+    // Throws unless the operands are as aligned as the chosen algorithm needs. Nothing checks this
+    // at launch: cuBLASLt trusts the pointers, and a misaligned one reads or writes the wrong bytes.
+    void requireOperandAlignment(const TensorSpan &A, const TensorSpan &B, const TensorSpan &C, const TensorSpan &D) const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        requireCublasOperandAlignment(state->algorithmAlignment,
+                                      operandAlignmentOf(A, B, C, D),
+                                      "cuBLASLt algorithm " + std::to_string(state->cublasKernelOptions.algorithmId));
+    }
+
     void executeKernel(Tensor A,
                        Tensor B,
                        Tensor C,
@@ -238,14 +265,15 @@ class CublasKernel final : public AcceleratorBackendLocalExecutionStateTag {
         // FIXME: Why was this there? What is the current support surface?
         // THOR_THROW_IF_FALSE(C.getMemPtr() != A.getMemPtr());
         // THOR_THROW_IF_FALSE(C.getMemPtr() != B.getMemPtr());
+        requireOperandAlignment(A, B, C, D);
 
         THOR_THROW_IF_FALSE(runWithoutChecks(A, B, C, D, workspace, alpha, beta, stream, pointerMode, fp8Scales) == CUBLAS_STATUS_SUCCESS);
     }
 
-    inline cublasStatus_t launchUncheckedPrevalidated(Tensor A,
-                                                       Tensor B,
-                                                       Tensor C,
-                                                       Tensor D,
+    inline cublasStatus_t launchUncheckedPrevalidated(const TensorSpan &A,
+                                                       const TensorSpan &B,
+                                                       const TensorSpan &C,
+                                                       const TensorSpan &D,
                                                        std::optional<Tensor> workspace,
                                                        const float *alpha,
                                                        const float *beta,
@@ -268,14 +296,14 @@ class CublasKernel final : public AcceleratorBackendLocalExecutionStateTag {
         return cublasLtMatmul(stream.getCublasLtHandleUnchecked(),
                               getOperationDesc(pointerMode),
                               alpha,
-                              A.getMemPtr(),
+                              A.address(),
                               state->ADesc,
-                              B.getMemPtr(),
+                              B.address(),
                               state->BDesc,
                               beta,
-                              C.getMemPtr(),
+                              C.address(),
                               state->CDesc,
-                              D.getMemPtr(),
+                              D.address(),
                               state->DDesc,
                               &state->cublasKernelOptions.algorithm,
                               ltWorkspace,
@@ -283,10 +311,10 @@ class CublasKernel final : public AcceleratorBackendLocalExecutionStateTag {
                               stream);
     }
 
-    inline cublasStatus_t runWithoutChecks(Tensor A,
-                                           Tensor B,
-                                           Tensor C,
-                                           Tensor D,
+    inline cublasStatus_t runWithoutChecks(const TensorSpan &A,
+                                           const TensorSpan &B,
+                                           const TensorSpan &C,
+                                           const TensorSpan &D,
                                            std::optional<Tensor> workspace,
                                            const float *alpha,
                                            const float *beta,
@@ -308,8 +336,8 @@ class CublasKernel final : public AcceleratorBackendLocalExecutionStateTag {
         cublasLtMatmulDesc_t operationDesc = getOperationDesc(pointerMode);
         configureTensorwideFp8Scales(operationDesc, fp8Scales);
 
-        const void *ltA = A.getMemPtr();
-        const void *ltB = B.getMemPtr();
+        const void *ltA = A.address();
+        const void *ltB = B.address();
         void *ltWorkspace = nullptr;
         size_t ltWorkspaceSizeInBytes = state->cublasKernelOptions.workspaceSizeInBytes;
 
@@ -333,31 +361,27 @@ class CublasKernel final : public AcceleratorBackendLocalExecutionStateTag {
             // and the second cuBLASLt operand is derived from external A, so the row-major public contract still computes
             // D = alpha * op(A) * op(B) + beta * C.
             if (fp8NeedsTransposedBWorkspace()) {
-                void *transposedB = addBytes(workspaceBase, fp8TransposedBWorkspaceOffsetInBytes());
-                launchMatrixTransposeByType(transposedB,
-                                            B.getMemPtr(),
-                                            static_cast<uint32_t>(state->cublasKernelRequirement.kernelRequirement.rowsB),
-                                            static_cast<uint32_t>(state->cublasKernelRequirement.kernelRequirement.colsB),
-                                            thorDataTypeForCudaDataType(state->cublasKernelRequirement.operationType.BDataType),
-                                            thorDataTypeForCudaDataType(state->cublasKernelRequirement.operationType.BDataType),
-                                            stream);
-                ltA = transposedB;
+                ltA = transposeFp8OperandIntoWorkspace(B,
+                                                       state->cublasKernelRequirement.kernelRequirement.rowsB,
+                                                       state->cublasKernelRequirement.kernelRequirement.colsB,
+                                                       state->cublasKernelRequirement.operationType.BDataType,
+                                                       workspace.value(),
+                                                       fp8TransposedBWorkspaceOffsetInBytes(),
+                                                       stream);
             } else {
-                ltA = B.getMemPtr();
+                ltA = B.address();
             }
 
             if (fp8NeedsTransposedAWorkspace()) {
-                void *transposedA = addBytes(workspaceBase, fp8TransposedAWorkspaceOffsetInBytes());
-                launchMatrixTransposeByType(transposedA,
-                                            A.getMemPtr(),
-                                            static_cast<uint32_t>(state->cublasKernelRequirement.kernelRequirement.rowsA),
-                                            static_cast<uint32_t>(state->cublasKernelRequirement.kernelRequirement.colsA),
-                                            thorDataTypeForCudaDataType(state->cublasKernelRequirement.operationType.ADataType),
-                                            thorDataTypeForCudaDataType(state->cublasKernelRequirement.operationType.ADataType),
-                                            stream);
-                ltB = transposedA;
+                ltB = transposeFp8OperandIntoWorkspace(A,
+                                                       state->cublasKernelRequirement.kernelRequirement.rowsA,
+                                                       state->cublasKernelRequirement.kernelRequirement.colsA,
+                                                       state->cublasKernelRequirement.operationType.ADataType,
+                                                       workspace.value(),
+                                                       fp8TransposedAWorkspaceOffsetInBytes(),
+                                                       stream);
             } else {
-                ltB = A.getMemPtr();
+                ltB = A.address();
             }
 
             ltWorkspace = ltWorkspaceSizeInBytes > 0 ? addBytes(workspaceBase, cublasWorkspaceOffsetInBytes()) : nullptr;
@@ -374,9 +398,9 @@ class CublasKernel final : public AcceleratorBackendLocalExecutionStateTag {
                                       ltB,
                                       state->BDesc,
                                       beta,
-                                      C.getMemPtr(),
+                                      C.address(),
                                       state->CDesc,
-                                      D.getMemPtr(),
+                                      D.address(),
                                       state->DDesc,
                                       &state->cublasKernelOptions.algorithm,
                                       ltWorkspace,
@@ -636,6 +660,28 @@ class CublasKernel final : public AcceleratorBackendLocalExecutionStateTag {
                                                  fp8Scales.CScaleDevicePointer,
                                                  fp8Scales.DScaleDevicePointer,
                                                  fp8Scales.DAmaxDevicePointer);
+    }
+
+    // 1394: the dense [cols, rows] transpose of the packed row-major [rows, cols] operand, written at `offset` bytes
+    // into the workspace, by Thor's dense copy (copyToDenseAsync's plan and launch, StridedCopy.h; through 1393
+    // gpuMatrixTranspose's launchMatrixTransposeByType, deleted). The copy moves the bytes as they are. Returns the
+    // transpose's address.
+    static const void *transposeFp8OperandIntoWorkspace(const TensorSpan &operand,
+                                                        int rows,
+                                                        int cols,
+                                                        cudaDataType_t operandDataType,
+                                                        const Tensor &workspace,
+                                                        size_t offset,
+                                                        Stream stream) {
+        if (operand.elementBytes() != cudaDataTypeSizeInBytes(operandDataType)) {
+            throw std::runtime_error("CublasKernel FP8 operand transpose: the operand's element size is not its "
+                                     "cuBLASLt data type's.");
+        }
+        const uint64_t r = static_cast<uint64_t>(rows), c = static_cast<uint64_t>(cols);
+        const StridedSpan source(operand.tensor, operand.offset, {c, r}, {1, c});
+        const StridedSpan transposed = StridedSpan(workspace).bytesAs(offset, operand.getDataType(), {c, r});
+        launchCopyToDense(planCopyToDense(source, transposed), source, transposed, stream);
+        return transposed.getMemPtr<void>();
     }
 
     bool fp8NeedsTransposedAWorkspace() const {
@@ -930,7 +976,17 @@ class CublasKernel final : public AcceleratorBackendLocalExecutionStateTag {
                 "the FP8 row-major adapter needs a batched transpose-workspace implementation first.");
         }
         allocateCublasResources();
+        state->algorithmAlignment = queryAlgorithmAlignment();
         materializationCount.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    CublasOperandAlignment queryAlgorithmAlignment() const {
+        // The selected-for alignment is in Thor operand order; the capabilities are in cuBLASLt's.
+        const bool swapsAB = usesFp8ColumnMajorLtPath();
+        const CublasOperandAlignment &selectedFor = state->cublasKernelRequirement.kernelRequirement.alignment;
+        const CublasOperandAlignment lt =
+            queryCublasLtAlgorithmAlignment(state->cublasKernelOptions.algorithm, swapsAB ? selectedFor.swappedAB() : selectedFor);
+        return swapsAB ? lt.swappedAB() : lt;
     }
 
     bool uninitialized() const { return state == nullptr; }

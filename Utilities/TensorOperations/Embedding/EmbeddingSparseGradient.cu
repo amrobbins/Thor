@@ -203,7 +203,7 @@ bool isSupportedGradientType(DataType dtype) {
 }
 
 void validateDenseContiguous(const Tensor& tensor, const std::string& name) {
-    if (tensor.hasCustomStrides() || !tensor.isDenseContiguous()) {
+    if (!tensor.isDenseContiguous()) {
         throw std::invalid_argument("Embedding sparse-gradient " + name + " tensor must be dense contiguous.");
     }
 }
@@ -1864,7 +1864,7 @@ void launchMaterializeSortPairsRaggedTyped(const Tensor& indices, PreparedEmbedd
         <<<grid, block, 0, stream.getStream()>>>(indices.getMemPtr<IndexT>(),
                                                  prepared.rowKeys.getMemPtr<RowT>(),
                                                  prepared.tokenIds.getMemPtr<uint32_t>(),
-                                                 extent.activeValueCount.getMemPtr<ActiveCountT>(),
+                                                 extent.activeValueCount.pointer<ActiveCountT>(),
                                                  prepared.numTokens,
                                                  extent.elementsPerValue,
                                                  prepared.vocabularySize,
@@ -2318,7 +2318,8 @@ std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradientI
             extent.activeValueCount.getDataType() != DataType::UINT64) {
             throw std::invalid_argument("Ragged Embedding sparse-gradient active-value count must use uint32 or uint64 storage.");
         }
-        if (extent.activeValueCount.getTotalNumElements() != 1 || extent.maxActiveValues == 0 || extent.elementsPerValue == 0) {
+        extent.activeValueCount.validate("Ragged Embedding sparse-gradient active-value count");
+        if (extent.maxActiveValues == 0 || extent.elementsPerValue == 0) {
             throw std::invalid_argument("Ragged Embedding sparse-gradient runtime extent has invalid capacity metadata.");
         }
         if (extent.maxActiveValues > std::numeric_limits<uint64_t>::max() / extent.elementsPerValue ||

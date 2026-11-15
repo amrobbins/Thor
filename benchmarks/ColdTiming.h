@@ -18,6 +18,7 @@
 //     are spread over the batch and the GPU never idles between them.
 //   - The copy reference is timed the same way (ring source and destination views, back to back).
 
+#include "DeepLearning/Implementation/Tensor/StridedSpan.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
 
@@ -58,7 +59,8 @@ struct TimingEvent {
 };
 
 // One allocation handed out as consecutive 256-byte aligned views (a fresh allocation's alignment), wrapping to the
-// start when the next view does not fit. Views are only addresses: launches on one stream never overlap.
+// start when the next view does not fit. A view is a StridedSpan of the ring's bytes, read as its dtype: only an
+// address, so launches on one stream never overlap.
 class Ring {
    public:
     Ring(const TensorPlacement& placement, uint64_t bytes)
@@ -75,8 +77,8 @@ class Ring {
         cursor_ += need;
         return offset;
     }
-    Tensor view(DataType dtype, const std::vector<uint64_t>& dims, uint64_t offset) const {
-        return storage_.aliasByteStorageAs(dtype, dims, offset);
+    StridedSpan view(DataType dtype, const std::vector<uint64_t>& dims, uint64_t offset) const {
+        return StridedSpan(storage_).bytesAs(offset, dtype, dims);
     }
     Tensor& storage() { return storage_; }
     [[nodiscard]] uint64_t bytes() const { return bytes_; }

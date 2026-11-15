@@ -124,8 +124,7 @@ struct SparseRowGradient {
         if (numRows.getDimensions() != std::vector<uint64_t>{1}) {
             throw std::invalid_argument("SparseRowGradient numRows tensor must have shape [1].");
         }
-        if (rows.hasCustomStrides() || !rows.isDenseContiguous() || values.hasCustomStrides() || !values.isDenseContiguous() ||
-            numRows.hasCustomStrides() || !numRows.isDenseContiguous()) {
+        if (!rows.isDenseContiguous() || !values.isDenseContiguous() || !numRows.isDenseContiguous()) {
             throw std::invalid_argument("SparseRowGradient tensors must be dense contiguous.");
         }
     }
