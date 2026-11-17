@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Summarise `thor_fp8_dense_site_audit` (1145-1149). Standard library only. 1149 reports bandwidth in TB/s.
+"""Summarise `thor_fp8_dense_site_audit`. Standard library only. Bandwidth in TB/s.
 
-ratio = production median / reference, where reference = max(launch floor, bytes / copy bandwidth); 1146 counts the
-output bytes too (1145 counted only the input). A ratio of 1 is line rate; the header records the bandwidth and floor.
+ratio = production median / reference, where reference = max(launch floor, bytes / copy bandwidth), the bytes counting
+the output as well as the input. A ratio of 1 is line rate; the header records the bandwidth and floor.
 
 Reports:
   1. per family, kind and path: cells, ratio geomean / p50 / p90 / max, and the share of cells within 1.25x and 2x;
@@ -10,9 +10,9 @@ Reports:
   3. the worst cells by excess time over the reference, and any geometries the production stamp refused;
   4. with --baseline (an earlier audit CSV): per family / kind / operation the geomean of median / baseline median over
      the shared cells, the share faster / slower by more than 5%, and the largest regressions;
-  5. with a --candidates run (1147): which retained family / shape is fastest per row-length bucket, how the production
-     choice compares with the fastest retained shape, and the regret of timing only the first N ranked candidates
-     (N = 6 Quick, 12 Regular, 24 Ultra).
+  5. with a --candidates run: which family / shape is fastest per row-length bucket, how the production choice
+     compares with the fastest shape, and the regret of timing only the heuristic list's first N shapes
+     (N = 6 Quick, 12 Regular, 24 Ultra: what production times without a trained KR ranker).
 
 Usage: fp8_dense_site_audit.py audit.csv[.gz] [--worst=30] [--large-mib=16] [--baseline=old.csv]
 """
@@ -97,7 +97,7 @@ def main():
             "passes": r["passes"], "median": float(r["median_us"]), "ref": float(r["reference_us"]),
             "ratio": float(r["ratio"]), "gbps": float(r["gbps"]),
             "stamp_ms": float(r["stamp_ms"]) if r.get("stamp_ms") else None,
-            # 1149: bandwidth in TB/s. Moved = input read + output written (FP32 value or UINT32 index per row);
+            # Bandwidth in TB/s. Moved = input read + output written (FP32 value or UINT32 index per row);
             # read = input only. Output writes can stay in L2 past the timed interval, so moved can exceed DRAM rate.
             "tbps": (int(r["input_bytes"]) + 4 * int(r["K"])) / float(r["median_us"]) / 1e6,
             "read_tbps": int(r["input_bytes"]) / float(r["median_us"]) / 1e6,

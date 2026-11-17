@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Summarise `thor_fp8_retained_cold_l2_sweep --continuation-audit` (1134+). Standard library only.
+"""Summarise `thor_fp8_retained_cold_l2_sweep --continuation-audit`. Standard library only.
 
 For each staged candidate: continuation = full - first. Its reference is a fitted copy model, not the candidate's own
 first_copy - first: single differences of two ~70 us medians are noisy (+-2 us), and at small sizes they often fall
-below what a kernel can do. 1137: the model is max(launch floor, partial bytes / B), where B is the median
+below what a kernel can do. The model is max(launch floor, partial bytes / B), where B is the median
 bytes/us of the measured partial copies of 4 MiB and more (a device-to-device copy reads and writes every partial
 byte from L2, so a bandwidth-bound continuation should not be slower). The launch floor defaults to 4 us.
 

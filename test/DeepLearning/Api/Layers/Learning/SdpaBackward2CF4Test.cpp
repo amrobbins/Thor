@@ -1,6 +1,5 @@
-// 2C-F4: saved neutral SDPA with one shared K/V values producer.
-// Check independent SDPA port gradients and the actual upstream fanout sum.
-// No production changes, masking, or dropout in this bounded gate.
+// Saved neutral SDPA with one shared K/V values producer: independent SDPA port gradients and the actual upstream
+// fanout sum, without masking or dropout.
 #include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Api/Layers/Learning/ScaledDotProductAttention.h"
 #include "DeepLearning/Api/Layers/Loss/RaggedCustomLoss.h"

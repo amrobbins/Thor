@@ -19,11 +19,6 @@ namespace {
 using namespace CubDevicePrimitiveSupport;
 
 template <typename OffsetT>
-const OffsetT* endOffsetsPtr(const Tensor& segment_offsets) {
-    return segment_offsets.getMemPtr<OffsetT>() + 1;
-}
-
-template <typename OffsetT>
 struct UniformSegmentOffsetOp {
     OffsetT segment_size;
 
@@ -57,7 +52,7 @@ void validateUniformSegmentedSum(const Tensor& input,
                                  uint64_t num_segments,
                                  uint64_t segment_size,
                                  const char* op_name) {
-    validateExclusiveSum(input, output, num_items);
+    validateScan(input, output, num_items);
     if (num_segments == 0) {
         if (num_items != 0) {
             throw std::invalid_argument(std::string(op_name) + " requires num_items to be zero when num_segments is zero.");
@@ -372,367 +367,6 @@ void launchUniformSegmentedScan(const CubDeviceSegmentedUniformScanPlan& plan,
 
 }  // namespace
 
-#if THOR_FUTURE_CUB_OPS
-
-CubDeviceSegmentedExclusiveSumPlan prepareCubDeviceSegmentedExclusiveSum(const Tensor& input,
-                                                                         const Tensor& output,
-                                                                         const Tensor& segment_offsets,
-                                                                         uint64_t num_items,
-                                                                         uint64_t num_segments) {
-    validateSegmentedExclusiveSum(input, output, segment_offsets, num_items, num_segments);
-    const int64_t cub_segments = checkedCubInt64Count(num_segments, "num_segments");
-
-    size_t bytes = 1;
-    if (num_items != 0 && num_segments != 0) {
-        auto query_value = [&]<typename T>() -> size_t {
-            auto query_offset = [&]<typename OffsetT>() -> size_t {
-                size_t queried_bytes = 0;
-                CUDA_CHECK(cub::DeviceSegmentedScan::ExclusiveSegmentedSum(nullptr,
-                                                                           queried_bytes,
-                                                                           input.getMemPtr<T>(),
-                                                                           const_cast<T*>(output.getMemPtr<T>()),
-                                                                           segment_offsets.getMemPtr<OffsetT>(),
-                                                                           endOffsetsPtr<OffsetT>(segment_offsets),
-                                                                           cub_segments));
-                return queried_bytes;
-            };
-            return dispatchSegmentOffsetDType(segment_offsets.getDataType(), query_offset);
-        };
-        bytes = dispatchScanDType(input.getDataType(), query_value);
-    }
-
-    CubDeviceSegmentedExclusiveSumPlan plan;
-    plan.placement = input.getPlacement();
-    plan.dtype = input.getDataType();
-    plan.offset_dtype = segment_offsets.getDataType();
-    plan.num_items = num_items;
-    plan.num_segments = num_segments;
-    plan.temp_storage_bytes = std::max<size_t>(bytes, 1);
-    return plan;
-}
-
-size_t cubDeviceSegmentedExclusiveSumTempBytes(const Tensor& input,
-                                               const Tensor& output,
-                                               const Tensor& segment_offsets,
-                                               uint64_t num_items,
-                                               uint64_t num_segments) {
-    return prepareCubDeviceSegmentedExclusiveSum(input, output, segment_offsets, num_items, num_segments).temp_storage_bytes;
-}
-
-void cubDeviceSegmentedExclusiveSum(const CubDeviceSegmentedExclusiveSumPlan& plan,
-                                    const Tensor& temp_storage,
-                                    const Tensor& input,
-                                    Tensor& output,
-                                    const Tensor& segment_offsets,
-                                    Stream& stream) {
-    validateSegmentedExclusiveSum(input, output, segment_offsets, plan.num_items, plan.num_segments);
-    if (input.getPlacement() != plan.placement || input.getDataType() != plan.dtype ||
-        segment_offsets.getDataType() != plan.offset_dtype) {
-        throw std::invalid_argument("CUB segmented exclusive-sum plan is not compatible with the provided tensors.");
-    }
-    requireTempStorage(temp_storage, plan.placement, plan.temp_storage_bytes);
-    const int64_t cub_segments = checkedCubInt64Count(plan.num_segments, "num_segments");
-    if (plan.num_items == 0 || plan.num_segments == 0) {
-        return;
-    }
-
-    void* temp_storage_ptr = mutableCubTempStoragePtr(temp_storage);
-    size_t temp_storage_bytes = plan.temp_storage_bytes;
-
-    auto launch_value = [&]<typename T>() -> void {
-        auto launch_offset = [&]<typename OffsetT>() -> void {
-            CUDA_CHECK(cub::DeviceSegmentedScan::ExclusiveSegmentedSum(temp_storage_ptr,
-                                                                       temp_storage_bytes,
-                                                                       input.getMemPtr<T>(),
-                                                                       output.getMemPtr<T>(),
-                                                                       segment_offsets.getMemPtr<OffsetT>(),
-                                                                       endOffsetsPtr<OffsetT>(segment_offsets),
-                                                                       cub_segments,
-                                                                       stream.getStream()));
-        };
-        dispatchSegmentOffsetDType(plan.offset_dtype, launch_offset);
-    };
-
-    dispatchScanDType(plan.dtype, launch_value);
-}
-
-void cubDeviceSegmentedExclusiveSum(const Tensor& temp_storage,
-                                    size_t temp_storage_bytes,
-                                    const Tensor& input,
-                                    Tensor& output,
-                                    const Tensor& segment_offsets,
-                                    uint64_t num_items,
-                                    uint64_t num_segments,
-                                    Stream& stream) {
-    CubDeviceSegmentedExclusiveSumPlan plan = prepareCubDeviceSegmentedExclusiveSum(input, output, segment_offsets, num_items, num_segments);
-    if (temp_storage_bytes < plan.temp_storage_bytes) {
-        throw std::invalid_argument("temp_storage_bytes is smaller than the prepared CUB segmented exclusive-sum requirement.");
-    }
-    plan.temp_storage_bytes = temp_storage_bytes;
-    cubDeviceSegmentedExclusiveSum(plan, temp_storage, input, output, segment_offsets, stream);
-}
-
-CubDeviceSegmentedInclusiveSumPlan prepareCubDeviceSegmentedInclusiveSum(const Tensor& input,
-                                                                         const Tensor& output,
-                                                                         const Tensor& segment_offsets,
-                                                                         uint64_t num_items,
-                                                                         uint64_t num_segments) {
-    validateSegmentedExclusiveSum(input, output, segment_offsets, num_items, num_segments);
-    const int64_t cub_segments = checkedCubInt64Count(num_segments, "num_segments");
-
-    size_t bytes = 1;
-    if (num_items != 0 && num_segments != 0) {
-        auto query_value = [&]<typename T>() -> size_t {
-            auto query_offset = [&]<typename OffsetT>() -> size_t {
-                size_t queried_bytes = 0;
-                CUDA_CHECK(cub::DeviceSegmentedScan::InclusiveSegmentedSum(nullptr,
-                                                                           queried_bytes,
-                                                                           input.getMemPtr<T>(),
-                                                                           const_cast<T*>(output.getMemPtr<T>()),
-                                                                           segment_offsets.getMemPtr<OffsetT>(),
-                                                                           endOffsetsPtr<OffsetT>(segment_offsets),
-                                                                           cub_segments));
-                return queried_bytes;
-            };
-            return dispatchSegmentOffsetDType(segment_offsets.getDataType(), query_offset);
-        };
-        bytes = dispatchScanDType(input.getDataType(), query_value);
-    }
-
-    CubDeviceSegmentedInclusiveSumPlan plan;
-    plan.placement = input.getPlacement();
-    plan.dtype = input.getDataType();
-    plan.offset_dtype = segment_offsets.getDataType();
-    plan.num_items = num_items;
-    plan.num_segments = num_segments;
-    plan.temp_storage_bytes = std::max<size_t>(bytes, 1);
-    return plan;
-}
-
-size_t cubDeviceSegmentedInclusiveSumTempBytes(const Tensor& input,
-                                               const Tensor& output,
-                                               const Tensor& segment_offsets,
-                                               uint64_t num_items,
-                                               uint64_t num_segments) {
-    return prepareCubDeviceSegmentedInclusiveSum(input, output, segment_offsets, num_items, num_segments).temp_storage_bytes;
-}
-
-void cubDeviceSegmentedInclusiveSum(const CubDeviceSegmentedInclusiveSumPlan& plan,
-                                    const Tensor& temp_storage,
-                                    const Tensor& input,
-                                    Tensor& output,
-                                    const Tensor& segment_offsets,
-                                    Stream& stream) {
-    validateSegmentedExclusiveSum(input, output, segment_offsets, plan.num_items, plan.num_segments);
-    if (input.getPlacement() != plan.placement || input.getDataType() != plan.dtype ||
-        segment_offsets.getDataType() != plan.offset_dtype) {
-        throw std::invalid_argument("CUB segmented inclusive-sum plan is not compatible with the provided tensors.");
-    }
-    requireTempStorage(temp_storage, plan.placement, plan.temp_storage_bytes);
-    const int64_t cub_segments = checkedCubInt64Count(plan.num_segments, "num_segments");
-    if (plan.num_items == 0 || plan.num_segments == 0) {
-        return;
-    }
-
-    void* temp_storage_ptr = mutableCubTempStoragePtr(temp_storage);
-    size_t temp_storage_bytes = plan.temp_storage_bytes;
-
-    auto launch_value = [&]<typename T>() -> void {
-        auto launch_offset = [&]<typename OffsetT>() -> void {
-            CUDA_CHECK(cub::DeviceSegmentedScan::InclusiveSegmentedSum(temp_storage_ptr,
-                                                                       temp_storage_bytes,
-                                                                       input.getMemPtr<T>(),
-                                                                       output.getMemPtr<T>(),
-                                                                       segment_offsets.getMemPtr<OffsetT>(),
-                                                                       endOffsetsPtr<OffsetT>(segment_offsets),
-                                                                       cub_segments,
-                                                                       stream.getStream()));
-        };
-        dispatchSegmentOffsetDType(plan.offset_dtype, launch_offset);
-    };
-
-    dispatchScanDType(plan.dtype, launch_value);
-}
-
-void cubDeviceSegmentedInclusiveSum(const Tensor& temp_storage,
-                                    size_t temp_storage_bytes,
-                                    const Tensor& input,
-                                    Tensor& output,
-                                    const Tensor& segment_offsets,
-                                    uint64_t num_items,
-                                    uint64_t num_segments,
-                                    Stream& stream) {
-    CubDeviceSegmentedInclusiveSumPlan plan = prepareCubDeviceSegmentedInclusiveSum(input, output, segment_offsets, num_items, num_segments);
-    if (temp_storage_bytes < plan.temp_storage_bytes) {
-        throw std::invalid_argument("temp_storage_bytes is smaller than the prepared CUB segmented inclusive-sum requirement.");
-    }
-    plan.temp_storage_bytes = temp_storage_bytes;
-    cubDeviceSegmentedInclusiveSum(plan, temp_storage, input, output, segment_offsets, stream);
-}
-
-CubDeviceSegmentedUniformExclusiveSumPlan prepareCubDeviceSegmentedUniformExclusiveSum(const Tensor& input,
-                                                                                       const Tensor& output,
-                                                                                       uint64_t num_items,
-                                                                                       uint64_t num_segments,
-                                                                                       uint64_t segment_size) {
-    validateUniformSegmentedSum(input, output, num_items, num_segments, segment_size, "CUB segmented-uniform exclusive-sum");
-
-    size_t bytes = 1;
-    if (num_items != 0 && num_segments != 0) {
-        auto query_value = [&]<typename T>() -> size_t {
-            const int64_t cub_segments = checkedCubInt64Count(num_segments, "num_segments");
-            const int64_t cub_segment_size = checkedCubInt64Count(segment_size, "segment_size");
-            auto begin_offsets = makeUniformSegmentBeginOffsets<int64_t>(cub_segment_size);
-            auto end_offsets = begin_offsets + 1;
-            size_t queried_bytes = 0;
-            CUDA_CHECK(cub::DeviceSegmentedScan::ExclusiveSegmentedSum(nullptr,
-                                                                       queried_bytes,
-                                                                       input.getMemPtr<T>(),
-                                                                       const_cast<T*>(output.getMemPtr<T>()),
-                                                                       begin_offsets,
-                                                                       end_offsets,
-                                                                       cub_segments));
-            return queried_bytes;
-        };
-        bytes = dispatchScanDType(input.getDataType(), query_value);
-    }
-
-    CubDeviceSegmentedUniformExclusiveSumPlan plan;
-    plan.placement = input.getPlacement();
-    plan.dtype = input.getDataType();
-    plan.num_items = num_items;
-    plan.num_segments = num_segments;
-    plan.segment_size = segment_size;
-    plan.temp_storage_bytes = std::max<size_t>(bytes, 1);
-    return plan;
-}
-
-size_t cubDeviceSegmentedUniformExclusiveSumTempBytes(const Tensor& input,
-                                                      const Tensor& output,
-                                                      uint64_t num_items,
-                                                      uint64_t num_segments,
-                                                      uint64_t segment_size) {
-    return prepareCubDeviceSegmentedUniformExclusiveSum(input, output, num_items, num_segments, segment_size).temp_storage_bytes;
-}
-
-void cubDeviceSegmentedUniformExclusiveSum(const CubDeviceSegmentedUniformExclusiveSumPlan& plan,
-                                           const Tensor& temp_storage,
-                                           const Tensor& input,
-                                           Tensor& output,
-                                           Stream& stream) {
-    validateUniformSegmentedSum(input, output, plan.num_items, plan.num_segments, plan.segment_size, "CUB segmented-uniform exclusive-sum");
-    if (input.getPlacement() != plan.placement || input.getDataType() != plan.dtype) {
-        throw std::invalid_argument("CUB segmented-uniform exclusive-sum plan is not compatible with the provided tensors.");
-    }
-    requireTempStorage(temp_storage, plan.placement, plan.temp_storage_bytes);
-    if (plan.num_items == 0 || plan.num_segments == 0) {
-        return;
-    }
-
-    void* temp_storage_ptr = mutableCubTempStoragePtr(temp_storage);
-    size_t temp_storage_bytes = plan.temp_storage_bytes;
-
-    auto launch_value = [&]<typename T>() -> void {
-        const int64_t cub_segments = checkedCubInt64Count(plan.num_segments, "num_segments");
-        const int64_t cub_segment_size = checkedCubInt64Count(plan.segment_size, "segment_size");
-        auto begin_offsets = makeUniformSegmentBeginOffsets<int64_t>(cub_segment_size);
-        auto end_offsets = begin_offsets + 1;
-        CUDA_CHECK(cub::DeviceSegmentedScan::ExclusiveSegmentedSum(temp_storage_ptr,
-                                                                   temp_storage_bytes,
-                                                                   input.getMemPtr<T>(),
-                                                                   output.getMemPtr<T>(),
-                                                                   begin_offsets,
-                                                                   end_offsets,
-                                                                   cub_segments,
-                                                                   stream.getStream()));
-    };
-
-    dispatchScanDType(plan.dtype, launch_value);
-}
-
-CubDeviceSegmentedUniformInclusiveSumPlan prepareCubDeviceSegmentedUniformInclusiveSum(const Tensor& input,
-                                                                                       const Tensor& output,
-                                                                                       uint64_t num_items,
-                                                                                       uint64_t num_segments,
-                                                                                       uint64_t segment_size) {
-    validateUniformSegmentedSum(input, output, num_items, num_segments, segment_size, "CUB segmented-uniform inclusive-sum");
-
-    size_t bytes = 1;
-    if (num_items != 0 && num_segments != 0) {
-        auto query_value = [&]<typename T>() -> size_t {
-            const int64_t cub_segments = checkedCubInt64Count(num_segments, "num_segments");
-            const int64_t cub_segment_size = checkedCubInt64Count(segment_size, "segment_size");
-            auto begin_offsets = makeUniformSegmentBeginOffsets<int64_t>(cub_segment_size);
-            auto end_offsets = begin_offsets + 1;
-            size_t queried_bytes = 0;
-            CUDA_CHECK(cub::DeviceSegmentedScan::InclusiveSegmentedSum(nullptr,
-                                                                       queried_bytes,
-                                                                       input.getMemPtr<T>(),
-                                                                       const_cast<T*>(output.getMemPtr<T>()),
-                                                                       begin_offsets,
-                                                                       end_offsets,
-                                                                       cub_segments));
-            return queried_bytes;
-        };
-        bytes = dispatchScanDType(input.getDataType(), query_value);
-    }
-
-    CubDeviceSegmentedUniformInclusiveSumPlan plan;
-    plan.placement = input.getPlacement();
-    plan.dtype = input.getDataType();
-    plan.num_items = num_items;
-    plan.num_segments = num_segments;
-    plan.segment_size = segment_size;
-    plan.temp_storage_bytes = std::max<size_t>(bytes, 1);
-    return plan;
-}
-
-size_t cubDeviceSegmentedUniformInclusiveSumTempBytes(const Tensor& input,
-                                                      const Tensor& output,
-                                                      uint64_t num_items,
-                                                      uint64_t num_segments,
-                                                      uint64_t segment_size) {
-    return prepareCubDeviceSegmentedUniformInclusiveSum(input, output, num_items, num_segments, segment_size).temp_storage_bytes;
-}
-
-void cubDeviceSegmentedUniformInclusiveSum(const CubDeviceSegmentedUniformInclusiveSumPlan& plan,
-                                           const Tensor& temp_storage,
-                                           const Tensor& input,
-                                           Tensor& output,
-                                           Stream& stream) {
-    validateUniformSegmentedSum(input, output, plan.num_items, plan.num_segments, plan.segment_size, "CUB segmented-uniform inclusive-sum");
-    if (input.getPlacement() != plan.placement || input.getDataType() != plan.dtype) {
-        throw std::invalid_argument("CUB segmented-uniform inclusive-sum plan is not compatible with the provided tensors.");
-    }
-    requireTempStorage(temp_storage, plan.placement, plan.temp_storage_bytes);
-    if (plan.num_items == 0 || plan.num_segments == 0) {
-        return;
-    }
-
-    void* temp_storage_ptr = mutableCubTempStoragePtr(temp_storage);
-    size_t temp_storage_bytes = plan.temp_storage_bytes;
-
-    auto launch_value = [&]<typename T>() -> void {
-        const int64_t cub_segments = checkedCubInt64Count(plan.num_segments, "num_segments");
-        const int64_t cub_segment_size = checkedCubInt64Count(plan.segment_size, "segment_size");
-        auto begin_offsets = makeUniformSegmentBeginOffsets<int64_t>(cub_segment_size);
-        auto end_offsets = begin_offsets + 1;
-        CUDA_CHECK(cub::DeviceSegmentedScan::InclusiveSegmentedSum(temp_storage_ptr,
-                                                                   temp_storage_bytes,
-                                                                   input.getMemPtr<T>(),
-                                                                   output.getMemPtr<T>(),
-                                                                   begin_offsets,
-                                                                   end_offsets,
-                                                                   cub_segments,
-                                                                   stream.getStream()));
-    };
-
-    dispatchScanDType(plan.dtype, launch_value);
-}
-
-
-#endif  // THOR_FUTURE_CUB_OPS
-
 CubDeviceSegmentedUniformScanPlan prepareCubDeviceSegmentedUniformScan(const Tensor& input,
                                                                        const Tensor& output,
                                                                        uint64_t num_items,
@@ -768,17 +402,6 @@ CubDeviceSegmentedUniformScanPlan prepareCubDeviceSegmentedUniformScan(const Ten
     plan.direction = direction;
     plan.temp_storage_bytes = std::max<size_t>(bytes, 1);
     return plan;
-}
-
-size_t cubDeviceSegmentedUniformScanTempBytes(const Tensor& input,
-                                              const Tensor& output,
-                                              uint64_t num_items,
-                                              uint64_t num_segments,
-                                              uint64_t segment_size,
-                                              CubScanOp op,
-                                              CubScanMode mode,
-                                              CubScanDirection direction) {
-    return prepareCubDeviceSegmentedUniformScan(input, output, num_items, num_segments, segment_size, op, mode, direction).temp_storage_bytes;
 }
 
 void cubDeviceSegmentedUniformScan(const CubDeviceSegmentedUniformScanPlan& plan,
@@ -1006,17 +629,6 @@ void launchSegmentedScan(const CubDeviceSegmentedScanPlan& plan,
     throw std::invalid_argument("Unsupported CUB segmented scan direction.");
 }
 
-void validateSegmentedScan(const Tensor& input,
-                           const Tensor& output,
-                           const Tensor& segment_offsets,
-                           uint64_t num_items,
-                           uint64_t num_segments) {
-    validateSegmentedExclusiveSum(input, output, segment_offsets, num_items, num_segments);
-    if (!isCubScanDTypeSupported(input.getDataType())) {
-        throw std::invalid_argument("Unsupported CUB segmented scan dtype " + dtypeName(input.getDataType()) + ".");
-    }
-}
-
 }  // namespace
 
 CubDeviceSegmentedScanPlan prepareCubDeviceSegmentedScan(const Tensor& input,
@@ -1055,17 +667,6 @@ CubDeviceSegmentedScanPlan prepareCubDeviceSegmentedScan(const Tensor& input,
     plan.direction = direction;
     plan.temp_storage_bytes = std::max<size_t>(bytes, 1);
     return plan;
-}
-
-size_t cubDeviceSegmentedScanTempBytes(const Tensor& input,
-                                       const Tensor& output,
-                                       const Tensor& segment_offsets,
-                                       uint64_t num_items,
-                                       uint64_t num_segments,
-                                       CubScanOp op,
-                                       CubScanMode mode,
-                                       CubScanDirection direction) {
-    return prepareCubDeviceSegmentedScan(input, output, segment_offsets, num_items, num_segments, op, mode, direction).temp_storage_bytes;
 }
 
 void cubDeviceSegmentedScan(const CubDeviceSegmentedScanPlan& plan,
@@ -1513,17 +1114,6 @@ CubDeviceSegmentedUniformArgScanPlan prepareCubDeviceSegmentedUniformArgScan(con
     return plan;
 }
 
-size_t cubDeviceSegmentedUniformArgScanTempBytes(const Tensor& input,
-                                                 const Tensor& output,
-                                                 uint64_t num_items,
-                                                 uint64_t num_segments,
-                                                 uint64_t segment_size,
-                                                 CubArgScanOp op,
-                                                 CubScanMode mode,
-                                                 CubScanDirection direction) {
-    return prepareCubDeviceSegmentedUniformArgScan(input, output, num_items, num_segments, segment_size, op, mode, direction).temp_storage_bytes;
-}
-
 void cubDeviceSegmentedUniformArgScan(const CubDeviceSegmentedUniformArgScanPlan& plan,
                                       const Tensor& temp_storage,
                                       const Tensor& input,
@@ -1583,17 +1173,6 @@ CubDeviceSegmentedArgScanPlan prepareCubDeviceSegmentedArgScan(const Tensor& inp
     plan.direction = direction;
     plan.temp_storage_bytes = std::max<size_t>(bytes, 1);
     return plan;
-}
-
-size_t cubDeviceSegmentedArgScanTempBytes(const Tensor& input,
-                                          const Tensor& output,
-                                          const Tensor& segment_offsets,
-                                          uint64_t num_items,
-                                          uint64_t num_segments,
-                                          CubArgScanOp op,
-                                          CubScanMode mode,
-                                          CubScanDirection direction) {
-    return prepareCubDeviceSegmentedArgScan(input, output, segment_offsets, num_items, num_segments, op, mode, direction).temp_storage_bytes;
 }
 
 void cubDeviceSegmentedArgScan(const CubDeviceSegmentedArgScanPlan& plan,

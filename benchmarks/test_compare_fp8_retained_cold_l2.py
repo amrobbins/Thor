@@ -1,4 +1,4 @@
-"""Host-only deterministic correctness checks for the retained sweep comparator."""
+"""Host-only deterministic correctness checks for the FP8 RK cold-L2 sweep comparator."""
 import csv
 import gzip
 import pathlib

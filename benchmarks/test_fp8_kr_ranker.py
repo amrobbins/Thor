@@ -1,4 +1,4 @@
-"""Host-only checks for the KR ranker dataset (1158): parsing, skipped variants, and the heuristic list order."""
+"""Host-only checks for the KR ranker dataset: parsing, skipped variants, and the heuristic list order."""
 import gzip
 import os
 import pathlib
@@ -55,25 +55,25 @@ class TestKRRankerDataset(unittest.TestCase):
                 dataset.load(path)
 
     def test_per_dtype_rankers(self):
-        # 1182: one ranker per dtype; each trains on its dtype's cells and writes its own header and namespace.
+        # One ranker per dtype; each trains on its dtype's cells and writes its own header and namespace.
         import train  # noqa: E402  (fp8_kr_ranker/train.py; standard library at import)
         self.assertEqual(sorted(train.DTYPES), ["f16", "fp32", "fp8"])
         fp8, fp32 = train.DTYPES["fp8"], train.DTYPES["fp32"]
         self.assertTrue(fp8["cells"]("fp8_e4m3") and fp8["cells"]("fp8_e5m2") and not fp8["cells"]("fp32"))
         self.assertTrue(fp32["cells"]("fp32") and not fp32["cells"]("fp8_e4m3"))
         self.assertEqual(fp32["model_header"], "Fp32KRRankerModel.h")
-        self.assertIn("Fp32KR::Fp32KRRankerModel", fp32["model_namespace"])
-        self.assertIn("Fp32KR::Fp32KRRankerParity", fp32["parity_namespace"])
+        self.assertIn("KR::Fp32::Fp32KRRankerModel", fp32["model_namespace"])
+        self.assertIn("KR::Fp32::Fp32KRRankerParity", fp32["parity_namespace"])
         self.assertIn("FP32_KR_SHORTLIST_DEPTHS", fp32["depths"])
         self.assertEqual(fp8["model_header"], "Fp8KRRankerModel.h")
         self.assertIn("FP8_KR_SHORTLIST_DEPTHS", fp8["depths"])
-        # 1238: FP16 and BF16 share one ranker.
+        # FP16 and BF16 share one ranker.
         f16 = train.DTYPES["f16"]
         self.assertTrue(f16["cells"]("fp16") and f16["cells"]("bf16") and not f16["cells"]("fp32"))
         self.assertFalse(fp32["cells"]("bf16") or fp8["cells"]("fp16"))
         self.assertEqual(f16["model_header"], "F16KRRankerModel.h")
-        self.assertIn("F16KR::F16KRRankerModel", f16["model_namespace"])
-        self.assertIn("F16KR::F16KRRankerParity", f16["parity_namespace"])
+        self.assertIn("KR::F16::F16KRRankerModel", f16["model_namespace"])
+        self.assertIn("KR::F16::F16KRRankerParity", f16["parity_namespace"])
         self.assertIn("F16_KR_SHORTLIST_DEPTHS", f16["depths"])
 
 

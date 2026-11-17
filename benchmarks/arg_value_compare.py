@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ARG-A0: FP8 RK argmin/argmax against the VALUE min/max line-rate reference.
+"""FP8 RK argmin/argmax against the VALUE min/max line-rate reference.
 
 Reads one sweep CSV (``--focus=arg``, or any run that measured argmin/argmax together with min_identity/max_identity)
 and pairs every ARG cell with the VALUE cell of the same (outer, R, K, dtype):
@@ -8,10 +8,10 @@ and pairs every ARG cell with the VALUE cell of the same (outer, R, K, dtype):
 
 The VALUE reference is the fastest measured candidate (``oracle``) and, separately, the fastest candidate inside the
 learned 28-candidate shortlist (``top28``, what production can reach). The ratio is ARG time / VALUE time, so 1.0
-means ARG runs at VALUE line rate and the A-series target is <= ~1.05.
+means ARG runs at VALUE line rate and the target is <= ~1.05.
 
-Since ARG-A2 the ARG cells hold the stamped production plan (family arg_production; configuration = the planned
-passes, e.g. fp8_arg_one_window:o8_w1_p16_c1 or direct:tiled_generic) and, with --onewindow-runtime-k, every
+The ARG cells hold the stamped production plan (family arg_production; configuration = the planned passes, e.g.
+fp8_arg_one_window:o8_w1_p16_c1) and, with --onewindow-runtime-k, every
 OneWindow ARG twin timed directly (family one_window_arg). The twin report compares each ARG twin with the VALUE
 OneWindow unit of the same name (family one_window_rk) on the same cell.
 

@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Dense copy audit report (1388): what Thor's dense copy of a strided span (copyToDenseAsync / launchCopyToDense,
+"""Dense copy audit report: what Thor's dense copy of a strided span (copyToDenseAsync / launchCopyToDense,
 Utilities/TensorOperations/Copy/StridedCopy.h) achieves per layout class, in TB/s of moved bytes, against the copy
-curve and against what copyToDenseAsync ran through 1387 (through 1393 also, for 2D rotations, against
-gpuMatrixTranspose, deleted in 1394).
+curve and against ref_1387, the copy copyToDenseAsync made before the copy planner.
 
 Reads `thor_dense_copy_audit` output (one row per cell). Cases: d dense (one memcpy), r a rotation ([b, a] of a dense
 [a, b]), g a payload rotation ([b, a, p] of [a, b, p]), h an attention head permute ([B, S, H, D] of [B, H, S, D]),
 k a pitched packing ([O, R, I] rows with row gaps, slab gaps or both), s a rank-1 gather (stride 2 to 33), n a general
 permutation of a dense rank-4 or rank-5 tensor. Moved bytes are the source bytes read (distinct sectors for k and s)
 plus the destination's. of_copy is the copy curve's time at the moved bytes over the cell's (1.0 at copy speed);
-vs_1387 is the 1387 path's time over the cell's (above 1.0 this build is faster).
+vs_1387 is ref_1387's time over the cell's (above 1.0 this build is faster).
 
 The gate lines come first, per case at or above --large-mib moved: TB/s p50, of_copy p50 / p10 / min, vs_1387 p50 /
 min, with the cells that failed verification or failed to run. Then:
@@ -17,7 +16,7 @@ min, with the cells that failed verification or failed to run. Then:
   1. by case and size: TB/s p50, of_copy p50 / p10 / min, vs_1387 p50 / min
   2. by plan (the plan name with the row length stripped): cells, of_copy p50 / min, vs_1387 p50
   3. k by sub-kind and s by stride: of_copy p50 / min, vs_1387 p50 / min
-  4. (through 1393: r against gpuMatrixTranspose; 1394 deleted it, and an older run's columns are ignored)
+  4. (none: an older run's gpuMatrixTranspose columns are ignored)
   5. the cells furthest below the copy curve (--slowest)
   6. measurement: sample spread ((max - min) / median) by case
 
@@ -94,9 +93,9 @@ def size_bucket(moved):
 
 
 def plan_kind(plan):
-    """The plan name without its row length or tile (1389: rectangular, sized to the span): row_copy_o2_w4,
-    transpose_w16_b1, memcpy_w4, packed_gather_o5_w1 (1389b: it has neither), matrix_transpose_w4 (1389e: likewise).
-    A 1388 name (transpose_p1_w4_t32_b0, a square tile) groups the same way."""
+    """The plan name without its row length or tile (rectangular, sized to the span): row_copy_o2_w4,
+    transpose_w16_b1, memcpy_w4, packed_gather_o5_w1 and matrix_transpose_w4 (these two have neither). An older name
+    with a square tile (transpose_p1_w4_t32_b0) groups the same way."""
     return re.sub(r"_t\d+(x\d+)?", "", re.sub(r"_p\d+", "", plan))
 
 

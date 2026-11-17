@@ -1,5 +1,6 @@
 #include "Utilities/TensorOperations/Ragged/RaggedWeightedReduction.h"
-#include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
+#include "Utilities/TensorOperations/Reduction/SegmentedReducer.h"
+#include "test/Utilities/TensorOperations/Reduction/ReductionTestSupport.h"
 
 #include "gtest/gtest.h"
 
@@ -10,7 +11,7 @@
 #include <vector>
 
 using namespace ThorImplementation;
-using namespace ThorImplementation::CubReductionTestSupport;
+using namespace ThorImplementation::ReductionTestSupport;
 
 namespace {
 
@@ -53,8 +54,8 @@ TEST(RaggedWeightedReduction, ActivePrefixHonorsPoisonedCapacityAndStorageDTypes
     };
 
     for (const DTypePair dtypes : dtypePairs) {
-        if (!CubSegmentedReduction::isInputDataTypeSupported(dtypes.values) ||
-            !CubSegmentedReduction::isInputDataTypeSupported(dtypes.weights)) {
+        if (!SegmentedReducer::isInputDataTypeSupported(dtypes.values) ||
+            !SegmentedReducer::isInputDataTypeSupported(dtypes.weights)) {
             continue;
         }
         Tensor values = makeGpuTensor(hostValues, {maxTotalValues, elementsPerValue}, stream, dtypes.values);

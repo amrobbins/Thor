@@ -2,7 +2,7 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/Expression/DynamicExpression.h"
-#include "Utilities/TensorOperations/Cub/CubReduction.h"
+#include "Utilities/TensorOperations/Reduction/Reducer.h"
 
 #include <cstdint>
 #include <functional>
@@ -100,7 +100,7 @@ class RaggedLossShaper : public Layer {
     std::shared_ptr<PreparedDynamicExpression> perExamplePrepared;
     std::shared_ptr<StampedExecutionPlan> perExampleStamped;
     std::function<void(Stream&)> perExamplePreRunHook;
-    std::shared_ptr<StampedCubReduction> batchReduction;
+    std::shared_ptr<StampedReducer> batchReduction;
 };
 
 }  // namespace ThorImplementation

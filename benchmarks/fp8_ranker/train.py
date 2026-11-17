@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train, validate and export Thor's FP8 RK candidate ranker (one model for VALUE and ARG). 1139+.
+"""Train, validate and export Thor's FP8 RK candidate ranker (one model for VALUE and ARG).
 
 Inputs: one or more `thor_fp8_retained_cold_l2_sweep --training` CSVs. Requires numpy, scikit-learn and xgboost.
 
@@ -15,16 +15,17 @@ Inputs: one or more `thor_fp8_retained_cold_l2_sweep --training` CSVs. Requires 
 5. Export: XGBoost JSON, the generated Fp8GeometryRankerModel.h (FEATURE_COUNT = 26), parity fixtures checked
    against XGBoost's own margins, curves.csv, misses.csv and summary.txt.
 
-1196: --dtype=fp32 trains the FP32 RK ranker (one ranker per dtype) on the datasets' FP32 cells (`--training
---dtypes=fp32`; VALUE and, from 1205, ARG cells), ordered by the model alone (the FP32 selector has no family-leader
+--dtype=fp32 trains the FP32 RK ranker (one ranker per dtype) on the datasets' FP32 cells (`--training
+--dtypes=fp32`; VALUE and ARG cells), ordered by the model alone (the FP32 selector has no family-leader
 prefix), exported as Fp32RKRankerModel.h (TRAINED = true) and Fp32RKRankerParityFixtures.h. It also prints an Ultra
-depth (the smallest N whose out-of-fold max regret is <= --ultra-max for VALUE and for ARG); FP32_RK_SHORTLIST_DEPTHS in Fp32RK/Fp32RKCandidates.h is set from the
-printed depths by hand. --dtype=fp8 (the default) is unchanged.
+depth (the smallest N whose out-of-fold max regret is <= --ultra-max for VALUE and for ARG); FP32_RK_SHORTLIST_DEPTHS in
+Reduction/RK/Fp32/Fp32RKCandidates.h is set from the printed depths by hand. --dtype=fp8 is the default.
 
-1252: --dtype=f16 trains the FP16 / BF16 RK ranker (one model for both formats; f6, the E4M3 slot, is the BF16 flag)
+--dtype=f16 trains the FP16 / BF16 RK ranker (one model for both formats; f6, the E4M3 slot, is the BF16 flag)
 on the datasets' fp16 and bf16 cells (`--training --dtypes=fp16,bf16`, VALUE and ARG), as --dtype=fp32: the model
 alone, Quick / Regular / Ultra printed, exported as F16RKRankerModel.h and F16RKRankerParityFixtures.h;
-F16_RK_SHORTLIST_DEPTHS in F16RK/F16RKCandidates.h is set by hand (a trained model does not compile without them).
+F16_RK_SHORTLIST_DEPTHS in Reduction/RK/F16/F16RKCandidates.h is set by hand (a trained model does not compile without
+them).
 
 Usage: train.py fp8-training.csv.gz [more.csv.gz ...] --out-dir=fp8_ranker_out [--dtype=fp8|fp32|f16] [--seed=0]
 """
@@ -42,7 +43,7 @@ import export  # noqa: E402
 
 REPORT_DEPTHS = (1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 28, 32, 40, 48, 64)
 
-# 1196: per-dtype outputs. `cells` picks the dataset's cells of the dtype (FP8: E4M3 and E5M2 together).
+# Per-dtype outputs. `cells` picks the dataset's cells of the dtype (FP8: E4M3 and E5M2 together).
 DTYPES = {
     "fp8": {
         "label": "FP8",
@@ -61,29 +62,29 @@ DTYPES = {
         "cells": lambda dtype: dtype == "fp32",
         "model_header": "Fp32RKRankerModel.h",
         "fixtures_header": "Fp32RKRankerParityFixtures.h",
-        "model_namespace": "ThorImplementation::CubReductionInternal::Fp32RK::Fp32RKRankerModel",
-        "parity_namespace": "ThorImplementation::CubReductionInternal::Fp32RK::Fp32RKRankerParity",
+        "model_namespace": "ThorImplementation::ReductionInternal::RK::Fp32::Fp32RKRankerModel",
+        "parity_namespace": "ThorImplementation::ReductionInternal::RK::Fp32::Fp32RKRankerParity",
         "trained_flag": True,
         "leaders": False,  # fp32RKRankedKernels orders by the margin alone
         "json": "fp32_rk_ranker.json",
-        "ultra": "FP32_RK_SHORTLIST_DEPTHS in Utilities/TensorOperations/Cub/Fp32RK/Fp32RKCandidates.h",
+        "ultra": "FP32_RK_SHORTLIST_DEPTHS in Utilities/TensorOperations/Reduction/RK/Fp32/Fp32RKCandidates.h",
     },
-    "f16": {  # 1252: FP16 and BF16 together (the BF16 flag is a feature)
+    "f16": {  # FP16 and BF16 together (the BF16 flag is a feature)
         "label": "FP16 / BF16",
         "cells": lambda dtype: dtype in ("fp16", "bf16"),
         "model_header": "F16RKRankerModel.h",
         "fixtures_header": "F16RKRankerParityFixtures.h",
-        "model_namespace": "ThorImplementation::CubReductionInternal::F16RK::F16RKRankerModel",
-        "parity_namespace": "ThorImplementation::CubReductionInternal::F16RK::F16RKRankerParity",
+        "model_namespace": "ThorImplementation::ReductionInternal::RK::F16::F16RKRankerModel",
+        "parity_namespace": "ThorImplementation::ReductionInternal::RK::F16::F16RKRankerParity",
         "trained_flag": True,
         "leaders": False,  # f16RKRankedKernels orders by the margin alone
         "json": "f16_rk_ranker.json",
-        "ultra": "F16_RK_SHORTLIST_DEPTHS in Utilities/TensorOperations/Cub/F16RK/F16RKCandidates.h",
+        "ultra": "F16_RK_SHORTLIST_DEPTHS in Utilities/TensorOperations/Reduction/RK/F16/F16RKCandidates.h",
     },
 }
 
 
-KIND_GROUPS = ("value", "arg", "carried_arg")  # 1211: carried-index ARG cells are reported and gated as their own group
+KIND_GROUPS = ("value", "arg", "carried_arg")  # carried-index ARG cells are reported and gated as their own group
 
 
 def kind_group(cell):
@@ -263,7 +264,7 @@ def main():
               f"REGULAR_DEPTH={regular} QUICK_DEPTH={quick}"]
     ultra = None
     if spec["ultra"]:
-        # 1205: VALUE and ARG cells (both kinds present since the FP32 ARG sweep): the deeper of the two depths.
+        # VALUE and ARG cells: the deeper of the two depths.
         for kind in KIND_GROUPS:
             series = oof_curves.get((kind, chosen))
             if not series:

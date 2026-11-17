@@ -2,14 +2,14 @@
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
-#include "Utilities/TensorOperations/Cub/CubReduction.h"
+#include "Utilities/TensorOperations/Reduction/Reducer.h"
 
 #include <cuda.h>
 #include <cuda_fp16.h>
 
 #include <algorithm>
 
-std::shared_ptr<ThorImplementation::StampedCubReduction> createBinaryAccuracyReduction(
+std::shared_ptr<ThorImplementation::StampedReducer> createBinaryAccuracyReduction(
     ThorImplementation::Tensor workspace_d,
     ThorImplementation::Tensor accuracy_d,
     uint32_t batchSize,
@@ -24,5 +24,5 @@ void launchComputeBinaryAccuracy(ThorImplementation::Tensor accuracy_d,
                                  LABEL_TYPE *labels_d,
                                  ThorImplementation::Tensor workspace_d,
                                  uint32_t batchSize,
-                                 std::shared_ptr<ThorImplementation::StampedCubReduction> reduction,
+                                 std::shared_ptr<ThorImplementation::StampedReducer> reduction,
                                  Stream stream);

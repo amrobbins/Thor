@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Train, validate and export Thor's R / KR shape rankers: FP8 (1158+), with --dtype=fp32 FP32 (1182), or with
---dtype=f16 FP16 / BF16 together (1238; the BF16 flag is the alternate-format feature, f20). One model
-per dtype (user decision 2026-11-02, so a dtype's kernels can change without retraining the others), each for VALUE
-and ARG, trained only on that dtype's cells of the datasets.
+"""Train, validate and export Thor's R / KR shape rankers: FP8, with --dtype=fp32 FP32, or with --dtype=f16 FP16 /
+BF16 together (the BF16 flag is the alternate-format feature, f20). One model per dtype, so a dtype's kernels can
+change without retraining the others, each for VALUE and ARG, trained only on that dtype's cells of the datasets.
 
 The RK ranker's method (benchmarks/fp8_ranker), on the KR pool:
 1. Labels: per cell, regret = time / oracle, graded (dataset.relevance; ties within 1% are equally good). Objective:
-   XGBoost rank:ndcg grouped by cell. Features: the sweep's C++ fp8KRRankerFeatures (24).
+   XGBoost rank:ndcg grouped by cell. Features: the sweep's C++ krRankerFeatures (24).
 2. Geometry-separated K-fold CV over the non-held-out cells (a row length R never straddles folds) gives out-of-fold
    scores; a final fit on all non-held-out cells scores the held-out row lengths.
 3. Regret(N) curves per kind, for the model order and for the heuristic order (fp8KRCandidateShapes, then the rest of
@@ -17,13 +16,16 @@ The RK ranker's method (benchmarks/fp8_ranker), on the KR pool:
 5. Export: XGBoost JSON, the generated Fp8KRRankerModel.h (TRAINED = true) and Fp8KRRankerParityFixtures.h (margins
    checked against XGBoost's own), curves.csv, misses.csv and summary.txt.
 
-Cut over, FP8: copy Fp8KRRankerModel.h to Utilities/TensorOperations/Cub/Fp8KR/, Fp8KRRankerParityFixtures.h to
-test/Utilities/TensorOperations/, and set FP8_KR_SHORTLIST_DEPTHS in Fp8KRSegments.h to the printed depths.
-Cut over, FP32: copy Fp32KRRankerModel.h to Utilities/TensorOperations/Cub/Fp32KR/, Fp32KRRankerParityFixtures.h to
-test/Utilities/TensorOperations/, and set FP32_KR_SHORTLIST_DEPTHS in Fp32KR/Fp32KRStampAutotuner.h.
-Cut over, FP16 / BF16: copy F16KRRankerModel.h to Utilities/TensorOperations/Cub/F16KR/, F16KRRankerParityFixtures.h
-to test/Utilities/TensorOperations/, and give F16KR/F16KRStampAutotuner.cpp its F16_KR_SHORTLIST_DEPTHS (it refuses to
-compile a trained model without them).
+Cut over, FP8: copy Fp8KRRankerModel.h to Utilities/TensorOperations/Reduction/Rankers/, Fp8KRRankerParityFixtures.h
+to test/Utilities/TensorOperations/Reduction/, and set FP8_KR_SHORTLIST_DEPTHS in Reduction/KR/KRSegments.h to the
+printed depths.
+Cut over, FP32: copy Fp32KRRankerModel.h to Utilities/TensorOperations/Reduction/Rankers/, Fp32KRRankerParityFixtures.h
+to test/Utilities/TensorOperations/Reduction/, and set FP32_KR_SHORTLIST_DEPTHS in
+Reduction/KR/Fp32/Fp32KRStampAutotuner.h.
+Cut over, FP16 / BF16: copy F16KRRankerModel.h to Utilities/TensorOperations/Reduction/Rankers/,
+F16KRRankerParityFixtures.h to test/Utilities/TensorOperations/Reduction/, and give
+Reduction/KR/F16/F16KRStampAutotuner.cpp its F16_KR_SHORTLIST_DEPTHS (it refuses to compile a trained model without
+them).
 
 Usage: train.py kr-training.csv.gz [more.csv.gz ...] --out-dir=fp8_kr_ranker_out [--dtype=fp8|fp32|f16] [--seed=0]
 Requires numpy, scikit-learn and xgboost.
@@ -46,16 +48,16 @@ import export  # noqa: E402  (fp8_ranker/export.py)
 REPORT_DEPTHS = (1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24)
 GENERATOR = "benchmarks/fp8_kr_ranker/train.py"
 
-# 1182: per-dtype outputs. `cells` picks the dataset's cells of the dtype (FP8: E4M3 and E5M2 together).
+# Per-dtype outputs. `cells` picks the dataset's cells of the dtype (FP8: E4M3 and E5M2 together).
 DTYPES = {
     "fp8": {
         "label": "FP8",
         "cells": lambda dtype: dtype.startswith("fp8"),
         "model_header": "Fp8KRRankerModel.h",
         "fixtures_header": "Fp8KRRankerParityFixtures.h",
-        "model_namespace": "ThorImplementation::CubReductionInternal::Fp8KR::Fp8KRRankerModel",
-        "parity_namespace": "ThorImplementation::CubReductionInternal::Fp8KR::Fp8KRRankerParity",
-        "depths": "set in Fp8KRSegments.h: FP8_KR_SHORTLIST_DEPTHS",
+        "model_namespace": "ThorImplementation::ReductionInternal::KR::Fp8::Fp8KRRankerModel",
+        "parity_namespace": "ThorImplementation::ReductionInternal::KR::Fp8::Fp8KRRankerParity",
+        "depths": "set in KRSegments.h: FP8_KR_SHORTLIST_DEPTHS",
         "json": "fp8_kr_ranker.json",
     },
     "fp32": {
@@ -63,9 +65,9 @@ DTYPES = {
         "cells": lambda dtype: dtype == "fp32",
         "model_header": "Fp32KRRankerModel.h",
         "fixtures_header": "Fp32KRRankerParityFixtures.h",
-        "model_namespace": "ThorImplementation::CubReductionInternal::Fp32KR::Fp32KRRankerModel",
-        "parity_namespace": "ThorImplementation::CubReductionInternal::Fp32KR::Fp32KRRankerParity",
-        "depths": "set in Fp32KR/Fp32KRStampAutotuner.h: FP32_KR_SHORTLIST_DEPTHS",
+        "model_namespace": "ThorImplementation::ReductionInternal::KR::Fp32::Fp32KRRankerModel",
+        "parity_namespace": "ThorImplementation::ReductionInternal::KR::Fp32::Fp32KRRankerParity",
+        "depths": "set in Reduction/KR/Fp32/Fp32KRStampAutotuner.h: FP32_KR_SHORTLIST_DEPTHS",
         "json": "fp32_kr_ranker.json",
     },
     "f16": {
@@ -73,15 +75,15 @@ DTYPES = {
         "cells": lambda dtype: dtype in ("fp16", "bf16"),
         "model_header": "F16KRRankerModel.h",
         "fixtures_header": "F16KRRankerParityFixtures.h",
-        "model_namespace": "ThorImplementation::CubReductionInternal::F16KR::F16KRRankerModel",
-        "parity_namespace": "ThorImplementation::CubReductionInternal::F16KR::F16KRRankerParity",
-        "depths": "set in F16KR/F16KRStampAutotuner.cpp: F16_KR_SHORTLIST_DEPTHS",
+        "model_namespace": "ThorImplementation::ReductionInternal::KR::F16::F16KRRankerModel",
+        "parity_namespace": "ThorImplementation::ReductionInternal::KR::F16::F16KRRankerParity",
+        "depths": "set in Reduction/KR/F16/F16KRStampAutotuner.cpp: F16_KR_SHORTLIST_DEPTHS",
         "json": "f16_kr_ranker.json",
     },
 }
 
 
-# 1217: carried-index ARG cells (the sweep's --carried-index) are their own group.
+# Carried-index ARG cells (the sweep's --carried-index) are their own group.
 KIND_GROUPS = ("value", "arg", "carried_arg")
 
 
@@ -125,7 +127,7 @@ def curves_for(cells, scores, max_n, large_bytes):
     for cell, cell_scores in zip(cells, scores):
         cell_orders = {"model": evaluate.order_by_scores(cell, cell_scores), "list": evaluate.list_order(cell)}
         frozen = [c.frozen_margin for c in cell.candidates]
-        if all(math.isfinite(m) for m in frozen):  # 1217: the installed model's order (sweeps 1217+)
+        if all(math.isfinite(m) for m in frozen):  # the installed model's order (NaN: a sweep without it)
             cell_orders["frozen"] = evaluate.order_by_scores(cell, frozen)
         orders.append(cell_orders)
         for name, order in cell_orders.items():

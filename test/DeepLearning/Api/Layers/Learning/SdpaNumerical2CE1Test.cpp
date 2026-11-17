@@ -241,7 +241,7 @@ TEST(SdpaNumerical2CE1, SavedTopLeftCausalCrossAttentionB2B7MatchesCpuReference)
     runSavedCross2CE1(true);
 }
 
-// 2C-G3: CUDA runtime/placement reuse.  The placed-network API performs input
+// CUDA runtime / placement reuse. The placed-network API performs input
 // staging and host-visible output materialization, and is NOT an external CUDA
 // stream-capture API.  These tests exercise the existing stamp-owned cuDNN
 // execution on successive submissions with changing device row offsets; they

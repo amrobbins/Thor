@@ -1,5 +1,4 @@
-// 2C-G2: saved neutral SDPA dropout backward, active-value numerical reference,
-// and deterministic per-instance replay.  Test-only; physical cuDNN SDPA stays unchanged.
+// Saved neutral SDPA dropout backward, active-value numerical reference, and deterministic per-instance replay.
 #include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Api/Layers/Learning/ScaledDotProductAttention.h"
 #include "DeepLearning/Api/Layers/Loss/RaggedCustomLoss.h"

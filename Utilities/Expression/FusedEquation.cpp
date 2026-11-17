@@ -488,14 +488,14 @@ static std::vector<uint32_t> narrowedReductionAxes(const std::vector<uint64_t>& 
 // reads its input and writes its output in physical order, and refuses a view whose retained axes are permuted (F / G)
 // or whose rows have gaps (H). A rotated view, and (1391, phase 7 A) a pitched view whose rows read at their pitch
 // cost less than its packed copy, run in two parts: the reduction of the bytes, then the dense copy of its output
-// (CubReductionViewSplit::copiesOutput). Any other view the reducer does not run reads its dense copy, in its own
+// (ViewSplit::copiesOutput). Any other view the reducer does not run reads its dense copy, in its own
 // dtype (stageInputTakesStridedSpan).
-static std::optional<CubReductionViewSplit> outputCopyReductionSplit(const CompiledReduction& reduction,
-                                                                     const StridedSpan& span) {
+static std::optional<ViewSplit> outputCopyReductionSplit(const CompiledReduction& reduction,
+                                                         const StridedSpan& span) {
     if (span.isDenseContiguous()) {
         return std::nullopt;
     }
-    std::optional<CubReductionViewSplit> split = CubReduction::splitRefusedView(
+    std::optional<ViewSplit> split = Reducer::splitRefusedView(
         span, narrowedReductionAxes(reduction.reduction_axes), reduction.output_dtype);
     if (!split.has_value() || !split->copiesOutput()) {
         return std::nullopt;
@@ -507,8 +507,8 @@ static bool reductionReadsSpanInPlace(const CompiledExecutionStage& stage, const
     if (!stage.reduction || span.isDenseContiguous()) {
         return true;
     }
-    // 1392: CubReduction::readsSpanInPlace also takes a pitched view the reducer reads at its row and slab pitches.
-    if (CubReduction::readsSpanInPlace(
+    // 1392: Reducer::readsSpanInPlace also takes a pitched view the reducer reads at its row and slab pitches.
+    if (Reducer::readsSpanInPlace(
             span, narrowedReductionAxes(stage.reduction->reduction_axes), stage.reduction->output_dtype)) {
         return true;
     }
@@ -10845,11 +10845,11 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
             throw std::runtime_error("Segmented reduce-min/max-backward offsets placement must match packed input placement.");
         }
 
-        if (!CubSegmentedArgReduction::isInputDataTypeSupported(compiledStage->input_dtype)) {
+        if (!SegmentedArgReducer::isInputDataTypeSupported(compiledStage->input_dtype)) {
             throw std::runtime_error(
                 "Segmented reduce-min/max backward input dtype is not supported by the CUB arg-reduction backend.");
         }
-        if (!CubSegmentedArgReduction::isOffsetDataTypeSupported(offsets->getDataType())) {
+        if (!SegmentedArgReducer::isOffsetDataTypeSupported(offsets->getDataType())) {
             throw std::runtime_error(
                 "Segmented reduce-min/max backward offsets dtype is not supported by the CUB arg-reduction backend.");
         }
@@ -10858,8 +10858,8 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
                 ? DataType::UINT32
                 : DataType::UINT64;
         Tensor indices(input.getPlacement(), TensorDescriptor(winner_index_dtype, grad_output.getDimensions()));
-        const CubArgReductionOp arg_op =
-            compiledStage->op == ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD ? CubArgReductionOp::ArgMin : CubArgReductionOp::ArgMax;
+        const ArgReductionOp arg_op =
+            compiledStage->op == ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD ? ArgReductionOp::ArgMin : ArgReductionOp::ArgMax;
         // The segmented scatter reads dense storage: its input is a whole tensor (a span's dense copy).
         if (!input.isWholeTensor()) {
             throw std::invalid_argument("Segmented reduce-min/max backward requires a dense tensor input.");
@@ -13125,7 +13125,7 @@ StampedExecutionPlan FusedEquation::stampImpl(
                 // 1390: a rotated view (F / G) in two parts: the reduction of its bytes in physical order into a
                 // dense [a, b x p], then the dense copy of that read as the output's [b, a, p]. 1391: a sliced
                 // pitched view (H) the same way: [O, R, Sr] into [O, Sr], then the copy of its [O, I] columns.
-                if (const std::optional<CubReductionViewSplit> split =
+                if (const std::optional<ViewSplit> split =
                         outputCopyReductionSplit(*stage.reduction, inputSpan);
                     split.has_value()) {
                     std::vector<uint64_t> physical_axes(split->dense_axes.begin(), split->dense_axes.end());

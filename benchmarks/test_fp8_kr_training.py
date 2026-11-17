@@ -1,4 +1,4 @@
-"""Host-only checks for the KR training sweep summary (1151-1152)."""
+"""Host-only checks for the KR training sweep summary."""
 import gzip
 import pathlib
 import tempfile

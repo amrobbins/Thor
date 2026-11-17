@@ -1,10 +1,10 @@
 #pragma once
-// 1263: the cells of thor_ragged_reduction_audit (benchmarks/RaggedReductionAudit.cpp), host only and free of CUDA so
-// test/Utilities/TensorOperations/RaggedReductionAuditCellsTest.cpp can check them without a GPU.
+// The cells of thor_ragged_reduction_audit (benchmarks/RaggedReductionAudit.cpp), host only and free of CUDA so
+// test/Utilities/TensorOperations/Reduction/RaggedReductionAuditCellsTest.cpp can check them without a GPU.
 //
 // A shape is (op, D, offset dtype, capacity ratio, active rows, segments). Every shape runs under every distribution of
 // segment lengths, so a report can compare distributions at a fixed (rows, segments, D, dtype, op): the distribution
-// spread that plans/Thor_Ragged_Reduction_Plan_2026-11-06.md gates on.
+// spread.
 //
 // Distributions (all deterministic in the seed, platform independent: splitmix64 and IEEE double only):
 //   uniform     equal lengths (rows / segments, the remainder spread one row each over the first segments)
@@ -16,9 +16,9 @@
 // exactly `rows`. All-length-1 and few-segment cases come from the shape's mean length, not from a distribution.
 //
 // Verification: the audit's input ring holds 0.5 in every element (in the input dtype), so each segment's output is
-// known in closed form and exact: SUM len * 0.5, MEAN, MIN and MAX 0.5, ARG the segment's first packed index (the lowest
-// tied index), and the empty values (0, 0, +inf, -inf, the sentinel). That checks every segment boundary of every cell;
-// it does not check arithmetic on varied data (the unit tests do).
+// known in closed form and exact: SUM len * 0.5, MEAN, MIN and MAX 0.5, ARG the segment's first packed index (the
+// lowest tied index), and the empty values (0, 0, +inf, -inf, the sentinel). That checks every segment boundary of
+// every cell; it does not check arithmetic on varied data (the unit tests do).
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -247,8 +247,8 @@ struct Verification {
 };
 
 // Segments up to this many rows of 0.5 have exact FP32 sums in any summation order: every partial sum is a multiple of
-// 0.5 of at most 2^23, which FP32's 24-bit significand holds. (1267: was 2^25, so a 29.6M-row segment, sum
-// 14806426.5, was required to be exact; FP32 rounds it to 14806426.)
+// 0.5 of at most 2^23, which FP32's 24-bit significand holds. (At 2^25 a 29.6M-row segment, sum 14806426.5, would have
+// to be exact; FP32 rounds it to 14806426.)
 inline constexpr uint64_t EXACT_SUM_ROWS = uint64_t{1} << 24;
 
 // VALUE output [segments, d] of an input whose every element is `value` (0.5 in the audit). Every output must be exact,

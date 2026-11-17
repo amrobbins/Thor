@@ -3,8 +3,6 @@
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/TensorOperations/Cub/CubDevicePrimitiveSupport.h"
 
-#include <cub/cub.cuh>
-
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -22,47 +20,6 @@ struct HostOffsetsUploadArgs : public HostFunctionArgsBase {
 };
 
 static void releaseHostOffsetsUpload(void*) {}
-
-template <typename T>
-size_t queryInclusiveSum(uint64_t batch_size) {
-    if (batch_size == 0) {
-        return 0;
-    }
-    if (batch_size > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
-        throw std::invalid_argument("row partition batch_size exceeds CUB's int item-count limit.");
-    }
-    size_t queried_bytes = 0;
-    const T* input = nullptr;
-    T* output = nullptr;
-    CUDA_CHECK(cub::DeviceScan::InclusiveSum(nullptr, queried_bytes, input, output, static_cast<int>(batch_size)));
-    return queried_bytes;
-}
-
-template <typename T>
-void launchInclusiveSum(const RowPartitionLengthsToOffsetsPlan& plan,
-                        const Tensor& temp_storage,
-                        const Tensor& lengths,
-                        Tensor& offsets,
-                        Stream& stream) {
-    if (plan.batch_size == 0) {
-        return;
-    }
-    void* temp_ptr = const_cast<void*>(static_cast<const void*>(temp_storage.getMemPtr<void>()));
-    size_t temp_bytes = plan.temp_storage_bytes;
-    const T* lengths_ptr = lengths.getMemPtr<T>();
-    T* offsets_ptr = offsets.getMemPtr<T>();
-    CUDA_CHECK(cub::DeviceScan::InclusiveSum(temp_ptr,
-                                             temp_bytes,
-                                             lengths_ptr,
-                                             offsets_ptr + 1,
-                                             static_cast<int>(plan.batch_size),
-                                             stream.getStream()));
-}
-
-template <typename T>
-__global__ void setFirstOffsetZeroKernel(T* offsets) {
-    offsets[0] = T{0};
-}
 
 template <typename OffsetT, typename LengthT>
 __global__ void offsetsToLengthsKernel(const OffsetT* offsets, LengthT* lengths, uint64_t batch_size) {
@@ -225,19 +182,6 @@ void requireRowPartitionOffsetDType(DataType dtype, const char* name) {
     }
 }
 
-void validateLengthsAndOffsets(const Tensor& lengths, const Tensor& offsets, uint64_t batch_size) {
-    requireRowPartitionVectorGpuTensor(lengths, "row partition lengths");
-    requireRowPartitionVectorGpuTensor(offsets, "row partition offsets");
-    requireSameGpuPlacement(lengths, offsets, "row partition lengths", "row partition offsets");
-    requireStorageForNumItems(lengths, "row partition lengths", batch_size);
-    requireStorageForNumItems(offsets, "row partition offsets", checkedOffsetsElements(batch_size));
-    requireRowPartitionOffsetDType(lengths.getDataType(), "row partition lengths");
-    requireRowPartitionOffsetDType(offsets.getDataType(), "row partition offsets");
-    if (lengths.getDataType() != offsets.getDataType()) {
-        throw std::invalid_argument("row partition lengths and offsets must have the same dtype.");
-    }
-}
-
 void validateOffsetsAndLengths(const Tensor& offsets, const Tensor& lengths, uint64_t batch_size) {
     requireRowPartitionVectorGpuTensor(offsets, "row partition offsets");
     requireRowPartitionVectorGpuTensor(lengths, "row partition lengths");
@@ -348,36 +292,6 @@ decltype(auto) dispatchRowIdDType(DataType dtype, Fn&& fn) {
             throw std::invalid_argument("Unsupported row partition row_ids dtype " + TensorDescriptor::getElementTypeName(dtype) + ".");
     }
 }
-
-struct QueryInclusiveSumFn {
-    uint64_t batch_size;
-    template <typename T>
-    size_t operator()() const {
-        return queryInclusiveSum<T>(batch_size);
-    }
-};
-
-struct LaunchInclusiveSumFn {
-    const RowPartitionLengthsToOffsetsPlan& plan;
-    const Tensor& temp_storage;
-    const Tensor& lengths;
-    Tensor& offsets;
-    Stream& stream;
-    template <typename T>
-    void operator()() const {
-        launchInclusiveSum<T>(plan, temp_storage, lengths, offsets, stream);
-    }
-};
-
-struct SetFirstOffsetZeroFn {
-    Tensor& offsets;
-    Stream& stream;
-    template <typename T>
-    void operator()() const {
-        setFirstOffsetZeroKernel<T><<<1, 1, 0, stream.getStream()>>>(offsets.getMemPtr<T>());
-        CUDA_CHECK(cudaGetLastError());
-    }
-};
 
 struct OffsetsToLengthsFn {
     const Tensor& offsets;
@@ -575,52 +489,6 @@ void rowPartitionUploadHostOffsets(const std::vector<uint64_t>& host_offsets,
 }
 
 bool isRowPartitionOffsetDTypeSupported(DataType dtype) { return isCanonicalRowPartitionOffsetDataType(dtype); }
-
-RowPartitionLengthsToOffsetsPlan prepareRowPartitionLengthsToOffsets(const Tensor& lengths,
-                                                                    const Tensor& offsets,
-                                                                    uint64_t batch_size) {
-    validateLengthsAndOffsets(lengths, offsets, batch_size);
-    RowPartitionLengthsToOffsetsPlan plan;
-    plan.placement = lengths.getPlacement();
-    plan.dtype = lengths.getDataType();
-    plan.batch_size = batch_size;
-    plan.temp_storage_bytes = dispatchOffsetDType(plan.dtype, QueryInclusiveSumFn{batch_size});
-    return plan;
-}
-
-size_t rowPartitionLengthsToOffsetsTempBytes(const Tensor& lengths, const Tensor& offsets, uint64_t batch_size) {
-    return prepareRowPartitionLengthsToOffsets(lengths, offsets, batch_size).temp_storage_bytes;
-}
-
-void rowPartitionLengthsToOffsets(const RowPartitionLengthsToOffsetsPlan& plan,
-                                  const Tensor& temp_storage,
-                                  const Tensor& lengths,
-                                  Tensor& offsets,
-                                  Stream& stream) {
-    validateLengthsAndOffsets(lengths, offsets, plan.batch_size);
-    if (lengths.getPlacement() != plan.placement || lengths.getDataType() != plan.dtype) {
-        throw std::invalid_argument("row partition lengthsToOffsets tensors do not match prepared plan.");
-    }
-    if (plan.temp_storage_bytes > 0) {
-        requireTempStorage(temp_storage, plan.placement, plan.temp_storage_bytes);
-    }
-    dispatchOffsetDType(plan.dtype, SetFirstOffsetZeroFn{offsets, stream});
-    dispatchOffsetDType(plan.dtype, LaunchInclusiveSumFn{plan, temp_storage, lengths, offsets, stream});
-}
-
-void rowPartitionLengthsToOffsets(const Tensor& temp_storage,
-                                  size_t temp_storage_bytes,
-                                  const Tensor& lengths,
-                                  Tensor& offsets,
-                                  uint64_t batch_size,
-                                  Stream& stream) {
-    RowPartitionLengthsToOffsetsPlan plan = prepareRowPartitionLengthsToOffsets(lengths, offsets, batch_size);
-    if (temp_storage_bytes < plan.temp_storage_bytes) {
-        throw std::invalid_argument("row partition lengthsToOffsets temp_storage_bytes is smaller than the prepared requirement.");
-    }
-    plan.temp_storage_bytes = temp_storage_bytes;
-    rowPartitionLengthsToOffsets(plan, temp_storage, lengths, offsets, stream);
-}
 
 void rowPartitionOffsetsToLengths(const Tensor& offsets, Tensor& lengths, uint64_t batch_size, Stream& stream) {
     validateOffsetsAndLengths(offsets, lengths, batch_size);

@@ -1,14 +1,15 @@
-// 1174: thor_dense_production_audit. What a user gets from a production CubReduction / CubArgReduction stamp at a
-// dense R, KR or RK site of any input dtype, timed cold, against the copy curve of the same GPU, in TB/s.
+// thor_dense_production_audit. What a user gets from a production Reducer / ArgReducer stamp at a dense R, KR or RK
+// site of any input dtype, timed cold, against the copy curve of the same GPU, in TB/s.
 //
-// It is the first step of converting a dtype to the FP8 pattern (Utilities/TensorOperations/Cub/
-// FP8_REDUCTION_PATTERN.md section 5): the baseline. It is also the before/after check of every later step of that
+// It is the first step of converting a dtype to the FP8 pattern (Utilities/TensorOperations/Reduction/README.md
+// section 8): the baseline. It is also the before/after check of every later step of that
 // dtype, and of FP8 when the FP32 path it continues into changes.
 //
 // Method (benchmarks/ColdTiming.h, as the FP8 sweeps): each cell is stamped once on its first input view, the stamp a
-// user gets (tuning at --tuning-depth). The stamp is then run with StampedCub*Reduction::runOnTensorsForBenchmark on
-// rotating input views spanning at least 2 GiB and output views spanning at least 1 GiB, so every launch reads a
-// cold input and pays its output's write-back; the stamp's own intermediates and scratch are reused, as in a real run.
+// user gets (tuning at --tuning-depth). The stamp is then run with
+// StampedReducer / StampedArgReducer::runOnTensorsForBenchmark on rotating input views spanning at least 2 GiB and
+// output views spanning at least 1 GiB, so every launch reads a cold input and pays its output's write-back; the
+// stamp's own intermediates and scratch are reused, as in a real run.
 // One untimed run, one timed probe, then --samples samples of about --interval-us of back-to-back runs (at most
 // --max-launches), interleaved across the cells of a batch. Moved bytes are the input plus the outputs; the reference
 // is the copy curve (time of a device copy moving the same bytes, measured the same way at startup).
@@ -20,10 +21,11 @@
 // Output: '#' header lines (settings, device, copy curve) and one CSV row per cell. benchmarks/dense_production_audit.py
 // reports it.
 #include "benchmarks/ColdTiming.h"
-#include "Utilities/TensorOperations/Cub/ReductionAutotunerCore.h"
+#include "Utilities/TensorOperations/Reduction/Contest/ReductionAutotunerCore.h"
 #include "benchmarks/Fp8OracleBatchQueue.h"
-#include "Utilities/TensorOperations/Cub/CubReduction.h"
-#include "Utilities/TensorOperations/Cub/CubReductionTuningDepth.h"
+#include "Utilities/TensorOperations/Reduction/ArgReducer.h"
+#include "Utilities/TensorOperations/Reduction/Reducer.h"
+#include "Utilities/TensorOperations/Reduction/ReductionTuningDepth.h"
 #include "Utilities/Common/ScopedGpu.h"
 
 #include <cuda_runtime_api.h>
@@ -44,7 +46,7 @@
 #include <vector>
 
 namespace T = ThorImplementation;
-namespace B = ThorImplementation::CubReductionBenchmarking;
+namespace B = ThorImplementation::ReductionBenchmarking;
 using B::ColdTiming::align256;
 using B::ColdTiming::CopyCurve;
 using B::ColdTiming::GiB;
@@ -63,20 +65,20 @@ void check(cudaError_t status, const char* what) { B::ColdTiming::checkCuda(stat
 struct OpSpec {
     const char* name;
     bool arg;
-    T::CubReductionOp value_op;
-    T::CubArgReductionOp arg_op;
+    T::ReductionOp value_op;
+    T::ArgReductionOp arg_op;
 };
 constexpr OpSpec OPS[] = {
-    {"sum", false, T::CubReductionOp::Sum, T::CubArgReductionOp::ArgMax},
-    {"mean", false, T::CubReductionOp::Mean, T::CubArgReductionOp::ArgMax},
-    {"product", false, T::CubReductionOp::Product, T::CubArgReductionOp::ArgMax},
-    {"min", false, T::CubReductionOp::Min, T::CubArgReductionOp::ArgMax},
-    {"max", false, T::CubReductionOp::Max, T::CubArgReductionOp::ArgMax},
-    {"l1_norm", false, T::CubReductionOp::L1Norm, T::CubArgReductionOp::ArgMax},
-    {"l2_norm", false, T::CubReductionOp::L2Norm, T::CubArgReductionOp::ArgMax},
-    {"sum_squares", false, T::CubReductionOp::SumSquares, T::CubArgReductionOp::ArgMax},
-    {"argmin", true, T::CubReductionOp::Min, T::CubArgReductionOp::ArgMin},
-    {"argmax", true, T::CubReductionOp::Max, T::CubArgReductionOp::ArgMax},
+    {"sum", false, T::ReductionOp::Sum, T::ArgReductionOp::ArgMax},
+    {"mean", false, T::ReductionOp::Mean, T::ArgReductionOp::ArgMax},
+    {"product", false, T::ReductionOp::Product, T::ArgReductionOp::ArgMax},
+    {"min", false, T::ReductionOp::Min, T::ArgReductionOp::ArgMax},
+    {"max", false, T::ReductionOp::Max, T::ArgReductionOp::ArgMax},
+    {"l1_norm", false, T::ReductionOp::L1Norm, T::ArgReductionOp::ArgMax},
+    {"l2_norm", false, T::ReductionOp::L2Norm, T::ArgReductionOp::ArgMax},
+    {"sum_squares", false, T::ReductionOp::SumSquares, T::ArgReductionOp::ArgMax},
+    {"argmin", true, T::ReductionOp::Min, T::ArgReductionOp::ArgMin},
+    {"argmax", true, T::ReductionOp::Max, T::ArgReductionOp::ArgMax},
 };
 
 const OpSpec& opSpec(std::string_view name) {
@@ -126,7 +128,7 @@ struct Settings {
     uint64_t arena_bytes = 8 * GiB;
     uint64_t output_ring_bytes = 3 * GiB;
     size_t queue_cells = 16;
-    T::CubReductionTuningDepth depth = T::CubReductionTuningDepth::Regular;
+    T::ReductionTuningDepth depth = T::ReductionTuningDepth::Regular;
     bool list_only = false;
 };
 
@@ -174,9 +176,9 @@ Settings parse(int argc, char** argv) {
         } else if (auto v = value("--queue-cells=")) {
             s.queue_cells = std::max<size_t>(1, std::stoull(*v));
         } else if (auto v = value("--tuning-depth=")) {
-            if (*v == "quick") s.depth = T::CubReductionTuningDepth::Quick;
-            else if (*v == "regular") s.depth = T::CubReductionTuningDepth::Regular;
-            else if (*v == "ultra") s.depth = T::CubReductionTuningDepth::Ultra;
+            if (*v == "quick") s.depth = T::ReductionTuningDepth::Quick;
+            else if (*v == "regular") s.depth = T::ReductionTuningDepth::Regular;
+            else if (*v == "ultra") s.depth = T::ReductionTuningDepth::Ultra;
             else throw std::invalid_argument("--tuning-depth takes quick, regular or ultra");
         } else if (a == "--list-only") {
             s.list_only = true;
@@ -256,21 +258,21 @@ std::vector<CellSpec> cells(const Settings& s) {
     return out;
 }
 
-const char* pathName(T::CubReductionPath path) {
+const char* pathName(T::ReductionLayout path) {
     switch (path) {
-        case T::CubReductionPath::DeviceTransformReduce: return "direct:device_transform_reduce";
-        case T::CubReductionPath::ContiguousFixedSegment: return "direct:contiguous_fixed_segment";
-        case T::CubReductionPath::TiledFixedSegment: return "direct:tiled_fixed_segment";
-        case T::CubReductionPath::OffsetSegmented: return "direct:offset_segmented";
-        case T::CubReductionPath::ComposedDense: return "composed_dense";
+        case T::ReductionLayout::SingleOutput: return "direct:device_transform_reduce";
+        case T::ReductionLayout::TrailingBlock: return "direct:contiguous_fixed_segment";
+        case T::ReductionLayout::MiddleBlock: return "direct:tiled_fixed_segment";
+        case T::ReductionLayout::Segmented: return "direct:offset_segmented";
+        case T::ReductionLayout::DisjointRuns: return "composed_dense";
     }
     return "unknown";
 }
 
 struct Cell {
     CellSpec spec;
-    std::shared_ptr<T::StampedCubReduction> value_stamp;
-    std::shared_ptr<T::StampedCubArgReduction> arg_stamp;
+    std::shared_ptr<T::StampedReducer> value_stamp;
+    std::shared_ptr<T::StampedArgReducer> arg_stamp;
     std::vector<T::StridedSpan> inputs;  // views of the input ring
     std::vector<std::optional<T::StridedSpan>> values, indices;  // views of the output ring
     size_t next_input = 0, next_output = 0;
@@ -315,7 +317,7 @@ int main(int argc, char** argv) {
         Stream stream(placement);
         cudaDeviceProp properties{};
         check(cudaGetDeviceProperties(&properties, 0), "device properties");
-        const T::ScopedCubReductionTuningDepth depth_scope(settings.depth);
+        const T::ScopedReductionTuningDepth depth_scope(settings.depth);
 
         // Outputs: value FP32 [outputs], then index UINT32 [outputs] at nextSliceOffset (256-byte aligned, at least 128
         // bytes past the value, as production lays them out).
@@ -341,8 +343,8 @@ int main(int argc, char** argv) {
         stream.synchronize();
         const uint64_t copy_bytes = 256 * MiB;
         const double bandwidth = B::ColdTiming::copyBandwidth(inputs, outputs, stream, copy_bytes);
-        // 1176: the curve starts at the smallest cell, so small cells are compared with a copy of their own size
-        // (1175 extrapolated below 2 MiB, putting their reference far under the launch floor).
+        // The curve starts at the smallest cell, so small cells are compared with a copy of their own size
+        // (extrapolating below 2 MiB put their reference far under the launch floor).
         uint64_t min_moved = max_moved;
         for (uint64_t n = 0; n < total; ++n)
             min_moved = std::min(min_moved, specs[n].elements() * settings.dtype->bytes + footprint(specs[n]));
@@ -358,7 +360,7 @@ int main(int argc, char** argv) {
                   << " input_reuse_bytes=" << InputReuseBytes << " output_reuse_bytes=" << OutputReuseBytes
                   << " input_byte=0x30 value_output=fp32 arg_index=uint32 arg_outputs="
                   << (settings.arg_value_index ? "value_index" : "index")
-                  << " tuning_depth=" << T::cubReductionTuningDepthRank(settings.depth)
+                  << " tuning_depth=" << T::reductionTuningDepthRank(settings.depth)
                   << " device=\"" << properties.name << "\" sm_count=" << properties.multiProcessorCount
                   << " cc=" << properties.major << '.' << properties.minor << " l2_bytes=" << properties.l2CacheSize
                   << " copy_bandwidth_tbps=" << std::fixed << std::setprecision(4) << bandwidth / 1e6 << '\n';
@@ -437,7 +439,7 @@ int main(int argc, char** argv) {
                 const auto stamp_start = std::chrono::steady_clock::now();
                 if (!c.op->arg) {
                     cell->value_stamp =
-                        T::CubReduction(c.op->value_op, c.axis(), T::DataType::FP32).stamp(cell->inputs[0], stream);
+                        T::Reducer(c.op->value_op, c.axis(), T::DataType::FP32).stamp(cell->inputs[0], stream);
                     if (cell->value_stamp->usesDenseExecutablePlan()) {
                         for (const auto& pass : cell->value_stamp->getDensePhysicalPassDiagnostics()) {
                             cell->passes += (cell->passes.empty() ? "" : "+") + pass.family;
@@ -448,12 +450,12 @@ int main(int argc, char** argv) {
                         cell->pass_count = 1;
                     }
                 } else {
-                    T::CubArgReductionOutputOptions options;
+                    T::ArgReductionOutputOptions options;
                     options.produce_value = has_value;
                     if (has_value) options.value_output_dtype = T::DataType::FP32;
                     options.produce_index = true;
                     options.index_output_dtype = T::DataType::UINT32;
-                    cell->arg_stamp = T::CubArgReduction(c.op->arg_op, c.axis(), options).stamp(cell->inputs[0], stream);
+                    cell->arg_stamp = T::ArgReducer(c.op->arg_op, c.axis(), options).stamp(cell->inputs[0], stream);
                     for (const std::string& pass : cell->arg_stamp->getPlannedPassNames()) {
                         cell->passes += (cell->passes.empty() ? "" : "+") + pass;
                         ++cell->pass_count;

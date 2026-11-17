@@ -85,10 +85,10 @@ void bind_network(nb::module_ &m) {
     network.attr("StatusCode") = network_status_code_type;
 
     auto reduction_tuning_depth_type =
-        nb::enum_<ThorImplementation::CubReductionTuningDepth>(m, "ReductionTuningDepth")
-            .value("quick", ThorImplementation::CubReductionTuningDepth::Quick)
-            .value("regular", ThorImplementation::CubReductionTuningDepth::Regular)
-            .value("ultra", ThorImplementation::CubReductionTuningDepth::Ultra);
+        nb::enum_<ThorImplementation::ReductionTuningDepth>(m, "ReductionTuningDepth")
+            .value("quick", ThorImplementation::ReductionTuningDepth::Quick)
+            .value("regular", ThorImplementation::ReductionTuningDepth::Regular)
+            .value("ultra", ThorImplementation::ReductionTuningDepth::Ultra);
     reduction_tuning_depth_type.attr("__qualname__") = "Network.ReductionTuningDepth";
     network.attr("ReductionTuningDepth") = reduction_tuning_depth_type;
 

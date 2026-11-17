@@ -1,5 +1,5 @@
 #include "Utilities/TensorOperations/Ragged/RaggedAccuracy.h"
-#include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
+#include "test/Utilities/TensorOperations/Reduction/ReductionTestSupport.h"
 
 #include "gtest/gtest.h"
 
@@ -8,7 +8,7 @@
 #include <vector>
 
 using namespace ThorImplementation;
-using namespace ThorImplementation::CubReductionTestSupport;
+using namespace ThorImplementation::ReductionTestSupport;
 
 TEST(RaggedAccuracy, BinaryUsesOnlyActivePackedPrefix) {
     REQUIRE_CUDA_DEVICE();

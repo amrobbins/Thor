@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Ragged reduction audit report (1263): what production segmented-reduction stamps achieve, by distribution of segment
+"""Ragged reduction audit report: what production segmented-reduction stamps achieve, by distribution of segment
 lengths, D, mean segment length and size, in TB/s of moved bytes (active input + offsets + outputs).
 
 Reads `thor_ragged_reduction_audit` output: one row per cell, every shape timed under every distribution of segment
-lengths. The gate of plans/Thor_Ragged_Reduction_Plan_2026-11-06.md is printed first: median TB/s and the distribution
-spread at or above --large-mib, and the cells whose outputs failed verification.
+lengths. The gate is printed first: median TB/s (against --target and, as a share of the copy curve, --copy-gate) and
+the distribution spread (against --spread-gate) at or above --large-mib, and the cells whose outputs failed
+verification.
 
   1. moved TB/s by kind and size: p50, p10, min, and the share of cells at the target
   2. moved TB/s by distribution and size
@@ -19,13 +20,13 @@ spread at or above --large-mib, and the cells whose outputs failed verification.
  10. with --copy only: each cell against a device copy of the same moved bytes
 
 With --compare=OTHER (another run, same seed and settings) section 11 reports both runs' TB/s and the per-cell ratio, by
-kind and size and by distribution: the before / after view of a phase.
+kind and size and by distribution: the before / after view of a change.
 
-1265: a --backend=ragged_kr run times each cell once per candidate shape (the `passes` column names it). Every section
+A --backend=ragged_kr run times each cell once per candidate shape (the `passes` column names it). Every section
 and the gate use each cell's best candidate; section 12 lists the candidates: TB/s, how often each is the best and its
 TB/s against the best per cell.
 
-1272: section 13 fits each candidate's uniform cells (balanced CTAs) to median_us = fixed + rows x per row + segments x
+Section 13 fits each candidate's uniform cells (balanced CTAs) to median_us = fixed + rows x per row + segments x
 per end: the fixed start-up time, the rows' marginal TB/s, an end's cost in rows and the extra weight that matches it
 (RaggedKRShape::end_extra).
 
@@ -141,10 +142,11 @@ def solve3(a, b):
 
 
 def cost_fit(rows, header, out=None, min_bytes=2**20):
-    """Section 13 (1272): per candidate and offset width, least squares over the uniform cells at or above min_bytes of
-    median_us = fixed + rows x a + segments x b. 1280: separately for D = 1 and D 2-15, rows counted in bytes (rows x D),
-    the extra only at D = 1 (an end's bytes vary with D). 1284: rows x D x the input's element bytes; the D >= 2 class
-    is 2-15 (FP8), 2-7 (FP16 / BF16) or 2-3 (FP32). 1285: rows of 16 bytes and more (ragged RK) are the class >=16B."""
+    """Section 13: per candidate and offset width, least squares over the uniform cells at or above min_bytes of
+    median_us = fixed + rows x a + segments x b, separately for D = 1, for D >= 2 below 16 bytes a row (2-15 for FP8,
+    2-7 for FP16 / BF16, 2-3 for FP32) and for rows of 16 bytes and more (ragged RK's, the class >=16B). Rows are
+    counted in bytes (rows x D x the input's element bytes), with the extra only at D = 1 (an end's bytes vary
+    with D)."""
     out = out or sys.stdout
     output_bytes = {"fp32": 4, "fp16": 2, "bf16": 2}.get(header.get("value_output", "fp32"), 1)
     element_bytes = {"fp32": 4, "fp16": 2, "bf16": 2}.get(header.get("dtype", "fp8_e4m3"), 1)
@@ -152,7 +154,7 @@ def cost_fit(rows, header, out=None, min_bytes=2**20):
     groups = {}
     for c in rows:
         if c["distribution"] == "uniform" and c["moved_bytes"] >= min_bytes:
-            # 1285: rows of 16 bytes and more are ragged RK's, fitted apart.
+            # Rows of 16 bytes and more are ragged RK's, fitted apart.
             d_class = "1" if c["D"] == 1 else (wide_class if c["D"] * element_bytes < 16 else ">=16B")
             groups.setdefault((c["passes"], c["offset_dtype"], d_class), []).append(c)
     table_rows = []
@@ -268,8 +270,8 @@ def report(header, cells, failed, verify_failed, args, out=None):
           f"p10 {f3(quantile([c['tbps'] for c in big], 0.1))} (target {args.target:g}); distribution spread p50 "
           f"{f3(quantile(ratios, 0.5))} p90 {f3(quantile(ratios, 0.9))} max {f3(max(ratios)) if ratios else 'nan'} "
           f"over {len(spreads)} shapes (gate {args.spread_gate:g}); cells failing verification {unverified}", file=out)
-    # 1275: the median clause is against the copy curve (plan, phase 2: at least 0.85 of copy), and a ragged_kr run
-    # may time the main kernel alone (--ragged-kr-time=main) with the finisher as a fixed tax.
+    # The median clause is against the copy curve (at least --copy-gate of copy), and a ragged_kr run may time the
+    # main kernel alone (--ragged-kr-time=main) with the finisher as a fixed tax.
     print(f"# gate of copy (moved >= {args.large_mib:g} MiB): p50 {f3(quantile([c['of_copy'] for c in big], 0.5))} "
           f"p10 {f3(quantile([c['of_copy'] for c in big], 0.1))} (gate {args.copy_gate:g}); timed "
           f"{header.get('ragged_kr_time', 'full')}", file=out)
@@ -398,7 +400,7 @@ def compare(cells, other_cells, out=None):
           rows_for(groups), out)
     groups = [((d,), [(c, o) for c, o in shared if c["distribution"] == d]) for d in distributions(cells)]
     table("    by distribution", ["distribution", "n", *columns], rows_for(groups), out)
-    # 1271: the gate's "no cell at >= 1 MiB slower than the other run", cell by cell.
+    # The gate's "no cell at >= 1 MiB slower than the other run", cell by cell.
     slower = sorted(((c["tbps"] / o["tbps"], c, o) for c, o in shared if c["moved_bytes"] >= 2**20), key=lambda t: t[0])
     rows = [[c["shape_id"], c["distribution"], c["operation"], c["rows"], c["segments"], f"{c['mean_len']:.4g}",
              f"{c['moved_bytes'] / 2**20:.1f}", f3(c["tbps"]), f3(o["tbps"]), f3(r)]
@@ -414,9 +416,9 @@ def main(argv=None):
     parser.add_argument("--compare", help="another audit of the same cells (same seed and settings)")
     parser.add_argument("--target", type=float, default=1.5, help="TB/s target (default 1.5)")
     parser.add_argument("--copy-gate", type=float, default=0.85,
-                        help="median share of the copy curve the plan's phase 2 gate asks (default 0.85, 1275)")
+                        help="median share of the copy curve the gate asks (default 0.85)")
     parser.add_argument("--spread-gate", type=float, default=1.05,
-                        help="distribution spread the plan's phase 2 gate allows (default 1.05)")
+                        help="distribution spread the gate allows (default 1.05)")
     parser.add_argument("--large-mib", type=float, default=16.0)
     parser.add_argument("--worst", type=int, default=20)
     parser.add_argument("--copy", action="store_true",

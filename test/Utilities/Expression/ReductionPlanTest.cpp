@@ -25,15 +25,15 @@ namespace {
 
 struct ReductionCase {
     ExprOp expression_op;
-    CubReductionOp cub_op;
+    ReductionOp cub_op;
 };
 
 const std::vector<ReductionCase> valueReductionCases = {
-    {ExprOp::REDUCE_SUM, CubReductionOp::Sum},       {ExprOp::REDUCE_PROD, CubReductionOp::Product},
-    {ExprOp::REDUCE_MIN, CubReductionOp::Min},       {ExprOp::REDUCE_MAX, CubReductionOp::Max},
-    {ExprOp::REDUCE_AVG, CubReductionOp::Mean},      {ExprOp::REDUCE_NORM1, CubReductionOp::L1Norm},
-    {ExprOp::REDUCE_NORM2, CubReductionOp::L2Norm},
-    {ExprOp::REDUCE_SUM_SQUARES, CubReductionOp::SumSquares},
+    {ExprOp::REDUCE_SUM, ReductionOp::Sum},       {ExprOp::REDUCE_PROD, ReductionOp::Product},
+    {ExprOp::REDUCE_MIN, ReductionOp::Min},       {ExprOp::REDUCE_MAX, ReductionOp::Max},
+    {ExprOp::REDUCE_AVG, ReductionOp::Mean},      {ExprOp::REDUCE_NORM1, ReductionOp::L1Norm},
+    {ExprOp::REDUCE_NORM2, ReductionOp::L2Norm},
+    {ExprOp::REDUCE_SUM_SQUARES, ReductionOp::SumSquares},
 };
 
 }  // namespace
@@ -63,9 +63,9 @@ TEST(ExpressionReductionPlan, CacheKeySeparatesPhysicalPermutationLayouts) {
     EXPECT_NE(ijk_to_ki, different_physical_layout);
 }
 
-// 1390: the reducer refuses a rotated-output permutation ([32, 7, 5] over a dense [7, 5, 32], reducing the last axis
-// leaves [32, 7], the rotation of the dense [7, 32]), so no reduction plan is built for it. The Expression stage runs
-// it in two parts instead (FusedEquation: the dense reduction of its bytes, then a DenseCopy stage).
+// The reducer refuses a rotated-output permutation ([32, 7, 5] over a dense [7, 5, 32], reducing the last axis leaves
+// [32, 7], the rotation of the dense [7, 32]), so no reduction plan is built for it. The Expression stage runs it in
+// two parts instead (FusedEquation: the dense reduction of its bytes, then a DenseCopy stage).
 TEST(ExpressionReductionPlan, PhysicalPermutationWithARotatedOutputBuildsNoPlan) {
     REQUIRE_CUDA_DEVICE();
 
@@ -80,10 +80,10 @@ TEST(ExpressionReductionPlan, PhysicalPermutationWithARotatedOutputBuildsNoPlan)
                                                         DataType::FP32);
 
     EXPECT_THROW(static_cast<void>(StampedEquation::buildReduction(compiled, input, 0)), NotImplementedException);
-    const std::optional<CubReductionViewSplit> split =
-        CubReduction::splitRefusedView(input.getDimensions(), input.getStridesElements(), {2});
+    const std::optional<ViewSplit> split =
+        Reducer::splitRefusedView(input.getDimensions(), input.getStridesElements(), {2});
     ASSERT_TRUE(split.has_value());
-    EXPECT_EQ(split->kind, CubReductionViewSplit::Kind::RotatedOutput);
+    EXPECT_EQ(split->kind, ViewSplit::Kind::RotatedOutput);
     EXPECT_EQ(split->dense_dimensions, (std::vector<uint64_t>{7, 5, 32}));
 
     // The first part is an ordinary dense plan.
@@ -97,7 +97,7 @@ TEST(ExpressionReductionPlan, PhysicalPermutationWithARotatedOutputBuildsNoPlan)
         StampedEquation::buildReduction(dense, input.asDense(split->dense_dimensions), 0);
     ASSERT_NE(built, nullptr);
     ASSERT_TRUE(built->geometry.has_value());
-    EXPECT_EQ(built->geometry->path, CubReductionPath::TiledFixedSegment);
+    EXPECT_EQ(built->geometry->path, ReductionLayout::MiddleBlock);
     EXPECT_EQ(built->geometry->reduction_size, 5U);
     EXPECT_EQ(built->geometry->output_elements, 7U * 32U);
 }
@@ -122,7 +122,7 @@ TEST(ExpressionReductionPlan, EveryDenseValueReductionBuildsACachedPlan) {
         ASSERT_TRUE(built->value_op.has_value());
         EXPECT_EQ(built->value_op.value(), test_case.cub_op);
         ASSERT_TRUE(built->geometry.has_value());
-        EXPECT_EQ(built->geometry->path, CubReductionPath::TiledFixedSegment);
+        EXPECT_EQ(built->geometry->path, ReductionLayout::MiddleBlock);
 
         std::shared_ptr<BuiltReduction> cached = StampedEquation::buildReduction(compiled, input, 0);
         EXPECT_EQ(cached.get(), built.get());
@@ -183,11 +183,11 @@ TEST(ExpressionReductionPlan, EveryDenseArgReductionBuildsACachedIndexPlan) {
 
     struct ArgCase {
         ExprOp expression_op;
-        CubArgReductionOp cub_op;
+        ArgReductionOp cub_op;
     };
     const std::vector<ArgCase> cases = {
-        {ExprOp::REDUCE_ARGMIN, CubArgReductionOp::ArgMin},
-        {ExprOp::REDUCE_ARGMAX, CubArgReductionOp::ArgMax},
+        {ExprOp::REDUCE_ARGMIN, ArgReductionOp::ArgMin},
+        {ExprOp::REDUCE_ARGMAX, ArgReductionOp::ArgMax},
     };
 
     for (const ArgCase& test_case : cases) {
@@ -206,7 +206,7 @@ TEST(ExpressionReductionPlan, EveryDenseArgReductionBuildsACachedIndexPlan) {
         ASSERT_TRUE(built->arg_op.has_value());
         EXPECT_EQ(built->arg_op.value(), test_case.cub_op);
         ASSERT_TRUE(built->geometry.has_value());
-        EXPECT_EQ(built->geometry->path, CubReductionPath::TiledFixedSegment);
+        EXPECT_EQ(built->geometry->path, ReductionLayout::MiddleBlock);
         EXPECT_EQ(built->key.input_dtype, DataType::BF16);
         EXPECT_EQ(built->key.compute_dtype, DataType::FP32);
 
@@ -277,9 +277,9 @@ TEST(ExpressionReductionPlan, ReduceMinMaxBackwardWinnerPlansProduceIndices) {
         EXPECT_EQ(built->key.result_kind, ReductionResultKind::Indices);
         ASSERT_TRUE(built->arg_op.has_value());
         EXPECT_EQ(built->arg_op.value(),
-                  op == ExprOp::REDUCE_MIN ? CubArgReductionOp::ArgMin : CubArgReductionOp::ArgMax);
+                  op == ExprOp::REDUCE_MIN ? ArgReductionOp::ArgMin : ArgReductionOp::ArgMax);
         ASSERT_TRUE(built->geometry.has_value());
-        EXPECT_EQ(built->geometry->path, CubReductionPath::ContiguousFixedSegment);
+        EXPECT_EQ(built->geometry->path, ReductionLayout::TrailingBlock);
         EXPECT_EQ(built->key.input_dtype, DataType::FP8_E4M3);
     }
 }

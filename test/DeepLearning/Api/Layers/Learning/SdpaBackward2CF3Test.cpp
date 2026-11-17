@@ -1,7 +1,5 @@
-// 2C-F3: saved/re-placed dense-query, ragged-KV numerical backward.
-// Keep shared K/V input fanout as a separate gate (2C-F4) so that this
-// test isolates the mixed-domain SDPA and dense RAW-loss backward paths.
-// No changes to SDPA physical kernels or placement contracts.
+// Saved / re-placed dense-query, ragged-KV numerical backward. Shared K/V input fanout is SdpaBackward2CF4Test's, so
+// this test isolates the mixed-domain SDPA and dense RAW-loss backward paths.
 #include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Api/Layers/Learning/ScaledDotProductAttention.h"
 #include "DeepLearning/Api/Layers/Loss/CustomLoss.h"

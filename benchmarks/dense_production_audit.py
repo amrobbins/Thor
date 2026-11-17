@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Dense production audit report (1174): what production stamps achieve, by family, kind and size, in TB/s.
+"""Dense production audit report: what production stamps achieve, by family, kind and size, in TB/s.
 
 Reads `thor_dense_production_audit` output (one row per cell: a production stamp timed cold on rotating input and
-output views). Bandwidth (moved bytes / time, TB/s) is the measure throughout (1177).
+output views). Bandwidth (moved bytes / time, TB/s) is the measure throughout.
 
   1. moved TB/s by family, kind and input size: p50, p10, min, and the share of cells at the target
   2. what production runs: the pass signatures (kernel families, digits stripped) per family, with their TB/s

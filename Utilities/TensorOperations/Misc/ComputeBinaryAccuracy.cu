@@ -168,16 +168,16 @@ __global__ void computeBinaryAccuracyPerBatchItemResult44(PREDICTION_TYPE_4_BYTE
     ((uint64_t *)workspace)[offset4Elements] = ((uint64_t *)resultsBuffer)[0];
 }
 
-shared_ptr<StampedCubReduction> createBinaryAccuracyReduction(Tensor workspace_d,
-                                                              Tensor accuracy_d,
-                                                              uint32_t batchSize,
-                                                              Stream stream) {
+shared_ptr<StampedReducer> createBinaryAccuracyReduction(Tensor workspace_d,
+                                                         Tensor accuracy_d,
+                                                         uint32_t batchSize,
+                                                         Stream stream) {
     THOR_THROW_IF_FALSE(batchSize > 0);
     THOR_THROW_IF_FALSE(workspace_d.getDataType() == DataType::FP16);
     THOR_THROW_IF_FALSE(workspace_d.getTotalNumElements() == batchSize);
     THOR_THROW_IF_FALSE(accuracy_d.getDataType() == DataType::FP32);
     THOR_THROW_IF_FALSE(accuracy_d.getTotalNumElements() == 1);
-    CubReduction reduction(CubReductionOp::Sum, 0, DataType::FP32, 1.0f / static_cast<float>(batchSize));
+    Reducer reduction(ReductionOp::Sum, 0, DataType::FP32, 1.0f / static_cast<float>(batchSize));
     return reduction.stamp(workspace_d, accuracy_d, stream);
 }
 
@@ -187,7 +187,7 @@ void launchComputeBinaryAccuracy(ThorImplementation::Tensor accuracy_d,
                                  LABEL_TYPE *labels_d,
                                  ThorImplementation::Tensor workspace_d,
                                  uint32_t batchSize,
-                                 shared_ptr<StampedCubReduction> reduction,
+                                 shared_ptr<StampedReducer> reduction,
                                  Stream stream) {
     THOR_THROW_IF_FALSE(batchSize > 0);
 
@@ -237,35 +237,35 @@ template void launchComputeBinaryAccuracy<half, uint8_t>(ThorImplementation::Ten
                                                          uint8_t *labels_d,
                                                          ThorImplementation::Tensor workspace_d,
                                                          uint32_t batchSize,
-                                                         shared_ptr<StampedCubReduction> reduction,
+                                                         shared_ptr<StampedReducer> reduction,
                                                          Stream stream);
 template void launchComputeBinaryAccuracy<half, uint16_t>(ThorImplementation::Tensor accuracy_d,
                                                           half *predictions_d,
                                                           uint16_t *labels_d,
                                                           ThorImplementation::Tensor workspace_d,
                                                           uint32_t batchSize,
-                                                          shared_ptr<StampedCubReduction> reduction,
+                                                          shared_ptr<StampedReducer> reduction,
                                                           Stream stream);
 template void launchComputeBinaryAccuracy<half, uint32_t>(ThorImplementation::Tensor accuracy_d,
                                                           half *predictions_d,
                                                           uint32_t *labels_d,
                                                           ThorImplementation::Tensor workspace_d,
                                                           uint32_t batchSize,
-                                                          shared_ptr<StampedCubReduction> reduction,
+                                                          shared_ptr<StampedReducer> reduction,
                                                           Stream stream);
 template void launchComputeBinaryAccuracy<half, half>(ThorImplementation::Tensor accuracy_d,
                                                       half *predictions_d,
                                                       half *labels_d,
                                                       ThorImplementation::Tensor workspace_d,
                                                       uint32_t batchSize,
-                                                      shared_ptr<StampedCubReduction> reduction,
+                                                      shared_ptr<StampedReducer> reduction,
                                                       Stream stream);
 template void launchComputeBinaryAccuracy<half, float>(ThorImplementation::Tensor accuracy_d,
                                                        half *predictions_d,
                                                        float *labels_d,
                                                        ThorImplementation::Tensor workspace_d,
                                                        uint32_t batchSize,
-                                                       shared_ptr<StampedCubReduction> reduction,
+                                                       shared_ptr<StampedReducer> reduction,
                                                        Stream stream);
 
 template void launchComputeBinaryAccuracy<float, uint8_t>(ThorImplementation::Tensor accuracy_d,
@@ -273,35 +273,35 @@ template void launchComputeBinaryAccuracy<float, uint8_t>(ThorImplementation::Te
                                                           uint8_t *labels_d,
                                                           ThorImplementation::Tensor workspace_d,
                                                           uint32_t batchSize,
-                                                          shared_ptr<StampedCubReduction> reduction,
+                                                          shared_ptr<StampedReducer> reduction,
                                                           Stream stream);
 template void launchComputeBinaryAccuracy<float, uint16_t>(ThorImplementation::Tensor accuracy_d,
                                                            float *predictions_d,
                                                            uint16_t *labels_d,
                                                            ThorImplementation::Tensor workspace_d,
                                                            uint32_t batchSize,
-                                                           shared_ptr<StampedCubReduction> reduction,
+                                                           shared_ptr<StampedReducer> reduction,
                                                            Stream stream);
 template void launchComputeBinaryAccuracy<float, uint32_t>(ThorImplementation::Tensor accuracy_d,
                                                            float *predictions_d,
                                                            uint32_t *labels_d,
                                                            ThorImplementation::Tensor workspace_d,
                                                            uint32_t batchSize,
-                                                           shared_ptr<StampedCubReduction> reduction,
+                                                           shared_ptr<StampedReducer> reduction,
                                                            Stream stream);
 template void launchComputeBinaryAccuracy<float, half>(ThorImplementation::Tensor accuracy_d,
                                                        float *predictions_d,
                                                        half *labels_d,
                                                        ThorImplementation::Tensor workspace_d,
                                                        uint32_t batchSize,
-                                                       shared_ptr<StampedCubReduction> reduction,
+                                                       shared_ptr<StampedReducer> reduction,
                                                        Stream stream);
 template void launchComputeBinaryAccuracy<float, float>(ThorImplementation::Tensor accuracy_d,
                                                         float *predictions_d,
                                                         float *labels_d,
                                                         ThorImplementation::Tensor workspace_d,
                                                         uint32_t batchSize,
-                                                        shared_ptr<StampedCubReduction> reduction,
+                                                        shared_ptr<StampedReducer> reduction,
                                                         Stream stream);
 
 template void launchComputeBinaryAccuracy<half, int8_t>(ThorImplementation::Tensor accuracy_d,
@@ -309,21 +309,21 @@ template void launchComputeBinaryAccuracy<half, int8_t>(ThorImplementation::Tens
                                                         int8_t *labels_d,
                                                         ThorImplementation::Tensor workspace_d,
                                                         uint32_t batchSize,
-                                                        shared_ptr<StampedCubReduction> reduction,
+                                                        shared_ptr<StampedReducer> reduction,
                                                         Stream stream);
 template void launchComputeBinaryAccuracy<half, int16_t>(ThorImplementation::Tensor accuracy_d,
                                                          half *predictions_d,
                                                          int16_t *labels_d,
                                                          ThorImplementation::Tensor workspace_d,
                                                          uint32_t batchSize,
-                                                         shared_ptr<StampedCubReduction> reduction,
+                                                         shared_ptr<StampedReducer> reduction,
                                                          Stream stream);
 template void launchComputeBinaryAccuracy<half, int32_t>(ThorImplementation::Tensor accuracy_d,
                                                          half *predictions_d,
                                                          int32_t *labels_d,
                                                          ThorImplementation::Tensor workspace_d,
                                                          uint32_t batchSize,
-                                                         shared_ptr<StampedCubReduction> reduction,
+                                                         shared_ptr<StampedReducer> reduction,
                                                          Stream stream);
 
 template void launchComputeBinaryAccuracy<float, int8_t>(ThorImplementation::Tensor accuracy_d,
@@ -331,19 +331,19 @@ template void launchComputeBinaryAccuracy<float, int8_t>(ThorImplementation::Ten
                                                          int8_t *labels_d,
                                                          ThorImplementation::Tensor workspace_d,
                                                          uint32_t batchSize,
-                                                         shared_ptr<StampedCubReduction> reduction,
+                                                         shared_ptr<StampedReducer> reduction,
                                                          Stream stream);
 template void launchComputeBinaryAccuracy<float, int16_t>(ThorImplementation::Tensor accuracy_d,
                                                           float *predictions_d,
                                                           int16_t *labels_d,
                                                           ThorImplementation::Tensor workspace_d,
                                                           uint32_t batchSize,
-                                                          shared_ptr<StampedCubReduction> reduction,
+                                                          shared_ptr<StampedReducer> reduction,
                                                           Stream stream);
 template void launchComputeBinaryAccuracy<float, int32_t>(ThorImplementation::Tensor accuracy_d,
                                                           float *predictions_d,
                                                           int32_t *labels_d,
                                                           ThorImplementation::Tensor workspace_d,
                                                           uint32_t batchSize,
-                                                          shared_ptr<StampedCubReduction> reduction,
+                                                          shared_ptr<StampedReducer> reduction,
                                                           Stream stream);

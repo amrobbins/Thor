@@ -1,6 +1,5 @@
-// 2C-F1: independently placed neutral SDPA, real RAW-loss backward, and
-// numerical Q/K/V gradients.  This intentionally leaves masking, dropout,
-// mixed-domain backward and shared-use accumulation for later small gates.
+// Independently placed neutral SDPA: real RAW-loss backward and numerical Q/K/V gradients. Masking, dropout,
+// mixed-domain backward and shared-use accumulation are the other SDPA backward tests'.
 #include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Api/Layers/Learning/ScaledDotProductAttention.h"
 #include "DeepLearning/Api/Layers/Loss/RaggedCustomLoss.h"

@@ -1,0 +1,94 @@
+#pragma once
+
+// The FP32 RK VALUE candidate generator. Host-only.
+// The pool is every compiled FP32 first stage legal at a site: OneWindow, DeepRSmallK, AlignedK and RuntimeK
+// (PacketComplete, rotated Prefix), as RK::PhysicalKernel identities with element_bytes 4, each with its compiled
+// residency (zero excludes it) and, for staged stages, FP32 partials within the scratch budget. FP8's frozen per-family
+// scores are calibrated on FP8 timings and are not reused: within a family the pool follows a fixed enumeration order
+// (the entry's local rank, a ranker feature), and the families are interleaved by local rank, as FP8's candidates are
+// before its model ranks them. With a trained Fp32RKRankerModel the shortlist is the pool ordered by the model's
+// margin; without one it is the pool's prefix. One ranker per dtype: the 26 features are FP8's, in elements where FP8's
+// are in bytes (see fp32RKRankerFeatures).
+
+#include "Utilities/TensorOperations/Reduction/Kernels/StageSemantics.h"
+#include "Utilities/TensorOperations/Reduction/ReductionTuningDepth.h"
+#include "Utilities/TensorOperations/Reduction/RK/RKPhysicalIdentity.h"
+#include "Utilities/TensorOperations/Reduction/Rankers/Fp32RKRankerModel.h"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <vector>
+
+namespace ThorImplementation::ReductionInternal::RK::Fp32 {
+
+struct Fp32RKSite {
+    uint64_t outer = 0, r = 0, k = 0;
+    uint32_t sm_count = 0;
+    ReductionStageSemantics semantics{};
+    uint64_t scratch_budget_bytes = std::numeric_limits<uint64_t>::max();
+    // The input base alignment the site reads (4, 8 or 16). At 4 the 4-byte AlignedK packet is offered at even K too:
+    // no wider packet reads that base, and the rotated pass needs R > 32. Below 16 the OneWindow kernels are those
+    // whose window holds K and a prefix.
+    uint64_t input_alignment_bytes = 16;
+};
+
+struct Fp32RKPoolEntry {
+    RK::PhysicalKernel kernel;
+    uint32_t local_rank = 0;  // 1-based within its family, in enumeration order
+};
+
+/** The compiled residency (CTAs per SM) of an FP32 first stage under the site's semantics; 0 when no compiled kernel
+ *  runs it. Production uses fp32RKCompiledResidency; tests may substitute their own. */
+using Fp32RKResidency = std::function<uint32_t(const RK::PhysicalKernel&)>;
+
+/** The production residency: the FP32 kernels' occupancy queries (RKPhysicalKernels.h adapters). A kernel with no
+ *  compiled specialization (std::logic_error from the query) is 0; other errors propagate. */
+[[nodiscard]] uint32_t fp32RKCompiledResidency(const RK::PhysicalKernel& kernel, uint64_t k,
+                                               const ReductionStageSemantics& semantics);
+
+/** The input base alignment (bytes) the FP32 RK pass `kernel` requires, VALUE stage or ARG twin alike: 4 (any FP32
+ *  address) for the rotated RuntimeK pass and RuntimeK PacketComplete, the packet for AlignedK, 16 for OneWindow and
+ *  DeepRSmallK (see fp32RKPassInputAlignmentAtK for OneWindow). The carried-index twins read fresh, aligned
+ *  intermediates. */
+[[nodiscard]] uint32_t fp32RKPassInputAlignment(const RK::PhysicalKernel& kernel);
+
+/** The same for an original-input stage at inner size `k`: the OneWindow kernel reads any FP32 address (4) when K fits
+ *  its window less a prefix (RK::oneWindowUnalignedCapacity). Its ARG twin too (the carried twin reads 16-byte aligned
+ *  intermediates only). */
+[[nodiscard]] uint32_t fp32RKPassInputAlignmentAtK(const RK::PhysicalKernel& kernel, uint64_t k);
+
+/** The pool at `site`, families interleaved by local rank (OneWindow, DeepRSmallK, AlignedK, RuntimeK). Every entry
+ *  satisfies RK::structurallyValid and the family's FP32 launch limits. */
+[[nodiscard]] std::vector<Fp32RKPoolEntry> fp32RKCandidatePool(const Fp32RKSite& site, const Fp32RKResidency& residency);
+
+/** FP8's 26 ranker features (Fp8RKPolicy::Detail::rankerFeatures) for an FP32 entry: the E4M3 slot is
+ *  0, packet sizes are in bytes, tiles and the K / lane-span ratio count components, and the input-size feature is
+ *  in MiB of input bytes. `aggregate` is 0 for VALUE (1 ARG index, 2 ARG value and index). */
+[[nodiscard]] std::array<float, Fp32RKRankerModel::FEATURE_COUNT> fp32RKRankerFeatures(const Fp32RKPoolEntry& entry,
+                                                                                       const Fp32RKSite& site,
+                                                                                       uint32_t aggregate = 0);
+
+/** True once a trained Fp32RKRankerModel.h is installed. */
+[[nodiscard]] constexpr bool fp32RKRankerTrained() { return Fp32RKRankerModel::TRAINED; }
+
+/** Shortlist lengths (Quick, Regular, Ultra) of the trained FP32 RK ranker, for VALUE and ARG.
+ *  Model a37fea04, trained with the 4-byte AlignedK packet on 21255 FP32 cells (14682 VALUE and ARG cells at 1, 4, 96
+ *  and 192 MiB, and 6573 ARG cells at 96 and 192 MiB; sm_count 170). train.py's rules chose Quick 1, Regular 4, Ultra
+ *  13. Out-of-fold max regret of the ranked top N, ARG / VALUE: N=3 1.309 / 1.172 (p99 1.017 / 1.023); N=8
+ *  1.031 / 1.015; N=13 1.003 / 1.008 (held out: N=3 1.094 / 1.116, N=8 1.009 / 1.055, N=13 1.000 / 1.000). The depths
+ *  are {3, 8, 13}; a contest round costs about 3x, 8x and 13x one run of the fastest kernel. */
+inline constexpr std::array<size_t, 3> FP32_RK_SHORTLIST_DEPTHS{3, 8, 13};
+
+/** How many candidates `depth` times: FP32_RK_SHORTLIST_DEPTHS when trained, else the FP8 RK depths (6 / 12 / 24). */
+[[nodiscard]] size_t fp32RKShortlistLength(ReductionTuningDepth depth);
+
+/** The first `count` kernels to time: the pool ordered by the trained ranker's margin (ties in pool order), or the
+ *  pool's prefix without a trained model. */
+[[nodiscard]] std::vector<RK::PhysicalKernel> fp32RKRankedKernels(const std::vector<Fp32RKPoolEntry>& pool,
+                                                                  const Fp32RKSite& site, size_t count,
+                                                                  uint32_t aggregate = 0);
+
+}  // namespace ThorImplementation::ReductionInternal::RK::Fp32

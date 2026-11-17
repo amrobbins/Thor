@@ -1,7 +1,6 @@
-// 1388: Thor's dense copy of a strided span (Utilities/TensorOperations/Copy/StridedCopy.h): the planner's families
-// over canonical layouts (host only), and every family bit for bit against a host gather of the same bytes, across
-// element widths, misaligned bases, partial and rectangular transpose tiles, batches, rebinding and indices past
-// 2^31 words.
+// Thor's dense copy of a strided span (Utilities/TensorOperations/Copy/StridedCopy.h): the planner's families over
+// canonical layouts (host only), and every family bit for bit against a host gather of the same bytes, across element
+// widths, misaligned bases, partial and rectangular transpose tiles, batches, rebinding and indices past 2^31 words.
 
 #include "Utilities/TensorOperations/Copy/StridedCopy.h"
 
@@ -136,9 +135,9 @@ TEST(StridedCopy, PlansFollowTheCanonicalLayout) {
     EXPECT_EQ(hostPlan({4096, 2048}, {1, 4096}, 2).tile_x, 64U);
     EXPECT_EQ(hostPlan({2, 4096, 4096}, {4096 * 4096, 1, 4096}, 4).tile_x, 32U);  // a batch axis: not a plain rotation
 
-    // 1389e: a plain rotation of a dense matrix of single words goes to the matrix transpose kernel: at 4-byte words
-    // whenever both sides are a tile (32) or more; at 2-byte words from 24 MiB of words, both sides 64 words or more
-    // (1389k: 1-byte words never). Within its limits: under 2^31 words and at most 65,535 row tiles of v.
+    // A plain rotation of a dense matrix of single words goes to the matrix transpose kernel: at 4-byte words whenever
+    // both sides are a tile (32) or more; at 2-byte words from 24 MiB of words, both sides 64 words or more (1-byte
+    // words never). Within its limits: under 2^31 words and at most 65,535 row tiles of v.
     DenseCopyPlan m = hostPlan({64, 48}, {1, 64}, 4);
     EXPECT_EQ(m.family, DenseCopyFamily::MatrixTranspose);
     EXPECT_EQ(m.word_bytes, 4U);
@@ -152,12 +151,12 @@ TEST(StridedCopy, PlansFollowTheCanonicalLayout) {
     EXPECT_EQ(hostPlan({64, 31}, {1, 64}, 4).family, DenseCopyFamily::Transpose);            // a skinny side
     EXPECT_EQ(hostPlan({64, 48}, {1, 65}, 4).family, DenseCopyFamily::Transpose);            // a source with gaps
     EXPECT_EQ(hostPlan({64, 48}, {1, 64}, 8).family, DenseCopyFamily::Transpose);            // 8-byte words
-    // 1389k: 1-byte words are Transposes (the packed byte tile) at any size; along v from x of half v.
+    // 1-byte words are Transposes (the packed byte tile) at any size; along v from x of half v.
     EXPECT_EQ(denseCopyPlanName(hostPlan({5123, 4999}, {1, 5123}, 1)), "transpose_p1_w1_t128x128_b0_vfirst");
     EXPECT_EQ(denseCopyPlanName(hostPlan({4000, 8000}, {1, 4000}, 1)), "transpose_p1_w1_t128x128_b0_vfirst");
     EXPECT_EQ(denseCopyPlanName(hostPlan({3999, 8000}, {1, 3999}, 1)), "transpose_p1_w1_t128x128_b0");  // under v / 2
     EXPECT_EQ(denseCopyPlanName(hostPlan({251, 100003}, {1, 251}, 1)), "transpose_p1_w1_t128x128_b0");
-    EXPECT_FALSE(hostPlan({4000, 2000}, {1, 4000}, 2).tile_v_first);  // 2-byte words: from 8 v as before
+    EXPECT_FALSE(hostPlan({4000, 2000}, {1, 4000}, 2).tile_v_first);  // 2-byte words: from 8 v
     EXPECT_EQ(hostPlan({234227, 106}, {1, 234227}, 1).family, DenseCopyFamily::Transpose);        // v under 128
     EXPECT_EQ(denseCopyPlanName(hostPlan({4099, 3100}, {1, 4099}, 2)), "matrix_transpose_w2");   // 24.2 MiB
     EXPECT_EQ(hostPlan({134935, 92}, {1, 134935}, 2).family, DenseCopyFamily::Transpose);         // 23.7 MiB
@@ -165,14 +164,14 @@ TEST(StridedCopy, PlansFollowTheCanonicalLayout) {
     EXPECT_EQ(hostPlan({32, 2097121}, {1, 32}, 4).family, DenseCopyFamily::Transpose);            // 65,536 row tiles
     EXPECT_EQ(hostPlan({32, 2097120}, {1, 32}, 4).family, DenseCopyFamily::MatrixTranspose);      // 65,535
     EXPECT_EQ(hostPlan({46341, 46341}, {1, 46341}, 4).family, DenseCopyFamily::Transpose);        // 2^31 words or more
-    // 1389i: x of 8 v or more in 16 MiB of words or more is a Transpose with the tiles along v.
+    // A rotation with x of 8 v or more in 16 MiB of words or more is a Transpose with the tiles along v.
     EXPECT_EQ(denseCopyPlanName(hostPlan({16384, 256}, {1, 16384}, 4)), "transpose_p1_w4_t32x32_b0_vfirst");  // 16 MiB
     EXPECT_EQ(hostPlan({16384, 255}, {1, 16384}, 4).family, DenseCopyFamily::MatrixTranspose);    // under 16 MiB
     EXPECT_EQ(denseCopyPlanName(hostPlan({8000, 1000}, {1, 8000}, 4)), "transpose_p1_w4_t32x32_b0_vfirst");  // 8 v
     EXPECT_EQ(hostPlan({7999, 1000}, {1, 7999}, 4).family, DenseCopyFamily::MatrixTranspose);     // under 8 v
     EXPECT_EQ(denseCopyPlanName(hostPlan({96855, 2638}, {1, 96855}, 1)), "transpose_p1_w1_t128x128_b0_vfirst");
-    // 1389s: rotations of 2- and 4-byte words with x of 7/8 v or more, from 48 MiB: the wide tile along v (256 x 16
-    // 2-byte, 128 x 8 4-byte words), from the matrix kernel or the square tile; under either edge as before.
+    // Rotations of 2- and 4-byte words with x of 7/8 v or more, from 48 MiB: the wide tile along v (256 x 16 2-byte,
+    // 128 x 8 4-byte words), instead of the matrix kernel or the square tile, which keep the copies under either edge.
     EXPECT_EQ(denseCopyPlanName(hostPlan({278450, 198, 4}, {4, 1113800, 1}, 1)), "transpose_p1_w4_t128x8_b0_vfirst");
     EXPECT_EQ(denseCopyPlanName(hostPlan({19117, 5680}, {1, 19117}, 2)), "transpose_p1_w2_t256x16_b0_vfirst");
     EXPECT_EQ(denseCopyPlanName(hostPlan({13127, 4136}, {1, 13127}, 4)), "transpose_p1_w4_t128x8_b0_vfirst");
@@ -187,7 +186,7 @@ TEST(StridedCopy, PlansFollowTheCanonicalLayout) {
     EXPECT_FALSE(hostPlan({234227, 106}, {1, 234227}, 1).tile_v_first);  // v is one tile
     EXPECT_FALSE(hostPlan({34, 623019, 5}, {5, 170, 1}, 2).tile_v_first);  // x under v
     EXPECT_FALSE(hostPlan({1500, 1400, 3}, {3, 4500, 1}, 2).tile_v_first);  // x about v
-    // 1389j: a tile of single bytes is packed: tile_x rows (rounded up to 4) of a power of two of 4-byte words.
+    // A tile of single bytes is packed: tile_x rows (rounded up to 4) of a power of two of 4-byte words.
     EXPECT_TRUE(DenseCopyInternal::transposePacksBytes(1, 1));
     EXPECT_FALSE(DenseCopyInternal::transposePacksBytes(3, 1));
     EXPECT_FALSE(DenseCopyInternal::transposePacksBytes(1, 2));
@@ -208,21 +207,21 @@ TEST(StridedCopy, PlansFollowTheCanonicalLayout) {
     EXPECT_EQ(skinny_v.tile_x, 113U);
     EXPECT_EQ(skinny_v.tile_v, 9U);
     EXPECT_EQ(denseCopyPlanName(skinny_v), "transpose_p1_w1_t113x9_b0");
-    // 1389l: a packed byte tile of 320 4 x 4 blocks or more (1389m; through 1389l 256) keeps its sides; else it grows.
+    // A packed byte tile of 320 4 x 4 blocks or more keeps its sides; else it grows.
     EXPECT_EQ(denseCopyPlanName(hostPlan({234227, 106}, {1, 234227}, 1)), "transpose_p1_w1_t128x106_b0");  // 154 x 106
     EXPECT_EQ(denseCopyPlanName(hostPlan({40, 300000}, {1, 40}, 1)), "transpose_p1_w1_t40x128_b0");  // 10 x 32 blocks
     EXPECT_EQ(denseCopyPlanName(hostPlan({36, 300000}, {1, 36}, 1)), "transpose_p1_w1_t36x455_b0");  // 9 x 32
     EXPECT_EQ(denseCopyPlanName(hostPlan({28, 300000}, {1, 28}, 1)), "transpose_p1_w1_t28x585_b0");  // 7 x 32
     EXPECT_EQ(denseCopyPlanName(hostPlan({51, 100000}, {1, 51}, 1)), "transpose_p1_w1_t51x99_b0");   // 51 x 192
     EXPECT_EQ(denseCopyPlanName(hostPlan({28, 300000}, {1, 28}, 2)), "transpose_p1_w2_t28x146_b0");  // 2-byte words
-    // 1389t: a packed byte tile grown along x past four sides (512 bytes) that leaves under 2048 tiles stops there
-    // (1820 x 9 in 656 tiles through 1389s); 2048 tiles or more keep the grown tile, and other words grow as before.
+    // A packed byte tile grown along x past four sides (512 bytes) that leaves under 2048 tiles stops there; 2048 tiles
+    // or more keep the grown tile, and other words' tiles grow.
     EXPECT_EQ(denseCopyPlanName(hostPlan({1192132, 9}, {1, 1192132}, 1)), "transpose_p1_w1_t512x9_b0");
     EXPECT_EQ(DenseCopyInternal::workUnits(hostPlan({1192132, 9}, {1, 1192132}, 1)), 2329U);
     EXPECT_EQ(denseCopyPlanName(hostPlan({3725540, 9}, {1, 3725540}, 1)), "transpose_p1_w1_t512x9_b0");  // 2047
     EXPECT_EQ(denseCopyPlanName(hostPlan({3725541, 9}, {1, 3725541}, 1)), "transpose_p1_w1_t1820x9_b0");  // 2048
     EXPECT_EQ(denseCopyPlanName(hostPlan({9, 184, 18, 27, 9}, {804816, 486, 27, 1, 89424}, 1)),
-              "transpose_p1_w1_t512x9_b1");  // 1547 x 9 under 9 batch elements through 1389s
+              "transpose_p1_w1_t512x9_b1");  // under 9 batch elements
     EXPECT_EQ(denseCopyPlanName(hostPlan({51, 65, 66, 9, 13}, {501930, 7722, 9, 1, 594}, 1)),
               "transpose_p1_w1_t594x13_b1");  // 3315 tiles
     EXPECT_EQ(denseCopyPlanName(hostPlan({400001, 9}, {1, 400001}, 2)), "transpose_p1_w2_t455x9_b0");
@@ -237,18 +236,18 @@ TEST(StridedCopy, PlansFollowTheCanonicalLayout) {
     EXPECT_EQ(g7.family, DenseCopyFamily::Transpose);
     EXPECT_EQ(g7.word_bytes, 4U);
     EXPECT_EQ(g7.p, 7U);
-    EXPECT_EQ(g7.tile_x, 13U);  // 1389d: the smallest square tile of 1,024 words or more (13 x 13 x 7 = 1,183)
+    EXPECT_EQ(g7.tile_x, 13U);  // the smallest square tile of 1,024 words or more (13 x 13 x 7 = 1,183)
     EXPECT_EQ(g7.tile_v, 13U);
-    // 1389d: the smallest side counts words (through 1389c: 32 vectors, so 1,024 p words a tile). A short x is still
-    // the whole side, with v grown to keep 13 x 13 vectors; about 512 tiles or more and the side grows as before.
+    // The smallest side counts words. A short x is still the whole side, with v grown to keep 13 x 13 vectors; about
+    // 512 tiles or more and the side grows.
     EXPECT_EQ(denseCopyPlanName(hostPlan({10, 1134, 7}, {7, 70, 1}, 4)), "transpose_p7_w4_t10x16_b0");
-    EXPECT_EQ(DenseCopyInternal::workUnits(hostPlan({10, 1134, 7}, {7, 70, 1}, 4)), 71U);  // 12 through 1389c
+    EXPECT_EQ(DenseCopyInternal::workUnits(hostPlan({10, 1134, 7}, {7, 70, 1}, 4)), 71U);
     EXPECT_EQ(denseCopyPlanName(hostPlan({1768, 113, 3}, {3, 5304, 1}, 4)), "transpose_p3_w4_t19x19_b0_vfirst");
     EXPECT_EQ(denseCopyPlanName(hostPlan({58, 5196, 3}, {3, 174, 1}, 4)), "transpose_p3_w4_t24x24_b0");
     EXPECT_EQ(denseCopyPlanName(hostPlan({32, 337530, 5}, {5, 160, 1}, 4)), "transpose_p5_w4_t32x32_b0");
     EXPECT_EQ(denseCopyPlanName(hostPlan({4464, 179, 3}, {3, 13392, 1}, 1)), "transpose_p3_w1_t39x39_b0_vfirst");
-    // 1389r: unpacked single bytes (1-byte words, p of 3, 5, 7) from 16 MiB take tile rows of 32 bytes (7 vectors
-    // of 5) and v rows to 32 KB; under 16 MiB and at 2-byte words the square tile as before.
+    // Unpacked single bytes (1-byte words, p of 3, 5, 7) from 16 MiB take tile rows of 32 bytes (7 vectors of 5) and v
+    // rows to 32 KB; under 16 MiB and at 2-byte words, the square tile.
     EXPECT_EQ(denseCopyPlanName(hostPlan({37, 1149980, 5}, {5, 185, 1}, 1)), "transpose_p5_w1_t7x853_b0");
     EXPECT_EQ(DenseCopyInternal::workUnits(hostPlan({37, 1149980, 5}, {5, 185, 1}, 1)), 8094U);  // 71874 at 32 x 32
     EXPECT_EQ(denseCopyPlanName(hostPlan({37, 90688, 5}, {5, 185, 1}, 1)), "transpose_p5_w1_t7x850_b0");  // 16 MiB
@@ -262,7 +261,7 @@ TEST(StridedCopy, PlansFollowTheCanonicalLayout) {
     EXPECT_EQ(g8.outer_dims, (std::vector<uint64_t>{40, 30}));
     EXPECT_EQ(g8.outer_strides, (std::vector<uint64_t>{2, 80}));
 
-    // 1389f: rows of two to four 16-byte words (32, 48, 64 bytes) are transposed in a copy of 4 MiB or more.
+    // Rows of two to four 16-byte words (32, 48, 64 bytes) are transposed in a copy of 4 MiB or more.
     DenseCopyPlan wide = hostPlan({256, 512, 8}, {8, 2048, 1}, 4);  // 4 MiB of 32-byte rows
     EXPECT_EQ(wide.family, DenseCopyFamily::Transpose);
     EXPECT_EQ(wide.word_bytes, 16U);
@@ -330,16 +329,16 @@ TEST(StridedCopy, PlansFollowTheCanonicalLayout) {
     EXPECT_EQ(batches.batch_dest, (std::vector<uint64_t>{4800, 2400, 600}));
     EXPECT_EQ(denseCopyPlanName(batches), "transpose_p1_w2_t30x20_b3");
 
-    // An x by v plane under 256 vectors: the row copy (the plane is a few sectors), or for single words of 4 bytes
-    // or fewer the packed gather (1389b). 1389d: the plane, since a tile of 7-word vectors is 169 of them.
+    // An x by v plane under 256 vectors (the plane's, not a tile's: a tile of 7-word vectors is 169 of them): the row
+    // copy (the plane is a few sectors), or for single words of 4 bytes or fewer the packed gather.
     EXPECT_EQ(hostPlan({2, 16, 12, 8}, {12 * 16 * 8, 8, 16 * 8, 1}, 2).family, DenseCopyFamily::RowCopy);
     EXPECT_EQ(hostPlan({4, 48}, {1, 4}, 4).family, DenseCopyFamily::PackedGather);
     EXPECT_EQ(hostPlan({48, 4}, {1, 48}, 4).family, DenseCopyFamily::PackedGather);
     EXPECT_EQ(hostPlan({33, 9}, {1, 33}, 4).family, DenseCopyFamily::Transpose);  // 297 vectors
     EXPECT_EQ(hostPlan({15, 17, 7}, {7, 105, 1}, 4).family, DenseCopyFamily::RowCopy);    // 255 vectors of 7 words
     EXPECT_EQ(hostPlan({16, 16, 7}, {7, 112, 1}, 4).family, DenseCopyFamily::Transpose);  // 256
-    // 1389a: more than 2,048 tiles of under 640 words each are not a transpose. [B, 4, x, 25] of a dense
-    // [B, 4, 25, x] (B and 4 merge into one batch axis): 375 words a plane at x = 15, 650 at x = 26.
+    // More than 2,048 tiles of under 640 words each are not a transpose. [B, 4, x, 25] of a dense [B, 4, 25, x] (B and
+    // 4 merge into one batch axis): 375 words a plane at x = 15, 650 at x = 26.
     const auto planes = [](uint64_t b, uint64_t x, uint32_t e) {
         return hostPlan({b, 4, x, 25}, {100 * x, 25 * x, 1, x}, e);
     };
@@ -349,14 +348,14 @@ TEST(StridedCopy, PlansFollowTheCanonicalLayout) {
     EXPECT_EQ(planes(513, 15, 1).outer_dims, (std::vector<uint64_t>{2052, 15, 25}));
     EXPECT_EQ(planes(513, 15, 8).family, DenseCopyFamily::RowCopy);    // words, whatever their width
     EXPECT_EQ(planes(513, 26, 1).family, DenseCopyFamily::Transpose);  // 650 words a tile
-    EXPECT_EQ(std::string(denseCopyRevision()), "1395");  // 1395: the planner's row-copy counts only
-    // 1389h: the grid is one CTA per unit of work, 0 for a plan with none.
+    EXPECT_EQ(std::string(denseCopyRevision()), "1395");  // the planner's row-copy counts only
+    // The grid is one CTA per unit of work, 0 for a plan with none.
     EXPECT_EQ(DenseCopyInternal::gridOf(planes(512, 15, 1)), 2048U);
     EXPECT_EQ(DenseCopyInternal::gridOf(planes(513, 15, 1)), 188U);
-    EXPECT_EQ(DenseCopyInternal::gridOf(hostPlan({70001, 31}, {41, 1}, 4)), 2120U);  // 1389p: 1024 words a step
-    // A row copy's words per thread (rowCopyStepItems, 1389p): one 4-byte word or two 2-byte words up to 768 KiB, from
-    // 16 MiB and on single words over a sector apart, else 16 bytes a thread; 16 single bytes, four words of 8 or 16
-    // bytes. 1395: the only counts (1389n-1394: a plan's row_items could set another).
+    EXPECT_EQ(DenseCopyInternal::gridOf(hostPlan({70001, 31}, {41, 1}, 4)), 2120U);  // 1024 words a step
+    // A row copy's words per thread (rowCopyStepItems): one 4-byte word or two 2-byte words up to 768 KiB, from 16 MiB
+    // and on single words over a sector apart, else 16 bytes a thread; 16 single bytes, four words of 8 or 16 bytes; no
+    // other count is compiled.
     const DenseCopyPlan rows33 = hostPlan({40001}, {33}, 4);
     EXPECT_EQ(DenseCopyInternal::rowCopyStepItems(rows33), 1U);
     EXPECT_EQ(DenseCopyInternal::workUnits(rows33), 157U);
@@ -374,7 +373,7 @@ TEST(StridedCopy, PlansFollowTheCanonicalLayout) {
     EXPECT_EQ(DenseCopyInternal::rowCopyShortItems(4), 1U);
     EXPECT_EQ(DenseCopyInternal::rowCopyShortItems(2), 2U);
     EXPECT_EQ(DenseCopyInternal::rowCopyShortItems(1), 16U);
-    // 1389p: the short step by destination size, word and stride.
+    // The short step by destination size, word and stride.
     EXPECT_EQ(DenseCopyInternal::rowCopyStepItems(hostPlan({70001, 31}, {41, 1}, 2)), 8U);    // 4.3 MB: long
     EXPECT_EQ(DenseCopyInternal::rowCopyStepItems(hostPlan({300001, 31}, {41, 1}, 2)), 2U);   // 18.6 MB: short
     EXPECT_EQ(DenseCopyInternal::rowCopyStepItems(hostPlan({196608}, {2}, 4)), 1U);            // 768 KiB: short
@@ -385,18 +384,18 @@ TEST(StridedCopy, PlansFollowTheCanonicalLayout) {
     EXPECT_EQ(DenseCopyInternal::rowCopyStepItems(hostPlan({1000001}, {8}, 4)), 4U);           // 32 bytes apart
     EXPECT_EQ(DenseCopyInternal::rowCopyStepItems(hostPlan({2000001}, {17}, 2)), 2U);          // 34 bytes apart
     EXPECT_EQ(DenseCopyInternal::rowCopyStepItems(hostPlan({2000001}, {16}, 2)), 8U);
-    EXPECT_EQ(DenseCopyInternal::transposeLoadItems(1), 16U);  // the transpose's loads in flight: as before
+    EXPECT_EQ(DenseCopyInternal::transposeLoadItems(1), 16U);  // the transpose's loads in flight
     EXPECT_EQ(DenseCopyInternal::transposeLoadItems(2), 8U);
     EXPECT_EQ(DenseCopyInternal::transposeLoadItems(4), 4U);
     EXPECT_EQ(DenseCopyInternal::transposeLoadItems(16), 4U);
     EXPECT_EQ(DenseCopyInternal::gridOf(hostPlan({1000, 77}, {1, 1000}, 4)), 0U);  // the matrix kernel
     EXPECT_EQ(DenseCopyInternal::gridOf(hostPlan({1000}, {1}, 4)), 0U);            // one memcpy
-    // 1389g: the plan's name marks the tiles along v (1389i: the planner's when x is 8 v or more).
+    // The plan's name marks the tiles along v (the planner's when x is 8 v or more).
     DenseCopyPlan ordered = planes(512, 15, 1);
     EXPECT_FALSE(ordered.tile_v_first);
     ordered.tile_v_first = true;
     EXPECT_EQ(denseCopyPlanName(ordered), "transpose_p1_w1_t15x25_b1_vfirst");
-    // 1389b: the packed gather is single words of 1, 2 or 4 bytes over two or more outer axes into a 16-byte aligned
+    // The packed gather is single words of 1, 2 or 4 bytes over two or more outer axes into a 16-byte aligned
     // destination; 8-byte words, one outer axis and other destinations are row copies (2^31 words or more too:
     // IndicesPast2To31Words).
     const DenseCopyPlan packed = planes(513, 15, 1);
@@ -438,16 +437,16 @@ TEST(StridedCopy, CopiesEveryFamilyBitForBit) {
     const std::vector<Layout> layouts = {
         {{257, 129}, {1, 257}},                     // F rotation, partial tiles on both sides
         {{33, 9}, {1, 33}},                         // just above the smallest plane (256 vectors)
-        {{10, 3000}, {1, 10}},                      // 1389: a skinny x side, partial v tiles
-        {{3000, 9}, {1, 3000}},                     // 1389: a skinny v side, partial x tiles
-        {{3, 2, 4, 30, 20}, {2400, 7200, 600, 1, 30}},  // 1389: three batch axes
-        {{520, 4, 15, 25}, {1500, 375, 1, 15}},     // 1389a: 2,080 planes of 375 words: a packed gather (1389b)
-        {{5, 4, 6, 3, 7}, {504, 3, 12, 1, 72}},     // 1389b: five outer axes, carries past both stepped axes
-        {{7, 3, 5}, {1, 35, 7}},                    // 1389b: 105 words: a tail after the last whole pack
-        {{3, 2}, {1, 3}},                           // 1389b: 6 words: at 1 and 2 bytes only the tail
-        {{130, 65, 3}, {3, 390, 1}},                // G, 3-element rows (1389d: tiles of 19 x 19 at 4 bytes)
-        {{65, 31, 7}, {7, 455, 1}},                 // G, 7-element rows (1389d: 13 x 13, partial v tiles)
-        {{10, 300, 7}, {7, 70, 1}},                 // 1389d: G, a skinny x side of 7-element rows (10 x 16)
+        {{10, 3000}, {1, 10}},                      // a skinny x side, partial v tiles
+        {{3000, 9}, {1, 3000}},                     // a skinny v side, partial x tiles
+        {{3, 2, 4, 30, 20}, {2400, 7200, 600, 1, 30}},  // three batch axes
+        {{520, 4, 15, 25}, {1500, 375, 1, 15}},     // 2,080 planes of 375 words: a packed gather
+        {{5, 4, 6, 3, 7}, {504, 3, 12, 1, 72}},     // five outer axes, carries past both stepped axes
+        {{7, 3, 5}, {1, 35, 7}},                    // 105 words: a tail after the last whole pack
+        {{3, 2}, {1, 3}},                           // 6 words: at 1 and 2 bytes only the tail
+        {{130, 65, 3}, {3, 390, 1}},                // G, 3-element rows (tiles of 19 x 19 at 4 bytes)
+        {{65, 31, 7}, {7, 455, 1}},                 // G, 7-element rows (13 x 13, partial v tiles)
+        {{10, 300, 7}, {7, 70, 1}},                 // G, a skinny x side of 7-element rows (10 x 16)
         {{40, 30, 9}, {9, 360, 1}},                 // G, rows past a sector for 4-byte elements
         {{3, 129, 33, 4}, {33 * 129 * 4, 4, 129 * 4, 1}},  // head permute, one batch axis
         {{2, 3, 70, 20, 2}, {2800, 5600, 2, 140, 1}},  // two batch axes (of a dense [3, 2, 20, 70, 2])
@@ -465,9 +464,9 @@ TEST(StridedCopy, CopiesEveryFamilyBitForBit) {
             for (uint64_t offset : {0ULL, 1ULL, 3ULL}) expectCopy(layout.dims, layout.strides, dtype, offset, stream);
 }
 
-// 1389e: plain rotations of a dense matrix run the matrix transpose kernel: 4-byte words at any size (partial tiles on
-// both sides; 4-byte rows of two FP16 elements), 2-byte words from 24 MiB, on bases aligned to its packed 4-byte
-// words and not. 1389k: 1-byte words are Transposes (the packed byte tile), here the rotation it took through 1389j.
+// Plain rotations of a dense matrix run the matrix transpose kernel: 4-byte words at any size (partial tiles on both
+// sides; 4-byte rows of two FP16 elements), 2-byte words from 24 MiB, on bases aligned to its packed 4-byte words and
+// not. 1-byte words are Transposes (the packed byte tile).
 TEST(StridedCopy, PlainRotationsRunTheMatrixKernel) {
     Stream stream(kGpu);
     for (uint64_t offset : {0ULL, 4ULL}) {
@@ -482,7 +481,7 @@ TEST(StridedCopy, PlainRotationsRunTheMatrixKernel) {
         EXPECT_EQ(denseCopyPlanName(expectCopy({4099, 3100}, {1, 4099}, DataType::FP16, offset, stream)),
                   "matrix_transpose_w2");
     }
-    // 1389s: from 48 MiB with x of 7/8 v or more, the wide tile along v (partial tiles on both sides).
+    // From 48 MiB with x of 7/8 v or more, the wide tile along v (partial tiles on both sides).
     for (uint64_t offset : {0ULL, 2ULL})
         EXPECT_EQ(denseCopyPlanName(expectCopy({5003, 5101}, {1, 5003}, DataType::FP16, offset, stream)),
                   "transpose_p1_w2_t256x16_b0_vfirst");
@@ -490,8 +489,8 @@ TEST(StridedCopy, PlainRotationsRunTheMatrixKernel) {
               "transpose_p1_w4_t128x8_b0_vfirst");
 }
 
-// 1389f: rows of two to four 16-byte words in a copy of 4 MiB or more go through the transpose tile: partial tiles on
-// both sides, a batch axis, a base 16 bytes on; a base that is not 16-byte aligned keeps the row copy.
+// Rows of two to four 16-byte words in a copy of 4 MiB or more go through the transpose tile: partial tiles on both
+// sides, a batch axis, a base 16 bytes on; a base that is not 16-byte aligned keeps the row copy.
 TEST(StridedCopy, WideRowsTransposeFromFourMiB) {
     Stream stream(kGpu);
     for (uint64_t offset : {0ULL, 4ULL})
@@ -509,8 +508,8 @@ TEST(StridedCopy, WideRowsTransposeFromFourMiB) {
               "transpose_p4_w16_t22x22_b0");
 }
 
-// 1389r: unpacked single bytes from 16 MiB on the tall tile, with partial tiles along x (37 = 5 x 7 + 2, 3000 = 272
-// x 11 + 8) and along v, bit for bit, at an aligned and an odd byte offset.
+// Unpacked single bytes from 16 MiB on the tall tile, with partial tiles along x (37 = 5 x 7 + 2, 3000 = 272 x 11 + 8)
+// and along v, bit for bit, at an aligned and an odd byte offset.
 TEST(StridedCopy, UnpackedByteVectorsTakeTallTiles) {
     Stream stream(kGpu);
     for (uint64_t offset : {0ULL, 1ULL}) {
@@ -521,9 +520,9 @@ TEST(StridedCopy, UnpackedByteVectorsTakeTallTiles) {
     }
 }
 
-// 1389g: the transpose takes its tiles in either order, and a plan whose tile was changed by hand (the audit's probe
-// does both), with that tile's grid, copies the same bytes: tall, wide and small tiles with partial tiles on both
-// sides, rows of three words, a batch axis, and a matrix transpose's plan run as a tile transpose.
+// The transpose takes its tiles in either order, and a plan whose tile was changed by hand (the audit's probe does
+// both), with that tile's grid, copies the same bytes: tall, wide and small tiles with partial tiles on both sides,
+// rows of three words, a batch axis, and a matrix transpose's plan run as a tile transpose.
 TEST(StridedCopy, EitherTileOrderAndHandTilesCopyTheSame) {
     Stream stream(kGpu);
     struct Layout {
@@ -567,9 +566,8 @@ TEST(StridedCopy, EitherTileOrderAndHandTilesCopyTheSame) {
     }
 }
 
-// 1395: the row copy at each count the planner takes (each word width, the short and the long step of 2- and 4-byte
-// words), on the plan's grid and on 3 CTAs, bit for bit. Through 1394 this ran every count of 1, 2, 4, 8 and 16 the
-// audit's probe measured (RowCopiesTakeAnyWordsPerThread); only the planner's are compiled now.
+// The row copy at each count the planner takes (each word width, the short and the long step of 2- and 4-byte words),
+// on the plan's grid and on 3 CTAs, bit for bit.
 TEST(StridedCopy, RowCopiesRunThePlannersWordsPerThread) {
     Stream stream(kGpu);
     struct Layout {
@@ -609,13 +607,13 @@ TEST(StridedCopy, RowCopiesRunThePlannersWordsPerThread) {
     }
 }
 
-// 1389h: a copy launches one CTA per unit of work. A row copy, a packed gather and a transpose of more units than
-// CTAs are resident at once (through 1389g the grid was the resident CTAs: 510 to 1,020 on 170 SMs), bit for bit.
+// A copy launches one CTA per unit of work. A row copy, a packed gather and a transpose of more units than CTAs are
+// resident at once, bit for bit.
 TEST(StridedCopy, LargeCopiesLaunchOneCtaPerUnit) {
     Stream stream(kGpu);
     const DenseCopyPlan rows = expectCopy({70001, 31}, {41, 1}, DataType::FP32, 0, stream);
     EXPECT_EQ(rows.family, DenseCopyFamily::RowCopy);
-    EXPECT_EQ(rows.grid, 2120U);  // 1389p: four words a thread at 8.7 MB (1389o: one, 8477 CTAs)
+    EXPECT_EQ(rows.grid, 2120U);  // four words a thread at 8.7 MB
     const DenseCopyPlan packed = expectCopy({60, 300, 400}, {2, 120, 36000}, DataType::FP8_E4M3, 0, stream);
     EXPECT_EQ(packed.family, DenseCopyFamily::PackedGather);
     EXPECT_EQ(packed.grid, 1758U);
@@ -625,7 +623,7 @@ TEST(StridedCopy, LargeCopiesLaunchOneCtaPerUnit) {
     EXPECT_EQ(tiles.grid, 2068U);
 }
 
-// 1389i: rotations of long source rows take the tiles along v, the 16 MiB ones off the matrix kernel, bit for bit.
+// Rotations of long source rows take the tiles along v, the 16 MiB ones off the matrix kernel, bit for bit.
 TEST(StridedCopy, LongSourceRowsTakeTilesAlongV) {
     Stream stream(kGpu);
     const DenseCopyPlan rotation = expectCopy({16384, 256}, {1, 16384}, DataType::FP32, 0, stream);
@@ -641,8 +639,8 @@ TEST(StridedCopy, LongSourceRowsTakeTilesAlongV) {
     EXPECT_EQ(denseCopyPlanName(groups), "transpose_p3_w4_t19x19_b0_vfirst");
 }
 
-// 1389j: transposes of single bytes go four bytes at a time from the aligned words that hold them: every base offset
-// and odd strides, partial tiles on both sides, a skinny x, a batch axis, tiles along v, 128 x 128 tiles, bit for bit.
+// Transposes of single bytes go four bytes at a time from the aligned words that hold them: every base offset and odd
+// strides, partial tiles on both sides, a skinny x, a batch axis, tiles along v, 128 x 128 tiles, bit for bit.
 TEST(StridedCopy, SingleByteTransposesPackFourBytes) {
     Stream stream(kGpu);
     struct Layout {
@@ -656,11 +654,11 @@ TEST(StridedCopy, SingleByteTransposesPackFourBytes) {
         {{51, 7, 9, 180}, {1, 51 * 9 * 180, 51, 51 * 9}},  // a batch axis
         {{129, 1000}, {1, 131}},                           // a source with gaps
         {{50001, 301}, {1, 50001}},                        // x of 8 v or more: tiles along v
-        {{8193, 2051}, {1, 8193}},                         // 128 x 128 tiles along v (1389k), 16 MiB
-        {{51, 100000}, {1, 51}},                           // 1389l: a short x, the tile not grown (51 x 99)
-        {{36, 300000}, {1, 36}},                           // 1389m: 288 blocks, grown (36 x 455)
-        {{400001, 9}, {1, 400001}},                        // 1389t: x grown to 512 bytes at most (782 tiles)
-        {{7, 60001, 9}, {540009, 1, 60001}},               // 1389t: the same under 7 batch elements (512 x 9)
+        {{8193, 2051}, {1, 8193}},                         // 128 x 128 tiles along v, 16 MiB
+        {{51, 100000}, {1, 51}},                           // a short x, the tile not grown (51 x 99)
+        {{36, 300000}, {1, 36}},                           // 288 blocks, grown (36 x 455)
+        {{400001, 9}, {1, 400001}},                        // x grown to 512 bytes at most (782 tiles)
+        {{7, 60001, 9}, {540009, 1, 60001}},               // the same under 7 batch elements (512 x 9)
     };
     for (const Layout& layout : layouts) {
         for (uint64_t offset : {0ULL, 1ULL, 2ULL, 3ULL}) {
@@ -671,10 +669,10 @@ TEST(StridedCopy, SingleByteTransposesPackFourBytes) {
         }
     }
     EXPECT_EQ(denseCopyPlanName(expectCopy({8193, 2051}, {1, 8193}, DataType::FP8_E4M3, 0, stream)),
-              "transpose_p1_w1_t128x128_b0_vfirst");  // 1389k: x of half v or more
+              "transpose_p1_w1_t128x128_b0_vfirst");  // x of half v or more
     EXPECT_TRUE(expectCopy({50001, 301}, {1, 50001}, DataType::FP8_E4M3, 1, stream).tile_v_first);
     EXPECT_EQ(denseCopyPlanName(expectCopy({400001, 9}, {1, 400001}, DataType::FP8_E4M3, 3, stream)),
-              "transpose_p1_w1_t512x9_b0");  // 1389t: 765 x 9 through 1389s
+              "transpose_p1_w1_t512x9_b0");  // x grown to 512 bytes
 }
 
 TEST(StridedCopy, CopiesSeededRandomLayouts) {
@@ -713,7 +711,7 @@ TEST(StridedCopy, CopiesSeededRandomLayouts) {
 
 TEST(StridedCopy, StampedPlanRunsOnReboundSpans) {
     Stream stream(kGpu);
-    const std::vector<uint64_t> dims = {130, 31, 2}, strides = {2, 260, 1};  // 31: a tile transpose (1389e)
+    const std::vector<uint64_t> dims = {130, 31, 2}, strides = {2, 260, 1};  // 31: a tile transpose
     std::vector<uint8_t> host;
     const uint64_t span = reach(dims, strides);
     const Tensor storage = filledTensor(DataType::FP16, 2 * span + 8, 7, host, stream);
@@ -740,8 +738,8 @@ TEST(StridedCopy, StampedPlanRunsOnReboundSpans) {
     Tensor wrong_shape(kGpu, TensorDescriptor(DataType::FP16, {65, 130, 2}));
     EXPECT_THROW(copyToDenseAsync(a, wrong_shape, stream), std::invalid_argument);
 
-    // 1389b: a packed gather stores 16-byte words, so its plan is refused on a dense destination that is not 16-byte
-    // aligned; that destination's own plan is the row copy.
+    // A packed gather stores 16-byte words, so its plan is refused on a dense destination that is not 16-byte aligned;
+    // that destination's own plan is the row copy.
     const std::vector<uint64_t> pdims = {7, 3, 5}, pstrides = {1, 35, 7};
     const StridedSpan permuted(storage, 0, pdims, pstrides);
     Tensor aligned(kGpu, TensorDescriptor(DataType::FP16, pdims));

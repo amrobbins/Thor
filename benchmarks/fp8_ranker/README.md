@@ -1,10 +1,9 @@
-# FP8 RK ranker training (1139+)
+# FP8 RK ranker training
 
 To retrain both rankers for a GPU, end to end (sweeps, training, install, verification), follow
 `benchmarks/FP8_RANKER_RETRAINING.md`.
 
-This trains one ranker for retained FP8 RK VALUE and ARG candidates. It replaces `experiment_fp8_geometry_ranker.py`
-and the frozen Thor1011 model.
+This trains one ranker for FP8 RK VALUE and ARG candidates.
 
 1. **Dataset.** Run `thor_fp8_retained_cold_l2_sweep --training` (see `FP8_RETAINED_COLD_L2_SWEEP.md`). Every legal
    candidate in every cell is timed end to end, and the C++ ranker features are written beside its time.
@@ -16,7 +15,7 @@ and the frozen Thor1011 model.
    Regular shortlist.
 4. **Cut over.** Not done by this script. The generated `Fp8GeometryRankerModel.h` (26 features: the 25
    `rankerFeatures` plus the aggregate kind) and `Fp8GeometryRankerParityFixtures.h` replace the frozen model in
-   `Utilities/TensorOperations/Cub/Fp8RK/`. `rankerFeatures` gains the kind, and the depths become constants.
+   `Utilities/TensorOperations/Reduction/Rankers/`. `rankerFeatures` gains the kind, and the depths become constants.
 
 **Labels.** Each candidate's regret is its time divided by the cell oracle, graded 4/3/2/1/0 at 1%, 3%, 7% and 15%.
 Candidates within 1% of the oracle count as equally good. The objective is XGBoost `rank:ndcg`, grouped by cell.

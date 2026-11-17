@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Compare retained FP8 GPU sweeps, emphasizing high-bandwidth regressions.
+"""Compare two FP8 RK cold-L2 sweeps, emphasizing high-bandwidth regressions.
 
-The full-plan time includes FP32 continuations. Historical same-FP8 and new
-FP32 output contracts must never be compared as a clean kernel A/B.
+The full-plan time includes FP32 continuations. Sweeps of the same-FP8 and the
+FP32 output modes must never be compared as a clean kernel A/B.
 """
 import argparse
 import csv

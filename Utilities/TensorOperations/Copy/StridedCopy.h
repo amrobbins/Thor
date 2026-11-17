@@ -7,12 +7,12 @@
 
 namespace ThorImplementation {
 
-// Thor's permutation / transpose / materialization operation (1388): copy a span's elements, in row-major order of its
+// Thor's permutation / transpose / materialization operation: copy a span's elements, in row-major order of its
 // dimensions, into a dense tensor of the same dtype and shape. The words are copied as they are: no conversion.
 // Source and destination must be on the same GPU, and destination must be dense. DenseCopyPlan.h has the families: one
-// memcpy for a dense span, the matrix transpose kernel for a plain rotation of a dense matrix (1389e), a shared-tile
-// transpose when rows narrower than a sector change order otherwise (1389f: rows of up to two sectors too, from
-// 4 MiB), a packed gather for other permutations of single words, a row copy for the rest.
+// memcpy for a dense span, the matrix transpose kernel for a plain rotation of a dense matrix, a shared-tile transpose
+// when rows narrower than a sector (or, from 4 MiB, of up to two sectors) change order otherwise, a packed gather for
+// other permutations of single words, a row copy for the rest.
 
 /** The plan for copying `source` into the dense `destination` (a Tensor converts), for this pair's layouts, addresses
  *  and GPU. Throws std::invalid_argument unless they have one descriptor and GPU and the destination is dense. */

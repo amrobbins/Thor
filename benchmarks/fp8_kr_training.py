@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Summarise `thor_fp8_kr_training_sweep` (1151-1152). Standard library only. Bandwidth in TB/s (moved = input +
-output). 1152 sweeps time every launch on cold input and output ring views (the RK sweep's method), so moved TB/s is
-bounded by the copy rate in the header; 1151 sweeps shared one output, which L2 could keep at short rows.
+"""Summarise `thor_fp8_kr_training_sweep`. Standard library only. Bandwidth in TB/s (moved = input + output). The
+sweep times every launch on cold input and output ring views (the RK sweep's method), so moved TB/s is bounded by the
+copy rate in the header.
 
 For every cell (one [K, R] site with one semantics) the sweep times the production candidate list (in_list=1, by
 list_position) and the legal shapes around it (in_list=0). Per cell:
-  oracle    the fastest timed shape of any kind: what the retained KR kernels can do at this site;
+  oracle    the fastest timed shape of any kind: what the KR kernels can do at this site;
   list      the fastest listed shape: what an exhaustive production autotune can find;
   list@N    the fastest of list positions 1..N: an idealised tuning depth N (Quick 6, Regular 12, Ultra 24; the real
             autotuner also trims by rounds, so this is the depth's ceiling).
@@ -15,7 +15,7 @@ slower than the oracle has a list gap (the generator misses a shape that exists)
 Reports:
   0. grid cells: oracle moved TB/s by row length R (rows) and working set (columns), VALUE and ARG;
   1. coverage: cells by kind and input size, oracle and list@12 TB/s (geomean, p10, min), share at the target, and
-     (1153) the oracle as a share of a copy moving the same bytes ("of copy": 100% = as fast as a memcpy at this
+     the oracle as a share of a copy moving the same bytes ("of copy": 100% = as fast as a memcpy at this
      size; read-heavy cells can pass 100%, since reads alone outrun a copy's mixed read / write traffic);
   2. large cells (>= --large-mib) by row-length bucket, VALUE and ARG: oracle TB/s, list@12, the winning families;
   3. list regret by depth N (time over the oracle and over the full list; all, large, held-out);
@@ -23,14 +23,14 @@ Reports:
   5. kernel gaps: the large cells furthest below the target, by time lost against the target;
   6. by operation and dtype (large cells): oracle TB/s;
   7. measurement: sample spread by size, close calls (top two shapes within 2%), copy rate at start and end, and
-     (1153) the copy curve: what a device-to-device copy achieves by size, launch and ramp included;
-  8. production (1152 sweeps): the production stamp's pick against the oracle and the full list;
+     the copy curve: what a device-to-device copy achieves by size, launch and ramp included;
+  8. production: the production stamp's pick against the oracle and the full list;
   9. with --compare=other.csv[.gz] (the same seed and options): run-to-run agreement of every (cell, shape) median,
      of each cell's oracle time and shape, and of the production pick;
- 10. (1155) fixed cost and rate: per kind, row class and winning family, a least-squares fit of the oracle time
+ 10. fixed cost and rate: per kind, row class and winning family, a least-squares fit of the oracle time
      t = a + moved / B over large cells (a: the per-operation cost in us; B: the streaming rate), against a memcpy fit
      of the copy curve; at 16-64 MiB, a decides whether 1.5 TB/s is reachable;
- 11. (1155, --split-stages sweeps) the Split finishing kernel's cost: full - partials time per Split shape, and the
+ 11. (--split-stages sweeps) the Split finishing kernel's cost: full - partials time per Split shape, and the
      oracle TB/s of Split-won cells if it were free.
 
 Usage: fp8_kr_training.py kr-training.csv[.gz] [--target=1.5] [--large-mib=16] [--miss=0.03] [--worst=25]
@@ -113,9 +113,9 @@ class Cell:
         self.reference = float(first["reference_us"])
         self.target_mib = int(first.get("target_mib") or 0)
         self.production = first.get("production") or None
-        self.copy_us = float(first.get("copy_us") or 0)  # 1153: a copy moving the same bytes
+        self.copy_us = float(first.get("copy_us") or 0)  # a copy moving the same bytes
         self.stamp_ms = first.get("stamp_ms") or ""
-        # 1155: variant=partials rows (--split-stages) time a Split shape's partial kernel alone; not candidates.
+        # variant=partials rows (--split-stages) time a Split shape's partial kernel alone; not candidates.
         self.partials = {row["shape"]: float(row["median_us"]) for row in rows
                          if row.get("variant") == "partials" and row["abandoned"] != "1"}
         rows = [row for row in rows if row.get("variant", "full") != "partials"]
@@ -534,7 +534,7 @@ def main():
         odd = sorted({c.production for c in with_production if not c.production_shape()})
         if odd:
             print(f"   production passes not among the timed shapes: {', '.join(odd[:10])}\n")
-        # 1161: what a stamp costs (wall time of the production stamp, contest included), by input size.
+        # What a stamp costs (wall time of the production stamp, contest included), by input size.
         out = []
         for name, low, high in (("<1M", 0, 2**20), ("1-16M", 2**20, 16 * 2**20), ("16-128M", 16 * 2**20, 128 * 2**20),
                                 (">=128M", 128 * 2**20, float("inf"))):

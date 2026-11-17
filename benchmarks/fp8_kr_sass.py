@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""SASS capture of the retained FP8 R / KR kernels (1149). Read-only; standard library + CUDA toolkit binaries.
+"""SASS capture of the R / KR kernels. Read-only; standard library + CUDA toolkit binaries.
 
-Extracts every device ELF from the built CubReductionNarrowFlatRCooperative.cu.o, and for each fp8KR* kernel writes
+Extracts every device ELF from the built KR.cu.o, and for each KR kernel writes
   <out>/<arch>/<kernel>.sass   the full SASS listing (cuobjdump -sass), and
   <out>/kr_sass_summary.csv    resources (registers, stack, local / spill, shared) and an instruction mix:
                                total instructions, global loads by width, global stores, shuffles, conversions,
@@ -9,11 +9,12 @@ Extracts every device ELF from the built CubReductionNarrowFlatRCooperative.cu.o
                                memory traffic.
 and prints the summary. Zip <out> and attach it. Requires cuobjdump and c++filt on PATH.
 
-Usage: fp8_kr_sass.py --build BUILD_DIR --out OUT_DIR [--filter fp8KR] [--object NAME.cu.o]
+Usage: fp8_kr_sass.py --build BUILD_DIR --out OUT_DIR [--filter KR] [--object NAME.cu.o]
 
-1189: --object picks another translation unit's object (default the NarrowFlat one), e.g.
-CubReductionKParallelShardedTiled.cu.o for the AlignedK kernels; FP32 kernel names (fp32...Kernel) are shortened like
-FP8 ones.
+--object picks another translation unit's object (default the KR one), e.g. RKAlignedK.cu.o for the AlignedK
+kernels; FP32 kernel names (fp32...Kernel) are shortened like FP8 ones. The default filter, KR, keeps every kernel of
+KR.cu.o (their family names are krValue*, krArg*, krCarriedArg*; FP8's own fp8KRArgVectorKernel, FP32's own
+fp32KRArg*).
 """
 
 import argparse
@@ -27,7 +28,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-OBJECT_NAME = "CubReductionNarrowFlatRCooperative.cu.o"
+OBJECT_NAME = "KR.cu.o"
 RESOURCE = re.compile(r"Function\s+(\S+):\s*$")
 RESOURCE_VALUES = re.compile(r"(REG|STACK|SHARED|LOCAL):(\d+)")
 SASS_FUNCTION = re.compile(r"^\s*Function\s*:\s*(\S+)\s*$")
@@ -68,11 +69,11 @@ def demangle(names):
 
 
 def short_name(demangled):
-    # "void ns::(anonymous namespace)::fp8KRValueGroupKernel<__nv_fp8_e4m3, 0, 0>(args)" -> "fp8KRValueGroupKernel<e4m3,0,0>"
-    # 1185-1186: any retained kernel (fp8KR..., fp8OneWindow..., narrowFp8Packed...), template arguments kept whole
-    # (balanced <>), namespaces dropped, so --filter can select RK kernels and names stay distinct.
-    # 1191: any kernel name (\w+Kernel before its template arguments or parameters), e.g. the rotated
-    # awkwardAlignmentRotatedShardedFirstStageKernel, so no listing is named after the whole signature.
+    # "void ns::(anonymous namespace)::krValueGroupKernel<__nv_fp8_e4m3, 0, 0>(args)" -> "krValueGroupKernel<e4m3,0,0>"
+    # Any kernel (krValue..., oneWindow..., deepRSmallK...), template arguments kept whole (balanced <>), namespaces
+    # dropped, so --filter can select RK kernels and names stay distinct; any kernel name (\w+Kernel before its
+    # template arguments or parameters), e.g. the rotated runtimeKRotatedValueKernel, so no listing is named after the
+    # whole signature.
     match = re.search(r"\w*[Ff]p(?:8|32)\w*Kernel", demangled) or re.search(r"\w+Kernel(?=[<(])", demangled)
     if not match:
         return demangled.replace("__nv_fp8_", "").replace(" ", "")
@@ -137,7 +138,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--build", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--filter", default="fp8KR", help="substring of the demangled kernel names to keep")
+    parser.add_argument("--filter", default="KR", help="substring of the demangled kernel names to keep")
     parser.add_argument("--object", default=OBJECT_NAME, help="object file name to search for under --build")
     args = parser.parse_args()
     for program in ("cuobjdump", "c++filt"):
@@ -167,7 +168,7 @@ def main():
             for mangled, lines in kept.items():
                 name = short_name(names[mangled])
                 safe = re.sub(r"[^A-Za-z0-9_,.-]+", "_", name)
-                if len(safe) > 200:  # 1191: stay under the 255-byte file name limit
+                if len(safe) > 200:  # stay under the 255-byte file name limit
                     safe = safe[:180] + "_" + hashlib.sha1(safe.encode()).hexdigest()[:12]
                 (arch_dir / f"{safe}.sass").write_text(f"// {names[mangled]}\n// {mangled}\n" + "\n".join(lines) + "\n")
                 row = {"arch": arch, "kernel": name}

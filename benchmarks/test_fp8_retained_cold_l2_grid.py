@@ -1,4 +1,4 @@
-"""Stable quick gate for the permanent retained FP8 RK performance census."""
+"""Stable quick gate for the FP8 RK cold-L2 census's grid."""
 import pathlib
 import re
 import unittest

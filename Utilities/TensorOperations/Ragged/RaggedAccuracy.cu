@@ -2,7 +2,7 @@
 
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/TensorOperations/Cub/CubDevicePrimitiveSupport.h"
-#include "Utilities/TensorOperations/Cub/CubReductionOperation.cuh"
+#include "Utilities/TensorOperations/Reduction/Kernels/ReductionOperation.cuh"
 
 #include <cub/block/block_reduce.cuh>
 #include <cuda_fp16.h>
@@ -16,7 +16,7 @@
 namespace ThorImplementation {
 namespace {
 using namespace CubDevicePrimitiveSupport;
-using CubReductionInternal::ToFp32;
+using ReductionInternal::ToFp32;
 
 constexpr uint32_t kBlockSize = 256;
 constexpr uint32_t kTargetItemsPerThread = 8;

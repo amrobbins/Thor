@@ -2,12 +2,10 @@
 
 #include "DeepLearning/Implementation/Tensor/DataType.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
-#include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 #include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 #include "Utilities/Common/Stream.h"
 
-#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -30,13 +28,6 @@ enum RowPartitionValidationErrorBits : uint32_t {
     ROW_PARTITION_ROW_LENGTH_EXCEEDS_INT32 = 1U << 4U,
 };
 
-struct RowPartitionLengthsToOffsetsPlan {
-    TensorPlacement placement;
-    DataType dtype = kDefaultRowPartitionOffsetDataType;
-    uint64_t batch_size = 0;
-    size_t temp_storage_bytes = 0;
-};
-
 [[nodiscard]] bool isRowPartitionOffsetDTypeSupported(DataType dtype);
 
 // Upload an already-authoritative host row partition into an explicit GPU offsets
@@ -48,27 +39,6 @@ void rowPartitionUploadHostOffsets(const std::vector<uint64_t>& host_offsets,
                                    Tensor& offsets,
                                    uint64_t batch_size,
                                    Stream& stream);
-
-[[nodiscard]] RowPartitionLengthsToOffsetsPlan prepareRowPartitionLengthsToOffsets(const Tensor& lengths,
-                                                                                  const Tensor& offsets,
-                                                                                  uint64_t batch_size);
-
-[[nodiscard]] size_t rowPartitionLengthsToOffsetsTempBytes(const Tensor& lengths,
-                                                           const Tensor& offsets,
-                                                           uint64_t batch_size);
-
-void rowPartitionLengthsToOffsets(const RowPartitionLengthsToOffsetsPlan& plan,
-                                  const Tensor& temp_storage,
-                                  const Tensor& lengths,
-                                  Tensor& offsets,
-                                  Stream& stream);
-
-void rowPartitionLengthsToOffsets(const Tensor& temp_storage,
-                                  size_t temp_storage_bytes,
-                                  const Tensor& lengths,
-                                  Tensor& offsets,
-                                  uint64_t batch_size,
-                                  Stream& stream);
 
 void rowPartitionOffsetsToLengths(const Tensor& offsets, Tensor& lengths, uint64_t batch_size, Stream& stream);
 

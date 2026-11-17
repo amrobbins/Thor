@@ -1,26 +1,27 @@
-// FP8 R / KR production audit (1145-1148).
+// FP8 R / KR production audit.
 //
-// 1152: superseded for timing by thor_fp8_kr_training_sweep, which times the RK sweep's way (ring inputs and outputs,
+// For timing, thor_fp8_kr_training_sweep supersedes it: that sweep times the RK sweep's way (ring inputs and outputs,
 // asynchronous batches) and records the production pick. This audit's flush-per-sample timing with a shared output
 // disagreed with itself by up to 28% (the same shape timed as the production stamp and as a candidate in one run).
 //
-// 1148: CUDA events on the 1147 GPU resolve only about 2 us (every time below 20 us was a multiple of 2.048 us). A sample
-// now flushes L2, then times `batch` back-to-back launches, each on its own never-read input slot of the arena (so every
-// launch is still L2-cold), and divides by the batch. The batch targets about 200 us per sample at line rate (up to 32;
-// 1150: 40 us left 64 MiB cells on a 5% grid).
+// CUDA events here resolve only about 2 us (every time below 20 us was a multiple of 2.048 us). A sample flushes L2,
+// then times `batch` back-to-back launches, each on its own never-read input slot of the arena (so every launch is
+// still L2-cold), and divides by the batch. The batch targets about 200 us per sample at line rate (up to 32; 40 us
+// left 64 MiB cells on a 5% grid).
 //
-// Times what a user gets from CubReduction / CubArgReduction stamps at FP8 R sites ([N], axis 0) and KR sites
-// ([K, R], axis 1), against line rate. Every timed launch starts with a cold L2: before each sample a separate
-// production SUM reduction reads a flush buffer of several L2 sizes. A read-only flush leaves no dirty lines, so the
-// timed launch pays no write-back for the flush. The reference is max(launch floor, (input + output bytes) / B), where
-// B is the device-to-device copy bandwidth (read + write bytes per second) measured once at startup (1146: the output
-// is counted too; at R = 2 a VALUE result is twice its input). stamp_ms is the stamp's wall time, which includes the
-// retained R / KR autotuning on a selection-cache miss. No experimental kernels.
+// Times what a user gets from Reducer / ArgReducer stamps at FP8 R sites ([N], axis 0) and KR sites ([K, R], axis 1),
+// against line rate. Every timed launch starts with a cold L2: before each sample a separate production SUM reduction
+// reads a flush buffer of several L2 sizes. A read-only flush leaves no dirty lines, so the timed launch pays no
+// write-back for the flush. The reference is max(launch floor, (input + output bytes) / B), where B is the
+// device-to-device copy bandwidth (read + write bytes per second) measured once at startup (the output is counted too:
+// at R = 2 a VALUE result is twice its input). stamp_ms is the stamp's wall time, which includes the R / KR autotuning
+// on a selection-cache miss. No experimental kernels.
 #include "test/Utilities/TensorOperations/OutputSpan.h"
-#include "Utilities/TensorOperations/Cub/CubReduction.h"
-#include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
-#include "Utilities/TensorOperations/Cub/CubReductionStageSemantics.h"
-#include "Utilities/TensorOperations/Cub/Fp8KR/Fp8KRSegments.h"
+#include "Utilities/TensorOperations/Reduction/ArgReducer.h"
+#include "Utilities/TensorOperations/Reduction/Reducer.h"
+#include "Utilities/TensorOperations/Reduction/Kernels/KernelLaunchers.h"
+#include "Utilities/TensorOperations/Reduction/Kernels/StageSemantics.h"
+#include "Utilities/TensorOperations/Reduction/KR/KRSegments.h"
 #include "Utilities/Common/ScopedGpu.h"
 
 #include <cuda_runtime_api.h>
@@ -60,7 +61,7 @@ struct Settings {
     int samples = 11;
     double floor_us = 4.0;
     uint64_t flush_l2_multiple = 4;
-    bool candidates = false;  // 1147: also time every retained R / KR candidate shape
+    bool candidates = false;  // also time every R / KR candidate shape
 };
 
 std::vector<std::string> splitList(std::string_view text) {
@@ -120,13 +121,13 @@ Settings parse(int argc, char** argv) {
 
 const char* dtypeName(T::DataType dtype) { return dtype == T::DataType::FP8_E5M2 ? "fp8_e5m2" : "fp8_e4m3"; }
 
-const char* pathName(T::CubReductionPath path) {
+const char* pathName(T::ReductionLayout path) {
     switch (path) {
-        case T::CubReductionPath::DeviceTransformReduce: return "cub_device_reduce";
-        case T::CubReductionPath::ContiguousFixedSegment: return "contiguous_fixed_segment";
-        case T::CubReductionPath::TiledFixedSegment: return "tiled_fixed_segment";
-        case T::CubReductionPath::OffsetSegmented: return "offset_segmented";
-        case T::CubReductionPath::ComposedDense: return "composed_dense";
+        case T::ReductionLayout::SingleOutput: return "cub_device_reduce";
+        case T::ReductionLayout::TrailingBlock: return "contiguous_fixed_segment";
+        case T::ReductionLayout::MiddleBlock: return "tiled_fixed_segment";
+        case T::ReductionLayout::Segmented: return "offset_segmented";
+        case T::ReductionLayout::DisjointRuns: return "composed_dense";
     }
     return "unknown";
 }
@@ -197,7 +198,7 @@ int main(int argc, char** argv) {
         T::Tensor copy_destination(placement, T::TensorDescriptor(T::DataType::UINT8, {settings.max_bytes}));
         T::Tensor flush(placement, T::TensorDescriptor(T::DataType::FP8_E4M3, {flush_bytes}));
         flush.fillRandom(-1.0, 1.0, stream);
-        auto flusher = T::CubReduction(T::CubReductionOp::Sum, uint32_t{0}, T::DataType::FP32).stamp(flush, stream);
+        auto flusher = T::Reducer(T::ReductionOp::Sum, uint32_t{0}, T::DataType::FP32).stamp(flush, stream);
         stream.synchronize();
 
         TimingEvent start, stop;
@@ -261,14 +262,14 @@ int main(int argc, char** argv) {
                         std::string path, passes;
                         const auto stamp_start = std::chrono::steady_clock::now();
                         auto first_stamp_end = stamp_start;  // stamp_ms: the first slot's stamp (later ones hit the cache)
-                        std::vector<std::shared_ptr<T::StampedCubReduction>> values;
-                        std::vector<std::shared_ptr<T::StampedCubArgReduction>> args;
-                        std::shared_ptr<T::StampedCubReduction> value;
-                        std::shared_ptr<T::StampedCubArgReduction> arg;
+                        std::vector<std::shared_ptr<T::StampedReducer>> values;
+                        std::vector<std::shared_ptr<T::StampedArgReducer>> args;
+                        std::shared_ptr<T::StampedReducer> value;
+                        std::shared_ptr<T::StampedArgReducer> arg;
                         std::function<void(size_t)> launch_slot;
                         if (op == "sum" || op == "max") {
-                            const T::CubReduction reduction(op == "sum" ? T::CubReductionOp::Sum : T::CubReductionOp::Max,
-                                                            axis, T::DataType::FP32);
+                            const T::Reducer reduction(op == "sum" ? T::ReductionOp::Sum : T::ReductionOp::Max,
+                                                       axis, T::DataType::FP32);
                             for (const T::StridedSpan& slot_input : inputs) {
                                 values.push_back(reduction.stamp(slot_input, stream));
                                 if (values.size() == 1) first_stamp_end = std::chrono::steady_clock::now();
@@ -281,13 +282,13 @@ int main(int argc, char** argv) {
                             }
                             launch_slot = [&](size_t slot) { values[slot]->runOn(stream); };
                         } else {
-                            T::CubArgReductionOutputOptions outputs;
+                            T::ArgReductionOutputOptions outputs;
                             outputs.produce_value = false;
                             outputs.produce_index = true;
                             outputs.index_output_dtype = T::DataType::UINT32;
-                            const T::CubArgReduction reduction(op == "argmax" ? T::CubArgReductionOp::ArgMax
-                                                                              : T::CubArgReductionOp::ArgMin,
-                                                               axis, outputs);
+                            const T::ArgReducer reduction(op == "argmax" ? T::ArgReductionOp::ArgMax
+                                                                              : T::ArgReductionOp::ArgMin,
+                                                          axis, outputs);
                             for (const T::StridedSpan& slot_input : inputs) {
                                 args.push_back(reduction.stamp(slot_input, stream));
                                 if (args.size() == 1) first_stamp_end = std::chrono::steady_clock::now();
@@ -314,20 +315,20 @@ int main(int argc, char** argv) {
                                   << std::setprecision(3) << med / reference << ',' << std::setprecision(1)
                                   << double(bytes) / med / 1e3 << ',' << std::setprecision(1) << stamp_ms << ",0\n";
                         if (settings.candidates) {
-                            // Every retained shape in the selector's order. rank is the position in the order the
-                            // production autotuner times (VALUE: the direct CUB pass is second, so shapes after the
-                            // first move down one); a depth of N candidates times ranks 1..N.
-                            namespace C = T::CubReductionInternal;
-                            const auto shapes = C::Fp8KR::fp8KRCandidateShapes(g.k, g.r, static_cast<uint32_t>(sm));
+                            // Every shape of fp8KRCandidateShapes (the heuristic list) in its order; rank is the
+                            // 1-based position. Production times the trained ranker's shortlist over the pool
+                            // (fp8KRRankedShapes), and this list's first N shapes only without a trained model.
+                            namespace C = T::ReductionInternal;
+                            const auto shapes = C::KR::fp8KRCandidateShapes(g.k, g.r, static_cast<uint32_t>(sm));
                             const bool is_value = op == "sum" || op == "max";
                             const auto semantics = C::makeValueReductionStageSemantics(
-                                op == "sum" ? T::CubReductionOp::Sum : T::CubReductionOp::Max, C::DensePassRole::Complete,
+                                op == "sum" ? T::ReductionOp::Sum : T::ReductionOp::Max, C::DensePassRole::Complete,
                                 g.r);
                             T::Tensor out(placement, T::TensorDescriptor(is_value ? T::DataType::FP32
                                                                                    : T::DataType::UINT32, {g.k}));
                             for (size_t index = 0; index < shapes.size(); ++index) {
                                 const auto& shape = shapes[index];
-                                const uint64_t scratch_bytes = C::Fp8KR::fp8KRScratchBytes(shape, !is_value);
+                                const uint64_t scratch_bytes = C::KR::krScratchBytes(shape, !is_value);
                                 T::Tensor scratch;
                                 if (scratch_bytes != 0) {
                                     scratch = T::Tensor(placement, T::TensorDescriptor(T::DataType::UINT8, {scratch_bytes}));
@@ -343,10 +344,10 @@ int main(int argc, char** argv) {
                                     }
                                 }, batch);
                                 const double candidate_median = median(candidate_samples);
-                                const size_t rank = index + 1 + (is_value && index >= 1 ? 1 : 0);
+                                const size_t rank = index + 1;
                                 std::cout << g.family << ',' << kind << ',' << op << ',' << dtypeName(dtype) << ','
                                           << g.k << ',' << g.r << ',' << bytes << ",candidate,"
-                                          << C::Fp8KR::fp8KRShapeName(shape) << ',' << std::setprecision(2)
+                                          << C::KR::krShapeName(shape) << ',' << std::setprecision(2)
                                           << candidate_median << ','
                                           << *std::min_element(candidate_samples.begin(), candidate_samples.end())
                                           << ',' << reference << ',' << std::setprecision(3)

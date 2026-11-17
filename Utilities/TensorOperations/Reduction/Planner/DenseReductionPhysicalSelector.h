@@ -1,0 +1,86 @@
+#pragma once
+
+#include "Utilities/TensorOperations/Reduction/Planner/DenseReductionFamilies.h"
+#include "Utilities/TensorOperations/Reduction/ReductionTuningDepth.h"
+
+#include <limits>
+#include <optional>
+
+class Stream;
+namespace ThorImplementation { enum class ReductionOp : uint8_t; }
+
+namespace ThorImplementation::ReductionInternal {
+
+/**
+ * Stamp-time facts shared by the ordinary planner and FP8 cache-miss FP32 lookahead.
+ * No Tensor, stream, executable, or completed-plan ownership is part of the physical selection request.
+ *
+ * The optional proposal hook is for deterministic host tests. Production leaves it null; any replacement is still
+ * subject to the ordinary planner's transition validation when used by planDenseReduction().
+ */
+struct DensePhysicalSelectionContext {
+    using ProposalOverride = DenseReductionCandidate (*)(const DenseReductionProblem& problem,
+                                                          DenseReductionSite site,
+                                                          DenseReducerFamily family,
+                                                          const DenseRKPlanningContext& rk,
+                                                          void* user_context);
+
+    DenseRKPlanningContext rk;
+    // Non-owning stamp-time tuning information for future domain-local autotuners. Existing FP32 policy does not
+    // consult it. Never retain the pointer in a physical selection or a cache entry.
+    const Stream* tuning_stream = nullptr;
+    uint32_t gpu_ordinal = 0;
+    // Reserved for domain-local tuning; today's production FP32 policy preserves its existing workspace behavior.
+    uint64_t max_workspace_bytes = std::numeric_limits<uint64_t>::max();
+    // Original public VALUE semantics required by the FP8 RK selector.
+    // Optional for FP32 selection and host-injected selectors. The total
+    // reduction divisor cannot be inferred from a nominated axis alone.
+    std::optional<ReductionOp> original_value_operation;
+    uint64_t original_reduction_size = 0;
+    float output_scale = 1.0f;
+    // The autotuning depth (the reduction's ReductionTuningDepth).
+    ReductionTuningDepth tuning_depth = ReductionTuningDepth::Regular;
+    // The original input's base alignment in bytes (Tensor::alignmentBytes(16)); descriptor-only queries assume
+    // 16. The FP32 RK selectors keep only the passes that tolerate it at original-input sites (intermediates
+    // are fresh, aligned allocations).
+    uint64_t original_input_alignment_bytes = 16;
+    ProposalOverride proposal_override = nullptr;
+    void* proposal_override_context = nullptr;
+};
+
+/**
+ * The authoritative selection of ONE physical pass for a nominated site. The returned next_problem and next_bytes
+ * describe the pass's actual output, not a hypothetical completed reduction or a sequence of required continuations.
+ * The result owns only an immutable physical-plan description; the caller handles all stamping and allocation.
+ *
+ * Every site goes to a per-dtype selector: FP32 sites (original FP32 input and every FP32 intermediate), original
+ * FP16 / BF16 sites, and original FP8 sites (below). There is no other policy; a site no selector covers is a planning
+ * error. Only a test's proposal_override plans without them.
+ */
+[[nodiscard]] DenseReductionCandidate selectDensePhysicalPass(const DenseReductionProblem& problem,
+                                                               DenseReductionSite site,
+                                                               const DensePhysicalSelectionContext& context);
+
+/**
+ * The FP32 routing. FP32 VALUE sites (original FP32 input, and the FP32 intermediates of every dtype's earlier passes)
+ * are selected by the FP32 selectors (RK::Fp32::selectCachedValueSite at RK sites, KR::Fp32::selectCachedValueSite at
+ * R / KR sites) and run their passes, with no fallback: a site they cannot cover is a planning error. The context must
+ * carry the tuning stream, the original operation and the original reduction size. And FP32 ARG sites: original FP32
+ * input (Fp32RK / KR::Fp32::selectCachedArgSite) and carried-index intermediates of any dtype's earlier ARG passes
+ * (selectCachedCarriedArgSite); the planned dense ARG executor then runs FP32 ARG input too.
+ */
+
+/**
+ * The FP16 / BF16 routing. Every original FP16 / BF16 site is selected by the 2-byte selectors and runs their passes,
+ * with no fallback (a site they cannot
+ * cover is a planning error):
+ *   - VALUE RK: RK::F16::selectCachedValueSite (a staged first stage's FP32 partials continue on the FP32
+ *     selectors, as every intermediate does);
+ *   - VALUE R / KR: KR::F16::selectCachedValueSite;
+ *   - ARG RK: RK::F16::selectCachedArgSite; ARG R / KR: KR::F16::selectCachedArgSite. FP16 / BF16 ARG runs the planned
+ *     dense ARG executor (its intermediates on the FP32 carried-ARG passes).
+ * An original input off a 16-byte boundary keeps the RK passes that tolerate its alignment (the rotated RuntimeK pass at
+ * any 2-byte address, AlignedK at a packet no wider than it) and prints one warning per process.
+ */
+
+}  // namespace ThorImplementation::ReductionInternal

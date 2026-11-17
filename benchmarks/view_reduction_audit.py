@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""View reduction audit report (1335): what production CubReduction stamps of non-dense views achieve, in TB/s of
-touched bytes, against the copy curve and against each cell's reference (plans/Thor_View_Reduction_Plan_2026-11-08.md).
+"""View reduction audit report: what production Reducer stamps of non-dense views achieve, in TB/s of touched
+bytes, against the copy curve and against each cell's reference.
 
-Reads `thor_view_reduction_audit` output (one row per cell). Cases: A (a compact permutation, every axis reduced),
-B (a compact permutation, reduced axes physically trailing), C (a rank-1 strided view; s = 0 is a broadcast view), and
-the phase 5 measurement (1375): D (permutation-aware tiled with natural output, on the Thor tiled kernels) and E (a
-split physical reduction; production throws, so an unsupported cell times the dense stamp of its physical tensor,
-reference `view_unsupported`). The reference is the dense stamp of the same bytes (A / B / D / E) or the gather
-reference kernel (C, s >= 2); of_reference is the reference's time over the cell's, so 1.0 is at the reference and below
-1.0 is slower.
+Reads `thor_view_reduction_audit` output (one row per cell; ViewReductionAudit.cu's header comment describes each case).
+Cases: A (a compact permutation, every axis reduced), B (a compact permutation, reduced axes physically trailing), C (a
+rank-1 strided view; s = 0 is a broadcast view), D (a compact permutation with a natural output) and E (a split physical
+reduction; a cell the view stamp refuses times the dense stamp of its physical tensor, reference `view_unsupported`).
+The reference is the dense stamp of the same bytes (A / B / D / E) or the gather reference kernel (C, s >= 2);
+of_reference is the reference's time over the cell's, so 1.0 is at the reference and below 1.0 is slower.
 
 The gate lines come first, per case at or above --large-mib touched: TB/s p50 / p10, of_copy p50, of_reference p50 /
 p10 / min, and the cells whose outputs failed verification or that failed to run. Then:
@@ -21,29 +20,29 @@ p10 / min, and the cells whose outputs failed verification or that failed to run
   6. stamp wall time by case
   7. measurement: sample spread ((max - min) / median) by case
 
-With --compare=OTHER (another run of the same seed and settings, e.g. the phase 0 baseline) section 8 joins the cells
+With --compare=OTHER (another run of the same seed and settings, e.g. a baseline) section 8 joins the cells
 and reports OTHER's time over this run's (above 1.0: this run is faster) by case and size and, for C, by stride, with
 the legacy clause: the cells at or above --legacy-mib touched where this run is slower than OTHER by more than
 --legacy-tolerance.
 
-Section 9, phase 5 (D, E; 1375): D's tiled time over the dense stamp's by size and by tiled family (above 1.0 the dense
-planner is faster), with the cells where either side wins by more than --legacy-tolerance; E's unsupported cells and the
-dense stamp's TB/s and of_copy by size.
+Section 9 (D, E): D's view time over the dense stamp's by size and by pass chain (above 1.0 the dense stamp is
+faster), with the cells where either side wins by more than --legacy-tolerance; E's unsupported cells and the dense
+stamp's TB/s and of_copy by size.
 
-Section 10, phase 5 (F, G, H; 1386): the three view classes still on the Thor tiled kernels. F a compact permutation
-with a rotated [inner, outer] output, G VIEW-DIRECT-2B ([A, R, B, P] read as [B, A, P]), H VIEW-PITCHED-TILED (rows /
-slabs with gaps). The reference is the dense stamp of the physical bytes in physical output order (F, G) or of the
-packed tensor without the gaps (H). Per case: tiled / dense by size, kernel family, outputs and reduction size, with
+Section 10 (F, G, H): the three view classes the reducer refuses, timed as the two parts a caller runs. F a compact
+permutation with a rotated [inner, outer] output, G a payload transpose ([A, R, B, P] read as [B, A, P]), H pitched
+(rows / slabs with gaps). The reference is the dense stamp of the physical bytes in physical output order (F, G) or of
+the packed tensor without the gaps (H). Per case: view / dense by size, pass family, outputs and reduction size, with
 the cells 2x and 10x slower than the reference; then the slowest cells (--slowest).
 
-Section 11, phase 7 (H; 1391): H by gap sub-class and by how it ran (sliced, packed, 1392 pitched_complete), view /
-dense. Section 12, phase 7 C (H; 1392): the in-place read (RuntimeK PacketComplete at the view's pitches) against the
-split, from the alternative columns an H cell carries (split_us when the main read it in place, pitched_w<W>_us at
-each forced W): by tile bytes (under 256 or not) and by the bytes in flight per SM at the reducer's W (1392a: the most
-warps per item that fit one wave of 32 warps per SM, at least four rows per warp; in place from 4 KiB per SM against a
-sliced split, 2 KiB against a packed one), the split's time over the best W's (above 1.0 the in-place read is
-faster), the time the reducer's choice takes over the best of all five, how often each W is best, and the cells where
-the choice is slower than the best by more than --legacy-tolerance.
+Section 11 (H): H by gap sub-class and by how it ran (sliced, packed, pitched_complete), view / dense. Section 12 (H):
+the in-place read (RuntimeK PacketComplete at the view's pitches) against the split, from the alternative columns an H
+cell carries (split_us when the main read it in place, pitched_w<W>_us at each forced W): by tile bytes (under 256 or
+not) and by the bytes in flight per SM at the reducer's W (the most warps per item that fit one wave of 32 warps per
+SM, at least four rows per warp; in place from 4 KiB per SM against a sliced split, 2 KiB against a packed one), the
+split's time over the best W's (above 1.0 the in-place read is faster), the time the reducer's choice takes over the
+best of all five, how often each W is best, and the cells where the choice is slower than the best by more than
+--legacy-tolerance.
 
 Standard library only.
 """
@@ -64,7 +63,7 @@ CASES = ("a", "b", "c", "d", "e", "f", "g", "h")
 CASE_NAMES = {"a": "A full permutation", "b": "B trailing permutation", "c": "C strided rank-1",
               "d": "D tiled natural output", "e": "E split physical", "f": "F rotated output",
               "g": "G payload transpose", "h": "H pitched"}
-# 1386 (section 10): buckets of outputs and reduction size (count)
+# Section 10: buckets of outputs and reduction size (count)
 OUTPUTS = (("<=256", 0, 257), ("257-4K", 257, 4097), ("4K-64K", 4097, 65537), (">64K", 65537, float("inf")))
 REDUCTIONS = (("R<64", 0, 64), ("R 64-1K", 64, 1024), ("R 1K-16K", 1024, 16384), ("R>=16K", 16384, float("inf")))
 
@@ -242,7 +241,7 @@ def phase5(cells, tolerance):
     split = [c for c in cells if c["case"] == "e"]
     if not tiled and not split:
         return []
-    lines = ["", "# 9. phase 5: D tiled / dense (above 1.0 the dense planner is faster); E on the dense planner"]
+    lines = ["", "# 9. D view / dense (above 1.0 the dense stamp is faster); E on the dense planner"]
     groups = [(name, [c for c in tiled if size_bucket(c["touched_bytes"]) == name]) for name, _, _ in SIZES]
     families = sorted({c["passes"] for c in tiled})
     groups += [(family, [c for c in tiled if c["passes"] == family]) for family in families]
@@ -253,12 +252,12 @@ def phase5(cells, tolerance):
         ratio = [1.0 / c["of_reference"] for c in group]
         faster = sum(1 for r in ratio if r > 1.0 + tolerance)
         slower = sum(1 for r in ratio if r < 1.0 - tolerance)
-        lines.append(f"  D {name:26s} cells {len(group):4d} tiled/dense p50 {fmt(quantile(ratio, .5))}"
+        lines.append(f"  D {name:26s} cells {len(group):4d} view/dense p50 {fmt(quantile(ratio, .5))}"
                      f" p10 {fmt(quantile(ratio, .1))} p90 {fmt(quantile(ratio, .9))}"
                      f"  dense faster {faster:3d} slower {slower:3d}")
-    for c in sorted(tiled, key=lambda c: -c["of_reference"])[:5]:  # the dense stamp furthest behind the tiled one
+    for c in sorted(tiled, key=lambda c: -c["of_reference"])[:5]:  # the dense stamp furthest behind the view
         lines.append(f"    dense slowest: {c['cell_id']:5d} {c['operation']:11s} dims {c['dims']:24s} touched "
-                     f"{c['touched_bytes'] / 2**20:8.2f} MiB tiled/dense {fmt(1.0 / c['of_reference'])} "
+                     f"{c['touched_bytes'] / 2**20:8.2f} MiB view/dense {fmt(1.0 / c['of_reference'])} "
                      f"{c['reference_passes'][:40]}")
     unsupported = [c for c in split if c["reference"] == "view_unsupported"]
     lines.append(f"  E cells {len(split)}, unsupported by the view stamp {len(unsupported)}")
@@ -281,14 +280,14 @@ def bucket(value, buckets):
 
 
 def family(passes):
-    """A pass chain without its tiles and sizes (digits) or the 1390 two-part prefix."""
+    """A pass chain without its tiles and sizes (digits) or its two-part prefix (an older run's "tiled:" too)."""
     return re.sub(r"\d+", "#", passes).removeprefix("split_").removeprefix("tiled:")
 
 
 def tiled_classes(cells, slowest):
-    """F / G / H: the view's time over the dense reference's (1 / of_reference), and the slowest cells. Through 1386
-    the view ran the Thor tiled kernels, in 1387-1389 the dense planner with a layout pass inside the reducer, from 1390
-    the two parts a caller runs (passes "split_rotated:..." / "split_packed:...")."""
+    """F / G / H: the view's time over the dense reference's (1 / of_reference), and the slowest cells. The view
+    runs as the two parts a caller runs (passes "split_rotated:..." / "split_packed:..." / "split_sliced:...") or, for
+    H, in place ("pitched_complete:...")."""
     lines = []
     for case in ("f", "g", "h"):
         here = with_reference([c for c in cells if c["case"] == case])
@@ -320,14 +319,14 @@ def tiled_classes(cells, slowest):
 
 
 ELEMENT_BYTES = {"fp32": 4, "fp16": 2, "bf16": 2, "fp8_e4m3": 1, "fp8_e5m2": 1}
-# 1392 (phase 7 C): the PacketComplete tile cap by element bytes, and the alternative columns of an H cell
+# Section 12: the PacketComplete tile cap by element bytes, and the alternative columns of an H cell
 PACKET_TILE = {4: 124, 2: 248, 1: 496}
 ALTERNATIVES = ("split", "pitched_w1", "pitched_w2", "pitched_w4", "pitched_w8")
 IN_FLIGHT_KIB_PER_SM = (("<2K", 0, 2), ("2-4K", 2, 4), ("4-8K", 4, 8), (">=8K", 8, float("inf")))
 
 
 def pitched_rows(c):
-    """1391 (phase 7): an H cell as [O, R, I] rows (I contiguous, row pitch Sr, slab pitch So), from its dims, strides
+    """An H cell as [O, R, I] rows (I contiguous, row pitch Sr, slab pitch So), from its dims, strides
     and axes in physical order; None when it does not flatten so."""
     dims = [int(x) for x in c["dims"].split("x")]
     strides = [int(x) for x in c["strides"].split("x")]
@@ -376,12 +375,12 @@ def h_subclass(c):
 
 
 def h_mechanisms(cells, large_bytes):
-    """1391 (plans/Thor_Tiled_View_Replacement_Plan_2026-11-12.md, phase 7): H by sub-class and by how it ran
-    (split_sliced: its rows read at their pitch; split_packed: its dense copy), all sizes and from --large-mib."""
+    """Section 11: H by sub-class and by how it ran (split_sliced: its rows read at their pitch; split_packed: its
+    dense copy; pitched_complete: in place), all sizes and from --large-mib."""
     here = with_reference([c for c in cells if c["case"] == "h"])
     if not here:
         return []
-    lines = ["", "# 11. phase 7: H by gaps and path, view / dense"]
+    lines = ["", "# 11. H by gaps and path, view / dense"]
     for name in ("row gaps < 32 B", "row gaps >= 32 B", "slab gaps", "row + slab gaps", "other"):
         for path in sorted({c["passes"].split(":")[0] for c in here}):
             for label, group in (("all", [c for c in here if h_subclass(c) == name and c["passes"].startswith(path)]),
@@ -396,7 +395,7 @@ def h_mechanisms(cells, large_bytes):
 
 
 def alternative_times(c):
-    """1392: {name: us} of an H cell's paths: its alternative columns, and its main under the name of what it ran
+    """{name: us} of an H cell's paths: its alternative columns, and its main under the name of what it ran
     (split for a split, pitched_w<W> for the in-place read at the rule's W)."""
     times = {}
     for name in ALTERNATIVES:
@@ -412,7 +411,7 @@ def alternative_times(c):
 
 
 def pitched_launch(c, sm_count):
-    """1392a: (W, KiB in flight per SM) of the reducer's in-place launch (pitchedCompleteLaunch), or None: W the most of
+    """(W, KiB in flight per SM) of the reducer's in-place launch (pitchedCompleteLaunch), or None: W the most of
     1 / 2 / 4 / 8 whose O x K tiles x W warps fit one wave of 32 per SM, at least four rows per warp."""
     rows = pitched_rows(c)
     if rows is None or not sm_count:
@@ -429,7 +428,7 @@ def pitched_launch(c, sm_count):
 
 
 def tile_bytes(c):
-    """1392: the bytes of one balanced K tile (pitchedCompleteLaunch), or None."""
+    """The bytes of one balanced K tile (pitchedCompleteLaunch), or None."""
     rows = pitched_rows(c)
     if rows is None:
         return None
@@ -439,15 +438,14 @@ def tile_bytes(c):
 
 
 def pitched_alternatives(cells, header, tolerance):
-    """1392 (plans/Thor_Tiled_View_Replacement_Plan_2026-11-12.md, phase 7 C): the in-place read of H against the
-    split, by K tile bytes and work items per SM."""
+    """Section 12: the in-place read of H against the split, by K tile bytes and work items per SM."""
     sm_count = int(header.get("sm_count", 0) or 0)
     here = [c for c in cells if c["case"] == "h"]
     timed = [(c, alternative_times(c)) for c in here]
     timed = [(c, t) for c, t in timed if "split" in t and any(k.startswith("pitched_w") for k in t)]
     if not timed:
         return []
-    lines = ["", f"# 12. phase 7 C: H in place / split by K tile bytes and bytes in flight per SM ({sm_count} SMs)"]
+    lines = ["", f"# 12. H in place / split by K tile bytes and bytes in flight per SM ({sm_count} SMs)"]
     for wide, (name, low, high) in ((w, b) for w in (False, True) for b in IN_FLIGHT_KIB_PER_SM):
         group = [(c, t) for c, t in timed if (p := pitched_launch(c, sm_count)) is not None and low <= p[1] < high
                  and (tile_bytes(c) >= 256) == wide]

@@ -7,7 +7,6 @@
 
 #include <limits>
 
-#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
 #include <type_traits>
@@ -108,22 +107,6 @@ void expectOffsetsToInt32LengthsCheckedDType() {
 
     EXPECT_EQ(copyGpuVector<int32_t>(lengths, stream), (std::vector<int32_t>{3, 0, 4, 1}));
     EXPECT_EQ(copyGpuVector<uint32_t>(errorBits, stream), (std::vector<uint32_t>{0U}));
-}
-
-template <typename T>
-void expectLengthsToOffsetsDType() {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    Tensor lengths = makeGpuVector<T>({T{3}, T{0}, T{4}, T{1}}, stream);
-    Tensor offsets(gpuPlacement, TensorDescriptor(dtypeFor<T>(), {5}));
-
-    const RowPartitionLengthsToOffsetsPlan plan = prepareRowPartitionLengthsToOffsets(lengths, offsets, 4);
-    Tensor temp(gpuPlacement, TensorDescriptor(DataType::UINT8, {std::max<size_t>(plan.temp_storage_bytes, 1)}));
-    rowPartitionLengthsToOffsets(plan, temp, lengths, offsets, stream);
-    stream.synchronize();
-
-    EXPECT_EQ(copyGpuVector<T>(offsets, stream), (std::vector<T>{T{0}, T{3}, T{3}, T{7}, T{8}}));
 }
 
 }  // namespace
@@ -443,10 +426,6 @@ TEST(RowPartition, OffsetsToInt32LengthsCheckedReportsInt32OverflowWithoutLargeA
     EXPECT_EQ(copyGpuVector<int32_t>(lengths, stream), (std::vector<int32_t>{0}));
 }
 
-TEST(RowPartition, LengthsToOffsetsUint32) { expectLengthsToOffsetsDType<uint32_t>(); }
-
-TEST(RowPartition, LengthsToOffsetsUint64) { expectLengthsToOffsetsDType<uint64_t>(); }
-
 TEST(RowPartition, OffsetsToRowIdsLeavesUnusedCapacityUntouched) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -493,10 +472,10 @@ TEST(RowPartition, RejectsSignedLengthAndOffsetDTypes) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
-    Tensor lengths = makeGpuVector<int32_t>({1, 2, 3}, stream);
-    Tensor offsets(gpuPlacement, TensorDescriptor(DataType::INT32, {4}));
+    Tensor offsets = makeGpuVector<int32_t>({0, 1, 3, 6}, stream);
+    Tensor lengths(gpuPlacement, TensorDescriptor(DataType::INT32, {3}));
 
-    EXPECT_THROW(static_cast<void>(prepareRowPartitionLengthsToOffsets(lengths, offsets, 3)), std::invalid_argument);
+    EXPECT_THROW(rowPartitionOffsetsToLengths(offsets, lengths, 3, stream), std::invalid_argument);
 }
 
 TEST(RowPartition, OffsetsToRopePositionIdsWritesOnlyLogicalActiveCapacity) {

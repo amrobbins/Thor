@@ -1,8 +1,7 @@
 #pragma once
 
-// 1164: the reduction sweeps' one timing method, shared by thor_fp8_kr_training_sweep (where it was developed,
-// 1152-1153), thor_fp8_retained_cold_l2_sweep --training (RK) and, 1174, thor_dense_production_audit (any dtype).
-// 1174: renamed from Fp8ColdTiming.h; nothing in it is FP8-specific.
+// The reduction sweeps' and audits' one timing method, shared by thor_fp8_kr_training_sweep,
+// thor_fp8_retained_cold_l2_sweep --training (RK), thor_dense_production_audit and the ragged, view and copy audits.
 //
 //   - Cold inputs without a flush kernel: every launch reads its own input view, cycling through views that span at
 //     least InputReuseBytes (20x a 96 MiB L2), each 256-byte aligned as a fresh cudaMalloc allocation is.
@@ -12,8 +11,8 @@
 //   - Per candidate, one untimed launch (it loads the kernel) and one timed probe launch; each sample then times
 //     launchesPerSample(probe) back-to-back launches, about interval_us of GPU time, and divides by the count. CUDA
 //     events here resolve about 2 us, so a 5 us kernel timed once per sample is on a 40% grid; ~1 ms samples put the
-//     event resolution at 0.2%. (KR, 1152-1153: run-to-run p50 0.1-0.3% per (cell, shape); the RK sweep's one launch
-//     per sample showed sample spreads of 8-22% below 16 MiB in the 1162/1163 stamp audits.)
+//     event resolution at 0.2%. (KR: run-to-run p50 0.1-0.3% per (cell, shape); one launch per sample showed sample
+//     spreads of 8-22% below 16 MiB in the RK stamp audits.)
 //   - Samples come from asynchronous batches (Fp8OracleBatchQueue): pass p visits every cell, so a candidate's samples
 //     are spread over the batch and the GPU never idles between them.
 //   - The copy reference is timed the same way (ring source and destination views, back to back).
@@ -33,7 +32,7 @@
 #include <utility>
 #include <vector>
 
-namespace ThorImplementation::CubReductionBenchmarking::ColdTiming {
+namespace ThorImplementation::ReductionBenchmarking::ColdTiming {
 
 inline constexpr uint64_t MiB = 1ULL << 20;
 inline constexpr uint64_t GiB = 1ULL << 30;
@@ -132,8 +131,8 @@ inline double copyBandwidth(Ring& in, Ring& out, Stream& stream, uint64_t bytes)
     return 2.0 * double(bytes) / median(us);  // bytes read + written per us
 }
 
-// 1153: copy time against moved bytes (copy n bytes: n read + n written), timed as the cells are: ring source and
-// destination views, back-to-back copies per sample (about interval_us), median of 5 interleaved samples.
+// Copy time against moved bytes (copy n bytes: n read + n written), timed as the cells are: ring source and destination
+// views, back-to-back copies per sample (about interval_us), median of 5 interleaved samples.
 struct CopyCurve {
     std::vector<std::pair<double, double>> points;  // (moved bytes, us)
     // Log-log interpolation; proportional beyond the end points.
@@ -152,9 +151,9 @@ struct CopyCurve {
     }
 };
 
-// 1176: min_moved sets the first point. Below the first point the curve is proportional, which puts a copy of a few KiB
-// far under the launch floor, so callers timing small cells pass their smallest moved bytes (rounded down to a power
-// of two, at least 4 KiB). The FP8 sweeps keep the 2 MiB start they were trained and audited with.
+// min_moved sets the first point. Below the first point the curve is proportional, which puts a copy of a few KiB far
+// under the launch floor, so callers timing small cells pass their smallest moved bytes (rounded down to a power of
+// two, at least 4 KiB). The FP8 sweeps keep the 2 MiB start they were trained and audited with.
 inline CopyCurve copyCurve(Ring& in, Ring& out, Stream& stream, uint64_t max_moved, double interval_us,
                            uint64_t min_moved = 2 * MiB) {
     uint64_t first = 4096;
@@ -200,4 +199,4 @@ inline CopyCurve copyCurve(Ring& in, Ring& out, Stream& stream, uint64_t max_mov
     return curve;
 }
 
-}  // namespace ThorImplementation::CubReductionBenchmarking::ColdTiming
+}  // namespace ThorImplementation::ReductionBenchmarking::ColdTiming

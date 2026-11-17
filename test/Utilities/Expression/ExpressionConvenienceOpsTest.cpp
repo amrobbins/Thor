@@ -3777,8 +3777,8 @@ TEST(ExpressionConvenienceOps, ReductionReadsAPermutedViewInPlaceWithoutACopy) {
     expectNear(copyToCpuValues(plan.output("y"), stream), {12.0f, 15.0f, 18.0f, 21.0f});
 }
 
-// 1390: the reducer refuses a view whose rows have gaps (VIEW-PITCHED-TILED), so Expression copies it into a dense
-// tensor of its own (a DenseCopy stage) and reduces that: what the reducer's packing pass did inside it in 1387-1389.
+// The reducer refuses a view whose rows have gaps (case H), so Expression copies it into a dense tensor of its own (a
+// DenseCopy stage) and reduces that.
 TEST(ExpressionConvenienceOps, ReductionOfAViewWithRowGapsReadsItsDenseCopy) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -3799,9 +3799,9 @@ TEST(ExpressionConvenienceOps, ReductionOfAViewWithRowGapsReadsItsDenseCopy) {
     expectNear(copyToCpuValues(plan.output("y"), stream), {3.0f, 11.0f, 19.0f});
 }
 
-// 1391 (phase 7 A): when the view's storage holds the gap after its last row and reading the rows at their pitch moves
-// fewer bytes than the packed copy, the reduction reads x as the dense [6, 8] (gap columns included) into [8], and a
-// DenseCopy stage writes its first 5 columns: no copy of the input.
+// When the view's storage holds the gap after its last row and reading the rows at their pitch moves fewer bytes than
+// the packed copy, the reduction reads x as the dense [6, 8] (gap columns included) into [8], and a DenseCopy stage
+// writes its first 5 columns: no copy of the input.
 TEST(ExpressionConvenienceOps, ReductionOfAViewWithRowGapsReadsTheRowsAtTheirPitch) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -3823,8 +3823,8 @@ TEST(ExpressionConvenienceOps, ReductionOfAViewWithRowGapsReadsTheRowsAtTheirPit
     expectNear(copyToCpuValues(plan.output("y"), stream), {120.0f, 126.0f, 132.0f, 138.0f, 144.0f});
 }
 
-// 1392 (phase 7 C): a pitched view with wide rows and many outputs is one Reduction stage that reads the rows at their
-// row and slab pitches (RuntimeK PacketComplete), with no copy before or after it.
+// A pitched view with wide rows and many outputs is one Reduction stage that reads the rows at their row and slab
+// pitches (RuntimeK PacketComplete), with no copy before or after it.
 TEST(ExpressionConvenienceOps, ReductionOfAPitchedViewWithManyOutputsReadsItInPlace) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -3851,9 +3851,9 @@ TEST(ExpressionConvenienceOps, ReductionOfAPitchedViewWithManyOutputsReadsItInPl
     expectNear(copyToCpuValues(plan.output("y"), stream), expected);
 }
 
-// 1390: a view whose retained axes come out of physical order (a rotated output: F, and VIEW-DIRECT-2B with a payload)
-// runs as two stages: the reduction of its bytes in physical order into a buffer, then a DenseCopy stage that writes
-// the buffer, read rotated, into the output (the caller's when it gives one).
+// A view whose kept axes come out of physical order (a rotated output: F, and G with a payload) runs as two stages: the
+// reduction of its bytes in physical order into a buffer, then a DenseCopy stage that writes the buffer, read rotated,
+// into the output (the caller's when it gives one).
 TEST(ExpressionConvenienceOps, ReductionWithARotatedOutputReducesTheBytesThenCopiesTheResultRotated) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -3887,7 +3887,7 @@ TEST(ExpressionConvenienceOps, ReductionWithARotatedOutputReducesTheBytesThenCop
         expectNear(copyToCpuValues(y, stream), expected);
     }
 
-    // VIEW-DIRECT-2B: x2 a dense [a 2, r 3, b 2, p 3]; the view [r, b, a, p] reduced over r is [b, a, p].
+    // G: x2 a dense [a 2, r 3, b 2, p 3]; the view [r, b, a, p] reduced over r is [b, a, p].
     std::vector<float> values2(36);
     for (size_t i = 0; i < values2.size(); ++i) values2[i] = static_cast<float>(i % 7) - 3.0f;
     Tensor storage2 = makeGpuTensor({2, 3, 2, 3}, values2, stream);

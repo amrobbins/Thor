@@ -2,9 +2,10 @@
 """Build-only, isolated *selected* FP8 first-stage kernel census for Thor.
 
 This tool does not modify reduction sources. `generate` copies just the definitions
-from three production CUDA translation units into build-directory translation
-units and explicitly references every selected kernel instantiation. CMake
-compiles them with Thor's CUDA flags into a standalone archive.
+from the production CUDA translation units (INVENTORY_TUS: DeepRSmallK's, OneWindow's,
+AlignedK's and RuntimeK's) into build-directory translation units and explicitly
+references every selected kernel instantiation. CMake compiles them with Thor's CUDA
+flags into a standalone archive.
 
 `analyze` extracts device ELFs from the isolated objects and counts exact
 per-function SASS sizes, separate from object/archive bytes. No GPU run needed.
@@ -21,19 +22,19 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 DTYPES = (('__nv_fp8_e4m3', 'E4M3'), ('__nv_fp8_e5m2', 'E5M2'))
-# The frozen selector's ten OneWindow variants (Fp8OneWindowPolicy::candidates). Since P5-J2 they run bucketed
-# runtime-K units (ONE_WINDOW_UNITS); the P4/P8 variants have none.
+# The frozen selector's ten OneWindow variants (Fp8OneWindowPolicy::candidates). They run bucketed runtime-K units
+# (ONE_WINDOW_UNITS); the P4/P8 variants have none.
 ONE_WINDOW = ((1,1,16),(1,2,16),(1,4,16),(1,8,16),(2,1,16),(4,1,16),(8,1,16),
               (8,1,4),(4,1,8),(8,1,8))
 # OneWindow reduction operations are compile-time specializations. The final
 # output conversion and additive finalization remain runtime; none of these
-# kernels multiplies the inventory by input transform or output dtype. Since
-# P5-F MAX launches the MIN kernel (FixedOp 2) on sign-folded FP8 bytes.
+# kernels multiplies the inventory by input transform or output dtype. MAX
+# launches the MIN kernel (FixedOp 2) on sign-folded FP8 bytes.
 ONE_WINDOW_OPERATIONS = ((0, 'SUM'), (1, 'PRODUCT'), (2, 'MIN-MAX'))
-# RuntimeK retains four compiled FP32 combines for its Packet and two Rotated
+# RuntimeK compiles four FP32 combines for its Packet and two Rotated
 # first-stage topologies; input FP8 format is not selected at runtime. Packet
-# compiles all three transforms for every combine. P5-F: rotated MIN/MAX fold
-# the transform into the FP8 bytes (identity kernels only); PrefixReserved MAX
+# compiles all three transforms for every combine. Rotated MIN/MAX fold the
+# transform into the FP8 bytes (identity kernels only); PrefixReserved MAX
 # also folds its sign and launches the MIN kernel, Exact keeps MIN and MAX.
 # Runtime shard/warp/tile geometry adds no CUDA symbols.
 RUNTIME_K_OPERATIONS = (
@@ -46,51 +47,60 @@ RUNTIME_K_OPERATIONS = (
 ALIGNED_TYPED_OPERATIONS = RUNTIME_K_OPERATIONS[1:]
 EXPECTED_COUNTS = {'OneWindow': 90, 'DeepRSmallK': 264,
                    'AlignedK': 164, 'RuntimeK': 204, 'ARG': 27}
-# ARG (argmin/argmax) twins, all in the narrow TU. Operation (argmin/argmax) and FP8 format are the runtime
-# Fp8ArgFold, so there is no dtype or operation axis: 15 OneWindow units + 7 DeepRSmallK ownerships + rotated
-# RuntimeK (P8) + PacketComplete (P16) + 2 AlignedK packets + the packed staged-partial continuation = 27 kernels.
+# ARG (argmin/argmax) twins, in the narrow TU but where ARG_KERNEL_TUS says otherwise. Operation (argmin/argmax) and
+# FP8 format are the runtime Fp8ArgFold, so there is no dtype or operation axis: 15 OneWindow units + 7 DeepRSmallK
+# ownerships + rotated RuntimeK (P8) + PacketComplete (P16) + 2 AlignedK packets + the packed staged-partial
+# continuation = 27 kernels.
 ARG_KERNELS = (
-    tuple(('fp8OneWindowArgCompleteKernel', f'{o}, {p}, {c}, {str(la).lower()}', f'OneWindow/O{o}/P{p}/c{c}'
+    tuple(('fp8OneWindowArgKernel', f'{o}, {p}, {c}, {str(la).lower()}', f'OneWindow/O{o}/P{p}/c{c}'
            f'{"/la" if la else ""}') for o, p, c, la in (
         (1, 16, 1, False), (1, 16, 2, True), (1, 16, 4, False), (1, 16, 8, True), (1, 16, 16, True),
         (2, 16, 1, False), (2, 16, 2, False), (2, 16, 4, False), (2, 16, 8, True),
         (4, 16, 2, False), (4, 16, 4, False), (4, 16, 8, True),
         (8, 16, 1, False), (8, 16, 2, False), (8, 16, 4, False)))
-    + tuple(('fp8DeepRArgFirstStageKernel', str(c), f'DeepRSmallK/components{c}') for c in (1, 2, 4, 5, 8))
-    + tuple(('fp8DeepRArgTinyKFirstStageKernel', str(lanes), f'DeepRSmallK/tiny-lanes{lanes}') for lanes in (8, 4))
-    + (('fp8RotatedArgKernel', '8', 'RuntimeK/Rotated/P8'),
+    + tuple(('fp8DeepRSmallKArgKernel', str(c), f'DeepRSmallK/components{c}') for c in (1, 2, 4, 5, 8))
+    + tuple(('fp8DeepRSmallKArgTinyKKernel', str(lanes), f'DeepRSmallK/tiny-lanes{lanes}') for lanes in (8, 4))
+    + (('fp8RuntimeKRotatedArgKernel', '8', 'RuntimeK/Rotated/P8'),
        ('fp8PacketCompleteArgKernel', '16', 'RuntimeK/PacketComplete/P16'),
        ('fp8AlignedKArgKernel', '2', 'AlignedK/P2'),
        ('fp8AlignedKArgKernel', '8', 'AlignedK/P8'),
        ('fp8ArgPackedContinuationKernel', '0', 'PackedContinuation'))
 )
+# The ARG kernels that live beside their VALUE kernels: in Reduction/Kernels/RKRuntimeK.cu (the rotated TU),
+# PacketComplete's and the rotated one; in Reduction/Kernels/RKAlignedK.cu (the aligned TU), AlignedK's and the
+# packed continuation, beside FP32's.
+ARG_KERNEL_TUS = {'fp8PacketCompleteArgKernel': 'rotated', 'fp8RuntimeKRotatedArgKernel': 'rotated',
+                  'fp8AlignedKArgKernel': 'aligned', 'fp8ArgPackedContinuationKernel': 'aligned',
+                  'fp8OneWindowArgKernel': 'onewindow'}  # OneWindow's in Reduction/Kernels/RKOneWindow.cu
+# The generated TUs, one per production kernel file the inventory copies.
+INVENTORY_TUS = ('narrow', 'onewindow', 'aligned', 'rotated')
 # OneWindow units (outputs per warp, packet bytes, components-per-lane bucket, load-ahead); mirrors
-# ONE_WINDOW_RUNTIME_K_UNITS (P5-J2). x 3 physical operations (MIN/MAX folded) x 2 FP8 formats = 90 kernels.
+# ONE_WINDOW_UNITS. x 3 physical operations (MIN/MAX folded) x 2 FP8 formats = 90 kernels.
 ONE_WINDOW_UNITS = (
     (1, 16, 1, False), (1, 16, 2, True), (1, 16, 4, False), (1, 16, 8, True), (1, 16, 16, True),
     (2, 16, 1, False), (2, 16, 2, False), (2, 16, 4, False), (2, 16, 8, True),
     (4, 16, 2, False), (4, 16, 4, False), (4, 16, 8, True),
     (8, 16, 1, False), (8, 16, 2, False), (8, 16, 4, False),
 )
-EXPERIMENTAL_FAMILIES = ()  # families measured but excluded from the selected total (none since P5-J2)
+EXPERIMENTAL_FAMILIES = ()  # families measured but excluded from the selected total (none)
 DEEP_ROWS = (64,128,256,512,1024)
 ROTATED_ROWS = (32,64,128,256,512,1024)
 ALIGNED_STAGED = ((2,32),(2,64),(2,128),(8,32),(8,64),(8,128))
 ALIGNED_COMPLETE = ((2,32),(8,32),(8,64))
 
 FAMILIES = {
-    'fp8OneWindowRuntimeKCompleteKernel': 'OneWindow',
-    'narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel': 'DeepRSmallK',
-    'narrowFp8PackedFlatRCooperativeFirstStageKernel': 'DeepRSmallK',
-    'kParallelFp8PacketKernel': 'AlignedK',
-    'kParallelFp8StagedHoistedCombineKernel': 'AlignedK',
-    'kParallelFp8CompleteUnifiedKernel': 'AlignedK',
-    'fp8GeneralRParallelKTileP16CompleteKernel': 'RuntimeK',
-    'awkwardAlignmentRotatedShardedFirstStageKernel': 'RuntimeK',
-    'fp8OneWindowArgCompleteKernel': 'ARG',
-    'fp8DeepRArgFirstStageKernel': 'ARG',
-    'fp8DeepRArgTinyKFirstStageKernel': 'ARG',
-    'fp8RotatedArgKernel': 'ARG',
+    'oneWindowValueKernel': 'OneWindow',
+    'deepRSmallKValueTinyKKernel': 'DeepRSmallK',
+    'deepRSmallKValueKernel': 'DeepRSmallK',
+    'fp8AlignedKValueKernel': 'AlignedK',
+    'fp8AlignedKValueStagedUnifiedKernel': 'AlignedK',
+    'fp8AlignedKValueCompleteUnifiedKernel': 'AlignedK',
+    'packetCompleteValueKernel': 'RuntimeK',
+    'runtimeKRotatedValueKernel': 'RuntimeK',
+    'fp8OneWindowArgKernel': 'ARG',
+    'fp8DeepRSmallKArgKernel': 'ARG',
+    'fp8DeepRSmallKArgTinyKKernel': 'ARG',
+    'fp8RuntimeKRotatedArgKernel': 'ARG',
     'fp8PacketCompleteArgKernel': 'ARG',
     'fp8AlignedKArgKernel': 'ARG',
     'fp8ArgPackedContinuationKernel': 'ARG',
@@ -110,7 +120,7 @@ CUDA_GLOBAL_DECLARATION = re.compile(
 def first_party_kernel_names(objects: list[Path], archive: Path) -> set[str]:
     generated_dir = archive.parent
     kernels: set[str] = set()
-    for name in ('narrow', 'aligned', 'rotated'):
+    for name in INVENTORY_TUS:
         path = generated_dir / f'{name}.cu'
         if not path.is_file():
             raise SystemExit(f'Missing generated CUDA source for inventory membership check: {path}')
@@ -123,7 +133,7 @@ def first_party_kernel_names(objects: list[Path], archive: Path) -> set[str]:
 
 def is_named_kernel_function(name: str, kernel_name: str) -> bool:
     # Match an actual demangled function name (not a template parameter type).
-    # Thor kernels are in the CubReductionInternal namespace; the name can
+    # Thor kernels are in the ReductionInternal namespace; the name can
     # include an anonymous namespace qualifier as well. A function nested in a
     # kernel (an out-of-line lambda: `kernel<...>(...)::{lambda(...)#1}::operator()`)
     # is a device helper, not the kernel.
@@ -149,7 +159,7 @@ def cut_unique(text: str, marker: str, source: str) -> str:
 
 def validate_policy_snapshot(source: Path):
     """Fail closed if the inventory literals drift from the policy headers."""
-    b = source / 'Utilities/TensorOperations/Cub/Fp8RK'
+    b = source / 'Utilities/TensorOperations/Reduction/RK/Fp8'
     ow = (b / 'Fp8OneWindowSelector.h').read_text()
     marker = 'inline constexpr std::array<Variant, 10> candidates = '
     if ow.count(marker) != 1:
@@ -172,8 +182,9 @@ def validate_policy_snapshot(source: Path):
                 '(packet == 8 && (threads == 32 || threads == 64))')
     if any(x not in aligned for x in required):
         raise ValueError('AlignedK inventory changed')
-    narrow = (source / 'Utilities/TensorOperations/Cub/CubReductionNarrowFlatRCooperative.cu').read_text()
-    table = narrow.split('ONE_WINDOW_RUNTIME_K_UNITS{{', 1)[-1].split('}};', 1)[0]
+    # The OneWindow units are in RKOneWindow.cu.
+    one_window = (source / 'Utilities/TensorOperations/Reduction/Kernels/RKOneWindow.cu').read_text()
+    table = one_window.split('ONE_WINDOW_UNITS{{', 1)[-1].split('}};', 1)[0]
     units = [(int(o), int(p), int(c), la == 'true')
              for o, p, c, la in re.findall(r'\{(\d+), (\d+), (\d+), (true|false)\}', table)]
     if len(units) != len(set(units)) or tuple(sorted(units)) != tuple(sorted(ONE_WINDOW_UNITS)):
@@ -201,20 +212,21 @@ def read_prune_groups(path: Path | None):
 
 def generate(source: Path, out: Path):
     validate_policy_snapshot(source)
-    # The four accepted typed AlignedK deletions are the compiled PRODUCTION
-    # policy; RuntimeK PacketStaged and legacy experimental baselines are gone.
+    # The accepted typed AlignedK deletions (fp8_accepted_pruning.csv) are the
+    # compiled production policy.
     dropped_aligned = read_prune_groups(source / 'benchmarks/fp8_accepted_pruning.csv')
     matched = set()
-    root = source / 'Utilities/TensorOperations/Cub'
+    root = source / 'Utilities/TensorOperations'
     specs = {
-        'narrow': ('CubReductionNarrowFlatRCooperative.cu',
-                   '}  // namespace\n\nvoid launchFp8DeepRSmallKRetainedFirstStage'),
-        # 1259: the rotated cut names the occupancy template that follows it (the bare namespace pair has matched
-        # twice since 1249), and the aligned cut moved to elementBytes with the generic KParallel dispatch deleted.
-        'rotated': ('CubReductionAwkwardRotatedSharded.cu',
+        'narrow': ('Reduction/Kernels/RKDeepRSmallK.cu',
+                   '}  // namespace\n\nvoid launchFp8DeepRSmallKFirstStage'),
+        # The rotated cut names the occupancy template that follows it (the bare namespace pair matches twice in
+        # that file); the aligned cut is elementBytes. OneWindow's cut is the end of its kernels' anonymous namespace.
+        'onewindow': ('Reduction/Kernels/RKOneWindow.cu', '}  // namespace\n\n// The production OneWindow launcher'),
+        'rotated': ('Reduction/Kernels/RKRuntimeK.cu',
                     '}  // namespace\n\nnamespace {\n\ntemplate <typename InputT, int RowsPerShard, int PacketBytes, '
                     'int CooperativeWarps,'),
-        'aligned': ('CubReductionKParallelShardedTiled.cu',
+        'aligned': ('Reduction/Kernels/RKAlignedK.cu',
                     '[[nodiscard]] size_t elementBytes(DataType dtype) {'),
     }
     source_text = {}
@@ -235,13 +247,13 @@ def generate(source: Path, out: Path):
         # FixedOp=0 (SUM).
         for o, packet, bucket, la in ONE_WINDOW_UNITS:
             for operation, label in ONE_WINDOW_OPERATIONS:
-                add('narrow', 'OneWindow', short, 'fp8OneWindowRuntimeKCompleteKernel',
+                add('onewindow', 'OneWindow', short, 'oneWindowValueKernel',
                     f'{dtype}, {o}, {packet}, {bucket}, {str(la).lower()}, {operation}',
                     f'O{o}/P{packet}/c{bucket}{"/la" if la else ""}/{label}')
-        # Retained DeepRSmallK: P16 × 7 ownership variants × 3 compiled
-        # transforms × 4 compiled FP32 combines. The five row depths are a
-        # runtime operand since P5-C, except for the one-component kernel,
-        # which is compiled at each depth. FP8 formats are instantiated separately.
+        # DeepRSmallK: P16 × 7 ownership variants × 3 compiled transforms ×
+        # 4 compiled FP32 combines. The five row depths are a runtime operand,
+        # except for the one-component kernel, which is compiled at each depth.
+        # FP8 formats are instantiated separately.
         # Staged output is always unfinalized FP32.
         for transform, label in (('IdentityFp32', 'Identity'),
                                  ('AbsoluteValueFp32', 'ABS'),
@@ -252,39 +264,39 @@ def generate(source: Path, out: Path):
                                            ('PropagatingMaximumFp32', 'MAX')):
                 for lanes in (8, 4):
                     add('narrow', 'DeepRSmallK', short,
-                        'narrowFp8PackedFlatRCooperativeTinyKFirstStageKernel',
+                        'deepRSmallKValueTinyKKernel',
                         f'{dtype}, {combine}, {transform}, 16, {lanes}',
                         f'P16/tiny-lanes{lanes}/{label}/{combine_label}')
                 # One component per lane (K 9..32) keeps a compiled depth (log2) at every
-                # retained depth; the runtime depth cost it up to 4.8% (1080).
+                # row depth; a runtime depth cost it up to 4.8%.
                 for rows in DEEP_ROWS:
                     add('narrow', 'DeepRSmallK', short,
-                        'narrowFp8PackedFlatRCooperativeFirstStageKernel',
+                        'deepRSmallKValueKernel',
                         f'{dtype}, {combine}, {transform}, 16, 1, {rows.bit_length() - 1}',
                         f'rows{rows}/P16/components1/{label}/{combine_label}')
                 for components in (2, 4, 5, 8):
                     add('narrow', 'DeepRSmallK', short,
-                        'narrowFp8PackedFlatRCooperativeFirstStageKernel',
+                        'deepRSmallKValueKernel',
                         f'{dtype}, {combine}, {transform}, 16, {components}',
                         f'P16/components{components}/{label}/{combine_label}')
-        # AlignedK retains its independently selected mixed operation policy.
+        # AlignedK keeps its independently selected mixed operation policy.
         for transform, label in (('IdentityFp32', 'Identity'),
                                  ('AbsoluteValueFp32', 'ABS'),
                                  ('SquareFp32', 'Square')):
             for topology, combos in [('Complete',ALIGNED_COMPLETE),('Staged',ALIGNED_STAGED)]:
                 for p,threads in combos:
                     if topology == 'Staged' and transform == 'IdentityFp32':
-                        add('aligned','AlignedK',short,'kParallelFp8StagedHoistedCombineKernel',
+                        add('aligned','AlignedK',short,'fp8AlignedKValueStagedUnifiedKernel',
                             f'{dtype}, {p}, {threads}', f'{topology}/P{p}/CTA{threads}/{label}/4-ops')
                     elif topology == 'Complete' and transform == 'IdentityFp32':
                         if p == 8 and threads == 64:
-                            # Typed additive SUM/MEAN is the only retained typed
-                            # Identity Complete operation at these physical axes.
-                            add('aligned','AlignedK',short,'kParallelFp8PacketKernel',
-                                f'{dtype}, IdentityFp32, cuda::std::plus<float>, AdditiveFinalizeFp32, 8, 64, TiledRKStageTopology::Complete',
+                            # Typed additive SUM/MEAN is the only typed Identity
+                            # Complete operation at these physical axes.
+                            add('aligned','AlignedK',short,'fp8AlignedKValueKernel',
+                                f'{dtype}, IdentityFp32, cuda::std::plus<float>, AdditiveFinalizeFp32, 8, 64, RKStageTopology::Complete',
                                 'Complete/P8/CTA64/Identity/typed-SUM-MEAN')
                         policy = 'Joined' if p == 2 else 'InBranch'
-                        add('aligned','AlignedK',short,'kParallelFp8CompleteUnifiedKernel',
+                        add('aligned','AlignedK',short,'fp8AlignedKValueCompleteUnifiedKernel',
                             f'{dtype}, {p}, {threads}, Fp8CompleteFinalizePolicy::{policy}',
                             f'Complete/P{p}/CTA{threads}/Identity/{policy}-runtime-op')
                     else:
@@ -294,12 +306,12 @@ def generate(source: Path, out: Path):
                         if prune_key in dropped_aligned:
                             matched.add(prune_key)
                             continue
-                        add('aligned','AlignedK',short,'kParallelFp8PacketKernel',
-                            f'{dtype}, {transform}, cuda::std::plus<float>, AdditiveFinalizeFp32, {p}, {threads}, TiledRKStageTopology::{topology}',
+                        add('aligned','AlignedK',short,'fp8AlignedKValueKernel',
+                            f'{dtype}, {transform}, cuda::std::plus<float>, AdditiveFinalizeFp32, {p}, {threads}, RKStageTopology::{topology}',
                             f'{topology}/P{p}/CTA{threads}/{label}')
-        # After enabling ABS/square with PRODUCT/MIN/MAX in production AlignedK,
-        # these are individually compiled typed kernel specializations, unlike
-        # the shared Identity Hoisted/Unified operation implementations above.
+        # ABS/square with PRODUCT/MIN/MAX are individually compiled typed kernel
+        # specializations in production AlignedK, unlike the shared Identity
+        # Hoisted/Unified operation implementations above.
         for transform, label, suffix in (('AbsoluteValueFp32', 'ABS', 'abs'),
                                          ('SquareFp32', 'Square', 'square')):
             for operation, op_label, reduction in ALIGNED_TYPED_OPERATIONS:
@@ -311,22 +323,22 @@ def generate(source: Path, out: Path):
                         if prune_key in dropped_aligned:
                             matched.add(prune_key)
                             continue
-                        add('aligned', 'AlignedK', short, 'kParallelFp8PacketKernel',
-                            f'{dtype}, {transform}, {reduction}, IdentityFp32, {packet}, {threads}, TiledRKStageTopology::{topology}',
+                        add('aligned', 'AlignedK', short, 'fp8AlignedKValueKernel',
+                            f'{dtype}, {transform}, {reduction}, IdentityFp32, {packet}, {threads}, RKStageTopology::{topology}',
                             f'{topology}/P{packet}/CTA{threads}/{label}/{op_label}')
-        # Transformed additive SUM kernels are already represented in the
-        # legacy 56 baseline symbols above. Omit them only if the analyzer
-        # explicitly nominated that exact typed symbol.
-        # RuntimeK retains all four compile-time FP32 combines. Packet kernels
+        # Transformed additive SUM kernels are added above (sum_abs / sum_square);
+        # like these, each is omitted only if the accepted prune list names that
+        # exact typed symbol.
+        # RuntimeK compiles all four FP32 combines. Packet kernels
         # specialize FixedOp (the established typed A/B implementation); Rotated
         # kernels use their existing canonical typed reduction functors. Both
         # FP8 formats and all three transforms are separate compiled variants.
-        # Packet warp/tile/shard geometry remains runtime, and Rotated retains
-        # only the six selected compiled row depths for each layout.
+        # Packet warp/tile/shard geometry remains runtime, and Rotated compiles
+        # only the six selected row depths for each layout.
         for operation, op_label, combine in RUNTIME_K_OPERATIONS:
             folded = op_label in ('MIN', 'MAX')
             for transform, label in ((0, 'Identity'), (1, 'ABS'), (2, 'Square')):
-                add('narrow', 'RuntimeK', short, 'fp8GeneralRParallelKTileP16CompleteKernel',
+                add('rotated', 'RuntimeK', short, 'packetCompleteValueKernel',
                     f'{dtype}, {transform}, {operation}',
                     f'PacketP16/Complete/{label}/{op_label}')
             for exact in (False, True):
@@ -337,14 +349,14 @@ def generate(source: Path, out: Path):
                                              (('IdentityFp32', 'Identity'),
                                               ('AbsoluteValueFp32', 'ABS'),
                                               ('SquareFp32', 'Square'))):
-                        add('rotated', 'RuntimeK', short, 'awkwardAlignmentRotatedShardedFirstStageKernel',
+                        add('rotated', 'RuntimeK', short, 'runtimeKRotatedValueKernel',
                             f'{dtype}, {combine}, {transform}, {rows}, 16, 16, {str(exact).lower()}',
                             f'Rotated/{"Exact" if exact else "Prefix"}/P16/rows{rows}/{label}/'
                             f'{"MIN-MAX" if folded and not exact else op_label}')
 
     # ARG twins: argmin/argmax x E4M3/E5M2 are runtime (one kernel per physical shape).
     for kernel, args, config in ARG_KERNELS:
-        add('narrow', 'ARG', 'E4M3+E5M2', kernel, args, f'ARG/{config}')
+        add(ARG_KERNEL_TUS.get(kernel, 'narrow'), 'ARG', 'E4M3+E5M2', kernel, args, f'ARG/{config}')
 
     unknown = dropped_aligned - matched
     if unknown:
@@ -357,13 +369,13 @@ def generate(source: Path, out: Path):
         end = (f'\n// Exact selected GPU symbol roots: no oracle dispatch is referenced here.\n'
                f'extern "C" void thor_fp8_selected_{tu}_kernel_references(const void** out) {{\n'
                f'{body}\n}}\n'
-               f'}} // anonymous namespace\n}} // ThorImplementation::CubReductionInternal\n')
+               f'}} // anonymous namespace\n}} // ThorImplementation::ReductionInternal\n')
         generated = ('// GENERATED: isolated FP8 inventory size probe; do not edit or use for production.\n'
                      f'// Extracted from {specs[tu][0]}, preserving the source kernel definitions.\n'
                      + prefix + '\n#if !THOR_CUB_ENABLE_FP8_TYPES\n#error FP8 must be enabled for the isolated size probe\n#endif\n' + end)
         (out/f'{tu}.cu').write_text(generated)
     (out/'expected.json').write_text(json.dumps(manifest,indent=2)+'\n')
-    for tu in ('narrow','aligned','rotated'):
+    for tu in INVENTORY_TUS:
         assert (out/f'{tu}.cu').exists()
     modes = Counter(m['mode'] for m in manifest)
     expected_counts = Counter(EXPECTED_COUNTS)
@@ -390,7 +402,7 @@ def generate(source: Path, out: Path):
                                     for topology, expected in (
                                         ('PacketP16', 12),
                                         ('Rotated', 90))}), rt_topologies
-    print('Generated 3 CUDA source TUs in',out)
+    print(f'Generated {len(INVENTORY_TUS)} CUDA source TUs in',out)
     print('Expected selected first-stage specializations:',dict(modes))
 
 
@@ -433,7 +445,7 @@ def analyze(objects: list[Path], archive: Path, out: Path):
     object_rows=[]; rows=[]; extra=[]; support=[]
     for object_path in objects:
         obj=object_path.resolve(strict=True)
-        tu=next((n for n in ('narrow','aligned','rotated') if obj.name == f'{n}.cu.o'),None)
+        tu=next((n for n in INVENTORY_TUS if obj.name == f'{n}.cu.o'),None)
         if tu is None: raise SystemExit(f'Unrecognized generated object: {obj}')
         obj_out=out/'cubins'/tu
         obj_out.mkdir(parents=True,exist_ok=True)

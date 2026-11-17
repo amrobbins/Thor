@@ -1,20 +1,13 @@
-// 1388: Thor's dense copy of a strided span (StridedCopy.h; the plan in DenseCopyPlan.h; 1389: the transpose's loads in
-// flight, rectangular tiles and any number of batch axes, after thor_dense_copy_audit; 1389b: PackedGather). Three
-// kernels over the word width (1, 2, 4, 8, 16 bytes): RowCopy, in a 32-bit and a 64-bit index form, PackedGather
-// (words of 1, 2 or 4 bytes) and Transpose. They copy words, so they are independent of the dtype. Through 1387 any
-// span that was neither dense nor one pitch of dense rows ran a gather of one element per thread with a 64-bit
-// division and modulo per axis per element. 1389e: a MatrixTranspose plan (a plain rotation of a dense matrix)
-// launches the matrix transpose kernel of gpuMatrixTransposeKernels.cu on unsigned words (1394: moved here). 1389g:
-// the transpose takes its tiles in either order (DenseCopyPlan::tile_v_first), for the audit's probe; the planner's
-// plans are as before.
-// 1389h: a launch is one CTA per unit of work (DenseCopyInternal::gridOf). Through 1389g it was the CTAs resident at
-// once, each looping over its share of the units; the kernels' loops over the units are kept, so they still run on
-// any smaller grid (the probe's and the tests'). 1389j: transposes of single bytes take denseTransposeBytesKernel,
-// four bytes at a time. 1389k: the matrix transpose kernel for words of 2 or 4 bytes only. 1389n: the row copy took
-// its words per thread from the plan (row_items), so the audit's probe could vary them; 1395 compiles the planner's
-// counts only.
-// 1389o: the planner's row copy is one 4-byte word or two 2-byte words a thread and step; the transpose's loads in
-// flight are as before (transposeLoadItems). 1389p: that short step by size and stride only (rowCopyStepItems).
+// Thor's dense copy of a strided span (StridedCopy.h; the plan in DenseCopyPlan.h). Four kernels over the word width
+// (1, 2, 4, 8, 16 bytes): RowCopy, in a 32-bit and a 64-bit index form; PackedGather (words of 1, 2 or 4 bytes);
+// Transpose, with its packed form for single bytes (denseTransposeBytesKernel, four bytes at a time); and, for a
+// MatrixTranspose plan (a plain rotation of a dense matrix of 2- or 4-byte words), denseMatrixTransposeKernel. They
+// copy words, so they are independent of the dtype.
+// A launch is one CTA per unit of work (DenseCopyInternal::gridOf). The kernels loop over the units, so they also run
+// on any smaller grid (the probe's and the tests'). The transpose takes its tiles in either order
+// (DenseCopyPlan::tile_v_first: the planner's for long source rows, packed bytes and wide rotations; the probe's by
+// hand). The row copy takes rowCopyStepItems words a thread and step: two counts per word are compiled (one for 1-, 8-
+// and 16-byte words); the transpose's loads in flight are transposeLoadItems.
 
 #include "Utilities/TensorOperations/Copy/StridedCopy.h"
 
@@ -29,12 +22,12 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Expression/CudaHelpers.h"
-#include "Utilities/TensorOperations/Cub/FastDivU32.h"
+#include "Utilities/TensorOperations/Reduction/Kernels/FastDivU32.h"
 
 namespace ThorImplementation {
 namespace {
 
-using CubReductionInternal::FastDivU32;
+using ReductionInternal::FastDivU32;
 using DenseCopyInternal::MAX_RANK;
 using DenseCopyInternal::THREADS;
 
@@ -104,7 +97,7 @@ template <typename Word>
 constexpr uint32_t TRANSPOSE_LOAD_ITEMS = DenseCopyInternal::transposeLoadItems(sizeof(Word));
 
 // The destination in order, so writes are coalesced; each thread loads all of its words before storing any.
-// 1389n: ITEMS words a thread per step (the plan's rowCopyStepItems; the planner's is rowCopyItems of the word).
+// ITEMS words a thread per step (the plan's rowCopyStepItems).
 template <typename Word, bool Fast, uint32_t ITEMS>
 __global__ __launch_bounds__(THREADS) void denseRowCopyKernel(const Word* __restrict__ source,
                                                               Word* __restrict__ destination,
@@ -126,8 +119,8 @@ __global__ __launch_bounds__(THREADS) void denseRowCopyKernel(const Word* __rest
     }
 }
 
-// PackedGather (1389b): the source word of destination word j of single words (p = 1) over two or more outer axes,
-// with its coordinates on the two innermost outer axes. Indices below 2^31 (the planner checks).
+// PackedGather: the source word of destination word j of single words (p = 1) over two or more outer axes, with its
+// coordinates on the two innermost outer axes. Indices below 2^31 (the planner checks).
 __device__ __forceinline__ uint64_t packedGatherSourceWord(const RowCopyArgs& a, uint32_t j, uint32_t& c0,
                                                            uint32_t& c1) {
     uint32_t rest = a.dim_divs[0].divide(j);
@@ -170,12 +163,12 @@ __device__ __forceinline__ uint4 packWords(const Word* w) {
     }
 }
 
-// PackedGather (1389b): each thread gathers the 16 / W consecutive destination words of one 16-byte destination word
-// (a pack), all loaded before the one store. Through 1389a these were row-copy words: an address decode over every
-// outer axis and a 1-, 2- or 4-byte store for each. Here the source address is decoded once a pack and then steps
-// along the innermost outer axis, carrying into the next one; a carry past that decodes again. The packs are in
-// destination order across the threads, so a warp's store is 512 consecutive bytes. The words past the last whole
-// pack (fewer than 16 / W) are stored singly by the first block.
+// PackedGather: each thread gathers the 16 / W consecutive destination words of one 16-byte destination word (a pack),
+// all loaded before the one store, where a row copy decodes an address over every outer axis and stores 1, 2 or 4 bytes
+// for each word. Here the source address is decoded once a pack and then steps along the innermost outer axis, carrying
+// into the next one; a carry past that decodes again. The packs are in destination order across the threads, so a
+// warp's store is 512 consecutive bytes. The words past the last whole pack (fewer than 16 / W) are stored singly by
+// the first block.
 template <typename Word>
 __global__ __launch_bounds__(THREADS) void densePackedGatherKernel(const Word* __restrict__ source,
                                                                    Word* __restrict__ destination,
@@ -197,9 +190,9 @@ __global__ __launch_bounds__(THREADS) void densePackedGatherKernel(const Word* _
         for (uint32_t k = 0; k < PACK; ++k) {
             w[k] = source[offset];
             if (k + 1 < PACK) {
-                // Branches. As selects (1389c) the step measured up to 1.5x faster on packed gathers under 5 MiB
-                // and 1.14x to 2.27x slower on two of the audit's general permutations of 24 and 31 MiB at 1- and
-                // 2-byte words (58.8 to 133 us at worst). The cause was not found; 1389d put the branches back.
+                // Branches. As selects the step measured up to 1.5x faster on packed gathers under 5 MiB and 1.14x to
+                // 2.27x slower on two of the audit's general permutations of 24 and 31 MiB at 1- and 2-byte words (58.8
+                // to 133 us at worst); the cause was not found.
                 if (++c0 < d0) {
                     offset += s0;
                 } else {
@@ -225,8 +218,8 @@ struct TransposeArgs {
     uint32_t out_width = 32;  // words of a destination segment: tile_v vectors
     uint32_t pitch = 33;      // shared words between tile rows
     uint32_t tiles_x = 1, tiles_v = 1, tiles_xv = 1, tiles = 1, batch_rank = 0;
-    uint32_t v_first = 0;  // 1389g: the plan's tile_v_first
-    uint32_t quads = 1;    // 1389j, packed bytes: blocks of four v rows in a tile
+    uint32_t v_first = 0;  // the plan's tile_v_first
+    uint32_t quads = 1;    // packed bytes: blocks of four v rows in a tile
     uint64_t x_dest_stride = 0, v_source_stride = 0;
     uint64_t batch_dims[MAX_RANK]{};
     uint64_t batch_source[MAX_RANK]{};
@@ -236,10 +229,10 @@ struct TransposeArgs {
 };
 
 // A tile is tile_v v rows (its rows) of tile_x x vectors of p words (width words, pitch apart). Source v rows are read
-// in order into the tile, each thread loading ITEMS words before it stores any (1389: through 1388 one load at a time,
-// so a tile cost one memory latency per word per thread); destination x rows are written in order from it. Every
-// index is below 2^31 (the planner checks); offsets are 64-bit. 1389g: the tiles of a plane are taken along x within a
-// band of tile_v v rows, or (v_first, which only the audit's probe sets) along v within tile_x x rows.
+// in order into the tile, each thread loading ITEMS words before it stores any (one load at a time costs a tile one
+// memory latency per word per thread); destination x rows are written in order from it. Every index is below 2^31 (the
+// planner checks); offsets are 64-bit. The tiles of a plane are taken along x within a band of tile_v v rows, or
+// (v_first) along v within tile_x x rows.
 template <typename Word>
 __global__ __launch_bounds__(THREADS) void denseTransposeKernel(const Word* __restrict__ source,
                                                                 Word* __restrict__ destination,
@@ -310,8 +303,8 @@ __global__ __launch_bounds__(THREADS) void denseTransposeKernel(const Word* __re
     }
 }
 
-// 1389j: the four bytes row[at], ..., row[at + 3] in one word, the first in the low byte, from the aligned words that
-// hold them. Bytes past row[valid - 1] are undefined: a word with none of row[0], ..., row[valid - 1] is not read.
+// The four bytes row[at], ..., row[at + 3] in one word, the first in the low byte, from the aligned words that hold
+// them. Bytes past row[valid - 1] are undefined: a word with none of row[0], ..., row[valid - 1] is not read.
 __device__ __forceinline__ uint32_t loadFourBytes(const uint8_t* row, uint32_t at, uint32_t valid) {
     const uintptr_t first = reinterpret_cast<uintptr_t>(row + at);
     const uint32_t* word = reinterpret_cast<const uint32_t*>(first & ~uintptr_t{3});
@@ -322,7 +315,7 @@ __device__ __forceinline__ uint32_t loadFourBytes(const uint8_t* row, uint32_t a
     return __funnelshift_r(low, next ? __ldg(word + 1) : 0u, shift);
 }
 
-// 1389j: w[k] holds byte j of row k (columns in the bytes); afterwards w[j] holds row k in its byte k, column j.
+// w[k] holds byte j of row k (columns in the bytes); afterwards w[j] holds row k in its byte k, column j.
 __device__ __forceinline__ void transposeFourByFour(uint32_t (&w)[4]) {
     const uint32_t a = __byte_perm(w[0], w[1], 0x5140), b = __byte_perm(w[0], w[1], 0x7362);
     const uint32_t c = __byte_perm(w[2], w[3], 0x5140), d = __byte_perm(w[2], w[3], 0x7362);
@@ -332,13 +325,13 @@ __device__ __forceinline__ void transposeFourByFour(uint32_t (&w)[4]) {
     w[3] = __byte_perm(b, d, 0x7632);
 }
 
-// Transpose of single bytes (1389j: plans of 1-byte words with p = 1). As denseTransposeKernel, with the bytes four at
-// a time: a thread loads a block of 4 x 4 bytes (four v rows, four x columns, each row's four bytes as one 4-byte
-// word from the aligned words that hold them, so any base and stride), transposes it in registers and writes the four
-// words, each four v rows of one x row, into the tile; the destination x rows are then written in aligned 4-byte
-// words where the whole word lies in the tile's v rows, and byte by byte at the two ends of a row otherwise. Through
-// 1389i every byte had its own load, shared store, shared load and store, with an index decode per byte: the 1-byte
-// transposes ran at 0.45 to 0.88 of the copy curve from 16 MiB, the same rotations at 2-byte words at 0.97 to 1.04.
+// Transpose of single bytes (plans of 1-byte words with p = 1). As denseTransposeKernel, with the bytes four at a time:
+// a thread loads a block of 4 x 4 bytes (four v rows, four x columns, each row's four bytes as one 4-byte word from the
+// aligned words that hold them, so any base and stride), transposes it in registers and writes the four words, each
+// four v rows of one x row, into the tile; the destination x rows are then written in aligned 4-byte words where the
+// whole word lies in the tile's v rows, and byte by byte at the two ends of a row otherwise. With its own load, shared
+// store, shared load and store and an index decode per byte, the 1-byte transposes ran at 0.45 to 0.88 of the copy
+// curve from 16 MiB, the same rotations at 2-byte words at 0.97 to 1.04.
 // The tile is tile_x rows (rounded up to 4) of `pitch` words, a power of two; word r of x row c sits at
 // r ^ ((c / 4) % pitch), so the four words a block writes and the words a destination row reads fall in distinct
 // banks.
@@ -468,7 +461,7 @@ __global__ __launch_bounds__(THREADS) void denseTransposeBytesKernel(const uint8
     a.width_div = FastDivU32::make(a.width);
     a.out_width_div = FastDivU32::make(a.out_width);
     a.p_div = FastDivU32::make(a.p);
-    if (DenseCopyInternal::transposePacksBytes(plan.p, plan.word_bytes)) {  // 1389j: denseTransposeBytesKernel
+    if (DenseCopyInternal::transposePacksBytes(plan.p, plan.word_bytes)) {  // denseTransposeBytesKernel
         a.width = (plan.tile_x + 3) / 4;
         a.quads = (plan.tile_v + 3) / 4;
         a.out_width = (plan.tile_v + 6) / 4;
@@ -479,9 +472,8 @@ __global__ __launch_bounds__(THREADS) void denseTransposeBytesKernel(const uint8
     return a;
 }
 
-// The row copy on the planner's words per thread (rowCopyStepItems). 1395: its two counts per word are the only ones
-// compiled (one for 1-, 8- and 16-byte words): 14 kernels. 1389n-1394 compiled 1, 2, 4, 8 and 16 for every word (50),
-// for the audit's probe.
+// The row copy on the planner's words per thread (rowCopyStepItems): its two counts per word are the only ones compiled
+// (one for 1-, 8- and 16-byte words), 14 kernels.
 template <typename Word, bool Fast>
 void launchRowCopy(const DenseCopyPlan& plan, const Word* in, Word* out, cudaStream_t stream) {
     constexpr uint32_t LONG_ITEMS = DenseCopyInternal::rowCopyItems(sizeof(Word));
@@ -519,11 +511,10 @@ void launchTyped(const DenseCopyPlan& plan, const void* source, void* destinatio
     CUDA_CHECK(cudaPeekAtLastError());
 }
 
-// 1394: the matrix transpose kernel of a MatrixTranspose plan, moved here from gpuMatrixTransposeKernels.cu (deleted
-// with its dtype-cast path and typed entry points; its one production caller, the cuBLAS FP8 operand transpose, is a
-// dense copy now). The body is that kernel's with the input and output word one type, so nothing converts. 32 x 32
-// tiles of packed 4-byte words (PACK words of 4 / PACK bytes each), 8 rows of threads; int indices and at most 65,535
-// row tiles, which matrixTransposeFits (DenseCopyPlan.cpp) checks. Words of 2 or 4 bytes (1389k).
+// The matrix transpose kernel of a MatrixTranspose plan (the cuBLAS FP8 operand transpose is a dense copy too), with
+// the input and output word one type, so nothing converts. 32 x 32 tiles of packed 4-byte words (PACK words of 4 / PACK
+// bytes each), 8 rows of threads; int indices and at most 65,535 row tiles, which matrixTransposeFits
+// (DenseCopyPlan.cpp) checks. Words of 2 or 4 bytes.
 constexpr int MATRIX_TILE = 32;
 constexpr int MATRIX_BLOCK_ROWS = 8;
 
@@ -782,9 +773,9 @@ void launchCopyToDense(const DenseCopyPlan& plan, const StridedSpan& source, con
         return;
     }
     if (plan.family == DenseCopyFamily::MatrixTranspose) {
-        // 1389e: the source is the dense [v, x] matrix of words (the planner checked); the kernel writes its
-        // [x, v] transpose. Unsigned words, copied as they are whatever the dtype (1394: denseMatrixTransposeKernel).
-        // 1389k: words of 2 or 4 bytes; single bytes are Transposes (the packed byte tile).
+        // The source is the dense [v, x] matrix of words (the planner checked); denseMatrixTransposeKernel writes its
+        // [x, v] transpose. Unsigned words, copied as they are whatever the dtype. Words of 2 or 4 bytes; single bytes
+        // are Transposes (the packed byte tile).
         if (plan.word_bytes == 2) {
             launchMatrixTranspose<uint16_t>(plan, in, out, stream.getStream());
         } else if (plan.word_bytes == 4) {

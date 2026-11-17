@@ -1,78 +1,63 @@
-// 1263: thor_ragged_reduction_audit. What a user gets from a production CubSegmentedReduction /
-// CubSegmentedArgReduction stamp (values [rows, D...], row offsets [segments + 1]) at any distribution of segment
-// lengths, timed cold against the copy curve of the same GPU, in TB/s. Phase 0 of
-// plans/Thor_Ragged_Reduction_Plan_2026-11-06.md: the baseline of the current kernels, and the before / after check of
-// every later phase.
+// thor_ragged_reduction_audit. What a user gets from a production SegmentedReducer / SegmentedArgReducer stamp (values
+// [rows, D...], row offsets [segments + 1]) at any distribution of segment lengths, timed cold against the copy curve
+// of the same GPU, in TB/s.
 //
 // Cells (benchmarks/RaggedReductionAuditCells.h): --shapes seeded shapes, each run under every distribution in
 // --distributions, so the report can compare distributions at a fixed (rows, segments, D, dtype, op). A shape draws an
-// op from --ops, D from --d-values, an offset dtype from --offsets, a capacity ratio from --capacity-ratios (values hold
-// ceil(rows * ratio) rows, of which the offsets make the first `rows` active), a moved-bytes target log-uniform from
-// --min-kib to --max-mib, and a mean segment length log-uniform from 1 to --max-mean-length. D = 1 is rank-1 values.
-// VALUE output is FP32; ARG writes a UINT32 index (UINT64 when the packed indices need it).
+// op from --ops, D from --d-values, an offset dtype from --offsets, a capacity ratio from --capacity-ratios (values
+// hold ceil(rows * ratio) rows, of which the offsets make the first `rows` active), a moved-bytes target log-uniform
+// from --min-kib to --max-mib, and a mean segment length log-uniform from 1 to --max-mean-length. D = 1 is rank-1
+// values. VALUE output is FP32; ARG writes a UINT32 index (UINT64 when the packed indices need it).
 //
-// Method (benchmarks/ColdTiming.h, as thor_dense_production_audit): the input ring holds 0.5 in the input dtype in every
-// element. Each cell is stamped once on its first views (stampRuntimeOffsets, the Expression / network path, or with
-// --stamp=validated the stamp that reads the offsets), then run with runOnTensorsForBenchmark on rotating input views
-// spanning at least 2 GiB, rotating offsets copies spanning at least --offsets-reuse-mib (each cell owns its copies)
-// and rotating output views spanning at least 1 GiB. One verified run (each segment against its closed form, see the
-// header), one untimed run, one timed probe, then --samples samples of about --interval-us of back-to-back runs (at
-// most --max-launches), interleaved across the cells of a batch.
+// Method (benchmarks/ColdTiming.h, as thor_dense_production_audit): the input ring holds 0.5 in the input dtype in
+// every element. Each cell is stamped once on its first views (stampRuntimeOffsets, the Expression / network path, or
+// with --stamp=validated the stamp that reads the offsets), then run with runOnTensorsForBenchmark on rotating input
+// views spanning at least 2 GiB, rotating offsets copies spanning at least --offsets-reuse-mib (each cell owns its
+// copies) and rotating output views spanning at least 1 GiB. One verified run (each segment against its closed form,
+// see the header), one untimed run, one timed probe, then --samples samples of about --interval-us of back-to-back runs
+// (at most --max-launches), interleaved across the cells of a batch.
 //
 // Moved bytes are the active input, the offsets and the outputs; the reference is the copy curve (a device copy moving
 // the same bytes, measured the same way at startup).
 //
-// Output: '#' header lines (settings, device, copy curve) and one CSV row per cell. benchmarks/ragged_reduction_audit.py
-// reports it.
+// Output: '#' header lines (settings, device, copy curve) and one CSV row per cell.
+// benchmarks/ragged_reduction_audit.py reports it.
 //
-// 1265: --backend=ragged_kr times the retained ragged KR VALUE kernel (Cub/RaggedReduction.h, not yet routed) instead
-// of the production stamp: FP8 input, D = 1, SUM / MEAN / MIN / MAX only (other cells are skipped and counted). Every
-// eligible cell runs once per --ragged-kr-shapes candidate on its persistent grid (one '# ragged_kr_candidate' line
-// each); the report keeps each cell's best candidate for the gate and lists the candidates. The ragged_kr and
-// production runs of one setting draw the same shapes, so --compare in the report is the before / after.
-//
-// 1275: --ragged-kr-time=main (or finish) times the main kernel (or the finisher) alone, for the phase 2 gate's speed
-// and spread clauses (the main kernel against the copy curve; the finisher is a fixed tax per stamped grid). The
-// outputs of those timed runs are incomplete; verification and the untimed run launch both kernels.
-//
-// 1280: FP8 cells with D up to 15 (rows under 16 bytes) are eligible too (the components kernel at D >= 2). Each
-// candidate has a grid per kernel (D = 1 and D >= 2, their residencies differ; both on its '# ragged_kr_candidate'
-// line), and each cell's workspace holds its D's records.
-//
-// 1284 (phase 3b): every input dtype is eligible, at D up to raggedKRMaxComponents (rows under 16 bytes: FP16 / BF16
-// D <= 7, FP32 D <= 3), through the one launcher (launchRaggedKRValue).
-//
-// 1285 (phase 4): FP8 cells (1295: every dtype) with rows of 16 bytes and more run ragged RK (launchRaggedRKValue) once per
-// --ragged-rk-shapes candidate (each candidate's CTA budget on a '# ragged_rk_candidate' line; passes
-// "ragged_rk:<shape>+ragged_finish"); --ragged-kr-time applies to both families.
-//
-// 1298 (phase 5): ARG cells that ragged KR ARG takes (raggedKRArgSupported: FP8 at D = 1; 1300: D 1 to 15; 1311:
-// FP16 / BF16 at D 1 to 7; 1313: FP32 at D 1 to 3) run launchRaggedKRArg once per --ragged-kr-shapes candidate on the
-// ARG kernel's grid (arg_grid, and 1300 arg_components_grid for D >= 2, on the '# ragged_kr_candidate' line; passes
-// "ragged_kr:<shape>+ragged_finish_arg"), verified against the closed form like the production ARG cells.
-//
-// 1314 (phase 5): ARG cells with rows of 16 bytes and more that ragged RK ARG takes (raggedRKArgSupported: FP8 at D >=
-// 16; 1320: FP16 / BF16 at D >= 8; 1321: FP32 at D >= 4) run launchRaggedRKArg once per --ragged-rk-shapes candidate
-// on the RK ARG kernels' CTA budget (arg_ctas on the '# ragged_rk_candidate' line; passes
-// "ragged_rk:<shape>+ragged_finish_arg").
-//
-// 1323 (phase 6): --backend=ragged_select runs the cells --backend=ragged_kr runs, once each, on the shape the ragged
-// selector picks at stamp time (selectCachedRagged, Cub/RaggedStampAutotuner.h: every candidate timed on synthetic
-// uniform offsets at the cell's N, B, D and input alignment; stamp_ms is the selection's time, near 0 when another
-// distribution of the shape already filled the cache). passes is the winner's name; a '# ragged_select' line per cell
-// gives the contest (each candidate's time on the synthetic offsets) and whether it hit the cache. Joined with a
-// --backend=ragged_kr run of the same settings (the same shapes, each candidate on the real offsets), it measures the
-// pick's regret per distribution.
-//
-// 1325 (phase 7) added --ragged-routing=on|off; 1328 (phase 8) removed it with the switch: --backend=production now
-// stamps the retained ragged kernels wherever a ragged family runs the cell (passes names them).
+// Backends:
+//   - --backend=production (the default): the stamp, which runs the ragged kernels wherever a ragged family runs the
+//     cell (passes names them).
+//   - --backend=ragged_kr: the ragged kernels launched directly, once per candidate shape. VALUE SUM / MEAN / MIN / MAX
+//     with rows under 16 bytes (D x element bytes <= 15: FP8 D 1..15, FP16 / BF16 D 1..7, FP32 D 1..3) run ragged KR
+//     (launchRaggedKRValue) once per --ragged-kr-shapes candidate on its persistent grid; each candidate has a grid per
+//     kernel (D = 1 and D >= 2, their residencies differ; both on its '# ragged_kr_candidate' line), and each cell's
+//     workspace holds its D's records. Rows of 16 bytes and more run ragged RK (launchRaggedRKValue) once per
+//     --ragged-rk-shapes candidate (each candidate's CTA budget on a '# ragged_rk_candidate' line; passes
+//     "ragged_rk:<shape>+ragged_finish"). ARG cells that ragged KR ARG takes (raggedKRArgSupported: FP8 at D 1 to 15,
+//     FP16 / BF16 at D 1 to 7, FP32 at D 1 to 3) run launchRaggedKRArg on the ARG kernel's grid (arg_grid, and
+//     arg_components_grid for D >= 2, on the '# ragged_kr_candidate' line; passes
+//     "ragged_kr:<shape>+ragged_finish_arg"), verified against the closed form like the production ARG cells; ARG cells
+//     with rows of 16 bytes and more that ragged RK ARG takes (raggedRKArgSupported: FP8 at D >= 16, FP16 / BF16 at
+//     D >= 8, FP32 at D >= 4) run launchRaggedRKArg on the RK ARG kernels' CTA budget (arg_ctas on the
+//     '# ragged_rk_candidate' line; passes "ragged_rk:<shape>+ragged_finish_arg"). Other cells are skipped and
+//     counted. The report keeps each cell's best candidate and lists the candidates; the ragged_kr and production runs
+//     of one setting draw the same shapes, so --compare in the report is the before / after.
+//   - --backend=ragged_select: the cells --backend=ragged_kr runs, once each, on the shape the ragged selector picks at
+//     stamp time (selectCachedRagged, Reduction/Ragged/RaggedStampAutotuner.h: every candidate timed on synthetic
+//     uniform offsets at the cell's N, B, D and input alignment; stamp_ms is the selection's time, near 0 when another
+//     distribution of the shape already filled the cache). passes is the winner's name; a '# ragged_select' line per
+//     cell gives the contest (each candidate's time on the synthetic offsets) and whether it hit the cache. Joined with
+//     a --backend=ragged_kr run of the same settings (the same shapes, each candidate on the real offsets), it measures
+//     the pick's regret per distribution.
+//   - --ragged-kr-time=main (or finish), with either ragged backend, times the main kernel (or the finisher) alone: the
+//     main kernel against the copy curve; the finisher is a fixed tax per stamped grid. The outputs of those timed runs
+//     are incomplete; verification and the untimed run launch both kernels.
 #include "benchmarks/ColdTiming.h"
 #include "benchmarks/Fp8OracleBatchQueue.h"
 #include "benchmarks/RaggedReductionAuditCells.h"
-#include "Utilities/TensorOperations/Cub/CubReduction.h"
-#include "Utilities/TensorOperations/Cub/CubReductionTuningDepth.h"
-#include "Utilities/TensorOperations/Cub/RaggedReduction.h"
-#include "Utilities/TensorOperations/Cub/RaggedStampAutotuner.h"
+#include "Utilities/TensorOperations/Reduction/SegmentedReducer.h"
+#include "Utilities/TensorOperations/Reduction/ReductionTuningDepth.h"
+#include "Utilities/TensorOperations/Reduction/Ragged/RaggedReduction.h"
+#include "Utilities/TensorOperations/Reduction/Ragged/RaggedStampAutotuner.h"
 #include "Utilities/Common/ScopedGpu.h"
 
 #include <cuda_runtime_api.h>
@@ -95,7 +80,7 @@
 #include <vector>
 
 namespace T = ThorImplementation;
-namespace B = ThorImplementation::CubReductionBenchmarking;
+namespace B = ThorImplementation::ReductionBenchmarking;
 namespace A = ThorImplementation::RaggedReductionAudit;
 using B::ColdTiming::align256;
 using B::ColdTiming::CopyCurve;
@@ -117,16 +102,16 @@ struct OpSpec {
     const char* name;
     bool arg;
     A::Op op;
-    T::CubReductionOp value_op;
-    T::CubArgReductionOp arg_op;
+    T::ReductionOp value_op;
+    T::ArgReductionOp arg_op;
 };
 constexpr OpSpec OPS[] = {
-    {"sum", false, A::Op::Sum, T::CubReductionOp::Sum, T::CubArgReductionOp::ArgMax},
-    {"mean", false, A::Op::Mean, T::CubReductionOp::Mean, T::CubArgReductionOp::ArgMax},
-    {"min", false, A::Op::Min, T::CubReductionOp::Min, T::CubArgReductionOp::ArgMax},
-    {"max", false, A::Op::Max, T::CubReductionOp::Max, T::CubArgReductionOp::ArgMax},
-    {"argmin", true, A::Op::ArgMin, T::CubReductionOp::Min, T::CubArgReductionOp::ArgMin},
-    {"argmax", true, A::Op::ArgMax, T::CubReductionOp::Max, T::CubArgReductionOp::ArgMax},
+    {"sum", false, A::Op::Sum, T::ReductionOp::Sum, T::ArgReductionOp::ArgMax},
+    {"mean", false, A::Op::Mean, T::ReductionOp::Mean, T::ArgReductionOp::ArgMax},
+    {"min", false, A::Op::Min, T::ReductionOp::Min, T::ArgReductionOp::ArgMax},
+    {"max", false, A::Op::Max, T::ReductionOp::Max, T::ArgReductionOp::ArgMax},
+    {"argmin", true, A::Op::ArgMin, T::ReductionOp::Min, T::ArgReductionOp::ArgMin},
+    {"argmax", true, A::Op::ArgMax, T::ReductionOp::Max, T::ArgReductionOp::ArgMax},
 };
 
 const OpSpec& opSpec(std::string_view name) {
@@ -196,7 +181,7 @@ struct Settings {
     uint64_t max_mib = 256;
     uint64_t max_mean_length = uint64_t{1} << 22;
     uint64_t max_cells = UINT64_MAX;
-    std::vector<uint64_t> shape_ids;  // 1269: only these shapes (empty: all); the draws of the others do not change
+    std::vector<uint64_t> shape_ids;  // only these shapes (empty: all); the draws of the others do not change
     int samples = 5;
     double interval_us = 1000.0;
     uint64_t max_launches = 256;
@@ -204,24 +189,23 @@ struct Settings {
     uint64_t output_ring_bytes = 3 * GiB;
     uint64_t offsets_reuse_bytes = 256 * MiB;
     size_t queue_cells = 8;
-    T::CubReductionTuningDepth depth = T::CubReductionTuningDepth::Regular;
+    T::ReductionTuningDepth depth = T::ReductionTuningDepth::Regular;
     bool validated_stamp = false;
     bool ragged_kr = false;  // --backend=ragged_kr
-    bool ragged_select = false;  // 1323: --backend=ragged_select
-    // 1272: the end's extra weight swept; unweighted dropped (it lost to weighted throughout 1268-1271). 1273: i16 won
-    // 264 of 300 cells, its fit put the extra near 4; e12 for comparison, 8 CTAs per SM (1360) to see whether smaller
-    // cells want a smaller grid, and i32 after its copy-order fix. 1274: c8 won every cell below 4 MiB and i32 three
-    // cells in all, so i32 makes way for 4 CTAs per SM (680): the grid for a cell's size is the stamp's choice. 1275:
-    // 680 CTAs won no cell in 1274 and is dropped.
-    std::vector<T::CubReductionInternal::RaggedKRShape> ragged_kr_shapes{
+    bool ragged_select = false;  // --backend=ragged_select
+    // Weighted splits only (unweighted lost to weighted throughout). i16 won 264 of 300 cells and its fit put the end's
+    // extra weight near 4: e12 for comparison, and 8 CTAs per SM (c8, which won every cell below 4 MiB) beside the
+    // persistent grid; the grid for a cell's size is the stamp's choice. i32 (three cells won) and 4 CTAs per SM (none)
+    // are not listed.
+    std::vector<T::ReductionInternal::RaggedKRShape> ragged_kr_shapes{
         {16, 0, true, 4}, {16, 0, true, 12}, {16, 8, true, 4}};
-    // 1285: ragged RK candidates (FP8 rows >= 16 bytes): the auto K tile cap (from the input's size), and the caps 512
-    // and 64, so the first sweep shows what the tile width costs on each side of the auto choice.
-    std::vector<T::CubReductionInternal::RaggedRKShape> ragged_rk_shapes{{0, 0, true, 4}, {512, 0, true, 4},
+    // Ragged RK candidates (FP8 rows >= 16 bytes): the auto K tile cap (from the input's size), and the caps 512 and
+    // 64, so the first sweep shows what the tile width costs on each side of the auto choice.
+    std::vector<T::ReductionInternal::RaggedRKShape> ragged_rk_shapes{{0, 0, true, 4}, {512, 0, true, 4},
                                                                           {64, 0, true, 4}};
-    // 1275: --ragged-kr-time: which kernels the timed runs launch (full: both; main or finish: that kernel alone, the
-    // outputs then incomplete). Verification always runs both.
-    T::CubReductionInternal::RaggedLaunchParts ragged_parts = T::CubReductionInternal::RaggedLaunchParts::MainAndFinish;
+    // --ragged-kr-time: which kernels the timed runs launch (full: both; main or finish: that kernel alone, the outputs
+    // then incomplete). Verification always runs both.
+    T::ReductionInternal::RaggedLaunchParts ragged_parts = T::ReductionInternal::RaggedLaunchParts::MainAndFinish;
     bool verify = true;
     bool list_only = false;
 };
@@ -282,9 +266,9 @@ Settings parse(int argc, char** argv) {
         } else if (auto v = value("--queue-cells=")) {
             s.queue_cells = std::max<size_t>(1, std::stoull(*v));
         } else if (auto v = value("--tuning-depth=")) {
-            if (*v == "quick") s.depth = T::CubReductionTuningDepth::Quick;
-            else if (*v == "regular") s.depth = T::CubReductionTuningDepth::Regular;
-            else if (*v == "ultra") s.depth = T::CubReductionTuningDepth::Ultra;
+            if (*v == "quick") s.depth = T::ReductionTuningDepth::Quick;
+            else if (*v == "regular") s.depth = T::ReductionTuningDepth::Regular;
+            else if (*v == "ultra") s.depth = T::ReductionTuningDepth::Ultra;
             else throw std::invalid_argument("--tuning-depth takes quick, regular or ultra");
         } else if (auto v = value("--stamp=")) {
             if (*v == "runtime") s.validated_stamp = false;
@@ -292,11 +276,11 @@ Settings parse(int argc, char** argv) {
             else throw std::invalid_argument("--stamp takes runtime or validated");
         } else if (auto v = value("--backend=")) {
             s.ragged_kr = *v == "ragged_kr";
-            s.ragged_select = *v == "ragged_select";  // 1323
+            s.ragged_select = *v == "ragged_select";
             if (*v != "production" && !s.ragged_kr && !s.ragged_select)
                 throw std::invalid_argument("--backend takes production, ragged_kr or ragged_select");
         } else if (auto v = value("--ragged-kr-time=")) {
-            using T::CubReductionInternal::RaggedLaunchParts;
+            using T::ReductionInternal::RaggedLaunchParts;
             if (*v == "full") s.ragged_parts = RaggedLaunchParts::MainAndFinish;
             else if (*v == "main") s.ragged_parts = RaggedLaunchParts::MainOnly;
             else if (*v == "finish") s.ragged_parts = RaggedLaunchParts::FinishOnly;
@@ -304,13 +288,13 @@ Settings parse(int argc, char** argv) {
         } else if (auto v = value("--ragged-kr-shapes=")) {
             s.ragged_kr_shapes.clear();
             for (const std::string& name : splitList(*v)) {
-                T::CubReductionInternal::RaggedKRShape shape;
+                T::ReductionInternal::RaggedKRShape shape;
                 char tail = 0;
                 unsigned items = 0, ctas = 0, extra = 0;
                 std::string base = name;
-                shape.weighted = !(base.size() > 2 && base.ends_with("_u"));  // 1268: unweighted split
+                shape.weighted = !(base.size() > 2 && base.ends_with("_u"));  // unweighted split
                 if (!shape.weighted) base.resize(base.size() - 2);
-                // 1272: "_eN" sets the end's extra weight; without it, the default for the rows.
+                // "_eN" sets the end's extra weight; without it, the default for the rows.
                 if (shape.weighted && std::sscanf(base.c_str(), "i%u_c%u_e%u%c", &items, &ctas, &extra, &tail) == 3) {
                     shape.end_extra = static_cast<int32_t>(std::min(extra, 1000U));
                 } else if (std::sscanf(base.c_str(), "i%u_c%u%c", &items, &ctas, &tail) != 2) {
@@ -318,14 +302,14 @@ Settings parse(int argc, char** argv) {
                 }
                 shape.items_per_thread = items;
                 shape.ctas_per_sm = ctas;
-                if (!T::CubReductionInternal::raggedKRShapeLegal(shape))
+                if (!T::ReductionInternal::raggedKRShapeLegal(shape))
                     throw std::invalid_argument("illegal ragged KR shape " + name);
                 s.ragged_kr_shapes.push_back(shape);
             }
-        } else if (auto v = value("--ragged-rk-shapes=")) {  // 1285
+        } else if (auto v = value("--ragged-rk-shapes=")) {
             s.ragged_rk_shapes.clear();
             for (const std::string& name : splitList(*v)) {
-                T::CubReductionInternal::RaggedRKShape shape;
+                T::ReductionInternal::RaggedRKShape shape;
                 std::string base = name;
                 shape.weighted = !(base.size() > 2 && base.ends_with("_u"));
                 if (!shape.weighted) base.resize(base.size() - 2);
@@ -340,7 +324,7 @@ Settings parse(int argc, char** argv) {
                 }
                 shape.tile_bytes = tile;
                 shape.ctas_per_sm = ctas;
-                if (!T::CubReductionInternal::raggedRKShapeLegal(shape))
+                if (!T::ReductionInternal::raggedRKShapeLegal(shape))
                     throw std::invalid_argument("illegal ragged RK shape " + name);
                 s.ragged_rk_shapes.push_back(shape);
             }
@@ -389,7 +373,7 @@ struct CellSpec {
     double capacity_ratio = 1.0;
     T::DataType index_dtype = T::DataType::UINT32;
     int candidate = -1;  // --backend=ragged_kr: the index into --ragged-kr-shapes (rk: --ragged-rk-shapes)
-    bool rk = false;     // 1285: a ragged RK cell (rows of 16 bytes and more)
+    bool rk = false;     // a ragged RK cell (rows of 16 bytes and more)
     [[nodiscard]] uint64_t outputBytesPerElement() const {
         return op->arg ? (index_dtype == T::DataType::UINT64 ? 8 : 4) : 4;
     }
@@ -399,25 +383,25 @@ struct CellSpec {
     [[nodiscard]] uint64_t offsetsSeed(uint64_t seed) const { return A::mix(seed ^ A::mix(shape_id + 0x5EED)); }
 };
 
-// --backend=ragged_kr runs VALUE with rows under 16 bytes (1284: every dtype, D x element bytes <= 15; 1280: FP8 at D 1
-// to 15; 1265-1279: FP8 at D = 1), SUM, MEAN, MIN, MAX; 1298: and ARG where ragged KR ARG takes it (FP8; 1300 D <= 15).
+// --backend=ragged_kr runs VALUE with rows under 16 bytes (every dtype, D x element bytes <= 15), SUM, MEAN, MIN, MAX;
+// and ARG where ragged KR ARG takes it.
 bool raggedKREligible(const Settings& s, const CellSpec& c) {
     const uint32_t bytes = static_cast<uint32_t>(A::elementBytes(s.dtype->format));
-    if (c.op->arg) return T::CubReductionInternal::raggedKRArgSupported(s.dtype->dtype, c.d);  // 1298
-    return c.d >= 1 && c.d <= T::CubReductionInternal::RaggedMergePath::raggedKRMaxComponents(bytes);
+    if (c.op->arg) return T::ReductionInternal::raggedKRArgSupported(s.dtype->dtype, c.d);
+    return c.d >= 1 && c.d <= T::ReductionInternal::RaggedMergePath::raggedKRMaxComponents(bytes);
 }
 
-// 1285: --backend=ragged_kr runs ragged RK on FP8 VALUE cells with rows of 16 bytes and more (1295: every dtype; 1314:
-// and ARG cells ragged RK ARG takes).
+// --backend=ragged_kr runs ragged RK on VALUE cells with rows of 16 bytes and more (every dtype), and on the ARG cells
+// ragged RK ARG takes.
 bool raggedRKEligible(const Settings& s, const CellSpec& c) {
-    if (c.op->arg && !T::CubReductionInternal::raggedRKArgSupported(s.dtype->dtype, c.d)) return false;
-    return c.d * A::elementBytes(s.dtype->format) >= T::CubReductionInternal::RaggedMergePath::RAGGED_RK_MIN_ROW_BYTES;
+    if (c.op->arg && !T::ReductionInternal::raggedRKArgSupported(s.dtype->dtype, c.d)) return false;
+    return c.d * A::elementBytes(s.dtype->format) >= T::ReductionInternal::RaggedMergePath::RAGGED_RK_MIN_ROW_BYTES;
 }
 
 std::vector<CellSpec> cells(const Settings& s, uint64_t* skipped = nullptr) {
     std::vector<CellSpec> out;
     const uint64_t vb = A::elementBytes(s.dtype->format);
-    const bool ragged = s.ragged_kr || s.ragged_select;  // 1323: ragged_select runs the ragged_kr cells
+    const bool ragged = s.ragged_kr || s.ragged_select;  // ragged_select runs the ragged_kr cells
     for (uint64_t shape = 0; shape < s.shapes; ++shape) {
         const A::ShapeDraw draw =
             A::drawShape(s.seed, shape, s.ops.size(), s.d_values.size(), s.offsets.size(), s.capacity_ratios.size(),
@@ -476,16 +460,16 @@ void fillRing(Ring& ring, const std::vector<uint8_t>& element, Stream& stream) {
 
 struct Cell {
     CellSpec spec;
-    std::shared_ptr<T::StampedCubSegmentedReduction> value_stamp;
-    std::shared_ptr<T::StampedCubSegmentedArgReduction> arg_stamp;
+    std::shared_ptr<T::StampedSegmentedReducer> value_stamp;
+    std::shared_ptr<T::StampedSegmentedArgReducer> arg_stamp;
     // --backend=ragged_kr: the candidate's shape and grid, and the boundary workspace.
     bool ragged = false;
-    T::CubReductionInternal::RaggedKRShape ragged_shape;
+    T::ReductionInternal::RaggedKRShape ragged_shape;
     uint32_t ragged_grid = 0;
-    bool ragged_rk = false;  // 1285: ragged RK on a CTA budget
-    T::CubReductionInternal::RaggedRKShape ragged_rk_shape;
+    bool ragged_rk = false;  // ragged RK on a CTA budget
+    T::ReductionInternal::RaggedRKShape ragged_rk_shape;
     uint32_t ragged_rk_ctas = 0;
-    T::CubReductionInternal::RaggedLaunchParts ragged_parts = T::CubReductionInternal::RaggedLaunchParts::MainAndFinish;
+    T::ReductionInternal::RaggedLaunchParts ragged_parts = T::ReductionInternal::RaggedLaunchParts::MainAndFinish;
     std::optional<T::Tensor> ragged_workspace;
     std::vector<T::StridedSpan> inputs, offsets, outputs;  // views of the rings (offsets: of offsets_store)
     std::optional<T::Tensor> offsets_store;  // owned by the cell: other cells' ring takes never overwrite it
@@ -502,8 +486,8 @@ struct Cell {
     std::vector<std::unique_ptr<TimingEvent>> starts, stops;
 };
 
-// 1275: `full` runs both ragged kernels whatever --ragged-kr-time says (the untimed run, so a finish-only cell's
-// records are the main kernel's before it is timed).
+// `full` runs both ragged kernels whatever --ragged-kr-time says (the untimed run, so a finish-only cell's records are
+// the main kernel's before it is timed).
 void runOnce(Cell& cell, Stream& stream, bool full = false) {
     const T::StridedSpan& input = cell.inputs[cell.next_input];
     const T::StridedSpan& offsets = cell.offsets[cell.next_offsets];
@@ -511,29 +495,29 @@ void runOnce(Cell& cell, Stream& stream, bool full = false) {
     cell.next_input = (cell.next_input + 1) % cell.inputs.size();
     cell.next_offsets = (cell.next_offsets + 1) % cell.offsets.size();
     cell.next_output = (cell.next_output + 1) % cell.outputs.size();
-    if (cell.ragged_rk && cell.spec.op->arg) {  // 1314
+    if (cell.ragged_rk && cell.spec.op->arg) {
         const T::StridedSpan& out = output;
-        T::CubReductionInternal::launchRaggedRKArg(cell.spec.op->arg_op, cell.ragged_rk_shape, cell.ragged_rk_ctas,
+        T::ReductionInternal::launchRaggedRKArg(cell.spec.op->arg_op, cell.ragged_rk_shape, cell.ragged_rk_ctas,
                                                    input, offsets, out, *cell.ragged_workspace, stream,
-                                                   full ? T::CubReductionInternal::RaggedLaunchParts::MainAndFinish
+                                                   full ? T::ReductionInternal::RaggedLaunchParts::MainAndFinish
                                                         : cell.ragged_parts);
-    } else if (cell.ragged && cell.spec.op->arg) {  // 1298
+    } else if (cell.ragged && cell.spec.op->arg) {
         const T::StridedSpan& out = output;
-        T::CubReductionInternal::launchRaggedKRArg(cell.spec.op->arg_op, cell.ragged_shape, cell.ragged_grid, input,
+        T::ReductionInternal::launchRaggedKRArg(cell.spec.op->arg_op, cell.ragged_shape, cell.ragged_grid, input,
                                                    offsets, out, *cell.ragged_workspace, stream,
-                                                   full ? T::CubReductionInternal::RaggedLaunchParts::MainAndFinish
+                                                   full ? T::ReductionInternal::RaggedLaunchParts::MainAndFinish
                                                         : cell.ragged_parts);
     } else if (cell.ragged_rk) {
         const T::StridedSpan& out = output;
-        T::CubReductionInternal::launchRaggedRKValue(cell.spec.op->value_op, cell.ragged_rk_shape, cell.ragged_rk_ctas,
+        T::ReductionInternal::launchRaggedRKValue(cell.spec.op->value_op, cell.ragged_rk_shape, cell.ragged_rk_ctas,
                                                      input, offsets, out, *cell.ragged_workspace, stream,
-                                                     full ? T::CubReductionInternal::RaggedLaunchParts::MainAndFinish
+                                                     full ? T::ReductionInternal::RaggedLaunchParts::MainAndFinish
                                                           : cell.ragged_parts);
     } else if (cell.ragged) {
         const T::StridedSpan& out = output;
-        T::CubReductionInternal::launchRaggedKRValue(cell.spec.op->value_op, cell.ragged_shape, cell.ragged_grid,
+        T::ReductionInternal::launchRaggedKRValue(cell.spec.op->value_op, cell.ragged_shape, cell.ragged_grid,
                                                      input, offsets, out, *cell.ragged_workspace, stream,
-                                                     full ? T::CubReductionInternal::RaggedLaunchParts::MainAndFinish
+                                                     full ? T::ReductionInternal::RaggedLaunchParts::MainAndFinish
                                                           : cell.ragged_parts);
     } else if (cell.value_stamp) {
         cell.value_stamp->runOnTensorsForBenchmark(input, offsets, output, stream);
@@ -560,22 +544,22 @@ void makeStampTensors(Cell& cell, const std::vector<uint8_t>& packed_offsets, co
 // Runs the stamp on the first views and checks every segment against its closed form (0.5 in every element).
 A::Verification verify(Cell& cell, const std::vector<uint64_t>& host_offsets, Stream& stream) {
     const CellSpec& c = cell.spec;
-    if (cell.ragged_rk && c.op->arg) {  // 1314
+    if (cell.ragged_rk && c.op->arg) {
         const T::StridedSpan& out = cell.outputs[0];
-        T::CubReductionInternal::launchRaggedRKArg(c.op->arg_op, cell.ragged_rk_shape, cell.ragged_rk_ctas,
+        T::ReductionInternal::launchRaggedRKArg(c.op->arg_op, cell.ragged_rk_shape, cell.ragged_rk_ctas,
                                                    cell.inputs[0], cell.offsets[0], out, *cell.ragged_workspace, stream);
-    } else if (cell.ragged && c.op->arg) {  // 1298
+    } else if (cell.ragged && c.op->arg) {
         const T::StridedSpan& out = cell.outputs[0];
-        T::CubReductionInternal::launchRaggedKRArg(c.op->arg_op, cell.ragged_shape, cell.ragged_grid, cell.inputs[0],
+        T::ReductionInternal::launchRaggedKRArg(c.op->arg_op, cell.ragged_shape, cell.ragged_grid, cell.inputs[0],
                                                    cell.offsets[0], out, *cell.ragged_workspace, stream);
     } else if (cell.ragged_rk) {
         const T::StridedSpan& out = cell.outputs[0];
-        T::CubReductionInternal::launchRaggedRKValue(c.op->value_op, cell.ragged_rk_shape, cell.ragged_rk_ctas,
+        T::ReductionInternal::launchRaggedRKValue(c.op->value_op, cell.ragged_rk_shape, cell.ragged_rk_ctas,
                                                      cell.inputs[0], cell.offsets[0], out, *cell.ragged_workspace,
                                                      stream);
     } else if (cell.ragged) {
         const T::StridedSpan& out = cell.outputs[0];
-        T::CubReductionInternal::launchRaggedKRValue(c.op->value_op, cell.ragged_shape, cell.ragged_grid,
+        T::ReductionInternal::launchRaggedKRValue(c.op->value_op, cell.ragged_shape, cell.ragged_grid,
                                                      cell.inputs[0], cell.offsets[0], out, *cell.ragged_workspace,
                                                      stream);
     } else if (cell.value_stamp) {
@@ -630,9 +614,9 @@ int main(int argc, char** argv) {
                           << A::movedBytes(c.rows, c.segments, c.d, vb, c.offsets->bytes, c.outputBytesPerElement())
                           << ','
                           << (c.candidate < 0 ? std::string("production")
-                              : c.rk          ? T::CubReductionInternal::raggedRKShapeName(
+                              : c.rk          ? T::ReductionInternal::raggedRKShapeName(
                                                     settings.ragged_rk_shapes[c.candidate])
-                                              : T::CubReductionInternal::raggedKRShapeName(
+                                              : T::ReductionInternal::raggedKRShapeName(
                                                     settings.ragged_kr_shapes[c.candidate]))
                           << '\n';
             }
@@ -644,7 +628,7 @@ int main(int argc, char** argv) {
         Stream stream(placement);
         cudaDeviceProp properties{};
         check(cudaGetDeviceProperties(&properties, 0), "device properties");
-        const T::ScopedCubReductionTuningDepth depth_scope(settings.depth);
+        const T::ScopedReductionTuningDepth depth_scope(settings.depth);
 
         uint64_t max_output = 0, max_moved = 4 * MiB, min_moved = UINT64_MAX;
         for (uint64_t n = 0; n < total; ++n) {
@@ -687,33 +671,33 @@ int main(int argc, char** argv) {
                   << (settings.ragged_kr ? "ragged_kr" : settings.ragged_select ? "ragged_select" : "production")
                   << " skipped=" << skipped
                   << " ragged_kr_time="
-                  << (settings.ragged_parts == T::CubReductionInternal::RaggedLaunchParts::MainOnly     ? "main"
-                      : settings.ragged_parts == T::CubReductionInternal::RaggedLaunchParts::FinishOnly ? "finish"
+                  << (settings.ragged_parts == T::ReductionInternal::RaggedLaunchParts::MainOnly     ? "main"
+                      : settings.ragged_parts == T::ReductionInternal::RaggedLaunchParts::FinishOnly ? "finish"
                                                                                                         : "full")
                   << " verify=" << (settings.verify ? 1 : 0)
-                  << " tuning_depth=" << T::cubReductionTuningDepthRank(settings.depth) << " device=\""
+                  << " tuning_depth=" << T::reductionTuningDepthRank(settings.depth) << " device=\""
                   << properties.name << "\" sm_count=" << properties.multiProcessorCount << " cc=" << properties.major
                   << '.' << properties.minor << " l2_bytes=" << properties.l2CacheSize
                   << " copy_bandwidth_tbps=" << std::fixed << std::setprecision(4) << bandwidth / 1e6 << '\n';
         std::cout << "# copy_curve";
         for (const auto& [moved, us] : curve.points) std::cout << ' ' << static_cast<uint64_t>(moved) << '=' << us;
         std::cout << '\n';
-        std::vector<uint32_t> ragged_grids, ragged_component_grids;  // 1280: D = 1, and D >= 2
-        // 1298: the KR ARG kernels' grids (1300: D = 1, and D >= 2), when the dtype has them.
+        std::vector<uint32_t> ragged_grids, ragged_component_grids;  // D = 1, and D >= 2
+        // The KR ARG kernels' grids (D = 1, and D >= 2), when the dtype has them.
         std::vector<uint32_t> ragged_arg_grids, ragged_arg_component_grids;
-        const bool ragged_arg = T::CubReductionInternal::raggedKRArgSupported(settings.dtype->dtype, 1);
+        const bool ragged_arg = T::ReductionInternal::raggedKRArgSupported(settings.dtype->dtype, 1);
         if (settings.ragged_kr) {
             for (const auto& shape : settings.ragged_kr_shapes) {
-                ragged_grids.push_back(T::CubReductionInternal::raggedKRGrid(shape, settings.dtype->dtype, 0));
+                ragged_grids.push_back(T::ReductionInternal::raggedKRGrid(shape, settings.dtype->dtype, 0));
                 ragged_component_grids.push_back(
-                    T::CubReductionInternal::raggedKRGrid(shape, settings.dtype->dtype, 0, 2));
+                    T::ReductionInternal::raggedKRGrid(shape, settings.dtype->dtype, 0, 2));
                 ragged_arg_grids.push_back(
-                    ragged_arg ? T::CubReductionInternal::raggedKRArgGrid(shape, settings.dtype->dtype, 0) : 0);
+                    ragged_arg ? T::ReductionInternal::raggedKRArgGrid(shape, settings.dtype->dtype, 0) : 0);
                 ragged_arg_component_grids.push_back(
-                    ragged_arg ? T::CubReductionInternal::raggedKRArgGrid(shape, settings.dtype->dtype, 0, 2) : 0);
-                std::cout << "# ragged_kr_candidate " << T::CubReductionInternal::raggedKRShapeName(shape)
+                    ragged_arg ? T::ReductionInternal::raggedKRArgGrid(shape, settings.dtype->dtype, 0, 2) : 0);
+                std::cout << "# ragged_kr_candidate " << T::ReductionInternal::raggedKRShapeName(shape)
                           << " grid=" << ragged_grids.back()
-                          << " workspace_bytes=" << T::CubReductionInternal::raggedValueWorkspaceBytes(ragged_grids.back())
+                          << " workspace_bytes=" << T::ReductionInternal::raggedValueWorkspaceBytes(ragged_grids.back())
                           << " components_grid=" << ragged_component_grids.back();
                 if (ragged_arg)
                     std::cout << " arg_grid=" << ragged_arg_grids.back()
@@ -721,16 +705,16 @@ int main(int argc, char** argv) {
                 std::cout << '\n';
             }
         }
-        std::vector<uint32_t> ragged_rk_ctas;  // 1285: each RK candidate's CTA budget (1295: every dtype)
-        std::vector<uint32_t> ragged_rk_arg_ctas;  // 1314: the RK ARG kernels' budget, when the dtype has them
-        const bool ragged_rk_arg = T::CubReductionInternal::raggedRKArgSupported(
-            settings.dtype->dtype, T::CubReductionInternal::RaggedMergePath::RAGGED_RK_MIN_ROW_BYTES);
+        std::vector<uint32_t> ragged_rk_ctas;  // each RK candidate's CTA budget
+        std::vector<uint32_t> ragged_rk_arg_ctas;  // the RK ARG kernels' budget, when the dtype has them
+        const bool ragged_rk_arg = T::ReductionInternal::raggedRKArgSupported(
+            settings.dtype->dtype, T::ReductionInternal::RaggedMergePath::RAGGED_RK_MIN_ROW_BYTES);
         if (settings.ragged_kr) {
             for (const auto& shape : settings.ragged_rk_shapes) {
-                ragged_rk_ctas.push_back(T::CubReductionInternal::raggedRKCtas(shape, settings.dtype->dtype, 0));
+                ragged_rk_ctas.push_back(T::ReductionInternal::raggedRKCtas(shape, settings.dtype->dtype, 0));
                 ragged_rk_arg_ctas.push_back(
-                    ragged_rk_arg ? T::CubReductionInternal::raggedRKArgCtas(shape, settings.dtype->dtype, 0) : 0);
-                std::cout << "# ragged_rk_candidate " << T::CubReductionInternal::raggedRKShapeName(shape)
+                    ragged_rk_arg ? T::ReductionInternal::raggedRKArgCtas(shape, settings.dtype->dtype, 0) : 0);
+                std::cout << "# ragged_rk_candidate " << T::ReductionInternal::raggedRKShapeName(shape)
                           << " ctas=" << ragged_rk_ctas.back();
                 if (ragged_rk_arg) std::cout << " arg_ctas=" << ragged_rk_arg_ctas.back();
                 std::cout << '\n';
@@ -839,8 +823,8 @@ int main(int argc, char** argv) {
 
                 // The production stamp, bound to the first views (--backend=ragged_kr: the candidate's workspace).
                 const auto stamp_start = std::chrono::steady_clock::now();
-                if (settings.ragged_select) {  // 1323: the selector's pick for this cell's site
-                    namespace R = T::CubReductionInternal;
+                if (settings.ragged_select) {  // the selector's pick for this cell's site
+                    namespace R = T::ReductionInternal;
                     R::RaggedSite site;
                     site.arg = c.op->arg;
                     if (c.op->arg) site.arg_op = c.op->arg_op;
@@ -879,43 +863,43 @@ int main(int argc, char** argv) {
                     for (size_t i = 0; i < selection.contest_names.size(); ++i)
                         std::cout << (i ? ";" : "") << selection.contest_names[i] << ':' << selection.contest_us[i];
                     std::cout << '\n';
-                } else if (c.candidate >= 0 && c.rk && c.op->arg) {  // 1314
+                } else if (c.candidate >= 0 && c.rk && c.op->arg) {
                     cell->ragged = true;
                     cell->ragged_rk = true;
                     cell->ragged_rk_shape = settings.ragged_rk_shapes[c.candidate];
                     cell->ragged_parts = settings.ragged_parts;
                     cell->ragged_rk_ctas = ragged_rk_arg_ctas[c.candidate];
-                    const T::CubReductionInternal::RaggedRKLaunch launch = T::CubReductionInternal::raggedRKArgLaunch(
+                    const T::ReductionInternal::RaggedRKLaunch launch = T::ReductionInternal::raggedRKArgLaunch(
                         cell->ragged_rk_shape, cell->ragged_rk_ctas, settings.dtype->dtype, c.d, c.capacity_rows);
                     cell->ragged_workspace.emplace(placement,
                                                    T::TensorDescriptor(T::DataType::UINT8, {launch.workspace_bytes}));
                     cell->passes =
-                        T::CubReductionInternal::raggedRKShapeName(cell->ragged_rk_shape) + "+ragged_finish_arg";
+                        T::ReductionInternal::raggedRKShapeName(cell->ragged_rk_shape) + "+ragged_finish_arg";
                     cell->pass_count = 2;
-                } else if (c.candidate >= 0 && c.rk) {  // 1285
+                } else if (c.candidate >= 0 && c.rk) {
                     cell->ragged = true;
                     cell->ragged_rk = true;
                     cell->ragged_rk_shape = settings.ragged_rk_shapes[c.candidate];
                     cell->ragged_parts = settings.ragged_parts;
                     cell->ragged_rk_ctas = ragged_rk_ctas[c.candidate];
-                    const T::CubReductionInternal::RaggedRKLaunch launch = T::CubReductionInternal::raggedRKLaunch(
+                    const T::ReductionInternal::RaggedRKLaunch launch = T::ReductionInternal::raggedRKLaunch(
                         cell->ragged_rk_shape, cell->ragged_rk_ctas, settings.dtype->dtype, c.d, c.capacity_rows);
                     cell->ragged_workspace.emplace(placement,
                                                    T::TensorDescriptor(T::DataType::UINT8, {launch.workspace_bytes}));
-                    cell->passes = T::CubReductionInternal::raggedRKShapeName(cell->ragged_rk_shape) + "+ragged_finish";
+                    cell->passes = T::ReductionInternal::raggedRKShapeName(cell->ragged_rk_shape) + "+ragged_finish";
                     cell->pass_count = 2;
-                } else if (c.candidate >= 0 && c.op->arg) {  // 1298
+                } else if (c.candidate >= 0 && c.op->arg) {
                     cell->ragged = true;
                     cell->ragged_shape = settings.ragged_kr_shapes[c.candidate];
                     cell->ragged_parts = settings.ragged_parts;
                     cell->ragged_grid = (c.d == 1 ? ragged_arg_grids : ragged_arg_component_grids)[c.candidate];
                     cell->ragged_workspace.emplace(
                         placement, T::TensorDescriptor(T::DataType::UINT8,
-                                                       {T::CubReductionInternal::raggedArgWorkspaceBytes(
+                                                       {T::ReductionInternal::raggedArgWorkspaceBytes(
                                                            settings.dtype->dtype, cell->ragged_grid,
                                                            static_cast<uint32_t>(c.d))}));
                     cell->passes =
-                        T::CubReductionInternal::raggedKRShapeName(cell->ragged_shape) + "+ragged_finish_arg";
+                        T::ReductionInternal::raggedKRShapeName(cell->ragged_shape) + "+ragged_finish_arg";
                     cell->pass_count = 2;
                 } else if (c.candidate >= 0) {
                     cell->ragged = true;
@@ -924,13 +908,13 @@ int main(int argc, char** argv) {
                     cell->ragged_grid = (c.d == 1 ? ragged_grids : ragged_component_grids)[c.candidate];
                     cell->ragged_workspace.emplace(
                         placement, T::TensorDescriptor(T::DataType::UINT8,
-                                                       {T::CubReductionInternal::raggedValueWorkspaceBytes(
+                                                       {T::ReductionInternal::raggedValueWorkspaceBytes(
                                                            cell->ragged_grid, static_cast<uint32_t>(c.d))}));
-                    cell->passes = T::CubReductionInternal::raggedKRShapeName(cell->ragged_shape) + "+ragged_finish";
+                    cell->passes = T::ReductionInternal::raggedKRShapeName(cell->ragged_shape) + "+ragged_finish";
                     cell->pass_count = 2;
                 } else if (!c.op->arg) {
                     makeStampTensors(*cell, packed, placement, stream);
-                    const T::CubSegmentedReduction reduction(c.op->value_op, T::DataType::FP32);
+                    const T::SegmentedReducer reduction(c.op->value_op, T::DataType::FP32);
                     cell->value_stamp =
                         settings.validated_stamp
                             ? reduction.stamp(*cell->stamp_input, *cell->stamp_output, *cell->stamp_offsets, stream)
@@ -942,7 +926,7 @@ int main(int argc, char** argv) {
                     }
                 } else {
                     makeStampTensors(*cell, packed, placement, stream);
-                    const T::CubSegmentedArgReduction reduction(c.op->arg_op, c.index_dtype);
+                    const T::SegmentedArgReducer reduction(c.op->arg_op, c.index_dtype);
                     cell->arg_stamp =
                         settings.validated_stamp
                             ? reduction.stamp(*cell->stamp_input, *cell->stamp_output, *cell->stamp_offsets, stream)

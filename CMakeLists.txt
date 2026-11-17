@@ -1001,46 +1001,66 @@ file(GLOB_RECURSE THOR_SOURCES CONFIGURE_DEPENDS
         #        "${CMAKE_SOURCE_DIR}/Demos/**/*.cu"
 )
 
-# Cub CUDA translation units are intentionally compiled as self-contained CUDA
-# objects: no relocatable device code/separable compilation and no CUDA device
-# LTO. The Cub subsystem has no cross-translation-unit device dependencies, and
-# keeping these kernels out of RDC preserves the code generation of the
-# benchmark-proven implementations (notably cooperative sharded reductions).
+# The reducer's and the Cub wrappers' CUDA translation units are intentionally
+# compiled as self-contained CUDA objects: no relocatable device code/separable
+# compilation and no CUDA device LTO. They have no cross-translation-unit device
+# dependencies, and keeping these kernels out of RDC preserves the code
+# generation they were measured with (compiled with RDC and device LTO they
+# regress, FP8 E5M2 most; benchmarks/reducer_compile_contract.py checks it).
+# The set is every .cu directly in Cub/ and every .cu anywhere under Reduction/.
 file(GLOB THOR_CUB_CUDA_SELF_CONTAINED_SOURCES CONFIGURE_DEPENDS
         "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/*.cu"
 )
+file(GLOB_RECURSE _thor_reduction_cuda_sources CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/*.cu"
+)
+list(APPEND THOR_CUB_CUDA_SELF_CONTAINED_SOURCES ${_thor_reduction_cuda_sources})
+unset(_thor_reduction_cuda_sources)
 if (NOT THOR_CUB_CUDA_SELF_CONTAINED_SOURCES)
     message(FATAL_ERROR "Thor Cub CUDA source set is empty")
 endif ()
+# A .cu in a subdirectory of Cub/ would fall out of the set into the ordinary
+# (RDC, device LTO) build without notice: stop instead.
+file(GLOB_RECURSE _thor_reducer_cuda_tree CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/*.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/*.cu"
+)
+foreach (_thor_reducer_cuda_source IN LISTS _thor_reducer_cuda_tree)
+    if (NOT _thor_reducer_cuda_source IN_LIST THOR_CUB_CUDA_SELF_CONTAINED_SOURCES)
+        message(FATAL_ERROR "Reducer CUDA source outside the self-contained set (move it to Cub/ or Reduction/): "
+                "${_thor_reducer_cuda_source}")
+    endif ()
+endforeach ()
+unset(_thor_reducer_cuda_tree)
 foreach (_thor_cub_cuda_source IN LISTS THOR_CUB_CUDA_SELF_CONTAINED_SOURCES)
     if (NOT EXISTS "${_thor_cub_cuda_source}")
         message(FATAL_ERROR "Thor Cub CUDA source selected for self-contained compilation is missing: ${_thor_cub_cuda_source}")
     endif ()
 endforeach ()
-# 1275: line tables for the ragged kernels (1284: every dtype's object; 1366: StridedR's), so Nsight Compute attributes instructions to source lines. -lineinfo
-# adds debug sections only; the generated code does not change.
+# Line tables for the ragged kernels (every dtype's object) and StridedR's, so Nsight Compute attributes instructions
+# to source lines. -lineinfo adds debug sections only; the generated code does not change.
 set_source_files_properties(
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedKRFp8.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedKRF16.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedKRFp32.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedRKFp8.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedRKFp8Narrow.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedRKF16.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedRKF16Narrow.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedRKFp32.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedRKFp32Narrow.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedFinish.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedKRArgFp8.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedKRArgF16.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedKRArgFp32.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedFinishArg.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedFinishArgFp32.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedRKArgFp8.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedRKArgF16.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedFinishArgWide.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedRKArgFp32.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubRaggedFinishArgPairWide.cu"
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubStridedR.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedKRFp8.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedKRF16.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedKRFp32.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedRKFp8.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedRKFp8Narrow.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedRKF16.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedRKF16Narrow.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedRKFp32.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedRKFp32Narrow.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedFinish.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedKRArgFp8.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedKRArgF16.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedKRArgFp32.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedFinishArg.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedFinishArgFp32.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedRKArgFp8.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedRKArgF16.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedFinishArgWide.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedRKArgFp32.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Ragged/RaggedFinishArgPairWide.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Kernels/StridedR.cu"
         PROPERTIES COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>"
 )
 
@@ -2032,6 +2052,23 @@ target_compile_options(thor_softmax_benchmark PRIVATE
         $<$<CONFIG:Debug>:-O0 -ggdb>
 )
 
+# The CUB scan wrappers in TB/s by row count, on the flat, uniform-segmented and offset-segmented paths, beside CUB
+# used directly (DeviceScan, ScanByKey). Compiled as CUDA for the direct CUB calls.
+set_source_files_properties(benchmarks/ScanBenchmark.cpp PROPERTIES LANGUAGE CUDA)
+add_executable(thor_scan_benchmark EXCLUDE_FROM_ALL
+        benchmarks/ScanBenchmark.cpp
+)
+thor_apply_linker_settings(thor_scan_benchmark)
+target_link_libraries(thor_scan_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_link_libraries(thor_scan_benchmark PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(thor_scan_benchmark PRIVATE PkgConfig::LIBURING)
+target_compile_options(thor_scan_benchmark PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3>
+        $<$<CONFIG:Debug>:-O0>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G>
+)
+
 # SERIALIZATION-OWNERSHIP-2C-G4-A: executable public-layer SDPA benchmark
 # preflight.  Keep this separate from expression-only Python performance tests.
 # G4-A validates actual GPU execution; G4-B adds matched event timing.
@@ -2126,172 +2163,47 @@ target_compile_options(thor_type_converter_benchmark PRIVATE
         $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G>
 )
 
-# Host-only regression for the production-owned retained FP8 RK candidate
-# selector. No Thor/CUDA linkage, no additional kernel specializations.
-add_executable(thor_fp8_rk_production_selector_smoke EXCLUDE_FROM_ALL
-        benchmarks/Fp8RKProductionCandidatesSmoke.cpp)
-target_include_directories(thor_fp8_rk_production_selector_smoke PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR})
-
-# CPU-only structural FP8 RK physical-plan contract test.  The seven new
-# production binder/adapter .cpp files are independently compiled through
-# THOR_SOURCES; no separate CUDA compilation or kernel instantiation is added.
-add_executable(thor_fp8_rk_physical_identity_smoke EXCLUDE_FROM_ALL
-        benchmarks/Fp8RKPhysicalIdentitySmoke.cpp
-        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalIdentity.cpp)
-target_include_directories(thor_fp8_rk_physical_identity_smoke PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR})
-
-# Host-only retained RuntimeK proposal census, in its own independently
-# compiled translation unit. No CUDA or XGBoost code is instantiated here.
-add_executable(thor_fp8_rk_runtime_proposals_smoke EXCLUDE_FROM_ALL
-        benchmarks/Fp8RKRuntimeProposalsSmoke.cpp
-        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKRuntimeProposals.cpp
-        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalIdentity.cpp)
-target_include_directories(thor_fp8_rk_runtime_proposals_smoke PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR})
-
-# Standalone host regression: FP8 RK first-stage/FP32-continuation shape
-# and workspace lower-bound contract. Does not instantiate CUDA kernels.
-add_executable(thor_fp8_rk_continuation_layout_smoke EXCLUDE_FROM_ALL
-        benchmarks/Fp8RKContinuationLayoutSmoke.cpp
-        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalIdentity.cpp
-        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKContinuationLayout.cpp)
-target_include_directories(thor_fp8_rk_continuation_layout_smoke PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR})
-
-# Retained FP8 RK first-stage physical-plan/ordinary planner contract (runs on the host, no GPU).
-# Tests inject FP8 physical identities and subsequent FP32 candidates. 1172: links Thor (see above).
-add_executable(thor_dense_retained_fp8_rk_physical_plan_smoke EXCLUDE_FROM_ALL
-        benchmarks/DenseRetainedFp8RKPhysicalPlanSmoke.cpp)
-target_include_directories(thor_dense_retained_fp8_rk_physical_plan_smoke PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(thor_dense_retained_fp8_rk_physical_plan_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
-
-# P2-D: real default-production selector, flat stamped passes, multi-axis,
-# explicit unsupported semantics, descriptor workspace, and no run-time selection.
-add_executable(thor_fp8_rk_production_cutover_smoke EXCLUDE_FROM_ALL
-        benchmarks/Fp8RKProductionCutoverSmoke.cpp)
-target_link_libraries(thor_fp8_rk_production_cutover_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
-target_include_directories(thor_fp8_rk_production_cutover_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
-# Ordinary dense planner/stamp/run integration of one retained FP8 RK
-# physical pass plus independently selected FP32 passes.
-add_executable(thor_dense_retained_fp8_rk_execution_smoke EXCLUDE_FROM_ALL
-        benchmarks/DenseRetainedFp8RKExecutionSmoke.cpp)
-target_link_libraries(thor_dense_retained_fp8_rk_execution_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
-target_include_directories(thor_dense_retained_fp8_rk_execution_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
-# Host-only site contract. Kept in separate compilation units; no CUDA
-# template instantiations are introduced by the isolated RK planning layer.
-add_executable(thor_fp8_rk_isolated_site_smoke EXCLUDE_FROM_ALL
-        benchmarks/Fp8RKIsolatedSiteSmoke.cpp
-        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKIsolatedSite.cpp
-        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKContinuationLayout.cpp
-        Utilities/TensorOperations/Cub/Fp8RK/Fp8RKPhysicalIdentity.cpp
-        Utilities/TensorOperations/Cub/DenseReductionPlanning.cpp)
-target_include_directories(thor_fp8_rk_isolated_site_smoke PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(thor_fp8_rk_isolated_site_smoke PRIVATE nlohmann_json::nlohmann_json)
-
-# Official-selector continuation chain (runs on the host, no GPU): zero, one and multiple
-# individually selected FP32 physical passes, no alternative FP32 policy. 1172: links Thor (see above).
-add_executable(thor_fp8_rk_selected_continuation_smoke EXCLUDE_FROM_ALL
-        benchmarks/Fp8RKSelectedContinuationSmoke.cpp)
-target_include_directories(thor_fp8_rk_selected_continuation_smoke PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(thor_fp8_rk_selected_continuation_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
-
-# Host-only GEMM-style selection recipe boundary. No CUDA or Thor objects.
-add_executable(thor_fp8_rk_selection_recipe_smoke EXCLUDE_FROM_ALL
-    benchmarks/Fp8RKSelectionRecipeSmoke.cpp)
-target_include_directories(thor_fp8_rk_selection_recipe_smoke PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR})
-
-# P2-A descriptor-only FP8 key/ownership boundary (no CUDA runtime).
-add_executable(thor_fp8_rk_descriptor_selection_smoke EXCLUDE_FROM_ALL
-        benchmarks/Fp8RKDescriptorSelectionSmoke.cpp)
-target_include_directories(thor_fp8_rk_descriptor_selection_smoke PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(thor_fp8_rk_descriptor_selection_smoke PRIVATE nlohmann_json::nlohmann_json)
-
-# P2-A real GPU cache-miss input construction and cross-overload cache parity.
-# No CUDA kernel specialization additions.
-add_executable(thor_fp8_rk_descriptor_selection_gpu_smoke EXCLUDE_FROM_ALL
-        benchmarks/Fp8RKDescriptorSelectionGpuSmoke.cpp)
-target_link_libraries(thor_fp8_rk_descriptor_selection_gpu_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
-target_include_directories(thor_fp8_rk_descriptor_selection_gpu_smoke PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR})
-
-# 1171: the FP8 RK selection cache smoke became test/Utilities/TensorOperations/DenseReductionSelectionCacheTest.cpp
-# (the one dense reduction selection cache), which runs in thor_tests.
-
-# P1-D host-only lock and cache lifecycle, without CUDA runtime/device objects.
-# This shared lock is also the serialization primitive for future FP32 tuning.
-add_executable(thor_reduction_gpu_measurement_lifecycle_smoke EXCLUDE_FROM_ALL
-        benchmarks/ReductionGpuMeasurementLifecycleSmoke.cpp
-        Utilities/TensorOperations/Cub/ReductionGpuMeasurementLock.cpp)
-target_include_directories(thor_reduction_gpu_measurement_lifecycle_smoke PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(thor_reduction_gpu_measurement_lifecycle_smoke PRIVATE pthread)
-
-# Phase-3 CUDA lifecycle regression. Separate host TU: no additional GPU
-# specializations, and it can build in parallel with the other smoke targets.
-add_executable(thor_fp8_rk_stamp_lifecycle_smoke EXCLUDE_FROM_ALL
-        benchmarks/Fp8RKStampLifecycleSmoke.cpp)
-target_link_libraries(thor_fp8_rk_stamp_lifecycle_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
-target_include_directories(thor_fp8_rk_stamp_lifecycle_smoke PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR})
-
-# P1-C temporary benchmark-only FP32 continuation with real physical
-# production selection/launch; does not alter the active FP8 autotuner.
-add_executable(thor_fp8_rk_selected_continuation_gpu_smoke EXCLUDE_FROM_ALL
-        benchmarks/Fp8RKSelectedContinuationGpuSmoke.cpp)
-target_link_libraries(thor_fp8_rk_selected_continuation_gpu_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
-target_include_directories(thor_fp8_rk_selected_continuation_gpu_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
-# Permanent retained-only FP8 cold-L2 oracle census. Uses the same production
-# physical launches/FP32 completions; no removed experimental CUDA kernels.
+# The FP8 RK cold-L2 census and ranker training sweep (benchmarks/FP8_RETAINED_COLD_L2_SWEEP.md): the production
+# physical launches and FP32 continuations.
 add_executable(thor_fp8_retained_cold_l2_sweep EXCLUDE_FROM_ALL
         benchmarks/Fp8RetainedColdL2Sweep.cpp)
 thor_apply_linker_settings(thor_fp8_retained_cold_l2_sweep)
 target_link_libraries(thor_fp8_retained_cold_l2_sweep PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
 target_include_directories(thor_fp8_retained_cold_l2_sweep PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-# 1145: FP8 R / KR production audit against line rate (cold L2 per sample).
+# FP8 R / KR production audit against line rate (cold L2 per sample).
 add_executable(thor_fp8_dense_site_audit EXCLUDE_FROM_ALL
         benchmarks/Fp8DenseSiteAudit.cpp)
 thor_apply_linker_settings(thor_fp8_dense_site_audit)
 target_link_libraries(thor_fp8_dense_site_audit PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
 target_include_directories(thor_fp8_dense_site_audit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-# 1151: FP8 R / KR training sweep: every retained KR shape (the production list and its neighbours) at seeded random
-# and grid sites, interleaved cold-L2 timing (the KR counterpart of thor_fp8_retained_cold_l2_sweep --training).
+# R / KR training sweep: every KR shape (the production list and its neighbours) at seeded random and grid sites,
+# interleaved cold-L2 timing (the KR counterpart of thor_fp8_retained_cold_l2_sweep --training).
 add_executable(thor_fp8_kr_training_sweep EXCLUDE_FROM_ALL
         benchmarks/Fp8KRTrainingSweep.cpp)
 thor_apply_linker_settings(thor_fp8_kr_training_sweep)
 target_link_libraries(thor_fp8_kr_training_sweep PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
 target_include_directories(thor_fp8_kr_training_sweep PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-# 1174: production stamps of any dtype at dense R / KR / RK sites, timed cold against the copy curve (TB/s). The
-# baseline and before/after check of each dtype's conversion to the FP8 pattern (FP8_REDUCTION_PATTERN.md).
+# Production stamps of any dtype at dense R / KR / RK sites, timed cold against the copy curve (TB/s): the baseline
+# and before / after check of a change to a dtype's kernels or selection (Reduction/README.md, section 8).
 add_executable(thor_dense_production_audit EXCLUDE_FROM_ALL
         benchmarks/DenseProductionAudit.cpp)
 thor_apply_linker_settings(thor_dense_production_audit)
 target_link_libraries(thor_dense_production_audit PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
 target_include_directories(thor_dense_production_audit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-# 1263: production CubSegmentedReduction / CubSegmentedArgReduction stamps under every distribution of segment lengths,
-# timed cold against the copy curve (TB/s). Phase 0 of plans/Thor_Ragged_Reduction_Plan_2026-11-06.md.
+# Production SegmentedReducer / SegmentedArgReducer stamps under every distribution of segment lengths, timed cold
+# against the copy curve (TB/s).
 add_executable(thor_ragged_reduction_audit EXCLUDE_FROM_ALL
         benchmarks/RaggedReductionAudit.cpp)
 thor_apply_linker_settings(thor_ragged_reduction_audit)
 target_link_libraries(thor_ragged_reduction_audit PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
 target_include_directories(thor_ragged_reduction_audit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-# 1335: production CubReduction stamps of non-dense views (the three classes that run CUB device reductions), timed
-# cold against the copy curve and the dense stamp of the same bytes or a gather reference kernel. Phase 0 of
-# plans/Thor_View_Reduction_Plan_2026-11-08.md.
+# Production Reducer stamps of non-dense views (cases A-H; the refused ones as the two parts a caller runs), timed
+# cold against the copy curve and the dense stamp of the same bytes or a gather reference kernel.
 add_executable(thor_view_reduction_audit EXCLUDE_FROM_ALL
         benchmarks/ViewReductionAudit.cu)
 thor_apply_linker_settings(thor_view_reduction_audit)
@@ -2299,19 +2211,13 @@ set_target_properties(thor_view_reduction_audit PROPERTIES CUDA_SEPARABLE_COMPIL
 target_link_libraries(thor_view_reduction_audit PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
 target_include_directories(thor_view_reduction_audit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-# 1388: Thor's dense copy of strided spans per layout class (benchmarks/DenseCopyAudit.cu, dense_copy_audit.py).
+# Thor's dense copy of strided spans per layout class (benchmarks/DenseCopyAudit.cu, dense_copy_audit.py).
 add_executable(thor_dense_copy_audit EXCLUDE_FROM_ALL
         benchmarks/DenseCopyAudit.cu)
 thor_apply_linker_settings(thor_dense_copy_audit)
 set_target_properties(thor_dense_copy_audit PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
 target_link_libraries(thor_dense_copy_audit PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
 target_include_directories(thor_dense_copy_audit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
-add_executable(thor_fp8_rk_stamp_autotuner_smoke EXCLUDE_FROM_ALL
-        benchmarks/Fp8RKStampAutotunerSmoke.cpp)
-target_link_libraries(thor_fp8_rk_stamp_autotuner_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
-target_include_directories(thor_fp8_rk_stamp_autotuner_smoke PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Fused-expression census contains a small CUDA cache-eviction kernel while
 # executing production Thor fused kernels for all timed work.  Keep the target
@@ -2337,21 +2243,6 @@ target_compile_options(thor_fused_kernel_census PRIVATE
         # Benchmark-only cache-control code stays optimized in Debug; the timed
         # kernels themselves come from the Thor library configuration.
         $<$<CONFIG:Debug>:-O3>
-)
-
-add_executable(thor_einsum_benchmark EXCLUDE_FROM_ALL
-        benchmarks/EinsumBenchmark.cpp
-)
-thor_apply_linker_settings(thor_einsum_benchmark)
-thor_enable_release_host_lto(thor_einsum_benchmark)
-thor_enable_release_no_semantic_interposition(thor_einsum_benchmark)
-target_link_libraries(thor_einsum_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
-target_link_libraries(thor_einsum_benchmark PRIVATE OpenMP::OpenMP_CXX)
-target_link_libraries(thor_einsum_benchmark PRIVATE PkgConfig::LIBURING)
-target_compile_options(thor_einsum_benchmark PRIVATE
-        $<$<CONFIG:Release>:-O3>
-        $<$<CONFIG:RelWithDebInfo>:-O3>
-        $<$<CONFIG:Debug>:-O0 -ggdb>
 )
 
 add_executable(thor_einsum_exact_planner_benchmark EXCLUDE_FROM_ALL
@@ -2857,6 +2748,7 @@ if (THOR_ENABLE_FP8_SELECTED_INVENTORY_SIZE_TARGET AND NOT _thor_python_release_
     set(_thor_fp8_inventory_script "${CMAKE_SOURCE_DIR}/benchmarks/fp8_selected_inventory_size.py")
     set(_thor_fp8_inventory_sources
             "${_thor_fp8_inventory_dir}/narrow.cu"
+            "${_thor_fp8_inventory_dir}/onewindow.cu"
             "${_thor_fp8_inventory_dir}/aligned.cu"
             "${_thor_fp8_inventory_dir}/rotated.cu"
     )
@@ -2866,16 +2758,17 @@ if (THOR_ENABLE_FP8_SELECTED_INVENTORY_SIZE_TARGET AND NOT _thor_python_release_
                     generate --source "${CMAKE_SOURCE_DIR}" --out "${_thor_fp8_inventory_dir}"
             DEPENDS "${_thor_fp8_inventory_script}"
                     "${CMAKE_SOURCE_DIR}/benchmarks/fp8_accepted_pruning.csv"
-                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubReductionNarrowFlatRCooperative.cu"
-                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubReductionKParallelShardedTiled.cu"
-                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/CubReductionAwkwardRotatedSharded.cu"
-                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/Fp8RK/Fp8OneWindowSelector.h"
-                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/Fp8RK/Fp8DeepRSmallKSelector.h"
-                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/Fp8RK/Fp8AlignedKSelector.h"
-                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/Fp8RK/Fp8RuntimeKSelector.h"
-                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/Fp8RK/Fp8GeometryRankerModel.h"
-                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/Fp8RK/Fp8GeneralRParallelSelector.h"
-                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/Fp8RK/Fp8RKProductionCandidates.h"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Kernels/RKDeepRSmallK.cu"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Kernels/RKOneWindow.cu"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Kernels/RKAlignedK.cu"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Kernels/RKRuntimeK.cu"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/RK/Fp8/Fp8OneWindowSelector.h"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/RK/Fp8/Fp8DeepRSmallKSelector.h"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/RK/Fp8/Fp8AlignedKSelector.h"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/RK/Fp8/Fp8RuntimeKSelector.h"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/Rankers/Fp8GeometryRankerModel.h"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/RK/Fp8/Fp8RKSelector.h"
+                    "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/RK/Fp8/Fp8RKProductionCandidates.h"
             COMMENT "Generate isolated selector-reachable FP8 CUDA kernels"
             VERBATIM
     )
@@ -2921,7 +2814,7 @@ if (THOR_ENABLE_FP8_SELECTED_INVENTORY_SIZE_TARGET AND NOT _thor_python_release_
 
 endif ()
 
-# ARG-A1: standalone FP8 ARG key microbenchmark (load roofline vs packed-key ARG update) and SASS probe. Excluded from
+# Standalone FP8 ARG key microbenchmark (load roofline vs packed-key ARG update) and SASS probe. Excluded from
 # normal builds; contributes no kernel to the Thor library.
 add_executable(thor_fp8_arg_key_microbenchmark EXCLUDE_FROM_ALL
         benchmarks/Fp8ArgKeyMicrobenchmark.cu)
@@ -2929,11 +2822,3 @@ thor_apply_linker_settings(thor_fp8_arg_key_microbenchmark)
 set_target_properties(thor_fp8_arg_key_microbenchmark PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
 target_link_libraries(thor_fp8_arg_key_microbenchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
 target_include_directories(thor_fp8_arg_key_microbenchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
-# Standalone CUDA validation of the reusable cold-L2 reduction autotuner.
-# Excluded from normal builds; no production dispatch or kernel inventory change.
-add_executable(thor_reduction_autotuner_smoke EXCLUDE_FROM_ALL
-        benchmarks/ReductionAutotunerCudaSmoke.cu)
-thor_apply_linker_settings(thor_reduction_autotuner_smoke)
-set_target_properties(thor_reduction_autotuner_smoke PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
-target_link_libraries(thor_reduction_autotuner_smoke PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})

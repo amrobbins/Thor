@@ -12,7 +12,7 @@
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/TensorOperations/Ragged/PaddedRaggedSequence.h"
 #include "Utilities/TensorOperations/Ragged/RaggedConv1dWidthCapacity.h"
-#include "Utilities/TensorOperations/Cub/DenseReductionSelectionCache.h"
+#include "Utilities/TensorOperations/Reduction/Planner/DenseReductionSelectionCache.h"
 
 #include "cuda_runtime.h"
 
@@ -9257,17 +9257,16 @@ TEST(RaggedExpression, TrailingTransposeBackwardRunsOnlyAcrossActivePackedRows) 
     expectNear(actual, expected);
 }
 
-// 1325 (phase 7; the end-to-end item moved from phase 5): segment_sum / mean / min / max and the segment MIN / MAX
-// backward through Expression on the retained ragged kernels. 1328 (phase 8): the routing switch is removed, so the
-// outputs and gradients are checked against host references (1325 compared routing on with off): FP16 / BF16 / FP32,
-// D 1 (KR), 3 (KR in FP16, RK in FP32), 8 and 17 (RK), UINT32 and UINT64 offsets, random lengths with empty segments,
-// ties (the gradient goes to the first winner), and inactive capacity whose gradient keeps its sentinel. Integer values
-// keep SUM and the gradients exact; MEAN to a rounding. The stamps tune under the RaggedKR / RaggedRK selection kinds.
+// segment_sum / mean / min / max and the segment MIN / MAX backward through Expression on the ragged kernels: the
+// outputs and gradients against host references, FP16 / BF16 / FP32, D 1 (KR), 3 (KR in FP16, RK in FP32), 8 and 17
+// (RK), UINT32 and UINT64 offsets, random lengths with empty segments, ties (the gradient goes to the first winner),
+// and inactive capacity whose gradient keeps its sentinel. Integer values keep SUM and the gradients exact; MEAN to a
+// rounding. The stamps tune under the RaggedKR / RaggedRK selection kinds.
 TEST(RaggedExpression, SegmentReductionsAndMinMaxBackwardRunOnTheRetainedRaggedKernels) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
-    using ThorImplementation::CubReductionInternal::DenseReductionSelectionKind;
-    using ThorImplementation::CubReductionInternal::denseReductionSelectionCache;
+    using ThorImplementation::ReductionInternal::DenseReductionSelectionKind;
+    using ThorImplementation::ReductionInternal::denseReductionSelectionCache;
     denseReductionSelectionCache().clear();
     uint64_t seed = 0x1325;
     const auto next = [&] {

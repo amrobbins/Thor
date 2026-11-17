@@ -62,11 +62,11 @@ void LossShaper::compileImpl() {
         // There is no ErrorInput to connect to the previous layer, so this is a nop
     } else {
         const vector<uint64_t> inputDimensions = featureInput.value().getDimensions();
-        CubReduction cubReduction(CubReductionOp::Sum,
-                                  getReductionAxes(inputDimensions, outputLossType),
-                                  featureOutput.value().getDataType(),
-                                  1.0f);
-        reduction = cubReduction.stamp(featureInput.value(), featureOutput.value(), stream);
+        Reducer reducer(ReductionOp::Sum,
+                        getReductionAxes(inputDimensions, outputLossType),
+                        featureOutput.value().getDataType(),
+                        1.0f);
+        reduction = reducer.stamp(featureInput.value(), featureOutput.value(), stream);
     }
 
     uninitialized = false;

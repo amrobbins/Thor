@@ -10,7 +10,7 @@ import view_reduction_audit as audit
 HEADER = ("cell_id,case,operation,dtype,dims,strides,axes,count,outputs,stride,pitch_bytes,span_bytes,useful_bytes,"
           "touched_bytes,stamp_ms,passes,reference,reference_passes,verified,max_rel_err,probe_us,launches,"
           "sample0_us,sample1_us,sample2_us,median_us,reference_us,copy_us,tbps,of_copy,of_reference")
-# 1392: the H alternative columns
+# The H alternative columns
 HEADER_1392 = HEADER + ",split_us,pitched_w1_us,pitched_w2_us,pitched_w4_us,pitched_w8_us,alternative_passes"
 
 
@@ -26,7 +26,7 @@ def row(cell, case, op, touched, us, ref_us, stride=0, verified=1, passes="physi
 
 
 def alternatives(split="", w1="", w2="", w4="", w8=""):
-    """1392: the alternative columns (split, then W 1 / 2 / 4 / 8), appended to a row()."""
+    """The alternative columns (split, then W 1 / 2 / 4 / 8), appended to a row()."""
     return f",{split},{w1},{w2},{w4},{w8},x"
 
 
@@ -51,7 +51,7 @@ class AuditTest(unittest.TestCase):
             row(3, "c", "sum", mib32, 40.0, 38.0, stride=64),
             row(4, "c", "mean", 4 + 4, 3.0, 0.0, stride=0),
             row(5, "c", "min", mib32, 20.0, 20.0, stride=2, verified=0),
-            # 1375: D on the tiled kernels against the dense stamp (cell 7 the dense planner faster, cell 8 slower);
+            # D against the dense stamp, as an older run's tiled passes (cell 7 the dense stamp faster, cell 8 slower);
             # E unsupported by the view stamp (cell 9 times the dense stamp, no reference)
             row(7, "d", "sum", mib32, 30.0, 20.0, passes="tiled:permutation_natural"),
             row(8, "d", "max", 2**21, 4.0, 5.0, passes="tiled:permutation_natural"),
@@ -106,17 +106,17 @@ class AuditTest(unittest.TestCase):
 
     def test_phase5(self):
         text = self.run_report()
-        self.assertIn("# 9. phase 5", text)
-        # D: tiled / dense 1.5 (cell 7) and 0.8 (cell 8); p50 1.15, one cell each way
-        self.assertIn("D all                        cells    2 tiled/dense p50 1.150", text)
+        self.assertIn("# 9. D view / dense", text)
+        # D: view / dense 1.5 (cell 7) and 0.8 (cell 8); p50 1.15, one cell each way
+        self.assertIn("D all                        cells    2 view/dense p50 1.150", text)
         self.assertIn("dense faster   1 slower   1", text)
-        # the dense stamp furthest behind the tiled one first
+        # the dense stamp furthest behind the view first
         self.assertLess(text.index("dense slowest:     8"), text.index("dense slowest:     7"))
         self.assertIn("E cells 1, unsupported by the view stamp 1", text)
         self.assertIn("E dense 16-128M", text)
 
     def test_tiled_classes(self):
-        # F / G / H against the dense reference (view / dense 30, 1.5 and 2.5); 1390: the two-part pass chains
+        # F / G / H against the dense reference (view / dense 30, 1.5 and 2.5); the two-part pass chains
         path = write([HEADER,
                       row(20, "f", "sum", 2**21, 300.0, 10.0,
                           passes="split_rotated:retained_fp32_kr:s4+copy:transpose_p1_w4_t32x32_b0"),
@@ -147,8 +147,8 @@ class AuditTest(unittest.TestCase):
         self.assertIn("view/dense 30.0 rotated:retained_fp#_kr:s#+copy:transpose_", text)
 
     def test_h_mechanisms(self):
-        # 1391 (phase 7): H by gaps and path. [1, 122, 30] at row pitch 31 (4-byte gaps), [4, 6, 8] at slab pitch 50,
-        # [3, 5, 2] at row pitch 4 and slab pitch 25.
+        # H by gaps and path. [1, 122, 30] at row pitch 31 (4-byte gaps), [4, 6, 8] at slab pitch 50, [3, 5, 2] at row
+        # pitch 4 and slab pitch 25.
         big = 32 * 2**20
         path = write([HEADER,
                       row(30, "h", "sum", big, 12.0, 10.0, passes="split_sliced:retained_fp32_rk:x+copy:row_copy",
@@ -164,7 +164,7 @@ class AuditTest(unittest.TestCase):
             text = out.getvalue()
         finally:
             os.unlink(path)
-        self.assertIn("# 11. phase 7: H by gaps and path", text)
+        self.assertIn("# 11. H by gaps and path", text)
         self.assertIn("row gaps < 32 B   sliced   all   cells   1 view/dense p50 1.200", text)
         self.assertIn("row gaps < 32 B   sliced   large cells   1", text)
         self.assertIn("slab gaps         packed   all   cells   1 view/dense p50 3.000", text)
@@ -172,9 +172,9 @@ class AuditTest(unittest.TestCase):
         self.assertIn("row + slab gaps   packed   all   cells   1 view/dense p50 2.500", text)
 
     def test_pitched_alternatives(self):
-        # 1392 (phase 7 C), 170 SMs. [2048, 4, 64] at pitches 400 / 80: 2048 items of 256-byte tiles, W 1 (four
-        # rows), 3.01 KiB per SM in flight, read in place (10 us) where the split takes 30. [8, 6, 300] at 4000 / 320:
-        # 8 x 3 tiles of 400 bytes at W 1 (0.055 KiB per SM), split (12 us) where W 8 would take 9.
+        # 170 SMs. [2048, 4, 64] at pitches 400 / 80: 2048 items of 256-byte tiles, W 1 (four rows), 3.01 KiB per SM in
+        # flight, read in place (10 us) where the split takes 30. [8, 6, 300] at 4000 / 320: 8 x 3 tiles of 400 bytes at
+        # W 1 (0.055 KiB per SM), split (12 us) where W 8 would take 9.
         path = write(['# view_reduction_audit=1 version=1335 dtype=fp32 device="Test GPU" sm_count=170',
                       HEADER_1392,
                       row(40, "h", "sum", 2**20, 10.0, 9.0, passes="pitched_complete:w1_t64", dims="2048x4x64",
@@ -189,7 +189,7 @@ class AuditTest(unittest.TestCase):
             text = out.getvalue()
         finally:
             os.unlink(path)
-        self.assertIn("# 12. phase 7 C: H in place / split by K tile bytes and bytes in flight per SM (170 SMs)", text)
+        self.assertIn("# 12. H in place / split by K tile bytes and bytes in flight per SM (170 SMs)", text)
         self.assertIn("tile >=256 B in flight/SM <2K  cells   1 in place   0 split/best W p50 1.333", text)
         self.assertIn("chosen/best p50 1.333", text)
         self.assertIn("best: split 0 w1 0 w2 0 w4 0 w8 1", text)

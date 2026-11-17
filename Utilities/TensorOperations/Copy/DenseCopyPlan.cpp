@@ -1,7 +1,5 @@
-// 1388: the host planning of a strided span's dense copy (DenseCopyPlan.h has the rules; 1389: rectangular
-// transpose tiles, any number of batch axes; 1389b: the packed gather; 1389d: the smallest tile in words; 1389e:
-// plain rotations on the matrix transpose kernel; 1389f: rows of two to four 16-byte words transposed from 4 MiB).
-// No CUDA.
+// The host planning of a strided span's dense copy (DenseCopyPlan.h has the rules and the measurements behind them). No
+// CUDA.
 
 #include "Utilities/TensorOperations/Copy/DenseCopyPlan.h"
 
@@ -51,15 +49,14 @@ struct Tile {
 [[nodiscard]] Tile transposeTile(uint64_t x, uint64_t v, uint64_t vectors, uint64_t p, uint32_t word_bytes) {
     const uint64_t vector_bytes = p * word_bytes;
     const uint64_t full = std::max<uint64_t>(32, ceilDiv(128, vector_bytes));  // a tile row of 128 bytes or more
-    // 1389d: the smallest side is the one whose square tile is TRANSPOSE_MIN_TILE_WORDS words (32 vectors of one
-    // word, 19 of 3, 13 of 7), not 32 vectors whatever their width.
+    // The smallest side is the one whose square tile is TRANSPOSE_MIN_TILE_WORDS words (32 vectors of one word, 19 of
+    // 3, 13 of 7), not 32 vectors whatever their width.
     uint64_t side = 1;
     while (side * side * p < TRANSPOSE_MIN_TILE_WORDS) ++side;
     while (side < full && (side + 1) * (side + 1) * TRANSPOSE_TARGET_TILES <= vectors) ++side;
     const uint64_t area = side * side;
     Tile tile{std::min(x, side), std::min(v, side)};
-    // 1389l: a packed byte tile with TRANSPOSE_PACKED_MIN_BLOCKS 4 x 4 blocks or more (1389m: 320, through 1389l one a
-    // thread, 256) keeps its sides (DenseCopyPlan.h).
+    // A packed byte tile with TRANSPOSE_PACKED_MIN_BLOCKS 4 x 4 blocks or more keeps its sides (DenseCopyPlan.h).
     const bool packed_blocks = transposePacksBytes(p, word_bytes) &&
                                ceilDiv(tile.x, 4) * ceilDiv(tile.v, 4) >= TRANSPOSE_PACKED_MIN_BLOCKS;
     if (packed_blocks) {
@@ -67,7 +64,7 @@ struct Tile {
         tile.v = std::min(v, std::max(tile.v, area / tile.x));
     } else if (tile.v < side) {
         tile.x = std::min(x, std::max(tile.x, area / tile.v));
-        // 1389t: a packed byte tile grown along x past four full sides stops there if it leaves fewer than
+        // A packed byte tile grown along x past four full sides stops there if it leaves fewer than
         // TRANSPOSE_PACKED_MIN_GROWN_TILES tiles (DenseCopyPlan.h).
         const uint64_t tiles = ceilDiv(x, tile.x) * ceilDiv(v, tile.v) * (vectors / (x * v));
         if (transposePacksBytes(p, word_bytes) && tile.x > 4 * full && tiles < TRANSPOSE_PACKED_MIN_GROWN_TILES)
@@ -80,8 +77,8 @@ struct Tile {
             else t.x -= std::max<uint64_t>(1, t.x / 8);
         }
     };
-    // 1389r: unpacked single bytes from TRANSPOSE_TALL_BYTES_MIN_BYTES: the tall tile, if it holds the square's
-    // vectors or more (DenseCopyPlan.h).
+    // Unpacked single bytes from TRANSPOSE_TALL_BYTES_MIN_BYTES: the tall tile, if it holds the square's vectors or
+    // more (DenseCopyPlan.h).
     if (word_bytes == 1 && !transposePacksBytes(p, word_bytes) &&
         vectors * vector_bytes >= TRANSPOSE_TALL_BYTES_MIN_BYTES) {
         Tile tall{std::min(x, ceilDiv(TRANSPOSE_TALL_BYTES_ROW_BYTES, vector_bytes)), v};
@@ -92,24 +89,24 @@ struct Tile {
     return tile;
 }
 
-// 1389s: the wide tile of a rotation of single words of word_bytes: four sides along x, a quarter side (at least 8)
-// along v, the side a tile row of 128 bytes (64 2-byte, 32 4-byte words).
+// The wide tile of a rotation of single words of word_bytes: four sides along x, a quarter side (at least 8) along v,
+// the side a tile row of 128 bytes (64 2-byte, 32 4-byte words).
 [[nodiscard]] Tile wideRotationTile(uint64_t x, uint64_t v, uint32_t word_bytes) {
     const uint64_t side = std::max<uint64_t>(32, ceilDiv(128, word_bytes));
     return {std::min(x, 4 * side), std::min(v, std::max<uint64_t>(8, side / 4))};
 }
 
-// 1389e: whether the [x, v] rotation of a dense [v, x] matrix of `word`-byte words goes to the matrix transpose
-// kernel (DenseCopyPlan.h has the measurements behind the sizes).
+// Whether the [x, v] rotation of a dense [v, x] matrix of `word`-byte words goes to the matrix transpose kernel
+// (DenseCopyPlan.h has the measurements behind the sizes).
 [[nodiscard]] bool matrixTransposeFits(uint64_t x, uint64_t v, uint32_t word) {
     if (word > 4) return false;
-    if (transposePacksBytes(1, word)) return false;  // 1389k: single bytes take the packed byte tile (DenseCopyPlan.h)
+    if (transposePacksBytes(1, word)) return false;  // single bytes take the packed byte tile (DenseCopyPlan.h)
     const uint64_t side = MATRIX_TRANSPOSE_SIDE_BYTES / word;  // words: 128, 64 or 32
     if (std::min(x, v) < side) return false;                   // a skinny side: the rectangular tile
     if (x >= MAX_32BIT_INDEX / v) return false;                // its int indices: x v under 2^31
     if (ceilDiv(v, side) > MATRIX_TRANSPOSE_MAX_ROW_TILES) return false;
-    // 1389i: long source rows (x of TRANSPOSE_ALONG_V_RATIO v or more) from MATRIX_TRANSPOSE_MAX_LONG_ROW_BYTES: the
-    // transpose kernel's tiles along v.
+    // Long source rows (x of TRANSPOSE_ALONG_V_RATIO v or more) from MATRIX_TRANSPOSE_MAX_LONG_ROW_BYTES: the transpose
+    // kernel's tiles along v.
     if (x >= TRANSPOSE_ALONG_V_RATIO * v && x * v * word >= MATRIX_TRANSPOSE_MAX_LONG_ROW_BYTES) return false;
     return word == 4 || x * v * word >= MATRIX_TRANSPOSE_MIN_NARROW_BYTES;
 }
@@ -173,8 +170,8 @@ DenseCopyPlan planLayout(const std::vector<uint64_t>& dims, const std::vector<ui
 
     // Transpose: rows under a sector and an x axis (not the innermost outer axis v) whose rows are adjacent in the
     // source; the other outer axes are batch axes; 32-bit tile indices; an x by v plane of at least 256 vectors (a
-    // smaller one is local to the row copy's reads anyway). 1389f: rows of one to two sectors of 16-byte words too
-    // (32, 48 or 64 bytes), in a copy of TRANSPOSE_MIN_WIDE_BYTES or more (DenseCopyPlan.h has the measurements).
+    // smaller one is local to the row copy's reads anyway). Rows of one to two sectors of 16-byte words too (32, 48 or
+    // 64 bytes), in a copy of TRANSPOSE_MIN_WIDE_BYTES or more (DenseCopyPlan.h has the measurements).
     const uint64_t row_bytes = p * element_bytes;
     const bool narrow_rows = row_bytes < SECTOR_BYTES;
     const bool wide_rows = !narrow_rows && row_bytes <= TRANSPOSE_MAX_WIDE_ROW_BYTES && word == 16 &&
@@ -185,16 +182,16 @@ DenseCopyPlan planLayout(const std::vector<uint64_t>& dims, const std::vector<ui
         for (size_t k = 0; k < v_axis; ++k)
             if (outer_strides[k] == plan.p) x_axis = k;  // the innermost such axis
         if (x_axis != outer.size() && outer_dims[x_axis] < MAX_32BIT_INDEX && outer_dims[v_axis] < MAX_32BIT_INDEX) {
-            // 1389s: a plain rotation of 2- or 4-byte words with x of 7/8 v or more, from
-            // TRANSPOSE_WIDE_ROTATION_MIN_BYTES: the wide tile along v (DenseCopyPlan.h).
+            // A plain rotation of 2- or 4-byte words with x of 7/8 v or more, from TRANSPOSE_WIDE_ROTATION_MIN_BYTES:
+            // the wide tile along v (DenseCopyPlan.h).
             const bool plain_rotation =
                 outer.size() == 2 && plan.p == 1 && outer_strides[v_axis] == outer_dims[x_axis];
             const bool wide_rotation =
                 plain_rotation && (word == 2 || word == 4) &&
                 8 * outer_dims[x_axis] >= TRANSPOSE_WIDE_ROTATION_X_EIGHTHS * outer_dims[v_axis] &&
                 total * element_bytes >= TRANSPOSE_WIDE_ROTATION_MIN_BYTES;
-            // 1389e: a plain rotation of a dense matrix of single words, at the sizes the matrix kernel is as fast
-            // or faster. A source with gaps or a broadcast axis (v's stride is not x) stays a Transpose.
+            // A plain rotation of a dense matrix of single words, at the sizes the matrix kernel is as fast or faster.
+            // A source with gaps or a broadcast axis (v's stride is not x) stays a Transpose.
             if (plain_rotation && !wide_rotation && matrixTransposeFits(outer_dims[x_axis], outer_dims[v_axis], word)) {
                 plan.family = DenseCopyFamily::MatrixTranspose;
                 plan.x = outer_dims[x_axis];
@@ -209,18 +206,18 @@ DenseCopyPlan planLayout(const std::vector<uint64_t>& dims, const std::vector<ui
             uint64_t tiles = ceilDiv(outer_dims[x_axis], tile.x) * ceilDiv(outer_dims[v_axis], tile.v);
             for (size_t k = 0; k < v_axis; ++k)
                 if (k != x_axis) tiles = checkedProduct(tiles, outer_dims[k]);
-            // 1389a: thousands of tiles of a few hundred words (a small x by v plane under many batch elements) keep
-            // 256 threads on loop overhead; the row copy measured 1.3x to 1.75x faster on them.
+            // Thousands of tiles of a few hundred words (a small x by v plane under many batch elements) keep 256
+            // threads on loop overhead; the row copy measured 1.3x to 1.75x faster on them.
             const bool many_small_tiles = tile.x * tile.v * plan.p < TRANSPOSE_SMALL_TILE_WORDS &&
                                           tiles > TRANSPOSE_MAX_SMALL_TILES;
-            // 1389d: the plane, not the tile (through 1389c a tile under 256 vectors was the whole plane).
+            // The plane, not the tile.
             const bool plane = outer_dims[x_axis] * outer_dims[v_axis] >= TRANSPOSE_MIN_PLANE_VECTORS;
             if (tiles < MAX_32BIT_INDEX && plane && !many_small_tiles) {
                 plan.family = DenseCopyFamily::Transpose;
                 plan.tile_x = static_cast<uint32_t>(tile.x);
                 plan.tile_v = static_cast<uint32_t>(tile.v);
-                // 1389i: long source rows take the tiles along v, where the two orders differ (DenseCopyPlan.h).
-                // 1389k: packed bytes from x of half v.
+                // Long source rows take the tiles along v, where the two orders differ (DenseCopyPlan.h); packed bytes
+                // from x of half v.
                 const bool long_rows = transposePacksBytes(plan.p, word)
                                            ? TRANSPOSE_BYTES_ALONG_V_DIVISOR * outer_dims[x_axis] >= outer_dims[v_axis]
                                            : outer_dims[x_axis] >= TRANSPOSE_ALONG_V_RATIO * outer_dims[v_axis];
@@ -241,7 +238,7 @@ DenseCopyPlan planLayout(const std::vector<uint64_t>& dims, const std::vector<ui
         }
     }
 
-    // 1389b: single words of 4 bytes or fewer over two or more outer axes, packed 16 bytes to a store.
+    // Single words of 4 bytes or fewer over two or more outer axes, packed 16 bytes to a store.
     const bool packed = plan.p == 1 && word <= 4 && outer.size() >= 2 && plan.words < MAX_32BIT_INDEX &&
                         destination_address % PACK_BYTES == 0;
     plan.family = packed ? DenseCopyFamily::PackedGather : DenseCopyFamily::RowCopy;
@@ -274,7 +271,7 @@ uint64_t sharedBytes(const DenseCopyPlan& plan) {
 
 }  // namespace DenseCopyInternal
 
-const char* denseCopyRevision() { return "1395"; }  // 1395: the planner's row-copy counts only
+const char* denseCopyRevision() { return "1395"; }
 
 std::string denseCopyPlanName(const DenseCopyPlan& plan) {
     const std::string w = "_w" + std::to_string(plan.word_bytes);

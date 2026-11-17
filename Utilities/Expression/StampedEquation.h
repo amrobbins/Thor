@@ -35,7 +35,9 @@
 #include "Utilities/TensorOperations/Cub/CubDevicePrimitives.h"
 #include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
 #include "Utilities/TensorOperations/Copy/StridedCopy.h"
-#include "Utilities/TensorOperations/Cub/CubReduction.h"
+#include "Utilities/TensorOperations/Reduction/ArgReducer.h"
+#include "Utilities/TensorOperations/Reduction/SegmentedReducer.h"
+#include "Utilities/TensorOperations/Reduction/Reducer.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/BucketedCublasGemm.h"
 #include "Utilities/TensorOperations/Ragged/PaddedRaggedSequenceKernel.h"
@@ -73,7 +75,7 @@ enum class ReductionResultKind : uint8_t {
 struct ReductionCacheKey {
     const ExprOp op;
     const std::vector<uint64_t> input_dims;
-    // CubReduction's physical permutation/tiled candidate and retained-output order are derived from
+    // Reducer's physical permutation/tiled candidate and retained-output order are derived from
     // (input_dims, input_strides, reduction_axes). Keep the physical strides in the cache identity so
     // plans for incompatible zero-copy views can never be reused. Tensor storage offsets are intentionally
     // excluded because getMemPtr() already points at the visible view origin and the stamped plan is offset-invariant.
@@ -122,9 +124,9 @@ struct ReductionCacheKey {
 
 struct BuiltReduction {
     ReductionCacheKey key;
-    std::optional<CubReductionOp> value_op = std::nullopt;
-    std::optional<CubArgReductionOp> arg_op = std::nullopt;
-    std::optional<CubReductionGeometry> geometry = std::nullopt;
+    std::optional<ReductionOp> value_op = std::nullopt;
+    std::optional<ArgReductionOp> arg_op = std::nullopt;
+    std::optional<ReductionGeometry> geometry = std::nullopt;
 
     explicit BuiltReduction(ReductionCacheKey key) : key(std::move(key)) {}
 
@@ -706,7 +708,7 @@ class StampedReduction {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
-    [[nodiscard]] CubReductionPath getPath() const {
+    [[nodiscard]] ReductionLayout getPath() const {
         if (!cub_reduction) {
             throw std::runtime_error("StampedReduction has no CUB reduction backend.");
         }
@@ -734,7 +736,7 @@ class StampedReduction {
    private:
     const std::shared_ptr<BuiltReduction> built_reduction;
     Tensor output;
-    std::shared_ptr<StampedCubReduction> cub_reduction;
+    std::shared_ptr<StampedReducer> cub_reduction;
     Stream stream;
 };
 
@@ -755,7 +757,7 @@ class StampedArgMinMax {
    private:
     const std::shared_ptr<BuiltReduction> built_reduction;
     Tensor output;
-    std::shared_ptr<StampedCubArgReduction> cub_arg_reduction;
+    std::shared_ptr<StampedArgReducer> cub_arg_reduction;
     Stream stream;
 };
 
@@ -781,7 +783,7 @@ class StampedSegmentedReduction {
     const Tensor input;
     const Tensor segment_offsets;
     mutable Tensor output;
-    std::shared_ptr<StampedCubSegmentedReduction> cub_segmented_reduction;
+    std::shared_ptr<StampedSegmentedReducer> cub_segmented_reduction;
     Stream stream;
 };
 
@@ -1830,7 +1832,7 @@ class StampedReduceMinMaxBackward {
                                 const Tensor& indices,
                                 const Stream& stream);
 
-    StampedReduceMinMaxBackward(CubArgReductionOp segmented_op,
+    StampedReduceMinMaxBackward(ArgReductionOp segmented_op,
                                 const Tensor& input,
                                 const Tensor& grad_output,
                                 const Tensor& output,
@@ -1847,8 +1849,8 @@ class StampedReduceMinMaxBackward {
     Tensor output;
     const Tensor indices;
     const std::optional<Tensor> segment_offsets;
-    std::shared_ptr<StampedCubArgReduction> cub_arg_reduction;
-    std::shared_ptr<StampedCubSegmentedArgReduction> cub_segmented_arg_reduction;
+    std::shared_ptr<StampedArgReducer> cub_arg_reduction;
+    std::shared_ptr<StampedSegmentedArgReducer> cub_segmented_arg_reduction;
     uint64_t segmented_elements_per_value = 1;
     ReduceMinMaxBackwardScatterPlan scatter_plan;
     Stream stream;
@@ -3265,8 +3267,8 @@ class StampedExecutionPlan {
         return out;
     }
 
-    [[nodiscard]] std::vector<CubReductionPath> reductionPaths() const {
-        std::vector<CubReductionPath> out;
+    [[nodiscard]] std::vector<ReductionLayout> reductionPaths() const {
+        std::vector<ReductionLayout> out;
         for (const StampedExecutionStage& step : steps) {
             if (step.kind == StampedExecutionStage::Kind::Reduction) {
                 if (!step.reduction) {

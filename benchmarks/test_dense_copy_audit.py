@@ -9,7 +9,7 @@ import dense_copy_audit as audit
 
 HEADER = ("cell_id,case,sub,dtype,dims,strides,plan,useful_bytes,touched_bytes,moved_bytes,verified,probe_us,launches,"
           "sample0_us,sample1_us,sample2_us,median_us,copy_us,ref_1387,ref_1387_us,tbps,of_copy,vs_1387")
-# Through 1393 the audit also wrote gpuMatrixTranspose's columns (1394 deleted it); an older run still loads.
+# An older run also has gpuMatrixTranspose's columns; it still loads.
 OLD_HEADER = ("cell_id,case,sub,dtype,dims,strides,plan,useful_bytes,touched_bytes,moved_bytes,verified,probe_us,"
               "launches,sample0_us,sample1_us,sample2_us,median_us,copy_us,ref_1387,ref_1387_us,matrix_transpose_us,"
               "matrix_transpose_verified,tbps,of_copy,vs_1387,vs_matrix_transpose")
@@ -75,9 +75,9 @@ class AuditTest(unittest.TestCase):
     def test_plan_kind(self):
         self.assertEqual(audit.plan_kind("row_copy_o2_p3_w4"), "row_copy_o2_w4")
         self.assertEqual(audit.plan_kind("transpose_p17_w16_t32x8_b1"), "transpose_w16_b1")
-        self.assertEqual(audit.plan_kind("transpose_p17_w16_t32_b1"), "transpose_w16_b1")  # a 1388 name
-        self.assertEqual(audit.plan_kind("packed_gather_o5_w1"), "packed_gather_o5_w1")  # 1389b
-        self.assertEqual(audit.plan_kind("matrix_transpose_w4"), "matrix_transpose_w4")  # 1389e
+        self.assertEqual(audit.plan_kind("transpose_p17_w16_t32_b1"), "transpose_w16_b1")  # a square tile
+        self.assertEqual(audit.plan_kind("packed_gather_o5_w1"), "packed_gather_o5_w1")  # no row length or tile
+        self.assertEqual(audit.plan_kind("matrix_transpose_w4"), "matrix_transpose_w4")  # likewise
         self.assertEqual(audit.plan_kind("memcpy_w4"), "memcpy_w4")
 
     def test_report_sections(self):
@@ -87,12 +87,12 @@ class AuditTest(unittest.TestCase):
         self.assertIn("failed cells: 1", text)
         for section in ("# 1. by case", "# 2. by plan", "# 3. k by sub-kind", "# 5. the 15 cells", "# 6. measurement"):
             self.assertIn(section, text)
-        self.assertNotIn("gpuMatrixTranspose", text)  # 1394
+        self.assertNotIn("gpuMatrixTranspose", text)
         self.assertIn("transpose_w4_b0", text)
         self.assertIn("k pitched packing      both", text)
         self.assertNotIn("# 7. compare", text)
 
-    def test_load_older_run(self):  # 1394: a run with gpuMatrixTranspose's columns
+    def test_load_older_run(self):  # a run with gpuMatrixTranspose's columns
         _, cells, _, _ = audit.load(self.slower)
         self.assertEqual(len(cells), 2)
         self.assertAlmostEqual(cells[0]["vs_1387"], 4.0, places=3)

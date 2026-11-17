@@ -160,15 +160,13 @@ TEST(ExpressionReductionArchitecture, ArgReductionDoesNotRetainSupersededKernelF
     const std::filesystem::path cub_root = std::filesystem::path(SOURCE_DIR) / "Utilities/TensorOperations/Cub";
     EXPECT_FALSE(std::filesystem::exists(cub_root / "CubArgReductionMin.cu"));
     EXPECT_FALSE(std::filesystem::exists(cub_root / "CubArgReductionMax.cu"));
-    // 1330 (ragged phase 9): the header's last users, the offset-segmented ARG kernels, are deleted, so the header is
-    // too (1261 had cut it to their FP32 candidate rules and stores).
+    // The header went with its last users, the offset-segmented ARG kernels.
     EXPECT_FALSE(std::filesystem::exists(cub_root / "CubArgReductionOperation.cuh"));
 }
 
-// 1330 (ragged phase 9): the legacy offset-segmented kernels (one owner per segment: CUB DeviceSegmentedReduce over
-// offset pointers for rank-1 values, the vector narrow / wide kernels for [N, D...]) are deleted. Every segmented
-// stamp runs the merge-path ragged kernels (CubRagged*.cu, RaggedStampAutotuner.cpp); a site no ragged family runs
-// throws. They must stay deleted.
+// The offset-segmented kernels (one owner per segment: CUB DeviceSegmentedReduce over offset pointers for rank-1
+// values, the vector narrow / wide kernels for [N, D...]) are deleted and must stay deleted. Every segmented stamp runs
+// the merge-path ragged kernels (Ragged*.cu, RaggedStampAutotuner.cpp); a site no ragged family runs throws.
 TEST(ExpressionReductionArchitecture, SegmentedReductionDoesNotRetainLegacyOffsetSegmentedKernels) {
     const std::filesystem::path cub_root = std::filesystem::path(SOURCE_DIR) / "Utilities/TensorOperations/Cub";
     EXPECT_FALSE(std::filesystem::exists(cub_root / "CubReductionOffsetSegmented.cu"));
@@ -196,7 +194,7 @@ TEST(ExpressionReductionArchitecture, SegmentedReductionDoesNotRetainLegacyOffse
         "OffsetSegmentedArgCandidateInput",
         "device_segmented_reduce.cuh",
     };
-    // 1373: the dense fixed-size segmented CUB reduction (ContiguousFixedSegment) is deleted too, so no file is exempt.
+    // The dense fixed-size segmented CUB reduction (ContiguousFixedSegment) is deleted too, so no file is exempt.
     std::vector<std::string> violations;
     forEachActiveSourceFile(source_roots, [&](const std::filesystem::path& path) {
         const std::string relative = std::filesystem::relative(path, SOURCE_DIR).generic_string();
@@ -215,10 +213,10 @@ TEST(ExpressionReductionArchitecture, SegmentedReductionDoesNotRetainLegacyOffse
                                        }();
 }
 
-// 1373 (plans/Thor_View_Reduction_Plan_2026-11-08.md, phase 4): no value or arg reduction calls a CUB device
-// reduction. Dense inputs run the retained planner, compact-permutation views run it on the dense span of their bytes,
-// rank-1 views run StridedR, and the other views run the Thor tiled kernels. The one CUB device-reduce call left is
-// FlatScatterAddKernel's ReduceByKey, a keyed grouping (it includes <cub/cub.cuh>, not the device-reduce headers).
+// No value or arg reduction calls a CUB device reduction. Dense inputs run the dense planner, compact-permutation views
+// run it on the dense span of their bytes, rank-1 views run StridedR, and the reducer refuses the other views (a caller
+// runs them in two parts). The one CUB device-reduce call left is FlatScatterAddKernel's ReduceByKey, a keyed grouping
+// (it includes <cub/cub.cuh>, not the device-reduce headers).
 TEST(ExpressionReductionArchitecture, NoReductionCallsACubDeviceReduction) {
     const std::vector<std::filesystem::path> source_roots = {
         std::filesystem::path(SOURCE_DIR) / "Utilities",
@@ -263,13 +261,15 @@ TEST(ExpressionReductionArchitecture, NoReductionCallsACubDeviceReduction) {
                                        }();
 }
 
-// 1393: the Thor tiled view family (direct and pitched component-tiled, the 32x33 payload transpose, the wide
-// shared-transpose kernels, their async full-row pipeline and the per-operation executors over them) is deleted. No
-// stamp reached it after 1390. L2 keeps one finalizer type (AdditiveFinalizeFp32's square_root flag).
+// The Thor tiled view family (direct and pitched component-tiled, the 32x33 payload transpose, the wide
+// shared-transpose kernels, their async full-row pipeline and the per-operation executors over them) is deleted. L2
+// keeps one finalizer type (AdditiveFinalizeFp32's square_root flag).
 TEST(ExpressionReductionArchitecture, ValueReductionDoesNotRetainTiledViewFamily) {
     const std::filesystem::path cub_root =
         std::filesystem::path(SOURCE_DIR) / "Utilities/TensorOperations/Cub";
-    const std::string operation_header = readTextFile(cub_root / "CubReductionOperation.cuh");
+    const std::filesystem::path reduction_root =
+        std::filesystem::path(SOURCE_DIR) / "Utilities/TensorOperations/Reduction";
+    const std::string operation_header = readTextFile(reduction_root / "Kernels/ReductionOperation.cuh");
     EXPECT_EQ(operation_header.find("SquareRootFinalizeFp32"), std::string::npos)
         << "L2 must not regain an independent square-root finalizer template type.";
     EXPECT_NE(operation_header.find("bool square_root"), std::string::npos);
@@ -286,10 +286,24 @@ TEST(ExpressionReductionArchitecture, ValueReductionDoesNotRetainTiledViewFamily
     }
 
     const std::vector<std::filesystem::path> files = {
-        cub_root / "CubReduction.h",
-        cub_root / "CubReduction.cpp",
-        cub_root / "CubReductionInternal.h",
-        cub_root / "CubReductionOperation.cuh",
+        reduction_root / "Reducer.h",
+        reduction_root / "ArgReducer.h",
+        reduction_root / "SegmentedReducer.h",
+        reduction_root / "ReductionTypes.h",
+        reduction_root / "Layout/ReductionGeometry.h",
+        reduction_root / "Layout/ViewSplit.h",
+        reduction_root / "Planner/DenseExecutablePlan.h",
+        reduction_root / "Reducer.cpp",
+        reduction_root / "ArgReducer.cpp",
+        reduction_root / "SegmentedReducer.cpp",
+        reduction_root / "ReducerBenchmarkHooks.cpp",
+        reduction_root / "FrontEnd.h",
+        reduction_root / "FrontEnd.cpp",
+        reduction_root / "Layout/ReductionGeometry.cpp",
+        reduction_root / "Layout/ViewSplit.cpp",
+        reduction_root / "Planner/DensePhysicalPassExecution.cpp",
+        reduction_root / "Kernels/KernelLaunchers.h",
+        reduction_root / "Kernels/ReductionOperation.cuh",
     };
     const std::vector<std::string> forbidden_tokens = {
         "CubReductionTiledPolicy",
@@ -316,14 +330,20 @@ TEST(ExpressionReductionArchitecture, ValueReductionDoesNotRetainTiledViewFamily
     }
 }
 
-// 1385: the packet-adaptive cooperative tiled kernel was unreachable (dense geometry runs the dense planner, and its
-// gate refused every view candidate), so it and its policy constants are deleted.
+// The packet-adaptive cooperative tiled kernel was unreachable (dense geometry runs the dense planner, and its gate
+// refused every view candidate), so it and its policy constants are deleted.
 TEST(ExpressionReductionArchitecture, ValueReductionDoesNotRetainAdaptiveCooperativeTiledKernel) {
-    const std::filesystem::path cub_root =
-        std::filesystem::path(SOURCE_DIR) / "Utilities/TensorOperations/Cub";
+    const std::filesystem::path reduction_root =
+        std::filesystem::path(SOURCE_DIR) / "Utilities/TensorOperations/Reduction";
     const std::vector<std::filesystem::path> files = {
-        cub_root / "CubReduction.h",
-        cub_root / "CubReductionOperation.cuh",
+        reduction_root / "Reducer.h",
+        reduction_root / "ArgReducer.h",
+        reduction_root / "SegmentedReducer.h",
+        reduction_root / "ReductionTypes.h",
+        reduction_root / "Layout/ReductionGeometry.h",
+        reduction_root / "Layout/ViewSplit.h",
+        reduction_root / "Planner/DenseExecutablePlan.h",
+        reduction_root / "Kernels/ReductionOperation.cuh",
     };
     const std::vector<std::string> forbidden_tokens = {
         "adaptiveCooperativeTiled",
@@ -343,14 +363,30 @@ TEST(ExpressionReductionArchitecture, ValueReductionDoesNotRetainAdaptiveCoopera
 TEST(ExpressionReductionArchitecture, ValueReductionDoesNotRetainLegacyLogicalIndexFallback) {
     const std::filesystem::path cub_root =
         std::filesystem::path(SOURCE_DIR) / "Utilities/TensorOperations/Cub";
+    const std::filesystem::path reduction_root =
+        std::filesystem::path(SOURCE_DIR) / "Utilities/TensorOperations/Reduction";
 
     EXPECT_FALSE(std::filesystem::exists(cub_root / "CubReductionIndexing.cuh"))
         << "DELETE requires the legacy logical-index mapper header to stay removed.";
 
     const std::vector<std::filesystem::path> files = {
-        cub_root / "CubReduction.h",
-        cub_root / "CubReduction.cpp",
-        cub_root / "CubReductionOperation.cuh",
+        reduction_root / "Reducer.h",
+        reduction_root / "ArgReducer.h",
+        reduction_root / "SegmentedReducer.h",
+        reduction_root / "ReductionTypes.h",
+        reduction_root / "Layout/ReductionGeometry.h",
+        reduction_root / "Layout/ViewSplit.h",
+        reduction_root / "Planner/DenseExecutablePlan.h",
+        reduction_root / "Reducer.cpp",
+        reduction_root / "ArgReducer.cpp",
+        reduction_root / "SegmentedReducer.cpp",
+        reduction_root / "ReducerBenchmarkHooks.cpp",
+        reduction_root / "FrontEnd.h",
+        reduction_root / "FrontEnd.cpp",
+        reduction_root / "Layout/ReductionGeometry.cpp",
+        reduction_root / "Layout/ViewSplit.cpp",
+        reduction_root / "Planner/DensePhysicalPassExecution.cpp",
+        reduction_root / "Kernels/ReductionOperation.cuh",
     };
     const std::vector<std::string> forbidden_tokens = {
         "StridedFixedSegment",

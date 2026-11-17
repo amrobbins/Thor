@@ -3,8 +3,8 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/Expression/ExecutionDiagnostics.h"
-#include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Einsum/EinsumPlanner.h"
+#include "Utilities/TensorOperations/Reduction/Reducer.h"
 
 #include <memory>
 #include <optional>
@@ -73,7 +73,7 @@ class StampedEinsum;
  * tensor dimensions are required to resolve broadcasting and ellipses. The
  * resulting operation is lowered completely into an Expression graph. Matrix
  * contractions use Expression::matmul; all independent sums use
- * Expression::reduce_sum and therefore the centralized CubReduction backend.
+ * Expression::reduce_sum and therefore the centralized Reducer backend.
  */
 class Einsum {
    public:
@@ -133,8 +133,8 @@ class StampedEinsum {
     }
     [[nodiscard]] bool usesStandaloneReduction() const;
     [[nodiscard]] bool usesStridedBatchedGemm() const { return uses_strided_batched_gemm; }
-    [[nodiscard]] std::vector<CubReductionPath> getStandaloneReductionPaths() const;
-    [[nodiscard]] std::optional<CubReductionPath> getStandaloneReductionPath() const;
+    [[nodiscard]] std::vector<ReductionLayout> getStandaloneReductionPaths() const;
+    [[nodiscard]] std::optional<ReductionLayout> getStandaloneReductionPath() const;
     [[nodiscard]] std::vector<StampedReductionStageDiagnostic> getStandaloneReductionDiagnostics() const;
     [[nodiscard]] std::vector<std::string> getExpressionStageKindNames() const;
     [[nodiscard]] std::vector<StampedMatmulStageDiagnostic> getExpressionMatmulStageDiagnostics() const;

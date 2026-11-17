@@ -2,7 +2,7 @@
 
 #include <optional>
 #include "DeepLearning/Implementation/Layers/Layer.h"
-#include "Utilities/TensorOperations/Cub/CubReduction.h"
+#include "Utilities/TensorOperations/Reduction/Reducer.h"
 
 #include <nlohmann/json.hpp>
 
@@ -46,7 +46,7 @@ class LossShaper : public Layer {
 
     OutputLossType outputLossType;
     uint32_t currentValidExampleCount = 0;
-    std::shared_ptr<StampedCubReduction> reduction;
+    std::shared_ptr<StampedReducer> reduction;
 };
 
 inline void to_json(nlohmann::json &j, const LossShaper::OutputLossType &outputLossType) {

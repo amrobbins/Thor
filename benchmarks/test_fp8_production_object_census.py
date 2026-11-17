@@ -18,30 +18,30 @@ from benchmarks.fp8_production_object_census import (
 class ProductionObjectClassificationTest(unittest.TestCase):
     def test_retained_family_names(self):
         samples = {
-            'fp8OneWindowRuntimeKCompleteKernel': 'OneWindow',
-            'narrowFp8PackedFlatRCooperativeFirstStageKernel': 'DeepRSmallK',
-            'kParallelFp8PacketKernel': 'AlignedK',
-            'fp8GeneralRParallelKTileP16CompleteKernel': 'RuntimeK',
+            'oneWindowValueKernel': 'OneWindow',
+            'deepRSmallKValueKernel': 'DeepRSmallK',
+            'fp8AlignedKValueKernel': 'AlignedK',
+            'packetCompleteValueKernel': 'RuntimeK',
         }
         for symbol, expected in samples.items():
             with self.subTest(symbol=symbol):
                 self.assertEqual(classify_function(
-                    f'ThorImplementation::CubReductionInternal::{symbol}<__nv_fp8_e4m3>()'), expected)
+                    f'ThorImplementation::ReductionInternal::{symbol}<__nv_fp8_e4m3>()'), expected)
 
     def test_retained_mangled_cuda_kernel_is_classified_without_demangling(self):
         for kernel, family in {
-            'fp8OneWindowRuntimeKCompleteKernel': 'OneWindow',
-            'narrowFp8PackedFlatRCooperativeFirstStageKernel': 'DeepRSmallK',
-            'kParallelFp8PacketKernel': 'AlignedK',
-            'awkwardAlignmentRotatedShardedFirstStageKernel': 'RuntimeK',
+            'oneWindowValueKernel': 'OneWindow',
+            'deepRSmallKValueKernel': 'DeepRSmallK',
+            'fp8AlignedKValueKernel': 'AlignedK',
+            'runtimeKRotatedValueKernel': 'RuntimeK',
         }.items():
-            mangled = (f'_ZN18ThorImplementation20CubReductionInternal'
+            mangled = (f'_ZN18ThorImplementation17ReductionInternal'
                        f'{len(kernel)}{kernel}I13__nv_fp8_e4m3E')
             self.assertEqual(classify_function(mangled, mangled), family)
 
     def test_shared_rotated_non_fp8_kernels_are_not_mislabeled_runtime_k(self):
-        name = ('void ThorImplementation::CubReductionInternal::'
-                '(anonymous namespace)::awkwardAlignmentRotatedShardedFirstStageKernel'
+        name = ('void ThorImplementation::ReductionInternal::'
+                '(anonymous namespace)::runtimeKRotatedValueKernel'
                 '<float, PropagatingMaximumFp32>()')
         self.assertEqual(classify_function(name), 'other-device-function')
         typed = name.replace('<float,', '<__nv_fp8_e4m3,')
@@ -53,18 +53,18 @@ class ProductionObjectClassificationTest(unittest.TestCase):
 
     def test_unselected_fp8_kernel_is_visible(self):
         self.assertEqual(classify_function(
-            'ThorImplementation::CubReductionInternal::legacyFp8Kernel<__nv_fp8_e5m2>()'),
+            'ThorImplementation::ReductionInternal::legacyFp8Kernel<__nv_fp8_e5m2>()'),
             'other-fp8-kernel')
         self.assertEqual(classify_function(
-            'ThorImplementation::CubReductionInternal::fp8UnretainedKernel()'),
+            'ThorImplementation::ReductionInternal::fp8UnretainedKernel()'),
             'other-fp8-kernel')
 
     def test_helper_and_non_fp8_kernel_are_not_false_positives(self):
         self.assertEqual(classify_function(
-            'ThorImplementation::CubReductionInternal::loadFp8Packet<__nv_fp8_e4m3>()'),
+            'ThorImplementation::ReductionInternal::loadFp8Packet<__nv_fp8_e4m3>()'),
             'other-device-function')
         self.assertEqual(classify_function(
-            'ThorImplementation::CubReductionInternal::reduceKernel<float>()'),
+            'ThorImplementation::ReductionInternal::reduceKernel<float>()'),
             'other-device-function')
         self.assertEqual(classify_function(
             'cub::detail::device::somethingKernel<__nv_fp8_e4m3>()'),
@@ -104,7 +104,7 @@ class ProductionObjectManifestComparisonTest(unittest.TestCase):
 class ProductionObjectIdentityComparisonTest(unittest.TestCase):
     @staticmethod
     def _prod(family, symbol, *, arch='sm_120',
-              obj='CubReductionNarrowFlatRCooperative.cu.o', name=None):
+              obj='RKDeepRSmallK.cu.o', name=None):
         return {'category': family, 'mangled_name': symbol,
                 'name': name or f'call_{symbol}()',
                 'object': obj, 'cubin': f'cuda.{arch}.cubin'}
@@ -117,8 +117,8 @@ class ProductionObjectIdentityComparisonTest(unittest.TestCase):
 
     def test_separates_new_kernel_duplicates_missing_and_architectures(self):
         production = [
-            self._prod('OneWindow', '_Zselected', obj='first/CubReductionNarrowFlatRCooperative.cu.o'),
-            self._prod('OneWindow', '_Zselected', obj='second/CubReductionNarrowFlatRCooperative.cu.o'),
+            self._prod('OneWindow', '_Zselected', obj='first/RKDeepRSmallK.cu.o'),
+            self._prod('OneWindow', '_Zselected', obj='second/RKDeepRSmallK.cu.o'),
             self._prod('OneWindow', '_Zextra'),
             self._prod('RuntimeK', '_Zruntime', arch='sm_89'),
             self._prod('other-device-function', '_Zignored'),
@@ -147,8 +147,8 @@ class ProductionObjectIdentityComparisonTest(unittest.TestCase):
     def test_distinct_anonymous_namespace_salts_match_same_full_typed_signature(self):
         # A generated isolated CUDA TU has a different _GLOBAL__N__ hash from
         # the production TU.  The complete demangled signature is identical.
-        signature = ('void ThorImplementation::CubReductionInternal::'
-                     '(anonymous namespace)::fp8OneWindowRuntimeKCompleteKernel'
+        signature = ('void ThorImplementation::ReductionInternal::'
+                     '(anonymous namespace)::oneWindowValueKernel'
                      '<__nv_fp8_e4m3, 1, 16, 1, false, 0>()')
         production = [self._prod('OneWindow', '_Zproduction_salt', name=signature)]
         isolated = [self._selected('OneWindow', '_Zisolated_salt', name=signature)]
@@ -160,9 +160,9 @@ class ProductionObjectIdentityComparisonTest(unittest.TestCase):
         self.assertEqual(states['OneWindow', 'matched_instances'], 1)
 
     def test_different_template_argument_is_distinct_specialization(self):
-        root = 'void ThorImplementation::CubReductionInternal::(anonymous namespace)::Kernel'
+        root = 'void ThorImplementation::ReductionInternal::(anonymous namespace)::Kernel'
         production = [self._prod('AlignedK', '_Za',
-                                 obj='CubReductionKParallelShardedTiled.cu.o',
+                                 obj='RKAlignedK.cu.o',
                                  name=root + '<__nv_fp8_e4m3, 8>()')]
         selected = [self._selected('AlignedK', '_Zb', name=root + '<__nv_fp8_e4m3, 16>()')]
         # An isolated AlignedK symbol must originate from its aligned TU.
@@ -172,7 +172,7 @@ class ProductionObjectIdentityComparisonTest(unittest.TestCase):
         self.assertEqual(states['AlignedK', 'matched_instances'], 0)
 
     def test_same_signature_from_unrelated_object_does_not_match(self):
-        signature = 'void ThorImplementation::CubReductionInternal::Kernel<int>()'
+        signature = 'void ThorImplementation::ReductionInternal::Kernel<int>()'
         rows, _ = compare_selected_kernel_identities([
             self._prod('OneWindow', '_Zprod', obj='Unrelated.cu.o', name=signature)
         ], [self._selected('OneWindow', '_Zsel', name=signature)])

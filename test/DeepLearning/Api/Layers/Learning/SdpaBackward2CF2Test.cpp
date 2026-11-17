@@ -1,7 +1,6 @@
-// 2C-F2: causal-mask SDPA numerical backward, including a mixed
-// ragged-query/dense-key-value case.  No production changes.  Dropout,
-// dense-query/ragged-KV, shared input accumulation and other masking
-// variants remain separate gates.
+// Causal-mask SDPA numerical backward, including a mixed ragged-query / dense-key-value case. Dense-query / ragged-KV,
+// shared input accumulation and dropout have their own tests (SdpaBackward2CF3Test, SdpaBackward2CF4Test,
+// SdpaDropoutBackward2CG2Test).
 #include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Api/Layers/Learning/ScaledDotProductAttention.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"

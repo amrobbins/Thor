@@ -10,7 +10,7 @@
 // Host-side submission scheduling only. The CUDA benchmark owns the device
 // buffers, streams and timestamp events, and keeps each Work's captures alive
 // until collect() returns after the batch-wide stream synchronization.
-namespace ThorImplementation::CubReductionBenchmarking {
+namespace ThorImplementation::ReductionBenchmarking {
 
 class Fp8OracleBatchQueue {
 public:
@@ -85,4 +85,4 @@ private:
     Timing timing_{};
 };
 
-} // namespace ThorImplementation::CubReductionBenchmarking
+} // namespace ThorImplementation::ReductionBenchmarking

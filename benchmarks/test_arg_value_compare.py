@@ -1,4 +1,4 @@
-"""Host checks for the ARG-A0 sweep additions and arg_value_compare.py."""
+"""Host checks for the sweep's ARG cells and arg_value_compare.py."""
 import contextlib
 import io
 import pathlib
@@ -31,7 +31,7 @@ class SweepSourceTest(unittest.TestCase):
     def test_arg_options_present(self):
         for text in ('"argmin"', '"argmax"', '--focus=arg', '--shapes=all', '--arg-outputs=index',
                      'analyzeDenseGeometry(dims,{1})', 'runOnInputForBenchmark', 'getPlannedPassNames',
-                     '"arg_production"', '"one_window_arg"', 'launchFp8OneWindowArgComplete',
+                     '"arg_production"', '"one_window_arg"', 'launchFp8OneWindowArg',
                      '"deep_r_small_k_arg"', 'launchFp8DeepRSmallKArgFirstStage', '"runtime_k_arg"',
                      'launchFp8RuntimeKArgPass', '"aligned_k_arg"', 'launchFp8AlignedKArgPass'):
             self.assertIn(text, SOURCE)

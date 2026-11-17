@@ -10,7 +10,7 @@ It measures four production paths in FP32:
 | --- | --- | --- |
 | GEMM | `Expression::matmul` -> cuBLASLt | one FMA |
 | fused pair product | one `FusedKernel` for `lhs * rhs` | one output/iteration element |
-| reduction | central `CubReduction(Sum)` over contiguous width 256 | one reduction input element |
+| reduction | central `Reducer(Sum)` over contiguous width 256 | one reduction input element |
 | materialization | `materializeTensorViewAsync` dense D2D path | one copied element (one read + one write) |
 
 The GEMM sweep fixes `m=n=2048` and varies `k`. This makes arithmetic scale approximately linearly while avoiding the small/skinny shape anomalies that motivated the previous diagnostic benchmark. The elementwise, reduction, and materialization sweeps vary total element count over the same broad powers-of-four range.

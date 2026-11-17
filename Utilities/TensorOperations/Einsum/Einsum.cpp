@@ -261,7 +261,7 @@ void markLogicalOperandPreReduced(LogicalEinsumOperand& operand,
     // with gaps, retained payloads with internal gaps). Through 1389 Einsum materialized a refused view itself, by a
     // cast to the reduction's output dtype.
 
-    // Accumulate through centralized CubReduction in FP32 and store in the
+    // Accumulate through centralized Reducer in FP32 and store in the
     // dtype requested by the downstream lowering. Matrix lowering requests the
     // einsum storage dtype to satisfy Thor's no-implicit-conversion matmul
     // contract; pair-product lowering can retain FP32 through its final fused
@@ -1691,12 +1691,12 @@ void StampedEinsum::runOn(Stream& run_stream) const {
 
 bool StampedEinsum::usesStandaloneReduction() const { return !execution->reductionPaths().empty(); }
 
-std::vector<CubReductionPath> StampedEinsum::getStandaloneReductionPaths() const {
+std::vector<ReductionLayout> StampedEinsum::getStandaloneReductionPaths() const {
     return execution->reductionPaths();
 }
 
-std::optional<CubReductionPath> StampedEinsum::getStandaloneReductionPath() const {
-    const std::vector<CubReductionPath> paths = getStandaloneReductionPaths();
+std::optional<ReductionLayout> StampedEinsum::getStandaloneReductionPath() const {
+    const std::vector<ReductionLayout> paths = getStandaloneReductionPaths();
     if (paths.empty()) {
         return std::nullopt;
     }

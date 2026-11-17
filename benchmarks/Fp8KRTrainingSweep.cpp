@@ -1,7 +1,7 @@
-// FP8 R / KR training sweep (1151-1158): the KR counterpart of `thor_fp8_retained_cold_l2_sweep --training`.
+// FP8 R / KR training sweep: the KR counterpart of `thor_fp8_retained_cold_l2_sweep --training`.
 //
 // The questions, as the RK training sweep asked them for RK:
-//   - does any retained KR shape reach line rate at this site (a kernel gap when none does), and
+//   - does any KR shape reach line rate at this site (a kernel gap when none does), and
 //   - when one does, does fp8KRCandidateShapes list it, how early, and does the production stamp pick it?
 //
 // Cells. A cell is one site [K, R] (K = 1 is a pure R reduction) with one sampled semantics:
@@ -10,46 +10,44 @@
 //     (R >= bytes gives a pure R site of that size), so odd rows and odd sizes are covered;
 //   - --semantics cells per geometry alternate VALUE (sum, l1_norm, sum_squares, product, min, max; FP32 output) and
 //     ARG (argmin, argmax; UINT32 index, with or without the FP32 value), with a sampled dtype (E4M3 / E5M2);
-//   - 1179 --dtypes=fp32 (alone or with the FP8 dtypes): FP32 VALUE cells on the same kernels
-//     (launchFp32KRValueSegments, not yet routed in production) and the FP32 pool (retainedKRCandidatePool at element size 4). An FP32 cell takes
-//     its geometry's row length in elements (R = the grid's row length, row bytes 4 R; a pure R site keeps its bytes)
-//     and a quarter of its rows, so it reads about the same bytes as an FP8 cell; the grid's short rows (R = 2..8)
-//     are the generic Pack measurement on short FP32 rows that decides whether vector Pack is ported. 1181: FP32 ARG
-//     cells too (launchFp32KRArgSegments, the FP32 ARG pool: fp32KRArgShapeLegal). Shape names and columns other than
-//     R are in bytes; input_bytes = 4 K R; the ranker features are FP8's (FP32's ranker comes in phase 4);
-//   - 1233 --dtypes=fp16,bf16 (with any of the others): FP16 / BF16 VALUE cells (launchF16KRValueSegments, not yet
-//     routed in production) on the 2-byte pool (retainedKRCandidatePool at element size 2). A 2-byte cell takes its
-//     geometry's row length in elements (row bytes 2 R) and half its rows (a pure R site keeps its bytes). 1237: ARG
-//     cells too (launchF16KRArgSegments, the 2-byte ARG pool: f16KRArgShapeLegal). The ranker site's alternate-format
-//     slot is the BF16 flag; frozen_margin is FP8's model (the 2-byte ranker comes in phase 4). The production stamp
-//     is today's (legacy) FP16 / BF16 plan, so the sweep also measures the gap the retained kernels close. 1234: the
-//     2-byte pool has its own vector Pack shapes (rows of 1 to 8 elements; the ring's views are 16-byte aligned);
-//   - 1217 --carried-index=uint32|uint64 (with --dtypes=fp32 and ARG operations only): the ARG cells are carried-index
+//   - --dtypes=fp32 (alone or with the FP8 dtypes): FP32 VALUE cells on the same kernels (launchFp32KRValueSegments)
+//     and the FP32 pool (retainedKRCandidatePool at element size 4). An FP32 cell takes its geometry's row length in
+//     elements (R = the grid's row length, row bytes 4 R; a pure R site keeps its bytes) and a quarter of its rows, so
+//     it reads about the same bytes as an FP8 cell; the grid's short rows (R = 2..8) measure generic Pack on short FP32
+//     rows. FP32 ARG cells too (launchFp32KRArgSegments, the FP32 ARG pool: fp32KRArgShapeLegal). Shape names and
+//     columns other than R are in bytes; input_bytes = 4 K R; the ranker features are krRankerFeatures, as for FP8;
+//   - --dtypes=fp16,bf16 (with any of the others): FP16 / BF16 VALUE cells (launchF16KRValueSegments) on the 2-byte
+//     pool (retainedKRCandidatePool at element size 2). A 2-byte cell takes its geometry's row length in elements (row
+//     bytes 2 R) and half its rows (a pure R site keeps its bytes). ARG cells too (launchF16KRArgSegments, the 2-byte
+//     ARG pool: f16KRArgShapeLegal). The ranker site's alternate-format slot is the BF16 flag; frozen_margin is FP8's
+//     model (the sweep does not run the 2-byte ranker). The 2-byte pool has its own vector Pack shapes (rows of 1 to 8
+//     elements; the ring's views are 16-byte aligned);
+//   - --carried-index=uint32|uint64 (with --dtypes=fp32 and ARG operations only): the ARG cells are carried-index
 //     (intermediate) sites, kinds carried_arg_index / carried_arg_value_index: FP32 values plus a cold carried index
 //     of that width (each launch reads its own view of both), timed through launchFp32KRCarriedArgSegments at row
 //     stride 1 (an original run); the pool is the FP32 ARG pool, the ranker site kind 3 / 4. A carried cell takes an
 //     FP32 cell's geometry with rows (or a pure R site's elements) scaled by 4 / (4 + index bytes), so its working set
-//     (values and index) is the FP32 cell's; input_bytes and moved_tbps count the index. No production stamp (the
-//     planner does not route carried sites to the retained kernels yet).
-//   - 1217: every row carries frozen_margin, the installed ranker's margin for the candidate (FP32's model for FP32
-//     cells, FP8's otherwise), so the installed model's regret on new cells is measured without retraining.
+//     (values and index) is the FP32 cell's; input_bytes and moved_tbps count the index. No production stamp (no
+//     public stamp starts at a carried site).
+//   - every row carries frozen_margin, the installed ranker's margin for the candidate (FP32's model for FP32 cells,
+//     FP8's otherwise), so the installed model's regret on new cells is measured without retraining.
 //   - a seeded shuffle, so any --max-cells prefix samples the whole grid; cell ids keep the grid order;
 //   - heldout marks --heldout-percent of row lengths R (every size and semantics of a held-out R together).
 //
-// Candidates. 1158: production's pool, fp8KRCandidatePool, with each candidate's ranker features (fp8KRRankerFeatures,
-// columns f0..f23) so benchmarks/fp8_kr_ranker trains on exactly what production ranks. The pool is every shape
+// Candidates: production's pool, fp8KRCandidatePool, with each candidate's ranker features (krRankerFeatures, columns
+// f0..f23) so benchmarks/fp8_kr_ranker trains on exactly what production ranks. The pool is every shape
 // fp8KRCandidateShapes lists (in_list=1, list_position = its rank in the list), then, unless --list-only, the other
 // legal shapes nearby (in_list=0): Pack at 2, 3, 4, 6, 8, 12, 16 rows per thread and the vector shape, Group at every
 // G, Block, and Split at every power-of-two chunk while rows < 64 per SM or rows have at least 16 KiB; an extra shape
-// that gives one thread more than FP8_KR_POOL_MAX_THREAD_BYTES of input is not in it. pool_position is the 1-based
-// position in the pool. An extra shape whose probe launch takes over 20x the line-rate reference is not timed further
-// (abandoned=1; the row carries the probe time). Unless --no-production, the production stamp (CubReduction /
-// CubArgReduction at the default tuning depth) is made at each site and its pick recorded (production, is_production).
-// 1155 --split-stages: every Split shape is also timed with its partial kernel alone (variant=partials, the output
+// that gives one thread more than KR_POOL_MAX_THREAD_BYTES of input is not in it. pool_position is the 1-based position
+// in the pool. An extra shape whose probe launch takes over 20x the line-rate reference is not timed further
+// (abandoned=1; the row carries the probe time). Unless --no-production, the production stamp (Reducer / ArgReducer at
+// the default tuning depth) is made at each site and its pick recorded (production, is_production).
+// --split-stages: every Split shape is also timed with its partial kernel alone (variant=partials, the output
 // unwritten; not a candidate), so the finishing kernel's cost is the difference from the full row.
 //
-// Timing (1152: the RK sweep's method, which reproduces to about 3 digits across runs; the 1150-1151 flush-per-sample
-// timing did not: the same shape timed twice in one 1150 audit run disagreed by up to 28%).
+// Timing (benchmarks/ColdTiming.h, the RK sweep's method, which reproduces to about 3 digits across runs; a
+// flush-per-sample timing did not: the same shape timed twice in one run disagreed by up to 28%).
 //   - Cold inputs without a flush kernel: every launch reads its own view of an --arena-gib ring (256-byte aligned,
 //     as a fresh allocation), cycling through views spanning at least 2 GiB, so no input is re-read within 20x L2.
 //   - Cold outputs too: every launch writes its own view of an --output-ring-gib ring, cycling through views spanning
@@ -61,28 +59,29 @@
 //     once and the stream is synchronized once. Pass p visits every cell, each cell's candidates starting at a rotated
 //     position, so a candidate's samples are spread over the batch and the GPU never idles between samples.
 //   - A sample times `launches_per_sample` back-to-back launches (each on its own views) and divides by the count,
-//     about --interval-us per sample (CUDA events here resolve about 2 us). 1153: the count is per candidate, from its
-//     own probe time (1152 used the cell's line-rate estimate for every candidate, so a shape 10x off line rate took
-//     10 ms per sample: 80% of the GPU time went to shapes at least 5x slower than the cell's best).
+//     about --interval-us per sample (CUDA events here resolve about 2 us). The count is per candidate, from its own
+//     probe time (one count for the whole cell, from its line-rate estimate, gave a shape 10x off line rate 10 ms per
+//     sample: 80% of the GPU time went to shapes at least 5x slower than the cell's best).
 //   - Inputs are the RK sweep's constant byte 0x30 (E4M3 0.5, E5M2 0.125).
-// moved_tbps = (input + output bytes) / median, read_tbps = input bytes / median; reference_us = max(--floor-us,
-// moved bytes / copy bandwidth), the copy measured the same way (ring input, ring output) at start and end. 1153:
-// copy_us is a device-to-device copy moving the same bytes (moved / 2 copied), interpolated from a copy curve timed
-// the same way at startup: what a memcpy achieves at this size, launch and ramp included (the header lists the
-// curve). Very short kernels can be host-submission bound (a launch costs the host a few us), as in production.
+// moved_tbps = (input + output bytes) / median, read_tbps = input bytes / median; reference_us = max(--floor-us, moved
+// bytes / copy bandwidth), the copy measured the same way (ring input, ring output) at start and end. copy_us is a
+// device-to-device copy moving the same bytes (moved / 2 copied), interpolated from a copy curve timed the same way at
+// startup: what a memcpy achieves at this size, launch and ramp included (the header lists the curve). Very short
+// kernels can be host-submission bound (a launch costs the host a few us), as in production.
 //
 // stdout: a comment header, one CSV row per (cell, candidate) and a closing comment; stderr: progress. Typical use:
 //   ./thor_fp8_kr_training_sweep --max-cells=400 2> kr-training.log | gzip -1 > kr-training.csv.gz
 //   python3 ../benchmarks/fp8_kr_training.py kr-training.csv.gz [--compare=kr-training-2.csv.gz]
 #include "benchmarks/ColdTiming.h"
-#include "Utilities/TensorOperations/Cub/ReductionAutotunerCore.h"
+#include "Utilities/TensorOperations/Reduction/Contest/ReductionAutotunerCore.h"
 #include "benchmarks/Fp8OracleBatchQueue.h"
-#include "Utilities/TensorOperations/Cub/CubReduction.h"
-#include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
-#include "Utilities/TensorOperations/Cub/CubReductionStageSemantics.h"
-#include "Utilities/TensorOperations/Cub/Fp32KR/Fp32KRRankerModel.h"
-#include "Utilities/TensorOperations/Cub/Fp8KR/Fp8KRRankerModel.h"
-#include "Utilities/TensorOperations/Cub/Fp8KR/Fp8KRSegments.h"
+#include "Utilities/TensorOperations/Reduction/ArgReducer.h"
+#include "Utilities/TensorOperations/Reduction/Reducer.h"
+#include "Utilities/TensorOperations/Reduction/Kernels/KernelLaunchers.h"
+#include "Utilities/TensorOperations/Reduction/Kernels/StageSemantics.h"
+#include "Utilities/TensorOperations/Reduction/Rankers/Fp32KRRankerModel.h"
+#include "Utilities/TensorOperations/Reduction/Rankers/Fp8KRRankerModel.h"
+#include "Utilities/TensorOperations/Reduction/KR/KRSegments.h"
 #include "Utilities/Common/ScopedGpu.h"
 
 #include <cuda_runtime_api.h>
@@ -104,9 +103,9 @@
 #include <vector>
 
 namespace T = ThorImplementation;
-namespace C = ThorImplementation::CubReductionInternal;
-namespace KR = ThorImplementation::CubReductionInternal::Fp8KR;
-namespace B = ThorImplementation::CubReductionBenchmarking;
+namespace C = ThorImplementation::ReductionInternal;
+namespace KR = ThorImplementation::ReductionInternal::KR;
+namespace B = ThorImplementation::ReductionBenchmarking;
 
 namespace {
 
@@ -117,8 +116,8 @@ void check(cudaError_t status, const char* what) {
 constexpr uint64_t KiB = 1ULL << 10;
 constexpr uint64_t MiB = 1ULL << 20;
 constexpr uint64_t GiB = 1ULL << 30;
-// 1164: the timing machinery (rings, views, probe launch counts, copy reference) is benchmarks/ColdTiming.h, shared
-// with the RK training sweep.
+// The timing machinery (rings, views, probe launch counts, copy reference) is benchmarks/ColdTiming.h, shared with the
+// RK training sweep.
 constexpr uint64_t INPUT_REUSE_BYTES = B::ColdTiming::InputReuseBytes;
 constexpr uint64_t OUTPUT_REUSE_BYTES = B::ColdTiming::OutputReuseBytes;
 using B::ColdTiming::align256;
@@ -137,7 +136,7 @@ const char* kindName(Kind kind) {
         case Kind::Value: return "value";
         case Kind::ArgIndex: return "arg_index";
         case Kind::ArgValueIndex: return "arg_value_index";
-        case Kind::CarriedArgIndex: return "carried_arg_index";  // 1217
+        case Kind::CarriedArgIndex: return "carried_arg_index";
         case Kind::CarriedArgValueIndex: return "carried_arg_value_index";
     }
     return "unknown";
@@ -147,15 +146,15 @@ bool producesValue(Kind kind) { return kind == Kind::ArgValueIndex || kind == Ki
 
 struct ValueOp {
     const char* name;
-    T::CubReductionOp op;
+    T::ReductionOp op;
 };
 // One VALUE operation per compiled KR semantics: SUM x {identity, abs, square}, PRODUCT, MIN, MAX.
-constexpr ValueOp VALUE_OPS[] = {{"sum", T::CubReductionOp::Sum},
-                                 {"l1_norm", T::CubReductionOp::L1Norm},
-                                 {"sum_squares", T::CubReductionOp::SumSquares},
-                                 {"product", T::CubReductionOp::Product},
-                                 {"min", T::CubReductionOp::Min},
-                                 {"max", T::CubReductionOp::Max}};
+constexpr ValueOp VALUE_OPS[] = {{"sum", T::ReductionOp::Sum},
+                                 {"l1_norm", T::ReductionOp::L1Norm},
+                                 {"sum_squares", T::ReductionOp::SumSquares},
+                                 {"product", T::ReductionOp::Product},
+                                 {"min", T::ReductionOp::Min},
+                                 {"max", T::ReductionOp::Max}};
 constexpr const char* ARG_OPS[] = {"argmin", "argmax"};
 
 struct Settings {
@@ -165,21 +164,21 @@ struct Settings {
     uint32_t semantics_per_geometry = 2;  // even: VALUE, odd: ARG
     uint32_t heldout_percent = 10;        // of row lengths R
     std::vector<uint64_t> targets_mib{8, 32, 128, 512};
-    uint64_t min_bytes = 4 * MiB;  // 1158: --min-kib (or --min-mib)
+    uint64_t min_bytes = 4 * MiB;  // --min-kib (or --min-mib)
     uint64_t max_mib = 512;
     int samples = 5;
     std::vector<T::DataType> dtypes{T::DataType::FP8_E4M3, T::DataType::FP8_E5M2};
     std::vector<std::string> ops;  // empty: all
     bool list_only = false;
     bool production = true;
-    bool split_stages = false;  // 1155: also time each Split shape's partial kernel alone
+    bool split_stages = false;  // also time each Split shape's partial kernel alone
     double floor_us = 4.0;
     uint64_t arena_bytes = 8 * GiB;
     uint64_t output_ring_bytes = 3 * GiB;
     double interval_us = 1000.0;
     uint64_t max_launches = 256;
     size_t queue_cells = 128;
-    std::optional<T::DataType> carried_index;  // 1217 --carried-index=uint32|uint64
+    std::optional<T::DataType> carried_index;  // --carried-index=uint32|uint64
 };
 
 std::vector<std::string> splitList(std::string_view text) {
@@ -237,9 +236,9 @@ Settings parse(int argc, char** argv) {
             for (const std::string& d : splitList(*v)) {
                 if (d == "fp8_e4m3") s.dtypes.push_back(T::DataType::FP8_E4M3);
                 else if (d == "fp8_e5m2") s.dtypes.push_back(T::DataType::FP8_E5M2);
-                else if (d == "fp32") s.dtypes.push_back(T::DataType::FP32);  // 1179
-                else if (d == "fp16") s.dtypes.push_back(T::DataType::FP16);  // 1233
-                else if (d == "bf16") s.dtypes.push_back(T::DataType::BF16);  // 1233
+                else if (d == "fp32") s.dtypes.push_back(T::DataType::FP32);
+                else if (d == "fp16") s.dtypes.push_back(T::DataType::FP16);
+                else if (d == "bf16") s.dtypes.push_back(T::DataType::BF16);
                 else throw std::invalid_argument("--dtypes takes fp8_e4m3,fp8_e5m2,fp32,fp16,bf16");
             }
         } else if (auto v = value("--ops=")) {
@@ -277,7 +276,7 @@ Settings parse(int argc, char** argv) {
                          "    [--list-only]\n"
                          "    [--no-production] [--split-stages] [--floor-us=4] [--arena-gib=8]\n"
                          "    [--output-ring-gib=3] [--interval-us=1000] [--max-launches=256] [--queue-cells=128]\n"
-                         "    [--carried-index=uint32|uint64]  (1217; with --dtypes=fp32 --ops=argmin,argmax)\n";
+                         "    [--carried-index=uint32|uint64]  (with --dtypes=fp32 --ops=argmin,argmax)\n";
             std::exit(0);
         } else {
             throw std::invalid_argument("Unknown argument " + std::string(a));
@@ -321,7 +320,7 @@ uint64_t mix(uint64_t x) {  // splitmix64 finalizer: deterministic across platfo
 double unit(uint64_t h) { return static_cast<double>(h >> 11) * (1.0 / 9007199254740992.0); }
 
 struct Geometry {
-    uint64_t rows, r, target_mib;  // target_mib 0: a random geometry; r in elements of the cell's dtype (1179)
+    uint64_t rows, r, target_mib;  // target_mib 0: a random geometry; r in elements of the cell's dtype
     bool random;
 };
 
@@ -388,14 +387,14 @@ std::vector<CellSpec> cells(const Settings& s) {
             CellSpec c{id, g, heldout, Kind::Value, s.dtypes[mix(h ^ 11) % s.dtypes.size()], ""};
             const bool fp32 = c.dtype == T::DataType::FP32;
             if (fp32) {
-                // 1179: R elements of 4 bytes and a quarter of the rows (a pure R site keeps its bytes).
+                // R elements of 4 bytes and a quarter of the rows (a pure R site keeps its bytes).
                 if (g.rows == 1) {
                     c.geometry.r = std::max<uint64_t>(1, g.r / 4);
                 } else {
                     c.geometry.rows = std::max<uint64_t>(1, g.rows / 4);
                 }
             } else if (isF16(c.dtype)) {
-                // 1233: R elements of 2 bytes and half the rows (a pure R site keeps its bytes).
+                // R elements of 2 bytes and half the rows (a pure R site keeps its bytes).
                 if (g.rows == 1) {
                     c.geometry.r = std::max<uint64_t>(1, g.r / 2);
                 } else {
@@ -408,7 +407,7 @@ std::vector<CellSpec> cells(const Settings& s) {
                 c.kind = (mix(h ^ 13) & 1) ? Kind::ArgValueIndex : Kind::ArgIndex;
                 c.operation = arg_ops[mix(h ^ 17) % arg_ops.size()];
                 if (s.carried_index && fp32) {
-                    // 1217: a carried site; the values and index together fill the FP32 cell's working set.
+                    // A carried site; the values and index together fill the FP32 cell's working set.
                     c.kind = c.kind == Kind::ArgValueIndex ? Kind::CarriedArgValueIndex : Kind::CarriedArgIndex;
                     const uint64_t element = 4 + indexBytes(*s.carried_index);
                     if (c.geometry.rows == 1) c.geometry.r = std::max<uint64_t>(1, c.geometry.r * 4 / element);
@@ -428,51 +427,51 @@ std::vector<CellSpec> cells(const Settings& s) {
 }
 
 // Launched threads and CTAs of a shape's main kernel (as fp8KRLaunchGeometry launches it).
-uint64_t shapeThreads(const KR::Fp8KRSegmentShape& shape) {
+uint64_t shapeThreads(const KR::KRSegmentShape& shape) {
     switch (shape.family()) {
-        case KR::Fp8KRFamily::Pack: return ceilDiv(shape.rows, shape.rows_per_thread);
-        case KR::Fp8KRFamily::Group: return shape.rows * shape.group_lanes;
-        case KR::Fp8KRFamily::Split: return shape.segments() * KR::FP8_KR_THREADS;
-        case KR::Fp8KRFamily::Block: return shape.rows * KR::FP8_KR_THREADS;
+        case KR::KRFamily::Pack: return ceilDiv(shape.rows, shape.rows_per_thread);
+        case KR::KRFamily::Group: return shape.rows * shape.group_lanes;
+        case KR::KRFamily::Split: return shape.segments() * KR::KR_THREADS;
+        case KR::KRFamily::Block: return shape.rows * KR::KR_THREADS;
     }
     return 0;
 }
-uint64_t shapeBlocks(const KR::Fp8KRSegmentShape& shape) {
-    if (shape.family() == KR::Fp8KRFamily::Split) return shape.segments();
-    if (shape.family() == KR::Fp8KRFamily::Block) return shape.rows;
-    return ceilDiv(shapeThreads(shape), KR::FP8_KR_THREADS);
+uint64_t shapeBlocks(const KR::KRSegmentShape& shape) {
+    if (shape.family() == KR::KRFamily::Split) return shape.segments();
+    if (shape.family() == KR::KRFamily::Block) return shape.rows;
+    return ceilDiv(shapeThreads(shape), KR::KR_THREADS);
 }
-const char* familyName(const KR::Fp8KRSegmentShape& shape) {
+const char* familyName(const KR::KRSegmentShape& shape) {
     switch (shape.family()) {
-        case KR::Fp8KRFamily::Pack: return shape.vector ? "vector" : "pack";
-        case KR::Fp8KRFamily::Group: return "group";
-        case KR::Fp8KRFamily::Split: return "split";
-        case KR::Fp8KRFamily::Block: return "block";
+        case KR::KRFamily::Pack: return shape.vector ? "vector" : "pack";
+        case KR::KRFamily::Group: return "group";
+        case KR::KRFamily::Split: return "split";
+        case KR::KRFamily::Block: return "block";
     }
     return "unknown";
 }
 
 struct Candidate {
-    KR::Fp8KRSegmentShape shape;
+    KR::KRSegmentShape shape;
     size_t list_position = 0;    // 0: not in the production list
-    bool partials_only = false;  // 1155 --split-stages: the Split partial kernel alone (variant=partials)
+    bool partials_only = false;  // --split-stages: the Split partial kernel alone (variant=partials)
 };
 
 std::vector<Candidate> candidates(uint64_t rows, uint64_t row_bytes, uint32_t element_bytes, bool arg, uint32_t sms,
                                   const Settings& s) {
-    // 1158: production's pool (fp8KRCandidatePool: the heuristic list, then the legal shapes around it), so the
-    // ranker trains on exactly the candidates it ranks; --list-only keeps the heuristic list.
+    // production's pool (fp8KRCandidatePool: the heuristic list, then the legal shapes around it), so the ranker trains
+    // on exactly the candidates it ranks; --list-only keeps the heuristic list.
     std::vector<Candidate> result;
-    for (const KR::Fp8KRPoolEntry& entry : KR::retainedKRCandidatePool(rows, row_bytes, sms, element_bytes)) {
+    for (const KR::KRPoolEntry& entry : KR::retainedKRCandidatePool(rows, row_bytes, sms, element_bytes)) {
         if (s.list_only && entry.list_position == 0) continue;
         if (arg && element_bytes == 4 && !KR::fp32KRArgShapeLegal(entry.shape)) continue;
-        if (arg && element_bytes == 2 && !KR::f16KRArgShapeLegal(entry.shape)) continue;  // 1237
+        if (arg && element_bytes == 2 && !KR::f16KRArgShapeLegal(entry.shape)) continue;
         result.push_back({entry.shape, entry.list_position});
     }
     if (s.split_stages) {
         const size_t count = result.size();
         for (size_t i = 0; i < count; ++i)
-            if (result[i].shape.family() == KR::Fp8KRFamily::Split) result.push_back({result[i].shape, 0, true});
+            if (result[i].shape.family() == KR::KRFamily::Split) result.push_back({result[i].shape, 0, true});
     }
     return result;
 }
@@ -481,10 +480,10 @@ uint64_t outputFootprint(Kind kind, uint64_t rows) {
     return producesValue(kind) ? T::ReductionAutotuning::nextSliceOffset(4 * rows) + 4 * rows : 4 * rows;
 }
 
-// The Split scratch a shape needs at a cell of this kind (1217: carried shapes write wide partials).
-uint64_t scratchBytes(const KR::Fp8KRSegmentShape& shape, Kind kind) {
+// The Split scratch a shape needs at a cell of this kind (carried shapes write wide partials).
+uint64_t scratchBytes(const KR::KRSegmentShape& shape, Kind kind) {
     if (isCarried(kind)) return C::fp32KRCarriedArgScratchBytes(shape);
-    return KR::fp8KRScratchBytes(shape, kind != Kind::Value);
+    return KR::krScratchBytes(shape, kind != Kind::Value);
 }
 
 struct Timed {
@@ -498,9 +497,9 @@ struct Timed {
 struct Cell {
     CellSpec spec;
     std::vector<T::StridedSpan> inputs;   // views of the input ring
-    std::vector<T::StridedSpan> carried;  // 1217: one carried index view per input view (carried cells)
+    std::vector<T::StridedSpan> carried;  // one carried index view per input view (carried cells)
     std::vector<std::optional<T::StridedSpan>> values, indices;  // views of the output ring
-    std::optional<C::CubReductionStageSemantics> semantics;
+    std::optional<C::ReductionStageSemantics> semantics;
     bool maximum = false;
     size_t next_input = 0, next_output = 0;
     std::vector<Timed> candidates;
@@ -508,7 +507,7 @@ struct Cell {
     std::string production;
     double stamp_ms = 0;
     double reference_us = 0;
-    KR::Fp8KRRankerSite ranker_site{};  // 1158: what production's ranker sees at this site
+    KR::KRRankerSite ranker_site{};  // what production's ranker sees at this site
     double copy_us = 0;          // a copy moving the same bytes (interpolated from the copy curve)
     uint64_t moved_bytes = 0;    // input + output bytes of one launch
     uint64_t first_input = 0;    // ring offset of the first input view (the production stamp's input)
@@ -571,8 +570,8 @@ int main(int argc, char** argv) {
                   << " output_ring_bytes=" << output_ring_bytes << " input_reuse_bytes=" << INPUT_REUSE_BYTES
                   << " output_reuse_bytes=" << OUTPUT_REUSE_BYTES << " input_byte=0x30 explore="
                   << (settings.list_only ? 0 : 1) << " production=" << (settings.production ? 1 : 0)
-                  << " pool_max_thread_bytes=" << KR::FP8_KR_POOL_MAX_THREAD_BYTES << " sm_count=" << sm
-                  << " fp8_kr_ranker_training=1 feature_count=" << KR::FP8_KR_RANKER_FEATURES
+                  << " pool_max_thread_bytes=" << KR::KR_POOL_MAX_THREAD_BYTES << " sm_count=" << sm
+                  << " fp8_kr_ranker_training=1 feature_count=" << KR::KR_RANKER_FEATURES
                   << " ranker_trained=" << (KR::fp8KRRankerTrained() ? 1 : 0)
                   << " split_stages=" << (settings.split_stages ? 1 : 0)
                   << " l2_bytes=" << l2_bytes << " copy_bandwidth_tbps=" << std::fixed << std::setprecision(4)
@@ -593,7 +592,7 @@ int main(int argc, char** argv) {
                      "production,is_production,stamp_ms,scratch_bytes,launches_per_sample,input_views,output_views,"
                      "abandoned,probe_us,median_us,min_us,reference_us,copy_us,moved_tbps,read_tbps";
         for (int i = 0; i < settings.samples; ++i) std::cout << ",sample" << i << "_us";
-        for (size_t i = 0; i < KR::FP8_KR_RANKER_FEATURES; ++i) std::cout << ",f" << i;
+        for (size_t i = 0; i < KR::KR_RANKER_FEATURES; ++i) std::cout << ",f" << i;
         std::cout << ",frozen_margin\n";
 
         const int passes = settings.samples;
@@ -603,9 +602,9 @@ int main(int argc, char** argv) {
         void* const scratch_ptr = scratch.getMemPtr<void>();
 
         const auto launch = [&](Cell& cell, size_t index) {
-            const KR::Fp8KRSegmentShape& shape = cell.candidates[index].candidate.shape;
-            const KR::Fp8KRSplitStages stages = cell.candidates[index].candidate.partials_only
-                ? KR::Fp8KRSplitStages::PartialsOnly : KR::Fp8KRSplitStages::Both;
+            const KR::KRSegmentShape& shape = cell.candidates[index].candidate.shape;
+            const KR::KRSplitStages stages = cell.candidates[index].candidate.partials_only
+                ? KR::KRSplitStages::PartialsOnly : KR::KRSplitStages::Both;
             const bool is_value = cell.spec.kind == Kind::Value;
             const uint64_t scratch_bytes = scratchBytes(shape, cell.spec.kind);
             void* partials = scratch_bytes != 0 ? scratch_ptr : nullptr;
@@ -646,7 +645,7 @@ int main(int argc, char** argv) {
             const double moved = static_cast<double>(cell.moved_bytes);
             for (size_t index = 0; index < cell.candidates.size(); ++index) {
                 const Timed& t = cell.candidates[index];
-                const KR::Fp8KRSegmentShape& shape = t.candidate.shape;
+                const KR::KRSegmentShape& shape = t.candidate.shape;
                 std::vector<double> samples;
                 if (!t.abandoned) {
                     for (int p = 0; p < passes; ++p) {
@@ -658,14 +657,14 @@ int main(int argc, char** argv) {
                 const std::vector<double> times = samples.empty() ? std::vector<double>{t.probe_us} : samples;
                 const double med = median(times);
                 const double fastest = *std::min_element(times.begin(), times.end());
-                const std::string name = KR::fp8KRShapeName(shape);
+                const std::string name = KR::krShapeName(shape);
                 std::cout << kindName(spec.kind) << ',' << spec.id << ',' << (spec.heldout ? 1 : 0) << ','
                           << (spec.geometry.random ? 1 : 0) << ',' << rows << ',' << r << ',' << bytes << ','
                           << spec.geometry.target_mib << ',' << dtypeName(spec.dtype) << ',' << spec.operation << ','
                           << name << ',' << familyName(shape) << ','
                           << (t.candidate.partials_only ? "partials" : "full") << ',' << shape.rows_per_thread << ','
                           << shape.group_lanes << ','
-                          << (shape.family() == KR::Fp8KRFamily::Split ? shape.chunk_bytes : 0) << ','
+                          << (shape.family() == KR::KRFamily::Split ? shape.chunk_bytes : 0) << ','
                           << shape.chunks() << ',' << (shape.vector ? 1 : 0) << ',' << shapeBlocks(shape) << ','
                           << shapeThreads(shape) << ',' << (t.candidate.list_position != 0 ? 1 : 0) << ','
                           << t.candidate.list_position << ',' << (t.candidate.partials_only ? 0 : index + 1) << ','
@@ -679,15 +678,15 @@ int main(int argc, char** argv) {
                           << moved / med / 1e6 << ',' << double(bytes) / med / 1e6 << std::setprecision(3);
                 for (double s : samples) std::cout << ',' << s;
                 for (size_t s = samples.size(); s < static_cast<size_t>(passes); ++s) std::cout << ',';
-                // 1158: the ranker features production computes for this pool entry (9 significant digits: exact
-                // float32 round trip).
-                const auto features = KR::fp8KRRankerFeatures({shape, static_cast<uint32_t>(t.candidate.list_position)},
-                                                              cell.ranker_site, sms);
+                // The ranker features production computes for this pool entry (9 significant digits: exact float32
+                // round trip).
+                const auto features = KR::krRankerFeatures({shape, static_cast<uint32_t>(t.candidate.list_position)},
+                                                           cell.ranker_site, sms);
                 std::cout << std::defaultfloat << std::setprecision(9);
                 for (float f : features) std::cout << ',' << f;
-                // 1217: the installed ranker's margin (FP32's model for FP32 cells).
-                const float frozen = spec.dtype == T::DataType::FP32 ? C::Fp32KR::Fp32KRRankerModel::margin(features)
-                                                                     : KR::Fp8KRRankerModel::margin(features);
+                // The installed ranker's margin (FP32's model for FP32 cells).
+                const float frozen = spec.dtype == T::DataType::FP32 ? C::KR::Fp32::Fp32KRRankerModel::margin(features)
+                                                                     : KR::Fp8::Fp8KRRankerModel::margin(features);
                 std::cout << ',' << frozen << std::fixed << std::setprecision(3) << '\n';
                 if (t.abandoned) ++abandoned_candidates;
                 else ++timed_candidates;
@@ -721,7 +720,7 @@ int main(int argc, char** argv) {
                     const uint64_t offset = inputs.take(bytes);
                     if (v == 0) cell->first_input = offset;
                     cell->inputs.push_back(inputs.view(spec.dtype, {rows, r}, offset));
-                    // 1217: the view's carried index (any values; the ring's bytes), taken right after the values.
+                    // The view's carried index (any values; the ring's bytes), taken right after the values.
                     if (carried)
                         cell->carried.push_back(
                             inputs.view(*settings.carried_index, {rows, r}, inputs.take(carried_bytes)));
@@ -744,7 +743,7 @@ int main(int argc, char** argv) {
                 }
                 cell->maximum = spec.operation == "argmax";
                 if (is_value) {
-                    cell->ranker_site = C::fp8KRValueRankerSite(*cell->semantics, spec.dtype);
+                    cell->ranker_site = C::krValueRankerSite(*cell->semantics, spec.dtype);
                 } else {
                     cell->ranker_site.kind =
                         static_cast<uint8_t>((producesValue(spec.kind) ? 2 : 1) + (carried ? 2 : 0));
@@ -766,22 +765,22 @@ int main(int argc, char** argv) {
                     std::string passes_name;
                     try {
                         if (is_value) {
-                            T::CubReductionOp op = T::CubReductionOp::Sum;
+                            T::ReductionOp op = T::ReductionOp::Sum;
                             for (const ValueOp& v : VALUE_OPS)
                                 if (spec.operation == v.name) op = v.op;
-                            auto stamped = T::CubReduction(op, axis, T::DataType::FP32).stamp(site, stream);
+                            auto stamped = T::Reducer(op, axis, T::DataType::FP32).stamp(site, stream);
                             if (stamped->usesDenseExecutablePlan())
                                 for (const auto& pass : stamped->getDensePhysicalPassDiagnostics())
                                     passes_name += (passes_name.empty() ? "" : "+") + pass.family;
                         } else {
-                            T::CubArgReductionOutputOptions options;
+                            T::ArgReductionOutputOptions options;
                             options.produce_value = producesValue(spec.kind);
                             if (options.produce_value) options.value_output_dtype = T::DataType::FP32;
                             options.produce_index = true;
                             options.index_output_dtype = T::DataType::UINT32;
-                            auto stamped = T::CubArgReduction(cell->maximum ? T::CubArgReductionOp::ArgMax
-                                                                            : T::CubArgReductionOp::ArgMin,
-                                                              axis, options).stamp(site, stream);
+                            auto stamped = T::ArgReducer(cell->maximum ? T::ArgReductionOp::ArgMax
+                                                                            : T::ArgReductionOp::ArgMin,
+                                                         axis, options).stamp(site, stream);
                             for (const std::string& pass : stamped->getPlannedPassNames())
                                 passes_name += (passes_name.empty() ? "" : "+") + pass;
                         }

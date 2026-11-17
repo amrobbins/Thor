@@ -647,8 +647,8 @@ ApiSubgraphCloneResult Network::cloneSubgraphInto(const Network& sourceNetworkCo
 
     // 1170: a composed network tunes its reductions at the deepest depth set on any network it was cloned from.
     if (const auto sourceDepth = sourceNetworkConst.reductionTuningDepth) {
-        if (!reductionTuningDepth || ThorImplementation::cubReductionTuningDepthRank(*sourceDepth) >
-                                         ThorImplementation::cubReductionTuningDepthRank(*reductionTuningDepth)) {
+        if (!reductionTuningDepth || ThorImplementation::reductionTuningDepthRank(*sourceDepth) >
+                                         ThorImplementation::reductionTuningDepthRank(*reductionTuningDepth)) {
             reductionTuningDepth = sourceDepth;
         }
     }
@@ -1282,7 +1282,7 @@ shared_ptr<PlacedNetwork> Network::place(uint32_t batchSize,
     try {
         // 1170: every reduction stamped by this placement (expressions, losses, metrics, optimizers) autotunes at the
         // network's depth. The scope is thread-local, so concurrent placements of different networks do not mix.
-        ThorImplementation::ScopedCubReductionTuningDepth reductionTuningScope(getReductionTuningDepth());
+        ThorImplementation::ScopedReductionTuningDepth reductionTuningScope(getReductionTuningDepth());
         // FIXME: pull preOptimize into initialize
         for (uint32_t i = 0; i < devices.size(); ++i) {
             preOptimize(devices[i], batchSize);

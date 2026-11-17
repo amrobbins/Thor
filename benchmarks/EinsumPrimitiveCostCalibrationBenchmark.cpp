@@ -4,7 +4,7 @@
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/StampedEquation.h"
 #include "Utilities/TensorOperations/Copy/StridedCopy.h"
-#include "Utilities/TensorOperations/Cub/CubReduction.h"
+#include "Utilities/TensorOperations/Reduction/Reducer.h"
 
 #include "cuda_runtime.h"
 
@@ -188,8 +188,8 @@ PrimitiveSample runReductionCase(uint64_t elements, Stream& stream) {
     Tensor input = makeZeroTensor({rows, REDUCTION_WIDTH}, stream);
     stream.synchronize();
 
-    const std::shared_ptr<StampedCubReduction> reduction =
-        CubReduction(CubReductionOp::Sum, 1, DataType::FP32).stamp(input, stream);
+    const std::shared_ptr<StampedReducer> reduction =
+        Reducer(ReductionOp::Sum, 1, DataType::FP32).stamp(input, stream);
 
     PrimitiveSample sample;
     sample.primitive = "cub_reduction";

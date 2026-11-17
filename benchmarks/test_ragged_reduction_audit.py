@@ -90,7 +90,7 @@ class AuditTest(unittest.TestCase):
         self.assertIn("# gate (moved >= 16 MiB)", text)
         self.assertRegex(text, r"distribution spread p50 1\.02\d p90 9\.99\d max 9\.99\d over 2 shapes")
         self.assertIn("cells failing verification 1", text)
-        self.assertIn("# gate of copy (moved >= 16 MiB): p50 0.900 p10 0.900 (gate 0.85); timed full", text)  # 1275
+        self.assertIn("# gate of copy (moved >= 16 MiB): p50 0.900 p10 0.900 (gate 0.85); timed full", text)
         for section in ("1. Moved TB/s by kind", "2. Moved TB/s by distribution", "3. Distribution spread",
                         "widest spreads", "4. Moved TB/s by D", "5. Moved TB/s by mean segment length",
                         "6. What production runs", "7. Slowest cells", "8. Stamp wall time", "9. Measurement",
@@ -136,14 +136,14 @@ class AuditTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_cost_fit_recovers_a_linear_model(self):  # 1272
+    def test_cost_fit_recovers_a_linear_model(self):
         cells = []
         for i, (rows, segments) in enumerate([(2**24, 1000), (2**26, 70000), (2**25, 2**20), (2**27, 3), (2**24, 2**21)]):
             us = 12.0 + rows / 1.5e6 + segments * 15.0 / 1.5e6  # 1.5 TB/s rows; an end costs 15 rows
             for offsets in ("uint32", "uint64"):
                 cells.append({"distribution": "uniform", "moved_bytes": rows + 9 * segments, "passes": "ragged_kr:x",
                               "offset_dtype": offsets, "D": 1, "rows": rows, "segments": segments, "median_us": us})
-            # 1280: D = 3, fitted apart, rows counted in bytes (an end costs 40 bytes; no extra column).
+            # D = 3, fitted apart, rows counted in bytes (an end costs 40 bytes; no extra column).
             cells.append({"distribution": "uniform", "moved_bytes": 3 * rows + 9 * segments, "passes": "ragged_kr:x",
                           "offset_dtype": "uint32", "D": 3, "rows": rows, "segments": segments,
                           "median_us": 12.0 + 3 * rows / 1.5e6 + segments * 40.0 / 1.5e6})
@@ -155,7 +155,7 @@ class AuditTest(unittest.TestCase):
         self.assertRegex(text, r"ragged_kr:x\s+uint32\s+1\s+5\s+12\.00\s+1\.500\s+10\.0\s+15\.0\s+7\.0\s+0%")
         self.assertRegex(text, r"ragged_kr:x\s+uint64\s+1\s+5\s+12\.00\s+1\.500\s+10\.0\s+15\.0\s+3\.0\s+0%")
         self.assertRegex(text, r"ragged_kr:x\s+uint32\s+2-15\s+5\s+12\.00\s+1\.500\s+26\.7\s+40\.0\s+-\s+0%")
-        # 1284: FP16 input: a row of D elements is 2 x D bytes, and the D >= 2 class is 2-7.
+        # FP16 input: a row of D elements is 2 x D bytes, and the D >= 2 class is 2-7.
         wide = [dict(c, median_us=12.0 + 2 * c["D"] * c["rows"] / 1.5e6 + c["segments"] * 30.0 / 1.5e6)
                 for c in cells if c["distribution"] == "uniform"]
         out = io.StringIO()
@@ -163,7 +163,7 @@ class AuditTest(unittest.TestCase):
         text = out.getvalue()
         self.assertRegex(text, r"ragged_kr:x\s+uint32\s+1\s+5\s+12\.00\s+1\.500\s+20\.0\s+30\.0\s+22\.0\s+0%")
         self.assertRegex(text, r"ragged_kr:x\s+uint32\s+2-7\s+5\s+12\.00\s+1\.500\s+20\.0\s+30\.0\s+-\s+0%")
-        # 1285: FP8 rows of 16 bytes and more fit apart, as ">=16B".
+        # FP8 rows of 16 bytes and more fit apart, as ">=16B".
         rk = [dict(c, D=64, passes="ragged_rk:x", median_us=12.0 + 64 * c["rows"] / 1.5e6 + c["segments"] * 300.0 / 1.5e6)
               for c in cells if c["distribution"] == "uniform" and c["D"] == 1]
         out = io.StringIO()

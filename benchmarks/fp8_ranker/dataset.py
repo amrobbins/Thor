@@ -1,6 +1,6 @@
-"""Training dataset of `thor_fp8_retained_cold_l2_sweep --training` (1133+). Standard library only.
+"""Training dataset of `thor_fp8_retained_cold_l2_sweep --training`. Standard library only.
 
-One cell = one geometry (outer, R, K) with one sampled semantics; every legal retained candidate was timed end to end.
+One cell = one geometry (outer, R, K) with one sampled semantics; every legal candidate was timed end to end.
 The C++ ranker features f0..f24 come straight from the sweep (rankerFeatures at the candidate's local rank), so no
 feature is re-derived here. The model sees those 25 plus the aggregate kind (FEATURE_NAMES).
 """
@@ -10,7 +10,7 @@ import gzip
 import math
 from dataclasses import dataclass, field
 
-# 1211: the carried kinds are the ARG kinds at a carried-index (intermediate) FP32 site; the aggregate feature tells
+# The carried kinds are the ARG kinds at a carried-index (intermediate) FP32 site; the aggregate feature tells
 # them apart (the model's one site-kind feature).
 KINDS = {"value": 0, "arg_index": 1, "arg_value_index": 2, "carried_arg_index": 3, "carried_arg_value_index": 4}
 BASE_FEATURES = 25

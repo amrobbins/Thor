@@ -1,4 +1,4 @@
-// 1170: the network-level reduction tuning depth. Unset means Regular; Network::place() stamps every layer under the
+// The network-level reduction tuning depth. Unset means Regular; Network::place() stamps every layer under the
 // network's depth on the calling thread, whatever the process default or the caller's own scope is.
 //
 // The GPU tests place a network whose only reduction is a dense Sum metric over FP8 E4M3 values and count the contests
@@ -11,8 +11,8 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
-#include "Utilities/TensorOperations/Cub/CubReductionTuningDepth.h"
-#include "Utilities/TensorOperations/Cub/DenseReductionSelectionCache.h"
+#include "Utilities/TensorOperations/Reduction/Planner/DenseReductionSelectionCache.h"
+#include "Utilities/TensorOperations/Reduction/ReductionTuningDepth.h"
 
 #include "gtest/gtest.h"
 
@@ -24,12 +24,12 @@
 #include <vector>
 
 using namespace Thor;
-using Depth = ThorImplementation::CubReductionTuningDepth;
+using Depth = ThorImplementation::ReductionTuningDepth;
 
 namespace {
 
 uint64_t contestsSoFar() {
-    return ThorImplementation::CubReductionInternal::denseReductionSelectionCache().tuningAttempts();
+    return ThorImplementation::ReductionInternal::denseReductionSelectionCache().tuningAttempts();
 }
 
 // Builds input [width] FP8 -> Sum metric -> output, places it (inference only, batch 4) at `depth` (nullopt: unset)
@@ -56,8 +56,8 @@ uint64_t placeFp8SumNetwork(uint64_t width, std::optional<Depth> depth) {
 }
 
 struct DefaultDepthGuard {
-    Depth saved = ThorImplementation::defaultCubReductionTuningDepth();
-    ~DefaultDepthGuard() { ThorImplementation::setDefaultCubReductionTuningDepth(saved); }
+    Depth saved = ThorImplementation::defaultReductionTuningDepth();
+    ~DefaultDepthGuard() { ThorImplementation::setDefaultReductionTuningDepth(saved); }
 };
 
 }  // namespace
@@ -94,17 +94,17 @@ TEST(NetworkReductionTuningDepth, AnUnsetNetworkIsRegularWhateverTheAmbientDepth
     DefaultDepthGuard guard;
     // Neither an Ultra process default nor an Ultra scope around place() makes an unset network tune at Ultra: it
     // tunes at Regular, so an Ultra network afterwards runs a contest of its own.
-    ThorImplementation::setDefaultCubReductionTuningDepth(Depth::Ultra);
+    ThorImplementation::setDefaultReductionTuningDepth(Depth::Ultra);
     {
-        ThorImplementation::ScopedCubReductionTuningDepth ultra(Depth::Ultra);
+        ThorImplementation::ScopedReductionTuningDepth ultra(Depth::Ultra);
         EXPECT_GE(placeFp8SumNetwork(50051, std::nullopt), 1U);
     }
     EXPECT_GE(placeFp8SumNetwork(50051, Depth::Ultra), 1U);
     // A Quick network under an Ultra scope tunes at Quick, and the scope is restored after placement.
     {
-        ThorImplementation::ScopedCubReductionTuningDepth ultra(Depth::Ultra);
+        ThorImplementation::ScopedReductionTuningDepth ultra(Depth::Ultra);
         EXPECT_GE(placeFp8SumNetwork(50069, Depth::Quick), 1U);
-        EXPECT_EQ(ThorImplementation::currentCubReductionTuningDepth(), Depth::Ultra);
+        EXPECT_EQ(ThorImplementation::currentReductionTuningDepth(), Depth::Ultra);
     }
     EXPECT_GE(placeFp8SumNetwork(50069, std::nullopt), 1U);  // Regular is deeper than the cached Quick
 }

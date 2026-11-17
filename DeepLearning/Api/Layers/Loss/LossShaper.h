@@ -5,7 +5,7 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Implementation/Layers/Utility/Reshape.h"
-#include "Utilities/TensorOperations/Cub/CubReduction.h"
+#include "Utilities/TensorOperations/Reduction/Reducer.h"
 #include <optional>
 
 namespace Thor {
@@ -95,8 +95,8 @@ class LossShaper : public Layer {
             ThorImplementation::LossShaper::getReductionAxes(implementationInputLossDimensions, outputLossType);
         const ThorImplementation::TensorDescriptor inputDescriptor(lossInput.getDataType(), implementationInputLossDimensions);
         const ThorImplementation::TensorDescriptor outputDescriptor(lossOutput.getDataType(), implementationOutputLossDimensions);
-        ThorImplementation::CubReduction reduction(
-            ThorImplementation::CubReductionOp::Sum, axes, lossOutput.getDataType(), 1.0f);
+        ThorImplementation::Reducer reduction(
+            ThorImplementation::ReductionOp::Sum, axes, lossOutput.getDataType(), 1.0f);
         Stream queryStream = Stream::getNextUploadStream(tensorPlacement.getDeviceNum());
         return outputDescriptor.getArraySizeInBytes() + reduction.queryWorkspaceSizeInBytes(inputDescriptor, queryStream);
     }

@@ -1,6 +1,6 @@
-# Reusable cache-cold reduction autotuning (Thor1001)
+# Reusable cache-cold reduction autotuning
 
-`Utilities/TensorOperations/Cub/ReductionAutotuner.h` provides a **CUDA single-stream**
+`Utilities/TensorOperations/Reduction/Contest/ReductionAutotuner.h` provides a **CUDA single-stream**
 reduction autotuner, intentionally independent of FP8 candidate enumeration.
 Pass executable callbacks rather than kernel function pointers, allowing a
 candidate to launch either a complete reduction or the first stage plus a
@@ -11,19 +11,14 @@ per-candidate timings. It is not a cached executable plan yet.
 
 ## Timing contract
 
-1. Allocate one owning input Tensor as a ring of 256-byte-aligned views (1163;
-   cudaMalloc's alignment, so a timed input is aligned as a real tensor's) with
-   at least 128 bytes of unused padding after every view, including when the
-   logical tensor byte size is already aligned. Output and scratch rings use
-   this same layout and the same slot count. Keep at least eight times the
-   device-reported L2 capacity of traffic between reuses of the same slot,
-   counting each slot's input + output + scratch bytes (1161; override
-   `Options::cold_reuse_bytes` if needed), so every timed launch's first stage
-   reads an L2-cold input. Clone the representative input into all ring slots
-   in O(log slots) GPU-copy submissions.
+1. Allocate one owning input Tensor as a ring of 256-byte-aligned views (cudaMalloc's alignment, so a timed input is
+   aligned as a real tensor's) with at least 128 bytes of unused padding after every view, including when the logical
+   tensor byte size is already aligned. Output and scratch rings use this same layout and the same slot count. Keep at
+   least eight times the device-reported L2 capacity of traffic between reuses of the same slot, counting each slot's
+   input + output + scratch bytes (override `Options::cold_reuse_bytes` if needed), so every timed launch's first stage
+   reads an L2-cold input. Clone the representative input into all ring slots in O(log slots) GPU-copy submissions.
 2. One throwaway warmup per candidate by default, in input order.
-3. **Probe** (1161 KR, 1162 every contest): one timed launch per candidate on
-   the next cold slot, then one host synchronization to read them.
+3. **Probe**: one timed launch per candidate on the next cold slot, then one host synchronization to read them.
 4. From the probes (`planFromProbes`): each candidate's launches per
    measurement = ceil(`probe_target_us` / probe), 1 to
    `max_launches_per_measurement` (defaults 200 us and 32), so a short kernel
@@ -42,9 +37,8 @@ per-candidate timings. It is not a cached executable plan yet.
    going to the earlier candidate. Every candidate's probe, launch count,
    samples and trimmed mean (or `abandoned`) are returned with the winner.
 
-Why (1160/1161, 3258 FP8 KR sites): with one launch count per site, a stamp
-took 4 ms plus its contest's GPU time, and below 16 MiB 92-98% of that went to
-shapes 10-100x slower than the winner (median 200-440 ms per stamp). With this
+Why (measured on 3258 FP8 KR sites): with one launch count per site, a stamp took 4 ms plus its contest's GPU time, and
+below 16 MiB 92-98% of that went to shapes 10-100x slower than the winner (median 200-440 ms per stamp). With this
 policy the median stamp took 11-29 ms by size, with the same pick quality.
 
 A smaller kernel launch latency corresponds to higher throughput for the
@@ -84,17 +78,7 @@ select FP8 family variants, or change `run()`.
 
 ## Validation
 
-```bash
-# From ~/Thor:
-g++ -std=c++23 -O2 -Wall -Wextra -Werror -I. \
-  benchmarks/ReductionAutotunerCoreSmoke.cpp -o /tmp/reduction_autotuner_core_smoke
-/tmp/reduction_autotuner_core_smoke
-
-# From ~/Thor/build-release, on an NVIDIA GPU:
-cmake --build . --target thor_reduction_autotuner_smoke -j 8
-./thor_reduction_autotuner_smoke
-```
-
-The GPU smoke compares one complete reduction, one first-stage + FP32 copy
-continuation, and a deliberately slower complete reduction. It prints the
-selected name and trimmed-five samples' metrics (mean over surviving three).
+The scheduler and scoring (`ReductionAutotunerCore.h`) are gtests in `thor_tests` (`ReductionAutotunerCore.*`,
+`ReductionAutotunerSlices.*`). On the GPU, `ReductionAutotunerContest.*` checks the ring slots' alignment and guard,
+and runs a contest between a complete reduction, a first stage with an FP32 copy continuation and a deliberately
+slower complete reduction (the slow one must not win, with abandonment on or off).

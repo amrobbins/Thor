@@ -3,7 +3,7 @@
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
 #include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
-#include "Utilities/TensorOperations/Cub/CubReduction.h"
+#include "Utilities/TensorOperations/Reduction/Reducer.h"
 
 #include <limits>
 #include <stdexcept>
@@ -129,7 +129,7 @@ uint64_t RaggedLossShaper::getFirstInstanceMemRequirementInBytes(
     const DataType dtype = raggedLossInput.getValuesDataType();
     ThorImplementation::TensorDescriptor perExampleDescriptor(dtype, {b, 1});
     bytes = checkedAdd(bytes, perExampleDescriptor.getArraySizeInBytes());
-    ThorImplementation::CubReduction reduction(ThorImplementation::CubReductionOp::Sum, {0}, dtype, 1.0f);
+    ThorImplementation::Reducer reduction(ThorImplementation::ReductionOp::Sum, {0}, dtype, 1.0f);
     Stream queryStream = Stream::getNextUploadStream(tensorPlacement.getDeviceNum());
     bytes = checkedAdd(bytes, reduction.queryWorkspaceSizeInBytes(perExampleDescriptor, queryStream));
     return bytes;

@@ -2181,7 +2181,7 @@ StampedReduction::StampedReduction(std::shared_ptr<BuiltReduction> built,
         THOR_THROW_IF_FALSE(axis <= UINT32_MAX);
         axes.push_back(static_cast<uint32_t>(axis));
     }
-    cub_reduction = CubReduction(built_reduction->value_op.value(), std::move(axes), output.getDataType())
+    cub_reduction = Reducer(built_reduction->value_op.value(), std::move(axes), output.getDataType())
                         .stamp(input, output, stream);
     THOR_THROW_IF_FALSE(cub_reduction->getGeometry().path == built_reduction->geometry->path);
 }
@@ -2210,11 +2210,11 @@ StampedArgMinMax::StampedArgMinMax(std::shared_ptr<BuiltReduction> built,
         axes.push_back(static_cast<uint32_t>(axis));
     }
 
-    CubArgReductionOutputOptions outputs;
+    ArgReductionOutputOptions outputs;
     outputs.produce_value = false;
     outputs.produce_index = true;
     outputs.index_output_dtype = output.getDataType();
-    cub_arg_reduction = CubArgReduction(built_reduction->arg_op.value(), std::move(axes), outputs)
+    cub_arg_reduction = ArgReducer(built_reduction->arg_op.value(), std::move(axes), outputs)
                             .stamp(input, std::nullopt, output, stream);
     THOR_THROW_IF_FALSE(cub_arg_reduction->getGeometry().path == built_reduction->geometry->path);
 }
@@ -2281,19 +2281,19 @@ StampedSegmentedReduction::StampedSegmentedReduction(std::shared_ptr<CompiledSeg
         throw std::runtime_error("Segmented-reduction tensor dtypes do not match the compiled descriptor.");
     }
 
-    CubReductionOp cub_op;
+    ReductionOp cub_op;
     switch (compiled_segmented_reduction->op) {
         case ExprOp::SEGMENTED_REDUCE_SUM:
-            cub_op = CubReductionOp::Sum;
+            cub_op = ReductionOp::Sum;
             break;
         case ExprOp::SEGMENTED_REDUCE_MIN:
-            cub_op = CubReductionOp::Min;
+            cub_op = ReductionOp::Min;
             break;
         case ExprOp::SEGMENTED_REDUCE_MAX:
-            cub_op = CubReductionOp::Max;
+            cub_op = ReductionOp::Max;
             break;
         case ExprOp::SEGMENTED_REDUCE_MEAN:
-            cub_op = CubReductionOp::Mean;
+            cub_op = ReductionOp::Mean;
             RowPartitionRuntime::registerLogicalWorkNonEmptyRowCount(segment_offsets);
             break;
         default:
@@ -2306,9 +2306,9 @@ StampedSegmentedReduction::StampedSegmentedReduction(std::shared_ptr<CompiledSeg
         throw std::runtime_error("Segmented-reduction elements-per-value metadata does not match the input tensor shape.");
     }
 
-    cub_segmented_reduction = CubSegmentedReduction(cub_op, output.getDataType())
+    cub_segmented_reduction = SegmentedReducer(cub_op, output.getDataType())
                                   .stampRuntimeOffsets(input, output, segment_offsets, stream);
-    THOR_THROW_IF_FALSE(cub_segmented_reduction->getPath() == CubReductionPath::OffsetSegmented);
+    THOR_THROW_IF_FALSE(cub_segmented_reduction->getPath() == ReductionLayout::Segmented);
 }
 
 std::optional<uint64_t> StampedSegmentedReduction::runtimeLogicalFlopCount(
@@ -6767,11 +6767,11 @@ StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltRe
         axes.push_back(static_cast<uint32_t>(axis));
     }
 
-    CubArgReductionOutputOptions outputs;
+    ArgReductionOutputOptions outputs;
     outputs.produce_value = false;
     outputs.produce_index = true;
     outputs.index_output_dtype = DataType::UINT32;
-    cub_arg_reduction = CubArgReduction(built_reduction->arg_op.value(), std::move(axes), outputs)
+    cub_arg_reduction = ArgReducer(built_reduction->arg_op.value(), std::move(axes), outputs)
                             .stamp(input, std::nullopt, indices, stream);
     THOR_THROW_IF_FALSE(cub_arg_reduction->getGeometry().path == built_reduction->geometry->path);
     scatter_plan = prepareReduceMinMaxBackwardScatter(input.getDimensions(),
@@ -6781,7 +6781,7 @@ StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltRe
                                                        stream);
 }
 
-StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(CubArgReductionOp segmented_op,
+StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(ArgReductionOp segmented_op,
                                                          const Tensor& input,
                                                          const Tensor& grad_output,
                                                          const Tensor& output,
@@ -6832,7 +6832,7 @@ StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(CubArgReductionOp segme
         throw std::runtime_error(
             "Segmented reduce-min/max backward requires UINT32/UINT64 winner indices shaped like the upstream gradient.");
     }
-    cub_segmented_arg_reduction = CubSegmentedArgReduction(segmented_op, indices.getDataType())
+    cub_segmented_arg_reduction = SegmentedArgReducer(segmented_op, indices.getDataType())
                                       .stampRuntimeOffsets(input, indices, segment_offsets, stream);
 }
 
@@ -8096,41 +8096,41 @@ static cudnnDataType_t toCudnnSoftmaxDataType(DataType dtype) {
     }
 }
 
-static CubReductionOp toCubReductionOp(ExprOp op) {
+static ReductionOp toCubReductionOp(ExprOp op) {
     switch (op) {
         case ExprOp::REDUCE_SUM:
-            return CubReductionOp::Sum;
+            return ReductionOp::Sum;
         case ExprOp::REDUCE_PROD:
-            return CubReductionOp::Product;
+            return ReductionOp::Product;
         case ExprOp::REDUCE_MIN:
-            return CubReductionOp::Min;
+            return ReductionOp::Min;
         case ExprOp::REDUCE_MAX:
-            return CubReductionOp::Max;
+            return ReductionOp::Max;
         case ExprOp::REDUCE_AVG:
-            return CubReductionOp::Mean;
+            return ReductionOp::Mean;
         case ExprOp::REDUCE_NORM1:
-            return CubReductionOp::L1Norm;
+            return ReductionOp::L1Norm;
         case ExprOp::REDUCE_NORM2:
-            return CubReductionOp::L2Norm;
+            return ReductionOp::L2Norm;
         case ExprOp::REDUCE_SUM_SQUARES:
-            return CubReductionOp::SumSquares;
+            return ReductionOp::SumSquares;
         default:
             throw std::runtime_error("ExprOp is not a supported CUB value reduction op.");
     }
 }
 
-static CubArgReductionOp toCubArgReductionOp(ExprOp op) {
+static ArgReductionOp toCubArgReductionOp(ExprOp op) {
     switch (op) {
         case ExprOp::REDUCE_MIN:
         case ExprOp::REDUCE_ARGMIN:
         case ExprOp::REDUCE_MIN_BACKWARD:
-            return CubArgReductionOp::ArgMin;
+            return ArgReductionOp::ArgMin;
         case ExprOp::REDUCE_MAX:
         case ExprOp::REDUCE_ARGMAX:
         case ExprOp::REDUCE_MAX_BACKWARD:
-            return CubArgReductionOp::ArgMax;
+            return ArgReductionOp::ArgMax;
         default:
-            throw std::runtime_error("ExprOp is not a supported CUB arg reduction op.");
+            throw std::runtime_error("ExprOp is not a supported arg reduction op.");
     }
 }
 
@@ -10230,13 +10230,13 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(ExprOp op,
                 throw std::runtime_error("Value-reduction planning received a non-value reduction op.");
             }
             built->value_op = toCubReductionOp(built->key.op);
-            // 1392: a pitched view the reducer reads in place is accepted (CubReduction::pitchedCompleteLaunch).
+            // 1392: a pitched view the reducer reads in place is accepted (Reducer::pitchedCompleteLaunch).
             built->geometry =
-                CubReduction::analyzeValueSpanGeometry(built->value_op.value(), input, axes, built->key.output_dtype);
+                Reducer::analyzeValueSpanGeometry(built->value_op.value(), input, axes, built->key.output_dtype);
             break;
         case ReductionResultKind::Indices:
             built->arg_op = toCubArgReductionOp(built->key.op);
-            built->geometry = CubReduction::analyzeGeometry(input_dims, input.getStridesElements(), axes);
+            built->geometry = Reducer::analyzeGeometry(input_dims, input.getStridesElements(), axes);
             break;
     }
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Line rate of a `--training` dataset (1194). Standard library only.
+"""Line rate of a `--training` dataset. Standard library only.
 
 For every cell: the oracle (fastest candidate) in TB/s of moved bytes, the input (outer * R * K * element size; FP32 4
-bytes, FP16 / BF16 2, FP8 1; a carried-index cell adds its index width) plus the output it writes (1195: as the FP8
-audits report; at R = 3 the output is a third of the input),
-and the regret of the list-prefix shortlist at the tuning depths (the untrained selector times the first
-6 / 12 / 24 candidates in list_position order). Prints, by target working set and by K bucket: cells, oracle TB/s
-p50 / p10 / min, the share of cells at --line-tbps (default 1.5), the families that win, and the prefix regrets.
+bytes, FP16 / BF16 2, FP8 1; a carried-index cell adds its index width) plus the output it writes (as the FP8 audits
+report; at R = 3 the output is a third of the input), and the regret of the list-prefix shortlist at the tuning depths
+(the untrained selector times the first 6 / 12 / 24 candidates in list_position order). Prints, by target working
+set and by K bucket: cells, oracle TB/s p50 / p10 / min, the share of cells at --line-tbps (default 1.5), the families
+that win, and the prefix regrets.
 
 Usage: line_rate.py DATASET.csv[.gz] [--line-tbps=1.5]
 """
@@ -19,7 +19,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dataset  # noqa: E402
 
-ELEMENT_BYTES = {"fp32": 4, "fp16": 2, "bf16": 2, "fp8_e4m3": 1, "fp8_e5m2": 1}  # 1252: FP16 / BF16
+ELEMENT_BYTES = {"fp32": 4, "fp16": 2, "bf16": 2, "fp8_e4m3": 1, "fp8_e5m2": 1}
 DEPTHS = (6, 12, 24)
 
 
@@ -43,7 +43,7 @@ def main():
     parser.add_argument("--line-tbps", type=float, default=1.5)
     args = parser.parse_args()
     header, cells = dataset.load(args.dataset)
-    # 1211: a carried-index cell (kind carried_*) streams its carried index too (the header's carried_index width).
+    # A carried-index cell (kind carried_*) streams its carried index too (the header's carried_index width).
     carried_bytes = {"uint32": 4, "uint64": 8}.get(header.get("carried_index", "none"), 0)
     rows = []
     for cell in cells:

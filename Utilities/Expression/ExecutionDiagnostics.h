@@ -4,7 +4,7 @@
 #include <vector>
 
 #include "Utilities/Expression/Expression.h"
-#include "Utilities/TensorOperations/Cub/CubReduction.h"
+#include "Utilities/TensorOperations/Reduction/Layout/ReductionGeometry.h"
 
 namespace ThorImplementation {
 
@@ -78,7 +78,7 @@ struct StampedMatmulStageDiagnostic {
 // exposing or mutating the stamped CUB operation itself.
 struct StampedReductionStageDiagnostic {
     uint32_t stage_index = 0;
-    CubReductionPath path = CubReductionPath::DeviceTransformReduce;
+    ReductionLayout path = ReductionLayout::SingleOutput;
     std::vector<uint64_t> input_dimensions;
     std::vector<uint64_t> input_strides_elements;
     std::vector<uint64_t> reduction_axes;

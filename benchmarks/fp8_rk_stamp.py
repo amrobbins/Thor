@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""FP8 RK stamp audit (1162): what production's own RK contest costs and picks.
+"""FP8 RK stamp audit: what production's own RK contest costs and picks.
 
 Reads `thor_fp8_retained_cold_l2_sweep --training --stamp` output. Every cell carries the timed median of every
-retained candidate (the oracle is the fastest) and a '#stamp,cell_id,stamp_ms,candidates,winner' line: the wall time of
+candidate (the oracle is the fastest) and a '#stamp,cell_id,stamp_ms,candidates,winner' line: the wall time of
 production's own contest at that cell (Regular depth) and the candidate it picked, named like the CSV configuration.
 
   1. stamp wall time by input size
   2. the pick against the oracle (time over the fastest timed candidate), by kind and size
-  3. the contest's GPU time estimated from the timed medians, before 1162 (every one of the `candidates` top-ranked
-     shapes run once per round: warmup + 7 rounds) and with the shared policy (warmup + probe for every one, then 7
-     rounds of about 200 us for each one within 3x max(best, 8 us)), against the measured stamp time
+  3. the contest's GPU time estimated from the timed medians, with one launch per shape per round and no probe (every
+     one of the `candidates` top-ranked shapes: warmup + 7 rounds) and with the shared policy (warmup + probe for
+     every one, then 7 rounds of about 200 us for each one within 3x max(best, 8 us)), against the measured stamp
+     time
 
 Standard library only.
 """
@@ -22,7 +23,7 @@ import sys
 
 SIZES = (("<1M", 0, 2**20), ("1-16M", 2**20, 16 * 2**20), ("16-128M", 16 * 2**20, 128 * 2**20),
          (">=128M", 128 * 2**20, float("inf")))
-ROUNDS = 7  # Regular (fp8RKTuningPlan)
+ROUNDS = 7  # Regular (reductionTuningPlan)
 
 
 def _open(path):
@@ -63,7 +64,8 @@ def quantile(values, q):
 
 
 def contest_us(times, count):
-    """Estimated contest GPU time (us) of the top `count` candidates (by the ranker margin) before and after 1162."""
+    """Estimated contest GPU time (us) of the top `count` candidates (by the ranker margin), without and with the
+    probe policy."""
     before = sum(t * (1 + ROUNDS) for t in times[:count])
     probes = [max(t, 2.048) for t in times[:count]]
     limit = 3.0 * max(min(probes), 8.0)
@@ -129,7 +131,7 @@ def main(argv=None):
     if unmatched:
         print(f"   picks not among the timed configurations: {len(unmatched)} (first: {unmatched[:3]})\n")
 
-    # 2b (1163): where a loss comes from. The ranker's top N (N = the stamp's candidate count, by frozen margin) either
+    # 2b: where a loss comes from. The ranker's top N (N = the stamp's candidate count, by frozen margin) either
     # holds the oracle or not; the contest then picks within it. The sweep's own sample spread bounds what it can tell.
     rows = []
     for kind in ("value", "arg"):
@@ -169,9 +171,9 @@ def main(argv=None):
             rows.append([name, len(measured), f"{quantile(before, 0.5):.1f}", f"{quantile(after, 0.5):.1f}",
                          f"{quantile(measured, 0.5):.1f}", f"{sum(before) / 1000:.1f}", f"{sum(after) / 1000:.1f}",
                          f"{sum(measured) / 1000:.1f}"])
-    table("3. Contest GPU time estimated from the timed medians (ms; totals in s): before 1162 (one launch per\n"
+    table("3. Contest GPU time estimated from the timed medians (ms; totals in s): without probes (one launch per\n"
           "   measurement, every candidate), with the shared policy, and the measured stamp (wall, incl. setup)",
-          ["input", "n", "before p50", "policy p50", "measured p50", "before s", "policy s", "measured s"], rows)
+          ["input", "n", "no-probe p50", "policy p50", "measured p50", "no-probe s", "policy s", "measured s"], rows)
     return 0
 
 

@@ -1,48 +1,36 @@
-// 1335: thor_view_reduction_audit. What a user gets from a production CubReduction stamp of a non-dense view, the
-// three view classes that ran CUB device reductions through 1364 (plans/Thor_View_Reduction_Plan_2026-11-08.md, phase
-// 0; the baseline view-base-*.csv); 1373 deleted those CUB calls:
+// thor_view_reduction_audit. What a user gets from a production Reducer stamp of a non-dense view, per view class:
 //
-//   A  VIEW-DIRECT-1: a compact physical permutation (rank 2-4, every dim >= 2, a non-identity axis permutation of a
-//      dense tensor), every axis reduced (CUB TransformReduce over the span through 1364; 1365: the retained dense
-//      planner on the dense span of its bytes).
-//   B  VIEW-DIRECT-2A: a compact permutation whose reduced axes are the physical suffix and whose retained axes keep
-//      their physical order (logical [O..., permuted R...] over physical [O..., R...]; CUB's fixed-size segmented
-//      reduce through 1364; 1365: the retained dense planner).
-//   C  a rank-1 affine view [n] with stride s (elements), full reduction (CUB Reduce over an affine iterator through
-//      1365; 1366: StridedR, Utilities/TensorOperations/Cub/StridedReduction.h); s = 0 is a broadcast view of one
-//      element.
-//
-// 1375, the phase 5 measurement (nothing is rerouted): two more compact permutations whose retained axes keep their
-// physical order, so each is a dense tensor reduced over its physical axes.
-//   D  permutation-aware tiled with natural output: physical [O..., R..., I...] with I non-empty (O may be absent), the
-//      reduced axes at other logical positions. Production ran the Thor tiled view kernels through 1375; 1376 runs the
-//      dense planner on the bytes. The reference is the dense [outer, R, inner] over the R axis ([R, inner] over axis
-//      0 without O).
+//   A  a compact physical permutation (rank 2-4, every dim >= 2, a non-identity axis permutation of a dense tensor),
+//      every axis reduced: the dense planner on the dense span of its bytes.
+//   B  a compact permutation whose reduced axes are the physical suffix and whose kept axes keep their physical order
+//      (logical [O..., permuted R...] over physical [O..., R...]): the dense planner.
+//   C  a rank-1 affine view [n] with stride s (elements), full reduction: StridedR
+//      (Utilities/TensorOperations/Reduction/Kernels/StridedReduction.h); s = 0 is a broadcast view of one element.
+//   D  a compact permutation with a natural output: physical [O..., R..., I...] with I non-empty (O may be absent), the
+//      reduced axes at other logical positions: the dense planner on the bytes. The reference is the dense
+//      [outer, R, inner] over the R axis ([R, inner] over axis 0 without O).
 //   E  a split physical reduction: the reduced axes form two runs in physical order (R O R, O R O R, R O R O or
-//      O R O R O). Production threw through 1375 (no tiled candidate); the cell then timed the dense stamp of the
-//      physical tensor over its physical reduced axes (retained ComposedDense), with reference `view_unsupported`.
-//      1376 runs the view on the dense planner, timed against that dense stamp like D.
-// In D and E the logical order is never the physical one: the retained axes keep their order and the reduced axes are
+//      O R O R O): the dense planner on the view (DisjointRuns), timed against the dense stamp of the physical tensor
+//      over its physical reduced axes like D. If the view stamp throws, the cell times that dense stamp, with
+//      reference `view_unsupported`.
+// In D and E the logical order is never the physical one: the kept axes keep their order and the reduced axes are
 // placed at random logical positions.
 //
-// 1386, the measurement of the three view classes that still ran the Thor tiled kernels (nothing was rerouted; 1387:
-// the retained dense planner with a layout pass inside the reducer; 1390: the reducer refuses them and the cell times
-// the two parts a caller runs, CubReduction::splitRefusedView: F / G the reduction of the bytes in physical order then
-// the dense copy of its output read rotated, passes "split_rotated:<plan>+copy:<copy plan>"; H the dense copy of the
-// view then the reduction of the copy, "split_packed:copy:<copy plan>+<plan>", or (1391, phase 7 A) the reduction of
-// its rows read at their pitch then the copy of the output's columns, "split_sliced:<plan>+copy:<copy plan>"):
-//   F  a compact permutation with a rotated output: physical [O..., R..., I...], O and I non-empty, logical retained
-//      order [I..., O...] (permutation-aware tiled, PermutedInnerOuter: the direct kernel with a shared-memory
-//      transpose epilogue, or the wide shared-transpose kernel).
-//   G  VIEW-DIRECT-2B: physical [A..., R..., B..., P...], all non-empty, logical retained order [B..., A..., P...] (the
-//      32x33 payload-transpose kernel). With P empty it would be F.
-//   H  VIEW-PITCHED-TILED: logical = physical [O..., R..., I...] with I contiguous, rows R apart by a row pitch and
-//      slabs O apart by a slab pitch, with gaps: between rows (a slice of the last axis), between slabs (a slice of
-//      the middle axis), or both (repeated-label einsum diagonals). O may be absent (then the rows have gaps).
-//      1392 (phase 7 C): with enough outputs the reducer reads H in place (passes "pitched_complete:w<W>_t<tile>"),
-//      and every H cell also times the split when its main reads in place (split_us) and the in-place read at each
-//      forced W (pitched_w<W>_us, CubReduction::stampPitched), each verified like the main; one whose probe is over
-//      50x the main's and 1 ms is left empty.
+// The reducer refuses F, G and H, and the cell times the two parts a caller runs (Reducer::splitRefusedView): F / G the
+// reduction of the bytes in physical order then the dense copy of its output read rotated, passes
+// "split_rotated:<plan>+copy:<copy plan>"; H the dense copy of the view then the reduction of the copy,
+// "split_packed:copy:<copy plan>+<plan>", or the reduction of its rows read at their pitch then the copy of the
+// output's columns, "split_sliced:<plan>+copy:<copy plan>":
+//   F  a compact permutation with a rotated output: physical [O..., R..., I...], O and I non-empty, logical kept order
+//      [I..., O...].
+//   G  physical [A..., R..., B..., P...], all non-empty, logical kept order [B..., A..., P...]. With P empty it would
+//      be F.
+//   H  logical = physical [O..., R..., I...] with I contiguous, rows R apart by a row pitch and slabs O apart by a slab
+//      pitch, with gaps: between rows (a slice of the last axis), between slabs (a slice of the middle axis), or both
+//      (repeated-label einsum diagonals). O may be absent (then the rows have gaps). With enough outputs the reducer
+//      reads H in place (passes "pitched_complete:w<W>_t<tile>"), and every H cell also times the split when its main
+//      reads in place (split_us) and the in-place read at each forced W (pitched_w<W>_us, Reducer::stampPitched), each
+//      verified like the main; one whose probe is over 50x the main's and 1 ms is left empty.
 // The reduced axes of F and G are placed at random logical positions; in H they are logically contiguous. The reference
 // is the production stamp of a dense tensor: F the physical [outer, R, inner] over axis 1 (its output in physical
 // order, so the reference skips the rotation); G the physical [A, R, B x P] over axis 1 (likewise); H a packed
@@ -51,23 +39,22 @@
 // Each cell is timed cold against two references from the same run:
 //   - the copy curve at the cell's touched bytes (ColdTiming.h, as every reduction audit);
 //   - A / B / D / E: the production stamp of the dense tensor of the same bytes (A: [N] over axis 0; B: [outer, R] over
-//     axis 1; D and E above), the retained kernels phase 1 routes A / B to; C (s >= 2): a gather reference kernel
-//     (below), the bound of the access pattern.
+//     axis 1; D and E above); C (s >= 2): a gather reference kernel (below), the bound of the access pattern.
 //
 // Touched bytes: A / B / D / E / F / G the input plus the FP32 outputs. H: the distinct 32-byte sectors its rows cover
 // (counted exactly) plus the FP32 outputs. C: the bytes the memory system moves for the gather:
 // n x 32 (one sector per element) when the pitch p = s x element bytes is at least 32, the span ((n - 1) x p + element
 // bytes) below that, one element at s = 0; plus the FP32 output. useful_bytes is n x element bytes plus the output.
 //
-// Method (ColdTiming.h, as thor_dense_production_audit): the input ring holds 0.5 in the cell dtype in every element
-// (a fill kernel), so every output has a closed form (count = its reduction size: SUM / L1 count / 2, MEAN / MIN / MAX
-// 0.5, SumSquares count / 4, L2 sqrt(count / 4), PRODUCT 2^-count); each cell's first run is verified against it
-// (exact below 2^24 elements per output, relative 1e-3 above; PRODUCT within 2^-126). The constant input checks counts
-// and finalization, not addressing: the unit tests check addressing. Each cell is stamped once on its first view, then
-// run with runOnTensorsForBenchmark (1335: view stamps take view replacements) on rotating input views spanning at
-// least 2 GiB of touched bytes and output views spanning at least 1 GiB. C's wide pitches (p >= 64) rotate sub-pitch
-// shifts of 32 bytes inside a region as well, so a large span holds many distinct sets of touched sectors. One verified
-// run, one untimed run, one timed probe, then --samples samples of about --interval-us of back-to-back runs (at most
+// Method (ColdTiming.h, as thor_dense_production_audit): the input ring holds 0.5 in the cell dtype in every element (a
+// fill kernel), so every output has a closed form (count = its reduction size: SUM / L1 count / 2, MEAN / MIN / MAX
+// 0.5, SumSquares count / 4, L2 sqrt(count / 4), PRODUCT 2^-count); each cell's first run is verified against it (exact
+// below 2^24 elements per output, relative 1e-3 above; PRODUCT within 2^-126). The constant input checks counts and
+// finalization, not addressing: the unit tests check addressing. Each cell is stamped once on its first view, then run
+// with runOnTensorsForBenchmark (view stamps take view replacements) on rotating input views spanning at least 2 GiB of
+// touched bytes and output views spanning at least 1 GiB. C's wide pitches (p >= 64) rotate sub-pitch shifts of 32
+// bytes inside a region as well, so a large span holds many distinct sets of touched sectors. One verified run, one
+// untimed run, one timed probe, then --samples samples of about --interval-us of back-to-back runs (at most
 // --max-launches), interleaved across the cells of a batch; the reference the same way.
 //
 // Gather reference (C): one load per element with the cell's element width and stride, each lane of a warp reading
@@ -79,8 +66,8 @@
 // reports it.
 #include "benchmarks/ColdTiming.h"
 #include "benchmarks/Fp8OracleBatchQueue.h"
-#include "Utilities/TensorOperations/Cub/CubReduction.h"
-#include "Utilities/TensorOperations/Cub/CubReductionTuningDepth.h"
+#include "Utilities/TensorOperations/Reduction/Reducer.h"
+#include "Utilities/TensorOperations/Reduction/ReductionTuningDepth.h"
 #include "Utilities/TensorOperations/Copy/StridedCopy.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Exceptions.h"
@@ -106,7 +93,7 @@
 #include <vector>
 
 namespace T = ThorImplementation;
-namespace B = ThorImplementation::CubReductionBenchmarking;
+namespace B = ThorImplementation::ReductionBenchmarking;
 using B::ColdTiming::align256;
 using B::ColdTiming::CopyCurve;
 using B::ColdTiming::GiB;
@@ -158,13 +145,13 @@ __global__ __launch_bounds__(GatherThreads) void gatherReferenceKernel(const Wor
 
 struct OpSpec {
     const char* name;
-    T::CubReductionOp op;
+    T::ReductionOp op;
 };
 constexpr OpSpec OPS[] = {
-    {"sum", T::CubReductionOp::Sum},           {"mean", T::CubReductionOp::Mean},
-    {"product", T::CubReductionOp::Product},   {"min", T::CubReductionOp::Min},
-    {"max", T::CubReductionOp::Max},           {"l1_norm", T::CubReductionOp::L1Norm},
-    {"l2_norm", T::CubReductionOp::L2Norm},    {"sum_squares", T::CubReductionOp::SumSquares},
+    {"sum", T::ReductionOp::Sum},           {"mean", T::ReductionOp::Mean},
+    {"product", T::ReductionOp::Product},   {"min", T::ReductionOp::Min},
+    {"max", T::ReductionOp::Max},           {"l1_norm", T::ReductionOp::L1Norm},
+    {"l2_norm", T::ReductionOp::L2Norm},    {"sum_squares", T::ReductionOp::SumSquares},
 };
 
 const OpSpec& opSpec(std::string_view name) {
@@ -201,7 +188,7 @@ std::vector<std::string> splitList(std::string_view text) {
 
 struct Settings {
     const DTypeSpec* dtype = &DTYPES[0];
-    std::vector<char> cases{'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'};  // 1386: f, g, h
+    std::vector<char> cases{'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'};  // f, g, h
     std::vector<std::string> ops{"sum", "mean", "product", "min", "max", "l1_norm", "l2_norm", "sum_squares"};
     std::vector<uint64_t> strides{0, 2, 3, 4, 8, 16, 33, 64, 4096};
     uint64_t cells_ab = 60;      // per case (A, B, D, E, F, G, H)
@@ -217,7 +204,7 @@ struct Settings {
     uint64_t arena_bytes = 8 * GiB;
     uint64_t output_ring_bytes = 2 * GiB;
     size_t queue_cells = 16;
-    T::CubReductionTuningDepth depth = T::CubReductionTuningDepth::Regular;
+    T::ReductionTuningDepth depth = T::ReductionTuningDepth::Regular;
     bool list_only = false;
 };
 
@@ -274,9 +261,9 @@ Settings parse(int argc, char** argv) {
         } else if (auto v = value("--queue-cells=")) {
             s.queue_cells = std::max<size_t>(1, std::stoull(*v));
         } else if (auto v = value("--tuning-depth=")) {
-            if (*v == "quick") s.depth = T::CubReductionTuningDepth::Quick;
-            else if (*v == "regular") s.depth = T::CubReductionTuningDepth::Regular;
-            else if (*v == "ultra") s.depth = T::CubReductionTuningDepth::Ultra;
+            if (*v == "quick") s.depth = T::ReductionTuningDepth::Quick;
+            else if (*v == "regular") s.depth = T::ReductionTuningDepth::Regular;
+            else if (*v == "ultra") s.depth = T::ReductionTuningDepth::Ultra;
             else throw std::invalid_argument("--tuning-depth takes quick, regular or ultra");
         } else if (a == "--list-only") {
             s.list_only = true;
@@ -367,13 +354,13 @@ struct CellSpec {
     uint64_t outputs = 1, count = 0;    // outputs and the reduction size of each
     std::vector<uint64_t> dense_dims;   // A / B / D-G: the dense tensor of the same bytes (H: packed, no gaps)
     std::vector<uint32_t> dense_axes;   // and its reduced axes
-    uint64_t pitched_outer = 1, pitched_inner = 1;  // 1386 (H): the flattened extents
+    uint64_t pitched_outer = 1, pitched_inner = 1;  // H: the flattened extents
     uint64_t row_pitch = 0, slab_pitch = 0;         // and pitches, in elements
 };
 
-// 1375 (D, E): the view of the dense physical tensor `physical` whose `reduced` physical axes are reduced. The retained
-// axes keep their physical order; the reduced axes, shuffled, go to random logical positions; the logical order is
-// never the physical one.
+// D, E: the view of the dense physical tensor `physical` whose `reduced` physical axes are reduced. The kept axes keep
+// their physical order; the reduced axes, shuffled, go to random logical positions; the logical order is never the
+// physical one.
 void layOutPhysicalView(CellSpec& c, const std::vector<uint64_t>& physical, const std::vector<bool>& reduced,
                         uint64_t h) {
     const std::vector<uint64_t> physical_strides = denseStrides(physical);
@@ -385,7 +372,7 @@ void layOutPhysicalView(CellSpec& c, const std::vector<uint64_t>& physical, cons
                        reduced_axes[k]);
     bool identity = true;
     for (size_t i = 0; i < logical.size(); ++i) identity = identity && logical[i] == i;
-    if (identity) {  // swap the first reduced axis with a neighbour: the retained axes keep their order
+    if (identity) {  // swap the first reduced axis with a neighbour: the kept axes keep their order
         size_t i = 0;
         while (!reduced[logical[i]]) ++i;
         std::swap(logical[i], logical[i + 1 < logical.size() ? i + 1 : i - 1]);
@@ -400,9 +387,8 @@ void layOutPhysicalView(CellSpec& c, const std::vector<uint64_t>& physical, cons
     for (size_t p = 0; p < physical.size(); ++p) (reduced[p] ? c.count : c.outputs) *= physical[p];
 }
 
-// 1386 (F, G): the view of the dense physical tensor `physical` whose `reduced` physical axes are reduced, with the
-// retained axes in the logical order `logical` (physical axes); the reduced axes, shuffled, go to random logical
-// positions.
+// F, G: the view of the dense physical tensor `physical` whose `reduced` physical axes are reduced, with the kept axes
+// in the logical order `logical` (physical axes); the reduced axes, shuffled, go to random logical positions.
 void layOutRetainedOrder(CellSpec& c, const std::vector<uint64_t>& physical, const std::vector<bool>& reduced,
                          std::vector<size_t> logical, uint64_t h) {
     const std::vector<uint64_t> physical_strides = denseStrides(physical);
@@ -430,7 +416,7 @@ std::vector<size_t> axisRange(size_t first, size_t count) {
     return out;
 }
 
-// 1375: 1 axis, or 2 when the run's extent allows (h decides).
+// 1 axis, or 2 when the run's extent allows (h decides).
 std::vector<uint64_t> runDims(uint64_t target, uint64_t h) {
     return splitDims(target, (target >= 16 && h % 2) ? 2 : 1, mix(h + 1));
 }
@@ -714,10 +700,10 @@ std::vector<CellSpec> cells(const Settings& s) {
     return out;
 }
 
-// 1386 (H): the distinct 32-byte sectors the rows cover (the views start 256-byte aligned). Rows, and slabs, are in
-// address order and do not overlap, so a row adds the sectors past the previous row's last one, and a slab shares at
-// most its first sector with the slab before. What a row (slab) adds depends only on its index mod 32: 32 rows (slabs)
-// on, every address has moved by a multiple of 32 bytes. So each class is counted once and weighted by its size.
+// H: the distinct 32-byte sectors the rows cover (the views start 256-byte aligned). Rows, and slabs, are in address
+// order and do not overlap, so a row adds the sectors past the previous row's last one, and a slab shares at most its
+// first sector with the slab before. What a row (slab) adds depends only on its index mod 32: 32 rows (slabs) on, every
+// address has moved by a multiple of 32 bytes. So each class is counted once and weighted by its size.
 uint64_t classSize(uint64_t n, uint64_t c) { return c < n ? (n - 1 - c) / 32 + 1 : 0; }  // k in [0, n), k = c mod 32
 
 double pitchedTouchedBytes(const CellSpec& c, uint64_t b) {
@@ -752,46 +738,46 @@ double touchedInputBytes(const CellSpec& c, uint64_t b) {
 }
 
 // The closed form of a reduction of `count` elements of 0.5, and whether `got` matches it.
-bool verifyValue(T::CubReductionOp op, uint64_t count, float got, double* rel_err) {
+bool verifyValue(T::ReductionOp op, uint64_t count, float got, double* rel_err) {
     const double n = double(count);
     double expected = 0;
     switch (op) {
-        case T::CubReductionOp::Sum:
-        case T::CubReductionOp::L1Norm: expected = 0.5 * n; break;
-        case T::CubReductionOp::Mean:
-        case T::CubReductionOp::Min:
-        case T::CubReductionOp::Max: expected = 0.5; break;
-        case T::CubReductionOp::SumSquares: expected = 0.25 * n; break;
-        case T::CubReductionOp::L2Norm: expected = std::sqrt(0.25 * n); break;
-        case T::CubReductionOp::Product: expected = count <= 149 ? std::ldexp(1.0, -int(count)) : 0.0; break;
+        case T::ReductionOp::Sum:
+        case T::ReductionOp::L1Norm: expected = 0.5 * n; break;
+        case T::ReductionOp::Mean:
+        case T::ReductionOp::Min:
+        case T::ReductionOp::Max: expected = 0.5; break;
+        case T::ReductionOp::SumSquares: expected = 0.25 * n; break;
+        case T::ReductionOp::L2Norm: expected = std::sqrt(0.25 * n); break;
+        case T::ReductionOp::Product: expected = count <= 149 ? std::ldexp(1.0, -int(count)) : 0.0; break;
     }
     const double err = std::abs(double(got) - expected);
     *rel_err = expected != 0 ? err / std::abs(expected) : err;
-    if (op == T::CubReductionOp::Product) return err <= std::ldexp(1.0, -126) || *rel_err <= 1e-6;
-    if (op == T::CubReductionOp::L2Norm) return *rel_err <= (count < (1u << 24) ? 1e-6 : 1e-3);
+    if (op == T::ReductionOp::Product) return err <= std::ldexp(1.0, -126) || *rel_err <= 1e-6;
+    if (op == T::ReductionOp::L2Norm) return *rel_err <= (count < (1u << 24) ? 1e-6 : 1e-3);
     return count < (1u << 24) ? err == 0 : *rel_err <= 1e-3;
 }
 
-const char* pathName(T::CubReductionPath path) {
+const char* pathName(T::ReductionLayout path) {
     switch (path) {
-        case T::CubReductionPath::DeviceTransformReduce: return "device_transform_reduce";
-        case T::CubReductionPath::ContiguousFixedSegment: return "contiguous_fixed_segment";
-        case T::CubReductionPath::TiledFixedSegment: return "tiled_fixed_segment";
-        case T::CubReductionPath::OffsetSegmented: return "offset_segmented";
-        case T::CubReductionPath::ComposedDense: return "composed_dense";
+        case T::ReductionLayout::SingleOutput: return "device_transform_reduce";
+        case T::ReductionLayout::TrailingBlock: return "contiguous_fixed_segment";
+        case T::ReductionLayout::MiddleBlock: return "tiled_fixed_segment";
+        case T::ReductionLayout::Segmented: return "offset_segmented";
+        case T::ReductionLayout::DisjointRuns: return "composed_dense";
     }
     return "unknown";
 }
 
-std::string passNames(const T::StampedCubReduction& stamp) {
+std::string passNames(const T::StampedReducer& stamp) {
     std::string passes;
     if (stamp.usesDenseExecutablePlan()) {
         for (const auto& pass : stamp.getDensePhysicalPassDiagnostics())
             passes += (passes.empty() ? "" : "+") + pass.family;
     } else if (stamp.getStridedRLaunch().has_value()) {
-        passes = stamp.getModernRKStrategyChain();  // 1366: "strided_r:closed_form" or ":split_g<G>" (1371)
+        passes = stamp.getModernRKStrategyChain();  // "strided_r:closed_form" or ":split_g<G>"
     } else if (stamp.getPitchedCompleteLaunch().has_value()) {
-        passes = stamp.getModernRKStrategyChain();  // 1392: "pitched_complete:w<W>_t<tile>"
+        passes = stamp.getModernRKStrategyChain();  // "pitched_complete:w<W>_t<tile>"
     } else {
         passes = std::string("physical:") + pathName(stamp.getPath());
     }
@@ -838,30 +824,29 @@ struct Timed {
     }
 };
 
-// How a view runs: `stamp` on the view, or (1390, F / G / H) the two parts of `split`. A rotated view (1391: or a
-// sliced H view): `stamp` reduces the bytes into split_buffer, which the copy (from rotation_source) writes into the
-// output rotated (or its columns). A packed view: the copy writes the view's rows into split_buffer, which `stamp`
-// reduces.
+// How a view runs: `stamp` on the view, or (F / G / H) the two parts of `split`. A rotated view (or a sliced H view):
+// `stamp` reduces the bytes into split_buffer, which the copy (from rotation_source) writes into the output rotated (or
+// its columns). A packed view: the copy writes the view's rows into split_buffer, which `stamp` reduces.
 struct ViewRunner {
-    std::shared_ptr<T::StampedCubReduction> stamp;
-    std::optional<T::CubReductionViewSplit> split;
+    std::shared_ptr<T::StampedReducer> stamp;
+    std::optional<T::ViewSplit> split;
     T::Tensor split_buffer;
     T::StridedSpan rotation_source;
     T::DenseCopyPlan split_copy;
 
     // The split's stamp on `view` (and its buffer); returns the output dimensions.
-    std::vector<uint64_t> stampSplit(T::CubReductionOp op, const T::StridedSpan& view,
+    std::vector<uint64_t> stampSplit(T::ReductionOp op, const T::StridedSpan& view,
                                      const T::TensorPlacement& placement, Stream& stream) {
-        const T::CubReductionViewSplit& sp = *split;
-        if (sp.copiesOutput()) {  // 1390: F / G; 1391: sliced H
-            stamp = T::CubReduction(op, sp.dense_axes, T::DataType::FP32).stamp(sp.reducedInput(view), stream);
+        const T::ViewSplit& sp = *split;
+        if (sp.copiesOutput()) {  // F / G; sliced H
+            stamp = T::Reducer(op, sp.dense_axes, T::DataType::FP32).stamp(sp.reducedInput(view), stream);
             split_buffer = stamp->getOutputTensor();
             rotation_source = sp.copySource(split_buffer);
             return sp.copy_dimensions;
         }
         split_buffer = T::Tensor(placement, T::TensorDescriptor(view.getDataType(), sp.dense_dimensions));  // packed H
         split_copy = T::planCopyToDense(view, split_buffer);
-        stamp = T::CubReduction(op, sp.dense_axes, T::DataType::FP32).stamp(T::StridedSpan(split_buffer), stream);
+        stamp = T::Reducer(op, sp.dense_axes, T::DataType::FP32).stamp(T::StridedSpan(split_buffer), stream);
         return stamp->getOutputTensor().getDimensions();
     }
     // Once the output views exist: the copy of a split that copies the output.
@@ -873,9 +858,9 @@ struct ViewRunner {
         if (!split.has_value()) return names;
         const std::string copy = "copy:" + T::denseCopyPlanName(split_copy);
         switch (split->kind) {
-            case T::CubReductionViewSplit::Kind::RotatedOutput: return "split_rotated:" + names + "+" + copy;
-            case T::CubReductionViewSplit::Kind::SlicedOutput: return "split_sliced:" + names + "+" + copy;
-            case T::CubReductionViewSplit::Kind::PackedInput: return "split_packed:" + copy + "+" + names;
+            case T::ViewSplit::Kind::RotatedOutput: return "split_rotated:" + names + "+" + copy;
+            case T::ViewSplit::Kind::SlicedOutput: return "split_sliced:" + names + "+" + copy;
+            case T::ViewSplit::Kind::PackedInput: return "split_packed:" + copy + "+" + names;
         }
         return names;
     }
@@ -893,26 +878,26 @@ struct ViewRunner {
     }
 };
 
-// The split of `views` as Expression takes it (CubReduction::splitRefusedView of the span; `reducer_reads_pitched`
+// The split of `views` as Expression takes it (Reducer::splitRefusedView of the span; `reducer_reads_pitched`
 // false: the split an H view the reducer reads in place has otherwise): an H view read at its row pitch (sliced) only
 // when every view in the ring has the last row's gap inside the ring.
-std::optional<T::CubReductionViewSplit> ringSplit(const std::vector<T::StridedSpan>& views,
-                                                  const std::vector<uint32_t>& axes,
-                                                  bool reducer_reads_pitched) {
-    std::optional<T::CubReductionViewSplit> split =
-        T::CubReduction::splitRefusedView(views[0], axes, T::DataType::FP32, reducer_reads_pitched);
-    if (split.has_value() && split->kind == T::CubReductionViewSplit::Kind::SlicedOutput) {
+std::optional<T::ViewSplit> ringSplit(const std::vector<T::StridedSpan>& views,
+                                      const std::vector<uint32_t>& axes,
+                                      bool reducer_reads_pitched) {
+    std::optional<T::ViewSplit> split =
+        T::Reducer::splitRefusedView(views[0], axes, T::DataType::FP32, reducer_reads_pitched);
+    if (split.has_value() && split->kind == T::ViewSplit::Kind::SlicedOutput) {
         try {
             for (const T::StridedSpan& v : views) static_cast<void>(split->reducedInput(v));
         } catch (const std::invalid_argument&) {
-            split = T::CubReduction::splitRefusedView(views[0].getDimensions(), views[0].getStridesElements(), axes);
+            split = T::Reducer::splitRefusedView(views[0].getDimensions(), views[0].getStridesElements(), axes);
         }
     }
     return split;
 }
 
-// 1392 (phase 7 C): another way to run an H cell, timed beside the main: the split (when the main reads the view in
-// place) or the in-place read at a forced W. Its outputs are the cell's output views read with its output dimensions.
+// Another way to run an H cell, timed beside the main: the split (when the main reads the view in place) or the
+// in-place read at a forced W. Its outputs are the cell's output views read with its output dimensions.
 struct Alternative {
     std::string name;  // the CSV column is <name>_us
     ViewRunner runner;
@@ -925,8 +910,8 @@ struct Alternative {
 struct Cell {
     CellSpec spec;
     ViewRunner run;
-    std::shared_ptr<T::StampedCubReduction> dense_stamp;
-    std::vector<std::unique_ptr<Alternative>> alternatives;  // 1392: H only
+    std::shared_ptr<T::StampedReducer> dense_stamp;
+    std::vector<std::unique_ptr<Alternative>> alternatives;  // H only
     std::vector<T::StridedSpan> inputs, dense_inputs, outputs;  // views of the input and output rings
     std::vector<uint64_t> input_offsets;  // byte offsets of the views' first elements in the input ring
     size_t next_input = 0, next_output = 0, next_reference = 0;
@@ -936,7 +921,7 @@ struct Cell {
     const char* reference_name = "none";
     Timed main, reference;
     bool has_reference = false;
-    bool view_unsupported = false;  // 1375 (E): the view stamp throws; `stamp` is then the dense stamp
+    bool view_unsupported = false;  // E: the view stamp throws; `stamp` is then the dense stamp
 };
 
 double median(std::vector<double> v) {
@@ -969,13 +954,13 @@ int main(int argc, char** argv) {
         Stream stream(placement);
         cudaDeviceProp properties{};
         check(cudaGetDeviceProperties(&properties, 0), "device properties");
-        const T::ScopedCubReductionTuningDepth depth_scope(settings.depth);
+        const T::ScopedReductionTuningDepth depth_scope(settings.depth);
 
         Ring inputs(placement, settings.arena_bytes);
         Ring outputs(placement, settings.output_ring_bytes);
         fillWordsKernel<<<4 * properties.multiProcessorCount, 256, 0, stream.getStream()>>>(
             static_cast<uint32_t*>(inputs.storage().getMemPtr<void>()), settings.arena_bytes / 4,
-            settings.dtype->half_pattern);  // 1363: the ring is UINT8, so read it untyped (getMemPtr<uint32_t> throws)
+            settings.dtype->half_pattern);  // the ring is UINT8, so read it untyped (getMemPtr<uint32_t> throws)
         check(cudaGetLastError(), "input ring fill");
         check(cudaMemsetAsync(outputs.storage().getMemPtr<void>(), 0, settings.output_ring_bytes, stream.getStream()),
               "output ring initialization");
@@ -1002,7 +987,7 @@ int main(int argc, char** argv) {
                   << " interval_us=" << settings.interval_us << " max_launches=" << settings.max_launches
                   << " arena_bytes=" << settings.arena_bytes << " output_ring_bytes=" << settings.output_ring_bytes
                   << " input_reuse_bytes=" << InputReuseBytes << " output_reuse_bytes=" << OutputReuseBytes
-                  << " input=0.5 value_output=fp32 tuning_depth=" << T::cubReductionTuningDepthRank(settings.depth)
+                  << " input=0.5 value_output=fp32 tuning_depth=" << T::reductionTuningDepthRank(settings.depth)
                   << " gather_ctas_per_sm=" << GatherCtasPerSm << " gather_threads=" << GatherThreads
                   << " gather_unroll=" << GatherUnroll << " device=\"" << properties.name
                   << "\" sm_count=" << properties.multiProcessorCount << " cc=" << properties.major << '.'
@@ -1015,8 +1000,8 @@ int main(int argc, char** argv) {
                      "useful_bytes,touched_bytes,stamp_ms,passes,reference,reference_passes,verified,max_rel_err,"
                      "probe_us,launches";
         for (int i = 0; i < settings.samples; ++i) std::cout << ",sample" << i << "_us";
-        // 1392 (phase 7 C): H cells' alternatives (empty elsewhere): the split when the main reads the view in place,
-        // the in-place read at each W, and their passes.
+        // H cells' alternatives (empty elsewhere): the split when the main reads the view in place, the in-place read
+        // at each W, and their passes.
         std::cout << ",median_us,reference_us,copy_us,tbps,of_copy,of_reference,split_us,pitched_w1_us,pitched_w2_us,"
                      "pitched_w4_us,pitched_w8_us,alternative_passes\n";
 
@@ -1100,25 +1085,25 @@ int main(int argc, char** argv) {
                     }
                 }
 
-                // The production stamp, bound to the first view. 1375 (E): a view no production reducer owns throws
+                // The production stamp, bound to the first view. E: a view no production reducer owns throws
                 // NotImplementedException; the cell then times the dense stamp of its physical tensor instead.
                 cell->reference_name = c.kind == 'c' ? (c.stride == 0 ? "none" : "gather") : "dense_stamp";
                 const auto stamp_start = std::chrono::steady_clock::now();
                 std::vector<uint64_t> out_dims;
-                // 1391 (phase 7 A): the split of the span, as Expression takes it (ringSplit). 1392: none for an H
-                // view the reducer reads in place.
+                // The split of the span, as Expression takes it (ringSplit). None for an H view the reducer reads in
+                // place.
                 cell->run.split = ringSplit(cell->inputs, c.axes, true);
                 if (cell->run.split.has_value()) {
                     out_dims = cell->run.stampSplit(c.op->op, cell->inputs[0], placement, stream);
                 } else {
                     try {
                         cell->run.stamp =
-                            T::CubReduction(c.op->op, c.axes, T::DataType::FP32).stamp(cell->inputs[0], stream);
+                            T::Reducer(c.op->op, c.axes, T::DataType::FP32).stamp(cell->inputs[0], stream);
                     } catch (const NotImplementedException&) {
                         if (c.kind != 'e') throw;
                         cell->view_unsupported = true;
                         cell->reference_name = "view_unsupported";
-                        cell->run.stamp = T::CubReduction(c.op->op, c.dense_axes, T::DataType::FP32)
+                        cell->run.stamp = T::Reducer(c.op->op, c.dense_axes, T::DataType::FP32)
                                               .stamp(cell->dense_inputs[0], stream);
                     }
                     out_dims = cell->run.stamp->getOutputTensor().getDimensions();
@@ -1133,7 +1118,7 @@ int main(int argc, char** argv) {
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - stamp_start).count();
                 cell->passes = cell->run.passes();
 
-                // One run of the cell on a view and an output: the stamp, or the two parts (1390).
+                // One run of the cell on a view and an output: the stamp, or the two parts.
                 Cell* raw = cell.get();
                 const auto run_on = [raw, &stream](const T::StridedSpan& input, const T::StridedSpan& output) {
                     raw->run.run(input, output, stream);
@@ -1181,7 +1166,7 @@ int main(int argc, char** argv) {
                 if (cell->view_unsupported) {
                     cell->has_reference = false;
                 } else if (c.kind != 'c') {
-                    cell->dense_stamp = T::CubReduction(c.op->op, c.dense_axes, T::DataType::FP32)
+                    cell->dense_stamp = T::Reducer(c.op->op, c.dense_axes, T::DataType::FP32)
                                             .stamp(cell->dense_inputs[0], stream);
                     cell->dense_passes = passNames(*cell->dense_stamp);
                     cell->reference.run_once = [raw, &stream] {
@@ -1216,8 +1201,8 @@ int main(int argc, char** argv) {
                 }
                 if (cell->has_reference) cell->reference.probe(stream, settings);
 
-                // 1392 (phase 7 C): an H cell also times the split when its main reads the view in place, and the
-                // in-place read at each W (CubReduction::stampPitched) whether or not the fill rule picks it.
+                // An H cell also times the split when its main reads the view in place, and the in-place read at each W
+                // (Reducer::stampPitched) whether or not the fill rule picks it.
                 if (c.kind == 'h') {
                     if (!cell->run.split.has_value()) {
                         auto alt = std::make_unique<Alternative>();
@@ -1237,7 +1222,7 @@ int main(int argc, char** argv) {
                         alt->name = "pitched_w" + std::to_string(w);
                         try {
                             alt->runner.stamp =
-                                T::CubReduction(c.op->op, c.axes, T::DataType::FP32).stampPitched(cell->inputs[0], w,
+                                T::Reducer(c.op->op, c.axes, T::DataType::FP32).stampPitched(cell->inputs[0], w,
                                                                                                     stream);
                         } catch (const NotImplementedException&) {
                             break;  // PacketComplete cannot read the view

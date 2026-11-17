@@ -55,14 +55,14 @@ def margin(trees, features):
     return total
 
 
-RK_MODEL_NAMESPACE = "ThorImplementation::CubReductionInternal::Fp8RK::Fp8GeometryRankerModel"
-RK_PARITY_NAMESPACE = "ThorImplementation::CubReductionInternal::Fp8RK::Fp8GeometryRankerParity"
+RK_MODEL_NAMESPACE = "ThorImplementation::ReductionInternal::RK::Fp8::Fp8GeometryRankerModel"
+RK_PARITY_NAMESPACE = "ThorImplementation::ReductionInternal::RK::Fp8::Fp8GeometryRankerParity"
 
 
 def write_header(path, trees, feature_count, model_bytes, provenance, namespace=RK_MODEL_NAMESPACE,
                  generator="benchmarks/fp8_ranker/train.py", trained_flag=False):
-    """1158: namespace / generator / trained_flag let the KR ranker (benchmarks/fp8_kr_ranker) share this exporter;
-    the defaults write the RK header exactly as before."""
+    """namespace / generator / trained_flag let the KR rankers (benchmarks/fp8_kr_ranker) and the other dtypes'
+    rankers share this exporter; the defaults write the FP8 RK header."""
     sha = hashlib.sha256(model_bytes).hexdigest()
     offsets, flat = [], []
     for nodes in trees:

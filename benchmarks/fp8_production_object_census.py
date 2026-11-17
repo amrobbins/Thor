@@ -44,17 +44,17 @@ def classify_function(name: str, mangled: str = '') -> str:
                    if is_named_kernel_function(name, kernel)), None)
     if family is not None:
         # Rotated RK kernels also serve FP16/BF16/FP32 production.  Do not
-        # count those non-FP8 instances as retained FP8 specializations just
-        # because they share RuntimeK's kernel function name.
+        # count those non-FP8 instances as FP8 specializations just because
+        # they share RuntimeK's kernel function name.
         if (family == 'RuntimeK' and
-            'awkwardAlignmentRotatedShardedFirstStageKernel' in name and
+            'runtimeKRotatedValueKernel' in name and
             not (FP8_TYPE.search(name) or FP8_TYPE.search(mangled))):
             return 'other-device-function'
         return family
     for kernel, family in FAMILIES.items():
         if f'{len(kernel)}{kernel}' in mangled:
             if (family == 'RuntimeK' and
-                kernel == 'awkwardAlignmentRotatedShardedFirstStageKernel' and
+                kernel == 'runtimeKRotatedValueKernel' and
                 not FP8_TYPE.search(mangled)):
                 return 'other-device-function'
             return family
@@ -129,7 +129,7 @@ def selected_manifest_counts(build: Path) -> Counter[str] | None:
     """Read the *generated* isolated selector inventory, if present.
 
     This is a count comparator, not proof that same-named production kernels
-    correspond one-for-one to retained candidate identities. The complete
+    correspond one-for-one to candidate identities. The complete
     source-level manifest remains the authority for selector reachability.
     """
     manifest = build / 'fp8-selected-inventory' / 'expected.json'
@@ -165,9 +165,10 @@ def _architecture(cubin_name: str) -> str:
 # *full demangled kernel signature* within its original source TU instead;
 # this preserves every template argument while removing the generated salt.
 SELECTED_SOURCE_TUS = {
-    'narrow': 'CubReductionNarrowFlatRCooperative.cu.o',
-    'aligned': 'CubReductionKParallelShardedTiled.cu.o',
-    'rotated': 'CubReductionAwkwardRotatedSharded.cu.o',
+    'narrow': 'RKDeepRSmallK.cu.o',
+    'onewindow': 'RKOneWindow.cu.o',
+    'aligned': 'RKAlignedK.cu.o',
+    'rotated': 'RKRuntimeK.cu.o',
 }
 PRODUCTION_SOURCE_TUS = {name: short for short, name in SELECTED_SOURCE_TUS.items()}
 

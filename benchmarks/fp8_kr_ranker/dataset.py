@@ -1,9 +1,10 @@
-"""Training dataset of `thor_fp8_kr_training_sweep` (1158+). Standard library only.
+"""Training dataset of `thor_fp8_kr_training_sweep`. Standard library only.
 
-1217: kinds carried_arg_index / carried_arg_value_index (--carried-index sweeps) and the frozen_margin column.
+The kinds carried_arg_index / carried_arg_value_index come from --carried-index sweeps; frozen_margin is the installed
+ranker's margin.
 
 One cell = one site [K, R] with one sampled semantics; every shape of production's candidate pool
-(fp8KRCandidatePool) was timed with the RK sweep's method. The C++ ranker features f0..f23 (fp8KRRankerFeatures)
+(fp8KRCandidatePool) was timed with the RK sweep's method. The C++ ranker features f0..f23 (krRankerFeatures)
 come straight from the sweep, so no feature is re-derived here. Rows with variant=partials (--split-stages) are not
 candidates and are skipped. An abandoned candidate (its probe launch over 20x the line-rate reference) keeps its probe
 time: it is slow, and the ranker should learn so.
@@ -20,20 +21,20 @@ FEATURE_NAMES = [
     "log2_bytes_per_block", "log2_words_per_lane", "row_bytes_mod4", "row_bytes_mod16", "log2_rows_per_sm", "kind",
     "combine", "transform", "e5m2", "log2_output_bytes", "list_position", "log2_sms",
 ]
-FEATURE_COUNT = len(FEATURE_NAMES)  # 24, Fp8KRSegments.h FP8_KR_RANKER_FEATURES
+FEATURE_COUNT = len(FEATURE_NAMES)  # 24, KRSegments.h KR_RANKER_FEATURES
 UNLISTED = 1000  # evaluate.list_order: listed shapes in list order, then the rest in pool order
 
 
 @dataclass
 class Candidate:
     family: str
-    configuration: str  # the shape name (fp8KRShapeName)
+    configuration: str  # the shape name (krShapeName)
     local_rank: int  # = list_position (for evaluate.order_by_scores' leader rule, unused by KR)
     list_position: int  # heuristic list position, or UNLISTED + pool position
     features: list  # FEATURE_COUNT floats (float32-exact values)
     median_ms: float  # microseconds (evaluate only takes ratios); the name keeps fp8_ranker.evaluate working
     abandoned: bool
-    frozen_margin: float = math.nan  # 1217: the installed ranker's margin (sweeps 1217+; NaN before)
+    frozen_margin: float = math.nan  # the installed ranker's margin (NaN: a sweep without it)
 
 
 @dataclass

@@ -1,7 +1,7 @@
-// ARG-A1 standalone microbenchmark for the FP8 ARG key scheme (Utilities/TensorOperations/Cub/Fp8ArgKey.h).
+// Standalone microbenchmark for the FP8 ARG key scheme (Utilities/TensorOperations/Reduction/Arg/Fp8ArgKey.h).
 //
-// Not a production kernel and not part of the Thor library: it answers "does the packed key + lane-candidate update
-// fit under DRAM line rate?" before any ARG kernel family exists, and gives a small kernel to inspect in SASS.
+// Not a production kernel and not part of the Thor library: it answers "does the packed key + lane-candidate update fit
+// under DRAM line rate?" apart from any ARG kernel family, and gives a small kernel to inspect in SASS.
 // One thread owns one PacketBytes-wide column packet of an [outer, R, K] FP8 tensor and walks its R rows; there is no
 // R split, no load-ahead and no shared memory, so shapes with few threads (small outer*K) under-fill the GPU in both
 // kernels alike. Two kernels with identical loads and identical UINT32-per-component output traffic:
@@ -9,18 +9,18 @@
 //   arg:  argmin/argmax via fp8ArgKeys4 + one lane candidate min per component, writes the winning row
 // The interesting number is arg/load: ~1.0 means the per-element ARG work hides under memory traffic.
 // Variants: p16, p16_b5 (16 components per lane capped at 48 registers), p8, p4 (components per lane = bytes).
-// ARG-A3f (1114): p8_lazy / p16_lazy keep one byte-SIMD running key minimum per word (__vminu4 over a 4-row batch) and
-// resolve rows only when a batch strictly improves a byte (__vcmpltu4 / __vcmpeq4, rare after the first batches on
-// random data); the per-element candidate build of the eager kernels disappears. `occ` rows run every kernel with
-// dynamic shared memory that caps residency at 2 blocks (16 warps) per SM, where per-element ALU work stops hiding
-// under memory traffic (production ARG kernels run at 4-8 warps per scheduler, not the microbenchmark's 16).
+// p8_lazy / p16_lazy keep one byte-SIMD running key minimum per word (__vminu4 over a 4-row batch) and resolve rows
+// only when a batch strictly improves a byte (__vcmpltu4 / __vcmpeq4, rare after the first batches on random data); the
+// per-element candidate build of the eager kernels disappears. `occ` rows run every kernel with dynamic shared memory
+// that caps residency at 2 blocks (16 warps) per SM, where per-element ALU work stops hiding under memory traffic
+// (production ARG kernels run at 4-8 warps per scheduler, not the microbenchmark's 16).
 //
 //   ./thor_fp8_arg_key_microbenchmark            # all shapes, both packets
 //   cuobjdump -res-usage thor_fp8_arg_key_microbenchmark
 //   cuobjdump -sass -fun '<mangled arg kernel>' thor_fp8_arg_key_microbenchmark
 
-#include "Utilities/TensorOperations/Cub/Fp8ArgKey.h"
-#include "test/Utilities/TensorOperations/Fp8ArgReference.h"
+#include "Utilities/TensorOperations/Reduction/Arg/Fp8ArgKey.h"
+#include "test/Utilities/TensorOperations/Reduction/Fp8ArgReference.h"
 
 #include <cuda_runtime.h>
 
@@ -34,7 +34,7 @@
 #include <string>
 #include <vector>
 
-namespace C = ThorImplementation::CubReductionInternal;
+namespace C = ThorImplementation::ReductionInternal;
 namespace Reference = ThorImplementation::Fp8ArgReference;
 
 namespace {

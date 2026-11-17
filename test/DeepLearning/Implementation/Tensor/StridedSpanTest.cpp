@@ -122,8 +122,8 @@ TEST(StridedSpan, WithLayoutReadsADenseSpansElementsUnderAnotherLayout) {
     EXPECT_THROW((void)transposed.withLayout({6}, {1}), std::invalid_argument);    // not dense
 }
 
-// 1365: asDense reads a compact permutation's elements as dense, in storage order (the view reductions of
-// plans/Thor_View_Reduction_Plan_2026-11-08.md phase 1).
+// asDense reads a compact permutation's elements as dense, in storage order (the dense planner reads such views through
+// it).
 TEST(StridedSpan, IsCompactPermutationAcceptsExactlyThePermutedDenseLayouts) {
     Tensor storage(cpuPlacement, TensorDescriptor(DataType::FP32, {4096}));
     EXPECT_TRUE(StridedSpan(storage, 0, {6, 4}, {1, 6}).isCompactPermutation());                 // a transpose

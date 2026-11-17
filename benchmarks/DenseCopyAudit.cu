@@ -1,7 +1,6 @@
-// 1388: thor_dense_copy_audit. What Thor's dense copy of a strided span (copyToDenseAsync / launchCopyToDense,
-// Utilities/TensorOperations/Copy/StridedCopy.h) achieves per layout class, against the copy curve and against what
-// copyToDenseAsync ran through 1387 (plans/Thor_Tiled_View_Replacement_Plan_2026-11-12.md, revision: the
-// first-class permutation the reductions' callers use).
+// thor_dense_copy_audit. What Thor's dense copy of a strided span (copyToDenseAsync / launchCopyToDense,
+// Utilities/TensorOperations/Copy/StridedCopy.h) achieves per layout class, against the copy curve and against
+// ref_1387, the copy copyToDenseAsync made before the copy planner.
 //
 //   d  dense: [n] (one memcpy, the sanity case).
 //   r  a rotation: [b, a] of a dense [a, b] (an F view's reduced output; a 2D transpose).
@@ -14,39 +13,29 @@
 // Each cell is timed cold (ColdTiming.h: ring views of the input and output spanning at least 2 GiB and 1 GiB,
 // launches per sample about --interval-us, --samples samples interleaved across a batch of cells) with:
 //   - the plan made once for the first views, launched on every view (launchCopyToDense);
-//   - ref_1387: what copyToDenseAsync ran through 1387 on the same views: one memcpy for a dense span,
-//     cudaMemcpy2DAsync for one pitch of dense rows, else the gather kernel of one element per thread with a 64-bit
-//     division and modulo per axis (reproduced below as it was);
-//   - (through 1393) matrix_transpose (r cells within its limits): gpuMatrixTranspose's launchMatrixTransposeByType,
-//     the 2D transpose the cuBLAS FP8 path used. 1394 deleted it (that path is a dense copy now, and its kernel is the
-//     copy's MatrixTranspose family), and its three CSV columns with it;
+//   - ref_1387 on the same views: one memcpy for a dense span, cudaMemcpy2DAsync for one pitch of dense rows, else the
+//     gather kernel of one element per thread with a 64-bit division and modulo per axis (reproduced below);
 //   - the copy curve at the cell's moved bytes: the source bytes the memory system reads (the distinct 32-byte sectors
 //     for k and s cells, every byte otherwise) plus the destination's bytes.
-// The first run of the plan is checked against the 1387 gather on the same input (a device byte compare).
+// The first run of the plan is checked against ref_1387's gather on the same input (a device byte compare).
 //
-// 1389g: --probe times, for each cell of --probe-min-mib useful bytes or more, the plan and variants of it on the
-// cell's views, one CSV row per variant (its own header; not for dense_copy_audit.py), each checked against the 1387
-// path's bytes:
-//   - grid_d2, grid_d4, grid_d16, grid_d64: the plan's kernel on a half, a quarter, a 16th and a 64th of its grid, so
-//     that each CTA runs 2 to 64 units of work (1389h: the plan's grid is one CTA per unit; through 1389g it was the
-//     resident CTAs, and the variants went up to one per unit);
+// --probe times, for each cell of --probe-min-mib useful bytes or more, the plan and variants of it on the cell's
+// views, one CSV row per variant (its own header; not for dense_copy_audit.py), each checked against ref_1387's bytes:
+//   - grid_d2, grid_d4, grid_d16, grid_d64: the plan's kernel on a half, a quarter, a 16th and a 64th of its grid (one
+//     CTA per unit of work), so that each CTA runs 2 to 64 units;
 //   - for a Transpose or MatrixTranspose plan, the transpose kernel on other tiles, each taken along x (_xfirst) and
 //     along v (_vfirst, DenseCopyPlan::tile_v_first): `planned` (the plan's tile), `square` (128-byte tile rows, at
 //     least 32 vectors a side), `tall32` and `tall128` (tile rows of 32 and 128 bytes and as many v rows as 32 KB of
 //     shared memory holds) and `wide` (four times square's x, a quarter of its v);
-//   - (1389n-1394) for a RowCopy plan, items1, items2, items4, items8, items16: the row copy at other words a thread
-//     per loop step. 1395 compiles the planner's counts only, so these are gone;
-//   - plan_repeat (1389h): the plan again, last. In the 1389g probe the first variant timed on a cell's views (the
-//     plan) was 2% to 6% slower on some cells than every later variant of the same kernel and grid class; this pair
-//     measures that, since the standard run also times the plan first and the 1387 path after it.
+//   - plan_repeat: the plan again, last. The first variant timed on a cell's views (the plan) was 2% to 6% slower on
+//     some cells than every later variant of the same kernel and grid class; this pair measures that, since the
+//     standard run also times the plan first and ref_1387 after it.
 //
-// 1389q: each timed item (the plan, the 1387 path, a probe variant) runs once untimed at the
-// start of each of its samples, so every item starts after a launch of itself. Before, the first item of a cell in
-// each pass started after the previous cell's work, which it paid for (most likely that cell's dirty output in the
-// L2), and the items after it started after the item before them. The 1389p probe's plan, timed first, over the
-// same plan timed last: p50 1.001 to 1.003, p90 1.010 to 1.013, up to 1.029; FP32 4864180 words at stride 33
-// (19.5 MB out) 118.4 against 115.2 us, where the 1389p audit has the plan at 118.1 and the 1387 gather, timed
-// second, at 114.8.
+// Each timed item (the plan, ref_1387, a probe variant) runs once untimed at the start of each of its samples, so every
+// item starts after a launch of itself. Without it, the first item of a cell in each pass started after the previous
+// cell's work, which it paid for (most likely that cell's dirty output in the L2), and the items after it started after
+// the item before them: the plan timed first over the same plan timed last was p50 1.001 to 1.003, p90 1.010 to 1.013,
+// up to 1.029 (FP32 4864180 words at stride 33, 19.5 MB out: 118.4 against 115.2 us).
 //
 // Output: '#' header lines (settings, device, copy curve) and one CSV row per cell; benchmarks/dense_copy_audit.py
 // reports it.
@@ -75,7 +64,7 @@
 #include <vector>
 
 namespace T = ThorImplementation;
-namespace B = ThorImplementation::CubReductionBenchmarking;
+namespace B = ThorImplementation::ReductionBenchmarking;
 using B::ColdTiming::CopyCurve;
 using B::ColdTiming::GiB;
 using B::ColdTiming::InputReuseBytes;
@@ -110,7 +99,7 @@ __global__ void countMismatchKernel(const uint8_t* a, const uint8_t* b, uint64_t
     if (local) atomicAdd(count, local);
 }
 
-// copyToDenseAsync's gather through 1387 (Utilities/TensorOperations/Copy/StridedCopy.cu), as it was.
+// ref_1387's gather: copyToDenseAsync's before the copy planner (Utilities/TensorOperations/Copy/StridedCopy.cu).
 struct SpanLayout1387 {
     uint32_t rank = 0;
     uint64_t dimensions[Rank1387]{};
@@ -133,7 +122,7 @@ __global__ void gather1387Kernel(const Element* source, Element* destination, ui
     destination[linearIndex] = source[sourceIndex];
 }
 
-// The rows of 1387's cudaMemcpy2DAsync path (tryCopyPitched): a dense suffix and a prefix of one pitch.
+// The rows of ref_1387's cudaMemcpy2DAsync path (tryCopyPitched): a dense suffix and a prefix of one pitch.
 struct Pitched1387 {
     uint64_t rows = 0, row_bytes = 0, pitch_bytes = 0;
 };
@@ -202,7 +191,7 @@ struct Settings {
     uint64_t output_ring_bytes = 2 * GiB;
     size_t queue_cells = 16;
     bool list_only = false;
-    bool probe = false;  // 1389g
+    bool probe = false;
     uint64_t probe_min_bytes = 16 * MiB;
 };
 
@@ -483,7 +472,7 @@ struct Timed {
         }
     }
     void submit(int pass, Stream& stream) {
-        run_once();  // 1389q: untimed, so the L2 holds this item's own last output when the timing starts
+        run_once();  // untimed, so the L2 holds this item's own last output when the timing starts
         check(cudaEventRecord(starts[pass]->handle, stream.getStream()), "start event");
         for (uint64_t l = 0; l < launches; ++l) run_once();
         check(cudaEventRecord(stops[pass]->handle, stream.getStream()), "stop event");
@@ -511,7 +500,7 @@ struct Cell {
     bool has_ref = false;
 };
 
-// 1389g (--probe): a plan and what the variant column calls it.
+// --probe: a plan and what the variant column calls it.
 struct Variant {
     std::string name;
     T::DenseCopyPlan plan;
@@ -547,7 +536,7 @@ std::vector<Variant> probeVariants(const T::DenseCopyPlan& planned) {
         const auto add = [&](const std::string& name, uint64_t tile_x, uint64_t tile_v) {
             tile_x = std::clamp<uint64_t>(tile_x, 1, base.x);
             tile_v = std::clamp<uint64_t>(tile_v, 1, base.v);
-            // 1389j: the shared bytes of the plan's tile layout (the packed byte tile for single bytes)
+            // The shared bytes of the plan's tile layout (the packed byte tile for single bytes)
             while (tile_v > 0 && I::transposeSharedBytes(tile_x, tile_v, base.p, base.word_bytes) >
                                      I::TRANSPOSE_MAX_SHARED_BYTES)
                 tile_v -= std::max<uint64_t>(1, tile_v / 8);
@@ -688,7 +677,7 @@ int main(int argc, char** argv) {
             }
         };
 
-        // 1389g (--probe): one row per variant; `collected` counts the rows.
+        // --probe: one row per variant; `collected` counts the rows.
         const auto printProbe = [&](const Probe& probe) {
             const Cell& cell = *probe.cell;
             const CellSpec& c = cell.spec;
@@ -746,7 +735,7 @@ int main(int argc, char** argv) {
 
                 cell->plan = T::planCopyToDense(cell->inputs[0], cell->outputs[0]);
 
-                // The 1387 path on the same views.
+                // ref_1387 on the same views.
                 const std::optional<Pitched1387> pitched = pitched1387(c.dims, c.strides, e);
                 const bool dense = c.strides == denseStrides(c.dims);
                 cell->ref_1387 = dense ? "memcpy" : pitched ? "memcpy_2d" : "gather";
@@ -782,7 +771,7 @@ int main(int argc, char** argv) {
                     check(cudaGetLastError(), "1387 path");
                 };
 
-                // Verified run: the plan against the 1387 path on the first input view.
+                // Verified run: the plan against ref_1387 on the first input view.
                 T::launchCopyToDense(cell->plan, cell->inputs[0], cell->outputs[0], stream);
                 const T::StridedSpan check_view =
                     T::StridedSpan(check_buffer).bytesAs(0, dtype, c.dims);
@@ -796,8 +785,8 @@ int main(int argc, char** argv) {
                               << T::denseCopyPlanName(cell->plan) << ",mismatched_bytes=" << bad << '\n';
                 }
 
-                // 1389g (--probe): the plan's variants instead of the cell's row, each checked against the 1387
-                // path's bytes (check_view) before it is timed. The variants share the cell's views.
+                // --probe: the plan's variants instead of the cell's row, each checked against ref_1387's bytes
+                // (check_view) before it is timed. The variants share the cell's views.
                 if (settings.probe) {
                     if (cell->useful_bytes < double(settings.probe_min_bytes)) continue;
                     for (Variant& variant : probeVariants(cell->plan)) {

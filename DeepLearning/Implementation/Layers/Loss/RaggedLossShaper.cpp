@@ -191,7 +191,7 @@ void RaggedLossShaper::compileImpl() {
     perExampleStamped = make_shared<StampedExecutionPlan>(perExamplePrepared->stamp(outputs));
 
     if (outputLossType == OutputLossType::BATCH) {
-        CubReduction reduction(CubReductionOp::Sum, std::vector<uint32_t>{0}, values.getDataType(), 1.0f);
+        Reducer reduction(ReductionOp::Sum, std::vector<uint32_t>{0}, values.getDataType(), 1.0f);
         batchReduction = reduction.stamp(perExampleWorkspace.value(), featureOutput.value(), stream);
     }
 }

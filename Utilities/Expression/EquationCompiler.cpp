@@ -6,7 +6,7 @@
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/TensorOperations/Cub/CubDevicePrimitives.h"
-#include "Utilities/TensorOperations/Cub/CubReduction.h"
+#include "Utilities/TensorOperations/Reduction/SegmentedReducer.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 #include "Utilities/TensorOperations/Ragged/RaggedConv1dWidthCapacity.h"
 
@@ -2235,23 +2235,23 @@ shared_ptr<CompiledSegmentedReduction> EquationCompiler::compileSegmentedReducti
     if (!node.output_dtype.has_value()) {
         throw std::runtime_error("Segmented-reduction node missing resolved output_dtype.");
     }
-    if (!CubSegmentedReduction::isOffsetDataTypeSupported(offsets_node.input_tensor_dtype.value())) {
+    if (!SegmentedReducer::isOffsetDataTypeSupported(offsets_node.input_tensor_dtype.value())) {
         throw std::runtime_error("Expression segmented-reduction offsets dtype must be UINT32 or UINT64.");
     }
 
     const DataType input_dtype = input_node.input_tensor_dtype.value();
     const DataType output_dtype = node.output_dtype.value();
-    if (!CubSegmentedReduction::isInputDataTypeSupported(input_dtype)) {
+    if (!SegmentedReducer::isInputDataTypeSupported(input_dtype)) {
         throw std::runtime_error("Expression segmented-reduction input dtype is not supported.");
     }
-    // CubSegmentedReduction converts source storage to FP32 for accumulation and
+    // SegmentedReducer converts source storage to FP32 for accumulation and
     // converts once to the configured output storage dtype.  Do not force an
     // input materialization merely because a caller requests FP32 reduction
     // statistics from FP8/FP16/BF16 ragged values.
     try {
-        (void)CubSegmentedReduction(node.op == ExprOp::SEGMENTED_REDUCE_SUM ? CubReductionOp::Sum :
-                                   node.op == ExprOp::SEGMENTED_REDUCE_MIN ? CubReductionOp::Min :
-                                   node.op == ExprOp::SEGMENTED_REDUCE_MAX ? CubReductionOp::Max : CubReductionOp::Mean,
+        (void)SegmentedReducer(node.op == ExprOp::SEGMENTED_REDUCE_SUM ? ReductionOp::Sum :
+                                   node.op == ExprOp::SEGMENTED_REDUCE_MIN ? ReductionOp::Min :
+                                   node.op == ExprOp::SEGMENTED_REDUCE_MAX ? ReductionOp::Max : ReductionOp::Mean,
                                    output_dtype)
             .resolveOutputDataType(input_dtype);
     } catch (const std::invalid_argument& e) {

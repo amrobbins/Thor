@@ -366,10 +366,10 @@ void expectEinsumViewGateNoLegacyMapper(const StampedEinsum& einsum, const std::
     const std::vector<StampedReductionStageDiagnostic> reductions =
         einsum.getStandaloneReductionDiagnostics();
     for (const StampedReductionStageDiagnostic& reduction : reductions) {
-        EXPECT_TRUE(reduction.path == CubReductionPath::DeviceTransformReduce
-                    || reduction.path == CubReductionPath::ContiguousFixedSegment
-                    || reduction.path == CubReductionPath::TiledFixedSegment
-                    || reduction.path == CubReductionPath::ComposedDense)
+        EXPECT_TRUE(reduction.path == ReductionLayout::SingleOutput
+                    || reduction.path == ReductionLayout::TrailingBlock
+                    || reduction.path == ReductionLayout::MiddleBlock
+                    || reduction.path == ReductionLayout::DisjointRuns)
             << "Einsum selected a non-ordained reduction path after DELETE. " << context
             << " stage_index=" << reduction.stage_index
             << " input_dimensions=" << describeVector(reduction.input_dimensions)
@@ -527,14 +527,14 @@ TEST(EinsumExecution, DiagonalPreReductionHappensBeforeGemmOnTheDiagonalViewsDen
     EXPECT_EQ(std::count(stage_kinds.begin(), stage_kinds.end(), "Reduction"), 1);
     EXPECT_EQ(std::count(stage_kinds.begin(), stage_kinds.end(), "Matmul"), 1);
     EXPECT_EQ(std::count(stage_kinds.begin(), stage_kinds.end(), "FusedKernel"), 0);
-    // 1390: the repeated-label diagonal view [2, 2, 3] with strides [18, 3, 1] has gaps between its slabs
-    // (VIEW-PITCHED-TILED), which the reducer refuses: Expression copies it dense (copyToDenseAsync) and reduces that.
+    // The repeated-label diagonal view [2, 2, 3] with strides [18, 3, 1] has gaps between its slabs (case H), which the
+    // reducer refuses: Expression copies it dense (copyToDenseAsync) and reduces that.
     EXPECT_EQ(std::count(stage_kinds.begin(), stage_kinds.end(), "DenseCopy"), 1);
 
     const std::vector<StampedReductionStageDiagnostic> reductions =
         einsum->getStandaloneReductionDiagnostics();
     ASSERT_EQ(reductions.size(), 1u);
-    EXPECT_EQ(reductions[0].path, CubReductionPath::TiledFixedSegment);
+    EXPECT_EQ(reductions[0].path, ReductionLayout::MiddleBlock);
     EXPECT_EQ(reductions[0].input_dimensions, (std::vector<uint64_t>{2, 2, 3}));
     EXPECT_EQ(reductions[0].input_strides_elements, (std::vector<uint64_t>{6, 3, 1}));
     EXPECT_EQ(reductions[0].reduction_axes, (std::vector<uint64_t>{1}));
@@ -563,13 +563,13 @@ TEST(EinsumExecution, DiagonalLocalReductionBeforePairProductIsTrackedByViewGate
     EXPECT_EQ(einsum->getExecutionPath(), EinsumExecutionPath::PAIR_PRODUCT);
     EXPECT_TRUE(einsum->usesStandaloneReduction());
 
-    // 1390: the same pitched diagonal outside GEMM lowering ([2, 3] with strides [9, 1]) is copied dense first.
+    // The same pitched diagonal outside GEMM lowering ([2, 3] with strides [9, 1]) is copied dense first.
     const std::vector<std::string> stage_kinds = einsum->getExpressionStageKindNames();
     EXPECT_EQ(std::count(stage_kinds.begin(), stage_kinds.end(), "DenseCopy"), 1);
     const std::vector<StampedReductionStageDiagnostic> reductions =
         einsum->getStandaloneReductionDiagnostics();
     ASSERT_EQ(reductions.size(), 1u);
-    EXPECT_EQ(reductions[0].path, CubReductionPath::TiledFixedSegment);
+    EXPECT_EQ(reductions[0].path, ReductionLayout::MiddleBlock);
     EXPECT_EQ(reductions[0].input_dimensions, (std::vector<uint64_t>{2, 3}));
     EXPECT_EQ(reductions[0].input_strides_elements, (std::vector<uint64_t>{3, 1}));
     EXPECT_EQ(reductions[0].reduction_axes, (std::vector<uint64_t>{0}));
@@ -1281,7 +1281,7 @@ TEST(EinsumExecution, OneSidedReductionLowersToCentralReductionThenGemm) {
     EXPECT_EQ(einsum->getExecutionPath(), EinsumExecutionPath::GEMM);
     EXPECT_TRUE(einsum->usesStandaloneReduction());
     ASSERT_TRUE(einsum->getStandaloneReductionPath().has_value());
-    EXPECT_EQ(einsum->getStandaloneReductionPath().value(), CubReductionPath::TiledFixedSegment);
+    EXPECT_EQ(einsum->getStandaloneReductionPath().value(), ReductionLayout::MiddleBlock);
     const std::vector<std::string> stage_kinds = einsum->getExpressionStageKindNames();
     EXPECT_EQ(std::count(stage_kinds.begin(), stage_kinds.end(), "Reduction"), 1);
     EXPECT_EQ(std::count(stage_kinds.begin(), stage_kinds.end(), "Matmul"), 1);
@@ -1782,8 +1782,8 @@ TEST(EinsumExecution, ExactFourOperandTreeHonorsNonCanonicalFinalOutputOrder) {
     expectNear(copyToCpu(einsum->getOutputTensor(), stream), {35, 80, 25, 67});
 }
 
-// 1390: "ijk->ki" reduces the input's bytes in physical order (the dense [i, j, k] over j, no input copy), then a
-// DenseCopy stage writes the [i, k] result rotated into the [k, i] output.
+// "ijk->ki" reduces the input's bytes in physical order (the dense [i, j, k] over j, no input copy), then a DenseCopy
+// stage writes the [i, k] result rotated into the [k, i] output.
 TEST(EinsumExecution, UnaryPermutationAndReductionReducesTheBytesThenCopiesTheResultRotated) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -1802,7 +1802,7 @@ TEST(EinsumExecution, UnaryPermutationAndReductionReducesTheBytesThenCopiesTheRe
     EXPECT_FALSE(einsum->isWholeEquationGenericFallback());
     EXPECT_TRUE(einsum->usesStandaloneReduction());
     ASSERT_TRUE(einsum->getStandaloneReductionPath().has_value());
-    EXPECT_EQ(einsum->getStandaloneReductionPath().value(), CubReductionPath::TiledFixedSegment);
+    EXPECT_EQ(einsum->getStandaloneReductionPath().value(), ReductionLayout::MiddleBlock);
     EXPECT_EQ(einsum->getOutputTensor().getDimensions(), (std::vector<uint64_t>{2, 2}));
     const std::vector<std::string> stage_kinds = einsum->getExpressionStageKindNames();
     EXPECT_EQ(std::count(stage_kinds.begin(), stage_kinds.end(), "Reduction"), 1);
@@ -1830,7 +1830,7 @@ TEST(EinsumExecution, DiagonalFullReductionUsesCubAndMapsLogicalScalarToPhysical
     EXPECT_EQ(einsum->getExecutionPath(), EinsumExecutionPath::GENERIC);
     EXPECT_TRUE(einsum->usesStandaloneReduction());
     ASSERT_TRUE(einsum->getStandaloneReductionPath().has_value());
-    EXPECT_EQ(einsum->getStandaloneReductionPath().value(), CubReductionPath::DeviceTransformReduce);
+    EXPECT_EQ(einsum->getStandaloneReductionPath().value(), ReductionLayout::SingleOutput);
     EXPECT_TRUE(einsum->getPlan().equation.output_dimensions.empty());
     EXPECT_EQ(einsum->getOutputTensor().getDimensions(), (std::vector<uint64_t>{1}));
 

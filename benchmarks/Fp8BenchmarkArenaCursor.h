@@ -11,7 +11,7 @@
 // SAME allocation: only one stage+continuation runs at a time on one stream.
 // No fixed input/workspace partition is necessary. The workspace high-water
 // mark is monotonic: stage-written bytes never re-enter the cold input ring.
-namespace ThorImplementation::CubReductionBenchmarking {
+namespace ThorImplementation::ReductionBenchmarking {
 
 class Fp8BenchmarkArenaCursor {
 public:
@@ -21,9 +21,9 @@ public:
         uint64_t bytes;
     };
 
-    // 1163: views start 256-byte aligned by default (cudaMalloc's alignment, as the reduction autotuner's ring), so a
-    // timed input is aligned as a real tensor's is; at 32-byte starts consecutive views of one cell sat at different
-    // offsets mod 256 and alignment-sensitive kernels timed bimodally.
+    // Views start 256-byte aligned by default (cudaMalloc's alignment, as the reduction autotuner's ring), so a timed
+    // input is aligned as a real tensor's is; at 32-byte starts consecutive views of one cell sat at different offsets
+    // mod 256 and alignment-sensitive kernels timed bimodally.
     static constexpr uint64_t DefaultAlignmentBytes = 256;
     static constexpr uint64_t PaddingBytes = 128;
 
@@ -79,4 +79,4 @@ private:
     uint64_t wraps_ = 0;
 };
 
-}  // namespace ThorImplementation::CubReductionBenchmarking
+}  // namespace ThorImplementation::ReductionBenchmarking
