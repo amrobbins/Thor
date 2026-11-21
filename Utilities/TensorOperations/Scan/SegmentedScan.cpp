@@ -91,37 +91,19 @@ constexpr bool kInstantiated =
     isArg(OP) ? std::is_same_v<O, uint32_t>
               : std::is_same_v<T, O> || (converts(OP) && kIsFloat<T> && kIsFloat<O>);
 
-// Which kernel of a (T, O, OP) a launch takes.
+// Which kernel of a (T, O, OP) a launch takes (the mode and direction are launch arguments).
 struct Variant {
-    SegmentedScanMode mode;
-    SegmentedScanDirection direction;
     bool ragged;
     DataType offset_dtype;  // ragged rows
 };
-
-template <typename T, typename O, SegmentedScanOp OP, SegmentedScanMode MODE, SegmentedScanDirection DIR>
-void launchRows(const Variant& variant, const K::Launch& args, cudaStream_t stream) {
-    if (!variant.ragged) return K::launch<T, O, OP, MODE, DIR, void>(args, stream);
-    if (variant.offset_dtype == DataType::UINT64) return K::launch<T, O, OP, MODE, DIR, uint64_t>(args, stream);
-    return K::launch<T, O, OP, MODE, DIR, uint32_t>(args, stream);
-}
-
-template <typename T, typename O, SegmentedScanOp OP, SegmentedScanMode MODE>
-void launchDirection(const Variant& variant, const K::Launch& args, cudaStream_t stream) {
-    if (variant.direction == SegmentedScanDirection::Reverse) {
-        return launchRows<T, O, OP, MODE, SegmentedScanDirection::Reverse>(variant, args, stream);
-    }
-    return launchRows<T, O, OP, MODE, SegmentedScanDirection::Forward>(variant, args, stream);
-}
 
 template <typename T, typename O, SegmentedScanOp OP>
 void launchFor(const Variant& variant, const K::Launch& args, cudaStream_t stream) {
     if constexpr (kInstantiated<T, O, OP>) {
         using S = Stored<T, O, OP>;
-        if (variant.mode == SegmentedScanMode::Exclusive) {
-            return launchDirection<T, S, OP, SegmentedScanMode::Exclusive>(variant, args, stream);
-        }
-        return launchDirection<T, S, OP, SegmentedScanMode::Inclusive>(variant, args, stream);
+        if (!variant.ragged) return K::launch<T, S, OP, void>(args, stream);
+        if (variant.offset_dtype == DataType::UINT64) return K::launch<T, S, OP, uint64_t>(args, stream);
+        return K::launch<T, S, OP, uint32_t>(args, stream);
     } else {
         throw std::logic_error("SegmentedScan: no kernel for a supported dtype pair.");
     }
@@ -285,8 +267,11 @@ void SegmentedScan::runOn(Stream& stream) const {
     args.workspace.num_tiles = num_tiles;
     args.arg_values = arg_values.isInitialized() ? arg_values.getMemPtr<void>() : nullptr;
     args.alternate_output = output.getDataType() == DataType::BF16 || output.getDataType() == DataType::FP8_E5M2;
+    args.exclusive = mode == SegmentedScanMode::Exclusive;
+    args.arg_min = op == SegmentedScanOp::ArgMin;
+    args.reverse = direction == SegmentedScanDirection::Reverse;
 
-    const Variant variant{mode, direction, ragged, ragged ? segment_offsets.getDataType() : DataType::UINT32};
+    const Variant variant{ragged, ragged ? segment_offsets.getDataType() : DataType::UINT32};
     const cudaStream_t cuda_stream = stream.getStream();
     dispatchType(input.getDataType(), [&]<typename T>() {
         dispatchType(output.getDataType(), [&]<typename O>() {
@@ -300,9 +285,8 @@ void SegmentedScan::runOn(Stream& stream) const {
                 case SegmentedScanOp::Product:
                     return launchFor<T, O, SegmentedScanOp::Product>(variant, args, cuda_stream);
                 case SegmentedScanOp::ArgMax:
+                case SegmentedScanOp::ArgMin:  // one kernel; args.arg_min picks
                     return launchFor<T, O, SegmentedScanOp::ArgMax>(variant, args, cuda_stream);
-                case SegmentedScanOp::ArgMin:
-                    return launchFor<T, O, SegmentedScanOp::ArgMin>(variant, args, cuda_stream);
             }
         });
     });

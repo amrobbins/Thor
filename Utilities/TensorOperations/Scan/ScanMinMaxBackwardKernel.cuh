@@ -47,7 +47,7 @@ using namespace SegmentedScanKernels;
 // flipped for a reverse scan (`place_flip`: bits 31 to 1, or 0), which leaves the index itself there, so the last of
 // equal values wins: keyOf's reverse key. A NaN keeps order 0, below every number either way; no number has order 0.
 __host__ __device__ inline uint64_t winnerKey(float value, uint64_t index, uint64_t flip, uint64_t place_flip) {
-    const uint64_t key = keyOf<float, SegmentedScanOp::ArgMax, SegmentedScanDirection::Forward>(value, index) ^ place_flip;
+    const uint64_t key = keyOf<float, SegmentedScanOp::ArgMax>(value, index) ^ place_flip;
     return (key >> 32) == 0U ? key : key ^ flip;
 }
 
@@ -55,47 +55,6 @@ __host__ __device__ inline uint64_t winnerKey(float value, uint64_t index, uint6
 __host__ __device__ inline uint64_t winnerIndex(uint64_t key, bool reverse) {
     const uint32_t place = static_cast<uint32_t>(key) >> 1;
     return reverse ? place : 0x7FFFFFFFU - place;
-}
-
-// One chunk's head bits in memory order (bit j: element j starts a run of the scan: a row's first element in scan
-// order). Dense rows take them from the chunk's first column, `col` (the scan kernel's denseHeads, with the direction
-// at run time); ragged rows read the tile's bitmap at the chunk's place in the tile, `local`. The first element of all
-// (forward) and the last before `end` (reverse) always start one.
-template <bool RAGGED, uint32_t E>
-__device__ inline uint32_t chunkHeads(bool reverse,
-                                      uint64_t chunk_first,
-                                      uint64_t end,
-                                      uint64_t local,
-                                      const uint32_t* s_heads,
-                                      uint64_t cols,
-                                      uint64_t col,
-                                      uint32_t pattern) {
-    uint32_t heads = 0;
-    if constexpr (RAGGED) {
-#pragma unroll
-        for (uint32_t j = 0; j < E; ++j) {
-            const uint64_t k = local + j;
-            heads |= ((s_heads[k >> 5] >> (k & 31U)) & 1U) << j;
-        }
-    } else {
-        const uint64_t first = reverse ? cols - col - 1 : (col == 0 ? 0 : cols - col);
-        const uint32_t mask = ~0U >> (32 - E);
-        heads = first < E ? (pattern << static_cast<uint32_t>(first)) & mask : 0U;
-    }
-    if (reverse) {
-        heads |= endHead<E>(chunk_first, end);
-    } else if (chunk_first == 0) {
-        heads |= 1U;
-    }
-    return heads;
-}
-
-// A chunk's eight head bits from memory order to scan order (and back: it is its own inverse).
-__host__ __device__ inline uint32_t mirrorBits(uint32_t bits, bool reverse) {
-    if (!reverse) return bits;
-    bits = ((bits & 0x0FU) << 4) | ((bits >> 4) & 0x0FU);
-    bits = ((bits & 0x33U) << 2) | ((bits >> 2) & 0x33U);
-    return ((bits & 0x55U) << 1) | ((bits >> 1) & 0x55U);
 }
 
 // A chunk's eight values from memory order (two 16-byte words) to scan order.
@@ -569,7 +528,7 @@ __global__ void __launch_bounds__(THREADS, kGradientMinBlocks)
         for (uint32_t h = 0; h < kRaw; ++h) raw[h] = s_data[kRaw * slot + h];
         T values[E];  // in scan order, as are the head bits
         unpackInScanOrder(raw, reverse, values);
-        const uint32_t heads = mirrorBits(
+        const uint32_t heads = mirrorHeads<E>(
             chunkHeads<RAGGED, E>(reverse, chunk_first, end, static_cast<uint64_t>(slot) * E, s_heads, cols, band_col, pattern), reverse);
         if (order == 0) s_starts = heads & 1U;
         A acc{};
@@ -679,7 +638,7 @@ __global__ void __launch_bounds__(THREADS, kGradientMinBlocks)
         for (uint32_t h = 0; h < kRaw; ++h) raw[h] = s_data[kRaw * slot + h];
         T values[E];  // in scan order, as are dy, the head bits and the winner bits
         unpackInScanOrder(raw, reverse, values);
-        const uint32_t heads = mirrorBits(
+        const uint32_t heads = mirrorHeads<E>(
             chunkHeads<RAGGED, E>(reverse, chunk_first, end, static_cast<uint64_t>(slot) * E, s_heads, cols, band_col, pattern), reverse);
         uint4 raw_grad[kGradRaw];
 #pragma unroll

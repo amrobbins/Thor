@@ -126,12 +126,16 @@ struct Launch {
     Workspace workspace;  // num_tiles is the grid; the pointers are null when no tile publishes
     void* arg_values = nullptr;  // an arg scan's winning values, in the input's dtype; null: not written
     bool alternate_output = false;  // a SharedFloat output: BF16 (not FP16), E5M2 (not E4M3)
+    bool exclusive = false;         // the mode: exclusive (not inclusive)
+    bool arg_min = false;           // an arg scan (the ArgMax kernel) is argmin
+    bool reverse = false;           // the direction: reverse (not forward)
 };
 
 // One launch of the kernel reading T and writing O: dense rows when OFF is void, ragged rows (offsets of OFF)
-// otherwise. Instantiated, in both modes and both directions, for the supported pairs in SegmentedScanFp32.cu,
-// SegmentedScanF16.cu, SegmentedScanFp8.cu and (argmax and argmin) SegmentedScanArg.cu.
-template <typename T, typename O, SegmentedScanOp OP, SegmentedScanMode MODE, SegmentedScanDirection DIR, typename OFF>
+// otherwise; the mode and the direction are the launch's (Launch::exclusive, Launch::reverse). Instantiated for the
+// supported pairs in SegmentedScanFp32.cu, SegmentedScanF16.cu, SegmentedScanFp8.cu and SegmentedScanArg.cu (OP ArgMax
+// only: argmin is the same kernel with Launch::arg_min).
+template <typename T, typename O, SegmentedScanOp OP, typename OFF>
 void launch(const Launch& args, cudaStream_t stream);
 
 }  // namespace SegmentedScanKernels

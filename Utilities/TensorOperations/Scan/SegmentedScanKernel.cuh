@@ -34,7 +34,8 @@
 // from last to first, and a run starts at a row's last element. Steps 2 to 4 see only slots in scan order, so they
 // are the forward scan's, and the block index is still the tile's place in the lookback.
 // Argmax and argmin run the same steps on a 64-bit key that packs each element's value and index (keyOf), and write
-// the index and, when asked, the value (decoded from the key); their runs are published in two words.
+// the index and, when asked, the value (decoded from the key); their runs are published in two words. They are one
+// kernel (OP ArgMax): argmin inverts the value's order in the key, a launch argument (arg_min).
 //
 // Why the stash and CHUNKS: on long rows a tile waits for the tiles before it, so the speed follows the bytes each SM
 // holds in flight. Registers (64 Ki per SM) and threads (1536 per SM on sm_120) cap what can wait in registers at 48 KB
@@ -101,23 +102,26 @@ __host__ __device__ inline O fromAcc(A value) {
 //   bits 31-1   2^31 - 1 - index, so of equal values the first wins (a reverse scan: the index, so the last wins, the
 //               first it meets);
 //   bit 0       the value is -0, so the value decodes exactly (valueOf). Indices are unique, so this bit never decides.
-// Both arg scans are then one unsigned max.
-template <typename T, SegmentedScanOp OP, SegmentedScanDirection DIR>
-__host__ __device__ inline uint64_t keyOf(T value, uint64_t index) {
+// Both arg scans are then one unsigned max. min: argmin's key (by default, OP's). reverse: a reverse scan's key (bits
+// 31-1 flipped: 2^31 - 1 - index is index with its 31 bits flipped).
+template <typename T, SegmentedScanOp OP>
+__host__ __device__ inline uint64_t keyOf(T value,
+                                          uint64_t index,
+                                          bool min = OP == SegmentedScanOp::ArgMin,
+                                          bool reverse = false) {
     uint32_t order;
     uint32_t negative_zero = 0U;
     if constexpr (std::is_same_v<T, uint32_t>) {
-        order = OP == SegmentedScanOp::ArgMin ? ~value : value;
+        order = min ? ~value : value;
     } else {
         uint32_t bits = cuda::std::bit_cast<uint32_t>(toAcc(value));  // exact for every float type
         negative_zero = bits == 0x80000000U ? 1U : 0U;
         if ((bits << 1) == 0U) bits = 0U;                         // -0 as +0
         order = (bits >> 31) != 0U ? ~bits : bits | 0x80000000U;  // the sign flipped in, negatives' magnitude out
-        if constexpr (OP == SegmentedScanOp::ArgMin) order = ~order;
+        if (min) order = ~order;
         if ((bits & 0x7FFFFFFFU) > 0x7F800000U) order = 0U;  // NaN; no number has order 0 either way
     }
-    const uint32_t place = DIR == SegmentedScanDirection::Reverse ? static_cast<uint32_t>(index) << 1
-                                                                  : (0x7FFFFFFFU - static_cast<uint32_t>(index)) << 1;
+    const uint32_t place = ((0x7FFFFFFFU - static_cast<uint32_t>(index)) << 1) ^ (reverse ? 0xFFFFFFFEU : 0U);
     return (static_cast<uint64_t>(order) << 32) | place | negative_zero;
 }
 
@@ -146,24 +150,24 @@ __host__ __device__ inline T fromValue(float value) {
 
 // The value an arg scan's key was made from (keyOf inverted): the same bits, but a NaN decodes to the canonical NaN.
 template <typename T, SegmentedScanOp OP>
-__host__ __device__ inline T valueOf(uint64_t key) {
+__host__ __device__ inline T valueOf(uint64_t key, bool min = OP == SegmentedScanOp::ArgMin) {
     uint32_t order = static_cast<uint32_t>(key >> 32);
     if constexpr (std::is_same_v<T, uint32_t>) {
-        return OP == SegmentedScanOp::ArgMin ? ~order : order;
+        return min ? ~order : order;
     } else {
         const bool is_nan = order == 0U;
-        if constexpr (OP == SegmentedScanOp::ArgMin) order = ~order;
+        if (min) order = ~order;
         uint32_t bits = (order >> 31) != 0U ? order & 0x7FFFFFFFU : ~order;
         bits |= static_cast<uint32_t>(key & 1U) << 31;  // -0
         return fromValue<T>(cuda::std::bit_cast<float>(is_nan ? 0x7FC00000U : bits));
     }
 }
 
-// One element as the scan accumulates it.
-template <typename T, SegmentedScanOp OP, SegmentedScanDirection DIR>
-__host__ __device__ inline Acc<T, OP> element(T value, uint64_t index) {
+// One element as the scan accumulates it (an arg scan's key: argmin's, a reverse scan's).
+template <typename T, SegmentedScanOp OP>
+__host__ __device__ inline Acc<T, OP> element(T value, uint64_t index, bool arg_min, bool reverse) {
     if constexpr (isArg(OP)) {
-        return keyOf<T, OP, DIR>(value, index);
+        return keyOf<T, OP>(value, index, arg_min, reverse);
     } else {
         return toAcc(value);
     }
@@ -171,11 +175,11 @@ __host__ __device__ inline Acc<T, OP> element(T value, uint64_t index) {
 
 // What the scan writes for an accumulated value: the value in the output type, or an arg scan's index (valueOf gives
 // its value).
-template <typename O, SegmentedScanOp OP, SegmentedScanDirection DIR, typename A>
-__host__ __device__ inline O result(A value) {
+template <typename O, SegmentedScanOp OP, typename A>
+__host__ __device__ inline O result(A value, bool reverse) {
     if constexpr (isArg(OP)) {
         const uint32_t place = static_cast<uint32_t>(value) >> 1;
-        return DIR == SegmentedScanDirection::Reverse ? place : 0x7FFFFFFFU - place;
+        return reverse ? place : 0x7FFFFFFFU - place;
     } else {
         return fromAcc<O, A>(value);
     }
@@ -443,33 +447,28 @@ __device__ inline uint32_t lowerBoundOffsets(const OFF* offsets, uint32_t rows, 
     return result;
 }
 
-// Dense rows: the head bits of a chunk of E elements whose first element is in column `col` of rows of `cols` columns
-// (bit j: element j starts a run: a row's first element, or for a reverse scan its last). `pattern` has a bit at every
-// multiple of cols below 32, so the chunk's heads are the pattern shifted to the chunk's first head: no work per
-// element.
-template <uint32_t E, SegmentedScanDirection DIR>
-__device__ inline uint32_t denseHeads(uint64_t col, uint64_t cols, uint32_t pattern) {
-    static_assert(E >= 1 && E <= 32, "a head bit per element");
-    // The chunk's first row start, or (reverse) its first row end: the element before the first row start after it.
-    const uint64_t first = DIR == SegmentedScanDirection::Reverse ? cols - col - 1 : (col == 0 ? 0 : cols - col);
-    const uint32_t mask = ~0U >> (32 - E);  // the low E bits
-    return first < E ? (pattern << static_cast<uint32_t>(first)) & mask : 0U;
+// A reverse scan's head bit for the last element (end - 1), if it is in the chunk from chunk_first: it always starts a
+// run, and nothing at or past the end is scanned.
+template <uint32_t E>
+__device__ inline uint32_t endHead(uint64_t chunk_first, uint64_t end) {
+    return chunk_first < end && end - chunk_first <= E ? 1U << static_cast<uint32_t>(end - 1 - chunk_first) : 0U;
 }
 
-// One chunk of a thread: its E elements (from the raw bytes) and its head bits (bit j: element j starts a run, a row's
-// first element or for a reverse scan its last). Dense rows take them from the chunk's first column, `col`; ragged rows
-// read the tile's bitmap at the chunk's place in the tile, `local`. A reverse scan's last element is a head too
-// (endHead).
-template <typename T, bool RAGGED, uint32_t E, SegmentedScanDirection DIR>
-__device__ inline uint32_t unpackChunk(const RawWord<E * sizeof(T)>* raw,
-                                       T* values,
-                                       uint64_t chunk_first,
-                                       uint64_t local,
-                                       const uint32_t* s_heads,
-                                       uint64_t cols,
-                                       uint64_t col,
-                                       uint32_t pattern) {
-    memcpy(values, raw, E * sizeof(T));
+// One chunk's head bits in memory order (bit j: element j starts a run of the scan: a row's first element in scan
+// order, so for a reverse scan its last). Dense rows take them from the chunk's first column, `col`: `pattern` has a
+// bit at every multiple of cols below 32, so the chunk's heads are the pattern shifted to the chunk's first head, no
+// work per element. Ragged rows read the tile's bitmap at the chunk's place in the tile, `local`. The first element of
+// all (forward) and the last before `end` (reverse) always start one.
+template <bool RAGGED, uint32_t E>
+__device__ inline uint32_t chunkHeads(bool reverse,
+                                      uint64_t chunk_first,
+                                      uint64_t end,
+                                      uint64_t local,
+                                      const uint32_t* s_heads,
+                                      uint64_t cols,
+                                      uint64_t col,
+                                      uint32_t pattern) {
+    static_assert(E >= 1 && E <= 32, "a head bit per element");
     uint32_t heads = 0;
     if constexpr (RAGGED) {
 #pragma unroll
@@ -478,30 +477,51 @@ __device__ inline uint32_t unpackChunk(const RawWord<E * sizeof(T)>* raw,
             heads |= ((s_heads[k >> 5] >> (k & 31U)) & 1U) << j;
         }
     } else {
-        heads = denseHeads<E, DIR>(col, cols, pattern);
+        // The chunk's first row start, or (reverse) its first row end: the element before the first start after it.
+        const uint64_t first = reverse ? cols - col - 1 : (col == 0 ? 0 : cols - col);
+        const uint32_t mask = ~0U >> (32 - E);  // the low E bits
+        heads = first < E ? (pattern << static_cast<uint32_t>(first)) & mask : 0U;
     }
-    if constexpr (DIR == SegmentedScanDirection::Forward) {
-        if (chunk_first == 0) heads |= 1U;  // the first element always starts a run
+    if (reverse) {
+        heads |= endHead<E>(chunk_first, end);
+    } else if (chunk_first == 0) {
+        heads |= 1U;
     }
     return heads;
 }
 
-// A reverse scan's head bit for the last element (end - 1), if it is in the chunk from chunk_first: it always starts a
-// run, and nothing at or past the end is scanned.
+// A chunk's E head bits from memory order to scan order (and back: it is its own inverse).
 template <uint32_t E>
-__device__ inline uint32_t endHead(uint64_t chunk_first, uint64_t end) {
-    return chunk_first < end && end - chunk_first <= E ? 1U << static_cast<uint32_t>(end - 1 - chunk_first) : 0U;
+__host__ __device__ inline uint32_t mirrorHeads(uint32_t bits, bool reverse) {
+#if defined(__CUDA_ARCH__)
+    const uint32_t mirrored = __brev(bits) >> (32U - E);
+#else
+    uint32_t mirrored = 0;
+    for (uint32_t j = 0; j < E; ++j) mirrored |= ((bits >> j) & 1U) << (E - 1 - j);
+#endif
+    return reverse ? mirrored : bits;
 }
 
-// MODE: inclusive or exclusive. DIR: forward or reverse. OFF: void for dense rows of columns.count elements, the offset
-// type for ragged rows. arg_values: an arg scan also writes each element's winning value there (the input's type) when
-// it is not null; the value scans ignore it. alternate_output: a SharedFloat output's format (BF16, E5M2); the other
-// outputs ignore it.
+// One chunk's E elements from its raw bytes, in scan order: a reverse scan's from the last (a select per element, so
+// the steps after index the chunk only by constants).
+template <typename T, uint32_t E>
+__device__ inline void chunkInScanOrder(const RawWord<E * sizeof(T)>* raw, bool reverse, T* out) {
+    T value[E];
+    memcpy(value, raw, E * sizeof(T));
+#pragma unroll
+    for (uint32_t jo = 0; jo < E; ++jo) out[jo] = reverse ? value[E - 1 - jo] : value[jo];
+}
+
+// OFF: void for dense rows of columns.count elements, the offset type for ragged rows.
+// arg_values: an arg scan also writes each element's winning value there (the input's type) when it is not null; the
+// value scans ignore it. alternate_output: a SharedFloat output's format (BF16, E5M2); the other outputs ignore it.
+// exclusive_mode: the mode, read only where each element's result is written. arg_min: an arg scan is argmin (OP is
+// ArgMax for both); the value scans ignore it. reverse: the direction. Each chunk is put in scan order as it is
+// unpacked (a select per element) and its outputs back in memory order as they are stored, so every loop over a chunk
+// runs in scan order and indexes it only by constants.
 template <typename T,
           typename O,
           SegmentedScanOp OP,
-          SegmentedScanMode MODE,
-          SegmentedScanDirection DIR,
           typename OFF,
           uint32_t THREADS = kThreads,
           uint32_t GROUP = kGroup,
@@ -517,11 +537,13 @@ __global__ void __launch_bounds__(THREADS)
                         uint32_t rows,
                         Workspace ws,
                         T* __restrict__ arg_values,
-                        bool alternate_output) {
+                        bool alternate_output,
+                        bool exclusive_mode,
+                        bool arg_min,
+                        bool reverse) {
     using A = Acc<T, OP>;
     constexpr uint32_t W = runWords(OP);  // workspace words per run
     constexpr bool RAGGED = !std::is_void_v<OFF>;
-    constexpr bool REVERSE = DIR == SegmentedScanDirection::Reverse;
     const uint64_t cols = columns.count;
     constexpr uint32_t E = ITEMS;
     constexpr uint64_t TILE = kTile<THREADS, CHUNKS, ITEMS>;
@@ -562,7 +584,7 @@ __global__ void __launch_bounds__(THREADS)
         __syncthreads();
     }
     const uint64_t tile = blockIdx.x;  // the tile's place in scan order, and so in the lookback
-    const uint64_t tile_begin = (REVERSE ? ws.num_tiles - 1 - tile : tile) * TILE;  // where it is in memory
+    const uint64_t tile_begin = (reverse ? ws.num_tiles - 1 - tile : tile) * TILE;  // where it is in memory
     const uint64_t thread_first = tile_begin + static_cast<uint64_t>(t) * E;  // the thread's chunk of band 0
     constexpr uint64_t kBand = static_cast<uint64_t>(THREADS) * E;            // elements per band
 
@@ -596,13 +618,13 @@ __global__ void __launch_bounds__(THREADS)
         for (uint32_t i = t; i < TILE / 32; i += THREADS) s_heads[i] = 0;
         // Forward: the row starts in the tile. Reverse: the row ends, the element before each start after the tile's
         // first element (the last element, end - 1, is added as each chunk is read: endHead).
-        const uint64_t first_start = REVERSE ? tile_begin + 1 : tile_begin;
+        const uint64_t first_start = reverse ? tile_begin + 1 : tile_begin;
         const uint32_t r0 = lowerBoundOffsets<THREADS>(offsets, rows, first_start);  // syncs after the clear
         for (uint32_t r = r0 + t; r <= rows; r += THREADS) {
             const uint64_t start = offsets[r];
             if (start >= first_start + TILE) break;
             if (start < end) {
-                const uint64_t at = start - first_start;  // REVERSE: start - 1 - tile_begin
+                const uint64_t at = start - first_start;  // reverse: start - 1 - tile_begin
                 atomicOr(&s_heads[at >> 5], 1U << (at & 31U));
             }
         }
@@ -675,22 +697,23 @@ __global__ void __launch_bounds__(THREADS)
     uint64_t band_col = col_first;  // the column of the thread's chunk in the current band
     for (uint32_t s = 0; s < CHUNKS; ++s) {
         const uint32_t slot = s * THREADS + t;
-        const uint32_t order = REVERSE ? kSlots - 1 - slot : slot;
+        const uint32_t order = reverse ? kSlots - 1 - slot : slot;
         const uint64_t chunk_first = thread_first + s * kBand;
         Raw raw[kRaw];
 #pragma unroll
         for (uint32_t h = 0; h < kRaw; ++h) raw[h] = s_data[kRaw * slot + h];
-        T values[E];
-        uint32_t heads = unpackChunk<T, RAGGED, E, DIR>(
-            raw, values, chunk_first, static_cast<uint64_t>(slot) * E, s_heads, cols, band_col, pattern);
-        if constexpr (REVERSE) heads |= endHead<E>(chunk_first, end);
-        if (order == 0) s_starts = (heads >> (REVERSE ? E - 1 : 0)) & 1U;
+        const uint64_t scan_first = reverse ? chunk_first + E - 1 : chunk_first;  // its first element in scan order
+        T values[E];  // in scan order, as are the head bits
+        chunkInScanOrder<T, E>(raw, reverse, values);
+        const uint32_t heads = mirrorHeads<E>(
+            chunkHeads<RAGGED, E>(reverse, chunk_first, end, static_cast<uint64_t>(slot) * E, s_heads, cols, band_col, pattern),
+            reverse);
+        if (order == 0) s_starts = heads & 1U;
         A acc{};
 #pragma unroll
         for (uint32_t jo = 0; jo < E; ++jo) {
-            const uint32_t j = REVERSE ? E - 1 - jo : jo;
-            const A x = element<T, OP, DIR>(values[j], chunk_first + j);
-            acc = (jo == 0 || ((heads >> j) & 1U)) ? x : applyOp<A, OP>(acc, x);
+            const A x = element<T, OP>(values[jo], reverse ? scan_first - jo : scan_first + jo, arg_min, reverse);
+            acc = (jo == 0 || ((heads >> jo) & 1U)) ? x : applyOp<A, OP>(acc, x);
         }
         s_value[order] = acc;
         s_head[order] = heads != 0 ? 1U : 0U;
@@ -839,7 +862,7 @@ __global__ void __launch_bounds__(THREADS)
     band_col = col_first;
     for (uint32_t s = 0; s < CHUNKS; ++s) {
         const uint32_t slot = s * THREADS + t;
-        const uint32_t order = REVERSE ? kSlots - 1 - slot : slot;  // as in step 1
+        const uint32_t order = reverse ? kSlots - 1 - slot : slot;  // as in step 1
         const uint32_t owner = order / CHUNKS;  // the thread that scanned the slot in step 2
         const uint32_t owner_warp = owner >> 5;
         const uint64_t chunk_first = thread_first + s * kBand;
@@ -861,49 +884,47 @@ __global__ void __launch_bounds__(THREADS)
         Raw raw[kRaw];
 #pragma unroll
         for (uint32_t h = 0; h < kRaw; ++h) raw[h] = s_data[kRaw * slot + h];
-        T values[E];
-        uint32_t heads = unpackChunk<T, RAGGED, E, DIR>(
-            raw, values, chunk_first, static_cast<uint64_t>(slot) * E, s_heads, cols, band_col, pattern);
-        if constexpr (REVERSE) heads |= endHead<E>(chunk_first, end);
+        const uint64_t scan_first = reverse ? chunk_first + E - 1 : chunk_first;
+        T values[E];  // in scan order, as are the head bits
+        chunkInScanOrder<T, E>(raw, reverse, values);
+        const uint32_t heads = mirrorHeads<E>(
+            chunkHeads<RAGGED, E>(reverse, chunk_first, end, static_cast<uint64_t>(slot) * E, s_heads, cols, band_col, pattern),
+            reverse);
         A acc{};
-        [[maybe_unused]] A last = carry.value;  // exclusive: the inclusive result of the element before
-        // In scan order: a reverse scan takes the chunk's 16-byte words, and each word's elements, from the last.
+        A last = carry.value;  // the inclusive result of the element before (exclusive scans write it)
+        // In scan order, a word of outputs at a time; a reverse scan's word wo is the chunk's word kWords - 1 - wo in
+        // memory, its elements mirrored back as it is stored.
 #pragma unroll
         for (uint32_t wo = 0; wo < kWords; ++wo) {
-            const uint32_t w = REVERSE ? kWords - 1 - wo : wo;
-            O word[kPerWord];
+            const uint32_t w = reverse ? kWords - 1 - wo : wo;  // the word's place in memory
+            O scanned[kPerWord];                                // in scan order
             [[maybe_unused]] A keys[kPerWord];  // an arg scan's winning keys, decoded only when values are written
 #pragma unroll
             for (uint32_t io = 0; io < kPerWord; ++io) {
-                const uint32_t i = REVERSE ? kPerWord - 1 - io : io;
-                const uint32_t j = w * kPerWord + i;
-                const bool head = ((heads >> j) & 1U) != 0U;
-                const A x = element<T, OP, DIR>(values[j], chunk_first + j);
+                const uint32_t q = wo * kPerWord + io;  // the element's place in the chunk in scan order
+                const bool head = ((heads >> q) & 1U) != 0U;
+                const A x = element<T, OP>(values[q], reverse ? scan_first - q : scan_first + q, arg_min, reverse);
                 if (head) open = false;
-                acc = (wo * kPerWord + io == 0 || head) ? x : applyOp<A, OP>(acc, x);
-                if constexpr (MODE == SegmentedScanMode::Inclusive) {
-                    if constexpr (isArg(OP)) {
-                        keys[i] = open ? applyOp<A, OP>(carry.value, acc) : acc;
-                        word[i] = result<O, OP, DIR>(keys[i]);
-                    } else if constexpr (kSharedFloat<O>) {
-                        word[i] = sharedFromFloat<O>(open ? applyOp<A, OP>(carry.value, acc) : acc, alternate_output);
-                    } else {
-                        word[i] = result<O, OP, DIR>(open ? applyOp<A, OP>(carry.value, acc) : acc);
-                    }
+                acc = (q == 0 || head) ? x : applyOp<A, OP>(acc, x);
+                const A inclusive = open ? applyOp<A, OP>(carry.value, acc) : acc;
+                // Inclusive: this element's result. Exclusive: the result before; a head takes the identity (an arg
+                // scan: the index 0xFFFFFFFF).
+                const A shown = exclusive_mode ? last : inclusive;
+                const bool identity = exclusive_mode && head;
+                if constexpr (isArg(OP)) {
+                    keys[io] = shown;
+                    scanned[io] = identity ? 0xFFFFFFFFU : result<O, OP>(shown, reverse);
+                } else if constexpr (kSharedFloat<O>) {
+                    constexpr float kIdentity = OP == SegmentedScanOp::Sum ? 0.0f : 1.0f;
+                    scanned[io] = sharedFromFloat<O>(identity ? kIdentity : shown, alternate_output);
                 } else {
-                    // A head takes the identity (an arg scan: the index 0xFFFFFFFF); the rest the result before.
-                    if constexpr (isArg(OP)) {
-                        keys[i] = last;
-                        word[i] = head ? 0xFFFFFFFFU : result<O, OP, DIR>(last);
-                    } else if constexpr (kSharedFloat<O>) {
-                        constexpr float kIdentity = OP == SegmentedScanOp::Sum ? 0.0f : 1.0f;
-                        word[i] = sharedFromFloat<O>(head ? kIdentity : last, alternate_output);
-                    } else {
-                        word[i] = head ? identityOf<O, OP>() : result<O, OP, DIR>(last);
-                    }
-                    last = open ? applyOp<A, OP>(carry.value, acc) : acc;
+                    scanned[io] = identity ? identityOf<O, OP>() : result<O, OP>(shown, reverse);
                 }
+                last = inclusive;
             }
+            O word[kPerWord];  // in memory order
+#pragma unroll
+            for (uint32_t i = 0; i < kPerWord; ++i) word[i] = reverse ? scanned[kPerWord - 1 - i] : scanned[i];
             if (full) {
                 Output bits;
                 memcpy(&bits, word, sizeof(bits));
@@ -916,15 +937,17 @@ __global__ void __launch_bounds__(THREADS)
             }
             if constexpr (isArg(OP)) {
                 if (arg_values != nullptr) {  // the same for every thread; an index-only scan decodes nothing
-                    T won[kPerWord];
+                    T won[kPerWord];  // in memory order
 #pragma unroll
-                    for (uint32_t i = 0; i < kPerWord; ++i) won[i] = valueOf<T, OP>(keys[i]);
-                    if constexpr (MODE == SegmentedScanMode::Exclusive) {
-                        constexpr SegmentedScanOp kExtreme =
-                            OP == SegmentedScanOp::ArgMax ? SegmentedScanOp::Max : SegmentedScanOp::Min;
+                    for (uint32_t i = 0; i < kPerWord; ++i) {
+                        won[i] = valueOf<T, OP>(reverse ? keys[kPerWord - 1 - i] : keys[i], arg_min);
+                    }
+                    if (exclusive_mode) {
+                        const T extreme =
+                            arg_min ? identityOf<T, SegmentedScanOp::Min>() : identityOf<T, SegmentedScanOp::Max>();
 #pragma unroll
-                        for (uint32_t i = 0; i < kPerWord; ++i) {
-                            if (((heads >> (w * kPerWord + i)) & 1U) != 0U) won[i] = identityOf<T, kExtreme>();
+                        for (uint32_t io = 0; io < kPerWord; ++io) {  // a head's value, at its place in memory
+                            if (((heads >> (wo * kPerWord + io)) & 1U) != 0U) won[reverse ? kPerWord - 1 - io : io] = extreme;
                         }
                     }
                     using Stored = StoreWord<kPerWord * sizeof(T)>;
@@ -948,10 +971,10 @@ __global__ void __launch_bounds__(THREADS)
 }
 
 #if defined(__CUDACC__)
-template <typename T, typename O, SegmentedScanOp OP, SegmentedScanMode MODE, SegmentedScanDirection DIR, typename OFF>
+template <typename T, typename O, SegmentedScanOp OP, typename OFF>
 void launch(const Launch& args, cudaStream_t stream) {
     const unsigned blocks = static_cast<unsigned>(args.workspace.num_tiles);
-    segmentedScanKernel<T, O, OP, MODE, DIR, OFF><<<blocks, kThreads, 0, stream>>>(
+    segmentedScanKernel<T, O, OP, OFF><<<blocks, kThreads, 0, stream>>>(
         static_cast<const T*>(args.input),
         static_cast<O*>(args.output),
         args.n,
@@ -960,25 +983,18 @@ void launch(const Launch& args, cudaStream_t stream) {
         args.rows,
         args.workspace,
         static_cast<T*>(args.arg_values),
-        args.alternate_output);
+        args.alternate_output,
+        args.exclusive,
+        args.arg_min,
+        args.reverse);
 }
 
-// The kernels of one (input, output, op) in one mode and direction: dense rows and ragged rows with UINT32 or UINT64
-// offsets.
-#define THOR_SEGMENTED_SCAN_INSTANTIATE_VARIANT(T, O, OP, MODE, DIR)                                                 \
-    template void launch<T, O, SegmentedScanOp::OP, SegmentedScanMode::MODE, SegmentedScanDirection::DIR, void>(     \
-        const Launch&, cudaStream_t);                                                                                \
-    template void launch<T, O, SegmentedScanOp::OP, SegmentedScanMode::MODE, SegmentedScanDirection::DIR, uint32_t>( \
-        const Launch&, cudaStream_t);                                                                                \
-    template void launch<T, O, SegmentedScanOp::OP, SegmentedScanMode::MODE, SegmentedScanDirection::DIR, uint64_t>( \
-        const Launch&, cudaStream_t)
-
-// The kernels of one (input, output, op): both modes, both directions.
-#define THOR_SEGMENTED_SCAN_INSTANTIATE(T, O, OP)                          \
-    THOR_SEGMENTED_SCAN_INSTANTIATE_VARIANT(T, O, OP, Inclusive, Forward); \
-    THOR_SEGMENTED_SCAN_INSTANTIATE_VARIANT(T, O, OP, Exclusive, Forward); \
-    THOR_SEGMENTED_SCAN_INSTANTIATE_VARIANT(T, O, OP, Inclusive, Reverse); \
-    THOR_SEGMENTED_SCAN_INSTANTIATE_VARIANT(T, O, OP, Exclusive, Reverse)
+// The kernels of one (input, output, op): dense rows and ragged rows with UINT32 or UINT64 offsets; each takes either
+// mode and either direction.
+#define THOR_SEGMENTED_SCAN_INSTANTIATE(T, O, OP)                                                    \
+    template void launch<T, O, SegmentedScanOp::OP, void>(const Launch&, cudaStream_t);     \
+    template void launch<T, O, SegmentedScanOp::OP, uint32_t>(const Launch&, cudaStream_t); \
+    template void launch<T, O, SegmentedScanOp::OP, uint64_t>(const Launch&, cudaStream_t)
 #endif
 
 }  // namespace ThorImplementation::SegmentedScanKernels
