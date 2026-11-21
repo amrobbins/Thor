@@ -52,8 +52,6 @@ CUDA_STACK = CudaStack(
         CudaDistribution("nvidia-cuda-nvrtc", "13.3.33"),
         CudaDistribution("nvidia-nvjitlink", "13.4.92"),
         CudaDistribution("nvidia-cublas", "13.6.0.2"),
-        CudaDistribution("nvidia-cusparse", "12.8.2.51"),
-        CudaDistribution("nvidia-cusolver", "12.2.6.9"),
         CudaDistribution("nvidia-cuda-cccl", "13.3.3.4.1"),
         CudaDistribution("nvidia-cudnn-cu13", "9.27.0.42"),
         CudaDistribution("nvidia-cudnn-frontend", "1.31.0"),
@@ -70,8 +68,6 @@ CUDA_STACK = CudaStack(
         LibrarySpec("nvidia-cuda-nvrtc", ("**/libnvrtc.so.13", )),
         LibrarySpec("nvidia-cublas", ("**/libcublas.so.13", )),
         LibrarySpec("nvidia-cublas", ("**/libcublasLt.so.13", )),
-        LibrarySpec("nvidia-cusparse", ("**/libcusparse.so.12", )),
-        LibrarySpec("nvidia-cusolver", ("**/libcusolver.so.12", )),
         LibrarySpec("nvidia-cudnn-cu13", ("**/libcudnn.so.9", )),
     ),
 )

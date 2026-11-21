@@ -5,8 +5,9 @@
 #include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/FusedEquation.h"
-#include "Utilities/TensorOperations/Cub/CubDevicePrimitives.h"
 #include "Utilities/TensorOperations/Reduction/SegmentedReducer.h"
+#include "Utilities/TensorOperations/Scan/ScanMinMaxBackward.h"
+#include "Utilities/TensorOperations/Scan/SegmentedScan.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 #include "Utilities/TensorOperations/Ragged/RaggedConv1dWidthCapacity.h"
 
@@ -57,7 +58,6 @@ void enforceFusedFastPathGate(std::string_view path, std::optional<uint32_t> req
 }
 
 }  // namespace
-
 
 static bool isThorCudnnConvolutionFloatingDType(DataType dtype) {
     switch (dtype) {
@@ -2642,16 +2642,13 @@ shared_ptr<CompiledScan> EquationCompiler::compileScan(const PhysicalExpression&
     if (!node.output_dtype.has_value()) {
         throw std::runtime_error("Scan node missing resolved output_dtype.");
     }
-    const bool arg_scan = node.scan_op == ScanOp::ArgMin || node.scan_op == ScanOp::ArgMax;
-    if (arg_scan) {
-        if (node.output_dtype.value() != DataType::UINT32) {
-            throw std::runtime_error("Expression arg scan output dtype must be UINT32.");
-        }
-    } else if (input_node.input_tensor_dtype.value() != node.output_dtype.value()) {
-        throw std::runtime_error("Expression scan currently requires input and output dtypes to match.");
-    }
-    if (!isCubScanDTypeSupported(input_node.input_tensor_dtype.value())) {
-        throw std::runtime_error("Expression scan dtype is not supported by the CUB scan backend.");
+    const DataType input_dtype = input_node.input_tensor_dtype.value();
+    const DataType output_dtype = node.output_dtype.value();
+    if (!SegmentedScan::isSupported(segmentedScanOpFor(node.scan_op), input_dtype, output_dtype)) {
+        throw std::runtime_error("Expression scan from " + TensorDescriptor::getElementTypeName(input_dtype) + " to " +
+                                 TensorDescriptor::getElementTypeName(output_dtype) +
+                                 " is not supported: a scan writes its input's dtype, a float sum or product may "
+                                 "write any float dtype, and an arg scan writes UINT32 indices.");
     }
 
     std::optional<DataType> offset_dtype = std::nullopt;
@@ -2663,8 +2660,8 @@ shared_ptr<CompiledScan> EquationCompiler::compileScan(const PhysicalExpression&
         if (!offsets_node.input_tensor_dtype.has_value()) {
             throw std::runtime_error("segmented_scan offsets node missing resolved input_tensor_dtype.");
         }
-        if (!isCubSegmentOffsetDTypeSupported(offsets_node.input_tensor_dtype.value())) {
-            throw std::runtime_error("Expression segmented_scan offsets dtype is not supported by the CUB segmented-scan backend.");
+        if (!SegmentedScan::isOffsetDataTypeSupported(offsets_node.input_tensor_dtype.value())) {
+            throw std::runtime_error("Expression segmented_scan offsets must be UINT32 or UINT64.");
         }
         offset_dtype = offsets_node.input_tensor_dtype.value();
     }
@@ -2674,8 +2671,8 @@ shared_ptr<CompiledScan> EquationCompiler::compileScan(const PhysicalExpression&
                                      node.scan_axis,
                                      node.scan_reverse,
                                      segmented_by_offsets,
-                                     input_node.input_tensor_dtype.value(),
-                                     node.output_dtype.value(),
+                                     input_dtype,
+                                     output_dtype,
                                      offset_dtype);
 }
 
@@ -4195,14 +4192,12 @@ shared_ptr<CompiledScanMinMaxBackward> EquationCompiler::compileScanMinMaxBackwa
     }
 
     const ScanOp value_op = (node.op == ExprOp::SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD) ? ScanOp::Min : ScanOp::Max;
-    if (!isCubScanDTypeSupported(input_node.input_tensor_dtype.value())) {
-        throw std::runtime_error("ScanMinMaxBackward input dtype is not supported by the CUB arg-scan backend.");
-    }
-    if (grad_node.input_tensor_dtype.value() != node.output_dtype.value()) {
-        throw std::runtime_error("ScanMinMaxBackward grad-output dtype must match output dtype.");
-    }
-    if (node.output_dtype.value() != DataType::FP32) {
-        throw std::runtime_error("ScanMinMaxBackward currently supports only FP32 gradients for the no-atomic flat scatter-add backend.");
+    if (!ScanMinMaxBackward::isSupported(input_node.input_tensor_dtype.value(), grad_node.input_tensor_dtype.value(),
+                                         node.output_dtype.value())) {
+        throw std::runtime_error("ScanMinMaxBackward takes float x, dy and dx (FP32, FP16, BF16, FP8 E4M3 or E5M2), not " +
+                                 TensorDescriptor::getElementTypeName(input_node.input_tensor_dtype.value()) + ", " +
+                                 TensorDescriptor::getElementTypeName(grad_node.input_tensor_dtype.value()) + " and " +
+                                 TensorDescriptor::getElementTypeName(node.output_dtype.value()) + ".");
     }
 
     std::optional<DataType> offset_dtype = std::nullopt;
@@ -4211,8 +4206,8 @@ shared_ptr<CompiledScanMinMaxBackward> EquationCompiler::compileScanMinMaxBackwa
         if (offsets_node.op != ExprOp::INPUT || !offsets_node.input_tensor_dtype.has_value()) {
             throw std::runtime_error("Segmented ScanMinMaxBackward offsets must be a local INPUT node with a resolved dtype.");
         }
-        if (!isCubSegmentOffsetDTypeSupported(offsets_node.input_tensor_dtype.value())) {
-            throw std::runtime_error("Segmented ScanMinMaxBackward offsets dtype is not supported by CUB.");
+        if (!SegmentedScan::isOffsetDataTypeSupported(offsets_node.input_tensor_dtype.value())) {
+            throw std::runtime_error("Segmented ScanMinMaxBackward offsets must be UINT32 or UINT64.");
         }
         offset_dtype = offsets_node.input_tensor_dtype.value();
     }
@@ -4973,8 +4968,8 @@ static PhysicalExecutionStage buildSegmentedReductionStage(const PhysicalExpress
 
     const auto [values_value_id, values_dtype] = resolve_stage_parent(node.lhs, "values");
     const auto [offsets_value_id, offsets_dtype] = resolve_stage_parent(node.rhs, "offsets");
-    if (!isCubSegmentOffsetDTypeSupported(offsets_dtype)) {
-        throw std::runtime_error("Expression segmented-reduction offsets dtype is not supported by CUB.");
+    if (!SegmentedReducer::isOffsetDataTypeSupported(offsets_dtype)) {
+        throw std::runtime_error("Expression segmented-reduction offsets dtype is not supported.");
     }
 
     PhysicalExpression stage_expr;
@@ -5361,13 +5356,10 @@ static PhysicalExecutionStage buildScanStage(const PhysicalExpression& expr,
         if (!requested_node.output_dtype.has_value()) {
             throw std::runtime_error("Scan node is missing resolved output dtype.");
         }
+        // The arg scan writes a paired scan's values, in the input's dtype (compileScan checks a lone scan's pair).
         const bool arg_scan = requested_node.scan_op == ScanOp::ArgMin || requested_node.scan_op == ScanOp::ArgMax;
-        if (arg_scan) {
-            if (requested_node.output_dtype.value() != DataType::UINT32) {
-                throw std::runtime_error("Expression arg scan output dtype must be UINT32.");
-            }
-        } else if (actual_input_dtype != requested_node.output_dtype.value()) {
-            throw std::runtime_error("Expression scan currently requires input and output dtypes to match.");
+        if (requested_outputs.size() == 2 && !arg_scan && actual_input_dtype != requested_node.output_dtype.value()) {
+            throw std::runtime_error("A paired scan's values are written in its input's dtype.");
         }
     }
 
@@ -5378,8 +5370,8 @@ static PhysicalExecutionStage buildScanStage(const PhysicalExpression& expr,
     std::optional<DataType> offsets_dtype = std::nullopt;
     if (node.op == ExprOp::SEGMENTED_SCAN) {
         const auto [offsets_value_id, actual_offsets_dtype] = resolve_stage_parent(node.rhs, "offsets");
-        if (!isCubSegmentOffsetDTypeSupported(actual_offsets_dtype)) {
-            throw std::runtime_error("Expression segmented_scan offsets dtype is not supported by the CUB segmented-scan backend.");
+        if (!SegmentedScan::isOffsetDataTypeSupported(actual_offsets_dtype)) {
+            throw std::runtime_error("Expression segmented_scan offsets must be UINT32 or UINT64.");
         }
         input_value_ids.push_back(offsets_value_id);
         offsets_dtype = actual_offsets_dtype;

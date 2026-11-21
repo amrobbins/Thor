@@ -125,23 +125,6 @@ static uint64_t checkedFinalScanAxis(const std::vector<uint64_t>& dims, uint64_t
     return axis;
 }
 
-static CubScanOp toCubScanOp(ScanOp op) {
-    switch (op) {
-        case ScanOp::Sum:
-            return CubScanOp::Sum;
-        case ScanOp::Min:
-            return CubScanOp::Min;
-        case ScanOp::Max:
-            return CubScanOp::Max;
-        case ScanOp::Product:
-            return CubScanOp::Product;
-        case ScanOp::ArgMin:
-        case ScanOp::ArgMax:
-            break;
-    }
-    throw std::runtime_error("Unsupported Expression scan op.");
-}
-
 static bool isArgScanOp(ScanOp op) { return op == ScanOp::ArgMin || op == ScanOp::ArgMax; }
 
 static bool thorMatmulDiagnosticsEnabled() {
@@ -214,29 +197,13 @@ static bool shouldPrintStampedMatmulDiagnosticOnce(const std::string& key) {
     return printed.insert(key).second;
 }
 
-static CubArgScanOp toCubArgScanOp(ScanOp op) {
-    switch (op) {
-        case ScanOp::ArgMin:
-            return CubArgScanOp::ArgMin;
-        case ScanOp::ArgMax:
-            return CubArgScanOp::ArgMax;
-        default:
-            break;
-    }
-    throw std::runtime_error("Unsupported Expression arg scan op.");
+static SegmentedScanMode segmentedScanModeFor(ScanMode mode) {
+    return mode == ScanMode::Exclusive ? SegmentedScanMode::Exclusive : SegmentedScanMode::Inclusive;
 }
 
-static CubScanMode toCubScanMode(ScanMode mode) {
-    switch (mode) {
-        case ScanMode::Exclusive:
-            return CubScanMode::Exclusive;
-        case ScanMode::Inclusive:
-            return CubScanMode::Inclusive;
-    }
-    throw std::runtime_error("Unsupported Expression scan mode.");
+static SegmentedScanDirection segmentedScanDirectionFor(bool reverse) {
+    return reverse ? SegmentedScanDirection::Reverse : SegmentedScanDirection::Forward;
 }
-
-static CubScanDirection toCubScanDirection(bool reverse) { return reverse ? CubScanDirection::Reverse : CubScanDirection::Forward; }
 
 static int64_t checkedDim(const std::vector<uint64_t>& dims, size_t idx, const char* tensor_name) {
     if (idx >= dims.size()) {
@@ -388,6 +355,24 @@ static void requireAttentionContractTensor(const Tensor& tensor, const char* sta
 }
 
 }  // namespace
+
+SegmentedScanOp segmentedScanOpFor(ScanOp op) {
+    switch (op) {
+        case ScanOp::Sum:
+            return SegmentedScanOp::Sum;
+        case ScanOp::Max:
+            return SegmentedScanOp::Max;
+        case ScanOp::Min:
+            return SegmentedScanOp::Min;
+        case ScanOp::Product:
+            return SegmentedScanOp::Product;
+        case ScanOp::ArgMax:
+            return SegmentedScanOp::ArgMax;
+        case ScanOp::ArgMin:
+            return SegmentedScanOp::ArgMin;
+    }
+    throw std::runtime_error("Unsupported Expression scan op.");
+}
 
 #ifdef THOR_DEBUG
 void resetExpressionTestExecutionCounters() {
@@ -4073,8 +4058,6 @@ StampedScan::StampedScan(std::shared_ptr<CompiledScan> compiled,
                 throw std::runtime_error("Expression paired arg scan value output shape must match input shape.");
             }
         }
-    } else if (input.getDataType() != output.getDataType()) {
-        throw std::runtime_error("Expression scan currently requires input and output dtypes to match.");
     }
     if (input.getPlacement() != output.getPlacement()) {
         throw std::runtime_error("Expression scan input and output must be on the same GPU placement.");
@@ -4088,12 +4071,11 @@ StampedScan::StampedScan(std::shared_ptr<CompiledScan> compiled,
 
     const std::vector<uint64_t> dims = input.getDimensions();
     checkedFinalScanAxis(dims, compiled_scan->axis);
-    const uint64_t num_items = input.getTotalNumElements();
 
-    const CubScanMode cub_mode = toCubScanMode(compiled_scan->mode);
-    const CubScanDirection cub_direction = toCubScanDirection(compiled_scan->reverse);
-
-    size_t temp_storage_bytes = 1;
+    // Thor's scan kernel; its constructor refuses what it does not take (SegmentedScan.h).
+    const SegmentedScanOp op = segmentedScanOpFor(compiled_scan->op);
+    const SegmentedScanMode mode = segmentedScanModeFor(compiled_scan->mode);
+    const SegmentedScanDirection direction = segmentedScanDirectionFor(compiled_scan->reverse);
     if (compiled_scan->segmented_by_offsets) {
         const Tensor& offsets = this->segment_offsets.value();
         if (!compiled_scan->offset_dtype.has_value() || offsets.getDataType() != compiled_scan->offset_dtype.value()) {
@@ -4106,44 +4088,11 @@ StampedScan::StampedScan(std::shared_ptr<CompiledScan> compiled,
         if (offset_dims.size() != 1 || offset_dims[0] == 0) {
             throw std::runtime_error("Expression segmented_scan offsets must be a non-empty rank-1 tensor of shape [num_segments + 1].");
         }
-        const uint64_t num_segments = offset_dims[0] - 1;
-        ragged_segmented = true;
-        if (arg_scan) {
-            ragged_segmented_arg_scan_plan = prepareCubDeviceSegmentedArgScan(
-                input, output, offsets, num_items, num_segments, toCubArgScanOp(compiled_scan->op), cub_mode, cub_direction);
-            temp_storage_bytes = ragged_segmented_arg_scan_plan.temp_storage_bytes;
-        } else {
-            ragged_segmented_scan_plan = prepareCubDeviceSegmentedScan(
-                input, output, offsets, num_items, num_segments, toCubScanOp(compiled_scan->op), cub_mode, cub_direction);
-            temp_storage_bytes = ragged_segmented_scan_plan.temp_storage_bytes;
-        }
+        segmented_scan = std::make_shared<const SegmentedScan>(op, mode, direction, input, output, offsets, value_output);
     } else {
-        const uint64_t segment_size = dims.empty() ? 0 : dims.back();
-        const uint64_t num_segments = (segment_size == 0) ? 0 : num_items / segment_size;
-        uniform_segmented = num_segments > 1;
-        if (uniform_segmented) {
-            if (arg_scan) {
-                segmented_arg_scan_plan = prepareCubDeviceSegmentedUniformArgScan(
-                    input, output, num_items, num_segments, segment_size, toCubArgScanOp(compiled_scan->op), cub_mode, cub_direction);
-                temp_storage_bytes = segmented_arg_scan_plan.temp_storage_bytes;
-            } else {
-                segmented_scan_plan = prepareCubDeviceSegmentedUniformScan(
-                    input, output, num_items, num_segments, segment_size, toCubScanOp(compiled_scan->op), cub_mode, cub_direction);
-                temp_storage_bytes = segmented_scan_plan.temp_storage_bytes;
-            }
-        } else {
-            if (arg_scan) {
-                arg_scan_plan =
-                    prepareCubDeviceArgScan(input, output, num_items, toCubArgScanOp(compiled_scan->op), cub_mode, cub_direction);
-                temp_storage_bytes = arg_scan_plan.temp_storage_bytes;
-            } else {
-                scan_plan = prepareCubDeviceScan(input, output, num_items, toCubScanOp(compiled_scan->op), cub_mode, cub_direction);
-                temp_storage_bytes = scan_plan.temp_storage_bytes;
-            }
-        }
+        const uint64_t row_length = dims.empty() ? input.getTotalNumElements() : dims.back();
+        segmented_scan = std::make_shared<const SegmentedScan>(op, mode, direction, input, output, row_length, value_output);
     }
-
-    temp_storage = Tensor(input.getPlacement(), TensorDescriptor(DataType::UINT8, {std::max<size_t>(temp_storage_bytes, 1)}));
 }
 
 std::optional<uint64_t> StampedScan::runtimeLogicalElementCount(uint64_t valid_example_count) const noexcept {
@@ -4198,36 +4147,7 @@ std::optional<uint64_t> StampedScan::runtimeLogicalByteCount(uint64_t valid_exam
 
 void StampedScan::run() { runOn(stream); }
 
-void StampedScan::runOn(Stream& run_stream) const {
-    const bool arg_scan = isArgScanOp(compiled_scan->op);
-    if (ragged_segmented) {
-        if (arg_scan) {
-            cubDeviceSegmentedArgScan(ragged_segmented_arg_scan_plan, temp_storage, input, output, segment_offsets.value(), run_stream);
-        } else {
-            cubDeviceSegmentedScan(ragged_segmented_scan_plan, temp_storage, input, output, segment_offsets.value(), run_stream);
-        }
-    } else if (uniform_segmented) {
-        if (arg_scan) {
-            cubDeviceSegmentedUniformArgScan(segmented_arg_scan_plan, temp_storage, input, output, run_stream);
-        } else {
-            cubDeviceSegmentedUniformScan(segmented_scan_plan, temp_storage, input, output, run_stream);
-        }
-    } else {
-        if (arg_scan) {
-            cubDeviceArgScan(arg_scan_plan, temp_storage, input, output, run_stream);
-        } else {
-            cubDeviceScan(scan_plan, temp_storage, input, output, run_stream);
-        }
-    }
-    if (arg_scan && has_value_output) {
-        cubDeviceArgScanValuesFromIndices(input,
-                                          output,
-                                          value_output,
-                                          input.getTotalNumElements(),
-                                          compiled_scan->op == ScanOp::ArgMin ? CubArgScanOp::ArgMin : CubArgScanOp::ArgMax,
-                                          run_stream);
-    }
-}
+void StampedScan::runOn(Stream& run_stream) const { segmented_scan->runOn(run_stream); }
 
 StampedSoftmax::StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
                                std::unique_ptr<BuiltSoftmax> built,
@@ -6660,43 +6580,66 @@ void StampedMatmul::runOnConditionalGraphCapture(Stream& run_stream) const {
 }
 
 StampedScanMinMaxBackward::StampedScanMinMaxBackward(std::shared_ptr<CompiledScanMinMaxBackward> compiled,
-                                                     std::shared_ptr<StampedScan> arg_scan,
-                                                     std::shared_ptr<BuiltFlatScatterAdd> scatter_add,
                                                      const Tensor& input,
                                                      const Tensor& grad_output,
                                                      const Tensor& output,
-                                                     const Tensor& indices,
-                                                     const Stream& stream)
+                                                     const Stream& stream,
+                                                     std::optional<Tensor> segment_offsets)
     : compiled_scan_minmax_backward(std::move(compiled)),
-      arg_scan(std::move(arg_scan)),
-      scatter_add(std::move(scatter_add)),
       input(input),
       grad_output(grad_output),
       output(output),
-      indices(indices),
+      segment_offsets(std::move(segment_offsets)),
       stream(stream) {
-    if (!compiled_scan_minmax_backward || !this->arg_scan || !this->scatter_add) {
-        throw std::runtime_error("StampedScanMinMaxBackward requires compiled, arg-scan, and scatter-add plans.");
+    if (!compiled_scan_minmax_backward) {
+        throw std::runtime_error("StampedScanMinMaxBackward requires a compiled descriptor.");
     }
     if (input.getDataType() != compiled_scan_minmax_backward->input_dtype ||
         grad_output.getDataType() != compiled_scan_minmax_backward->grad_output_dtype ||
         output.getDataType() != compiled_scan_minmax_backward->output_dtype) {
         throw std::runtime_error("StampedScanMinMaxBackward tensor dtypes do not match the compiled descriptor.");
     }
-    if (grad_output.getDimensions() != input.getDimensions() || output.getDimensions() != input.getDimensions() ||
-        indices.getDimensions() != input.getDimensions()) {
-        throw std::runtime_error("StampedScanMinMaxBackward expects input, grad, output, and indices with matching shapes.");
+    if (grad_output.getDimensions() != input.getDimensions() || output.getDimensions() != input.getDimensions()) {
+        throw std::runtime_error("StampedScanMinMaxBackward expects input, grad and output with matching shapes.");
     }
-    if (indices.getDataType() != DataType::UINT32) {
-        throw std::runtime_error("StampedScanMinMaxBackward arg-scan indices must be UINT32.");
+    if (compiled_scan_minmax_backward->segmented_by_offsets != this->segment_offsets.has_value()) {
+        throw std::runtime_error("StampedScanMinMaxBackward segmented-offset input does not match the compiled descriptor.");
+    }
+    const std::vector<uint64_t> dims = input.getDimensions();
+    checkedFinalScanAxis(dims, compiled_scan_minmax_backward->axis);
+
+    // Thor's fused kernel; its constructor refuses what it does not take (ScanMinMaxBackward.h).
+    const bool min = compiled_scan_minmax_backward->value_op == ScanOp::Min;
+    const SegmentedScanMode mode = segmentedScanModeFor(compiled_scan_minmax_backward->mode);
+    const SegmentedScanDirection direction = segmentedScanDirectionFor(compiled_scan_minmax_backward->reverse);
+    if (this->segment_offsets.has_value()) {
+        backward = std::make_shared<const ScanMinMaxBackward>(min, mode, direction, input, grad_output, output, this->segment_offsets.value());
+    } else {
+        const uint64_t row_length = dims.empty() ? input.getTotalNumElements() : dims.back();
+        backward = std::make_shared<const ScanMinMaxBackward>(min, mode, direction, input, grad_output, output, row_length);
+    }
+}
+
+std::optional<uint64_t> StampedScanMinMaxBackward::runtimeLogicalElementCount(uint64_t valid_example_count) const noexcept {
+    try {
+        if (!compiled_scan_minmax_backward || !compiled_scan_minmax_backward->segmented_by_offsets ||
+            !segment_offsets.has_value()) {
+            return std::nullopt;
+        }
+        const std::vector<uint64_t> offset_dims = segment_offsets->getDimensions();
+        if (offset_dims.size() != 1 || offset_dims[0] < 2) {
+            return std::nullopt;
+        }
+        const uint64_t batch_size = offset_dims[0] - 1;
+        return runtimeRaggedActiveValueCount(
+            segment_offsets.value(), batch_size, input.getTotalNumElements(), valid_example_count);
+    } catch (...) {
+        return std::nullopt;
     }
 }
 
 std::optional<uint64_t> StampedScanMinMaxBackward::runtimeLogicalFlopCount(uint64_t valid_example_count) const {
-    if (!compiled_scan_minmax_backward || !compiled_scan_minmax_backward->segmented_by_offsets || !arg_scan) {
-        return std::nullopt;
-    }
-    const std::optional<uint64_t> active_elements = arg_scan->runtimeLogicalElementCount(valid_example_count);
+    const std::optional<uint64_t> active_elements = runtimeLogicalElementCount(valid_example_count);
     if (!active_elements.has_value()) {
         return std::nullopt;
     }
@@ -6705,10 +6648,7 @@ std::optional<uint64_t> StampedScanMinMaxBackward::runtimeLogicalFlopCount(uint6
 
 std::optional<uint64_t> StampedScanMinMaxBackward::runtimeLogicalByteCount(uint64_t valid_example_count) const noexcept {
     try {
-        if (!compiled_scan_minmax_backward || !compiled_scan_minmax_backward->segmented_by_offsets || !arg_scan) {
-            return std::nullopt;
-        }
-        const std::optional<uint64_t> active_elements = arg_scan->runtimeLogicalElementCount(valid_example_count);
+        const std::optional<uint64_t> active_elements = runtimeLogicalElementCount(valid_example_count);
         if (!active_elements.has_value()) {
             return std::nullopt;
         }
@@ -6735,10 +6675,7 @@ std::optional<uint64_t> StampedScanMinMaxBackward::runtimeLogicalByteCount(uint6
 
 void StampedScanMinMaxBackward::run() { runOn(stream); }
 
-void StampedScanMinMaxBackward::runOn(Stream& run_stream) {
-    arg_scan->runOn(run_stream);
-    runFlatScatterAdd(scatter_add, grad_output, indices, output, run_stream);
-}
+void StampedScanMinMaxBackward::runOn(Stream& run_stream) { backward->runOn(run_stream); }
 
 StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltReduction> built,
                                                          const StridedSpan& input,

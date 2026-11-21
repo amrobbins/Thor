@@ -132,8 +132,6 @@ _INCLUDE_VARIABLE_SPECS: tuple[tuple[str, str, Path], ...] = (
     ("THOR_CUDNN_INCLUDE_DIR", "nvidia-cudnn-cu13", Path("cudnn.h")),
     ("THOR_CUDNN_FRONTEND_INCLUDE_DIR", "nvidia-cudnn-frontend", Path("cudnn_frontend.h")),
     ("THOR_CUBLAS_INCLUDE_DIR", "nvidia-cublas", Path("cublas_v2.h")),
-    ("THOR_CUSOLVER_INCLUDE_DIR", "nvidia-cusolver", Path("cusolverDn.h")),
-    ("THOR_CUSPARSE_INCLUDE_DIR", "nvidia-cusparse", Path("cusparse.h")),
     ("THOR_NVRTC_INCLUDE_DIR", "nvidia-cuda-nvrtc", Path("nvrtc.h")),
     ("THOR_NVJITLINK_INCLUDE_DIR", "nvidia-nvjitlink", Path("nvJitLink.h")),
 )
@@ -145,8 +143,6 @@ _LIBRARY_VARIABLE_SPECS: tuple[tuple[str, str, tuple[str, ...], bool], ...] = (
     ("THOR_NVRTC_LIBRARY", "nvidia-cuda-nvrtc", ("**/libnvrtc.so.13",), True),
     ("THOR_CUBLAS_LIBRARY", "nvidia-cublas", ("**/libcublas.so.13",), True),
     ("THOR_CUBLASLT_LIBRARY", "nvidia-cublas", ("**/libcublasLt.so.13",), True),
-    ("THOR_CUSPARSE_LIBRARY", "nvidia-cusparse", ("**/libcusparse.so.12",), True),
-    ("THOR_CUSOLVER_LIBRARY", "nvidia-cusolver", ("**/libcusolver.so.12",), True),
     ("THOR_CUDNN_LIBRARY", "nvidia-cudnn-cu13", ("**/libcudnn.so.9",), True),
 )
 

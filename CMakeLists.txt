@@ -124,8 +124,6 @@ if (THOR_CUDA_STACK STREQUAL "python")
             THOR_CUDNN_INCLUDE_DIR
             THOR_CUDNN_FRONTEND_INCLUDE_DIR
             THOR_CUBLAS_INCLUDE_DIR
-            THOR_CUSOLVER_INCLUDE_DIR
-            THOR_CUSPARSE_INCLUDE_DIR
             THOR_NVRTC_INCLUDE_DIR
             THOR_NVJITLINK_INCLUDE_DIR
             THOR_CUDART_LIBRARY
@@ -134,8 +132,6 @@ if (THOR_CUDA_STACK STREQUAL "python")
             THOR_NVRTC_LIBRARY
             THOR_CUBLAS_LIBRARY
             THOR_CUBLASLT_LIBRARY
-            THOR_CUSPARSE_LIBRARY
-            THOR_CUSOLVER_LIBRARY
             THOR_CUDNN_LIBRARY
     )
     foreach (_thor_python_cuda_var IN LISTS _thor_python_cuda_variables)
@@ -1001,15 +997,15 @@ file(GLOB_RECURSE THOR_SOURCES CONFIGURE_DEPENDS
         #        "${CMAKE_SOURCE_DIR}/Demos/**/*.cu"
 )
 
-# The reducer's and the Cub wrappers' CUDA translation units are intentionally
+# The reducer's and the scan kernel's CUDA translation units are intentionally
 # compiled as self-contained CUDA objects: no relocatable device code/separable
 # compilation and no CUDA device LTO. They have no cross-translation-unit device
 # dependencies, and keeping these kernels out of RDC preserves the code
 # generation they were measured with (compiled with RDC and device LTO they
 # regress, FP8 E5M2 most; benchmarks/reducer_compile_contract.py checks it).
-# The set is every .cu directly in Cub/ and every .cu anywhere under Reduction/.
+# The set is every .cu directly in Scan/ and every .cu anywhere under Reduction/.
 file(GLOB THOR_CUB_CUDA_SELF_CONTAINED_SOURCES CONFIGURE_DEPENDS
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/*.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Scan/*.cu"
 )
 file(GLOB_RECURSE _thor_reduction_cuda_sources CONFIGURE_DEPENDS
         "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/*.cu"
@@ -1019,16 +1015,16 @@ unset(_thor_reduction_cuda_sources)
 if (NOT THOR_CUB_CUDA_SELF_CONTAINED_SOURCES)
     message(FATAL_ERROR "Thor Cub CUDA source set is empty")
 endif ()
-# A .cu in a subdirectory of Cub/ would fall out of the set into the ordinary
+# A .cu in a subdirectory of Scan/ would fall out of the set into the ordinary
 # (RDC, device LTO) build without notice: stop instead.
 file(GLOB_RECURSE _thor_reducer_cuda_tree CONFIGURE_DEPENDS
-        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Cub/*.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Scan/*.cu"
         "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/*.cu"
 )
 foreach (_thor_reducer_cuda_source IN LISTS _thor_reducer_cuda_tree)
     if (NOT _thor_reducer_cuda_source IN_LIST THOR_CUB_CUDA_SELF_CONTAINED_SOURCES)
-        message(FATAL_ERROR "Reducer CUDA source outside the self-contained set (move it to Cub/ or Reduction/): "
-                "${_thor_reducer_cuda_source}")
+        message(FATAL_ERROR "Reducer CUDA source outside the self-contained set "
+                "(move it to Scan/ or Reduction/): ${_thor_reducer_cuda_source}")
     endif ()
 endforeach ()
 unset(_thor_reducer_cuda_tree)
@@ -1307,8 +1303,6 @@ if (THOR_CUDA_STACK STREQUAL "python")
             "${THOR_NVRTC_LIBRARY}"
             "${THOR_CUBLAS_LIBRARY}"
             "${THOR_CUBLASLT_LIBRARY}"
-            "${THOR_CUSOLVER_LIBRARY}"
-            "${THOR_CUSPARSE_LIBRARY}"
             "${THOR_CUDNN_LIBRARY}"
     )
         if (NOT EXISTS "${_thor_required_python_cuda_path}")
@@ -1371,8 +1365,6 @@ else ()
             CUDA::cudart
             CUDA::cublas
             CUDA::cublasLt
-            CUDA::cusolver
-            CUDA::cusparse
             CUDA::nvrtc
     )
 
@@ -2052,9 +2044,7 @@ target_compile_options(thor_softmax_benchmark PRIVATE
         $<$<CONFIG:Debug>:-O0 -ggdb>
 )
 
-# The CUB scan wrappers in TB/s by row count, on the flat, uniform-segmented and offset-segmented paths, beside CUB
-# used directly (DeviceScan, ScanByKey). Compiled as CUDA for the direct CUB calls.
-set_source_files_properties(benchmarks/ScanBenchmark.cpp PROPERTIES LANGUAGE CUDA)
+# Thor's scan kernels (SegmentedScan, ScanMinMaxBackward) in TB/s by row count.
 add_executable(thor_scan_benchmark EXCLUDE_FROM_ALL
         benchmarks/ScanBenchmark.cpp
 )
@@ -2066,7 +2056,6 @@ target_compile_options(thor_scan_benchmark PRIVATE
         $<$<CONFIG:Release>:-O3>
         $<$<CONFIG:RelWithDebInfo>:-O3>
         $<$<CONFIG:Debug>:-O0>
-        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G>
 )
 
 # SERIALIZATION-OWNERSHIP-2C-G4-A: executable public-layer SDPA benchmark

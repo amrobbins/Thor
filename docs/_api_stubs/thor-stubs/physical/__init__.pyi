@@ -845,7 +845,7 @@ class Expression:
         out-of-vocabulary embedding row does; no out-of-bounds memory is read.
         """
 
-    def scan(self, op: thor._thor.physical.ScanOp = thor._thor.physical.ScanOp.sum, axis: int = -1, inclusive: bool = True) -> Expression:
+    def scan(self, op: thor._thor.physical.ScanOp = thor._thor.physical.ScanOp.sum, axis: int = -1, inclusive: bool = True, reverse: bool = False) -> Expression:
         """
         Prefix scan along the final contiguous axis.
 
@@ -853,8 +853,12 @@ class Expression:
         ``ScanOp.product``. Index ops ``ScanOp.arg_min`` and ``ScanOp.arg_max`` return
         UINT32 flattened input indices for the winning prefix element. ``inclusive=True``
         includes the current element; ``inclusive=False`` returns each prefix before the
-        current element. Value-scan output shape and dtype match the input; use
-        ``cast(thor.DataType.uint32)`` to scan masks as counts.
+        current element. Inputs are UINT32, FP8 (E4M3, E5M2), FP16, BF16 or FP32. Value-scan output shape matches the
+        input, and so does its dtype unless a float sum or product is asked for another float dtype with
+        ``with_output_dtype()``; use ``cast(thor.DataType.uint32)`` to scan masks as counts.
+        ``reverse=True`` runs each row from its last element to its first: each output covers
+        the elements from the row's end up to it, and of equal elements an arg scan takes the
+        last in the row.
         """
 
     def prefix_count(self, inclusive: bool = True, axis: int = -1) -> Expression:
@@ -865,22 +869,25 @@ class Expression:
         intended for nonzero/compaction/ragged-packing index generation.
         """
 
-    def segmented_scan(self, offsets: Expression, op: thor._thor.physical.ScanOp = thor._thor.physical.ScanOp.sum, inclusive: bool = True) -> Expression:
+    def segmented_scan(self, offsets: Expression, op: thor._thor.physical.ScanOp = thor._thor.physical.ScanOp.sum, inclusive: bool = True, reverse: bool = False) -> Expression:
         """
         Ragged segmented prefix scan over the flattened input using a rank-1 offsets
-        tensor of shape [num_segments + 1]. Offsets must be UINT32 or UINT64. The
-        output shape and dtype match the input for value scans. Arg scans return UINT32
-        flattened input indices for the winning prefix element.
+        tensor of shape [num_segments + 1]. Offsets must be UINT32 or UINT64. Inputs and
+        output dtypes are as for ``scan()``. Arg scans return UINT32 flattened input
+        indices for the winning prefix element. ``reverse=True`` runs each segment from its
+        last element to its first, as for ``scan()``.
         """
 
-    def scan_with_indices(self, op: thor._thor.physical.ScanOp, axis: int = -1, inclusive: bool = True) -> tuple:
+    def scan_with_indices(self, op: thor._thor.physical.ScanOp, axis: int = -1, inclusive: bool = True, reverse: bool = False) -> tuple:
         """
         Return paired prefix min/max values and UINT32 flattened input indices from one coalescible scan stage.
+        ``reverse=True`` runs each row from its last element to its first, as for ``scan()``.
         """
 
-    def segmented_scan_with_indices(self, offsets: Expression, op: thor._thor.physical.ScanOp, inclusive: bool = True) -> tuple:
+    def segmented_scan_with_indices(self, offsets: Expression, op: thor._thor.physical.ScanOp, inclusive: bool = True, reverse: bool = False) -> tuple:
         """
         Return paired ragged segmented prefix min/max values and UINT32 flattened input indices from one coalescible scan stage.
+        ``reverse=True`` runs each segment from its last element to its first, as for ``scan()``.
         """
 
     def exclusive_scan_sum(self, axis: int = -1) -> Expression:

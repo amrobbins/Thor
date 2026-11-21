@@ -1611,6 +1611,56 @@ TEST(EmbeddingSparseBackwardTest, SparseGradientProducerUsesUint32RowStorageForV
     expectAllClose(values, std::vector<float>{8.0f, -11.0f, 2.0f}, 1e-5f, 1e-5f, "uint32 sparse gradient values");
 }
 
+TEST(EmbeddingSparseBackwardTest, SparseGradientSortCoversRowKeysUpToTheSentinel) {
+    // The sort covers bit_width(vocabularySize) bits: the row keys are at most vocabularySize, the sentinel of invalid
+    // tokens. With vocabularySize a power of two the sentinel is the one key that needs the top bit, so a sort a bit
+    // short would order the invalid tokens among row 0's and split its run. Row vocabularySize - 1 is the largest valid
+    // key.
+    Stream stream(gpuPlacement);
+    struct Case {
+        uint64_t vocabularySize;
+        DataType rowDataType;
+        int sortEndBit;
+    };
+    for (const Case& c : {Case{1, DataType::UINT16, 1},
+                          Case{1024, DataType::UINT16, 11},
+                          Case{1024, DataType::UINT64, 11},
+                          Case{65536, DataType::UINT32, 17}}) {
+        SCOPED_TRACE("vocabulary " + std::to_string(c.vocabularySize));
+        const uint32_t vocab = static_cast<uint32_t>(c.vocabularySize);
+        const std::vector<uint32_t> indices{0, vocab, 0, vocab - 1, vocab + 7, vocab - 1, 0};
+        const std::vector<float> upstream{1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f};
+
+        Tensor cpuIndices = makeCpuUint32Tensor({indices.size()}, indices);
+        Tensor cpuUpstream = makeCpuFloatTensor(DataType::FP32, {indices.size(), 1}, upstream);
+        Tensor gpuIndices = copyCpuToGpu(cpuIndices, stream);
+        Tensor gpuUpstream = copyCpuToGpu(cpuUpstream, stream);
+
+        SparseRowGradient gradient = SparseRowGradient::allocate(gpuPlacement,
+                                                                 /*capacity=*/std::min<uint64_t>(indices.size(), c.vocabularySize),
+                                                                 c.vocabularySize,
+                                                                 /*embeddingDim=*/1,
+                                                                 DataType::FP32,
+                                                                 c.rowDataType);
+        auto prepared = prepareEmbeddingSparseGradient(gpuIndices, gpuUpstream, gradient, std::nullopt);
+        EmbeddingSparseGradientProfileResult profile =
+            profilePreparedEmbeddingSparseGradient(*prepared, gpuIndices, gpuUpstream, gradient, stream);
+        stream.synchronize();
+        EXPECT_EQ(profile.sortEndBit, c.sortEndBit);
+
+        const std::vector<uint64_t> expectedRows = vocab == 1 ? std::vector<uint64_t>{0} : std::vector<uint64_t>{0, vocab - 1};
+        const std::vector<float> expectedValues = vocab == 1 ? std::vector<float>{109.0f} : std::vector<float>{69.0f, 40.0f};
+        const std::vector<uint64_t> numRows = copyGpuRowTensorToUint64Values(gradient.numRows, stream);
+        ASSERT_EQ(numRows[0], expectedRows.size());
+        std::vector<uint64_t> rows = copyGpuRowTensorToUint64Values(gradient.rows, stream);
+        rows.resize(numRows[0]);
+        EXPECT_EQ(rows, expectedRows);
+        std::vector<float> values = copyGpuFloatTensorToValues(gradient.values, stream);
+        values.resize(expectedValues.size());
+        expectAllClose(values, expectedValues, 1e-5f, 1e-5f, "sparse gradient values at the top of the key range");
+    }
+}
+
 TEST(EmbeddingSparseBackwardTest, SparseGradientProducerAccumulatesFp16AndBf16UpstreamIntoFp32Values) {
     Stream stream(gpuPlacement);
 

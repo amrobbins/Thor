@@ -25,14 +25,14 @@
 #include "Utilities/Expression/CompiledEquation.h"
 #include "Utilities/Expression/ConvolutionOperand.h"
 #include "Utilities/Expression/InPlaceRopeKernel.h"
-#include "Utilities/Expression/FlatScatterAddKernel.h"
 #include "Utilities/Expression/ExecutionDiagnostics.h"
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
 #include "Utilities/TensorOperations/DeepLearning/CudnnRmsNorm.h"
 #include "Utilities/TensorOperations/DeepLearning/CudnnLayerNorm.h"
 #include "Utilities/TensorOperations/DeepLearning/CudnnRaggedSoftmax.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingKernels.h"
-#include "Utilities/TensorOperations/Cub/CubDevicePrimitives.h"
+#include "Utilities/TensorOperations/Scan/ScanMinMaxBackward.h"
+#include "Utilities/TensorOperations/Scan/SegmentedScan.h"
 #include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
 #include "Utilities/TensorOperations/Copy/StridedCopy.h"
 #include "Utilities/TensorOperations/Reduction/ArgReducer.h"
@@ -1038,6 +1038,9 @@ class StampedRaggedConv1dCausalBackwardFilter {
     mutable std::shared_ptr<RaggedConv1dPaddedBackwardFilterState> padded_backward_filter_state;
 };
 
+// The scan kernel's op for an Expression scan op.
+[[nodiscard]] SegmentedScanOp segmentedScanOpFor(ScanOp op);
+
 class StampedScan {
    public:
     void run();
@@ -1065,16 +1068,8 @@ class StampedScan {
     mutable Tensor value_output;
     const std::optional<Tensor> segment_offsets;
     bool has_value_output = false;
-    Tensor temp_storage;
     Stream stream;
-    bool uniform_segmented = false;
-    bool ragged_segmented = false;
-    CubDeviceScanPlan scan_plan;
-    CubDeviceArgScanPlan arg_scan_plan;
-    CubDeviceSegmentedUniformScanPlan segmented_scan_plan;
-    CubDeviceSegmentedUniformArgScanPlan segmented_arg_scan_plan;
-    CubDeviceSegmentedScanPlan ragged_segmented_scan_plan;
-    CubDeviceSegmentedArgScanPlan ragged_segmented_arg_scan_plan;
+    std::shared_ptr<const SegmentedScan> segmented_scan;  // Thor's scan kernel, which runs every scan
 };
 
 class StampedSoftmax {
@@ -1795,23 +1790,22 @@ class StampedScanMinMaxBackward {
     [[nodiscard]] std::optional<uint64_t> runtimeLogicalByteCount(uint64_t valid_example_count = 0) const noexcept;
 
     StampedScanMinMaxBackward(std::shared_ptr<CompiledScanMinMaxBackward> compiled,
-                              std::shared_ptr<StampedScan> arg_scan,
-                              std::shared_ptr<BuiltFlatScatterAdd> scatter_add,
                               const Tensor& input,
                               const Tensor& grad_output,
                               const Tensor& output,
-                              const Tensor& indices,
-                              const Stream& stream);
+                              const Stream& stream,
+                              std::optional<Tensor> segment_offsets = std::nullopt);
 
    private:
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalElementCount(uint64_t valid_example_count) const noexcept;
+
     const std::shared_ptr<CompiledScanMinMaxBackward> compiled_scan_minmax_backward;
-    const std::shared_ptr<StampedScan> arg_scan;
-    const std::shared_ptr<BuiltFlatScatterAdd> scatter_add;
     const Tensor input;
     const Tensor grad_output;
     Tensor output;
-    Tensor indices;
+    const std::optional<Tensor> segment_offsets;
     Stream stream;
+    std::shared_ptr<const ScanMinMaxBackward> backward;  // Thor's fused kernel: x and dy in, dx out
 };
 
 class StampedReduceMinMaxBackward {

@@ -71,7 +71,7 @@ def test_build_requirements_are_derived_from_single_cuda_version():
     requirements = build_cuda_stack.cuda_build_requirements()
 
     assert requirements[0] == (
-        "cuda-toolkit[cccl,cublas,cudart,cusolver,cusparse,nvjitlink,nvrtc]>=13.3,<13.4"
+        "cuda-toolkit[cccl,cublas,cudart,nvjitlink,nvrtc]>=13.3,<13.4"
     )
     assert "nvidia-cudnn-cu13>=9.23,<10" in requirements
     assert "nvidia-cudnn-frontend>=1.25,<2" in requirements
@@ -127,8 +127,6 @@ def test_dynamic_dependencies_freeze_exact_installed_cuda_stack(monkeypatch, tmp
         "nvidia-cuda-nvrtc": "13.3.34",
         "nvidia-nvjitlink": "13.3.34",
         "nvidia-cublas": "13.5.2.1",
-        "nvidia-cusparse": "12.8.2.1",
-        "nvidia-cusolver": "12.2.3.1",
         "nvidia-cuda-cccl": "13.3.4.1",
         "nvidia-cudnn-cu13": "9.23.3.1",
         "nvidia-cudnn-frontend": "1.25.1",

@@ -30,8 +30,6 @@ CUDA_TOOLKIT_EXTRAS = (
     "cccl",
     "cublas",
     "cudart",
-    "cusolver",
-    "cusparse",
     "nvjitlink",
     "nvrtc",
 )
@@ -44,8 +42,6 @@ CUDA_TOOLKIT_COMPONENT_DISTRIBUTIONS = (
     "nvidia-cuda-nvrtc",
     "nvidia-nvjitlink",
     "nvidia-cublas",
-    "nvidia-cusparse",
-    "nvidia-cusolver",
     "nvidia-cuda-cccl",
 )
 
@@ -99,8 +95,6 @@ LIBRARY_SPECS = (
     LibrarySpec("nvidia-cuda-nvrtc", ("**/libnvrtc.so.13",)),
     LibrarySpec("nvidia-cublas", ("**/libcublas.so.13",)),
     LibrarySpec("nvidia-cublas", ("**/libcublasLt.so.13",)),
-    LibrarySpec("nvidia-cusparse", ("**/libcusparse.so.12",)),
-    LibrarySpec("nvidia-cusolver", ("**/libcusolver.so.12",)),
     LibrarySpec("nvidia-cudnn-cu13", ("**/libcudnn.so.9",)),
 )
 

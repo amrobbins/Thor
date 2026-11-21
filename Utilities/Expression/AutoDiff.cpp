@@ -6258,15 +6258,16 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                     const ExprOp backward_op = node.op == ExprOp::SEGMENTED_SCAN
                         ? (node.scan_op == ScanOp::Min ? ExprOp::SEGMENTED_SCAN_MIN_BACKWARD : ExprOp::SEGMENTED_SCAN_MAX_BACKWARD)
                         : (node.scan_op == ScanOp::Min ? ExprOp::SCAN_MIN_BACKWARD : ExprOp::SCAN_MAX_BACKWARD);
-                    const uint32_t grad_for_scatter = builder.cast(grad_like_output, DataType::FP32);
+                    // dy as it arrives and dx in x's gradient dtype, as the sum scan's backward: the kernel converts
+                    // both (ScanMinMaxBackward.h), so no cast is needed.
                     dx = builder.scanMinMaxBackward(backward_op,
                                                     builder.forwardValue(node.lhs),
-                                                    grad_for_scatter,
+                                                    grad_like_output,
                                                     segmented_offsets,
                                                     node.scan_mode,
                                                     node.scan_axis,
                                                     node.scan_reverse,
-                                                    DataType::FP32,
+                                                    lhs_grad_dtype,
                                                     node.op == ExprOp::SEGMENTED_SCAN ? node.ragged_runtime_batch_size : 0,
                                                     node.op == ExprOp::SEGMENTED_SCAN ? node.ragged_runtime_max_active_values : 0,
                                                     node.op == ExprOp::SEGMENTED_SCAN ? node.ragged_runtime_elements_per_value : 1);

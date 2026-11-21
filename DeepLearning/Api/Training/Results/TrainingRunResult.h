@@ -88,7 +88,7 @@ namespace training_run_result_detail {
     const std::string lower = lowercaseAscii(message);
     return lower.find("out of memory") != std::string::npos || lower.find("gpu out of memory") != std::string::npos ||
            lower.find("cudaerrormemoryallocation") != std::string::npos || lower.find("cuda_error_out_of_memory") != std::string::npos ||
-           lower.find("cublas_status_alloc_failed") != std::string::npos || lower.find("cusparse_status_alloc_failed") != std::string::npos ||
+           lower.find("cublas_status_alloc_failed") != std::string::npos ||
            lower.find("cudnn_status_alloc_failed") != std::string::npos ||
            lower.find("insufficient_device_memory") != std::string::npos ||
            lower.find("insufficient device memory") != std::string::npos ||

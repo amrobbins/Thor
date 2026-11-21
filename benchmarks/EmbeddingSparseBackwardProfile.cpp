@@ -552,7 +552,7 @@ void printCsvHeader() {
                  "sparse_gradient_ms,sparse_update_ms,total_backward_update_ms,graph_sparse_gradient_ms,"
                  "active_rows,singleton_rows,duplicate_rows,low_run_rows,high_run_rows,ultra_high_run_rows,"
                  "low_run_tokens,high_run_tokens,ultra_high_run_tokens,max_run_count,"
-                 "sort_temp_bytes,rle_temp_bytes,scan_temp_bytes\n";
+                 "sort_end_bit,sort_temp_bytes,rle_temp_bytes,scan_temp_bytes\n";
 }
 
 void printCsvRow(const CaseConfig& cfg,
@@ -571,7 +571,7 @@ void printCsvRow(const CaseConfig& cfg,
               << stats.activeRows.mean() << ',' << stats.singletonRows.mean() << ',' << stats.duplicateRows.mean() << ','
               << stats.lowRunRows.mean() << ',' << stats.highRunRows.mean() << ',' << stats.ultraHighRunRows.mean() << ','
               << stats.lowRunTokens.mean() << ',' << stats.highRunTokens.mean() << ',' << stats.ultraHighRunTokens.mean() << ','
-              << stats.maxRunCount.mean() << ',' << meta.sortTempBytes << ',' << meta.rleTempBytes << ',' << meta.scanTempBytes << '\n';
+              << stats.maxRunCount.mean() << ',' << meta.sortEndBit << ',' << meta.sortTempBytes << ',' << meta.rleTempBytes << ',' << meta.scanTempBytes << '\n';
 }
 
 bool keepCase(const Options& opts, const CaseConfig& cfg) {

@@ -921,11 +921,14 @@ class Expression {
     // Gathers along `axis` with UINT32/UINT64 indices; an index >= dims[axis] yields 0.
     [[nodiscard]] Expression takeAlongAxis(const Expression& indices, int64_t axis = -1) const;
     [[nodiscard]] static Expression takeAlongAxis(const Expression& input, const Expression& indices, int64_t axis = -1);
-    [[nodiscard]] Expression scan(ScanOp op = ScanOp::Sum, int64_t axis = -1, bool inclusive = true) const;
+    // A reverse scan runs each row from its last element to its first (SegmentedScan.h): "so far" counts from the
+    // row's end, and of equal elements an arg scan takes the first it meets, the last in the row.
+    [[nodiscard]] Expression scan(ScanOp op = ScanOp::Sum, int64_t axis = -1, bool inclusive = true, bool reverse = false) const;
     [[nodiscard]] static Expression scan(const Expression& input,
                                          ScanOp op = ScanOp::Sum,
                                          int64_t axis = -1,
-                                         bool inclusive = true);
+                                         bool inclusive = true,
+                                         bool reverse = false);
     [[nodiscard]] Expression exclusiveScanSum(int64_t axis = -1) const { return scan(ScanOp::Sum, axis, false); }
     [[nodiscard]] Expression inclusiveScanSum(int64_t axis = -1) const { return scan(ScanOp::Sum, axis, true); }
     [[nodiscard]] Expression prefixCount(bool inclusive = true, int64_t axis = -1) const;
@@ -952,10 +955,14 @@ class Expression {
         uint64_t max_active_values,
         uint64_t elements_per_value,
         RaggedRuntimeExtentSource source = RaggedRuntimeExtentSource::DEVICE_OFFSETS) const;
-    [[nodiscard]] std::pair<Expression, Expression> scanWithIndices(ScanOp op, int64_t axis = -1, bool inclusive = true) const;
+    [[nodiscard]] std::pair<Expression, Expression> scanWithIndices(ScanOp op,
+                                                                    int64_t axis = -1,
+                                                                    bool inclusive = true,
+                                                                    bool reverse = false) const;
     [[nodiscard]] std::pair<Expression, Expression> segmentedScanWithIndices(const Expression& offsets,
                                                                              ScanOp op,
-                                                                             bool inclusive = true) const;
+                                                                             bool inclusive = true,
+                                                                             bool reverse = false) const;
     [[nodiscard]] static Expression exclusiveScanSum(const Expression& input, int64_t axis = -1) {
         return scan(input, ScanOp::Sum, axis, false);
     }

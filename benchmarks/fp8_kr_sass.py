@@ -12,9 +12,9 @@ and prints the summary. Zip <out> and attach it. Requires cuobjdump and c++filt 
 Usage: fp8_kr_sass.py --build BUILD_DIR --out OUT_DIR [--filter KR] [--object NAME.cu.o]
 
 --object picks another translation unit's object (default the KR one), e.g. RKAlignedK.cu.o for the AlignedK
-kernels; FP32 kernel names (fp32...Kernel) are shortened like FP8 ones. The default filter, KR, keeps every kernel of
-KR.cu.o (their family names are krValue*, krArg*, krCarriedArg*; FP8's own fp8KRArgVectorKernel, FP32's own
-fp32KRArg*).
+kernels, or several by a glob, e.g. 'SegmentedScan*.cu.o' for the scan kernels (every match is read); FP32 kernel
+names (fp32...Kernel) are shortened like FP8 ones. The default filter, KR, keeps every kernel of KR.cu.o (their
+family names are krValue*, krArg*, krCarriedArg*; FP8's own fp8KRArgVectorKernel, FP32's own fp32KRArg*).
 """
 
 import argparse
@@ -139,7 +139,8 @@ def main():
     parser.add_argument("--build", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--filter", default="KR", help="substring of the demangled kernel names to keep")
-    parser.add_argument("--object", default=OBJECT_NAME, help="object file name to search for under --build")
+    parser.add_argument("--object", default=OBJECT_NAME,
+                        help="object file name, or a glob, to search for under --build; every match is read")
     args = parser.parse_args()
     for program in ("cuobjdump", "c++filt"):
         if shutil.which(program) is None:
@@ -147,9 +148,31 @@ def main():
     objects = sorted(args.build.rglob(args.object))
     if not objects:
         sys.exit(f"no {args.object} under {args.build} (build Thor first)")
-    obj = objects[0].resolve()
     args.out.mkdir(parents=True, exist_ok=True)
 
+    rows = []
+    for obj in (o.resolve() for o in objects):
+        rows += object_rows(obj, args)
+
+    if not rows:
+        sys.exit(f"no kernels matching '{args.filter}' in {', '.join(str(o) for o in objects)}")
+    columns = ["arch", "kernel", "reg", "stack", "local", "shared", "instructions"] + list(MIX)
+    with open(args.out / "kr_sass_summary.csv", "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows)
+    for obj in objects:
+        print(f"# object {obj.resolve()}")
+    print(f"# {len(rows)} kernels; listings in {args.out}/<arch>/, summary in {args.out}/kr_sass_summary.csv")
+    widths = {c: max(len(c), *(len(str(r[c])) for r in rows)) for c in columns}
+    print("  ".join(c.rjust(widths[c]) if c not in ("arch", "kernel") else c.ljust(widths[c]) for c in columns))
+    for r in sorted(rows, key=lambda r: (r["arch"], r["kernel"])):
+        print("  ".join(str(r[c]).rjust(widths[c]) if c not in ("arch", "kernel") else str(r[c]).ljust(widths[c])
+                        for c in columns))
+
+
+def object_rows(obj, args):
+    """The kept kernels of one object: their listings written under --out, their summary rows returned."""
     rows = []
     with tempfile.TemporaryDirectory() as tmp:
         run(["cuobjdump", "-xelf", "all", str(obj)], cwd=tmp)
@@ -177,21 +200,7 @@ def main():
                 row["instructions"] = counts["instructions"]
                 row.update({column: counts[column] for column in MIX})
                 rows.append(row)
-
-    if not rows:
-        sys.exit(f"no kernels matching '{args.filter}' in {obj}")
-    columns = ["arch", "kernel", "reg", "stack", "local", "shared", "instructions"] + list(MIX)
-    with open(args.out / "kr_sass_summary.csv", "w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=columns)
-        writer.writeheader()
-        writer.writerows(rows)
-    print(f"# object {obj}")
-    print(f"# {len(rows)} kernels; listings in {args.out}/<arch>/, summary in {args.out}/kr_sass_summary.csv")
-    widths = {c: max(len(c), *(len(str(r[c])) for r in rows)) for c in columns}
-    print("  ".join(c.rjust(widths[c]) if c not in ("arch", "kernel") else c.ljust(widths[c]) for c in columns))
-    for r in sorted(rows, key=lambda r: (r["arch"], r["kernel"])):
-        print("  ".join(str(r[c]).rjust(widths[c]) if c not in ("arch", "kernel") else str(r[c]).ljust(widths[c])
-                        for c in columns))
+    return rows
 
 
 if __name__ == "__main__":

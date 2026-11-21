@@ -3771,7 +3771,9 @@ ScanMode scanModeFromInclusive(bool inclusive) { return inclusive ? ScanMode::In
 
 }  // namespace
 
-Expression Expression::scan(ScanOp op, int64_t axis, bool inclusive) const { return scan(*this, op, axis, inclusive); }
+Expression Expression::scan(ScanOp op, int64_t axis, bool inclusive, bool reverse) const {
+    return scan(*this, op, axis, inclusive, reverse);
+}
 
 Expression Expression::prefixCount(bool inclusive, int64_t axis) const {
     return this->cast(DataType::UINT32).scan(ScanOp::Sum, axis, inclusive);
@@ -3807,7 +3809,7 @@ ScanOp indexScanOpForValueScanOp(ScanOp op) {
 
 }  // namespace
 
-Expression Expression::scan(const Expression& input, ScanOp op, int64_t axis, bool inclusive) {
+Expression Expression::scan(const Expression& input, ScanOp op, int64_t axis, bool inclusive, bool reverse) {
     if (axis < -1) {
         throw std::invalid_argument("Expression::scan currently supports only axis=-1 or an explicit non-negative final axis.");
     }
@@ -3819,6 +3821,7 @@ Expression Expression::scan(const Expression& input, ScanOp op, int64_t axis, bo
     semantics.scan_op = op;
     semantics.scan_mode = mode;
     semantics.scan_axis = static_cast<uint64_t>(axis < 0 ? UINT64_MAX : axis);
+    semantics.scan_reverse = reverse;
     return unaryOp(input, std::move(semantics));
 }
 
@@ -3940,7 +3943,7 @@ Expression Expression::withRaggedRuntimeExtent(const Expression& partition_input
     return binaryOp(*this, partition_input, std::move(semantics));
 }
 
-std::pair<Expression, Expression> Expression::scanWithIndices(ScanOp op, int64_t axis, bool inclusive) const {
+std::pair<Expression, Expression> Expression::scanWithIndices(ScanOp op, int64_t axis, bool inclusive, bool reverse) const {
     if (!node) {
         throw std::runtime_error("Cannot apply scanWithIndices to an empty expression");
     }
@@ -3957,12 +3960,14 @@ std::pair<Expression, Expression> Expression::scanWithIndices(ScanOp op, int64_t
     value_semantics.scan_op = op;
     value_semantics.scan_mode = mode;
     value_semantics.scan_axis = normalized_axis;
+    value_semantics.scan_reverse = reverse;
 
     ExprNode index_semantics{};
     index_semantics.op = ExprOp::SCAN;
     index_semantics.scan_op = indexScanOpForValueScanOp(op);
     index_semantics.scan_mode = mode;
     index_semantics.scan_axis = normalized_axis;
+    index_semantics.scan_reverse = reverse;
 
     return {
         unaryOp(*this, std::move(value_semantics)),
@@ -3972,7 +3977,8 @@ std::pair<Expression, Expression> Expression::scanWithIndices(ScanOp op, int64_t
 
 std::pair<Expression, Expression> Expression::segmentedScanWithIndices(const Expression& offsets,
                                                                        ScanOp op,
-                                                                       bool inclusive) const {
+                                                                       bool inclusive,
+                                                                       bool reverse) const {
     if (!node || !offsets.node) {
         throw std::runtime_error("Cannot apply segmentedScanWithIndices to an empty expression");
     }
@@ -3985,12 +3991,14 @@ std::pair<Expression, Expression> Expression::segmentedScanWithIndices(const Exp
     value_semantics.scan_op = op;
     value_semantics.scan_mode = mode;
     value_semantics.scan_axis = UINT64_MAX;
+    value_semantics.scan_reverse = reverse;
 
     ExprNode index_semantics{};
     index_semantics.op = ExprOp::SEGMENTED_SCAN;
     index_semantics.scan_op = indexScanOpForValueScanOp(op);
     index_semantics.scan_mode = mode;
     index_semantics.scan_axis = UINT64_MAX;
+    index_semantics.scan_reverse = reverse;
 
     return {
         binaryOp(*this, offsets, std::move(value_semantics)),

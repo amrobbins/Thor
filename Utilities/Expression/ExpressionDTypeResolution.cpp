@@ -121,14 +121,14 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
         throw std::runtime_error("Unsupported passthrough dtype in toSupportedComputeDType.");
     }
 
-    if (isScanOp(op)) {
+    if (isScanOp(op)) {  // the scan kernel's dtypes (SegmentedScan.h)
         switch (requested_compute_dtype) {
             case DataType::UINT32:
-            case DataType::UINT64:
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
             case DataType::FP16:
             case DataType::BF16:
             case DataType::FP32:
-            case DataType::FP64:
                 return requested_compute_dtype;
             default:
                 throw std::runtime_error("Unsupported scan dtype in toSupportedComputeDType.");
@@ -937,14 +937,16 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
                                          TensorDescriptor::getElementTypeName(offsets_dtype));
             }
         }
-        const DataType input_dtype = resolved_output_dtypes[node.lhs];
+        // A value scan writes its input's dtype unless asked for another; the scan stage's compile checks that the kernel
+        // takes the pair (a float sum or product may write any float dtype).
         const bool arg_scan = node.scan_op == ScanOp::ArgMin || node.scan_op == ScanOp::ArgMax;
-        const DataType default_output_dtype = arg_scan ? DataType::UINT32 : input_dtype;
-        if (node.output_dtype.has_value() && node.output_dtype.value() != default_output_dtype) {
-            throw std::runtime_error(arg_scan ? "Expression arg scan output dtype must be UINT32."
-                                              : "Expression scan currently requires output dtype to match input dtype.");
+        if (arg_scan) {
+            if (node.output_dtype.has_value() && node.output_dtype.value() != DataType::UINT32) {
+                throw std::runtime_error("Expression arg scan output dtype must be UINT32.");
+            }
+            return DataType::UINT32;
         }
-        return default_output_dtype;
+        return node.output_dtype.value_or(resolved_output_dtypes[node.lhs]);
     }
 
     if (isSegmentedReduceOp(node.op)) {
@@ -1017,11 +1019,9 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
                                          TensorDescriptor::getElementTypeName(offsets_dtype));
             }
         }
-        const DataType grad_dtype = resolved_output_dtypes[node.rhs];
-        if (node.output_dtype.has_value() && node.output_dtype.value() != grad_dtype) {
-            throw std::runtime_error("scan min/max backward output dtype must match grad-output dtype.");
-        }
-        return grad_dtype;
+        // dx in the dtype asked for (autodiff asks for x's gradient dtype), else dy's: the kernel reads x and dy and
+        // writes dx each in its own float dtype (ScanMinMaxBackward.h).
+        return node.output_dtype.value_or(resolved_output_dtypes[node.rhs]);
     }
 
     if (isReductionOp(node.op)) {

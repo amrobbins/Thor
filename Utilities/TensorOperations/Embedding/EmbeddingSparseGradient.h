@@ -44,6 +44,7 @@ struct EmbeddingSparseGradientProfileResult {
     DataType gradientDataType = DataType::FP32;
     DataType rowDataType = DataType::UINT64;
     bool fusedSparseRowUpdate = false;
+    int sortEndBit = 0;
     size_t sortTempBytes = 0;
     size_t rleTempBytes = 0;
     size_t scanTempBytes = 0;

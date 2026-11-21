@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """The reducer's compile contract, checked from a build's compile_commands.json. Read-only.
 
-The reducer's CUDA translation units (every .cu directly in Utilities/TensorOperations/Cub/ and every .cu anywhere
-under Utilities/TensorOperations/Reduction/) compile as self-contained objects: no relocatable device code and no
-device LTO (CMakeLists.txt, THOR_CUB_CUDA_SELF_CONTAINED_SOURCES). Compiled like the rest of Thor they regress, FP8
+The reducer's and the scan kernel's CUDA translation units (every .cu directly in Utilities/TensorOperations/Scan/,
+and every .cu anywhere under Utilities/TensorOperations/Reduction/) compile as
+self-contained objects: no relocatable device code and no device LTO (CMakeLists.txt,
+THOR_CUB_CUDA_SELF_CONTAINED_SOURCES). Compiled like the rest of Thor they regress, FP8
 E5M2 especially. This tool checks, for every such file:
 
   - it has a compile command, and that command builds an object of the self-contained target (ThorCubCuda*Objects);
@@ -11,7 +12,7 @@ E5M2 especially. This tool checks, for every such file:
     link-time optimization (-dlto, --dlink-time-opt, -flto, -gen-opt-lto, an lto_NN target code);
   - with --compare=OLD.json (an earlier build's compile_commands.json): its options equal the old command's for the
     same file, or for the file it was moved from (RENAMED_SOURCES) or split out of (SPLIT_SOURCES), once the file,
-    object and dependency paths are set aside.
+    object and dependency paths are set aside; files with no predecessor (NEW_SOURCES) are not compared.
 
 Usage (from the build directory; copy compile_commands.json aside before reconfiguring to keep the old one):
   python3 ../benchmarks/reducer_compile_contract.py --build . --source ..
@@ -29,6 +30,7 @@ import sys
 from pathlib import Path
 
 CUB = 'Utilities/TensorOperations/Cub'
+SCAN = 'Utilities/TensorOperations/Scan'
 REDUCTION = 'Utilities/TensorOperations/Reduction'
 # Reducer CUDA sources moved from an old path: new path -> old path, both from the source root.
 RENAMED_SOURCES = {
@@ -48,6 +50,9 @@ SPLIT_SOURCES = {
     f'{REDUCTION}/Kernels/KR.cu': f'{CUB}/CubReductionNarrowFlatRCooperative.cu',
     f'{REDUCTION}/Kernels/RKOneWindow.cu': f'{CUB}/CubReductionNarrowFlatRCooperative.cu',
 }
+# Files with no predecessor (from the source root): --compare has no old command for them.
+NEW_SOURCES = {f'{SCAN}/ScanMinMaxBackward.cu', f'{SCAN}/SegmentedScanArg.cu', f'{SCAN}/SegmentedScanF16.cu',
+               f'{SCAN}/SegmentedScanFp32.cu', f'{SCAN}/SegmentedScanFp8.cu'}
 # CMake asks nvcc for device LTO in the target code, --generate-code=arch=compute_120,code=[compute_120,lto_120],
 # not with -dlto: an lto_NN code is LTO.
 FORBIDDEN = re.compile(r'^(-rdc=true|--relocatable-device-code=true|-dc|--device-c|-dlto|--dlink-time-opt|-flto.*|'
@@ -56,7 +61,7 @@ TARGET = re.compile(r'ThorCubCuda\w*Objects')
 
 
 def reducer_sources(source: Path) -> list[str]:
-    files = sorted(p for p in (source / CUB).glob('*.cu')) + sorted((source / REDUCTION).rglob('*.cu'))
+    files = sorted((source / SCAN).glob('*.cu')) + sorted((source / REDUCTION).rglob('*.cu'))
     return [str(p.relative_to(source)) for p in files]
 
 
@@ -112,7 +117,7 @@ def check(build_commands: list[dict], source: Path, files: list[str], old_comman
             bad = [a for a in args if FORBIDDEN.match(a)]
             if bad:
                 problems.append('relocatable device code or LTO: ' + ' '.join(bad))
-            if theirs is not None:
+            if theirs is not None and rel not in NEW_SOURCES:
                 old = RENAMED_SOURCES.get(rel) or SPLIT_SOURCES.get(rel, rel)
                 if old not in theirs:
                     problems.append(f'no command for {old} in the old build')
@@ -125,6 +130,7 @@ def check(build_commands: list[dict], source: Path, files: list[str], old_comman
         note = 'ok' if not problems else '; '.join(problems)
         moved = f' (was {RENAMED_SOURCES[rel]})' if rel in RENAMED_SOURCES else ''
         moved = f' (split from {SPLIT_SOURCES[rel]})' if rel in SPLIT_SOURCES else moved
+        moved = ' (new: not compared)' if rel in NEW_SOURCES and theirs is not None else moved
         lines.append(f'  {rel}{moved}: {note}')
     lines.insert(0, f'# reducer compile contract: {len(files)} CUDA sources, {failures} failing')
     return lines, failures

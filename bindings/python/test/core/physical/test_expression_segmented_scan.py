@@ -165,7 +165,7 @@ def _segmented_minmax_scan_backward_reference(values: np.ndarray,
 @pytest.mark.parametrize("op", [ScanOp.min, ScanOp.max])
 @pytest.mark.parametrize("inclusive", [True, False])
 @pytest.mark.parametrize("dtype", [thor.DataType.fp16, thor.DataType.bf16, thor.DataType.fp32])
-def test_segmented_minmax_scan_backward_uses_arg_scan_and_flat_scatter_add(op: ScanOp, inclusive: bool, dtype: thor.DataType):
+def test_segmented_minmax_scan_backward_runs_one_stage_in_x_dtype(op: ScanOp, inclusive: bool, dtype: thor.DataType):
     x = ex.input("x")
     offsets = ex.input("offsets")
     upstream_name = "__grad_output"
@@ -187,13 +187,13 @@ def test_segmented_minmax_scan_backward_uses_arg_scan_and_flat_scatter_add(op: S
         "offsets": _host_to_gpu(offsets_np, thor.DataType.uint32, stream),
         upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
-    stage_kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
-    assert stage_kinds.count("ScanMinMaxBackward") == 1
+    # One stage and no cast: the backward reads x and dy as they arrive and writes dx in x's gradient dtype.
+    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["ScanMinMaxBackward"]
 
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
 
-    got = _copy_to_host(stamped.output("x_grad"), thor.DataType.fp32, stream)
+    got = _copy_to_host(stamped.output("x_grad"), dtype, stream).astype(np.float32)
     np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)
 
 

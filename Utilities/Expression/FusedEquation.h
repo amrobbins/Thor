@@ -13,7 +13,6 @@
 #include "Utilities/Expression/EquationRunner.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/InPlaceRopeKernel.h"
-#include "Utilities/Expression/FlatScatterAddKernel.h"
 #include "Utilities/Expression/SqueezeAxes.h"
 #include "Utilities/Expression/StampedEquation.h"
 

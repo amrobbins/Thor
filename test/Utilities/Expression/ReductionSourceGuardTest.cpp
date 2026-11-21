@@ -215,15 +215,14 @@ TEST(ExpressionReductionArchitecture, SegmentedReductionDoesNotRetainLegacyOffse
 
 // No value or arg reduction calls a CUB device reduction. Dense inputs run the dense planner, compact-permutation views
 // run it on the dense span of their bytes, rank-1 views run StridedR, and the reducer refuses the other views (a caller
-// runs them in two parts). The one CUB device-reduce call left is FlatScatterAddKernel's ReduceByKey, a keyed grouping
-// (it includes <cub/cub.cuh>, not the device-reduce headers).
+// runs them in two parts). No CUB device-reduce call is left anywhere (the last, FlatScatterAddKernel's ReduceByKey,
+// left with the scan min/max backward's old path in 1508).
 TEST(ExpressionReductionArchitecture, NoReductionCallsACubDeviceReduction) {
     const std::vector<std::filesystem::path> source_roots = {
         std::filesystem::path(SOURCE_DIR) / "Utilities",
         std::filesystem::path(SOURCE_DIR) / "DeepLearning",
         std::filesystem::path(SOURCE_DIR) / "bindings",
     };
-    const std::string keyed_grouping_owner = "Utilities/Expression/FlatScatterAddKernel.cu";
     const std::vector<std::string> forbidden_tokens = {
         "cub::DeviceReduce::",
         "cub::DeviceSegmentedReduce::",
@@ -235,22 +234,13 @@ TEST(ExpressionReductionArchitecture, NoReductionCallsACubDeviceReduction) {
     };
 
     std::vector<std::string> violations;
-    size_t keyed_grouping_calls = 0;
     forEachActiveSourceFile(source_roots, [&](const std::filesystem::path& path) {
         const std::string relative = std::filesystem::relative(path, SOURCE_DIR).generic_string();
-        std::string contents = readTextFile(path);
-        if (relative == keyed_grouping_owner) {
-            const std::string keyed = "cub::DeviceReduce::ReduceByKey(";
-            for (size_t at = contents.find(keyed); at != std::string::npos; at = contents.find(keyed, at)) {
-                contents.erase(at, keyed.size());
-                ++keyed_grouping_calls;
-            }
-        }
+        const std::string contents = readTextFile(path);
         for (const std::string& token : forbidden_tokens) {
             if (contents.find(token) != std::string::npos) violations.push_back(relative + ": " + token);
         }
     });
-    EXPECT_GT(keyed_grouping_calls, 0U) << "The guard's one exemption no longer matches FlatScatterAddKernel.cu.";
     EXPECT_TRUE(violations.empty()) << "Reductions must not call CUB device reductions.\n"
                                     << [&]() {
                                            std::ostringstream message;

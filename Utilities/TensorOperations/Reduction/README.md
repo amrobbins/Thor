@@ -590,8 +590,7 @@ Lessons that cost a patch each:
   - `GeneralReductionsAreCentralizedUnderCubReduction`: no direct general-purpose CUB value or ARG reduction in
     `Utilities`, `DeepLearning` or `bindings`.
   - `NoReductionCallsACubDeviceReduction`: no `cub::DeviceReduce::` or `cub::DeviceSegmentedReduce::` call and no
-    device-reduce header anywhere, this directory included. The one exemption is `FlatScatterAddKernel`'s
-    `ReduceByKey`, a keyed grouping rather than a tensor-axis reduction.
+    device-reduce header anywhere, this directory included, with no exemption.
   - `ArgReductionDoesNotRetainSupersededKernelFamilies`, `SegmentedReductionDoesNotRetainLegacyOffsetSegmentedKernels`,
     `ValueReductionDoesNotRetainTiledViewFamily`, `ValueReductionDoesNotRetainAdaptiveCooperativeTiledKernel`,
     `ValueReductionDoesNotRetainLegacyLogicalIndexFallback`: the deleted kernels and the logical-index backend stay

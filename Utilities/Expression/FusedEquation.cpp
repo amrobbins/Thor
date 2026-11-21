@@ -10938,21 +10938,7 @@ std::shared_ptr<StampedScanMinMaxBackward> FusedEquation::stampScanMinMaxBackwar
         }
     }
 
-    TensorDescriptor indicesDescriptor(DataType::UINT32, input.getDimensions());
-    Tensor indices(input.getPlacement(), indicesDescriptor);
-
-    const ScanOp arg_op = compiledStage->value_op == ScanOp::Min ? ScanOp::ArgMin : ScanOp::ArgMax;
-    auto arg_compiled = std::make_shared<CompiledScan>(arg_op,
-                                                       compiledStage->mode,
-                                                       compiledStage->axis,
-                                                       compiledStage->reverse,
-                                                       compiledStage->segmented_by_offsets,
-                                                       compiledStage->input_dtype,
-                                                       DataType::UINT32,
-                                                       compiledStage->offset_dtype);
-    auto arg_scan = std::make_shared<StampedScan>(arg_compiled, input, indices, stream, offsets, std::nullopt);
-    auto scatter = prepareFlatScatterAdd(grad_output, indices, output);
-    return std::make_shared<StampedScanMinMaxBackward>(compiledStage, arg_scan, scatter, input, grad_output, output, indices, stream);
+    return std::make_shared<StampedScanMinMaxBackward>(compiledStage, input, grad_output, output, stream, offsets);
 }
 
 StampedExecutionPlan FusedEquation::stampSingleOutput(const std::unordered_map<std::string, Tensor>& inputs,

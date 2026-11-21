@@ -4,6 +4,7 @@
 #include "Utilities/Common/Event.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Expression/CudaHelpers.h"
+#include "Utilities/TensorOperations/Cub/CubDevicePrimitiveSupport.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingSparseGradientCudaCompile.h"
 #include "Utilities/TensorOperations/Embedding/ReduceStageController.h"
 
@@ -835,9 +836,9 @@ EmbeddingSparseGradientReduceGridUpdateConfig ultraHighFinalReduceGridUpdateConf
 }
 
 template <typename RowT>
-size_t querySortTempBytes(RowT* keysIn, RowT* keysOut, uint32_t* valuesIn, uint32_t* valuesOut, int numItems) {
+size_t querySortTempBytes(RowT* keysIn, RowT* keysOut, uint32_t* valuesIn, uint32_t* valuesOut, int numItems, int endBit) {
     size_t bytes = 0;
-    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(nullptr, bytes, keysIn, keysOut, valuesIn, valuesOut, numItems, 0, 8 * sizeof(RowT)));
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(nullptr, bytes, keysIn, keysOut, valuesIn, valuesOut, numItems, 0, endBit));
     return bytes;
 }
 
@@ -1547,6 +1548,7 @@ struct PreparedEmbeddingSparseGradient {
     Tensor rleTempStorage;
     Tensor scanTempStorage;
     uint64_t maxUltraHighPartials = 1;
+    int sortEndBit = 64;  // row keys are at most vocabularySize, the invalid-row sentinel
     size_t sortTempBytes = 0;
     size_t rleTempBytes = 0;
     size_t scanTempBytes = 0;
@@ -1822,11 +1824,13 @@ void allocateTypedPreparedBuffers(PreparedEmbeddingSparseGradient& prepared,
         prepared.twoStageUltraHighPartialCounts = Tensor(placement, TensorDescriptor(DataType::UINT32, {stageBlocks}));
     }
 
+    prepared.sortEndBit = CubDevicePrimitiveSupport::radixSortEndBit(prepared.vocabularySize);
     prepared.sortTempBytes = querySortTempBytes(prepared.rowKeys.getMemPtr<RowT>(),
                                                 prepared.sortedRowKeys.getMemPtr<RowT>(),
                                                 prepared.tokenIds.getMemPtr<uint32_t>(),
                                                 prepared.sortedTokenIds.getMemPtr<uint32_t>(),
-                                                cubItems);
+                                                cubItems,
+                                                prepared.sortEndBit);
     prepared.rleTempBytes = queryRleTempBytes(prepared.sortedRowKeys.getMemPtr<RowT>(),
                                               outputGradient.rows.getMemPtr<RowT>(),
                                               prepared.runCounts.getMemPtr<uint32_t>(),
@@ -2196,7 +2200,7 @@ void sortPairsTyped(PreparedEmbeddingSparseGradient& prepared, int cubItems, Str
                                                prepared.sortedTokenIds.getMemPtr<uint32_t>(),
                                                cubItems,
                                                0,
-                                               8 * sizeof(RowT),
+                                               prepared.sortEndBit,
                                                stream.getStream()));
 }
 
@@ -2551,6 +2555,7 @@ EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradient(Prep
     result.gradientDataType = prepared.gradientDataType;
     result.rowDataType = prepared.rowDataType;
     result.fusedSparseRowUpdate = false;
+    result.sortEndBit = prepared.sortEndBit;
     result.sortTempBytes = prepared.sortTempBytes;
     result.rleTempBytes = prepared.rleTempBytes;
     result.scanTempBytes = prepared.scanTempBytes;
@@ -2594,6 +2599,7 @@ EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradientWithS
     result.gradientDataType = prepared.gradientDataType;
     result.rowDataType = prepared.rowDataType;
     result.fusedSparseRowUpdate = true;
+    result.sortEndBit = prepared.sortEndBit;
     result.sortTempBytes = prepared.sortTempBytes;
     result.rleTempBytes = prepared.rleTempBytes;
     result.scanTempBytes = prepared.scanTempBytes;
