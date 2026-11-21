@@ -14,7 +14,6 @@
 #include "DeepLearning/Implementation/Layers/Utility/Reshape.h"
 #include "DeepLearning/Implementation/Layers/Utility/Split.h"
 #include "DeepLearning/Implementation/Layers/Utility/TensorFanout.h"
-#include "DeepLearning/Implementation/Layers/Utility/TypeConversion.h"
 
 #include <stdio.h>
 #include "cuda.h"
@@ -1022,60 +1021,6 @@ TEST(Reshape, ReshapesCorrectly) {
     }
 
     LayerTestHelper::tearDownNetwork(layers);
-}
-
-TEST(TypeConversion, Converts) {
-    srand(time(NULL));
-
-    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
-
-    cudaError_t cudaStatus;
-
-    for (int test = 0; test < 10; ++test) {
-        int numDimensions = (rand() % 5) + 1;
-        vector<unsigned long> dimensions;
-        int numElements = 1;
-        for (int i = 0; i < numDimensions; ++i) {
-            dimensions.push_back((rand() % 5) + 1);
-            numElements *= dimensions.back();
-        }
-
-        TensorDescriptor sourceDescriptor(DataType::FP32, dimensions);
-        TensorDescriptor destDescriptor(DataType::INT64, dimensions);
-        Tensor sourceCpu(cpuPlacement, sourceDescriptor);
-        Tensor sourceGpu(gpuPlacement, sourceDescriptor);
-        Tensor destCpu(cpuPlacement, destDescriptor);
-
-        float *sourceMem = (float *)sourceCpu.getMemPtr();
-        for (int i = 0; i < numElements; ++i) {
-            sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
-        }
-
-        vector<shared_ptr<Layer>> layers;
-        layers.push_back(make_shared<NetworkInput>(sourceGpu));
-        layers.push_back(make_shared<TypeConversion>(DataType::INT32));
-        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
-
-        Stream stream = layers.front()->getStream();
-
-        LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput().value();
-
-        // Network is runnable here
-        layers[0]->forward(sourceCpu, false);
-        destCpu.copyFromAsync(outputGpu, stream);
-
-        cudaStatus = cudaStreamSynchronize(stream.getStream());
-        assert(cudaStatus == cudaSuccess);
-
-        int64_t *destMem = (int64_t *)destCpu.getMemPtr();
-        for (int i = 0; i < numElements; ++i) {
-            ASSERT_EQ(destMem[i], (int64_t)sourceMem[i]);
-        }
-
-        LayerTestHelper::tearDownNetwork(layers);
-    }
 }
 
 TEST(TensorFanout, CreatesFanout) {

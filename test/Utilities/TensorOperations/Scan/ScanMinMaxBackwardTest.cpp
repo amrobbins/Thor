@@ -140,16 +140,21 @@ Mismatch compareBackward(DataType dtype, const std::vector<uint8_t>& got, const 
     return mismatch;
 }
 
-Tensor upload(DataType dtype, const std::vector<uint8_t>& bytes) {
+// On a Thor stream: its streams do not block, so the default stream's copies would not be ordered with them.
+Tensor upload(DataType dtype, const std::vector<uint8_t>& bytes, Stream& stream) {
     const uint64_t element_bytes = static_cast<uint64_t>(TensorDescriptor::getElementSizeInBytes(dtype));
     Tensor tensor(gpu, TensorDescriptor(dtype, {bytes.size() / element_bytes}));
-    EXPECT_EQ(cudaMemcpy(tensor.getMemPtr<void>(), bytes.data(), bytes.size(), cudaMemcpyHostToDevice), cudaSuccess);
+    EXPECT_EQ(cudaMemcpyAsync(tensor.getMemPtr<void>(), bytes.data(), bytes.size(), cudaMemcpyHostToDevice, stream.getStream()),
+              cudaSuccess);
+    stream.synchronize();
     return tensor;
 }
 
-std::vector<uint8_t> download(const Tensor& tensor) {
+std::vector<uint8_t> download(const Tensor& tensor, Stream& stream) {
     std::vector<uint8_t> bytes(tensor.getArraySizeInBytes());
-    EXPECT_EQ(cudaMemcpy(bytes.data(), tensor.getMemPtr<void>(), bytes.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+    EXPECT_EQ(cudaMemcpyAsync(bytes.data(), tensor.getMemPtr<void>(), bytes.size(), cudaMemcpyDeviceToHost, stream.getStream()),
+              cudaSuccess);
+    stream.synchronize();
     return bytes;
 }
 
@@ -176,6 +181,7 @@ struct LargeCase {
     std::vector<uint64_t> dense_bounds;
 
     LargeCase() {
+        Stream stream(0);
         // Elements 0 to 2 are a row of their own (before offsets[0]); then a row of five, an empty row, a row of
         // 1.2M, one of 13M, one of one element, and one to the end; past it, 777 elements in no row.
         const std::vector<uint64_t> starts{3, 8, 8, 1200000, 14200000, 14200001, end};
@@ -224,7 +230,7 @@ struct LargeCase {
                 for (uint64_t i = 0; i < n; ++i) {
                     std::memcpy(bytes.data() + i * element_bytes, coded.data() + index[i] * element_bytes, element_bytes);
                 }
-                return upload(dtype, bytes);
+                return upload(dtype, bytes, stream);
             };
             x.push_back(make(x_index, x_base, kXValues, x_table[f]));
             dy.push_back(make(dy_index, dy_base, kDyValues, dy_table[f]));
@@ -239,8 +245,8 @@ struct LargeCase {
             std::memcpy(bytes64.data() + r * 8, &starts[r], 8);
             if (starts[r] > ragged_bounds.back()) ragged_bounds.push_back(starts[r]);
         }
-        offsets32 = upload(DataType::UINT32, bytes32);
-        offsets64 = upload(DataType::UINT64, bytes64);
+        offsets32 = upload(DataType::UINT32, bytes32, stream);
+        offsets64 = upload(DataType::UINT64, bytes64, stream);
         for (uint64_t at = 0; at < n; at += dense_cols) dense_bounds.push_back(at);
         dense_bounds.push_back(n);
     }
@@ -284,7 +290,7 @@ struct LargeCase {
             out.memsetAsync(stream, static_cast<int8_t>(0xA5));
             backward->runOn(stream);
             stream.synchronize();
-            const std::vector<uint8_t> got = download(out);
+            const std::vector<uint8_t> got = download(out, stream);
             const Mismatch mismatch = compareBackward(kFloats[fdx], got, want, rows == 2 ? n : end, 0xA5);
             if (mismatch.wrong != 0) {
                 const uint64_t bytes = TensorDescriptor::getElementSizeInBytes(kFloats[fdx]);
@@ -354,8 +360,8 @@ TEST(ScanMinMaxBackward, ShortDenseRows) {
         std::vector<uint8_t> dy_bytes(n * 4);
         std::memcpy(x_bytes.data(), x.data(), n * 4);
         std::memcpy(dy_bytes.data(), dy.data(), n * 4);
-        const Tensor gx = upload(DataType::FP32, x_bytes);
-        const Tensor gdy = upload(DataType::FP32, dy_bytes);
+        const Tensor gx = upload(DataType::FP32, x_bytes, stream);
+        const Tensor gdy = upload(DataType::FP32, dy_bytes, stream);
         Tensor gdx(gpu, TensorDescriptor(DataType::FP32, {n}));
         std::vector<uint64_t> bounds;
         for (uint64_t at = 0; at <= n; at += cols) bounds.push_back(at);
@@ -372,7 +378,7 @@ TEST(ScanMinMaxBackward, ShortDenseRows) {
             backward.runOn(stream);
             stream.synchronize();
             const Mismatch mismatch =
-                compareBackward(DataType::FP32, download(gdx), referenceBackward(x, dy, bounds, min, exclusive, reverse), n, 0);
+                compareBackward(DataType::FP32, download(gdx, stream), referenceBackward(x, dy, bounds, min, exclusive, reverse), n, 0);
             EXPECT_EQ(mismatch.wrong, 0U) << "the first wrong element is " << mismatch.first;
         }
     }

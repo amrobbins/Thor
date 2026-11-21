@@ -14,6 +14,12 @@
 
 #pragma GCC diagnostic ignored "-Wsign-compare"
 #include "gtest/gtest.h"
+
+#include "Utilities/Common/LowPrecisionFloat.h"
+
+#include <cmath>
+#include <cstring>
+#include <limits>
 #pragma GCC diagnostic pop
 
 using namespace ThorImplementation;
@@ -1699,3 +1705,123 @@ TEST(Tensor, CopyElementsFromAsyncCopiesOnlyThePrefix) {
     stream.synchronize();
 }
 
+
+namespace {
+
+// Fills a tensor of each placement with value and expects every element to be Thor's float -> integer rule applied to
+// the double (ThorLowPrecision::toIntegerSaturating, the rule TypeConverter follows): truncate toward zero, saturate,
+// and NaN as PTX documents for an FP64 source (the minimum when signed, 2^(N-1) when unsigned, clamped to 8 / 16 bits).
+template <typename T>
+void expectIntegerFillFollowsTheRule(DataType dataType, double value) {
+    Stream stream(0);
+    const uint64_t elements = 37;
+    const T expected = ThorLowPrecision::toIntegerSaturating<T>(value);
+    for (const TensorPlacement placement :
+         {TensorPlacement(TensorPlacement::MemDevices::CPU), TensorPlacement(TensorPlacement::MemDevices::GPU, 0)}) {
+        Tensor tensor(placement, TensorDescriptor(dataType, {elements}));
+        tensor.fill(value, stream);
+        Tensor host(TensorPlacement(TensorPlacement::MemDevices::CPU), TensorDescriptor(dataType, {elements}));
+        host.copyFromAsync(tensor, stream);
+        stream.synchronize();
+        const auto *mem = static_cast<const uint8_t *>(host.getMemPtr<void>());
+        for (uint64_t i = 0; i < elements; ++i) {
+            T got;
+            memcpy(&got, mem + i * sizeof(T), sizeof(T));
+            EXPECT_EQ(got, expected) << TensorDescriptor::getElementTypeName(dataType)
+                                     << (placement.getMemDevice() == TensorPlacement::MemDevices::CPU ? " cpu" : " gpu") << " fill of "
+                                     << value << ", element " << i;
+        }
+    }
+}
+
+}  // namespace
+
+TEST(Tensor, FillIntegerTypesTruncatesAndSaturatesOnCpuAndGpu) {
+    const double values[] = {std::numeric_limits<double>::quiet_NaN(),
+                             std::numeric_limits<double>::infinity(),
+                             -std::numeric_limits<double>::infinity(),
+                             1e30,
+                             -1e30,
+                             300.75,
+                             -300.75,
+                             70000.5,
+                             -70000.5,
+                             3e9,
+                             -3e9,
+                             1e19,
+                             -1.5,
+                             2.9,
+                             -0.0,
+                             0.0};
+    for (const double value : values) {
+        expectIntegerFillFollowsTheRule<int8_t>(DataType::INT8, value);
+        expectIntegerFillFollowsTheRule<int16_t>(DataType::INT16, value);
+        expectIntegerFillFollowsTheRule<int32_t>(DataType::INT32, value);
+        expectIntegerFillFollowsTheRule<int64_t>(DataType::INT64, value);
+        expectIntegerFillFollowsTheRule<uint8_t>(DataType::UINT8, value);
+        expectIntegerFillFollowsTheRule<uint16_t>(DataType::UINT16, value);
+        expectIntegerFillFollowsTheRule<uint32_t>(DataType::UINT32, value);
+        expectIntegerFillFollowsTheRule<uint64_t>(DataType::UINT64, value);
+    }
+}
+
+// fillRandom refuses a range its element type cannot hold, or a NaN bound, on either placement; the edges of each type
+// are accepted (integer bounds by the value they truncate to).
+TEST(Tensor, FillRandomRefusesARangeOutsideTheElementType) {
+    Stream stream(0);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    struct Case {
+        DataType dataType;
+        double minValue;
+        double maxValue;
+        bool accepted;
+    };
+    const Case cases[] = {
+        {DataType::INT8, -128.0, 127.0, true},
+        {DataType::INT8, -128.9, 127.9, true},
+        {DataType::INT8, -129.0, 0.0, false},
+        {DataType::INT8, 0.0, 128.0, false},
+        {DataType::INT16, -32768.0, 32767.0, true},
+        {DataType::INT16, 0.0, 32768.0, false},
+        {DataType::INT32, -2147483648.0, 2147483647.0, true},
+        {DataType::INT32, -2147483649.0, 0.0, false},
+        {DataType::INT64, -9223372036854775808.0, 9223372036854774784.0, true},
+        {DataType::INT64, 0.0, 9223372036854775808.0, false},
+        {DataType::UINT8, -0.5, 255.9, true},
+        {DataType::UINT8, -1.0, 10.0, false},
+        {DataType::UINT16, 0.0, 65536.0, false},
+        {DataType::UINT32, 0.0, 4294967295.0, true},
+        {DataType::UINT32, 0.0, 4294967296.0, false},
+        {DataType::UINT64, 0.0, 18446744073709549568.0, true},
+        {DataType::UINT64, 0.0, 18446744073709551616.0, false},
+        {DataType::FP8_E4M3, -448.0, 448.0, true},
+        {DataType::FP8_E4M3, -449.0, 0.0, false},
+        {DataType::FP8_E5M2, 0.0, 60000.0, false},
+        {DataType::FP16, -65504.0, 65504.0, true},
+        {DataType::FP16, 0.0, 65520.0, false},
+        {DataType::BF16, -1e38, 1e38, true},
+        {DataType::BF16, 0.0, 1e39, false},
+        {DataType::FP32, 0.0, inf, false},
+        {DataType::FP64, -1e300, 1e300, true},
+        {DataType::FP64, -inf, 0.0, false},
+        {DataType::FP32, nan, 1.0, false},
+        {DataType::INT32, 0.0, nan, false},
+        {DataType::BOOLEAN, -5.0, 5.0, true},
+    };
+    for (const TensorPlacement placement :
+         {TensorPlacement(TensorPlacement::MemDevices::CPU), TensorPlacement(TensorPlacement::MemDevices::GPU, 0)}) {
+        for (const Case &c : cases) {
+            Tensor tensor(placement, TensorDescriptor(c.dataType, {33}));
+            const std::string what = TensorDescriptor::getElementTypeName(c.dataType) + " [" + std::to_string(c.minValue) + ", " +
+                                     std::to_string(c.maxValue) +
+                                     (placement.getMemDevice() == TensorPlacement::MemDevices::CPU ? "] cpu" : "] gpu");
+            SCOPED_TRACE(what);
+            if (c.accepted)
+                EXPECT_NO_THROW(tensor.fillRandom(c.minValue, c.maxValue, stream));
+            else
+                EXPECT_THROW(tensor.fillRandom(c.minValue, c.maxValue, stream), std::invalid_argument);
+            stream.synchronize();
+        }
+    }
+}

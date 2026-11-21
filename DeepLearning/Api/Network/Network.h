@@ -25,7 +25,6 @@
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Implementation/Layers/Utility/TensorFanout.h"
-#include "DeepLearning/Implementation/Layers/Utility/TypeConversion.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 #include "Utilities/TarFile/TarReader.h"

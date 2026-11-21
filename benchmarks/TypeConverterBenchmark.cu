@@ -1,5 +1,6 @@
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/Common/Event.h"
+#include "Utilities/Common/LowPrecisionFloat.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/Expression/CudaHelpers.h"
@@ -75,6 +76,18 @@ struct TypePair {
 
 enum class BenchmarkMode { OUT_OF_PLACE, IN_PLACE };
 
+// What a case launches. PRODUCTION is TypeConverter; the others are the out-of-place kernel probe (2026-11-21):
+// PROBE converts with each thread moving wideBytes of the wider side (streamingStores: st.global.cs), MEMSET writes the
+// destination only and READ reads the source only (their GB/s count those bytes alone).
+enum class VariantKind { PRODUCTION, PROBE, MEMSET, READ };
+
+struct Variant {
+    std::string name;
+    VariantKind kind;
+    int wideBytes;
+    bool streamingStores;
+};
+
 struct Options {
     int gpu = 0;
     std::string suite = "common";
@@ -94,6 +107,7 @@ struct Options {
         256ULL * 1024 * 1024,
     };
     std::vector<BenchmarkMode> modes = {BenchmarkMode::OUT_OF_PLACE};
+    std::vector<Variant> variants = {{"production", VariantKind::PRODUCTION, 0, false}};
     int samples = 7;
     std::size_t targetTrafficBytes = 512 * MiB;
     std::size_t maxWorkingSetBytes = 4 * GiB;
@@ -158,6 +172,7 @@ struct BenchmarkPlan {
 struct BenchmarkResult {
     TypePair pair;
     BenchmarkMode mode;
+    std::string variant;
     std::uint64_t elements;
     BenchmarkPlan plan;
     double medianUsPerLaunch;
@@ -264,6 +279,38 @@ TypePair parsePair(std::string_view text) {
     return pair;
 }
 
+Variant parseVariant(std::string_view name) {
+    if (name == "production")
+        return {std::string(name), VariantKind::PRODUCTION, 0, false};
+    if (name == "memset")
+        return {std::string(name), VariantKind::MEMSET, 0, false};
+    if (name == "read")
+        return {std::string(name), VariantKind::READ, 0, false};
+    for (const int wide : {16, 32, 64, 128}) {
+        const std::string plain = "w" + std::to_string(wide);
+        if (name == plain)
+            return {plain, VariantKind::PROBE, wide, false};
+        if (name == plain + "cs")
+            return {plain + "cs", VariantKind::PROBE, wide, true};
+    }
+    throw std::invalid_argument("unknown variant '" + std::string(name) +
+                                "'; expected production, memset, read, or w16|w32|w64|w128 with an optional cs suffix");
+}
+
+std::vector<Variant> parseVariants(std::string_view csv) {
+    std::vector<Variant> variants;
+    while (!csv.empty()) {
+        const std::size_t comma = csv.find(',');
+        variants.push_back(parseVariant(csv.substr(0, comma)));
+        if (comma == std::string_view::npos)
+            break;
+        csv.remove_prefix(comma + 1);
+    }
+    if (variants.empty())
+        throw std::invalid_argument("--variants requires at least one variant");
+    return variants;
+}
+
 std::string optionValue(std::string_view argument, std::string_view option) {
     const std::string prefix = std::string(option) + "=";
     if (!argument.starts_with(prefix))
@@ -279,10 +326,12 @@ void printHelp(const char *program) {
               << "reported L2 capacity, so repeated samples do not measure cache-resident inputs.\n\n"
               << "Options:\n"
               << "  --gpu=N                       GPU device index (default: 0)\n"
-              << "  --suite=common|ml|all         Pair set when --pair is absent (default: common)\n"
+              << "  --suite=common|ml|all|probe   Pair set when --pair is absent (default: common)\n"
               << "  --pair=SOURCE:DEST            Benchmark an explicit pair; may be repeated\n"
               << "  --sizes=N[,N...]              Element counts; K/M/G suffixes are binary\n"
-              << "  --mode=out-of-place|in-place|both\n"
+              << "  --mode=out-of-place|in-place|both  In place covers widening and same-size pairs only\n"
+              << "  --variants=V[,V...]           production (default), memset, read, w16|w32|w64|w128[cs] (probe kernels;\n"
+              << "                                out of place, probe suite pairs only)\n"
               << "  --samples=N                   Timed samples per case (default: 7)\n"
               << "  --target-traffic-mib=N        Desired logical read+write bytes per sample\n"
               << "  --max-working-set-mib=N       Maximum conversion buffers per case (default: 4096)\n"
@@ -319,8 +368,8 @@ Options parseOptions(int argc, char **argv) {
             options.gpu = static_cast<int>(parseUnsigned(optionValue(argument, "--gpu"), "--gpu"));
         } else if (argument.starts_with("--suite=")) {
             options.suite = optionValue(argument, "--suite");
-            if (options.suite != "common" && options.suite != "ml" && options.suite != "all")
-                throw std::invalid_argument("--suite must be common, ml, or all");
+            if (options.suite != "common" && options.suite != "ml" && options.suite != "all" && options.suite != "probe")
+                throw std::invalid_argument("--suite must be common, ml, all, or probe");
         } else if (argument.starts_with("--pair=")) {
             options.explicitPairs.push_back(parsePair(optionValue(argument, "--pair")));
         } else if (argument.starts_with("--sizes=")) {
@@ -335,6 +384,8 @@ Options parseOptions(int argc, char **argv) {
                 options.modes = {BenchmarkMode::OUT_OF_PLACE, BenchmarkMode::IN_PLACE};
             else
                 throw std::invalid_argument("--mode must be out-of-place, in-place, or both");
+        } else if (argument.starts_with("--variants=")) {
+            options.variants = parseVariants(optionValue(argument, "--variants"));
         } else if (argument.starts_with("--samples=")) {
             options.samples = static_cast<int>(parseUnsigned(optionValue(argument, "--samples"), "--samples"));
         } else if (argument.starts_with("--target-traffic-mib=")) {
@@ -392,12 +443,25 @@ std::vector<TypePair> commonPairs() {
     };
 }
 
+// One pair per element-size combination that matters (13): the probe kernels are instantiated for these only.
+std::vector<TypePair> probePairs() {
+    return {
+        {DataType::FP8_E4M3, DataType::FP8_E5M2}, {DataType::FP8_E4M3, DataType::FP16}, {DataType::FP8_E4M3, DataType::FP32},
+        {DataType::UINT8, DataType::FP64},        {DataType::FP16, DataType::BF16},     {DataType::FP16, DataType::FP32},
+        {DataType::FP16, DataType::FP64},         {DataType::FP32, DataType::FP8_E4M3}, {DataType::FP32, DataType::FP16},
+        {DataType::INT32, DataType::FP32},        {DataType::FP32, DataType::FP64},     {DataType::FP64, DataType::FP32},
+        {DataType::INT64, DataType::FP64},
+    };
+}
+
 std::vector<TypePair> buildPairs(const Options &options) {
     if (!options.explicitPairs.empty())
         return options.explicitPairs;
 
     if (options.suite == "common")
         return commonPairs();
+    if (options.suite == "probe")
+        return probePairs();
 
     std::vector<TypePair> pairs;
     if (options.suite == "ml") {
@@ -544,6 +608,170 @@ void scrubL2(DeviceBuffer &evictionBuffer, std::uint32_t increment, cudaStream_t
     CUDA_CHECK(cudaGetLastError());
 }
 
+// ---- Out-of-place kernel probe (2026-11-21) ----
+// Each thread converts W / max(sizeof(S), sizeof(D)) elements: W bytes of the wider side, and its share of the
+// narrower side, each moved in the widest accesses that fit (16 bytes, or 32 where nvcc merges a pair on sm_100+).
+// The conversion is castToStorage, the production converter's (FP8 destinations satfinite, otherwise static_cast).
+
+template <int BYTES>
+__device__ __forceinline__ void probeLoad(void *to, const void *from) {
+    if constexpr (BYTES >= 16) {
+        const uint4 *source = static_cast<const uint4 *>(__builtin_assume_aligned(from, BYTES >= 32 ? 32 : 16));
+#pragma unroll
+        for (int i = 0; i < BYTES / 16; ++i)
+            static_cast<uint4 *>(to)[i] = source[i];
+    } else if constexpr (BYTES == 8) {
+        *static_cast<uint2 *>(to) = *static_cast<const uint2 *>(from);
+    } else if constexpr (BYTES == 4) {
+        *static_cast<unsigned int *>(to) = *static_cast<const unsigned int *>(from);
+    } else {
+        static_assert(BYTES == 2, "probe accesses of 2 to 128 bytes");
+        *static_cast<unsigned short *>(to) = *static_cast<const unsigned short *>(from);
+    }
+}
+
+template <int BYTES, bool STREAMING>
+__device__ __forceinline__ void probeStore(void *to, const void *from) {
+    if constexpr (BYTES >= 16) {
+        uint4 *dest = static_cast<uint4 *>(__builtin_assume_aligned(to, BYTES >= 32 ? 32 : 16));
+#pragma unroll
+        for (int i = 0; i < BYTES / 16; ++i) {
+            if constexpr (STREAMING)
+                __stcs(dest + i, static_cast<const uint4 *>(from)[i]);
+            else
+                dest[i] = static_cast<const uint4 *>(from)[i];
+        }
+    } else if constexpr (BYTES == 8) {
+        if constexpr (STREAMING)
+            __stcs(static_cast<uint2 *>(to), *static_cast<const uint2 *>(from));
+        else
+            *static_cast<uint2 *>(to) = *static_cast<const uint2 *>(from);
+    } else if constexpr (BYTES == 4) {
+        if constexpr (STREAMING)
+            __stcs(static_cast<unsigned int *>(to), *static_cast<const unsigned int *>(from));
+        else
+            *static_cast<unsigned int *>(to) = *static_cast<const unsigned int *>(from);
+    } else {
+        static_assert(BYTES == 2, "probe accesses of 2 to 128 bytes");
+        if constexpr (STREAMING)
+            __stcs(static_cast<unsigned short *>(to), *static_cast<const unsigned short *>(from));
+        else
+            *static_cast<unsigned short *>(to) = *static_cast<const unsigned short *>(from);
+    }
+}
+
+template <typename S, typename D, int W>
+__host__ __device__ constexpr int probeElementsPerThread() {
+    constexpr int wide = sizeof(S) > sizeof(D) ? static_cast<int>(sizeof(S)) : static_cast<int>(sizeof(D));
+    static_assert(W % wide == 0 && W / wide >= 2, "W holds at least two elements of the wider side");
+    return W / wide;
+}
+
+template <typename S, typename D, int W, bool STREAMING>
+__global__ void __launch_bounds__(THREADS_PER_BLOCK) probeConvertKernel(const S *source, D *dest, long numElements) {
+    constexpr int E = probeElementsPerThread<S, D, W>();
+    const long first = (static_cast<long>(blockIdx.x) * THREADS_PER_BLOCK + threadIdx.x) * E;
+    if (first >= numElements)
+        return;
+    if (first + E > numElements) {
+        for (long i = first; i < numElements; ++i)
+            dest[i] = ThorLowPrecision::castToStorage<D>(source[i]);
+        return;
+    }
+    alignas(16) S in[E];
+    probeLoad<E * static_cast<int>(sizeof(S))>(in, source + first);
+    alignas(16) D out[E];
+#pragma unroll
+    for (int i = 0; i < E; ++i)
+        out[i] = ThorLowPrecision::castToStorage<D>(in[i]);
+    probeStore<E * static_cast<int>(sizeof(D)), STREAMING>(dest + first, out);
+}
+
+template <typename S, typename D, int W, bool STREAMING>
+void launchProbeKernel(const void *source, void *dest, long numElements, cudaStream_t stream) {
+    constexpr long E = probeElementsPerThread<S, D, W>();
+    const long threads = (numElements + E - 1) / E;
+    const long blocks = (threads + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    probeConvertKernel<S, D, W, STREAMING><<<static_cast<unsigned int>(blocks), THREADS_PER_BLOCK, 0, stream>>>(
+        static_cast<const S *>(source), static_cast<D *>(dest), numElements);
+}
+
+template <typename S, typename D>
+void launchProbeTyped(const Variant &variant, const void *source, void *dest, long numElements, cudaStream_t stream) {
+    const bool cs = variant.streamingStores;
+    switch (variant.wideBytes) {
+        case 16:
+            cs ? launchProbeKernel<S, D, 16, true>(source, dest, numElements, stream)
+               : launchProbeKernel<S, D, 16, false>(source, dest, numElements, stream);
+            break;
+        case 32:
+            cs ? launchProbeKernel<S, D, 32, true>(source, dest, numElements, stream)
+               : launchProbeKernel<S, D, 32, false>(source, dest, numElements, stream);
+            break;
+        case 64:
+            cs ? launchProbeKernel<S, D, 64, true>(source, dest, numElements, stream)
+               : launchProbeKernel<S, D, 64, false>(source, dest, numElements, stream);
+            break;
+        case 128:
+            cs ? launchProbeKernel<S, D, 128, true>(source, dest, numElements, stream)
+               : launchProbeKernel<S, D, 128, false>(source, dest, numElements, stream);
+            break;
+        default:
+            throw std::invalid_argument("probe width must be 16, 32, 64 or 128 bytes");
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launchProbe(TypePair pair, const Variant &variant, const void *source, void *dest, long numElements, cudaStream_t stream) {
+#define THOR_PROBE_PAIR(SOURCE_DTYPE, SOURCE_T, DEST_DTYPE, DEST_T)                                   \
+    if (pair.source == DataType::SOURCE_DTYPE && pair.destination == DataType::DEST_DTYPE) {          \
+        launchProbeTyped<SOURCE_T, DEST_T>(variant, source, dest, numElements, stream);               \
+        return;                                                                                         \
+    }
+    THOR_PROBE_PAIR(FP8_E4M3, __nv_fp8_e4m3, FP8_E5M2, __nv_fp8_e5m2)
+    THOR_PROBE_PAIR(FP8_E4M3, __nv_fp8_e4m3, FP16, half)
+    THOR_PROBE_PAIR(FP8_E4M3, __nv_fp8_e4m3, FP32, float)
+    THOR_PROBE_PAIR(UINT8, std::uint8_t, FP64, double)
+    THOR_PROBE_PAIR(FP16, half, BF16, __nv_bfloat16)
+    THOR_PROBE_PAIR(FP16, half, FP32, float)
+    THOR_PROBE_PAIR(FP16, half, FP64, double)
+    THOR_PROBE_PAIR(FP32, float, FP8_E4M3, __nv_fp8_e4m3)
+    THOR_PROBE_PAIR(FP32, float, FP16, half)
+    THOR_PROBE_PAIR(INT32, std::int32_t, FP32, float)
+    THOR_PROBE_PAIR(FP32, float, FP64, double)
+    THOR_PROBE_PAIR(FP64, double, FP32, float)
+    THOR_PROBE_PAIR(INT64, std::int64_t, FP64, double)
+#undef THOR_PROBE_PAIR
+    throw std::invalid_argument(std::string("the probe kernels are instantiated for the probe suite's pairs only, not ") +
+                                std::string(typeInfo(pair.source).name) + " -> " + std::string(typeInfo(pair.destination).name));
+}
+
+// Reads 64 bytes per thread and writes nothing (the sink is written only if the xor of every word read equals a
+// constant, which the benchmark's inputs never produce, so the loads cannot be dropped).
+__global__ void __launch_bounds__(THREADS_PER_BLOCK) probeReadKernel(const uint4 *source, std::uint64_t words, unsigned int *sink) {
+    const std::uint64_t first = (static_cast<std::uint64_t>(blockIdx.x) * THREADS_PER_BLOCK + threadIdx.x) * 4;
+    unsigned int folded = 0;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        if (first + i < words) {
+            const uint4 word = source[first + i];
+            folded ^= word.x ^ word.y ^ word.z ^ word.w;
+        }
+    }
+    if (folded == 0x9E3779B9u)
+        *sink = folded;
+}
+
+__global__ void countMismatchedBytesKernel(const std::uint8_t *a, const std::uint8_t *b, std::uint64_t bytes, unsigned long long *count) {
+    const std::uint64_t first = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const std::uint64_t stride = static_cast<std::uint64_t>(blockDim.x) * gridDim.x;
+    unsigned long long mismatches = 0;
+    for (std::uint64_t i = first; i < bytes; i += stride)
+        mismatches += a[i] != b[i] ? 1 : 0;
+    if (mismatches != 0)
+        atomicAdd(count, mismatches);
+}
+
 std::size_t computeEvictionBytes(std::size_t l2Bytes, double factor) {
     const long double scaled = static_cast<long double>(l2Bytes) * factor;
     if (scaled > static_cast<long double>(std::numeric_limits<std::size_t>::max()))
@@ -588,6 +816,7 @@ BenchmarkPlan makePlan(
 }
 
 void launchConversion(const TypePair pair,
+                      const Variant &variant,
                       BenchmarkMode mode,
                       std::uint64_t elements,
                       const BenchmarkPlan &plan,
@@ -600,8 +829,27 @@ void launchConversion(const TypePair pair,
     if (mode == BenchmarkMode::OUT_OF_PLACE) {
         auto *sourcePointer = static_cast<std::byte *>(source.get()) + slot * plan.sourceStrideBytes;
         auto *destinationPointer = static_cast<std::byte *>(destination.get()) + slot * plan.destinationStrideBytes;
-        TypeConverter::convertType(
-            sourcePointer, destinationPointer, pair.source, pair.destination, static_cast<long>(elements), stream, gpu);
+        switch (variant.kind) {
+            case VariantKind::PRODUCTION:
+                TypeConverter::convertType(
+                    sourcePointer, destinationPointer, pair.source, pair.destination, static_cast<long>(elements), stream, gpu);
+                break;
+            case VariantKind::PROBE:
+                launchProbe(pair, variant, sourcePointer, destinationPointer, static_cast<long>(elements), stream.getStream());
+                break;
+            case VariantKind::MEMSET:
+                CUDA_CHECK(cudaMemsetAsync(destinationPointer, 0x5A, plan.destinationBytesPerLaunch, stream.getStream()));
+                break;
+            case VariantKind::READ: {
+                const std::uint64_t words = plan.sourceBytesPerLaunch / sizeof(uint4);
+                const std::uint64_t threads = (words + 3) / 4;
+                const std::uint64_t blocks = std::max<std::uint64_t>(1, (threads + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK);
+                probeReadKernel<<<static_cast<unsigned int>(blocks), THREADS_PER_BLOCK, 0, stream.getStream()>>>(
+                    reinterpret_cast<const uint4 *>(sourcePointer), words, reinterpret_cast<unsigned int *>(destinationPointer));
+                CUDA_CHECK(cudaGetLastError());
+                break;
+            }
+        }
     } else {
         auto *pointer = static_cast<std::byte *>(inPlace.get()) + slot * plan.inPlaceStrideBytes;
         TypeConverter::convertType(pointer, pointer, pair.source, pair.destination, static_cast<long>(elements), stream, gpu);
@@ -652,6 +900,34 @@ void verifyFirstSlot(TypePair pair,
     }
 }
 
+// A probe's first slot must hold the production converter's bytes for the same source.
+void verifyProbeAgainstProduction(TypePair pair,
+                                  std::uint64_t elements,
+                                  const BenchmarkPlan &plan,
+                                  DeviceBuffer &source,
+                                  DeviceBuffer &destination,
+                                  Stream stream,
+                                  int gpu) {
+    DeviceBuffer reference(checkedAdd(plan.destinationStrideBytes, SLOT_ALIGNMENT_BYTES, "reference allocation"));
+    DeviceBuffer count(sizeof(unsigned long long));
+    TypeConverter::convertType(source.get(), reference.get(), pair.source, pair.destination, static_cast<long>(elements), stream, gpu);
+    CUDA_CHECK(cudaMemsetAsync(count.get(), 0, sizeof(unsigned long long), stream.getStream()));
+    countMismatchedBytesKernel<<<1024, THREADS_PER_BLOCK, 0, stream.getStream()>>>(static_cast<const std::uint8_t *>(destination.get()),
+                                                                                   static_cast<const std::uint8_t *>(reference.get()),
+                                                                                   plan.destinationBytesPerLaunch,
+                                                                                   static_cast<unsigned long long *>(count.get()));
+    CUDA_CHECK(cudaGetLastError());
+    unsigned long long mismatches = 0;
+    CUDA_CHECK(cudaMemcpyAsync(&mismatches, count.get(), sizeof(mismatches), cudaMemcpyDeviceToHost, stream.getStream()));
+    CUDA_CHECK(cudaStreamSynchronize(stream.getStream()));
+    if (mismatches != 0) {
+        std::ostringstream message;
+        message << "probe verification failed for " << typeInfo(pair.source).name << " -> " << typeInfo(pair.destination).name << ": "
+                << mismatches << " of " << plan.destinationBytesPerLaunch << " bytes differ from the production converter's";
+        throw std::runtime_error(message.str());
+    }
+}
+
 double percentile(const std::vector<double> &sorted, double fraction) {
     if (sorted.empty())
         throw std::invalid_argument("cannot compute percentile of an empty sample set");
@@ -665,6 +941,7 @@ double percentile(const std::vector<double> &sorted, double fraction) {
 }
 
 BenchmarkResult benchmarkCase(TypePair pair,
+                              const Variant &variant,
                               BenchmarkMode mode,
                               std::uint64_t elements,
                               const Options &options,
@@ -688,7 +965,7 @@ BenchmarkResult benchmarkCase(TypePair pair,
 
     // Warm the launch path and allow GPU clocks to ramp using one complete untimed sample.
     for (std::uint64_t slot = 0; slot < plan.launchesPerSample; ++slot)
-        launchConversion(pair, mode, elements, plan, slot, source, destination, inPlace, stream, options.gpu);
+        launchConversion(pair, variant, mode, elements, plan, slot, source, destination, inPlace, stream, options.gpu);
     CUDA_CHECK(cudaStreamSynchronize(stream.getStream()));
 
     std::vector<double> usPerLaunch;
@@ -703,24 +980,30 @@ BenchmarkResult benchmarkCase(TypePair pair,
 
         start.record(stream);
         for (std::uint64_t slot = 0; slot < plan.launchesPerSample; ++slot)
-            launchConversion(pair, mode, elements, plan, slot, source, destination, inPlace, stream, options.gpu);
+            launchConversion(pair, variant, mode, elements, plan, slot, source, destination, inPlace, stream, options.gpu);
         stop.record(stream);
         const float totalMilliseconds = stop.synchronizeAndReportElapsedTimeInMilliseconds(start);
         usPerLaunch.push_back(static_cast<double>(totalMilliseconds) * 1000.0 / static_cast<double>(plan.launchesPerSample));
     }
 
-    if (options.verify)
+    if (options.verify && variant.kind == VariantKind::PRODUCTION)
         verifyFirstSlot(pair, mode, elements, plan, destination, inPlace, stream.getStream());
+    if (options.verify && variant.kind == VariantKind::PROBE)
+        verifyProbeAgainstProduction(pair, elements, plan, source, destination, stream, options.gpu);
 
     std::sort(usPerLaunch.begin(), usPerLaunch.end());
     const double medianUs = percentile(usPerLaunch, 0.5);
     const double p10Us = percentile(usPerLaunch, 0.1);
     const double p90Us = percentile(usPerLaunch, 0.9);
-    const double logicalBytes = static_cast<double>(plan.sourceBytesPerLaunch + plan.destinationBytesPerLaunch);
+    // MEMSET only writes the destination and READ only reads the source; their GB/s count those bytes alone.
+    const double logicalBytes = variant.kind == VariantKind::MEMSET ? static_cast<double>(plan.destinationBytesPerLaunch)
+                                : variant.kind == VariantKind::READ ? static_cast<double>(plan.sourceBytesPerLaunch)
+                                                                    : static_cast<double>(plan.sourceBytesPerLaunch + plan.destinationBytesPerLaunch);
 
     return {
         pair,
         mode,
+        variant.name,
         elements,
         plan,
         medianUs,
@@ -734,7 +1017,7 @@ BenchmarkResult benchmarkCase(TypePair pair,
 }
 
 void writeCsvHeader(std::ostream &output) {
-    output << "source_type,destination_type,mode,elements,source_bytes,destination_bytes,logical_bytes_per_launch,"
+    output << "source_type,destination_type,mode,variant,elements,source_bytes,destination_bytes,logical_bytes_per_launch,"
               "launches_per_sample,samples,median_us_per_launch,p10_us_per_launch,p90_us_per_launch,median_ns_per_element,"
               "effective_gbps,input_gbps,output_gbps,working_set_bytes,l2_bytes,eviction_bytes\n";
 }
@@ -742,7 +1025,7 @@ void writeCsvHeader(std::ostream &output) {
 void writeCsvRow(
     std::ostream &output, const BenchmarkResult &result, const Options &options, std::size_t l2Bytes, std::size_t evictionBytes) {
     output << typeInfo(result.pair.source).name << ',' << typeInfo(result.pair.destination).name << ',' << modeName(result.mode) << ','
-           << result.elements << ',' << result.plan.sourceBytesPerLaunch << ',' << result.plan.destinationBytesPerLaunch << ','
+           << result.variant << ',' << result.elements << ',' << result.plan.sourceBytesPerLaunch << ',' << result.plan.destinationBytesPerLaunch << ','
            << (result.plan.sourceBytesPerLaunch + result.plan.destinationBytesPerLaunch) << ',' << result.plan.launchesPerSample << ','
            << options.samples << ',' << std::fixed << std::setprecision(6) << result.medianUsPerLaunch << ',' << result.p10UsPerLaunch
            << ',' << result.p90UsPerLaunch << ',' << result.medianNsPerElement << ',' << result.effectiveGbPerSecond << ','
@@ -819,30 +1102,59 @@ int main(int argc, char **argv) {
                   << "Pairs: " << pairs.size() << ", sizes: " << options.elementCounts.size() << ", modes: " << options.modes.size()
                   << ", samples/case: " << options.samples << "\n";
 
+        // TypeConverter refuses in-place narrowing, so those cases are not run; the probe variants run out of place only.
+        const auto runsInMode = [](const TypePair pair, const Variant &variant, const BenchmarkMode mode) {
+            if (mode == BenchmarkMode::OUT_OF_PLACE)
+                return true;
+            return variant.kind == VariantKind::PRODUCTION &&
+                   typeInfo(pair.destination).elementBytes >= typeInfo(pair.source).elementBytes;
+        };
+        for (const Variant &variant : options.variants) {
+            if (variant.kind != VariantKind::PROBE)
+                continue;
+            const std::vector<TypePair> probe = probePairs();
+            for (const TypePair pair : pairs) {
+                const bool known = std::any_of(probe.begin(), probe.end(), [&](const TypePair p) {
+                    return p.source == pair.source && p.destination == pair.destination;
+                });
+                if (!known)
+                    throw std::invalid_argument("variant " + variant.name + " runs the probe suite's pairs only (--suite=probe)");
+            }
+        }
+        std::size_t casesPerSize = 0;
+        for (const TypePair pair : pairs)
+            for (const Variant &variant : options.variants)
+                for (const BenchmarkMode mode : options.modes)
+                    casesPerSize += runsInMode(pair, variant, mode) ? 1 : 0;
+
         writeCsvHeader(*csv);
         std::size_t completed = 0;
         std::size_t skipped = 0;
-        const std::size_t totalCases = pairs.size() * options.elementCounts.size() * options.modes.size();
+        const std::size_t totalCases = casesPerSize * options.elementCounts.size();
         for (const TypePair pair : pairs) {
-            for (const BenchmarkMode mode : options.modes) {
-                for (const std::uint64_t elements : options.elementCounts) {
-                    try {
-                        const BenchmarkResult result =
-                            benchmarkCase(pair, mode, elements, options, conversionMemoryBudgetBytes, evictionBuffer, stream);
-                        writeCsvRow(*csv, result, options, l2Bytes, evictionBytes);
-                        ++completed;
-                        std::cerr << '[' << completed + skipped << '/' << totalCases << "] " << typeInfo(pair.source).name << " -> "
-                                  << typeInfo(pair.destination).name << ' ' << modeName(mode) << " elements=" << elements
-                                  << " median=" << std::fixed << std::setprecision(3) << result.medianUsPerLaunch << " us, "
-                                  << result.effectiveGbPerSecond << " GB/s\n";
-                    } catch (const std::runtime_error &error) {
-                        const std::string message = error.what();
-                        if (message.find("exceeds the available conversion-buffer memory budget") == std::string::npos)
-                            throw;
-                        ++skipped;
-                        std::cerr << '[' << completed + skipped << '/' << totalCases << "] skipped " << typeInfo(pair.source).name << " -> "
-                                  << typeInfo(pair.destination).name << ' ' << modeName(mode) << " elements=" << elements << ": " << message
-                                  << '\n';
+            for (const Variant &variant : options.variants) {
+                for (const BenchmarkMode mode : options.modes) {
+                    if (!runsInMode(pair, variant, mode))
+                        continue;
+                    for (const std::uint64_t elements : options.elementCounts) {
+                        try {
+                            const BenchmarkResult result =
+                                benchmarkCase(pair, variant, mode, elements, options, conversionMemoryBudgetBytes, evictionBuffer, stream);
+                            writeCsvRow(*csv, result, options, l2Bytes, evictionBytes);
+                            ++completed;
+                            std::cerr << '[' << completed + skipped << '/' << totalCases << "] " << typeInfo(pair.source).name << " -> "
+                                      << typeInfo(pair.destination).name << ' ' << variant.name << ' ' << modeName(mode) << " elements=" << elements
+                                      << " median=" << std::fixed << std::setprecision(3) << result.medianUsPerLaunch << " us, "
+                                      << result.effectiveGbPerSecond << " GB/s\n";
+                        } catch (const std::runtime_error &error) {
+                            const std::string message = error.what();
+                            if (message.find("exceeds the available conversion-buffer memory budget") == std::string::npos)
+                                throw;
+                            ++skipped;
+                            std::cerr << '[' << completed + skipped << '/' << totalCases << "] skipped " << typeInfo(pair.source).name << " -> "
+                                      << typeInfo(pair.destination).name << ' ' << modeName(mode) << " elements=" << elements << ": " << message
+                                      << '\n';
+                        }
                     }
                 }
             }

@@ -1,28 +1,29 @@
 #include "TypeConverter.h"
 
 #include <stdio.h>
+#include <limits>
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/LowPrecisionFloat.h"
 
 using namespace ThorImplementation;
 using namespace std;
 
-// FIXME: if keeping the in-place variants, make launchReadConvertSyncWriteKernel much bigger, since the algo either repeatedly doubles
-//        from its size as the starting point, or halves to its size as the ending point.
-//        so for example use 1024 threads and fill 48KB = 49152 bytes of shared
-//        perhaps just get rid of in place, it is slow relatively.
-
-// Launch out-of-place kernels:
+// Launch the out-of-place kernel:
 template <typename FROM_TYPE, typename TO_TYPE>
 void launchOutOfPlaceConvertKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
 
-// Launch in-place kernels:
+// Launch the in-place widening kernel that converts the first chunk:
 template <typename FROM_TYPE, typename TO_TYPE>
 void launchReadConvertSyncWriteKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
 
 template <typename FROM_TYPE, typename TO_TYPE>
 struct Converter {
-    __device__ __forceinline__ TO_TYPE operator()(FROM_TYPE x) const { return static_cast<TO_TYPE>(x); }
+    __device__ __forceinline__ TO_TYPE operator()(FROM_TYPE x) const {
+        if constexpr (ThorLowPrecision::isFloatingStorageType<FROM_TYPE> && ThorLowPrecision::isIntegerStorageType<TO_TYPE>)
+            return ThorLowPrecision::toIntegerSaturating<TO_TYPE>(x);
+        else
+            return static_cast<TO_TYPE>(x);
+    }
 };
 template <typename FROM_TYPE>
 struct Converter<FROM_TYPE, __nv_fp8_e4m3> {
@@ -844,36 +845,6 @@ void launchOutOfPlaceConvertKernelNoOvershoot(FROM_TYPE *source_d, TO_TYPE *dest
     convertOutOfPlaceKernelNoOvershoot<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
 }
 
-// To Smaller
-template <typename FROM_TYPE, typename TO_TYPE>
-void TypeConverter::convertToSmallerElementsInPlaceOnGpu(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    THOR_THROW_IF_FALSE(numElements > 0);
-    if (numElements == 0)
-        return;
-
-    // First, make some empty space in the front by converting some number of the front-most elements to smaller elements
-    long availableBytes = 0;
-    long chunkSize = 8 * 256;
-
-    launchReadConvertSyncWriteKernel<FROM_TYPE, TO_TYPE>(source_d, dest_d, numElements < chunkSize ? numElements : chunkSize, stream);
-
-    long numElementsLeft = numElements - chunkSize;
-    long startingElement = chunkSize;
-    availableBytes = (sizeof(FROM_TYPE) - sizeof(TO_TYPE)) * chunkSize;
-
-    // Then convert elements into the empty space, thereby freeing up more empty space, and repeat until all elements are converted.
-    while (numElementsLeft > 0) {
-        chunkSize = availableBytes / sizeof(TO_TYPE);
-
-        launchOutOfPlaceConvertKernelNoOvershoot<FROM_TYPE, TO_TYPE>(
-            source_d + startingElement, dest_d + startingElement, chunkSize < numElementsLeft ? chunkSize : numElementsLeft, stream);
-
-        numElementsLeft -= chunkSize;
-        startingElement += chunkSize;
-        availableBytes += (sizeof(FROM_TYPE) - sizeof(TO_TYPE)) * chunkSize;
-    }
-}
-
 // To Bigger
 template <typename FROM_TYPE, typename TO_TYPE>
 void TypeConverter::convertToBiggerElementsInPlaceOnGpu(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
@@ -907,33 +878,35 @@ void TypeConverter::convertToBiggerElementsInPlaceOnGpu(FROM_TYPE *source_d, TO_
 
 template <typename FROM_TYPE, typename TO_TYPE>
 void TypeConverter::gpuConvertTypeImpl(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
+    // A conversion to the same type is refused (Tensor copies those as bytes), so it instantiates no kernel.
     THOR_THROW_IF_FALSE(!(is_same<FROM_TYPE, TO_TYPE>::value));
-    THOR_THROW_IF_FALSE(numElements >= 0);
-    if (numElements == 0)
-        return;
+    if constexpr (!is_same_v<FROM_TYPE, TO_TYPE>) {
+        THOR_THROW_IF_FALSE(numElements >= 0);
+        if (numElements == 0)
+            return;
 
-    ScopedGpu scopedGpu(stream.getGpuNum());
+        ScopedGpu scopedGpu(stream.getGpuNum());
 
-    bool inPlaceConversion = ((void *)source_d == (void *)dest_d);
+        bool inPlaceConversion = ((void *)source_d == (void *)dest_d);
 
-    // When not doing an inplace operation, the memory regions must not overlap
-    if (!inPlaceConversion) {
-        void *sourceStart = source_d;
-        void *sourceEnd = (void *)&(source_d[numElements - 1]);
-        void *destStart = dest_d;
-        void *destEnd = (void *)&(dest_d[numElements - 1]);
-        THOR_THROW_IF_FALSE(sourceEnd < destStart || sourceStart > destEnd);
-    }
+        // When not doing an inplace operation, the memory regions must not overlap
+        if (!inPlaceConversion) {
+            void *sourceStart = source_d;
+            void *sourceEnd = (void *)&(source_d[numElements - 1]);
+            void *destStart = dest_d;
+            void *destEnd = (void *)&(dest_d[numElements - 1]);
+            THOR_THROW_IF_FALSE(sourceEnd < destStart || sourceStart > destEnd);
+        }
 
-    // All conversions to and from all element sizes of 1, 2, 4, and 8 bytes are supported.
-    // InPlace and out of place conversions are supported in all cases
-    if (!inPlaceConversion || sizeof(FROM_TYPE) == sizeof(TO_TYPE)) {
+        // Every pair converts out of place with one kernel, which also runs in place between same-sized types. Only
+        // widening pairs instantiate the in-place kernels; convertType refuses in-place narrowing.
+        if constexpr (sizeof(FROM_TYPE) < sizeof(TO_TYPE)) {
+            if (inPlaceConversion) {
+                convertToBiggerElementsInPlaceOnGpu<FROM_TYPE, TO_TYPE>(source_d, dest_d, numElements, stream);
+                return;
+            }
+        }
         launchOutOfPlaceConvertKernel<FROM_TYPE, TO_TYPE>(source_d, dest_d, numElements, stream);
-    } else {
-        if (sizeof(FROM_TYPE) > sizeof(TO_TYPE))
-            convertToSmallerElementsInPlaceOnGpu<FROM_TYPE, TO_TYPE>(source_d, dest_d, numElements, stream);
-        else
-            convertToBiggerElementsInPlaceOnGpu<FROM_TYPE, TO_TYPE>(source_d, dest_d, numElements, stream);
     }
 }
 
@@ -959,479 +932,86 @@ __global__ void convertReadWholeChunkThenWriteWholeChunkKernel(FROM_TYPE *source
     }
 }
 
-// Reads 8 writes 1
-// Reads 8 writes 1
-// Reads 1 writes 8
-// Reads 16 writes 16
+// Out of place: each thread converts E = W / max(sizeof(FROM_TYPE), sizeof(TO_TYPE)) elements, that is W bytes of
+// the wider side and its share of the narrower side, each moved in the widest accesses that fit (16 bytes, or 32 where
+// nvcc merges a pair on sm_100+). W is 16 bytes when the destination is at least as wide as the source and 32 when it
+// is narrower: the fastest of 16 to 128 in the 1518 probe (RTX 5090; 16 beat 32 by 1.5% to 5% when widening, 32 beat
+// 16 by up to 1% when narrowing). A thread whose elements run past the end converts them one at a time, so nothing is
+// read or written past the last element.
 template <typename FROM_TYPE, typename TO_TYPE>
-__global__ void convertOutOfPlaceKernelS1D1(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 16;
-    if (index >= numElements)
-        return;
-
-    char inBuff[16];
-    long index16Elements = index >> 4;
-    ((float4 *)inBuff)[0] = ((float4 *)source_d)[index16Elements];
-
-    char outBuff[16];
-    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
-    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
-    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
-    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
-    ((TO_TYPE *)outBuff)[4] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[4]);
-    ((TO_TYPE *)outBuff)[5] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[5]);
-    ((TO_TYPE *)outBuff)[6] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[6]);
-    ((TO_TYPE *)outBuff)[7] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[7]);
-    ((TO_TYPE *)outBuff)[8] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[8]);
-    ((TO_TYPE *)outBuff)[9] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[9]);
-    ((TO_TYPE *)outBuff)[10] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[10]);
-    ((TO_TYPE *)outBuff)[11] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[11]);
-    ((TO_TYPE *)outBuff)[12] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[12]);
-    ((TO_TYPE *)outBuff)[13] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[13]);
-    ((TO_TYPE *)outBuff)[14] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[14]);
-    ((TO_TYPE *)outBuff)[15] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[15]);
-
-    ((float4 *)dest_d)[index16Elements] = ((float4 *)outBuff)[0];
+__host__ __device__ constexpr int outOfPlaceElementsPerThread() {
+    constexpr int wide = sizeof(FROM_TYPE) > sizeof(TO_TYPE) ? static_cast<int>(sizeof(FROM_TYPE)) : static_cast<int>(sizeof(TO_TYPE));
+    constexpr int bytesOfTheWiderSide = sizeof(FROM_TYPE) > sizeof(TO_TYPE) ? 32 : 16;
+    static_assert(wide == 1 || wide == 2 || wide == 4 || wide == 8, "element sizes of 1, 2, 4 and 8 bytes");
+    return bytesOfTheWiderSide / wide;
 }
 
-// Reads 16 writes 16
-template <typename FROM_TYPE, typename TO_TYPE>
-__global__ void convertOutOfPlaceKernelS1D2(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 16;
-    if (index >= numElements)
-        return;
-
-    char inBuff[16];
-    long index16Elements = index >> 4;
-    ((float4 *)inBuff)[0] = ((float4 *)source_d)[index16Elements];
-
-    half outBuff[16];
-    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
-    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
-    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
-    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
-    ((TO_TYPE *)outBuff)[4] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[4]);
-    ((TO_TYPE *)outBuff)[5] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[5]);
-    ((TO_TYPE *)outBuff)[6] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[6]);
-    ((TO_TYPE *)outBuff)[7] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[7]);
-    ((TO_TYPE *)outBuff)[8] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[8]);
-    ((TO_TYPE *)outBuff)[9] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[9]);
-    ((TO_TYPE *)outBuff)[10] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[10]);
-    ((TO_TYPE *)outBuff)[11] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[11]);
-    ((TO_TYPE *)outBuff)[12] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[12]);
-    ((TO_TYPE *)outBuff)[13] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[13]);
-    ((TO_TYPE *)outBuff)[14] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[14]);
-    ((TO_TYPE *)outBuff)[15] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[15]);
-
-    ((double4 *)dest_d)[index16Elements] = ((double4 *)outBuff)[0];
+template <int BYTES>
+__device__ __forceinline__ void loadConvertBytes(void *to, const void *from) {
+    if constexpr (BYTES >= 16) {
+        const uint4 *source = static_cast<const uint4 *>(__builtin_assume_aligned(from, BYTES >= 32 ? 32 : 16));
+#pragma unroll
+        for (int i = 0; i < BYTES / 16; ++i)
+            static_cast<uint4 *>(to)[i] = source[i];
+    } else if constexpr (BYTES == 8) {
+        *static_cast<uint2 *>(to) = *static_cast<const uint2 *>(from);
+    } else if constexpr (BYTES == 4) {
+        *static_cast<unsigned int *>(to) = *static_cast<const unsigned int *>(from);
+    } else {
+        static_assert(BYTES == 2, "accesses of 2 to 32 bytes");
+        *static_cast<unsigned short *>(to) = *static_cast<const unsigned short *>(from);
+    }
 }
 
-// Reads 8 writes 8
-template <typename FROM_TYPE, typename TO_TYPE>
-__global__ void convertOutOfPlaceKernelS1D4(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 8;
-    if (index >= numElements)
-        return;
-
-    char inBuff[8];
-    long index8Elements = index >> 3;
-    ((float2 *)inBuff)[0] = ((float2 *)source_d)[index8Elements];
-
-    float outBuff[8];
-    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
-    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
-    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
-    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
-    ((TO_TYPE *)outBuff)[4] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[4]);
-    ((TO_TYPE *)outBuff)[5] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[5]);
-    ((TO_TYPE *)outBuff)[6] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[6]);
-    ((TO_TYPE *)outBuff)[7] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[7]);
-
-    ((double4 *)dest_d)[index8Elements] = ((double4 *)outBuff)[0];
+template <int BYTES>
+__device__ __forceinline__ void storeConvertBytes(void *to, const void *from) {
+    if constexpr (BYTES >= 16) {
+        uint4 *dest = static_cast<uint4 *>(__builtin_assume_aligned(to, BYTES >= 32 ? 32 : 16));
+#pragma unroll
+        for (int i = 0; i < BYTES / 16; ++i)
+            dest[i] = static_cast<const uint4 *>(from)[i];
+    } else if constexpr (BYTES == 8) {
+        *static_cast<uint2 *>(to) = *static_cast<const uint2 *>(from);
+    } else if constexpr (BYTES == 4) {
+        *static_cast<unsigned int *>(to) = *static_cast<const unsigned int *>(from);
+    } else {
+        static_assert(BYTES == 2, "accesses of 2 to 32 bytes");
+        *static_cast<unsigned short *>(to) = *static_cast<const unsigned short *>(from);
+    }
 }
 
-// Reads 4 writes 4
 template <typename FROM_TYPE, typename TO_TYPE>
-__global__ void convertOutOfPlaceKernelS1D8(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
-    if (index >= numElements)
+__global__ void __launch_bounds__(256) convertOutOfPlaceKernel(const FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
+    constexpr int E = outOfPlaceElementsPerThread<FROM_TYPE, TO_TYPE>();
+    const long first = (static_cast<long>(blockIdx.x) * 256 + threadIdx.x) * E;
+    if (first >= numElements)
         return;
+    if (first + E > numElements) {
+        // At most one thread per launch runs this. The loop stays rolled, so it adds one copy of the conversion to
+        // the kernel, not one per element.
+#pragma unroll 1
+        for (long i = first; i < numElements; ++i)
+            dest_d[i] = Converter<FROM_TYPE, TO_TYPE>{}(source_d[i]);
+        return;
+    }
 
-    char inBuff[4];
-    long index4Elements = index >> 2;
-    ((float *)inBuff)[0] = ((float *)source_d)[index4Elements];
-
-    double outBuff[4];
-    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
-    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
-    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
-    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
-
-    ((double4 *)dest_d)[index4Elements] = ((double4 *)outBuff)[0];
+    alignas(16) FROM_TYPE in[E];
+    loadConvertBytes<E * static_cast<int>(sizeof(FROM_TYPE))>(in, source_d + first);
+    alignas(16) TO_TYPE out[E];
+#pragma unroll
+    for (int i = 0; i < E; ++i)
+        out[i] = Converter<FROM_TYPE, TO_TYPE>{}(in[i]);
+    storeConvertBytes<E * static_cast<int>(sizeof(TO_TYPE))>(dest_d + first, out);
 }
 
-// Reads 16 writes 16
-template <typename FROM_TYPE, typename TO_TYPE>
-__global__ void convertOutOfPlaceKernelS2D1(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 16;
-    if (index >= numElements)
-        return;
-
-    half inBuff[16];
-    long index16Elements = index >> 4;
-    ((double4 *)inBuff)[0] = ((double4 *)source_d)[index16Elements];
-
-    char outBuff[16];
-    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
-    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
-    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
-    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
-    ((TO_TYPE *)outBuff)[4] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[4]);
-    ((TO_TYPE *)outBuff)[5] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[5]);
-    ((TO_TYPE *)outBuff)[6] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[6]);
-    ((TO_TYPE *)outBuff)[7] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[7]);
-    ((TO_TYPE *)outBuff)[8] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[8]);
-    ((TO_TYPE *)outBuff)[9] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[9]);
-    ((TO_TYPE *)outBuff)[10] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[10]);
-    ((TO_TYPE *)outBuff)[11] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[11]);
-    ((TO_TYPE *)outBuff)[12] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[12]);
-    ((TO_TYPE *)outBuff)[13] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[13]);
-    ((TO_TYPE *)outBuff)[14] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[14]);
-    ((TO_TYPE *)outBuff)[15] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[15]);
-
-    ((float4 *)dest_d)[index16Elements] = ((float4 *)outBuff)[0];
-}
-
-// Reads 8 writes 8
-template <typename FROM_TYPE, typename TO_TYPE>
-__global__ void convertOutOfPlaceKernelS2D2(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 8;
-    if (index >= numElements)
-        return;
-
-    half inBuff[8];
-    long index8Elements = index >> 3;
-    ((float4 *)inBuff)[0] = ((float4 *)source_d)[index8Elements];
-
-    half outBuff[8];
-    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
-    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
-    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
-    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
-    ((TO_TYPE *)outBuff)[4] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[4]);
-    ((TO_TYPE *)outBuff)[5] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[5]);
-    ((TO_TYPE *)outBuff)[6] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[6]);
-    ((TO_TYPE *)outBuff)[7] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[7]);
-
-    ((float4 *)dest_d)[index8Elements] = ((float4 *)outBuff)[0];
-}
-
-// Reads 8 writes 8
-template <typename FROM_TYPE, typename TO_TYPE>
-__global__ void convertOutOfPlaceKernelS2D4(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 8;
-    if (index >= numElements)
-        return;
-
-    half inBuff[8];
-    long index8Elements = index >> 3;
-    ((float4 *)inBuff)[0] = ((float4 *)source_d)[index8Elements];
-
-    float outBuff[8];
-    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
-    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
-    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
-    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
-    ((TO_TYPE *)outBuff)[4] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[4]);
-    ((TO_TYPE *)outBuff)[5] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[5]);
-    ((TO_TYPE *)outBuff)[6] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[6]);
-    ((TO_TYPE *)outBuff)[7] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[7]);
-
-    ((double4 *)dest_d)[index8Elements] = ((double4 *)outBuff)[0];
-}
-
-// Reads 4 writes 4
-template <typename FROM_TYPE, typename TO_TYPE>
-__global__ void convertOutOfPlaceKernelS2D8(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
-    if (index >= numElements)
-        return;
-
-    half inBuff[4];
-    long index4Elements = index >> 2;
-    ((float2 *)inBuff)[0] = ((float2 *)source_d)[index4Elements];
-
-    double outBuff[4];
-    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
-    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
-    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
-    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
-
-    ((double4 *)dest_d)[index4Elements] = ((double4 *)outBuff)[0];
-}
-
-// Reads 8 writes 8
-template <typename FROM_TYPE, typename TO_TYPE>
-__global__ void convertOutOfPlaceKernelS4D1(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 8;
-    if (index >= numElements)
-        return;
-
-    float inBuff[8];
-    long index8Elements = index >> 3;
-    ((double4 *)inBuff)[0] = ((double4 *)source_d)[index8Elements];
-
-    char outBuff[8];
-    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
-    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
-    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
-    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
-    ((TO_TYPE *)outBuff)[4] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[4]);
-    ((TO_TYPE *)outBuff)[5] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[5]);
-    ((TO_TYPE *)outBuff)[6] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[6]);
-    ((TO_TYPE *)outBuff)[7] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[7]);
-
-    ((float2 *)dest_d)[index8Elements] = ((float2 *)outBuff)[0];
-}
-
-// Reads 8 writes 8
-template <typename FROM_TYPE, typename TO_TYPE>
-__global__ void convertOutOfPlaceKernelS4D2(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 8;
-    if (index >= numElements)
-        return;
-
-    float inBuff[8];
-    long index8Elements = index >> 3;
-    ((double4 *)inBuff)[0] = ((double4 *)source_d)[index8Elements];
-
-    half outBuff[8];
-    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
-    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
-    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
-    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
-    ((TO_TYPE *)outBuff)[4] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[4]);
-    ((TO_TYPE *)outBuff)[5] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[5]);
-    ((TO_TYPE *)outBuff)[6] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[6]);
-    ((TO_TYPE *)outBuff)[7] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[7]);
-
-    ((float4 *)dest_d)[index8Elements] = ((float4 *)outBuff)[0];
-}
-
-// Reads 4 writes 4
-template <typename FROM_TYPE, typename TO_TYPE>
-__global__ void convertOutOfPlaceKernelS4D4(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
-    if (index >= numElements)
-        return;
-
-    float inBuff[4];
-    long index4Elements = index >> 2;
-    ((float4 *)inBuff)[0] = ((float4 *)source_d)[index4Elements];
-
-    float outBuff[4];
-    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
-    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
-    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
-    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
-
-    ((float4 *)dest_d)[index4Elements] = ((float4 *)outBuff)[0];
-}
-
-// Reads 4 writes 4
-template <typename FROM_TYPE, typename TO_TYPE>
-__global__ void convertOutOfPlaceKernelS4D8(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
-    if (index >= numElements)
-        return;
-
-    float inBuff[4];
-    long index4Elements = index >> 2;
-    ((float4 *)inBuff)[0] = ((float4 *)source_d)[index4Elements];
-
-    double outBuff[4];
-    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
-    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
-    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
-    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
-
-    ((double4 *)dest_d)[index4Elements] = ((double4 *)outBuff)[0];
-}
-
-// Reads 4 writes 4
-template <typename FROM_TYPE, typename TO_TYPE>
-__global__ void convertOutOfPlaceKernelS8D1(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
-    if (index >= numElements)
-        return;
-
-    double inBuff[4];
-    long index4Elements = index >> 2;
-    ((double4 *)inBuff)[0] = ((double4 *)source_d)[index4Elements];
-
-    char outBuff[4];
-    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
-    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
-    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
-    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
-
-    ((float *)dest_d)[index4Elements] = ((float *)outBuff)[0];
-}
-
-// Reads 4 writes 4
-template <typename FROM_TYPE, typename TO_TYPE>
-__global__ void convertOutOfPlaceKernelS8D2(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
-    if (index >= numElements)
-        return;
-
-    double inBuff[4];
-    long index4Elements = index >> 2;
-    ((double4 *)inBuff)[0] = ((double4 *)source_d)[index4Elements];
-
-    half outBuff[4];
-    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
-    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
-    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
-    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
-
-    ((float2 *)dest_d)[index4Elements] = ((float2 *)outBuff)[0];
-}
-
-// Reads 4 writes 4
-template <typename FROM_TYPE, typename TO_TYPE>
-__global__ void convertOutOfPlaceKernelS8D4(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
-    if (index >= numElements)
-        return;
-
-    double inBuff[4];
-    long index4Elements = index >> 2;
-    ((double4 *)inBuff)[0] = ((double4 *)source_d)[index4Elements];
-
-    float outBuff[4];
-    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
-    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
-    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
-    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
-
-    ((float4 *)dest_d)[index4Elements] = ((float4 *)outBuff)[0];
-}
-
-// Reads 4 writes 4
-template <typename FROM_TYPE, typename TO_TYPE>
-__global__ void convertOutOfPlaceKernelS8D8(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
-    if (index >= numElements)
-        return;
-
-    double inBuff[4];
-    long index4Elements = index >> 2;
-    ((double4 *)inBuff)[0] = ((double4 *)source_d)[index4Elements];
-
-    double outBuff[4];
-    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
-    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
-    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
-    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
-
-    ((double4 *)dest_d)[index4Elements] = ((double4 *)outBuff)[0];
-}
-
-// Reads 8 writes 1
+// Also converts in place between same-sized types: each thread reads its elements before it writes them.
 template <typename FROM_TYPE, typename TO_TYPE>
 void launchOutOfPlaceConvertKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    if (sizeof(FROM_TYPE) == 1) {
-        if (sizeof(TO_TYPE) == 1) {
-            dim3 blockSize(256);
-            constexpr int elementsPerBlock = 256 * 16;
-            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-            convertOutOfPlaceKernelS1D1<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-        } else if (sizeof(TO_TYPE) == 2) {
-            dim3 blockSize(256);
-            constexpr int elementsPerBlock = 256 * 16;
-            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-            convertOutOfPlaceKernelS1D2<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-        } else if (sizeof(TO_TYPE) == 4) {
-            dim3 blockSize(256);
-            constexpr int elementsPerBlock = 256 * 8;
-            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-            convertOutOfPlaceKernelS1D4<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-        } else if (sizeof(TO_TYPE) == 8) {
-            dim3 blockSize(256);
-            constexpr int elementsPerBlock = 256 * 4;
-            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-            convertOutOfPlaceKernelS1D8<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-        }
-    } else if (sizeof(FROM_TYPE) == 2) {
-        if (sizeof(TO_TYPE) == 1) {
-            dim3 blockSize(256);
-            constexpr int elementsPerBlock = 256 * 16;
-            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-            convertOutOfPlaceKernelS2D1<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-        } else if (sizeof(TO_TYPE) == 2) {
-            dim3 blockSize(256);
-            constexpr int elementsPerBlock = 256 * 8;
-            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-            convertOutOfPlaceKernelS2D2<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-        } else if (sizeof(TO_TYPE) == 4) {
-            dim3 blockSize(256);
-            constexpr int elementsPerBlock = 256 * 8;
-            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-            convertOutOfPlaceKernelS2D4<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-        } else if (sizeof(TO_TYPE) == 8) {
-            dim3 blockSize(256);
-            constexpr int elementsPerBlock = 256 * 4;
-            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-            convertOutOfPlaceKernelS2D8<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-        }
-    } else if (sizeof(FROM_TYPE) == 4) {
-        if (sizeof(TO_TYPE) == 1) {
-            dim3 blockSize(256);
-            constexpr int elementsPerBlock = 256 * 8;
-            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-            convertOutOfPlaceKernelS4D1<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-        } else if (sizeof(TO_TYPE) == 2) {
-            dim3 blockSize(256);
-            constexpr int elementsPerBlock = 256 * 8;
-            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-            convertOutOfPlaceKernelS4D2<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-        } else if (sizeof(TO_TYPE) == 4) {
-            dim3 blockSize(256);
-            constexpr int elementsPerBlock = 256 * 4;
-            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-            convertOutOfPlaceKernelS4D4<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-        } else if (sizeof(TO_TYPE) == 8) {
-            dim3 blockSize(256);
-            constexpr int elementsPerBlock = 256 * 4;
-            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-            convertOutOfPlaceKernelS4D8<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-        }
-    } else if (sizeof(FROM_TYPE) == 8) {
-        if (sizeof(TO_TYPE) == 1) {
-            dim3 blockSize(256);
-            constexpr int elementsPerBlock = 256 * 4;
-            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-            convertOutOfPlaceKernelS8D1<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-        } else if (sizeof(TO_TYPE) == 2) {
-            dim3 blockSize(256);
-            constexpr int elementsPerBlock = 256 * 4;
-            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-            convertOutOfPlaceKernelS8D2<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-        } else if (sizeof(TO_TYPE) == 4) {
-            dim3 blockSize(256);
-            constexpr int elementsPerBlock = 256 * 4;
-            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-            convertOutOfPlaceKernelS8D4<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-        } else if (sizeof(TO_TYPE) == 8) {
-            dim3 blockSize(256);
-            constexpr int elementsPerBlock = 256 * 4;
-            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-            convertOutOfPlaceKernelS8D8<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-        }
-    } else {
-        THOR_UNREACHABLE();
-    }
+    constexpr long E = outOfPlaceElementsPerThread<FROM_TYPE, TO_TYPE>();
+    const long blocks = ((numElements + E - 1) / E + 255) / 256;
+    THOR_THROW_IF_FALSE(blocks <= static_cast<long>(std::numeric_limits<int>::max()));
+    convertOutOfPlaceKernel<FROM_TYPE, TO_TYPE>
+        <<<static_cast<unsigned int>(blocks), 256, 0, stream.getStream()>>>(source_d, dest_d, numElements);
 }
 
 template <typename FROM_TYPE, typename TO_TYPE>

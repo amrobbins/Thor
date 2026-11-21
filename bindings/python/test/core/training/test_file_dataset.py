@@ -1132,7 +1132,7 @@ def test_dataset_input_bindings_reject_hidden_conversion_missing_and_duplicate_b
     )
     dtype_bindings = thor.training.DatasetInputBindings()
     dtype_bindings.bind(dtype_input, dataset.field("seasonality_inputs"))
-    with pytest.raises(RuntimeError, match="dtype mismatch|TypeConversion"):
+    with pytest.raises(RuntimeError, match="dtype mismatch|TypeConverter"):
         thor.training.Trainer(
             network=dtype_network,
             data=data,

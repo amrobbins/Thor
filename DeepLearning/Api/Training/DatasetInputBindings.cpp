@@ -108,7 +108,7 @@ void validateDenseBinding(const NetworkInput &input,
     if (input.getDataType() != field.dataType) {
         throw std::runtime_error("DatasetInputBindings dtype mismatch: dataset field '" +
                                  field.name + "' cannot bind NetworkInput '" +
-                                 input.getName() + "'. Add an explicit graph TypeConversion after a matching NetworkInput.");
+                                 input.getName() + "'. Add an explicit TypeConverter layer after a matching NetworkInput.");
     }
     const std::vector<uint64_t> expectedDimensions = expectedNetworkInputDimensions(
         field, input.dimensionsIncludeBatch(), batchSize);

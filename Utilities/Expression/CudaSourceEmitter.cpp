@@ -2320,6 +2320,39 @@ static bool isIntegralScalarCastDType(DataType dtype) {
     }
 }
 
+// FP32 -> integer, by Thor's rule (ThorLowPrecision::toIntegerSaturating in LowPrecisionFloat.h, which TypeConverter
+// uses on the CPU and the GPU): truncate toward zero, saturate (infinities included), and NaN as PTX documents for
+// cvt.rzi, i.e. 0 for 8- to 32-bit destinations and the minimum or 2^63 for 64-bit ones. The intrinsics are cvt.rzi;
+// 8- and 16-bit destinations clamp the 32-bit result. A plain static_cast is undefined outside the range. Each form
+// names float_expr once, so it is evaluated once.
+static std::string floatToIntegralScalarExpr(const std::string& float_expr, DataType dst_dtype) {
+    switch (dst_dtype) {
+        case DataType::INT8:
+            return "([](int v) { return static_cast<signed char>(v < -128 ? -128 : (v > 127 ? 127 : v)); })(__float2int_rz(" +
+                   float_expr + "))";
+        case DataType::INT16:
+            return "([](int v) { return static_cast<short>(v < -32768 ? -32768 : (v > 32767 ? 32767 : v)); })(__float2int_rz(" +
+                   float_expr + "))";
+        case DataType::INT32:
+            return "__float2int_rz(" + float_expr + ")";
+        case DataType::INT64:
+            return "__float2ll_rz(" + float_expr + ")";
+        case DataType::UINT8:
+            return "([](unsigned int v) { return static_cast<unsigned char>(v > 255u ? 255u : v); })(__float2uint_rz(" + float_expr +
+                   "))";
+        case DataType::UINT16:
+            return "([](unsigned int v) { return static_cast<unsigned short>(v > 65535u ? 65535u : v); })(__float2uint_rz(" +
+                   float_expr + "))";
+        case DataType::UINT32:
+            return "__float2uint_rz(" + float_expr + ")";
+        case DataType::UINT64:
+            return "__float2ull_rz(" + float_expr + ")";
+        default:
+            throw runtime_error("Unsupported float to integral cast destination in fused stage emitter: " +
+                                TensorDescriptor::getElementTypeName(dst_dtype));
+    }
+}
+
 static std::string castToIntegralScalarExpr(const std::string& expr, DataType src_dtype, DataType dst_dtype) {
     const std::string dst_type = scalarStorageType(dst_dtype);
     if (src_dtype == DataType::BOOLEAN) {
@@ -2331,7 +2364,7 @@ static std::string castToIntegralScalarExpr(const std::string& expr, DataType sr
         case DataType::BF16:
         case DataType::FP8_E4M3:
         case DataType::FP8_E5M2:
-            return "static_cast<" + dst_type + ">(" + castScalarExpr(expr, src_dtype, DataType::FP32) + ")";
+            return floatToIntegralScalarExpr(castScalarExpr(expr, src_dtype, DataType::FP32), dst_dtype);
         case DataType::UINT8:
         case DataType::INT8:
         case DataType::UINT16:

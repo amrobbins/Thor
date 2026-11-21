@@ -15,8 +15,9 @@ namespace ThorImplementation {
 
 class Tensor;
 
-// In-place conversions are supported and are about 20% slower than non-in-place conversions
-// To do an inplace conversion, just send the same pointer to the source and dest.
+// An in-place conversion passes the same pointer as source and dest. It is supported when the destination element is
+// at least as large as the source element (widening, or the same size). In-place narrowing is refused: narrow out of
+// place into a separate destination, which is faster.
 class TypeConverter {
    public:
     // Schedules a type conversion on the specified device at the back of the stream.
@@ -52,13 +53,13 @@ class TypeConverter {
     struct Args;
     struct TensorArgs;
 
-    // Convert on CPU between two types. In place or out of place is supported.
+    // Convert on CPU between two types, out of place or in place when not narrowing.
     static void CUDART_CB cpuConvertType(void *data);
 
     template <typename FROM_TYPE, typename TO_TYPE>
     static void cpuConvertTypeImpl(FROM_TYPE *source, TO_TYPE *dest, long numElements);
 
-    // Convert on GPU between two types. In place or out of place is supported.
+    // Convert on GPU between two types, out of place or in place when not narrowing.
     static void gpuConvertType(void *source_d,
                                void *dest_d,
                                DataType sourceDataType,
@@ -69,8 +70,6 @@ class TypeConverter {
     template <typename FROM_TYPE, typename TO_TYPE>
     static void gpuConvertTypeImpl(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
 
-    template <typename FROM_TYPE, typename TO_TYPE>
-    static void convertToSmallerElementsInPlaceOnGpu(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
     template <typename FROM_TYPE, typename TO_TYPE>
     static void convertToBiggerElementsInPlaceOnGpu(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
 };

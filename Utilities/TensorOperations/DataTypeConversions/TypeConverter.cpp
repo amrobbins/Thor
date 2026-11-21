@@ -9,7 +9,12 @@ using namespace std;
 
 template <typename FROM_TYPE, typename TO_TYPE>
 struct Converter {
-    inline TO_TYPE operator()(FROM_TYPE x) const { return static_cast<TO_TYPE>(x); }
+    inline TO_TYPE operator()(FROM_TYPE x) const {
+        if constexpr (ThorLowPrecision::isFloatingStorageType<FROM_TYPE> && ThorLowPrecision::isIntegerStorageType<TO_TYPE>)
+            return ThorLowPrecision::toIntegerSaturating<TO_TYPE>(x);
+        else
+            return static_cast<TO_TYPE>(x);
+    }
 };
 template <typename FROM_TYPE>
 struct Converter<FROM_TYPE, __nv_fp8_e4m3> {
@@ -54,6 +59,17 @@ struct TypeConverter::TensorArgs final : Args {
     Tensor destTensor;
 };
 
+// In-place narrowing is refused here, when the conversion is enqueued, so neither the CPU callback nor the GPU launch
+// has to handle it. Narrowing out of place into a separate destination is faster.
+static void refuseInPlaceNarrowing(const void *source, const void *dest, DataType sourceDataType, DataType destDataType) {
+    if (source == dest &&
+        TensorDescriptor::getElementSizeInBytes(destDataType) < TensorDescriptor::getElementSizeInBytes(sourceDataType)) {
+        throw runtime_error("TypeConverter::convertType refuses in-place narrowing from " +
+                            TensorDescriptor::getElementTypeName(sourceDataType) + " to " +
+                            TensorDescriptor::getElementTypeName(destDataType) +
+                            "; convert out of place into a separate destination");
+    }
+}
 
 void TypeConverter::convertType(void *source,
                                 void *dest,
@@ -66,6 +82,7 @@ void TypeConverter::convertType(void *source,
     THOR_THROW_IF_FALSE(sourceDataType != destDataType);
 
     THOR_THROW_IF_FALSE(numElements >= 0);
+    refuseInPlaceNarrowing(source, dest, sourceDataType, destDataType);
     if (numElements == 0)
         return;
 
@@ -91,12 +108,14 @@ void TypeConverter::convertType(const Tensor &source,
     THOR_THROW_IF_FALSE(source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
     THOR_THROW_IF_FALSE(dest.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
     THOR_THROW_IF_FALSE(numElements >= 0);
-    if (numElements == 0)
-        return;
 
     // The tensors' own starts (a view's offset included), not their allocations'.
     void *sourceMem = const_cast<void *>(source.getMemPtr<void>());
     void *destMem = const_cast<void *>(dest.getMemPtr<void>());
+    refuseInPlaceNarrowing(sourceMem, destMem, sourceDataType, destDataType);
+    if (numElements == 0)
+        return;
+
     auto args = make_unique<TensorArgs>(source, dest, sourceMem, destMem, sourceDataType, destDataType, numElements);
     stream.enqueueHostFunction(cpuConvertType, std::move(args));
 }
@@ -107,7 +126,7 @@ void TypeConverter::convertType(const Tensor &source,
 //
 //----------------------------------
 
-// Convert on CPU between two types. In place or out of place is supported.
+// Convert on CPU between two types, out of place or in place when not narrowing.
 void CUDART_CB TypeConverter::cpuConvertType(void *data) {
     Args *args = (Args *)data;
     // FROM_TYPE *source = args->source;
@@ -916,7 +935,7 @@ void TypeConverter::cpuConvertTypeImpl(FROM_TYPE *source, TO_TYPE *dest, long nu
     }
 
     if (!inPlaceConversion || sizeof(TO_TYPE) == sizeof(FROM_TYPE)) {
-        // Out of place or in place or conversion to a same sized type
+        // Out of place, or in place between same-sized types
         const uint32_t numProcs = max(min((long)omp_get_num_procs(), numElements / 500000), 1L);
         if (numProcs > 1) {
             const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
@@ -929,13 +948,8 @@ void TypeConverter::cpuConvertTypeImpl(FROM_TYPE *source, TO_TYPE *dest, long nu
                 dest[i] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)source)[i]);
             }
         }
-    } else if (sizeof(TO_TYPE) < sizeof(FROM_TYPE)) {
-        // In place and converting to a smaller type
-        for (long i = 0; i < numElements; ++i) {
-            dest[i] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)source)[i]);
-        }
     } else {
-        // In place and converting to a larger type
+        // In place and converting to a larger type (convertType refuses in-place narrowing)
         for (long i = numElements - 1; i >= 0; --i) {
             dest[i] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)source)[i]);
         }

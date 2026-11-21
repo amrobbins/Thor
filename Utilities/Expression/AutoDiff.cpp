@@ -4349,10 +4349,9 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::CAST: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    // Type conversion is a straight-through operation in Thor's layer semantics:
-                    // TypeConversion::backProp() converts the incoming gradient back into the
-                    // source tensor dtype.  Keep Expression CAST consistent with that behavior so
-                    // graph-level type conversion can use the normal Expression/autodiff engine.
+                    // Type conversion is straight through: the incoming gradient is converted back
+                    // into the source tensor dtype.  The TypeConverter layer is this CAST, so
+                    // graph-level type conversion uses the normal Expression/autodiff engine.
                     const ExprNode& lhs_node = forward_expr.nodes.at(node.lhs);
                     const std::optional<DataType> source_dtype = preferredGradValueDType(lhs_node);
                     if (!source_dtype.has_value()) {

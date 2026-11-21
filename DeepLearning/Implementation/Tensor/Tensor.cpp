@@ -797,8 +797,7 @@ void Tensor::copyFromAsyncImpl(Tensor source, Stream copyStream) {
             copyBytesAsync(destMem, placement, sourceMem, source.placement, sourceDescriptor.getArraySizeInBytes(), copyStream);
         } else {
             ScopedGpu scopedGpu(0);  // CPU local stream belongs to gpu 0
-            // Convert between data types on cpu.
-            // Note that this may be an in-place conversion
+            // Convert between data types on cpu. This may be in place, except when narrowing, which TypeConverter refuses.
             TypeConverter::convertType(source,
                                        *this,
                                        sourceDescriptor.getDataType(),
@@ -820,8 +819,8 @@ void Tensor::copyFromAsyncImpl(Tensor source, Stream copyStream) {
                 copyBytesAsync(destMem, placement, sourceMem, source.placement, sourceDescriptor.getArraySizeInBytes(), copyStream);
             } else {
                 ScopedGpu scopedGpu(destDeviceNum);
-                // Convert between data types on device.
-                // Note that this may be an in-place conversion
+                // Convert between data types on device. This may be in place, except when narrowing, which TypeConverter
+                // refuses.
                 TypeConverter::convertType(sourceMem,
                                            destMem,
                                            sourceDescriptor.getDataType(),
@@ -863,9 +862,11 @@ struct IdentityMatrixArgs : HostFunctionArgsBase {
     Tensor tensor;
 };
 
+// A host double into a tensor element: castToStorage (integers by Thor's float -> integer rule, FP8 satfinite), with
+// FP16 and BF16 through FP32 below.
 template <typename T>
 inline T castCpuTensorValue(double value) {
-    return T(value);
+    return ThorLowPrecision::castToStorage<T>(value);
 }
 
 template <>
@@ -1193,9 +1194,88 @@ static void adjustUnsignedIntegralRandomRange(double &maxValue) {
         maxValue += 0.99999;
 }
 
+// fillRandom draws from [minValue, maxValue]; an integer type takes the values the draws truncate to. A range the element
+// type cannot hold, or a NaN bound, is refused, so there is no saturating or wrapping policy for it. BOOLEAN ignores the
+// range.
+static void refuseRandomRangeOutsideType(DataType dataType, double minValue, double maxValue) {
+    bool inside = true;
+    double low = 0.0;
+    double high = 0.0;
+    auto signedBits = [&](int bits) {
+        low = -std::ldexp(1.0, bits - 1);
+        high = std::ldexp(1.0, bits - 1) - 1.0;
+        // 2^(N-1) is exact in a double and 2^63 - 1 is not, so compare against the exclusive bound.
+        inside = std::trunc(minValue) >= low && std::trunc(maxValue) < std::ldexp(1.0, bits - 1);
+    };
+    auto unsignedBits = [&](int bits) {
+        high = std::ldexp(1.0, bits) - 1.0;
+        inside = std::trunc(minValue) >= 0.0 && std::trunc(maxValue) < std::ldexp(1.0, bits);
+    };
+    auto floating = [&](double largest) {
+        low = -largest;
+        high = largest;
+        inside = minValue >= low && maxValue <= high;
+    };
+    switch (dataType) {
+        case DataType::INT8:
+            signedBits(8);
+            break;
+        case DataType::INT16:
+            signedBits(16);
+            break;
+        case DataType::INT32:
+            signedBits(32);
+            break;
+        case DataType::INT64:
+            signedBits(64);
+            break;
+        case DataType::UINT8:
+            unsignedBits(8);
+            break;
+        case DataType::UINT16:
+            unsignedBits(16);
+            break;
+        case DataType::UINT32:
+            unsignedBits(32);
+            break;
+        case DataType::UINT64:
+            unsignedBits(64);
+            break;
+        case DataType::FP8_E4M3:
+            floating(448.0);
+            break;
+        case DataType::FP8_E5M2:
+            floating(57344.0);
+            break;
+        case DataType::FP16:
+            floating(65504.0);
+            break;
+        case DataType::BF16:
+            floating(3.3895313892515355e38);
+            break;
+        case DataType::FP32:
+            floating(static_cast<double>(numeric_limits<float>::max()));
+            break;
+        case DataType::FP64:
+            floating(numeric_limits<double>::max());
+            break;
+        case DataType::BOOLEAN:
+            return;
+        default:
+            THOR_UNREACHABLE();
+    }
+    if (!inside) {
+        std::ostringstream message;
+        message << "Tensor::fillRandom range [" << minValue << ", " << maxValue << "] is outside the range of "
+                << TensorDescriptor::getElementTypeName(dataType) << " [" << low << ", " << high << "].";
+        throw std::invalid_argument(message.str());
+    }
+}
+
 void Tensor::fillRandom(double minValue, double maxValue, Stream stream) {
     if (maxValue < minValue)
         swap(maxValue, minValue);
+    refuseRandomRangeOutsideType(getDataType(), minValue, maxValue);
 
     if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
         std::unique_ptr<HostFunctionArgsBase> args(new FillRandomArgs(*this, minValue, maxValue));
@@ -1351,30 +1431,30 @@ void Tensor::fill(double value, Stream stream) {
                                                     getPlacement().getDeviceNum(),
                                                     stream);
         } else if (dataType == DataType::FP32) {
-            launchFillValueGpuKernel<float>(value, (float *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+            launchFillValueGpuKernel<float>(castCpuTensorValue<float>(value), (float *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == DataType::FP64) {
-            launchFillValueGpuKernel<double>(value, (double *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+            launchFillValueGpuKernel<double>(castCpuTensorValue<double>(value), (double *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == DataType::UINT8) {
-            launchFillValueGpuKernel<uint8_t>(value, (uint8_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+            launchFillValueGpuKernel<uint8_t>(castCpuTensorValue<uint8_t>(value), (uint8_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == DataType::UINT16) {
             launchFillValueGpuKernel<uint16_t>(
-                value, (uint16_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+                castCpuTensorValue<uint16_t>(value), (uint16_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == DataType::UINT32) {
             launchFillValueGpuKernel<uint32_t>(
-                value, (uint32_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+                castCpuTensorValue<uint32_t>(value), (uint32_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == DataType::UINT64) {
             launchFillValueGpuKernel<uint64_t>(
-                value, (uint64_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+                castCpuTensorValue<uint64_t>(value), (uint64_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == DataType::INT8) {
-            launchFillValueGpuKernel<int8_t>(value, (int8_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+            launchFillValueGpuKernel<int8_t>(castCpuTensorValue<int8_t>(value), (int8_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == DataType::INT16) {
-            launchFillValueGpuKernel<int16_t>(value, (int16_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+            launchFillValueGpuKernel<int16_t>(castCpuTensorValue<int16_t>(value), (int16_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == DataType::INT32) {
-            launchFillValueGpuKernel<int32_t>(value, (int32_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+            launchFillValueGpuKernel<int32_t>(castCpuTensorValue<int32_t>(value), (int32_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == DataType::INT64) {
-            launchFillValueGpuKernel<int64_t>(value, (int64_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+            launchFillValueGpuKernel<int64_t>(castCpuTensorValue<int64_t>(value), (int64_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == DataType::BOOLEAN) {
-            launchFillValueGpuKernel<bool>(value, (bool *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+            launchFillValueGpuKernel<bool>(castCpuTensorValue<bool>(value), (bool *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else {
             THOR_UNREACHABLE();
         }
