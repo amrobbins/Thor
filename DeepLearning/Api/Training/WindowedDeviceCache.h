@@ -18,7 +18,7 @@ namespace Thor {
 enum class WindowedDeviceCache {
     /** Do not request persisting-L2 treatment for compact window sources. */
     OFF,
-    /** Best effort; unsupported/oversized sources continue with normal caching. */
+    /** Best effort; on devices without persisting L2, sources continue with normal caching. */
     AUTO,
     /** Fail session creation if an eligible compact window source cannot be cached. */
     REQUIRED,
@@ -31,8 +31,10 @@ enum class WindowedDeviceCache {
  * Per-session/report snapshot of the window-source persisting-L2 policy.
  *
  * eligibleSourceBytes counts unique compact source allocations referenced by
- * the session. activeUniqueBytes is device-wide manager telemetry and may
- * include sources leased by other concurrent sessions/runs on the same GPU.
+ * the session. activeUniqueBytes is device-wide manager telemetry: the access
+ * windows' bytes (a source larger than maxAccessPolicyWindowBytes counts its first
+ * window), which may include sources leased by other concurrent sessions/runs on
+ * the same GPU.
  */
 struct WindowedDeviceCacheReport {
     WindowedDeviceCache requested = WindowedDeviceCache::AUTO;

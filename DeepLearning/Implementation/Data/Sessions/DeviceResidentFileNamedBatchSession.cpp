@@ -116,7 +116,7 @@ class CompactResidentFieldMaterializer final : public Thor::DeviceBatchMateriali
             .deviceNum = snapshot.deviceNum,
             .tensorId = snapshot.tensorId,
             .base = snapshot.base,
-            .bytes = snapshot.bytes,
+            .bytes = snapshot.windowBytes,
             .persistingHitRatio = snapshot.hitRatio,
             .generation = snapshot.generation,
         };
@@ -443,8 +443,6 @@ void DeviceResidentFileNamedBatchSession::initializeWindowL2CacheLeases() {
                 return std::string("enabled");
             case Thor::DeviceWindowL2CacheLeaseStatus::UNSUPPORTED:
                 return std::string("unsupported");
-            case Thor::DeviceWindowL2CacheLeaseStatus::SOURCE_TOO_LARGE:
-                return std::string("source_too_large");
             case Thor::DeviceWindowL2CacheLeaseStatus::INVALID_ARGUMENT:
                 return std::string("invalid_argument");
             case Thor::DeviceWindowL2CacheLeaseStatus::CUDA_ERROR:
@@ -542,7 +540,7 @@ void DeviceResidentFileNamedBatchSession::applyWindowL2CachePolicyForField(
     const ThorImplementation::PersistingL2OperationResult result =
         stream.trySetPersistingL2AccessPolicyWindow(
             snapshot.base,
-            snapshot.bytes,
+            snapshot.windowBytes,
             snapshot.hitRatio,
             snapshot.tensorId,
             snapshot.generation);

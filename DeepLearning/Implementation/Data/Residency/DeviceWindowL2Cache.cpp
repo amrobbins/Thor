@@ -14,6 +14,7 @@ using ThorImplementation::PersistingL2Capabilities;
 using ThorImplementation::PersistingL2OperationResult;
 using ThorImplementation::PersistingL2OperationStatus;
 using ThorImplementation::queryPersistingL2Capabilities;
+using ThorImplementation::tryResetPersistingL2Cache;
 using ThorImplementation::trySetPersistingL2SetAsideBytes;
 
 DeviceWindowL2CacheLeaseSnapshot fixedFailure(
@@ -35,6 +36,7 @@ struct DeviceWindowL2CacheManager::Impl {
     struct SourceState {
         const void *base = nullptr;
         uint64_t bytes = 0;
+        uint64_t windowBytes = 0;
         uint64_t refCount = 0;
         float hitRatio = 0.0f;
     };
@@ -47,6 +49,7 @@ struct DeviceWindowL2CacheManager::Impl {
         uint64_t activeUniqueBytes = 0;
         uint64_t activeLeases = 0;
         uint64_t generation = 0;
+        uint64_t persistingL2Resets = 0;
         DeviceWindowL2CacheLeaseStatus unavailableStatus =
             DeviceWindowL2CacheLeaseStatus::UNSUPPORTED;
         std::string detail;
@@ -64,10 +67,10 @@ struct DeviceWindowL2CacheManager::Impl {
             if (source.refCount == 0) {
                 continue;
             }
-            if (activeUniqueBytes > std::numeric_limits<uint64_t>::max() - source.bytes) {
+            if (activeUniqueBytes > std::numeric_limits<uint64_t>::max() - source.windowBytes) {
                 activeUniqueBytes = std::numeric_limits<uint64_t>::max();
             } else {
-                activeUniqueBytes += source.bytes;
+                activeUniqueBytes += source.windowBytes;
             }
             if (activeLeases > std::numeric_limits<uint64_t>::max() - source.refCount) {
                 activeLeases = std::numeric_limits<uint64_t>::max();
@@ -286,22 +289,6 @@ DeviceWindowL2CacheLease DeviceWindowL2CacheManager::acquire(
             nullptr, -1, 0,
             fixedFailure(source, device.unavailableStatus, device.detail));
     }
-    if (source.bytes > device.maxAccessPolicyWindowBytes) {
-        return DeviceWindowL2CacheLease(
-            nullptr, -1, 0,
-            DeviceWindowL2CacheLeaseSnapshot{
-                .status = DeviceWindowL2CacheLeaseStatus::SOURCE_TOO_LARGE,
-                .deviceNum = source.deviceNum,
-                .tensorId = source.tensorId,
-                .base = source.base,
-                .bytes = source.bytes,
-                .budgetBytes = device.budgetBytes,
-                .activeUniqueBytes = device.activeUniqueBytes,
-                .generation = device.generation,
-                .hitRatio = 0.0f,
-                .detail = "window L2 cache source exceeds CUDA access-policy window limit"});
-    }
-
     auto found = device.sources.find(source.tensorId);
     if (found == device.sources.end()) {
         found = device.sources.emplace(
@@ -309,6 +296,7 @@ DeviceWindowL2CacheLease DeviceWindowL2CacheManager::acquire(
             Impl::SourceState{
                 .base = source.base,
                 .bytes = source.bytes,
+                .windowBytes = std::min(source.bytes, device.maxAccessPolicyWindowBytes),
                 .refCount = 0,
                 .hitRatio = 0.0f})
                     .first;
@@ -398,6 +386,7 @@ DeviceWindowL2CacheLeaseSnapshot DeviceWindowL2CacheManager::snapshot(
         .tensorId = tensorId,
         .base = source.base,
         .bytes = source.bytes,
+        .windowBytes = source.windowBytes,
         .budgetBytes = device.budgetBytes,
         .activeUniqueBytes = device.activeUniqueBytes,
         .generation = device.generation,
@@ -421,6 +410,13 @@ void DeviceWindowL2CacheManager::release(int deviceNum, uint64_t tensorId) noexc
         device.sources.erase(sourceIt);
     }
     Impl::rebalance(device);
+    if (device.sources.empty() && device.available) {
+        // The last source's lines would otherwise hold the set-aside after its session ends. Best effort, like the
+        // rest of the policy.
+        if (tryResetPersistingL2Cache(deviceNum).succeeded()) {
+            ++device.persistingL2Resets;
+        }
+    }
 }
 
 DeviceWindowL2CacheManager::Telemetry DeviceWindowL2CacheManager::telemetry(
@@ -440,6 +436,7 @@ DeviceWindowL2CacheManager::Telemetry DeviceWindowL2CacheManager::telemetry(
         .activeUniqueSources = static_cast<uint64_t>(device.sources.size()),
         .activeLeases = device.activeLeases,
         .generation = device.generation,
+        .persistingL2Resets = device.persistingL2Resets,
         .detail = device.detail};
 }
 

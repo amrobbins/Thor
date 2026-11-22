@@ -185,6 +185,8 @@ class DeviceResidentNamedDataset {
 
     struct CompactWindowPlanStorage {
         bool use32BitSteps = true;
+        // The largest power of two, up to 16, that divides every plan's sourceOffsetBytes.
+        uint64_t sourceOffsetAlignmentBytes = 1;
         std::vector<DeviceResidentWindowRowPlan32> plans32;
         std::vector<DeviceResidentWindowRowPlan64> plans64;
     };

@@ -82,8 +82,7 @@ void runMaterializationCase(
     for (uint64_t batchRow = 0; batchRow < batchSize; ++batchRow) {
         rowIndices[batchRow] = (batchRow * 137 + 19) % numExamples;
     }
-    // Invalid row indices historically leave their destination row untouched.
-    // Keep that behavior under the row/chunk mapping as well.
+    // A row whose index is outside the records is left untouched.
     if (batchSize > 7) rowIndices[7] = numExamples + 3;
     if (batchSize > 263) rowIndices[263] = numExamples;
 
@@ -124,71 +123,6 @@ void runMaterializationCase(
     }
 }
 
-void runExactTailCase(uint32_t copyWidth, uint32_t tailBytes) {
-    ASSERT_TRUE(copyWidth == 32 || copyWidth == 16 || copyWidth == 8 ||
-                copyWidth == 4 || copyWidth == 2);
-    ASSERT_GT(tailBytes, 0U);
-    ASSERT_LT(tailBytes, copyWidth);
-
-    constexpr uint64_t numExamples = 1;
-    constexpr uint64_t batchSize = 2;
-    constexpr uint8_t prefixSentinel = 0x5aU;
-    constexpr uint8_t destinationSentinel = 0xcdU;
-
-    // CUDA tensor allocations are at least 32-byte aligned. Offset the one
-    // valid source field by exactly the requested width (except for 32 itself)
-    // so source+destination jointly support exactly copyWidth and no wider
-    // transaction. The field reaches the logical end of recordStorage, making
-    // the final full-width source packet rely on Thor's 128-byte allocation
-    // padding for its legal over-read.
-    const uint64_t fieldOffsetBytes = copyWidth == 32 ? 0 : copyWidth;
-    const uint64_t fieldBytes = copyWidth + tailBytes;
-    const uint64_t recordSizeBytes = fieldOffsetBytes + fieldBytes;
-
-    std::vector<uint8_t> records(recordSizeBytes, prefixSentinel);
-    for (uint64_t byte = 0; byte < fieldBytes; ++byte) {
-        records[fieldOffsetBytes + byte] =
-            static_cast<uint8_t>((byte * 37 + copyWidth * 11 + tailBytes) & 0xffU);
-    }
-
-    // Row 1 is intentionally invalid. It must remain sentinel-filled, which
-    // makes any over-wide destination tail store from row 0 immediately visible
-    // instead of allowing a neighboring valid row to overwrite the corruption.
-    const std::vector<uint64_t> rowIndices{0, numExamples};
-    std::vector<uint8_t> expected(batchSize * fieldBytes, destinationSentinel);
-    for (uint64_t byte = 0; byte < fieldBytes; ++byte) {
-        expected[byte] = records[fieldOffsetBytes + byte];
-    }
-
-    Stream stream(0);
-    Tensor recordStorage = makeGpuTensor<uint8_t>({records.size()}, records, stream);
-    Tensor rowIndicesDevice = makeGpuTensor<uint64_t>({batchSize}, rowIndices, stream);
-    Tensor destination = makeGpuTensor<uint8_t>(
-        {batchSize, fieldBytes},
-        std::vector<uint8_t>(batchSize * fieldBytes, destinationSentinel),
-        stream);
-
-    launchDeviceResidentDirectMaterializationKernel(
-        recordStorage,
-        numExamples,
-        recordSizeBytes,
-        fieldOffsetBytes,
-        fieldBytes,
-        batchSize,
-        destination,
-        rowIndicesDevice,
-        stream);
-    stream.synchronize();
-
-    const std::vector<uint8_t> actual = copyGpuTensor<uint8_t>(destination, stream);
-    ASSERT_EQ(actual.size(), expected.size());
-    for (uint64_t offset = 0; offset < expected.size(); ++offset) {
-        EXPECT_EQ(actual[offset], expected[offset])
-            << "copyWidth=" << copyWidth << " tailBytes=" << tailBytes
-            << " byte offset=" << offset;
-    }
-}
-
 TEST(DeviceResidentDirectMaterializationKernelTest, LogicalRowsLeaveInactiveBatchCapacityUntouched) {
     REQUIRE_CUDA_DEVICE();
     runMaterializationCase(/*numExamples=*/97,
@@ -199,147 +133,83 @@ TEST(DeviceResidentDirectMaterializationKernelTest, LogicalRowsLeaveInactiveBatc
                            /*logicalRows=*/17);
 }
 
-TEST(DeviceResidentDirectMaterializationKernelTest, AlignedWideFieldsUseThirtyTwoByteTransactions) {
-    REQUIRE_CUDA_DEVICE();
-    // CUDA allocations are naturally wide-aligned and every compact-record row,
-    // field start, and destination row is 32-byte aligned. This exercises the
-    // ulonglong4_32a path added by the production optimization pass.
-    runMaterializationCase(/*numExamples=*/97,
-                           /*batchSize=*/16384,
-                           /*recordSizeBytes=*/64,
-                           /*fieldOffsetBytes=*/32,
-                           /*fieldBytes=*/32);
-}
-
-TEST(DeviceResidentDirectMaterializationKernelTest, SixteenByteFallbackRemainsContiguousAcrossLanes) {
-    REQUIRE_CUDA_DEVICE();
-    // A 48-byte record stride makes alternating source rows 16- versus 32-byte
-    // aligned. Row-local width selection therefore exercises the 16-byte path
-    // without changing the 32-byte payload-based lane grouping.
-    runMaterializationCase(/*numExamples=*/101,
-                           /*batchSize=*/8192,
-                           /*recordSizeBytes=*/48,
-                           /*fieldOffsetBytes=*/16,
-                           /*fieldBytes=*/32);
-}
-
-TEST(DeviceResidentDirectMaterializationKernelTest, EveryNarrowerTransactionWidthAndByteFallbackPreserveFields) {
+TEST(DeviceResidentDirectMaterializationKernelTest, EveryPacketWidthGathersFieldsExactlyAtEveryDepth) {
     REQUIRE_CUDA_DEVICE();
 
-    // These compact byte strides force selected rows through the 8/4/2/1-byte
-    // row-local alignment fallbacks while preserving exact field contents.
-    runMaterializationCase(/*numExamples=*/607,
-                           /*batchSize=*/517,
-                           /*recordSizeBytes=*/24,
-                           /*fieldOffsetBytes=*/8,
-                           /*fieldBytes=*/8);
-    runMaterializationCase(/*numExamples=*/607,
-                           /*batchSize=*/517,
-                           /*recordSizeBytes=*/12,
-                           /*fieldOffsetBytes=*/4,
-                           /*fieldBytes=*/4);
-    runMaterializationCase(/*numExamples=*/607,
-                           /*batchSize=*/517,
-                           /*recordSizeBytes=*/6,
-                           /*fieldOffsetBytes=*/2,
-                           /*fieldBytes=*/2);
-    runMaterializationCase(/*numExamples=*/607,
-                           /*batchSize=*/517,
-                           /*recordSizeBytes=*/5,
-                           /*fieldOffsetBytes=*/1,
-                           /*fieldBytes=*/3);
-}
-
-TEST(DeviceResidentDirectMaterializationKernelTest,
-     AlignedBulkCopiesExerciseEveryExactTailSizeAndPreserveFollowingRow) {
-    REQUIRE_CUDA_DEVICE();
-
-    // For every vector width, exercise every legal nonzero Tail<N>. Each case
-    // also makes the full-width source tail load cross recordStorage's logical
-    // end into Thor's tensor padding, while the following destination row is an
-    // invalid gather target that must remain untouched.
-    for (const uint32_t copyWidth : {32U, 16U, 8U, 4U, 2U}) {
-        for (uint32_t tailBytes = 1; tailBytes < copyWidth; ++tailBytes) {
-            runExactTailCase(copyWidth, tailBytes);
+    struct Layout {
+        uint64_t recordSizeBytes;
+        uint64_t fieldOffsetBytes;
+        uint64_t fieldBytes;
+        uint64_t packetsPerField;
+    };
+    // The gather takes the largest power of two up to 16 that divides the field bytes, the record size and both
+    // base addresses (the bases are allocation aligned, so the field offset counts): 16, 16, 8, 4, 2, 1 bytes here.
+    constexpr std::array<Layout, 6> layouts{{
+        {64, 32, 32, 2},
+        {48, 16, 32, 2},
+        {24, 8, 8, 1},
+        {12, 4, 4, 1},
+        {6, 2, 2, 1},
+        {5, 1, 3, 3},
+    }};
+    // It takes 1, 2, 4 or 8 packets per thread by the batch's packet count (steps of 196608; 16-byte packets stop at
+    // 4), so these packet counts put every width on each of its launches.
+    for (const Layout layout : layouts) {
+        for (const uint64_t packets : {1551ULL, 250000ULL, 500000ULL, 1000000ULL}) {
+            runMaterializationCase(/*numExamples=*/607,
+                                   /*batchSize=*/packets / layout.packetsPerField,
+                                   layout.recordSizeBytes,
+                                   layout.fieldOffsetBytes,
+                                   layout.fieldBytes);
         }
     }
 }
 
-TEST(DeviceResidentDirectMaterializationKernelTest, PayloadAwareGroupingCoversFullLaneLadder) {
+TEST(DeviceResidentDirectMaterializationKernelTest, EveryFieldLengthUpToSixtyFiveBytesGathersExactly) {
+    REQUIRE_CUDA_DEVICE();
+
+    for (uint64_t fieldBytes = 1; fieldBytes <= 65; ++fieldBytes) {
+        // Packed: 3 bytes before the field and 5 after, so fields start at every address.
+        runMaterializationCase(/*numExamples=*/97, /*batchSize=*/300, fieldBytes + 8, /*fieldOffsetBytes=*/3, fieldBytes);
+        // The whole record: the last field ends on the last byte of the storage.
+        runMaterializationCase(/*numExamples=*/97, /*batchSize=*/300, fieldBytes, /*fieldOffsetBytes=*/0, fieldBytes);
+    }
+}
+
+TEST(DeviceResidentDirectMaterializationKernelTest, LongFieldsGatherExactlyFromPackedAndPaddedRecords) {
     REQUIRE_CUDA_DEVICE();
 
     struct LaunchCase {
         uint64_t fieldBytes;
         uint64_t batchSize;
     };
-
-    // These exact payload thresholds select 1/2/4/8/16/32/64/128/256 rows per
-    // CTA respectively once the matching batch-size parallelism floor permits
-    // them. The largest destination is only about 512 KiB.
     constexpr std::array<LaunchCase, 9> cases{{
-        {4097, 64},
-        {4096, 128},
-        {2048, 256},
-        {1024, 512},
-        {512, 1024},
-        {256, 2048},
-        {128, 4096},
-        {64, 8192},
-        {32, 16384},
-    }};
-
-    for (const LaunchCase launchCase : cases) {
-        runMaterializationCase(/*numExamples=*/17,
-                               launchCase.batchSize,
-                               /*recordSizeBytes=*/launchCase.fieldBytes,
-                               /*fieldOffsetBytes=*/0,
-                               launchCase.fieldBytes);
-    }
-}
-
-TEST(DeviceResidentDirectMaterializationKernelTest, PayloadThresholdCasesRemainCorrectAcrossGroupingChanges) {
-    REQUIRE_CUDA_DEVICE();
-
-    struct LaunchCase {
-        uint64_t fieldBytes;
-        uint64_t batchSize;
-    };
-
-    // Exercise the old payload-boundary sizes as general regression cases. The
-    // production grouping is now selected only from row payload size, but all
-    // of these historically sensitive widths must remain correct.
-    constexpr std::array<LaunchCase, 8> cases{{
-        {33, 16384},
-        {65, 8192},
-        {129, 4096},
-        {257, 2048},
-        {513, 1024},
-        {1025, 512},
-        {2049, 256},
         {4097, 128},
+        {4096, 128},
+        {2049, 256},
+        {1025, 512},
+        {1024, 512},
+        {513, 1024},
+        {257, 2048},
+        {129, 4096},
+        {100, 4096},
     }};
-
     for (const LaunchCase launchCase : cases) {
+        runMaterializationCase(/*numExamples=*/17, launchCase.batchSize, launchCase.fieldBytes + 8, /*fieldOffsetBytes=*/3,
+                               launchCase.fieldBytes);
         runMaterializationCase(/*numExamples=*/17,
                                launchCase.batchSize,
-                               /*recordSizeBytes=*/launchCase.fieldBytes,
-                               /*fieldOffsetBytes=*/0,
+                               /*recordSizeBytes=*/(launchCase.fieldBytes + 31) / 32 * 32 + 32,
+                               /*fieldOffsetBytes=*/32,
                                launchCase.fieldBytes);
     }
 }
 
-TEST(DeviceResidentDirectMaterializationKernelTest, SmallFieldsRemainCorrectWithInputSizedGrouping) {
+TEST(DeviceResidentDirectMaterializationKernelTest, OneByteFieldsGatherExactlyAtEveryBatchSize) {
     REQUIRE_CUDA_DEVICE();
 
-    // A one-byte field always prefers 256 rows/CTA by payload. These batch
-    // sizes exercise correctness while the input-sized selector groups rows without consulting the SM count.
-    for (const uint64_t batchSize :
-         {64ULL, 128ULL, 256ULL, 512ULL, 1024ULL, 2048ULL, 4096ULL, 8192ULL, 16384ULL}) {
-        runMaterializationCase(/*numExamples=*/31,
-                               batchSize,
-                               /*recordSizeBytes=*/1,
-                               /*fieldOffsetBytes=*/0,
-                               /*fieldBytes=*/1);
+    for (const uint64_t batchSize : {1ULL, 64ULL, 128ULL, 256ULL, 512ULL, 1024ULL, 2048ULL, 4096ULL, 8192ULL, 16384ULL}) {
+        runMaterializationCase(/*numExamples=*/31, batchSize, /*recordSizeBytes=*/1, /*fieldOffsetBytes=*/0, /*fieldBytes=*/1);
     }
 }
 

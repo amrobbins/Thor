@@ -937,6 +937,9 @@ DeviceResidentNamedDataset::fromCompactFileDataset(
         CompactWindowPlanStorage storage;
         storage.use32BitSteps =
             spec.windowLength() <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max());
+        uint64_t sourceOffsetBits = 16;
+        for (const DeviceResidentWindowRowPlan64 &plan : plans) sourceOffsetBits |= plan.sourceOffsetBytes;
+        storage.sourceOffsetAlignmentBytes = sourceOffsetBits & (~sourceOffsetBits + 1);
         if (storage.use32BitSteps) {
             storage.plans32.reserve(plans.size());
             for (const DeviceResidentWindowRowPlan64 &plan : plans) {
@@ -1522,6 +1525,9 @@ void DeviceResidentNamedDataset::enqueueCompactFieldMaterialization(
     launchSpec.sourceStepBytes = fieldStorage.spec.sourceStepNumBytes();
     launchSpec.padValue = fieldStorage.spec.padValue;
     launchSpec.materializeMask = fieldStorage.materializeMask;
+    const auto planIt = compactWindowPlans.find(fieldStorage.spec.name);
+    THOR_THROW_IF_FALSE(planIt != compactWindowPlans.end());
+    launchSpec.sourceOffsetAlignmentBytes = planIt->second.sourceOffsetAlignmentBytes;
 
     launchDeviceResidentWindowMaterializationKernel(
         *sourceStorage,

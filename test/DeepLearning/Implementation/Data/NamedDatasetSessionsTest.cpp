@@ -24,6 +24,7 @@
 #include "gtest/gtest.h"
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -4372,13 +4373,12 @@ TEST(DeviceResidentFileNamedBatchSessionTest, ReturnsCompactDeviceWindowReferenc
         deviceBatch.getDeviceBatchReference("history_mask").getAccessPolicy();
     EXPECT_FALSE(maskPolicy.has_value());
     const auto l2Telemetry = Thor::DeviceWindowL2CacheManager::instance().telemetry(0);
-    if (l2Telemetry.available && l2Telemetry.budgetBytes > 0 &&
-        historyAccess->bytes <= l2Telemetry.maxAccessPolicyWindowBytes) {
+    if (l2Telemetry.available && l2Telemetry.budgetBytes > 0) {
         ASSERT_TRUE(historyPolicy.has_value());
         EXPECT_EQ(historyPolicy->deviceNum, 0);
         EXPECT_EQ(historyPolicy->tensorId, historyAccess->tensorId);
         EXPECT_EQ(historyPolicy->base, historyAccess->base);
-        EXPECT_EQ(historyPolicy->bytes, historyAccess->bytes);
+        EXPECT_EQ(historyPolicy->bytes, std::min(historyAccess->bytes, l2Telemetry.maxAccessPolicyWindowBytes));
         EXPECT_GT(historyPolicy->persistingHitRatio, 0.0f);
         EXPECT_LE(historyPolicy->persistingHitRatio, 1.0f);
         EXPECT_EQ(historyPolicy->generation, l2Telemetry.generation);

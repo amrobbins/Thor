@@ -194,7 +194,7 @@ TEST(DeviceWindowL2CacheManagerTest,
 }
 
 TEST(DeviceWindowL2CacheManagerTest,
-     OversizedSourceFallsBackWithoutConsumingBudget) {
+     OversizedSourcePersistsItsFirstAccessWindow) {
     if (!gpuAvailable())
         GTEST_SKIP() << "window L2 cache manager test requires a GPU";
 
@@ -207,24 +207,82 @@ TEST(DeviceWindowL2CacheManagerTest,
 
     auto &manager = DeviceWindowL2CacheManager::instance();
     manager.resetForTesting();
+    const uint64_t sourceBytes = capabilities.max_access_policy_window_bytes + 1;
     DeviceWindowL2CacheLease lease = manager.acquire(
         DeviceWindowL2CacheSource{
             .deviceNum = 0,
             .tensorId = 301,
             .base = fakeDeviceAddress(0x400000),
-            .bytes = capabilities.max_access_policy_window_bytes + 1});
+            .bytes = sourceBytes});
     const auto snapshot = lease.snapshot();
-    if (snapshot.status == DeviceWindowL2CacheLeaseStatus::UNSUPPORTED ||
-        snapshot.status == DeviceWindowL2CacheLeaseStatus::CUDA_ERROR)
+    if (!snapshot.active())
         GTEST_SKIP() << "persisting L2 manager unavailable: " << snapshot.detail;
-    EXPECT_EQ(snapshot.status,
-              DeviceWindowL2CacheLeaseStatus::SOURCE_TOO_LARGE);
-    EXPECT_FLOAT_EQ(snapshot.hitRatio, 0.0f);
+
+    // The window covers the first legal window of the source, and only those bytes compete for the budget.
+    const uint64_t windowBytes = capabilities.max_access_policy_window_bytes;
+    EXPECT_EQ(snapshot.bytes, sourceBytes);
+    EXPECT_EQ(snapshot.windowBytes, windowBytes);
+    EXPECT_EQ(snapshot.activeUniqueBytes, windowBytes);
+    EXPECT_GT(snapshot.hitRatio, 0.0f);
+    EXPECT_LE(snapshot.hitRatio, 1.0f);
+    EXPECT_LE(static_cast<long double>(snapshot.hitRatio) * static_cast<long double>(windowBytes),
+              static_cast<long double>(snapshot.budgetBytes));
 
     const auto telemetry = manager.telemetry(0);
-    EXPECT_EQ(telemetry.activeUniqueSources, 0u);
-    EXPECT_EQ(telemetry.activeUniqueBytes, 0u);
-    EXPECT_EQ(telemetry.activeLeases, 0u);
+    EXPECT_EQ(telemetry.activeUniqueSources, 1u);
+    EXPECT_EQ(telemetry.activeUniqueBytes, windowBytes);
+    EXPECT_EQ(telemetry.activeLeases, 1u);
+}
+
+TEST(DeviceWindowL2CacheManagerTest,
+     ReleasingTheLastSourceResetsPersistingLinesAndOnlyThen) {
+    if (!gpuAvailable())
+        GTEST_SKIP() << "window L2 cache manager test requires a GPU";
+
+    const PersistingL2Capabilities capabilities = queryPersistingL2Capabilities(0);
+    if (!capabilities.query_succeeded || !capabilities.supported)
+        GTEST_SKIP() << "persisting L2 unavailable: " << capabilities.detail;
+
+    const uint64_t budget = expectedBudget(capabilities);
+    const uint64_t sourceBytes = std::min<uint64_t>(
+        4096, std::min(budget, capabilities.max_access_policy_window_bytes));
+    if (sourceBytes == 0)
+        GTEST_SKIP() << "device exposes no usable persisting L2 source size";
+
+    auto &manager = DeviceWindowL2CacheManager::instance();
+    manager.resetForTesting();
+    DeviceWindowL2CacheLease first = manager.acquire(
+        DeviceWindowL2CacheSource{
+            .deviceNum = 0,
+            .tensorId = 501,
+            .base = fakeDeviceAddress(0x700000),
+            .bytes = sourceBytes});
+    if (!first.snapshot().active())
+        GTEST_SKIP() << "persisting L2 manager unavailable: " << first.snapshot().detail;
+    DeviceWindowL2CacheLease duplicate = manager.acquire(
+        DeviceWindowL2CacheSource{
+            .deviceNum = 0,
+            .tensorId = 501,
+            .base = fakeDeviceAddress(0x700000),
+            .bytes = sourceBytes});
+    DeviceWindowL2CacheLease second = manager.acquire(
+        DeviceWindowL2CacheSource{
+            .deviceNum = 0,
+            .tensorId = 502,
+            .base = fakeDeviceAddress(0x800000),
+            .bytes = sourceBytes});
+    ASSERT_TRUE(second.snapshot().active()) << second.snapshot().detail;
+    const uint64_t resetsBefore = manager.telemetry(0).persistingL2Resets;
+
+    // Sources remain: live persisting accesses keep displacing stale lines, so nothing is reset.
+    second = DeviceWindowL2CacheLease{};
+    duplicate = DeviceWindowL2CacheLease{};
+    EXPECT_EQ(manager.telemetry(0).persistingL2Resets, resetsBefore);
+
+    first = DeviceWindowL2CacheLease{};
+    const auto empty = manager.telemetry(0);
+    EXPECT_EQ(empty.activeUniqueSources, 0u);
+    EXPECT_EQ(empty.persistingL2Resets, resetsBefore + 1);
 }
 
 TEST(DeviceWindowL2CacheManagerTest,

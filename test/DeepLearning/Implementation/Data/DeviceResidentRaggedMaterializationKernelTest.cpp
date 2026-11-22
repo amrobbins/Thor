@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 using namespace ThorImplementation;
@@ -65,6 +66,108 @@ void writeUnalignedUint64(std::vector<uint8_t> &bytes, uint64_t offset, uint64_t
     for (uint64_t i = 0; i < sizeof(uint64_t); ++i) {
         bytes[offset + i] = static_cast<uint8_t>((value >> (8 * i)) & 0xffU);
     }
+}
+
+uint64_t splitMix64(uint64_t value) {
+    uint64_t z = value + 0x9e3779b97f4a7c15ULL;
+    z = (z ^ (z >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27U)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31U);
+}
+
+struct RaggedCase {
+    uint64_t valueBytes = 1;
+    // The stored rows' lengths in values: every row meanValues (Uniform); pseudo-random lengths from 0 to twice it
+    // (Varied); or mostly short and empty rows and one row in eight of eight times it (FewLong).
+    enum class Lengths { Uniform, Varied, FewLong };
+    uint64_t meanValues = 8;
+    Lengths lengths = Lengths::Varied;
+    uint64_t numExamples = 64;
+    uint64_t logicalRows = 64;
+    uint64_t recordSizeBytes = 32;
+    uint64_t referenceOffsetBytes = 8;
+};
+
+// Materialize a batch of pseudo-randomly chosen records and compare every byte with the definition: batch row r holds
+// the values of its record, where the published offsets put them; the offsets are unchanged; the batch rows past the
+// logical rows and the capacity past the last value are untouched. Every record's value count is poisoned.
+template <typename OffsetT>
+void runRaggedCase(const RaggedCase &testCase) {
+    constexpr uint8_t sentinel = 0xcdU;
+    const uint64_t numExamples = testCase.numExamples;
+    std::vector<uint64_t> firstValue(numExamples);
+    std::vector<uint64_t> valueCount(numExamples);
+    uint64_t storedValueCount = 0;
+    for (uint64_t example = 0; example < numExamples; ++example) {
+        uint64_t count = testCase.meanValues;
+        if (testCase.lengths == RaggedCase::Lengths::Varied) {
+            count = splitMix64(example * 3 + 1) % (2 * testCase.meanValues + 1);
+        } else if (testCase.lengths == RaggedCase::Lengths::FewLong) {
+            count = splitMix64(example * 5 + 2) % 8 == 0   ? testCase.meanValues * 8
+                    : splitMix64(example * 7 + 3) % 3 == 0 ? 0
+                                                           : splitMix64(example * 11 + 4) % (testCase.meanValues / 2 + 2);
+        }
+        if (example + 1 == numExamples && storedValueCount + count == 0) count = 1;  // a store holds a value
+        firstValue[example] = storedValueCount;
+        valueCount[example] = count;
+        storedValueCount += count;
+    }
+
+    std::vector<uint8_t> records(numExamples * testCase.recordSizeBytes, 0xeeU);
+    for (uint64_t example = 0; example < numExamples; ++example) {
+        const uint64_t reference = example * testCase.recordSizeBytes + testCase.referenceOffsetBytes;
+        writeUnalignedUint64(records, reference, firstValue[example]);
+        writeUnalignedUint64(records, reference + sizeof(uint64_t), ~valueCount[example]);
+    }
+    std::vector<uint8_t> packedValues(storedValueCount * testCase.valueBytes);
+    for (uint64_t byte = 0; byte < packedValues.size(); ++byte) packedValues[byte] = static_cast<uint8_t>(splitMix64(byte) >> 24);
+
+    const uint64_t logicalRows = testCase.logicalRows;
+    const uint64_t batchSize = logicalRows + 2;
+    std::vector<uint64_t> rowIndices(batchSize);
+    std::vector<OffsetT> offsets(batchSize + 1, 0);
+    for (uint64_t row = 0; row < batchSize; ++row) {
+        rowIndices[row] = splitMix64(row * 13 + 5) % numExamples;
+        const uint64_t count = row < logicalRows ? valueCount[rowIndices[row]] : 0;
+        offsets[row + 1] = static_cast<OffsetT>(static_cast<uint64_t>(offsets[row]) + count);
+    }
+    const uint64_t batchValues = static_cast<uint64_t>(offsets[logicalRows]);
+    const uint64_t capacityBytes = (batchValues + 3) * testCase.valueBytes;
+    std::vector<uint8_t> expected(capacityBytes, sentinel);
+    for (uint64_t row = 0; row < logicalRows; ++row) {
+        std::copy_n(packedValues.begin() + firstValue[rowIndices[row]] * testCase.valueBytes,
+                    valueCount[rowIndices[row]] * testCase.valueBytes,
+                    expected.begin() + static_cast<uint64_t>(offsets[row]) * testCase.valueBytes);
+    }
+
+    Stream stream(0);
+    Tensor recordStorage = makeGpuTensor<uint8_t>({records.size()}, records, stream);
+    Tensor packedValuesStorage = makeGpuTensor<uint8_t>({packedValues.size()}, packedValues, stream);
+    Tensor rowIndicesDevice = makeGpuTensor<uint64_t>({batchSize}, rowIndices, stream);
+    Tensor destinationOffsets = makeGpuTensor<OffsetT>({batchSize + 1}, offsets, stream);
+    Tensor destinationValues = makeGpuTensor<uint8_t>({capacityBytes}, std::vector<uint8_t>(capacityBytes, sentinel), stream);
+    launchDeviceResidentRaggedMaterializationKernel(
+        recordStorage, packedValuesStorage, numExamples, testCase.recordSizeBytes, testCase.referenceOffsetBytes, storedValueCount,
+        testCase.valueBytes, logicalRows, destinationValues, destinationOffsets, rowIndicesDevice, stream);
+    stream.synchronize();
+
+    const std::string what = "valueBytes=" + std::to_string(testCase.valueBytes) + " meanValues=" + std::to_string(testCase.meanValues) +
+                             " lengths=" + std::to_string(static_cast<int>(testCase.lengths)) + " examples=" +
+                             std::to_string(numExamples) + " rows=" + std::to_string(logicalRows) + " record=" +
+                             std::to_string(testCase.recordSizeBytes) + "+" + std::to_string(testCase.referenceOffsetBytes);
+    EXPECT_EQ(copyGpuTensor<OffsetT>(destinationOffsets, stream), offsets) << what;
+    const std::vector<uint8_t> actual = copyGpuTensor<uint8_t>(destinationValues, stream);
+    ASSERT_EQ(actual.size(), expected.size()) << what;
+    const auto mismatch = std::mismatch(actual.begin(), actual.end(), expected.begin());
+    if (mismatch.first != actual.end()) {
+        ADD_FAILURE() << what << ": first wrong byte at " << (mismatch.first - actual.begin()) << " of " << actual.size() << ", got "
+                      << static_cast<uint32_t>(*mismatch.first) << ", expected " << static_cast<uint32_t>(*mismatch.second);
+    }
+}
+
+void runRaggedCaseWithBothOffsetWidths(const RaggedCase &testCase) {
+    runRaggedCase<uint32_t>(testCase);
+    runRaggedCase<uint64_t>(testCase);
 }
 
 template <typename OffsetT>
@@ -165,85 +268,6 @@ void runMultiTileMaterializationCase() {
 }
 
 template <typename OffsetT>
-void runPayloadAwareRowGroupingCase(uint64_t expectedResidentRowBytes,
-                                    uint64_t logicalRows) {
-    constexpr uint64_t numExamples = 2;
-    constexpr uint64_t recordSizeBytes = 32;
-    constexpr uint64_t referenceOffsetBytes = 8;
-    constexpr uint64_t valueBytes = 1;
-    constexpr uint64_t selectedRowBytes = 1;
-    constexpr uint8_t destinationSentinel = 0xd7U;
-    const uint64_t batchSize = logicalRows + 3;
-
-    // Keep the selected batch tiny while independently controlling the
-    // resident-field average used by the launch selector. Both examples
-    // together contain exactly 2 * expectedResidentRowBytes bytes, but every
-    // selected row points at the one-byte example 0.
-    ASSERT_GE(expectedResidentRowBytes, 1U);
-    const uint64_t secondRowBytes = 2 * expectedResidentRowBytes - selectedRowBytes;
-    const uint64_t storedValueCount = selectedRowBytes + secondRowBytes;
-
-    std::vector<uint8_t> records(numExamples * recordSizeBytes, 0xa5U);
-    std::vector<uint8_t> packedValues(storedValueCount, 0);
-    writeUnalignedUint64(records, referenceOffsetBytes, 0);
-    writeUnalignedUint64(records, referenceOffsetBytes + sizeof(uint64_t), selectedRowBytes);
-    writeUnalignedUint64(records, recordSizeBytes + referenceOffsetBytes, selectedRowBytes);
-    writeUnalignedUint64(records,
-                         recordSizeBytes + referenceOffsetBytes + sizeof(uint64_t),
-                         secondRowBytes);
-    packedValues[0] = 0x4dU;
-    for (uint64_t byte = selectedRowBytes; byte < storedValueCount; ++byte) {
-        packedValues[byte] = static_cast<uint8_t>((byte * 7 + 11) & 0xffU);
-    }
-
-    std::vector<uint64_t> rowIndices(batchSize, 0);
-    const uint64_t activeValueCount = logicalRows * selectedRowBytes;
-    const uint64_t destinationCapacityValues = activeValueCount + 17;
-    Stream stream(0);
-    Tensor recordStorage = makeGpuTensor<uint8_t>({records.size()}, records, stream);
-    Tensor packedValuesStorage =
-        makeGpuTensor<uint8_t>({storedValueCount}, packedValues, stream);
-    Tensor rowIndicesDevice = makeGpuTensor<uint64_t>({batchSize}, rowIndices, stream);
-    Tensor destinationValues = makeGpuTensor<uint8_t>(
-        {destinationCapacityValues},
-        std::vector<uint8_t>(destinationCapacityValues, destinationSentinel),
-        stream);
-    std::vector<OffsetT> expectedOffsets(batchSize + 1, static_cast<OffsetT>(logicalRows));
-    for (uint64_t row = 0; row <= logicalRows; ++row) {
-        expectedOffsets[row] = static_cast<OffsetT>(row);
-    }
-    Tensor destinationOffsets =
-        makeGpuTensor<OffsetT>({batchSize + 1}, expectedOffsets, stream);
-
-    launchDeviceResidentRaggedMaterializationKernel(
-        recordStorage,
-        packedValuesStorage,
-        numExamples,
-        recordSizeBytes,
-        referenceOffsetBytes,
-        storedValueCount,
-        valueBytes,
-        logicalRows,
-        destinationValues,
-        destinationOffsets,
-        rowIndicesDevice,
-        stream);
-    stream.synchronize();
-
-    const std::vector<OffsetT> actualOffsets = copyGpuTensor<OffsetT>(destinationOffsets, stream);
-    EXPECT_EQ(actualOffsets, expectedOffsets)
-        << "expectedResidentRowBytes=" << expectedResidentRowBytes
-        << " logicalRows=" << logicalRows;
-
-    const std::vector<uint8_t> actualValues = copyGpuTensor<uint8_t>(destinationValues, stream);
-    std::vector<uint8_t> expectedValues(destinationCapacityValues, destinationSentinel);
-    std::fill(expectedValues.begin(), expectedValues.begin() + activeValueCount, packedValues[0]);
-    EXPECT_EQ(actualValues, expectedValues)
-        << "expectedResidentRowBytes=" << expectedResidentRowBytes
-        << " logicalRows=" << logicalRows;
-}
-
-template <typename OffsetT>
 void runReferenceLoadAlignmentCase(uint64_t recordSizeBytes, uint64_t referenceOffsetBytes) {
     constexpr uint64_t numExamples = 37;
     constexpr uint64_t logicalRows = 19;
@@ -318,114 +342,6 @@ void runReferenceLoadAlignmentCase(uint64_t recordSizeBytes, uint64_t referenceO
     }
     for (uint64_t byte = logicalRows * valueBytes; byte < actualValues.size(); ++byte) {
         EXPECT_EQ(actualValues[byte], destinationSentinel);
-    }
-}
-
-template <typename OffsetT>
-void runAlignedBulkWithEveryExactTailCase(uint32_t expectedCopyWidth) {
-    constexpr uint64_t recordSizeBytes = 32;
-    constexpr uint64_t referenceOffsetBytes = 8;
-    constexpr uint64_t valueBytes = 1;
-    constexpr uint8_t destinationSentinel = 0xd9U;
-
-    ASSERT_TRUE(expectedCopyWidth == 2 || expectedCopyWidth == 4 ||
-                expectedCopyWidth == 8 || expectedCopyWidth == 16 ||
-                expectedCopyWidth == 32);
-
-    // Keep each target row at exactly expectedCopyWidth alignment. For widths
-    // below 32 an initial row shifts both packed source and destination starts
-    // to W modulo 2W. Each target/filler pair then consumes exactly 2W bytes,
-    // preserving that alignment for the next target. Target row W + tail thus
-    // exercises every Tail<1..W-1> specialization while the W - tail filler
-    // restores the next target's alignment.
-    std::vector<uint64_t> rowCounts;
-    if (expectedCopyWidth < 32) rowCounts.push_back(expectedCopyWidth);
-    for (uint32_t tail = 1; tail < expectedCopyWidth; ++tail) {
-        rowCounts.push_back(expectedCopyWidth + tail);
-        rowCounts.push_back(expectedCopyWidth - tail);
-    }
-
-    // End with another aligned odd-sized target rather than its filler. Its
-    // full-width source tail load therefore crosses the logical end of the
-    // packed tensor into Thor's 128-byte backing padding.
-    const uint32_t finalTail = std::min<uint32_t>(13, expectedCopyWidth - 1);
-    rowCounts.push_back(expectedCopyWidth + finalTail);
-
-    const uint64_t numExamples = rowCounts.size();
-    const uint64_t logicalRows = numExamples;
-    const uint64_t batchSize = logicalRows + 2;
-    std::vector<uint64_t> starts(numExamples, 0);
-    uint64_t storedValueCount = 0;
-    for (uint64_t row = 0; row < numExamples; ++row) {
-        starts[row] = storedValueCount;
-        storedValueCount += rowCounts[row];
-    }
-
-    std::vector<uint8_t> records(numExamples * recordSizeBytes, 0xa5U);
-    for (uint64_t row = 0; row < numExamples; ++row) {
-        const uint64_t reference = row * recordSizeBytes + referenceOffsetBytes;
-        writeUnalignedUint64(records, reference, starts[row]);
-        // value_count is not part of the materializer contract. Poison it so
-        // this test also cannot accidentally regress toward resident-count use.
-        writeUnalignedUint64(records,
-                             reference + sizeof(uint64_t),
-                             std::numeric_limits<uint64_t>::max() - row);
-    }
-
-    std::vector<uint8_t> packedValues(storedValueCount);
-    for (uint64_t byte = 0; byte < packedValues.size(); ++byte) {
-        packedValues[byte] =
-            static_cast<uint8_t>((byte * 29 + expectedCopyWidth * 7 + 3) & 0xffU);
-    }
-
-    std::vector<uint64_t> rowIndices(batchSize, 0);
-    for (uint64_t row = 0; row < logicalRows; ++row) rowIndices[row] = row;
-
-    std::vector<OffsetT> expectedOffsets(batchSize + 1,
-                                         static_cast<OffsetT>(storedValueCount));
-    for (uint64_t row = 0; row < logicalRows; ++row) {
-        expectedOffsets[row] = static_cast<OffsetT>(starts[row]);
-    }
-    expectedOffsets[logicalRows] = static_cast<OffsetT>(storedValueCount);
-
-    const uint64_t destinationCapacity = storedValueCount + 64;
-    Stream stream(0);
-    Tensor recordStorage = makeGpuTensor<uint8_t>({records.size()}, records, stream);
-    Tensor packedValuesStorage =
-        makeGpuTensor<uint8_t>({storedValueCount}, packedValues, stream);
-    Tensor rowIndicesDevice = makeGpuTensor<uint64_t>({batchSize}, rowIndices, stream);
-    Tensor destinationValues = makeGpuTensor<uint8_t>(
-        {destinationCapacity},
-        std::vector<uint8_t>(destinationCapacity, destinationSentinel),
-        stream);
-    Tensor destinationOffsets =
-        makeGpuTensor<OffsetT>({batchSize + 1}, expectedOffsets, stream);
-
-    launchDeviceResidentRaggedMaterializationKernel(
-        recordStorage,
-        packedValuesStorage,
-        numExamples,
-        recordSizeBytes,
-        referenceOffsetBytes,
-        storedValueCount,
-        valueBytes,
-        logicalRows,
-        destinationValues,
-        destinationOffsets,
-        rowIndicesDevice,
-        stream);
-    stream.synchronize();
-
-    EXPECT_EQ(copyGpuTensor<OffsetT>(destinationOffsets, stream), expectedOffsets);
-    const std::vector<uint8_t> actualValues = copyGpuTensor<uint8_t>(destinationValues, stream);
-    ASSERT_GE(actualValues.size(), packedValues.size());
-    for (uint64_t byte = 0; byte < packedValues.size(); ++byte) {
-        EXPECT_EQ(actualValues[byte], packedValues[byte])
-            << "copyWidth=" << expectedCopyWidth << " active byte=" << byte;
-    }
-    for (uint64_t byte = packedValues.size(); byte < actualValues.size(); ++byte) {
-        EXPECT_EQ(actualValues[byte], destinationSentinel)
-            << "copyWidth=" << expectedCopyWidth << " inactive byte=" << byte;
     }
 }
 
@@ -583,35 +499,114 @@ TEST(DeviceResidentRaggedMaterializationKernelTest, LargeBatchGatherPreservesPub
     runMultiTileMaterializationCase<uint64_t>();
 }
 
-TEST(DeviceResidentRaggedMaterializationKernelTest, PayloadAwareBoundaryCasesRemainCorrectForBothOffsetWidths) {
+TEST(DeviceResidentRaggedMaterializationKernelTest, EveryValueWidthMaterializesRaggedRowsExactlyAtEveryDepth) {
     REQUIRE_CUDA_DEVICE();
 
-    // Exercise historically sensitive resident-average boundaries. Grouping is
-    // now selected only from the expected resident row payload. The selected
-    // example itself is only one byte, keeping the test lightweight even for
-    // the >4-KiB average.
-    for (const uint64_t expectedResidentRowBytes :
-         {32ULL, 33ULL, 65ULL, 129ULL, 257ULL, 513ULL, 1025ULL, 2049ULL, 4097ULL}) {
-        runPayloadAwareRowGroupingCase<uint32_t>(expectedResidentRowBytes, 16384);
-        runPayloadAwareRowGroupingCase<uint64_t>(expectedResidentRowBytes, 16384);
+    // A value is whole packets of 2 to 16 bytes (12-byte values are 4-byte packets) and a lane takes 1, 2 or 4 of them
+    // by the batch's row count. These row counts put every width on each of its depths between them; the largest
+    // batches of 3-byte values are past them and move as 16-byte packets (as do all of
+    // LargeBatchesOfByteAndTwoByteValuesMaterializeExactlyWhereverRowsStartAndEnd).
+    for (const uint64_t valueBytes : {1ULL, 2ULL, 3ULL, 4ULL, 8ULL, 12ULL, 16ULL, 32ULL}) {
+        for (const uint64_t logicalRows : {300ULL, 5000ULL, 10000ULL, 20000ULL, 40000ULL}) {
+            RaggedCase testCase;
+            testCase.valueBytes = valueBytes;
+            testCase.meanValues = 16;
+            testCase.numExamples = 3000;
+            testCase.logicalRows = logicalRows;
+            runRaggedCaseWithBothOffsetWidths(testCase);
+        }
     }
 }
 
-TEST(DeviceResidentRaggedMaterializationKernelTest, PayloadAwareRowGroupingUsesInputSizedLaunch) {
+TEST(DeviceResidentRaggedMaterializationKernelTest, StoresOfEveryMeanRowLengthMaterializeExactly) {
     REQUIRE_CUDA_DEVICE();
 
-    // A one-byte resident average uses the same four-rows-per-CTA grouping
-    // regardless of logical row count; only the resulting grid size scales with
-    // the input.
-    for (const uint64_t logicalRows :
-         {64ULL, 128ULL, 256ULL, 512ULL, 1024ULL, 2048ULL, 4096ULL, 8192ULL, 16384ULL}) {
-        runPayloadAwareRowGroupingCase<uint32_t>(1, logicalRows);
-        runPayloadAwareRowGroupingCase<uint64_t>(1, logicalRows);
+    // The store's mean row sizes a row's share of a block, from 256 rows a block to one; rows shorter and longer
+    // than the mean, empty rows and rows of several passes all come out the same.
+    for (const uint64_t meanValues : {1ULL, 2ULL, 3ULL, 5ULL, 9ULL, 17ULL, 33ULL, 65ULL, 129ULL, 257ULL, 513ULL, 1025ULL, 4097ULL}) {
+        for (const RaggedCase::Lengths lengths :
+             {RaggedCase::Lengths::Uniform, RaggedCase::Lengths::Varied, RaggedCase::Lengths::FewLong}) {
+            RaggedCase testCase;
+            testCase.meanValues = meanValues;
+            testCase.lengths = lengths;
+            testCase.numExamples = 200;
+            testCase.logicalRows = 300;
+            runRaggedCaseWithBothOffsetWidths(testCase);
+        }
     }
 }
 
-TEST(DeviceResidentRaggedMaterializationKernelTest, ReferenceMetadataUsesEveryAlignedLoadWidthAndByteFallback) {
+TEST(DeviceResidentRaggedMaterializationKernelTest, LargeBatchesOfByteAndTwoByteValuesMaterializeExactlyWhereverRowsStartAndEnd) {
     REQUIRE_CUDA_DEVICE();
+
+    // A batch of values on a 1- or 2-byte boundary that four packets a lane do not keep within 768 blocks moves in
+    // 16-byte packets, and a row's first and last byte are anywhere in them: its ends are every mix of aligned 1-,
+    // 2-, 4- and 8-byte pieces. Rows inside one packet, rows across a boundary with no whole packet, rows of many
+    // packets and empty rows, in every mix the varied lengths give; each mean row length with a row count past
+    // that bound, the last two with two packets to a lane.
+    struct MeanAndRows {
+        uint64_t meanValues;
+        uint64_t logicalRows;
+    };
+    for (const uint64_t valueBytes : {1ULL, 2ULL, 3ULL}) {
+        for (const MeanAndRows shape : {MeanAndRows{1, 200000}, MeanAndRows{4, 200000}, MeanAndRows{16, 200000}, MeanAndRows{20, 100000},
+                                        MeanAndRows{100, 40000}, MeanAndRows{1000, 4000}}) {
+            for (const RaggedCase::Lengths lengths : {RaggedCase::Lengths::Varied, RaggedCase::Lengths::FewLong}) {
+                RaggedCase testCase;
+                testCase.valueBytes = valueBytes;
+                testCase.meanValues = shape.meanValues;
+                testCase.lengths = lengths;
+                testCase.numExamples = 500;
+                testCase.logicalRows = shape.logicalRows;
+                runRaggedCaseWithBothOffsetWidths(testCase);
+            }
+        }
+    }
+}
+
+TEST(DeviceResidentRaggedMaterializationKernelTest, BatchesOfEverySizeMaterializeExactly) {
+    REQUIRE_CUDA_DEVICE();
+
+    for (const uint64_t logicalRows : {1ULL, 2ULL, 3ULL, 255ULL, 256ULL, 257ULL, 1023ULL, 4097ULL, 70000ULL}) {
+        for (const uint64_t valueBytes : {1ULL, 4ULL}) {
+            RaggedCase testCase;
+            testCase.valueBytes = valueBytes;
+            testCase.meanValues = 5;
+            testCase.numExamples = 1000;
+            testCase.logicalRows = logicalRows;
+            runRaggedCaseWithBothOffsetWidths(testCase);
+        }
+    }
+}
+
+TEST(DeviceResidentRaggedMaterializationKernelTest, LongRowsMaterializeExactly) {
+    REQUIRE_CUDA_DEVICE();
+
+    for (const uint64_t valueBytes : {1ULL, 4ULL, 16ULL}) {
+        RaggedCase testCase;
+        testCase.valueBytes = valueBytes;
+        testCase.meanValues = 5000;
+        testCase.lengths = RaggedCase::Lengths::FewLong;
+        testCase.numExamples = 40;
+        testCase.logicalRows = 60;
+        runRaggedCaseWithBothOffsetWidths(testCase);
+    }
+}
+
+TEST(DeviceResidentRaggedMaterializationKernelTest, ReferenceIsReadAtEveryByteOfItsRecord) {
+    REQUIRE_CUDA_DEVICE();
+
+    // Records are packed, so a reference starts at any byte of the record store: every record size from the
+    // smallest to past three words, with the reference at every offset that leaves room for the count after it.
+    for (uint64_t recordSizeBytes = 16; recordSizeBytes <= 27; ++recordSizeBytes) {
+        for (uint64_t referenceOffsetBytes = 0; referenceOffsetBytes + 16 <= recordSizeBytes; ++referenceOffsetBytes) {
+            RaggedCase testCase;
+            testCase.recordSizeBytes = recordSizeBytes;
+            testCase.referenceOffsetBytes = referenceOffsetBytes;
+            testCase.numExamples = 37;
+            runRaggedCase<uint32_t>(testCase);
+        }
+    }
     // 8-byte aligned, 4-byte aligned only, 2-byte aligned only, and deliberately unaligned.
     runReferenceLoadAlignmentCase<uint32_t>(32, 8);
     runReferenceLoadAlignmentCase<uint32_t>(20, 4);
@@ -619,23 +614,7 @@ TEST(DeviceResidentRaggedMaterializationKernelTest, ReferenceMetadataUsesEveryAl
     runReferenceLoadAlignmentCase<uint32_t>(19, 3);
 }
 
-TEST(DeviceResidentRaggedMaterializationKernelTest,
-     AlignedBulkCopiesExerciseEveryExactTailSizeWithoutOverwritingFollowingCapacity) {
-    REQUIRE_CUDA_DEVICE();
-
-    // Logical row length no longer participates in copy-width selection. These
-    // batches force every legal nonzero tail for each vector width while keeping
-    // the corresponding target row at exactly that alignment. The final target
-    // also ends at packedValuesStorage's logical end, requiring the full-width
-    // source tail load to rely on Thor's 128-byte allocation padding.
-    for (const uint32_t copyWidth : {32U, 16U, 8U, 4U, 2U}) {
-        runAlignedBulkWithEveryExactTailCase<uint32_t>(copyWidth);
-        runAlignedBulkWithEveryExactTailCase<uint64_t>(copyWidth);
-    }
-}
-
-TEST(DeviceResidentRaggedMaterializationKernelTest,
-     PublishedOffsetsIgnorePoisonedCountsAndUseWideCopies) {
+TEST(DeviceResidentRaggedMaterializationKernelTest, PublishedOffsetsDecideRowLengthsWhateverTheRecordCountsSay) {
     REQUIRE_CUDA_DEVICE();
     runPublishedOffsetsCase<uint32_t>();
     runPublishedOffsetsCase<uint64_t>();

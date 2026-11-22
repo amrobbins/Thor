@@ -78,8 +78,7 @@ void runByteGatherCase(
     for (uint64_t batchRow = 0; batchRow < batchSize; ++batchRow) {
         rowIndices[batchRow] = (batchRow * 137 + 19) % sourceRows;
     }
-    // Invalid resident row indices historically leave the destination row
-    // untouched; retain that behavior under the row/chunk mapping.
+    // An invalid resident row index leaves the destination row untouched.
     if (batchSize > 7) rowIndices[7] = sourceRows + 3;
     if (batchSize > 263) rowIndices[263] = sourceRows;
 
@@ -111,78 +110,7 @@ void runByteGatherCase(
     }
 }
 
-uint64_t exactAlignedLastSourceRow(uint32_t copyWidth, uint64_t rowBytes) {
-    if (copyWidth == 32) return 0;
-
-    const uint64_t alignmentPeriod = static_cast<uint64_t>(copyWidth) * 2;
-    for (uint64_t sourceRow = 1; sourceRow <= alignmentPeriod; ++sourceRow) {
-        if ((sourceRow * rowBytes) % alignmentPeriod == copyWidth) return sourceRow;
-    }
-    throw std::logic_error("Unable to construct exact named-gather row alignment.");
-}
-
-void runExactTailCase(uint32_t copyWidth, uint32_t tailBytes) {
-    ASSERT_TRUE(copyWidth == 32 || copyWidth == 16 || copyWidth == 8 ||
-                copyWidth == 4 || copyWidth == 2);
-    ASSERT_GT(tailBytes, 0U);
-    ASSERT_LT(tailBytes, copyWidth);
-
-    constexpr uint64_t batchSize = 2;
-    constexpr uint8_t sourceSentinel = 0x5aU;
-    constexpr uint8_t destinationSentinel = 0xcdU;
-
-    const uint64_t rowBytes = copyWidth + tailBytes;
-
-    // Thor CUDA tensor allocations are at least 32-byte aligned. Choose the
-    // final physical source row so its start is aligned to exactly copyWidth
-    // (or 32 for the widest case). Because this is the last source row, its
-    // final full-width tail load crosses the tensor's logical end and relies on
-    // Thor's 128-byte trailing allocation padding.
-    const uint64_t sourceRow = exactAlignedLastSourceRow(copyWidth, rowBytes);
-    const uint64_t sourceRows = sourceRow + 1;
-
-    std::vector<uint8_t> source(sourceRows * rowBytes, sourceSentinel);
-    for (uint64_t byte = 0; byte < rowBytes; ++byte) {
-        source[sourceRow * rowBytes + byte] =
-            static_cast<uint8_t>((byte * 37 + copyWidth * 11 + tailBytes) & 0xffU);
-    }
-
-    // Destination row 1 is intentionally invalid. It must remain sentinel
-    // filled, making any over-wide destination tail store from row 0 visible.
-    const std::vector<uint64_t> rowIndices{sourceRow, sourceRows};
-    std::vector<uint8_t> expected(batchSize * rowBytes, destinationSentinel);
-    for (uint64_t byte = 0; byte < rowBytes; ++byte) {
-        expected[byte] = source[sourceRow * rowBytes + byte];
-    }
-
-    Stream stream(0);
-    Tensor sourceDevice = makeGpuTensor<uint8_t>({sourceRows, rowBytes}, source, stream);
-    ASSERT_EQ(reinterpret_cast<uintptr_t>(sourceDevice.getMemPtr()) & 31U, 0U);
-    Tensor rowIndicesDevice = makeGpuTensor<uint64_t>({batchSize}, rowIndices, stream);
-    Tensor destination = makeGpuTensor<uint8_t>(
-        {batchSize, rowBytes},
-        std::vector<uint8_t>(batchSize * rowBytes, destinationSentinel),
-        stream);
-    ASSERT_EQ(reinterpret_cast<uintptr_t>(destination.getMemPtr()) & 31U, 0U);
-    const uintptr_t selectedSourceAddress =
-        reinterpret_cast<uintptr_t>(sourceDevice.getMemPtr()) + sourceRow * rowBytes;
-    ASSERT_EQ(selectedSourceAddress % copyWidth, 0U);
-    if (copyWidth < 32) {
-        ASSERT_EQ(selectedSourceAddress % (2U * copyWidth), copyWidth);
-    }
-
-    launchDeviceResidentNamedGatherKernel(
-        sourceDevice, destination, rowIndicesDevice, batchSize, stream);
-    stream.synchronize();
-
-    const std::vector<uint8_t> actual = copyGpuTensor<uint8_t>(destination, stream);
-    ASSERT_EQ(actual.size(), expected.size());
-    for (uint64_t offset = 0; offset < expected.size(); ++offset) {
-        EXPECT_EQ(actual[offset], expected[offset])
-            << "copyWidth=" << copyWidth << " tailBytes=" << tailBytes
-            << " byte offset=" << offset;
-    }
-}
+}  // namespace
 
 TEST(DeviceResidentNamedGatherKernelTest, LogicalRowsLeaveInactiveBatchCapacityUntouched) {
     REQUIRE_CUDA_DEVICE();
@@ -190,120 +118,67 @@ TEST(DeviceResidentNamedGatherKernelTest, LogicalRowsLeaveInactiveBatchCapacityU
         /*sourceRows=*/97, /*batchSize=*/257, /*rowBytes=*/32, /*logicalRows=*/17);
 }
 
-TEST(DeviceResidentNamedGatherKernelTest, AlignedRowsUseThirtyTwoByteTransactions) {
+TEST(DeviceResidentNamedGatherKernelTest, EveryPacketWidthGathersExactly) {
     REQUIRE_CUDA_DEVICE();
-    // CUDA tensor allocations are naturally wide-aligned and a 32-byte row
-    // stride preserves that alignment for every source/destination row. This
-    // exercises the ulonglong4_32a path.
-    runByteGatherCase(/*sourceRows=*/97, /*batchSize=*/16384, /*rowBytes=*/32);
-}
-
-TEST(DeviceResidentNamedGatherKernelTest, SixteenByteFallbackRemainsContiguousAcrossLanes) {
-    REQUIRE_CUDA_DEVICE();
-    // A 48-byte row stride makes alternating source/destination row starts
-    // 16- versus 32-byte aligned. Row-local width selection therefore
-    // exercises the 16-byte path without changing payload-based grouping.
-    runByteGatherCase(/*sourceRows=*/101, /*batchSize=*/8192, /*rowBytes=*/48);
-}
-
-TEST(DeviceResidentNamedGatherKernelTest, EveryNarrowerTransactionWidthAndByteFallbackPreserveRows) {
-    REQUIRE_CUDA_DEVICE();
-
-    // Each row width deliberately defeats the next-wider transaction while
-    // preserving the requested width: 8, 4, 2, then exact byte fallback.
-    runByteGatherCase(/*sourceRows=*/607, /*batchSize=*/517, /*rowBytes=*/24);
-    runByteGatherCase(/*sourceRows=*/607, /*batchSize=*/517, /*rowBytes=*/12);
-    runByteGatherCase(/*sourceRows=*/607, /*batchSize=*/517, /*rowBytes=*/6);
-    runByteGatherCase(/*sourceRows=*/607, /*batchSize=*/517, /*rowBytes=*/5);
-}
-
-TEST(DeviceResidentNamedGatherKernelTest,
-     AlignedBulkCopiesExerciseEveryExactTailSizeAndPreserveFollowingRow) {
-    REQUIRE_CUDA_DEVICE();
-
-    // For every vector width, exercise every legal nonzero Tail<N>. Each case
-    // places the selected source at the final physical row so the full-width
-    // source tail load crosses into Thor's 128-byte tensor padding, while the
-    // following destination row is an invalid gather target that must remain
-    // untouched.
-    for (const uint32_t copyWidth : {32U, 16U, 8U, 4U, 2U}) {
-        for (uint32_t tailBytes = 1; tailBytes < copyWidth; ++tailBytes) {
-            runExactTailCase(copyWidth, tailBytes);
+    // The packet width is the largest power of two up to 16 dividing the row bytes (the bases are allocation
+    // aligned): 32 and 48 use 16-byte packets, 24 eight, 12 four, 6 two, 5 one. The launcher takes 1, 2, 4 or 8
+    // packets per thread by the batch's packet count (up to 196608 packets per step; 16-byte packets stop at 4), and
+    // these batch sizes put every width on each of its launches.
+    for (const uint64_t batchSize : {8192ULL, 65536ULL, 131072ULL, 262144ULL, 524288ULL}) {
+        for (const uint64_t rowBytes : {32ULL, 48ULL, 24ULL, 12ULL, 6ULL, 5ULL}) {
+            runByteGatherCase(/*sourceRows=*/607, batchSize, rowBytes);
         }
     }
 }
 
-TEST(DeviceResidentNamedGatherKernelTest, PayloadAwareGroupingCoversFullLaneLadder) {
+TEST(DeviceResidentNamedGatherKernelTest, EveryRowLengthUpToSixtyFiveBytesGathersExactly) {
     REQUIRE_CUDA_DEVICE();
-
-    struct LaunchCase {
-        uint64_t rowBytes;
-        uint64_t batchSize;
-    };
-
-    // These exact payload thresholds select 1/2/4/8/16/32/64/128/256 rows per
-    // CTA respectively once the matching batch-size parallelism floor permits
-    // them. Each destination remains about 512 KiB or smaller.
-    constexpr std::array<LaunchCase, 9> cases{{
-        {4097, 64},
-        {4096, 128},
-        {2048, 256},
-        {1024, 512},
-        {512, 1024},
-        {256, 2048},
-        {128, 4096},
-        {64, 8192},
-        {32, 16384},
-    }};
-
-    for (const LaunchCase launchCase : cases) {
-        runByteGatherCase(/*sourceRows=*/17,
-                          launchCase.batchSize,
-                          launchCase.rowBytes);
+    // Every residue of every packet width, with invalid rows (7, 263) that must stay untouched next to valid ones.
+    for (uint64_t rowBytes = 1; rowBytes <= 65; ++rowBytes) {
+        runByteGatherCase(/*sourceRows=*/97, /*batchSize=*/517, rowBytes);
     }
 }
 
-TEST(DeviceResidentNamedGatherKernelTest, PayloadThresholdTransitionsUseNextWiderRowGrouping) {
+TEST(DeviceResidentNamedGatherKernelTest, WideAndOddRowLengthsGatherExactly) {
     REQUIRE_CUDA_DEVICE();
-
     struct LaunchCase {
         uint64_t rowBytes;
         uint64_t batchSize;
     };
-
-    // Exercise the first byte immediately above every 32-bytes/lane boundary.
-    // Each transition halves rows/CTA and doubles lanes/row independently of
-    // the transaction width selected for the tensor row.
-    constexpr std::array<LaunchCase, 8> cases{{
-        {33, 16384},
-        {65, 8192},
-        {129, 4096},
-        {257, 2048},
-        {513, 1024},
-        {1025, 512},
-        {2049, 256},
+    // Powers of two and their odd neighbours from 64 bytes to past 4 KiB; each destination is about 512 KiB or less.
+    constexpr std::array<LaunchCase, 17> cases{{
         {4097, 128},
+        {4096, 128},
+        {2049, 256},
+        {2048, 256},
+        {1025, 512},
+        {1024, 512},
+        {1000, 512},
+        {513, 1024},
+        {512, 1024},
+        {257, 2048},
+        {256, 2048},
+        {129, 4096},
+        {128, 4096},
+        {100, 4096},
+        {65, 8192},
+        {64, 8192},
+        {33, 16384},
     }};
-
     for (const LaunchCase launchCase : cases) {
-        runByteGatherCase(/*sourceRows=*/17,
-                          launchCase.batchSize,
-                          launchCase.rowBytes);
+        runByteGatherCase(/*sourceRows=*/17, launchCase.batchSize, launchCase.rowBytes);
     }
 }
 
-TEST(DeviceResidentNamedGatherKernelTest, SmallRowsRemainCorrectWithInputSizedGrouping) {
+TEST(DeviceResidentNamedGatherKernelTest, OneByteRowsGatherExactlyAtEveryBatchSize) {
     REQUIRE_CUDA_DEVICE();
-
-    // A one-byte row always prefers 256 rows/CTA by payload. These batch
-    // sizes exercise correctness while the input-sized selector groups rows without consulting the SM count.
     for (const uint64_t batchSize :
          {64ULL, 128ULL, 256ULL, 512ULL, 1024ULL, 2048ULL, 4096ULL, 8192ULL, 16384ULL}) {
         runByteGatherCase(/*sourceRows=*/31, batchSize, /*rowBytes=*/1);
     }
 }
 
-TEST(DeviceResidentNamedGatherKernelTest, ScalarTypedRowsKeepManyIndependentRowsPerBlock) {
+TEST(DeviceResidentNamedGatherKernelTest, Uint32RowsGatherExactly) {
     REQUIRE_CUDA_DEVICE();
 
     constexpr uint64_t sourceRows = 1031;
@@ -369,5 +244,3 @@ TEST(DeviceResidentNamedGatherKernelTest, RowIndicesSpanAtAnOffsetIntoASharedMet
                                                        batchSize, stream),
                  std::exception);
 }
-
-}  // namespace

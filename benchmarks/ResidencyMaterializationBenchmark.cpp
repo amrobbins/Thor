@@ -1,7 +1,6 @@
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentDirectMaterializationKernel.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentNamedGatherKernel.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentRaggedMaterializationKernel.h"
-#include "DeepLearning/Implementation/Data/Residency/DeviceResidentRowGrouping.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentWindowMaterializationKernel.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
@@ -13,11 +12,13 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <iomanip>
 #include <initializer_list>
 #include <iostream>
@@ -41,6 +42,9 @@ struct Options {
     int gpu = 0;
     int warmup = 5;
     int iterations = 20;
+    // A timed sample is this many microseconds of back-to-back launches (at least one), so the event timer's
+    // resolution is divided across them.
+    double target_sample_us = 200.0;
     double l2_evict_multiple = 4.0;
     uint64_t min_evict_bytes = 64ULL * MIB;
     uint64_t source_rows_floor = 4096;
@@ -58,10 +62,6 @@ struct Options {
     std::vector<uint64_t> window_step_bytes{1, 4, 16, 32};
     std::vector<double> window_valid_fractions{1.0, 0.5};
     std::vector<std::string> window_modes{"payload", "mask"};
-    // 0 means use the production selector. Any explicit value forces the
-    // corresponding kernel specialization so launch geometry can be tuned
-    // independently of the current heuristic.
-    std::vector<uint32_t> rows_per_cta{0};
 };
 
 template <typename T>
@@ -121,18 +121,6 @@ std::vector<std::string> parseStringCsv(std::string_view text, std::string_view 
     return parseCsv(text, flag, [](std::string_view token) { return std::string(token); });
 }
 
-std::vector<uint32_t> parseRowsPerCtaCsv(std::string_view text, std::string_view flag) {
-    return parseCsv(text, flag, [&](std::string_view token) -> uint32_t {
-        if (token == "auto") return 0;
-        const uint64_t value = parseUnsigned(token, flag);
-        if (value == 0 || value > 256 || (value & (value - 1)) != 0) {
-            throw std::invalid_argument(
-                std::string(flag) + " values must be auto or a power of two in [1,256]");
-        }
-        return static_cast<uint32_t>(value);
-    });
-}
-
 bool contains(const std::vector<std::string> &values, std::string_view value) {
     return std::find(values.begin(), values.end(), value) != values.end();
 }
@@ -161,6 +149,8 @@ Options parseOptions(int argc, char **argv) {
             options.warmup = static_cast<int>(parseUnsigned(requireValue(arg), arg));
         } else if (arg == "--iterations") {
             options.iterations = static_cast<int>(parseUnsigned(requireValue(arg), arg));
+        } else if (arg == "--target-sample-us") {
+            options.target_sample_us = parseDouble(requireValue(arg), arg);
         } else if (arg == "--l2-evict-multiple") {
             options.l2_evict_multiple = parseDouble(requireValue(arg), arg);
         } else if (arg == "--min-evict-mib") {
@@ -185,14 +175,13 @@ Options parseOptions(int argc, char **argv) {
             options.window_valid_fractions = parseDoubleCsv(requireValue(arg), arg);
         } else if (arg == "--window-modes") {
             options.window_modes = parseStringCsv(requireValue(arg), arg);
-        } else if (arg == "--rows-per-cta") {
-            options.rows_per_cta = parseRowsPerCtaCsv(requireValue(arg), arg);
         } else if (arg == "--help" || arg == "-h") {
             std::cout
                 << "Usage: thor_residency_materialization_benchmark [options]\n"
                 << "  --gpu N\n"
-                << "  --warmup N                         warm launches per case (default 5)\n"
-                << "  --iterations N                     timed launches per case (default 20)\n"
+                << "  --warmup N                         0 skips the untimed warmup sample of each case (default 5)\n"
+                << "  --iterations N                     timed samples per case (default 20)\n"
+                << "  --target-sample-us X               back-to-back launches per sample, about X us (default 200)\n"
                 << "  --l2-evict-multiple X              device-read eviction bytes / L2 (default 4.0)\n"
                 << "  --min-evict-mib N                  minimum eviction buffer size (default 64)\n"
                 << "  --source-rows-floor N              minimum resident source rows (default 4096)\n"
@@ -204,10 +193,9 @@ Options parseOptions(int argc, char **argv) {
                 << "  --ragged-value-bytes 1,4\n"
                 << "  --window-step-bytes 1,4,16,32\n"
                 << "  --window-valid-fractions 1.0,0.5\n"
-                << "  --window-modes payload,mask\n"
-                << "  --rows-per-cta auto,1,2,4,...,256  force/tune CTA row grouping (default auto)\n\n"
+                << "  --window-modes payload,mask\n\n"
                 << "The benchmark warms each case, then performs an untimed device read over a buffer\n"
-                << "larger than L2 before every timed launch. The timed target kernel therefore sees\n"
+                << "larger than L2 before every timed sample. The timed target kernel therefore sees\n"
                 << "DRAM-backed source reads without including cache eviction or initialization time.\n";
             std::exit(0);
         } else {
@@ -218,6 +206,7 @@ Options parseOptions(int argc, char **argv) {
     if (options.gpu < 0) throw std::invalid_argument("--gpu must be non-negative");
     if (options.warmup < 0) throw std::invalid_argument("--warmup must be non-negative");
     if (options.iterations <= 0) throw std::invalid_argument("--iterations must be positive");
+    if (!(options.target_sample_us > 0.0)) throw std::invalid_argument("--target-sample-us must be positive");
     if (options.l2_evict_multiple < 2.0) {
         throw std::invalid_argument("--l2-evict-multiple must be >= 2.0 to reliably displace target data from L2");
     }
@@ -246,12 +235,6 @@ uint64_t roundUp(uint64_t value, uint64_t alignment) {
     return ceilDiv(value, alignment) * alignment;
 }
 
-uint32_t selectedRowsPerCta(uint64_t logicalRows, uint64_t rowBytes) {
-    // Call the production selector directly so benchmark-reported auto geometry
-    // cannot drift away from the kernels being measured.
-    return DeviceResidentRowGrouping::selectRowsPerCta(logicalRows, rowBytes);
-}
-
 uint64_t splitMix64(uint64_t value) {
     uint64_t z = value + 0x9e3779b97f4a7c15ULL;
     z = (z ^ (z >> 30U)) * 0xbf58476d1ce4e5b9ULL;
@@ -259,38 +242,20 @@ uint64_t splitMix64(uint64_t value) {
     return z ^ (z >> 31U);
 }
 
-std::vector<uint64_t> makeCollisionFreeRowIndices(uint64_t batchRows, uint64_t sourceRows) {
-    if (batchRows > sourceRows) {
-        throw std::invalid_argument(
-            "Collision-free benchmark row selection requires sourceRows >= batchRows");
-    }
-    std::vector<uint64_t> indices(batchRows);
-    if (batchRows == 0) return indices;
-    if (sourceRows == 1) {
-        indices[0] = 0;
-        return indices;
-    }
-
-    // Walk an affine permutation modulo sourceRows. Choosing a stride coprime
-    // to sourceRows guarantees that no selected source row repeats until the
-    // entire resident source has been traversed. The hashed start/stride keeps
-    // successive logical batch rows distributed across the resident allocation
-    // instead of turning this into a sequential-memory benchmark.
-    const uint64_t start = splitMix64(sourceRows ^ 0x4d595df4d0f33173ULL) % sourceRows;
-    uint64_t stride = splitMix64(sourceRows ^ 0x94d049bb133111ebULL) % sourceRows;
+// rows distinct source rows in a scattered order: an affine permutation modulo sourceRows whose start and stride come
+// from seed, so every index set of a sample visits different rows.
+std::vector<uint64_t> scatteredRowIndices(uint64_t rows, uint64_t sourceRows, uint64_t seed) {
+    if (rows > sourceRows) throw std::invalid_argument("A scattered index set needs sourceRows >= rows");
+    std::vector<uint64_t> indices(rows);
+    if (rows == 0 || sourceRows == 1) return indices;
+    const uint64_t start = splitMix64(seed ^ 0x4d595df4d0f33173ULL) % sourceRows;
+    uint64_t stride = splitMix64(seed ^ 0x94d049bb133111ebULL) % sourceRows;
     if (stride == 0) stride = 1;
-    while (std::gcd(stride, sourceRows) != 1) {
-        ++stride;
-        if (stride == sourceRows) stride = 1;
-    }
-
+    while (std::gcd(stride, sourceRows) != 1) stride = stride + 1 == sourceRows ? 1 : stride + 1;
     uint64_t current = start;
-    for (uint64_t row = 0; row < batchRows; ++row) {
+    for (uint64_t row = 0; row < rows; ++row) {
         indices[row] = current;
-        // Overflow-free modular addition.
-        current = current >= sourceRows - stride
-                      ? current - (sourceRows - stride)
-                      : current + stride;
+        current = current >= sourceRows - stride ? current - (sourceRows - stride) : current + stride;
     }
     return indices;
 }
@@ -319,26 +284,6 @@ Tensor makeGpuBytes(int gpu, uint64_t bytes) {
     if (bytes == 0) throw std::invalid_argument("Cannot allocate a zero-byte benchmark tensor");
     return Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, gpu),
                   TensorDescriptor(DataType::UINT8, {bytes}));
-}
-
-Tensor makeGpuByteTensor(int gpu, const std::vector<uint64_t> &dimensions) {
-    if (dimensions.empty()) throw std::invalid_argument("Benchmark tensor dimensions cannot be empty");
-    return Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, gpu),
-                  TensorDescriptor(DataType::UINT8, dimensions));
-}
-
-Tensor makeGpuPlans(int gpu,
-                    const std::vector<DeviceResidentWindowRowPlan32> &plans,
-                    Stream &stream) {
-    const uint64_t bytes = plans.size() * sizeof(DeviceResidentWindowRowPlan32);
-    const TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    const TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, gpu);
-    Tensor host(cpuPlacement, TensorDescriptor(DataType::UINT8, {bytes}));
-    if (bytes != 0) std::memcpy(host.getMemPtr(), plans.data(), static_cast<size_t>(bytes));
-    Tensor device(gpuPlacement, host.getDescriptor());
-    device.copyFromAsync(host, stream);
-    stream.synchronize();
-    return device;
 }
 
 __global__ void readForL2EvictionKernel(const uint4 *__restrict__ bytes,
@@ -401,6 +346,9 @@ struct TimingStats {
     double p10_us = 0.0;
     double median_us = 0.0;
     double p90_us = 0.0;
+    // CPU time to enqueue one launch (median over samples). When it reaches median_us, the GPU waits on the CPU and
+    // the GPU time is the CPU's.
+    double host_median_us = 0.0;
 };
 
 double percentileSorted(const std::vector<float> &values, double percentile) {
@@ -413,40 +361,6 @@ double percentileSorted(const std::vector<float> &values, double percentile) {
            alpha * static_cast<double>(values[hi]);
 }
 
-template <typename Fn>
-TimingStats benchmarkDramReads(Stream &stream,
-                               DramReadEvictor &evictor,
-                               int warmup,
-                               int iterations,
-                               Fn &&fn) {
-    for (int i = 0; i < warmup; ++i) fn();
-    stream.synchronize();
-
-    Event start(stream.getGpuNum(), /*enableTiming=*/true);
-    Event stop(stream.getGpuNum(), /*enableTiming=*/true);
-    std::vector<float> milliseconds;
-    milliseconds.reserve(iterations);
-
-    for (int i = 0; i < iterations; ++i) {
-        // The eviction pass is deliberately not timed. Because it is a device
-        // read over >L2 bytes on the same stream, target source lines from the
-        // previous sample are displaced before the next target launch. This
-        // preserves a warmed launch/code path while measuring DRAM-backed reads.
-        evictor.run(stream);
-        start.record(stream);
-        fn();
-        stop.record(stream);
-        milliseconds.push_back(stop.synchronizeAndReportElapsedTimeInMilliseconds(start));
-    }
-
-    std::sort(milliseconds.begin(), milliseconds.end());
-    TimingStats stats;
-    stats.p10_us = percentileSorted(milliseconds, 0.10) * 1000.0;
-    stats.median_us = percentileSorted(milliseconds, 0.50) * 1000.0;
-    stats.p90_us = percentileSorted(milliseconds, 0.90) * 1000.0;
-    return stats;
-}
-
 struct Result {
     std::string kernel;
     std::string variant;
@@ -455,12 +369,13 @@ struct Result {
     uint64_t sourceStepBytes = 0;
     uint64_t windowLength = 0;
     double validFraction = 1.0;
-    std::string groupingMode = "auto";
-    uint32_t autoRowsPerCta = 0;
-    uint32_t rowsPerCta = 0;
-    uint32_t lanesPerRow = 0;
     uint64_t sourceReadBytes = 0;
     uint64_t destinationWriteBytes = 0;
+    // The distinct 32-byte DRAM sectors the source rows touch, in bytes (for ragged, the values' sectors; its record
+    // reads are not counted). Rows that do not start or end on a sector boundary make DRAM move more than the payload.
+    uint64_t sourceSectorBytes = 0;
+    // Launches timed together per sample; the timing is per launch.
+    uint32_t launchesPerSample = 1;
     TimingStats timing;
 };
 
@@ -472,8 +387,8 @@ double usefulGBps(uint64_t bytes, double microseconds) {
 void printCsvHeader() {
     std::cout
         << "kernel,variant,batch_rows,row_bytes,source_step_bytes,window_length,valid_fraction,"
-        << "grouping_mode,auto_rows_per_cta,rows_per_cta,lanes_per_row,source_read_bytes,destination_write_bytes,p10_us,median_us,p90_us,"
-        << "source_payload_GBps,output_payload_GBps\n";
+        << "source_read_bytes,destination_write_bytes,"
+        << "source_sector_bytes,launches_per_sample,p10_us,median_us,p90_us,host_us,source_payload_GBps,output_payload_GBps,dram_GBps\n";
 }
 
 void printResult(const Result &result) {
@@ -484,251 +399,406 @@ void printResult(const Result &result) {
               << result.sourceStepBytes << ','
               << result.windowLength << ','
               << std::fixed << std::setprecision(3) << result.validFraction << ','
-              << result.groupingMode << ','
-              << result.autoRowsPerCta << ','
-              << result.rowsPerCta << ','
-              << result.lanesPerRow << ','
               << result.sourceReadBytes << ','
               << result.destinationWriteBytes << ','
+              << result.sourceSectorBytes << ','
+              << result.launchesPerSample << ','
               << std::setprecision(3) << result.timing.p10_us << ','
               << result.timing.median_us << ','
               << result.timing.p90_us << ','
+              << result.timing.host_median_us << ','
               << std::setprecision(2) << usefulGBps(result.sourceReadBytes, result.timing.median_us) << ','
-              << usefulGBps(result.destinationWriteBytes, result.timing.median_us) << '\n';
+              << usefulGBps(result.destinationWriteBytes, result.timing.median_us) << ','
+              // DRAM bytes: the 32-byte sectors the source reads touch (or the source bytes where not counted) and
+              // the destination bytes.
+              << usefulGBps((result.sourceSectorBytes != 0 ? result.sourceSectorBytes : result.sourceReadBytes) +
+                                result.destinationWriteBytes,
+                            result.timing.median_us)
+              << '\n';
 }
 
+__global__ void launchFloorKernel() {}
 
+// The rows a case selects from: rowBytes at offsetBytes of every strideBytes of storage. A named tensor's rows are back
+// to back (the stride is the row, offset 0); a field of a compact record has the record size and the field's offset; a
+// window reads the bytes of its valid steps. No storage: the kernel reads no source (a window mask).
+struct RowSource {
+    const Tensor *storage = nullptr;
+    uint64_t rows = 0;
+    uint64_t strideBytes = 0;
+    uint64_t offsetBytes = 0;
+    uint64_t rowBytes = 0;
+
+    [[nodiscard]] const uint8_t *row(uint64_t index) const {
+        return static_cast<const uint8_t *>(storage->getMemPtr()) + index * strideBytes + offsetBytes;
+    }
+};
+
+// The distinct 32-byte DRAM sectors the rows of one index set touch, in bytes.
+uint64_t sourceSectorBytes(const RowSource &source, std::vector<uint64_t> rowIndices) {
+    if (source.storage == nullptr || source.rowBytes == 0) return 0;
+    std::sort(rowIndices.begin(), rowIndices.end());
+    const uint64_t base = reinterpret_cast<uintptr_t>(source.row(0)) % 32;
+    uint64_t sectors = 0;
+    uint64_t firstUncounted = 0;
+    for (const uint64_t index : rowIndices) {
+        const uint64_t first = std::max(firstUncounted, (base + index * source.strideBytes) / 32);
+        const uint64_t last = (base + index * source.strideBytes + source.rowBytes - 1) / 32;
+        if (last < first) continue;
+        sectors += last - first + 1;
+        firstUncounted = last + 1;
+    }
+    return sectors * 32;
+}
+
+// What tells a kernel which source row each batch row takes: wordsPerRow uint64 words per batch row, written from that
+// row's source row index. The gathers take the index itself; a window takes its row plan.
+struct RowSelection {
+    uint32_t wordsPerRow = 1;
+    std::function<void(uint64_t *words, uint64_t sourceRow)> write = [](uint64_t *words, uint64_t sourceRow) {
+        *words = sourceRow;
+    };
+};
+
+// One way of measuring a case:
+//   Kernel       the kernel, over scattered source rows or, with consecutiveRows, over consecutive ones: the access
+//                pattern of a copy, so the gap to Copy is the kernel's own cost and the gap to the scattered variant is
+//                the scattered rows'. With selectionInL2 the sample's selection is read into L2 first, as when it was
+//                just uploaded (the batch session copies it host to device right before the kernel); otherwise it is
+//                in DRAM. The rows are in DRAM either way;
+//   Copy         cudaMemcpyAsync of the output payload, contiguous, from the first of those consecutive rows;
+//   Fill         cudaMemsetAsync of the output payload: what writing it costs with nothing to read;
+//   LaunchFloor  an empty kernel.
+struct CaseVariant {
+    enum class Op { Kernel, Copy, Fill, LaunchFloor };
+    std::string name;
+    Op op = Op::Kernel;
+    bool consecutiveRows = false;
+    bool selectionInL2 = false;
+};
+
+std::vector<CaseVariant> gatherVariants() {
+    return {{"gather"},
+            {"gather_l2_indices", CaseVariant::Op::Kernel, false, true},
+            {"gather_sequential", CaseVariant::Op::Kernel, true},
+            {"copy", CaseVariant::Op::Copy},
+            {"launch_floor", CaseVariant::Op::LaunchFloor}};
+}
+
+// One timed sample: the eviction pass and prepare (untimed), then launchesPerSample back-to-back launches between two
+// events; the per-launch time is the sample divided by the launch count. The CPU time of the launch loop, also per
+// launch, is recorded beside it. warmupSamples untimed samples run first.
+template <typename Prepare, typename Fn>
+TimingStats benchmarkLaunchSamples(Stream &stream,
+                                   DramReadEvictor &evictor,
+                                   int warmupSamples,
+                                   int samples,
+                                   uint32_t launchesPerSample,
+                                   Prepare &&prepare,
+                                   Fn &&launch) {
+    for (int i = 0; i < warmupSamples; ++i) {
+        evictor.run(stream);
+        prepare();
+        for (uint32_t k = 0; k < launchesPerSample; ++k) launch(k);
+    }
+    stream.synchronize();
+
+    Event start(stream.getGpuNum(), /*enableTiming=*/true);
+    Event stop(stream.getGpuNum(), /*enableTiming=*/true);
+    std::vector<float> microsecondsPerLaunch;
+    std::vector<float> hostMicrosecondsPerLaunch;
+    microsecondsPerLaunch.reserve(samples);
+    hostMicrosecondsPerLaunch.reserve(samples);
+    for (int i = 0; i < samples; ++i) {
+        evictor.run(stream);
+        prepare();
+        start.record(stream);
+        const auto hostStart = std::chrono::steady_clock::now();
+        for (uint32_t k = 0; k < launchesPerSample; ++k) launch(k);
+        const auto hostStop = std::chrono::steady_clock::now();
+        stop.record(stream);
+        hostMicrosecondsPerLaunch.push_back(
+            std::chrono::duration<float, std::micro>(hostStop - hostStart).count() / static_cast<float>(launchesPerSample));
+        microsecondsPerLaunch.push_back(
+            stop.synchronizeAndReportElapsedTimeInMilliseconds(start) * 1000.0f / static_cast<float>(launchesPerSample));
+    }
+
+    std::sort(microsecondsPerLaunch.begin(), microsecondsPerLaunch.end());
+    std::sort(hostMicrosecondsPerLaunch.begin(), hostMicrosecondsPerLaunch.end());
+    TimingStats stats;
+    stats.p10_us = percentileSorted(microsecondsPerLaunch, 0.10);
+    stats.median_us = percentileSorted(microsecondsPerLaunch, 0.50);
+    stats.p90_us = percentileSorted(microsecondsPerLaunch, 0.90);
+    stats.host_median_us = percentileSorted(hostMicrosecondsPerLaunch, 0.50);
+    return stats;
+}
+
+// One case, measured as each of its variants, the same way. A sample is launchesPerSample back-to-back launches (about
+// --target-sample-us), each with its own selection over a source of at least 4x L2 and its own destination from a pool
+// of up to 2x L2, so its reads are DRAM-cold and its writes do not land on lines the previous launch left in L2.
+// rowBytes is a destination row; launch(destination, selection) launches the kernel.
+template <typename Launch>
+void runRowCase(const Options &options,
+                const cudaDeviceProp &properties,
+                Stream &stream,
+                DramReadEvictor &evictor,
+                const RowSource &source,
+                uint64_t batchRows,
+                uint64_t rowBytes,
+                const RowSelection &selection,
+                const std::vector<CaseVariant> &variants,
+                Result result,
+                Launch &&launch) {
+    constexpr uint32_t kMaxLaunchesPerSample = 256;
+    const uint64_t l2Bytes = static_cast<uint64_t>(properties.l2CacheSize);
+    const TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, options.gpu);
+    const uint64_t payloadBytes = batchRows * rowBytes;
+    // An estimate of one launch (2 us of launch, both directions at 1.4 TB/s) sizes the sample.
+    const double estimatedUs = std::max(2.0, 2.0 * static_cast<double>(payloadBytes) / 1.4e6);
+    const uint32_t launchesPerSample = static_cast<uint32_t>(
+        std::clamp(std::ceil(options.target_sample_us / estimatedUs), 1.0, static_cast<double>(kMaxLaunchesPerSample)));
+    const uint32_t destinations = static_cast<uint32_t>(
+        std::min<uint64_t>(launchesPerSample, std::max<uint64_t>(1, ceilDiv(2 * l2Bytes, payloadBytes))));
+
+    std::vector<Tensor> destination;
+    for (uint32_t d = 0; d < destinations; ++d) {
+        destination.emplace_back(gpuPlacement, TensorDescriptor(DataType::UINT8, {batchRows, rowBytes}));
+        destination.back().memsetAsync(stream, 0);
+    }
+
+    // One selection per launch of a sample, over scattered rows and over consecutive rows, in one tensor each.
+    const uint64_t wordsPerLaunch = batchRows * selection.wordsPerRow;
+    std::vector<uint64_t> scattered(static_cast<uint64_t>(launchesPerSample) * wordsPerLaunch);
+    std::vector<uint64_t> consecutive(scattered.size());
+    std::vector<uint64_t> consecutiveStart(launchesPerSample, 0);
+    uint64_t scatteredSectorBytes = 0;
+    uint64_t consecutiveSectorBytes = 0;
+    uint64_t copySectorBytes = 0;
+    for (uint32_t k = 0; k < launchesPerSample; ++k) {
+        std::vector<uint64_t> scatteredRows(batchRows, 0);
+        std::vector<uint64_t> consecutiveRows(batchRows, 0);
+        if (source.storage != nullptr) {
+            scatteredRows = scatteredRowIndices(batchRows, source.rows, source.rows * 977 + k);
+            consecutiveStart[k] = splitMix64(source.rows * 131 + k) % (source.rows - batchRows + 1);
+            std::iota(consecutiveRows.begin(), consecutiveRows.end(), consecutiveStart[k]);
+            scatteredSectorBytes += sourceSectorBytes(source, scatteredRows);
+            consecutiveSectorBytes += sourceSectorBytes(source, consecutiveRows);
+            copySectorBytes +=
+                roundUp(reinterpret_cast<uintptr_t>(source.row(consecutiveStart[k])) % 32 + payloadBytes, 32);
+        }
+        for (uint64_t row = 0; row < batchRows; ++row) {
+            const uint64_t word = static_cast<uint64_t>(k) * wordsPerLaunch + row * selection.wordsPerRow;
+            selection.write(scattered.data() + word, scatteredRows[row]);
+            selection.write(consecutive.data() + word, consecutiveRows[row]);
+        }
+    }
+    Tensor scatteredSelection = makeGpuTensor<uint64_t>(options.gpu, {scattered.size()}, scattered, stream);
+    Tensor consecutiveSelection = makeGpuTensor<uint64_t>(options.gpu, {consecutive.size()}, consecutive, stream);
+    Tensor sink(gpuPlacement, TensorDescriptor(DataType::UINT64, {1}));
+    stream.synchronize();
+
+    for (const CaseVariant &variant : variants) {
+        const Tensor &variantSelection = variant.consecutiveRows ? consecutiveSelection : scatteredSelection;
+        auto prepare = [&] {
+            if (!variant.selectionInL2) return;
+            // Read every selection of the sample (at most 256 launches of them) into L2 after the eviction.
+            readForL2EvictionKernel<<<std::max(1, properties.multiProcessorCount * 8), 256, 0, stream.getStream()>>>(
+                reinterpret_cast<const uint4 *>(variantSelection.getMemPtr()),
+                variantSelection.getArraySizeInBytes() / sizeof(uint4),
+                reinterpret_cast<unsigned long long *>(sink.getMemPtr<uint64_t>()));
+            CUDA_CHECK(cudaGetLastError());
+        };
+        const TimingStats timing = benchmarkLaunchSamples(
+            stream, evictor, options.warmup == 0 ? 0 : 1, options.iterations, launchesPerSample, prepare, [&](uint32_t k) {
+                Tensor &out = destination[k % destinations];
+                switch (variant.op) {
+                    case CaseVariant::Op::Kernel:
+                        launch(out, TensorSpan(variantSelection, static_cast<uint64_t>(k) * wordsPerLaunch, wordsPerLaunch));
+                        break;
+                    case CaseVariant::Op::Copy:
+                        CUDA_CHECK(cudaMemcpyAsync(out.getMemPtr(), source.row(consecutiveStart[k]), payloadBytes,
+                                                   cudaMemcpyDeviceToDevice, stream.getStream()));
+                        break;
+                    case CaseVariant::Op::Fill:
+                        CUDA_CHECK(cudaMemsetAsync(out.getMemPtr(), 1, payloadBytes, stream.getStream()));
+                        break;
+                    case CaseVariant::Op::LaunchFloor:
+                        launchFloorKernel<<<1, 32, 0, stream.getStream()>>>();
+                        CUDA_CHECK(cudaGetLastError());
+                        break;
+                }
+            });
+
+        result.variant = variant.name;
+        result.batchRows = batchRows;
+        result.rowBytes = rowBytes;
+        result.sourceReadBytes = 0;
+        result.sourceSectorBytes = 0;
+        if (variant.op == CaseVariant::Op::Kernel) {
+            result.sourceReadBytes = batchRows * source.rowBytes;
+            result.sourceSectorBytes =
+                (variant.consecutiveRows ? consecutiveSectorBytes : scatteredSectorBytes) / launchesPerSample;
+        } else if (variant.op == CaseVariant::Op::Copy) {
+            result.sourceReadBytes = payloadBytes;
+            result.sourceSectorBytes = copySectorBytes / launchesPerSample;
+        }
+        result.destinationWriteBytes = variant.op == CaseVariant::Op::LaunchFloor ? 0 : payloadBytes;
+        result.launchesPerSample = launchesPerSample;
+        result.timing = timing;
+        printResult(result);
+    }
+}
+
+// Rows of a source of at least 4x L2 (and 4x the batch), so a launch's rows are not left in L2 by the one before.
+uint64_t coldSourceRows(const Options &options, const cudaDeviceProp &properties, uint64_t batchRows, uint64_t strideBytes) {
+    const uint64_t rows = std::max(
+        {options.source_rows_floor, batchRows * 4, ceilDiv(4 * static_cast<uint64_t>(properties.l2CacheSize), strideBytes)});
+    if (rows > std::numeric_limits<uint64_t>::max() / strideBytes) {
+        throw std::overflow_error("Residency benchmark source byte count overflow");
+    }
+    return rows;
+}
+
+void runNamedGatherBenchmarks(const Options &options,
+                              const cudaDeviceProp &properties,
+                              Stream &stream,
+                              DramReadEvictor &evictor) {
+    const TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, options.gpu);
+    for (uint64_t rowBytes : options.row_bytes) {
+        for (uint64_t batchRows : options.batch_rows) {
+            const uint64_t sourceRows = coldSourceRows(options, properties, batchRows, rowBytes);
+            Tensor source(gpuPlacement, TensorDescriptor(DataType::UINT8, {sourceRows, rowBytes}));
+            source.memsetAsync(stream, static_cast<int8_t>(0x67));
+
+            Result result;
+            result.kernel = "named";
+            runRowCase(options, properties, stream, evictor, RowSource{&source, sourceRows, rowBytes, 0, rowBytes}, batchRows,
+                       rowBytes, RowSelection{}, gatherVariants(), result, [&](Tensor &out, const TensorSpan &indices) {
+                           launchDeviceResidentNamedGatherKernel(source, out, indices, batchRows, stream);
+                       });
+        }
+    }
+}
+
+// A field of compact records. aligned32: the field starts its record and the record is padded to 32 bytes, so every
+// field starts on a 32-byte boundary. packed: 3 bytes before the field and 5 after, so no field is aligned with its
+// destination row beyond what the row length happens to give.
 void runDirectBenchmarks(const Options &options,
+                         const cudaDeviceProp &properties,
                          Stream &stream,
                          DramReadEvictor &evictor) {
     for (const std::string &layout : options.direct_layouts) {
         for (uint64_t rowBytes : options.row_bytes) {
             if (rowBytes == 0) continue;
             const uint64_t fieldOffsetBytes = layout == "aligned32" ? 0 : 3;
-            const uint64_t recordSizeBytes = layout == "aligned32"
-                                                 ? roundUp(fieldOffsetBytes + rowBytes, 32)
-                                                 : fieldOffsetBytes + rowBytes + 5;
+            const uint64_t recordSizeBytes =
+                layout == "aligned32" ? roundUp(fieldOffsetBytes + rowBytes, 32) : fieldOffsetBytes + rowBytes + 5;
             for (uint64_t batchRows : options.batch_rows) {
-                const uint64_t sourceRows = std::max<uint64_t>(options.source_rows_floor, batchRows * 4);
-                if (sourceRows > std::numeric_limits<uint64_t>::max() / recordSizeBytes) {
-                    throw std::overflow_error("Direct benchmark source byte count overflow");
-                }
-
+                const uint64_t sourceRows = coldSourceRows(options, properties, batchRows, recordSizeBytes);
                 Tensor records = makeGpuBytes(options.gpu, sourceRows * recordSizeBytes);
-                Tensor destination = makeGpuByteTensor(options.gpu, {batchRows, rowBytes});
-                Tensor indices = makeGpuTensor<uint64_t>(
-                    options.gpu, {batchRows}, makeCollisionFreeRowIndices(batchRows, sourceRows), stream);
                 records.memsetAsync(stream, static_cast<int8_t>(0x3c));
-                destination.memsetAsync(stream, static_cast<int8_t>(0));
-                stream.synchronize();
-
-                const uint32_t automaticRowsPerCta =
-                    selectedRowsPerCta(batchRows, rowBytes);
-                for (uint32_t requestedRowsPerCta : options.rows_per_cta) {
-                    const uint32_t actualRowsPerCta =
-                        requestedRowsPerCta == 0 ? automaticRowsPerCta : requestedRowsPerCta;
-                    const TimingStats timing = benchmarkDramReads(
-                        stream, evictor, options.warmup, options.iterations, [&] {
-                            if (requestedRowsPerCta == 0) {
-                                launchDeviceResidentDirectMaterializationKernel(
-                                    records, sourceRows, recordSizeBytes, fieldOffsetBytes,
-                                    rowBytes, batchRows, destination, indices, stream);
-                            } else {
-                                launchDeviceResidentDirectMaterializationKernelWithRowsPerCtaForBenchmark(
-                                    records, sourceRows, recordSizeBytes, fieldOffsetBytes,
-                                    rowBytes, batchRows, destination, indices,
-                                    requestedRowsPerCta, stream);
-                            }
-                        });
-
-                    Result result;
-                    result.kernel = "direct";
-                    result.variant = layout;
-                    result.batchRows = batchRows;
-                    result.rowBytes = rowBytes;
-                    result.groupingMode = requestedRowsPerCta == 0 ? "auto" : "forced";
-                    result.autoRowsPerCta = automaticRowsPerCta;
-                    result.rowsPerCta = actualRowsPerCta;
-                    result.lanesPerRow = 256U / actualRowsPerCta;
-                    result.sourceReadBytes = batchRows * rowBytes;
-                    result.destinationWriteBytes = batchRows * rowBytes;
-                    result.timing = timing;
-                    printResult(result);
-                }
-            }
-        }
-    }
-}
-
-void runNamedGatherBenchmarks(const Options &options,
-                              Stream &stream,
-                              DramReadEvictor &evictor) {
-    for (uint64_t rowBytes : options.row_bytes) {
-        for (uint64_t batchRows : options.batch_rows) {
-            const uint64_t sourceRows = std::max<uint64_t>(options.source_rows_floor, batchRows * 4);
-            if (sourceRows > std::numeric_limits<uint64_t>::max() / rowBytes) {
-                throw std::overflow_error("Named-gather benchmark source byte count overflow");
-            }
-
-            Tensor source(TensorPlacement(TensorPlacement::MemDevices::GPU, options.gpu),
-                          TensorDescriptor(DataType::UINT8, {sourceRows, rowBytes}));
-            Tensor destination(TensorPlacement(TensorPlacement::MemDevices::GPU, options.gpu),
-                               TensorDescriptor(DataType::UINT8, {batchRows, rowBytes}));
-            Tensor indices = makeGpuTensor<uint64_t>(
-                options.gpu, {batchRows}, makeCollisionFreeRowIndices(batchRows, sourceRows), stream);
-            source.memsetAsync(stream, static_cast<int8_t>(0x67));
-            destination.memsetAsync(stream, 0);
-            stream.synchronize();
-
-            const uint32_t automaticRowsPerCta =
-                selectedRowsPerCta(batchRows, rowBytes);
-            for (uint32_t requestedRowsPerCta : options.rows_per_cta) {
-                const uint32_t actualRowsPerCta =
-                    requestedRowsPerCta == 0 ? automaticRowsPerCta : requestedRowsPerCta;
-                const TimingStats timing = benchmarkDramReads(
-                    stream, evictor, options.warmup, options.iterations, [&] {
-                        if (requestedRowsPerCta == 0) {
-                            launchDeviceResidentNamedGatherKernel(
-                                source, destination, indices, batchRows, stream);
-                        } else {
-                            launchDeviceResidentNamedGatherKernelWithRowsPerCtaForBenchmark(
-                                source, destination, indices, batchRows,
-                                requestedRowsPerCta, stream);
-                        }
-                    });
 
                 Result result;
-                result.kernel = "named";
-                result.variant = "gather";
-                result.batchRows = batchRows;
-                result.rowBytes = rowBytes;
-                result.groupingMode = requestedRowsPerCta == 0 ? "auto" : "forced";
-                result.autoRowsPerCta = automaticRowsPerCta;
-                result.rowsPerCta = actualRowsPerCta;
-                result.lanesPerRow = 256U / actualRowsPerCta;
-                result.sourceReadBytes = batchRows * rowBytes;
-                result.destinationWriteBytes = batchRows * rowBytes;
-                result.timing = timing;
-                printResult(result);
+                result.kernel = "direct_" + layout;
+                runRowCase(options, properties, stream, evictor,
+                           RowSource{&records, sourceRows, recordSizeBytes, fieldOffsetBytes, rowBytes}, batchRows, rowBytes,
+                           RowSelection{}, gatherVariants(), result, [&](Tensor &out, const TensorSpan &indices) {
+                               launchDeviceResidentDirectMaterializationKernel(
+                                   records, sourceRows, recordSizeBytes, fieldOffsetBytes, rowBytes, batchRows, out, indices,
+                                   stream);
+                           });
             }
         }
     }
 }
 
-void writeUint64LittleEndian(std::vector<uint8_t> &bytes, uint64_t offset, uint64_t value) {
-    for (uint32_t byte = 0; byte < sizeof(uint64_t); ++byte) {
-        bytes.at(offset + byte) = static_cast<uint8_t>((value >> (8U * byte)) & 0xffU);
-    }
-}
-
+// A ragged field: record i holds, at the reference offset, the index of its first value in the packed value store and
+// its value count; a batch row copies its record's values to the place the batch's destination offsets give it.
+// Every row here is the same length, so the offsets are regular and rowBytes is that length in bytes. aligned8: the
+// reference is on an 8-byte boundary of its record; unaligned: it is 3 bytes into it. The source rows are the values;
+// the records, 32 bytes per source row, are read on the way to them and sized into the cold source with them. The
+// destination offsets are one tensor per case: in L2 after a sample's first launch, as when the batch session has
+// just uploaded them. copy moves a batch of consecutive rows' values.
 void runRaggedBenchmarks(const Options &options,
+                         const cudaDeviceProp &properties,
                          Stream &stream,
                          DramReadEvictor &evictor) {
     constexpr uint64_t recordSizeBytes = 32;
+    const std::vector<CaseVariant> variants{{"ragged"},
+                                            {"ragged_l2_indices", CaseVariant::Op::Kernel, false, true},
+                                            {"ragged_sequential", CaseVariant::Op::Kernel, true},
+                                            {"copy", CaseVariant::Op::Copy},
+                                            {"launch_floor", CaseVariant::Op::LaunchFloor}};
+    const uint64_t largestBatchRows = *std::max_element(options.batch_rows.begin(), options.batch_rows.end());
 
     for (const std::string &referenceLayout : options.ragged_reference_layouts) {
         const uint64_t referenceOffsetBytes = referenceLayout == "aligned8" ? 8 : 3;
         for (uint64_t valueBytes : options.ragged_value_bytes) {
-            for (uint64_t requestedRowBytes : options.row_bytes) {
-                // Preserve the requested byte boundary exactly. The valueBytes=1
-                // sweep covers every odd threshold; wider element sizes run only
-                // cases that are physically representable without changing rowBytes.
-                if (requestedRowBytes % valueBytes != 0) continue;
-                const uint64_t valuesPerRow = requestedRowBytes / valueBytes;
-                const uint64_t rowBytes = requestedRowBytes;
+            for (uint64_t rowBytes : options.row_bytes) {
+                // A row is whole values: the 1-byte values run every row length, wider ones those they divide.
+                if (rowBytes == 0 || rowBytes % valueBytes != 0) continue;
+                const uint64_t valuesPerRow = rowBytes / valueBytes;
+
+                // One store for every batch size of this row length: records and values together at least 4x L2.
+                const uint64_t sourceRows = coldSourceRows(options, properties, largestBatchRows, recordSizeBytes + rowBytes);
+                const uint64_t storedValueCount = sourceRows * valuesPerRow;
+                std::vector<uint8_t> recordBytes(sourceRows * recordSizeBytes, 0);
+                for (uint64_t sourceRow = 0; sourceRow < sourceRows; ++sourceRow) {
+                    const uint64_t reference[2] = {sourceRow * valuesPerRow, valuesPerRow};
+                    std::memcpy(recordBytes.data() + sourceRow * recordSizeBytes + referenceOffsetBytes, reference, sizeof(reference));
+                }
+                Tensor records = makeGpuTensor<uint8_t>(options.gpu, {recordBytes.size()}, recordBytes, stream);
+                Tensor packedValues = makeGpuBytes(options.gpu, storedValueCount * valueBytes);
+                packedValues.memsetAsync(stream, static_cast<int8_t>(0x2d));
+
                 for (uint64_t batchRows : options.batch_rows) {
-                    const uint64_t sourceRows = std::max<uint64_t>(options.source_rows_floor, batchRows * 4);
-                    if (sourceRows > std::numeric_limits<uint64_t>::max() / valuesPerRow) {
-                        throw std::overflow_error("Ragged benchmark stored value count overflow");
+                    if (batchRows * valuesPerRow > std::numeric_limits<uint32_t>::max()) {
+                        throw std::runtime_error(
+                            "Ragged benchmark case exceeds UINT32 destination offsets; reduce --batch-rows or --row-bytes");
                     }
-                    const uint64_t storedValueCount = sourceRows * valuesPerRow;
-                    if (storedValueCount > std::numeric_limits<uint64_t>::max() / valueBytes) {
-                        throw std::overflow_error("Ragged benchmark packed byte count overflow");
-                    }
-
-                    std::vector<uint8_t> recordBytes(sourceRows * recordSizeBytes, 0);
-                    for (uint64_t sourceRow = 0; sourceRow < sourceRows; ++sourceRow) {
-                        const uint64_t reference = sourceRow * recordSizeBytes + referenceOffsetBytes;
-                        writeUint64LittleEndian(recordBytes, reference, sourceRow * valuesPerRow);
-                        writeUint64LittleEndian(recordBytes, reference + sizeof(uint64_t), valuesPerRow);
-                    }
-                    Tensor records = makeGpuTensor<uint8_t>(
-                        options.gpu, {recordBytes.size()}, recordBytes, stream);
-                    Tensor packedValues = makeGpuBytes(options.gpu, storedValueCount * valueBytes);
-                    packedValues.memsetAsync(stream, static_cast<int8_t>(0x2d));
-
-                    const std::vector<uint64_t> rowIndicesHost =
-                        makeCollisionFreeRowIndices(batchRows, sourceRows);
-                    Tensor indices = makeGpuTensor<uint64_t>(
-                        options.gpu, {batchRows}, rowIndicesHost, stream);
-
                     std::vector<uint32_t> offsets(batchRows + 1, 0);
-                    for (uint64_t row = 0; row <= batchRows; ++row) {
-                        const uint64_t offset = row * valuesPerRow;
-                        if (offset > std::numeric_limits<uint32_t>::max()) {
-                            throw std::runtime_error(
-                                "Ragged benchmark case exceeds UINT32 destination offsets; reduce --batch-rows or --row-bytes");
-                        }
-                        offsets[row] = static_cast<uint32_t>(offset);
-                    }
-                    Tensor destinationOffsets = makeGpuTensor<uint32_t>(
-                        options.gpu, {batchRows + 1}, offsets, stream);
-                    Tensor destinationValues = makeGpuBytes(options.gpu, batchRows * rowBytes);
-                    destinationValues.memsetAsync(stream, 0);
-                    stream.synchronize();
+                    for (uint64_t row = 0; row <= batchRows; ++row) offsets[row] = static_cast<uint32_t>(row * valuesPerRow);
+                    Tensor destinationOffsets = makeGpuTensor<uint32_t>(options.gpu, {batchRows + 1}, offsets, stream);
 
-                    const uint32_t automaticRowsPerCta =
-                    selectedRowsPerCta(batchRows, rowBytes);
-                    for (uint32_t requestedRowsPerCta : options.rows_per_cta) {
-                        const uint32_t actualRowsPerCta =
-                            requestedRowsPerCta == 0 ? automaticRowsPerCta : requestedRowsPerCta;
-                        const TimingStats timing = benchmarkDramReads(
-                            stream, evictor, options.warmup, options.iterations, [&] {
-                                if (requestedRowsPerCta == 0) {
-                                    launchDeviceResidentRaggedMaterializationKernel(
-                                        records, packedValues, sourceRows, recordSizeBytes,
-                                        referenceOffsetBytes, storedValueCount, valueBytes,
-                                        batchRows, destinationValues, destinationOffsets,
-                                        indices, stream);
-                                } else {
-                                    launchDeviceResidentRaggedMaterializationKernelWithRowsPerCtaForBenchmark(
-                                        records, packedValues, sourceRows, recordSizeBytes,
-                                        referenceOffsetBytes, storedValueCount, valueBytes,
-                                        batchRows, destinationValues, destinationOffsets,
-                                        indices, requestedRowsPerCta, stream);
-                                }
-                            });
-
-                        Result result;
-                        result.kernel = "ragged";
-                        result.variant = referenceLayout + "/v" + std::to_string(valueBytes);
-                        result.batchRows = batchRows;
-                        result.rowBytes = rowBytes;
-                        result.groupingMode = requestedRowsPerCta == 0 ? "auto" : "forced";
-                        result.autoRowsPerCta = automaticRowsPerCta;
-                        result.rowsPerCta = actualRowsPerCta;
-                        result.lanesPerRow = 256U / actualRowsPerCta;
-                        // Useful source payload excludes record references, offsets,
-                        // and row-index metadata so this remains directly comparable
-                        // to the direct/named payload throughput column.
-                        result.sourceReadBytes = batchRows * rowBytes;
-                        result.destinationWriteBytes = batchRows * rowBytes;
-                        result.timing = timing;
-                        printResult(result);
-                    }
+                    Result result;
+                    result.kernel = "ragged_" + referenceLayout + "_v" + std::to_string(valueBytes);
+                    runRowCase(options, properties, stream, evictor, RowSource{&packedValues, sourceRows, rowBytes, 0, rowBytes},
+                               batchRows, rowBytes, RowSelection{}, variants, result, [&](Tensor &out, const TensorSpan &indices) {
+                                   launchDeviceResidentRaggedMaterializationKernel(
+                                       records, packedValues, sourceRows, recordSizeBytes, referenceOffsetBytes, storedValueCount,
+                                       valueBytes, batchRows, out, destinationOffsets, indices, stream);
+                               });
                 }
             }
         }
     }
 }
 
+// Windows of a resident sequence source. A row is windowLength steps of sourceStepBytes: the middle valid_fraction of
+// its steps comes from the source and the steps around it are padding. payload materializes the row; mask materializes
+// one byte per step, 1 where the step is valid, and reads no source. Every selected window is its own span of the
+// source, so scattered windows share no bytes and consecutive ones are back to back. copy moves a whole output payload
+// and fill writes one: at valid fractions below 1 a payload launch reads less than copy and more than fill.
 void runWindowBenchmarks(const Options &options,
+                         const cudaDeviceProp &properties,
                          Stream &stream,
                          DramReadEvictor &evictor) {
+    static_assert(sizeof(DeviceResidentWindowRowPlan32) == 2 * sizeof(uint64_t));
     for (const std::string &mode : options.window_modes) {
         const bool materializeMask = mode == "mask";
         const std::vector<uint64_t> stepBytesSweep =
             materializeMask ? std::vector<uint64_t>{1} : options.window_step_bytes;
+        const std::vector<CaseVariant> variants =
+            materializeMask ? std::vector<CaseVariant>{{"mask"},
+                                                   {"mask_l2_plans", CaseVariant::Op::Kernel, false, true},
+                                                   {"fill", CaseVariant::Op::Fill},
+                                                   {"launch_floor", CaseVariant::Op::LaunchFloor}}
+                            : std::vector<CaseVariant>{{"window"},
+                                                   {"window_l2_plans", CaseVariant::Op::Kernel, false, true},
+                                                   {"window_sequential", CaseVariant::Op::Kernel, true},
+                                                   {"copy", CaseVariant::Op::Copy},
+                                                   {"fill", CaseVariant::Op::Fill},
+                                                   {"launch_floor", CaseVariant::Op::LaunchFloor}};
         for (uint64_t sourceStepBytes : stepBytesSweep) {
             for (uint64_t targetRowBytes : options.row_bytes) {
                 if (targetRowBytes % sourceStepBytes != 0) continue;
@@ -740,31 +810,31 @@ void runWindowBenchmarks(const Options &options,
                         validFraction * static_cast<double>(windowLength)));
                     validSteps = std::min<uint64_t>(validSteps, windowLength);
                     const uint64_t validStepBegin = (windowLength - validSteps) / 2;
+                    const uint64_t validBytes = validSteps * sourceStepBytes;
+                    const uint64_t sourceSpanBytes = std::max<uint64_t>(sourceStepBytes, validBytes);
+                    const uint64_t destinationRowBytes = materializeMask ? windowLength : targetRowBytes;
 
                     for (uint64_t batchRows : options.batch_rows) {
-                        const uint64_t sourceRows = std::max<uint64_t>(options.source_rows_floor, batchRows * 4);
-                        const uint64_t sourceSpanBytes = std::max<uint64_t>(sourceStepBytes, validSteps * sourceStepBytes);
-                        if (sourceRows > std::numeric_limits<uint64_t>::max() / sourceSpanBytes) {
-                            throw std::overflow_error("Window benchmark source byte count overflow");
+                        Tensor source;
+                        RowSource rowSource;
+                        if (!materializeMask) {
+                            const uint64_t sourceRows = coldSourceRows(options, properties, batchRows, sourceSpanBytes);
+                            // The copy reference reads a whole output payload from the first of any batchRows spans:
+                            // room for it past the last span.
+                            source = makeGpuBytes(
+                                options.gpu, sourceRows * sourceSpanBytes + batchRows * (destinationRowBytes - sourceSpanBytes));
+                            source.memsetAsync(stream, static_cast<int8_t>(0x49));
+                            rowSource = RowSource{&source, sourceRows, sourceSpanBytes, 0, validBytes};
                         }
-                        Tensor source = makeGpuBytes(options.gpu, sourceRows * sourceSpanBytes);
-                        source.memsetAsync(stream, static_cast<int8_t>(0x49));
 
-                        const std::vector<uint64_t> selectedSourceRows =
-                            makeCollisionFreeRowIndices(batchRows, sourceRows);
-                        std::vector<DeviceResidentWindowRowPlan32> plans(batchRows);
-                        for (uint64_t row = 0; row < batchRows; ++row) {
-                            plans[row].sourceOffsetBytes = selectedSourceRows[row] * sourceSpanBytes;
-                            plans[row].validStepBegin = static_cast<uint32_t>(validStepBegin);
-                            plans[row].validStepCount = static_cast<uint32_t>(validSteps);
-                        }
-                        Tensor planTensor = makeGpuPlans(options.gpu, plans, stream);
-
-                        const uint64_t destinationRowBytes = materializeMask ? windowLength : targetRowBytes;
-                        Tensor destination = makeGpuByteTensor(
-                            options.gpu, {batchRows, destinationRowBytes});
-                        destination.memsetAsync(stream, 0);
-                        stream.synchronize();
+                        RowSelection plans;
+                        plans.wordsPerRow = 2;
+                        plans.write = [=](uint64_t *words, uint64_t sourceRow) {
+                            const DeviceResidentWindowRowPlan32 plan{.sourceOffsetBytes = sourceRow * sourceSpanBytes,
+                                                                     .validStepBegin = static_cast<uint32_t>(validStepBegin),
+                                                                     .validStepCount = static_cast<uint32_t>(validSteps)};
+                            std::memcpy(words, &plan, sizeof(plan));
+                        };
 
                         DeviceResidentWindowMaterializationSpec spec;
                         spec.dataType = DataType::UINT8;
@@ -772,42 +842,20 @@ void runWindowBenchmarks(const Options &options,
                         spec.sourceStepBytes = sourceStepBytes;
                         spec.padValue = 0.0;
                         spec.materializeMask = materializeMask;
+                        // Every plan's source offset is a multiple of the span.
+                        const uint64_t spanBits = sourceSpanBytes | 16;
+                        spec.sourceOffsetAlignmentBytes = spanBits & (~spanBits + 1);
 
-                        const uint64_t selectorRowBytes = materializeMask ? windowLength : targetRowBytes;
-                        const uint32_t automaticRowsPerCta =
-                            selectedRowsPerCta(batchRows, selectorRowBytes);
-                        for (uint32_t requestedRowsPerCta : options.rows_per_cta) {
-                            const uint32_t actualRowsPerCta =
-                                requestedRowsPerCta == 0 ? automaticRowsPerCta : requestedRowsPerCta;
-                            const TimingStats timing = benchmarkDramReads(
-                                stream, evictor, options.warmup, options.iterations, [&] {
-                                    if (requestedRowsPerCta == 0) {
-                                        launchDeviceResidentWindowMaterializationKernel(
-                                            source, planTensor, batchRows, spec, destination, stream);
-                                    } else {
-                                        launchDeviceResidentWindowMaterializationKernelWithRowsPerCtaForBenchmark(
-                                            source, planTensor, batchRows, spec, destination,
-                                            requestedRowsPerCta, stream);
-                                    }
-                                });
-
-                            Result result;
-                            result.kernel = "window";
-                            result.variant = mode;
-                            result.batchRows = batchRows;
-                            result.rowBytes = destinationRowBytes;
-                            result.sourceStepBytes = sourceStepBytes;
-                            result.windowLength = windowLength;
-                            result.validFraction = static_cast<double>(validSteps) / static_cast<double>(windowLength);
-                            result.groupingMode = requestedRowsPerCta == 0 ? "auto" : "forced";
-                            result.autoRowsPerCta = automaticRowsPerCta;
-                            result.rowsPerCta = actualRowsPerCta;
-                            result.lanesPerRow = 256U / actualRowsPerCta;
-                            result.sourceReadBytes = materializeMask ? 0 : batchRows * validSteps * sourceStepBytes;
-                            result.destinationWriteBytes = batchRows * destinationRowBytes;
-                            result.timing = timing;
-                            printResult(result);
-                        }
+                        Result result;
+                        result.kernel = "window_" + mode;
+                        result.sourceStepBytes = sourceStepBytes;
+                        result.windowLength = windowLength;
+                        result.validFraction = static_cast<double>(validSteps) / static_cast<double>(windowLength);
+                        runRowCase(options, properties, stream, evictor, rowSource, batchRows, destinationRowBytes, plans,
+                                   variants, result, [&](Tensor &out, const TensorSpan &rowPlans) {
+                                       launchDeviceResidentWindowMaterializationKernel(
+                                           source, rowPlans, batchRows, spec, out, stream);
+                                   });
                     }
                 }
             }
@@ -852,23 +900,22 @@ int main(int argc, char **argv) {
                   << "Untimed device-read eviction: "
                   << static_cast<double>(evictor.bytes()) / static_cast<double>(MIB) << " MiB ("
                   << static_cast<double>(evictor.bytes()) / static_cast<double>(properties.l2CacheSize)
-                  << "x L2) before every timed launch\n"
-                  << "Warmup launches/case: " << options.warmup
-                  << ", timed launches/case: " << options.iterations << "\n"
+                  << "x L2) before every timed sample\n"
+                  << "Timed samples/case: " << options.iterations << "\n"
                   << "CSV results follow on stdout. source_payload_GBps is useful source payload only, not a hardware DRAM-byte counter.\n\n";
 
         printCsvHeader();
         if (contains(options.kernels, "direct")) {
-            runDirectBenchmarks(options, stream, evictor);
+            runDirectBenchmarks(options, properties, stream, evictor);
         }
         if (contains(options.kernels, "named")) {
-            runNamedGatherBenchmarks(options, stream, evictor);
+            runNamedGatherBenchmarks(options, properties, stream, evictor);
         }
         if (contains(options.kernels, "ragged")) {
-            runRaggedBenchmarks(options, stream, evictor);
+            runRaggedBenchmarks(options, properties, stream, evictor);
         }
         if (contains(options.kernels, "window")) {
-            runWindowBenchmarks(options, stream, evictor);
+            runWindowBenchmarks(options, properties, stream, evictor);
         }
         stream.synchronize();
         return 0;

@@ -12,18 +12,10 @@
  * rowIndicesDevice is a UINT64 device tensor with capacity [batch_size] whose
  * values are row positions in source's first dimension. Only the leading
  * logicalRows entries are consumed and inactive destination capacity is untouched.
+ * A row whose index is outside source is left untouched.
  */
 void launchDeviceResidentNamedGatherKernel(const ThorImplementation::Tensor &source,
                                            ThorImplementation::Tensor &destination,
                                            const ThorImplementation::TensorSpan &rowIndicesDevice,
                                            uint64_t logicalRows,
                                            Stream &stream);
-
-/** Benchmark-only launch hook that forces a specific rows-per-CTA specialization. */
-void launchDeviceResidentNamedGatherKernelWithRowsPerCtaForBenchmark(
-    const ThorImplementation::Tensor &source,
-    ThorImplementation::Tensor &destination,
-    const ThorImplementation::TensorSpan &rowIndicesDevice,
-    uint64_t logicalRows,
-    uint32_t rowsPerCta,
-    Stream &stream);
