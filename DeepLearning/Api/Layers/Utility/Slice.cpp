@@ -3,8 +3,7 @@
 #include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
 #include "DeepLearning/Api/Layers/Utility/SegmentedPrimitivePlacement.h"
 #include "DeepLearning/Implementation/ThorError.h"
-#include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
-#include "Utilities/Expression/RaggedExpression.h"
+#include "DeepLearning/Implementation/Layers/Utility/Slice.h"
 
 #include <algorithm>
 #include <limits>
@@ -53,6 +52,7 @@ Slice Slice::Builder::build() {
 
     std::vector<uint64_t> outputDimensions = inputDimensions;
     outputDimensions[_axis.value()] = _length.value();
+    const DataType outputDataType = _outputDataType.value_or(_featureInput->getDataType());
 
     Slice slice;
     slice.axis = _axis.value();
@@ -64,13 +64,13 @@ Slice Slice::Builder::build() {
         outputValueDimensions.reserve(outputDimensions.size() + 1);
         outputValueDimensions.push_back(_raggedFeatureInput->getMaxValuesPerRow());
         outputValueDimensions.insert(outputValueDimensions.end(), outputDimensions.begin(), outputDimensions.end());
-        Tensor outputValues(_featureInput->getDataType(), outputValueDimensions);
+        Tensor outputValues(outputDataType, outputValueDimensions);
         slice.raggedFeatureOutput = _raggedFeatureInput->withValues(outputValues);
         slice.featureInput = _raggedFeatureInput->getValues();
         slice.featureOutput = outputValues;
     } else {
         slice.featureInput = _featureInput.value();
-        slice.featureOutput = Tensor(_featureInput->getDataType(), outputDimensions);
+        slice.featureOutput = Tensor(outputDataType, outputDimensions);
     }
     slice.initialized = true;
     slice.addToNetwork(_network.value());
@@ -127,6 +127,7 @@ std::shared_ptr<ThorImplementation::Layer> Slice::stamp(ThorImplementation::Tens
                                                         Thor::Tensor connectingApiTensor,
                                                         bool inferenceOnly) const {
     (void)drivingApiLayer;
+    (void)placement;
     THOR_THROW_IF_FALSE(initialized);
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
@@ -141,109 +142,39 @@ std::shared_ptr<ThorImplementation::Layer> Slice::stamp(ThorImplementation::Tens
         THOR_THROW_IF_FALSE(axis < trailingDimensions.size());
         const uint64_t normalizedStart = Slice::normalizeStart(start, trailingDimensions[axis]);
 
-        const ThorImplementation::RaggedTensorDescriptor physicalInputDescriptor =
-            SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(
-                raggedInput, drivingLayer, "Slice");
-        const ThorImplementation::RaggedTensorDescriptor physicalOutputDescriptor =
-            raggedFeatureOutput->getDescriptorForPlacement(physicalInputDescriptor.getBatchSize());
-        ThorImplementation::RaggedExpression input = ThorImplementation::RaggedExpression::input(
-            "feature_input",
-            "feature_offsets",
-            physicalInputDescriptor,
-            ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
-        ThorImplementation::RaggedExpression output = input.sliceTrailingDimension(axis, normalizedStart, length);
-        if (output.getDescriptor() != physicalOutputDescriptor) {
-            throw std::runtime_error("Ragged Slice expression output descriptor does not match its API output.");
+        // Stamped from the values or the partition carrier, whichever is connected first; B comes from that
+        // already-placed physical driver, never from the logical [M, ...].
+        const bool partitionPort = connectingApiTensor == raggedInput.getOffsets();
+        const ThorImplementation::RaggedTensorDescriptor placed =
+            SegmentedPrimitivePlacementDetail::physicalRaggedDescriptorForStamp(raggedInput, drivingLayer, "Slice");
+        const uint64_t runtimeB = placed.getBatchSize();
+        if (runtimeB == 0 || runtimeB > std::numeric_limits<uint32_t>::max() ||
+            placed != raggedInput.getDescriptorForPlacement(runtimeB))
+            throw std::runtime_error("Slice driving row-partition descriptor disagrees with placement.");
+        const auto physical = SegmentedPrimitivePlacementDetail::physicalDescriptorForStamp(drivingLayer, "Slice");
+        if (partitionPort) {
+            if (physical.getDataType() != raggedInput.getOffsetsDataType() ||
+                physical.getDimensions() != std::vector<uint64_t>{1})
+                throw std::runtime_error("Slice requires a physical [1] active-count carrier.");
+        } else if (physical != placed.getValuesDescriptor()) {
+            throw std::runtime_error("Slice driving values dimensions disagree with placement.");
         }
-        ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(
-            ThorImplementation::Expression::outputs({{"feature_output", output.getValues()}}));
-
-        auto elementsPerValue = [](const std::vector<uint64_t>& dimensions) {
-            uint64_t elements = 1;
-            for (uint64_t dimension : dimensions) elements *= dimension;
-            return elements;
-        };
-        auto physicalSlice = std::make_shared<ThorImplementation::RaggedCustomLayer>(
-            ThorImplementation::DynamicExpression::fromExpressionDefinition(definition),
-            std::vector<std::string>{"feature_input", "feature_offsets"},
-            std::vector<std::string>{"feature_output"},
-            placement,
-            inferenceOnly,
-            physicalInputDescriptor.getMaxTotalValues(),
-            elementsPerValue(raggedInput.getTrailingDimensions()),
-            elementsPerValue(raggedFeatureOutput->getTrailingDimensions()),
-            0,
-            1,
-            getId());
-        physicalSlice->setLayerName("Slice");
+        // The values tensors carry the packed values dimension first.
+        auto physicalSlice = std::make_shared<ThorImplementation::Slice>(
+            static_cast<unsigned int>(axis + 1), normalizedStart, length, featureOutput->getDataType(), runtimeB);
+        physicalSlice->setConstructForInferenceOnly(inferenceOnly);
         return physicalSlice;
     }
 
+    (void)drivingLayer;
     THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
-    const uint64_t logicalAxis = axis;
-    const int64_t requestedStart = start;
-    const uint64_t requestedLength = length;
-
-    ThorImplementation::DynamicExpression expression(
-        std::vector<std::string>{"feature_input"},
-        std::vector<std::string>{"feature_output"},
-        [logicalAxis, requestedStart, requestedLength](const ThorImplementation::DynamicExpression::TensorMap& inputs,
-                                                       const ThorImplementation::DynamicExpression::TensorMap& outputs,
-                                                       Stream& stream) {
-            auto inputIt = inputs.find("feature_input");
-            if (inputIt == inputs.end())
-                throw std::runtime_error("Slice runtime expression is missing feature_input.");
-
-            const ThorImplementation::Tensor& input = inputIt->second;
-            std::vector<uint64_t> dimensions = input.getDimensions();
-            if (dimensions.empty() || logicalAxis + 1 >= dimensions.size()) {
-                throw std::runtime_error("Slice runtime input rank does not match its logical axis.");
-            }
-            const uint64_t physicalAxis = logicalAxis + 1;
-            const uint64_t normalizedStart = Slice::normalizeStart(requestedStart, dimensions[physicalAxis]);
-            if (requestedLength > dimensions[physicalAxis] - normalizedStart) {
-                throw std::runtime_error("Slice runtime start + length exceeds the selected axis.");
-            }
-
-            const std::vector<uint64_t> strides = input.getStridesElements();
-            if (strides.size() != dimensions.size())
-                throw std::runtime_error("Slice runtime input has invalid stride metadata.");
-            if (normalizedStart != 0 && strides[physicalAxis] > std::numeric_limits<uint64_t>::max() / normalizedStart)
-                throw std::overflow_error("Slice runtime storage offset overflow.");
-            const uint64_t elementOffset = normalizedStart * strides[physicalAxis];
-            dimensions[physicalAxis] = requestedLength;
-
-            ThorImplementation::Expression featureInput = ThorImplementation::Expression::input("feature_input");
-            ThorImplementation::Expression featureOutput = featureInput.stridedView(dimensions, strides, elementOffset);
-            ThorImplementation::Outputs expressionOutputs =
-                ThorImplementation::Expression::outputs({{"feature_output", featureOutput}});
-            auto definition = std::make_shared<ThorImplementation::ExpressionDefinition>(
-                ThorImplementation::ExpressionDefinition::fromOutputs(expressionOutputs));
-
-            return ThorImplementation::DynamicExpressionBuild{
-                .equation = std::make_shared<ThorImplementation::FusedEquation>(
-                    ThorImplementation::FusedEquation::compile(definition->outputs, stream.getGpuNum())),
-                .stamp_inputs = inputs,
-                .tensor_scalar_inputs = {},
-                .preallocated_outputs = outputs,
-                .requested_output_shapes = {},
-                .pre_forward_hook = {},
-                .serialized_definition = nullptr,
-            };
-        });
-
-    std::vector<ThorImplementation::CustomLayer::DeclaredOutputDescriptor> declaredOutputs{
-        ThorImplementation::CustomLayer::DeclaredOutputDescriptor{featureOutput->getDataType(), featureOutput->getDimensions()}};
-    auto physicalSlice = std::make_shared<ThorImplementation::CustomLayer>(
-        std::move(expression),
-        std::vector<std::string>{"feature_input"},
-        std::vector<std::string>{"feature_output"},
-        placement,
-        std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>>{},
-        inferenceOnly,
-        Layer::getId(),
-        std::move(declaredOutputs));
-    physicalSlice->setLayerName("Slice");
+    const std::vector<uint64_t> inputDimensions = featureInput->getDimensions();
+    THOR_THROW_IF_FALSE(axis < inputDimensions.size());
+    const uint64_t normalizedStart = Slice::normalizeStart(start, inputDimensions[axis]);
+    // The physical tensors carry the batch first.
+    auto physicalSlice = std::make_shared<ThorImplementation::Slice>(
+        static_cast<unsigned int>(axis + 1), normalizedStart, length, featureOutput->getDataType());
+    physicalSlice->setConstructForInferenceOnly(inferenceOnly);
     return physicalSlice;
 }
 
@@ -351,7 +282,8 @@ void Slice::deserialize(const json& j, Network* network) {
         std::vector<uint64_t> expectedTrailing = trailingDimensions;
         expectedTrailing[axis] = length;
         expectedOutputDimensions.insert(expectedOutputDimensions.end(), expectedTrailing.begin(), expectedTrailing.end());
-        if (outputValues.getDimensions() != expectedOutputDimensions || outputValues.getDataType() != values.getDataType()) {
+        // The output's data type is its own (Slice converts); its dimensions follow axis / start / length.
+        if (outputValues.getDimensions() != expectedOutputDimensions) {
             throw std::runtime_error("Slice serialized ragged output descriptor does not match axis/start/length.");
         }
 
@@ -375,7 +307,7 @@ void Slice::deserialize(const json& j, Network* network) {
         }
         std::vector<uint64_t> expectedOutputDimensions = inputDimensions;
         expectedOutputDimensions[axis] = length;
-        if (serializedOutput.getDimensions() != expectedOutputDimensions || serializedOutput.getDataType() != input.getDataType()) {
+        if (serializedOutput.getDimensions() != expectedOutputDimensions) {
             throw std::runtime_error("Slice serialized output descriptor does not match axis/start/length.");
         }
         slice.featureInput = input;

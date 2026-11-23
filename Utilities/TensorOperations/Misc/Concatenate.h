@@ -13,7 +13,8 @@
 // batch prefix. An array of another type than dest's is converted as it moves, element by element as TypeConverter
 // converts (the same bits), by the one kernel that reads every array and writes dest: no array is converted ahead of
 // the concatenate and nothing is staged. Arrays of dest's type are copied; when every array has it, the launches are
-// byte copies. sources[i] may be null only for a span of no elements. Every base is on a boundary of its element type.
+// byte copies. A null sources[i] is zeros: its span of dest is written with zero bits (the zero of every element type)
+// and nothing is read for it. Every base is on a boundary of its element type.
 void launchConcatenate(void *dest,
                        ThorImplementation::DataType destDataType,
                        const std::vector<void *> &sources,

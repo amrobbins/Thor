@@ -56,8 +56,8 @@ namespace ThorImplementation {
  * Output i has outputDataTypes[i], converted from the input's type as it moves (one launch writes every output). Output
  * i is the layer's connection (driver connection type) i, whatever order the outputs are connected in. Backward, one
  * concatenate converts each output's gradient to the input's type. An output that takes no gradient (its next layer
- * asks for none, or its type or the input's is integral) contributes zeros: its span of the input's gradient is read
- * from a zero tensor of the input's type, filled once at compile.
+ * asks for none, or its type or the input's is integral) contributes zeros: its source is null, so the concatenate
+ * writes zero bits into its span of the input's gradient and reads nothing for it.
  */
 class Split : public MultiConnectionLayer {
    public:
@@ -118,19 +118,14 @@ class Split : public MultiConnectionLayer {
 
         backwardSourceMemories.clear();
         backwardSourceDataTypes.clear();
-        zeroGradients.clear();
         if (errorOutputs[0].has_value()) {
             backwardSourceMemories.assign(numSplitTensors, nullptr);
             backwardSourceDataTypes.assign(numSplitTensors, inputDataType);
             for (uint32_t i = 0; i < numSplitTensors; ++i) {
-                if (errorInputs[i].has_value()) {
-                    backwardSourceMemories[i] = errorInputs[i].value().getMemPtr();
-                    backwardSourceDataTypes[i] = errorInputs[i].value().getDescriptor().getDataType();
-                } else {
-                    const TensorDescriptor zeroDescriptor(inputDataType, featureOutputs[i].value().getDescriptor().getDimensions());
-                    zeroGradients.push_back(Tensor::zeros(featureInputs[0].value().getPlacement(), zeroDescriptor, streams[0]));
-                    backwardSourceMemories[i] = zeroGradients.back().getMemPtr();
-                }
+                if (!errorInputs[i].has_value())
+                    continue;
+                backwardSourceMemories[i] = errorInputs[i].value().getMemPtr();
+                backwardSourceDataTypes[i] = errorInputs[i].value().getDescriptor().getDataType();
             }
         }
 
@@ -219,7 +214,6 @@ class Split : public MultiConnectionLayer {
         splitTensorFeatureOutputMemories.clear();
         backwardSourceMemories.clear();
         backwardSourceDataTypes.clear();
-        zeroGradients.clear();
         spanElementsPerSplitTensor.clear();
         outerSlicesPerBatch = 1;
         outputsReadyEvent = Event();
@@ -343,7 +337,6 @@ class Split : public MultiConnectionLayer {
     std::vector<void *> splitTensorFeatureOutputMemories;
     std::vector<void *> backwardSourceMemories;
     std::vector<DataType> backwardSourceDataTypes;
-    std::vector<Tensor> zeroGradients;
     std::vector<uint64_t> spanElementsPerSplitTensor;
     uint64_t outerSlicesPerBatch = 1;
 

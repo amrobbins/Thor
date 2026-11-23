@@ -15,6 +15,7 @@
 #include "DeepLearning/Implementation/Tensor/RowPartitionDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/DeepLearning/ManagedPartitionCarrierForTest.h"
 
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
@@ -358,19 +359,15 @@ void feedRaggedInput(Api::PlacedNetwork& placed,
         descriptor,
         inputReference.raggedTensor.getRowPartitionId(),
         hostOffsets);
-    physicalOffsetsInput->forwardManagedRowPartitionOffsets(
-        false,
-        descriptor,
-        kBatchSize,
-        hostOffsets,
-        inputReference.raggedTensor.getRowPartitionId());
+    ThorTest::forwardManagedRowPartitionCarrierForTest(
+        *physicalOffsetsInput, false, descriptor, kBatchSize, hostOffsets, inputReference.raggedTensor.getRowPartitionId());
     if (physicalActiveCountInput != nullptr) {
-        physicalActiveCountInput->forwardManagedRowPartitionActiveCount(
-            false,
-            descriptor,
-            kBatchSize,
-            hostOffsets,
-            inputReference.raggedTensor.getRowPartitionId());
+        ThorTest::forwardManagedRowPartitionCarrierForTest(*physicalActiveCountInput,
+                                                           false,
+                                                           descriptor,
+                                                           kBatchSize,
+                                                           hostOffsets,
+                                                           inputReference.raggedTensor.getRowPartitionId());
     }
 }
 

@@ -94,7 +94,11 @@ bound.
 
 At batch submission, the partition-owning input publishes complete authoritative
 host offsets. Placement-created managed `[1]` and `[B+1]` inputs are populated from
-that host state only if aggregate requirements requested them. A shared-partition
+that host state only if aggregate requirements requested them. Their bytes are a
+table of the batch metadata ring (below), uploaded with the batch's other metadata in
+its one copy; at the start of the batch one byte split of that table writes every
+managed carrier's statically connected tensor, and the carrier inputs themselves copy
+nothing and own no staging slots. A shared-partition
 `RaggedNetworkInput(..., partition=source)` contributes only another values stream
 and reuses the owner's `RowPartitionId`.
 

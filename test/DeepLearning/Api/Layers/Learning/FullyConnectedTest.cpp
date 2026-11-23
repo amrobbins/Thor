@@ -19,6 +19,7 @@
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
 #include "test/DeepLearning/RaggedTestUtils.h"
+#include "test/DeepLearning/ManagedPartitionCarrierForTest.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/RaggedMatmulCapacityBuckets.h"
 #include "Utilities/Expression/ExecutionDiagnostics.h"
 
@@ -359,8 +360,8 @@ vector<float> runRaggedForward(PlacedRaggedFullyConnectedFixture& fixture,
         fixture.rowPartitionId,
         hostOffsets);
     if (fixture.physicalOffsetsInput != nullptr) {
-        fixture.physicalOffsetsInput->forwardManagedRowPartitionOffsets(
-            false, descriptor, logicalBatchSize, hostOffsets, fixture.rowPartitionId);
+        ThorTest::forwardManagedRowPartitionCarrierForTest(
+            *fixture.physicalOffsetsInput, false, descriptor, logicalBatchSize, hostOffsets, fixture.rowPartitionId);
     }
     Event featureOutReadyEvent = fixture.physicalOutput->getOutputReadyEvent();
     featureOutReadyEvent.synchronize();

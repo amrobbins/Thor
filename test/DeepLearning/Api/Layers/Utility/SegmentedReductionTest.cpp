@@ -7,12 +7,14 @@
 #include "DeepLearning/Api/Layers/Utility/Slice.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/Utility/Slice.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Implementation/Layers/Utility/TensorFanout.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensor.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/DeepLearning/ManagedPartitionCarrierForTest.h"
 
 #include "gtest/gtest.h"
 
@@ -221,12 +223,12 @@ void runForwardBackwardCase(Api::SegmentedReduction::Type type) {
     Impl::Tensor valuesHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {12, 2}));
     writeCpuFloat(valuesHost, values);
     physicalValues->forward(valuesHost, false, batchSize);
-    physicalOffsets->forwardManagedRowPartitionOffsets(
-        false,
-        Impl::RowPartitionDescriptor(batchSize, 12, DataType::UINT32, 4),
-        batchSize,
-        std::vector<uint64_t>(offsets.begin(), offsets.end()),
-        fixture.rowPartitionId);
+    ThorTest::forwardManagedRowPartitionCarrierForTest(*physicalOffsets,
+                                                       false,
+                                                       Impl::RowPartitionDescriptor(batchSize, 12, DataType::UINT32, 4),
+                                                       batchSize,
+                                                       std::vector<uint64_t>(offsets.begin(), offsets.end()),
+                                                       fixture.rowPartitionId);
     physicalOutput->getOutputReadyEvent().synchronize();
 
     const ExpectedCase expected = expectedFor(type);
@@ -739,7 +741,7 @@ TEST(SegmentedReductionApi, RaggedSliceFeedsBothValuesAndOffsetsIntoSegmentedRed
     synchronizeEvents(initDoneEvents);
     ASSERT_NE(placed, nullptr);
     Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
-    auto physicalSlice = std::dynamic_pointer_cast<Impl::CustomLayer>(
+    auto physicalSlice = std::dynamic_pointer_cast<Impl::Slice>(
         stamped.getPhysicalLayerFromApiLayer(channel0.getId()));
     auto physicalMean = std::dynamic_pointer_cast<Impl::CustomLayer>(
         stamped.getPhysicalLayerFromApiLayer(mean.getId()));

@@ -1291,9 +1291,14 @@ class Slice(Layer):
     serialized declaratively as ``axis``, ``start``, and ``length`` and remains
     batch-polymorphic when the network is placed, cloned into training phases, or
     saved and reloaded.
+
+    ``output_data_type`` (default None: the input's) converts the window as it is
+    copied, in the same launch; its gradient is converted back to the input's type.
+    A gradient passes only between floating-point types: an integer or boolean
+    output takes none.
     """
 
-    def __init__(self, network: thor.Network, feature_input: object, axis: int, start: int, length: int) -> None: ...
+    def __init__(self, network: thor.Network, feature_input: object, axis: int, start: int, length: int, output_data_type: thor.DataType | None = None) -> None: ...
 
     def get_feature_output(self) -> object: ...
 
@@ -1307,6 +1312,9 @@ class Slice(Layer):
 
     @property
     def length(self) -> int: ...
+
+    @property
+    def output_data_type(self) -> thor.DataType: ...
 
 class Split(Layer):
     def __init__(self, network: thor.Network, feature_input: object, axis: int, sizes: Sequence[int], output_data_types: Sequence[thor.DataType] | None = None) -> None:
@@ -1336,7 +1344,9 @@ class Split(Layer):
         """
 
     def get_feature_outputs(self) -> list:
-        """Return the pieces, in order: thor.Tensor, or thor.RaggedTensor for a ragged input."""
+        """
+        Return the pieces, in order: thor.Tensor, or thor.RaggedTensor for a ragged input.
+        """
 
     @property
     def use_ragged(self) -> bool: ...

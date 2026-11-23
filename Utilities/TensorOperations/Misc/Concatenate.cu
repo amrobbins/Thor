@@ -96,7 +96,7 @@ __device__ __forceinline__ IndexT sliceOfPacket(IndexT packet, const FastDivisor
  *
  * The threads past columns * columnPackets, and past the end of a long slice, have no packet and leave. A slice past
  * the last is the last slice again, so no load or store is under a test, and a thread issues all its loads before any
- * store.
+ * store. Concatenating, an array with no source (null) is zeros: its threads store zero packets and load nothing.
  */
 struct SlicesArray {
     uint8_t *split = nullptr;
@@ -153,6 +153,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) slicesKernel(const __grid_co
         }
     }
     const SlicesArray &array = launch.array[arrayIndex];
+    const bool zeroSource = PackedIsDestination && array.split == nullptr;
     const PacketT *const source = reinterpret_cast<const PacketT *>(PackedIsDestination ? array.split : launch.packed);
     PacketT *const destination = reinterpret_cast<PacketT *>(PackedIsDestination ? launch.packed : array.split);
     const IndexT packetInSpan = packetInSlice - static_cast<IndexT>(array.firstPacket);
@@ -173,7 +174,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) slicesKernel(const __grid_co
         slice[k] = ownSlice < lastSlice ? ownSlice : lastSlice;
         packedPacket[k] = slice[k] * packedSlicePackets + packedPacketInSlice;
         splitPacket[k] = slice[k] * spanPackets + packetInSpan;
-        value[k] = source[PackedIsDestination ? splitPacket[k] : packedPacket[k]];
+        value[k] = zeroSource ? PacketT{} : source[PackedIsDestination ? splitPacket[k] : packedPacket[k]];
     }
 #pragma unroll
     for (uint32_t k = 0; k < PacketsPerThread; ++k) {
@@ -202,7 +203,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) slicesKernel(const __grid_co
  * A thread issues the loads of all its packets, the two words of the row's bytes and the two of the next row's
  * (the row's again where the packet ends in it), before it reads any; a word is loaded only where its bytes are
  * needed, so no load ends more than 15 bytes past the bytes a row holds, inside the padding every tensor is allocated
- * with.
+ * with. Concatenating, the row of an array with no source (null) is zeros, and so are its words: none is loaded.
  */
 struct BytesArray {
     uint8_t *split = nullptr;
@@ -262,6 +263,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock) concatenateBytesKernel(const
     const IndexT packedOffsetBytes = static_cast<IndexT>(array.packedOffsetBytes);
     const IndexT lastPacket = static_cast<IndexT>(array.packets - 1);
     const IndexT tileStart = static_cast<IndexT>(blockIdx.x - array.firstBlock) * (kThreadsPerBlock * PacketsPerThread);
+    const bool rowZero = PackedIsDestination && array.split == nullptr;
+    const bool nextRowZero = PackedIsDestination && array.nextSplit == nullptr;
+    const uint4 zeroWord{0U, 0U, 0U, 0U};
 
     // Loads only: the row's words (a) and the next row's (b).
     IndexT packetByte[PacketsPerThread];
@@ -304,12 +308,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock) concatenateBytesKernel(const
 
         shiftA[k] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(sourceA) & (kPacketBytes - 1));
         const uint4 *const wordA = reinterpret_cast<const uint4 *>(sourceA - shiftA[k]);
-        a0[k] = wordA[0];
-        a1[k] = wordA[shiftA[k] + rowBytes[k] > kPacketBytes ? 1 : 0];
+        a0[k] = rowZero ? zeroWord : wordA[0];
+        a1[k] = rowZero ? zeroWord : wordA[shiftA[k] + rowBytes[k] > kPacketBytes ? 1 : 0];
         shiftB[k] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(sourceB) & (kPacketBytes - 1));
         const uint4 *const wordB = reinterpret_cast<const uint4 *>(sourceB - shiftB[k]);
-        b0[k] = wordB[0];
-        b1[k] = wordB[straddles[k] && shiftB[k] + (kPacketBytes - rowBytes[k]) > kPacketBytes ? 1 : 0];
+        const bool zeroB = straddles[k] ? nextRowZero : rowZero;
+        b0[k] = zeroB ? zeroWord : wordB[0];
+        b1[k] = zeroB ? zeroWord : wordB[straddles[k] && shiftB[k] + (kPacketBytes - rowBytes[k]) > kPacketBytes ? 1 : 0];
     }
 #pragma unroll
     for (uint32_t k = 0; k < PacketsPerThread; ++k) {
@@ -349,13 +354,15 @@ struct Plan {
     const std::vector<ByteSpan> *geometry = nullptr;
     const std::vector<void *> *splits = nullptr;
     cudaStream_t stream = nullptr;
+    // Concatenating: a null source is zeros, and moves.
+    bool nullSplitsAreZeros = false;
 
     // Array i as a launch takes it; false for an array with no bytes to move (a span of zero bytes or, splitting, a
-    // null store).
+    // null store). A null source's split is null; its packet follows its span, its offset and the packed tensor.
     bool arrayPlanOf(size_t i, ArrayPlan &array) const {
         const ByteSpan &span = (*geometry)[i];
         void *const split = (*splits)[i];
-        if (span.spanBytes == 0 || split == nullptr) return false;
+        if (span.spanBytes == 0 || (split == nullptr && !nullSplitsAreZeros)) return false;
         array.index = static_cast<uint32_t>(i);
         array.split = static_cast<uint8_t *>(split);
         array.spanBytes = span.spanBytes;
@@ -647,6 +654,7 @@ void launchSameType(void *packed, const std::vector<void *> &splits, uint64_t ou
     plan.geometry = &geometry;
     plan.splits = &splits;
     plan.stream = stream.getStream();
+    plan.nullSplitsAreZeros = PackedIsDestination;
     launchPlan<PackedIsDestination>(plan);
 }
 
@@ -683,6 +691,9 @@ void launchSameType(void *packed, const std::vector<void *> &splits, uint64_t ou
  * run each type's conversion in turn.) In the long case the arrays follow each other in the slice in the same order
  * of types, and a thread finds its array by the binary search. Which case a launch is, is a test on the launch.
  * Indices are 64-bit: there is no division by thread, so their cost is two multiplications a thread.
+ *
+ * Concatenating, an array with no source (null) is zeros of the packed type: the host gives it the packed type, and
+ * its threads store zero packets before the switch and load nothing.
  *
  * A thread's loads are inside its type's case, behind the switch (a load of its table and an indirect branch).
  * Issued ahead of it by their byte width (patch 1580) they gained 0.03 to 0.13 us on launches of one packet a thread,
@@ -816,6 +827,35 @@ __device__ __forceinline__ void convertPackets(const FromT *from, ToT *to, uint6
     }
 }
 
+// A thread's packets of 1 << packetLog2 elements, each all zero bits (the zero of every element type).
+template <typename T, uint32_t PacketsPerThread>
+__device__ __forceinline__ void storeZeroPackets(T *to, uint64_t toStep, uint32_t stored, uint32_t packetLog2) {
+    alignas(16) const uint8_t zeros[kConvertPacketBytes] = {};
+    const uint32_t bytes = (1U << packetLog2) * static_cast<uint32_t>(sizeof(T));
+#pragma unroll
+    for (uint32_t k = 0; k < PacketsPerThread; ++k) {
+        if (k >= stored) break;
+        T *const at = to + k * toStep;
+        switch (bytes) {
+            case 16:
+                storeConvertBytes<16>(at, zeros);
+                break;
+            case 8:
+                storeConvertBytes<8>(at, zeros);
+                break;
+            case 4:
+                storeConvertBytes<4>(at, zeros);
+                break;
+            case 2:
+                storeConvertBytes<2>(at, zeros);
+                break;
+            default:
+                storeConvertBytes<1>(at, zeros);
+                break;
+        }
+    }
+}
+
 template <typename PackedT, uint32_t PacketsPerThread, bool PackedIsDestination>
 __global__ void __launch_bounds__(kThreadsPerBlock) convertSlicesKernel(const __grid_constant__ ConvertLaunch launch) {
     uint32_t group = blockIdx.x;
@@ -861,6 +901,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock) convertSlicesKernel(const __
     const uint64_t arrayStep = launch.columns * array.spanElements;
     const uint64_t packedStep = launch.columns * launch.packedSliceElements;
     PackedT *const packedAt = reinterpret_cast<PackedT *>(launch.packed) + packedElement;
+    if constexpr (PackedIsDestination) {
+        if (array.split == nullptr) {
+            storeZeroPackets<PackedT, PacketsPerThread>(packedAt, packedStep, stored, array.packetLog2);
+            return;
+        }
+    }
     switch (static_cast<DataType>(array.dataType)) {
 #define THOR_CONCATENATE_CONVERT_CASE(name, type)                                                                              \
     case DataType::name: {                                                                                                     \
@@ -1053,11 +1099,10 @@ void launchTyped(void *packed,
         if (spanElements[i] > std::numeric_limits<uint64_t>::max() - packedSliceElements)
             throw std::invalid_argument("Dense concatenate packed slice element count overflow.");
         packedSliceElements += spanElements[i];
-        if (PackedIsDestination && splits[i] == nullptr && spanElements[i] != 0)
-            throw std::invalid_argument("Dense concatenate source array is null.");
-        const bool moves = spanElements[i] != 0 && splits[i] != nullptr;
+        // A null source is zeros of the packed type; a null destination skips its array.
+        const bool moves = spanElements[i] != 0 && (PackedIsDestination || splits[i] != nullptr);
         anyElements |= moves;
-        converts |= moves && splitDataTypes[i] != packedDataType;
+        converts |= moves && splits[i] != nullptr && splitDataTypes[i] != packedDataType;
     }
     if (packedSliceElements == 0) throw std::invalid_argument("Dense concatenate requires a non-zero packed slice size.");
     if (outerSlices == 0 || !anyElements) return;
@@ -1077,10 +1122,11 @@ void launchTyped(void *packed,
     for (size_t i = 0; i < spanElements.size(); ++i) {
         const uint64_t offset = packedOffsetElements;
         packedOffsetElements += spanElements[i];
-        if (spanElements[i] == 0 || splits[i] == nullptr) continue;
+        if (spanElements[i] == 0 || (!PackedIsDestination && splits[i] == nullptr)) continue;
         TypedArray array;
         array.split = static_cast<uint8_t *>(splits[i]);
-        array.dataType = splitDataTypes[i];
+        // A null source's zeros are of the packed type: its packet and its place among the arrays follow that type.
+        array.dataType = splits[i] == nullptr ? packedDataType : splitDataTypes[i];
         array.spanElements = spanElements[i];
         array.packedOffsetElements = offset;
         array.packetLog2 = packetLog2Of(array, packedStore, packedDataType, packedSliceElements);

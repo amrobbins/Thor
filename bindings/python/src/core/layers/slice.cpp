@@ -1,4 +1,5 @@
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Utility/Slice.h"
@@ -7,6 +8,7 @@
 #include "DeepLearning/Api/Tensor/RaggedTensor.h"
 
 #include <cstdint>
+#include <optional>
 #include <utility>
 
 namespace nb = nanobind;
@@ -19,9 +21,11 @@ void bind_slice(nb::module_& m) {
 
     slice.def(
         "__init__",
-        [](Slice* self, Network& network, nb::object featureInput, uint64_t axis, int64_t start, uint64_t length) {
+        [](Slice* self, Network& network, nb::object featureInput, uint64_t axis, int64_t start, uint64_t length,
+           std::optional<ThorImplementation::DataType> outputDataType) {
             Slice::Builder builder;
             builder.network(network).axis(axis).start(start).length(length);
+            if (outputDataType.has_value()) builder.outputDataType(outputDataType.value());
             if (nb::isinstance<RaggedTensor>(featureInput)) {
                 builder.featureInput(nb::cast<RaggedTensor>(featureInput));
             } else if (nb::isinstance<Tensor>(featureInput)) {
@@ -36,7 +40,8 @@ void bind_slice(nb::module_& m) {
         "feature_input"_a,
         "axis"_a,
         "start"_a,
-        "length"_a);
+        "length"_a,
+        "output_data_type"_a.none() = nb::none());
 
     slice.def("get_feature_output", [](const Slice& self) -> nb::object {
         if (std::optional<RaggedTensor> raggedOutput = self.getRaggedFeatureOutput(); raggedOutput.has_value()) {
@@ -48,6 +53,7 @@ void bind_slice(nb::module_& m) {
     slice.def_prop_ro("axis", &Slice::getAxis);
     slice.def_prop_ro("start", &Slice::getStart);
     slice.def_prop_ro("length", &Slice::getLength);
+    slice.def_prop_ro("output_data_type", &Slice::getOutputDataType);
 
     slice.attr("__doc__") = R"nbdoc(
 Slice a contiguous window from one logical tensor axis.
@@ -59,5 +65,10 @@ resolved relative to the end of the selected logical axis. The operation is
 serialized declaratively as ``axis``, ``start``, and ``length`` and remains
 batch-polymorphic when the network is placed, cloned into training phases, or
 saved and reloaded.
+
+``output_data_type`` (default None: the input's) converts the window as it is
+copied, in the same launch; its gradient is converted back to the input's type.
+A gradient passes only between floating-point types: an integer or boolean
+output takes none.
 )nbdoc";
 }

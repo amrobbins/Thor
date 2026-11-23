@@ -3,9 +3,6 @@
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/RaggedTensor.h"
-#include "DeepLearning/Implementation/Layers/CustomLayer.h"
-#include "Utilities/Expression/DynamicExpression.h"
-#include "Utilities/Expression/Expression.h"
 
 #include <cstdint>
 #include <memory>
@@ -17,6 +14,17 @@
 
 namespace Thor {
 
+/**
+ * Slice keeps the entries [start, start + length) of one axis (a negative start counts from the end). The axis counts
+ * the per-example dimensions (the batch is not one of them); a RaggedTensor input slices a trailing value axis and the
+ * output shares its row partition. The output is a dense tensor of its own: forward is one dense copy of the window
+ * of the valid examples (ragged: the active packed values), backward one launch that writes the window's gradient
+ * into the input's and zeros around it.
+ *
+ * The output keeps the input's data type unless outputDataType is set; then the window is converted as it moves (one
+ * launch), and its gradient is converted back to the input's type. A gradient passes only between floating-point
+ * types: an integral output takes none.
+ */
 class Slice : public Layer {
    public:
     class Builder;
@@ -30,6 +38,7 @@ class Slice : public Layer {
     uint64_t getAxis() const { return axis; }
     int64_t getStart() const { return start; }
     uint64_t getLength() const { return length; }
+    DataType getOutputDataType() const { return featureOutput.value().getDataType(); }
 
     [[nodiscard]] bool getUseRagged() const { return raggedFeatureInput.has_value(); }
     [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureInput() const { return raggedFeatureInput; }
@@ -131,6 +140,16 @@ class Slice::Builder {
         return *this;
     }
 
+    // The output's data type; the input's when not set.
+    virtual Builder& outputDataType(DataType outputDataType) {
+        if (_outputDataType.has_value())
+            throw std::runtime_error("Slice output data type may only be set once.");
+        if (!Tensor::dataTypeValid(outputDataType))
+            throw std::invalid_argument("Slice output data type is not a valid data type.");
+        _outputDataType = outputDataType;
+        return *this;
+    }
+
    private:
     std::optional<Network*> _network;
     std::optional<Tensor> _featureInput;
@@ -138,6 +157,7 @@ class Slice::Builder {
     std::optional<uint64_t> _axis;
     std::optional<int64_t> _start;
     std::optional<uint64_t> _length;
+    std::optional<DataType> _outputDataType;
 };
 
 }  // namespace Thor

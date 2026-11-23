@@ -26,8 +26,8 @@ namespace ThorImplementation {
 // [1] active-count carrier, whose published host partition gives the active packed prefix (CUDA does not read it).
 // Output i is driver connection type i and has outputDataTypes[i], converted as it moves; the host partition is
 // published on every piece. Backward, one concatenate converts the pieces' gradients into the input's; a piece that
-// takes no gradient (its consumer sends none, or its type or the input's is integral) contributes zeros, read from a
-// zero tensor of the input's type made at compile.
+// takes no gradient (its consumer sends none, or its type or the input's is integral) contributes zeros: its source is
+// null, so the concatenate writes zero bits into its span and reads nothing for it.
 class RaggedSplit : public MultiConnectionLayer {
    public:
     RaggedSplit(unsigned int valuesAxis, std::vector<unsigned long> axisElements, uint64_t batchSize,
@@ -84,19 +84,13 @@ class RaggedSplit : public MultiConnectionLayer {
         for (uint32_t i = 0; i < outputs; ++i) outputMemories[i] = featureOutputs[i]->getMemPtr();
         backwardSourceMemories.clear();
         backwardSourceDataTypes.clear();
-        zeroGradients.clear();
         if (errorOutputs[kValuesInput].has_value()) {
             backwardSourceMemories.assign(outputs, nullptr);
             backwardSourceDataTypes.assign(outputs, inputDataType);
             for (uint32_t i = 0; i < outputs; ++i) {
-                if (errorInputs[i].has_value()) {
-                    backwardSourceMemories[i] = errorInputs[i]->getMemPtr();
-                    backwardSourceDataTypes[i] = errorInputs[i]->getDescriptor().getDataType();
-                } else {
-                    const TensorDescriptor zeroDescriptor(inputDataType, featureOutputs[i]->getDescriptor().getDimensions());
-                    zeroGradients.push_back(Tensor::zeros(featureInputs[kValuesInput]->getPlacement(), zeroDescriptor, streams[0]));
-                    backwardSourceMemories[i] = zeroGradients.back().getMemPtr();
-                }
+                if (!errorInputs[i].has_value()) continue;
+                backwardSourceMemories[i] = errorInputs[i]->getMemPtr();
+                backwardSourceDataTypes[i] = errorInputs[i]->getDescriptor().getDataType();
             }
         }
 
@@ -184,7 +178,6 @@ class RaggedSplit : public MultiConnectionLayer {
         outputMemories.clear();
         backwardSourceMemories.clear();
         backwardSourceDataTypes.clear();
-        zeroGradients.clear();
         geometry = RaggedTrailingConcatenateGeometry{};
         for (Event &event : forwardInputReadyEvents) event = Event();
         for (Event &event : backwardInputReadyEvents) event = Event();
@@ -298,14 +291,11 @@ class RaggedSplit : public MultiConnectionLayer {
             if (!errorOutputs[kValuesInput].has_value()) return 0;
             std::optional<uint64_t> bytes = logicalBytesForActiveRows(errorOutputs[kValuesInput].value(), *activeRows);
             if (!bytes.has_value()) return 0;
-            // A piece without a gradient is read from its zero tensor, of the input's type.
+            // A piece without a gradient is written as zeros and reads nothing.
             for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
                 if (!featureOutputs[i].has_value()) return 0;
-                const TensorDescriptor source =
-                    errorInputs[i].has_value()
-                        ? errorInputs[i]->getDescriptor()
-                        : TensorDescriptor(inputDataType, featureOutputs[i]->getDescriptor().getDimensions());
-                const std::optional<uint64_t> sourceBytes = logicalBytesForActiveRows(source, *activeRows);
+                if (!errorInputs[i].has_value()) continue;
+                const std::optional<uint64_t> sourceBytes = logicalBytesForActiveRows(*errorInputs[i], *activeRows);
                 if (!sourceBytes.has_value()) return 0;
                 bytes = checkedLogicalByteAdd(*bytes, *sourceBytes, "RaggedSplit backward input");
             }
@@ -400,7 +390,6 @@ class RaggedSplit : public MultiConnectionLayer {
     std::vector<void *> outputMemories;
     std::vector<void *> backwardSourceMemories;
     std::vector<DataType> backwardSourceDataTypes;
-    std::vector<Tensor> zeroGradients;
     RaggedTrailingConcatenateGeometry geometry;
     std::set<uint64_t> allFeatureInputTensorIds;
     std::set<uint64_t> stillWaitingForFeatureInputTensors;

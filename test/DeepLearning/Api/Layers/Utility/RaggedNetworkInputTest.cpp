@@ -38,6 +38,8 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <cmath>
+#include <tuple>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -1668,6 +1670,154 @@ TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateKeepsEachQueuedBatchsCop
         EXPECT_EQ(joinedValue, offsets[b][0].back() + offsets[b][1].back());
         EXPECT_EQ(wrong, 0u);
     }
+}
+
+// The managed row-partition carriers' bytes ride the batch metadata ring and reach the carriers in one launch at the
+// start of their batch. Three batches of different partitions, each in its own queue slot, all submitted before any
+// is waited on: every one is normalized by its own offsets, on two partitions (UINT32 and UINT64 offsets) and with an
+// active-count carrier beside the offsets one; the carrier inputs own no staging slots.
+TEST(RaggedNetworkInputApi, ManagedPartitionCarriersTakeEachQueuedBatchsBytesFromItsRingSlot) {
+    constexpr uint32_t batchSize = 4;
+    constexpr uint32_t queueDepth = 3;
+    Network network("ragged_managed_carriers_queued");
+
+    RaggedTensor tokens = RaggedNetworkInput::Builder()
+                              .network(network)
+                              .name("tokens")
+                              .valuesDataType(DataType::FP32)
+                              .offsetsDataType(DataType::UINT32)
+                              .trailingDimensions({2})
+                              .maxValuesPerRow(5)
+                              .build();
+    RaggedTensor other = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("other")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT64)
+                             .trailingDimensions({3})
+                             .maxValuesPerRow(3)
+                             .build();
+    SegmentedSoftmax tokensSoftmax = SegmentedSoftmax::Builder().network(network).featureInput(tokens).build();
+    SegmentedSoftmax otherSoftmax = SegmentedSoftmax::Builder().network(network).featureInput(other).build();
+    FiniteCheck checked =
+        FiniteCheck::Builder().network(network).featureInput(tokens).tensorLabel("tokens").enabled(false).build();
+    ASSERT_TRUE(checked.getRaggedFeatureOutput().has_value());
+    NetworkOutput::Builder()
+        .network(network)
+        .name("tokens_softmax")
+        .inputTensor(tokensSoftmax.getRaggedFeatureOutput().getValues())
+        .dataType(DataType::FP32)
+        .build();
+    NetworkOutput::Builder()
+        .network(network)
+        .name("other_softmax")
+        .inputTensor(otherSoftmax.getRaggedFeatureOutput().getValues())
+        .dataType(DataType::FP32)
+        .build();
+    NetworkOutput::Builder()
+        .network(network)
+        .name("tokens_checked")
+        .inputTensor(checked.getRaggedFeatureOutput()->getValues())
+        .dataType(DataType::FP32)
+        .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+    placed->preallocateInputSlots(queueDepth);
+    placed->preallocateOutputSlots(queueDepth);
+    placed->synchronize();
+
+    auto& stamp = placed->getStampedNetwork(0);
+    const auto tokensOffsets = stamp.getManagedPartitionOffsetsInputForTest(tokens.getRowPartitionId());
+    const auto tokensActiveCount = stamp.getManagedPartitionActiveCountInputForTest(tokens.getRowPartitionId());
+    const auto otherOffsets = stamp.getManagedPartitionOffsetsInputForTest(other.getRowPartitionId());
+    ASSERT_NE(tokensOffsets, nullptr);
+    ASSERT_NE(tokensActiveCount, nullptr);
+    ASSERT_NE(otherOffsets, nullptr);
+    for (const auto& carrier : {tokensOffsets, tokensActiveCount, otherOffsets})
+        EXPECT_EQ(carrier->getNumInputSlots(), 0u) << "a managed carrier has no staging";
+
+    // Per batch: the tokens' offsets (active 12, 7, 20 of 20) and the other input's (8, 1, 12 of 12).
+    const std::vector<std::vector<std::vector<uint64_t>>> offsets{
+        {{0, 5, 5, 10, 12}, {0, 3, 3, 5, 8}},
+        {{0, 1, 3, 3, 7}, {0, 0, 0, 1, 1}},
+        {{0, 5, 10, 15, 20}, {0, 3, 6, 9, 12}},
+    };
+    std::vector<std::map<std::string, ThorImplementation::Tensor>> outputs(offsets.size());
+    std::vector<std::map<std::string, Event>> outputReadyEvents(offsets.size());
+    std::vector<Event> done;
+    for (uint32_t b = 0; b < offsets.size(); ++b) {
+        Batch batch = makeFp32RaggedBatch("tokens", tokens, offsets[b][0]);
+        Batch otherBatch = makeFp32RaggedBatch("other", other, offsets[b][1]);
+        batch.insert("other", otherBatch.getRaggedTensor("other"));
+        ASSERT_NO_THROW(done.push_back(placed->submitBatch(0,
+                                                           batch,
+                                                           outputs[b],
+                                                           outputReadyEvents[b],
+                                                           /*isInferenceOnly=*/true,
+                                                           /*reusableProcessingFinishedEvent=*/nullptr,
+                                                           /*waitForOutputsOnProcessingStream=*/true,
+                                                           /*submitTiming=*/nullptr,
+                                                           /*outputSlotIndex=*/b)));
+    }
+
+    const ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    auto hostCopy = [&](ThorImplementation::Tensor tensor) {
+        if (tensor.getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::CPU) return tensor;
+        ThorImplementation::Tensor host = tensor.clone(cpuPlacement);
+        Stream stream(tensor.getPlacement().getDeviceNum());
+        host.copyFromAsync(tensor, stream);
+        stream.synchronize();
+        return host;
+    };
+    // makeFp32RaggedBatch's values: element i of the packed values is (i + 1) / 32.
+    auto input = [](uint64_t value, uint64_t features, uint64_t f) {
+        return static_cast<float>(value * features + f + 1) * 0.03125f;
+    };
+    for (uint32_t b = 0; b < offsets.size(); ++b) {
+        SCOPED_TRACE(::testing::Message() << "batch " << b);
+        done[b].synchronize();
+        for (const auto& [name, partition, features] :
+             std::vector<std::tuple<std::string, uint32_t, uint64_t>>{{"tokens_softmax", 0, 2}, {"other_softmax", 1, 3}}) {
+            ASSERT_TRUE(outputs[b].contains(name));
+            outputReadyEvents[b].at(name).synchronize();
+            const ThorImplementation::Tensor values = hostCopy(outputs[b].at(name));
+            const float* softmax = values.getMemPtr<float>();
+            const std::vector<uint64_t>& rows = offsets[b][partition];
+            uint64_t wrong = 0;
+            for (uint32_t row = 0; row < batchSize; ++row) {
+                for (uint64_t f = 0; f < features; ++f) {
+                    double denominator = 0.0;
+                    for (uint64_t v = rows[row]; v < rows[row + 1]; ++v) denominator += std::exp(input(v, features, f));
+                    for (uint64_t v = rows[row]; v < rows[row + 1]; ++v) {
+                        const double expected = std::exp(input(v, features, f)) / denominator;
+                        wrong += std::abs(softmax[v * features + f] - expected) > 1e-5;
+                    }
+                }
+            }
+            EXPECT_EQ(wrong, 0u) << name;
+        }
+        ASSERT_TRUE(outputs[b].contains("tokens_checked"));
+        outputReadyEvents[b].at("tokens_checked").synchronize();
+        const ThorImplementation::Tensor checkedValues = hostCopy(outputs[b].at("tokens_checked"));
+        uint64_t wrong = 0;
+        for (uint64_t i = 0; i < offsets[b][0].back() * 2; ++i)
+            wrong += checkedValues.getMemPtr<float>()[i] != static_cast<float>(i + 1) * 0.03125f;
+        EXPECT_EQ(wrong, 0u) << "tokens_checked";
+    }
+
+    // The carriers hold the last batch's bytes.
+    placed->synchronize();
+    const ThorImplementation::Tensor lastTokens = hostCopy(tokensOffsets->getFeatureOutput().value());
+    const ThorImplementation::Tensor lastCount = hostCopy(tokensActiveCount->getFeatureOutput().value());
+    const ThorImplementation::Tensor lastOther = hostCopy(otherOffsets->getFeatureOutput().value());
+    for (uint32_t i = 0; i <= batchSize; ++i) {
+        EXPECT_EQ(lastTokens.getMemPtr<uint32_t>()[i], offsets[2][0][i]);
+        EXPECT_EQ(lastOther.getMemPtr<uint64_t>()[i], offsets[2][1][i]);
+    }
+    EXPECT_EQ(lastCount.getMemPtr<uint32_t>()[0], offsets[2][0].back());
 }
 
 TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateReusesSharedAuthoritativeInputPartition) {

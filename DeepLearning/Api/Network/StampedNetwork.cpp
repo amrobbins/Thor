@@ -9,6 +9,7 @@
 #include "DeepLearning/Implementation/Diagnostics/TrainingDiagnostics.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "DeepLearning/Implementation/Layers/Utility/RaggedSequenceConcatenate.h"
+#include "Utilities/TensorOperations/Misc/Split.h"
 
 #include <exception>
 #include <functional>
@@ -16,6 +17,7 @@
 #include <iterator>
 #include <stdexcept>
 #include <algorithm>
+#include <cstring>
 #include <optional>
 #include <set>
 #if THOR_ENABLE_BATCH_SUBMISSION_TIMING
@@ -1083,6 +1085,7 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
         addManagedInput(physicalization.activeCountInput, /*activeCountOnly=*/true);
         addManagedInput(physicalization.offsetsInput, /*activeCountOnly=*/false);
     }
+    writeManagedPartitionCarriers(physicalBatchInputs);
 
     batchMetadataRing->commitBatch();
 
@@ -1183,9 +1186,6 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
     for (NetworkInput* input : inputs) {
         input->setActiveInputSlot(queueSlot);
     }
-    for (NetworkInput* input : managedPartitionInputs) {
-        input->setActiveInputSlot(queueSlot);
-    }
     for (uint32_t i = 0; i < outputs.size(); ++i) {
         outputs[i]->setActiveOutputSlot(outputSlot);
     }
@@ -1199,6 +1199,26 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
     }
 
     const auto inputForwardStart = timingNow(submitTiming);
+
+    // The managed row-partition carriers take this batch's bytes from its ring slot in one launch, before any input
+    // runs, on the first carrier's stream: that stream waited for the previous batch to finish (end of the previous
+    // sendPhysicalBatch), so no reader of the carriers' previous bytes is left. Each carrier waits on `filled`.
+    std::optional<Event> carriersFilled;
+    if (!managedPartitionInputs.empty()) {
+        ManagedPartitionCarrierTable &carriers = *managedPartitionCarrierTable;
+        THOR_THROW_IF_FALSE(carriers.table.has_value());
+        const Stream fillStream = managedPartitionInputs[0]->getStream();
+        fillStream.waitEvent(batchMetadataRing->uploadedEvent());
+        launchSplit(carriers.splitDestinations,
+                    carriers.splitDataTypes,
+                    batchMetadataRing->deviceTable(carriers.table.value()),
+                    DataType::UINT8,
+                    /*outerSlices=*/1,
+                    carriers.splitSpanBytes,
+                    fillStream);
+        fillStream.putEvent(carriers.filled);
+        carriersFilled = carriers.filled;
+    }
 
     // A partition-owning logical RaggedNetworkInput always materializes values.
     // The values input carries authoritative host partition metadata, while hidden
@@ -1255,22 +1275,14 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
             THOR_THROW_IF_FALSE(!it->second.sourceReference.has_value());
             ManagedRowPartitionOffsetsInput managed =
                 std::get<ManagedRowPartitionOffsetsInput>(std::move(it->second.value));
-            if (managed.activeCountOnly) {
-                THOR_THROW_IF_FALSE(managed.logicalRowPartitionId.has_value());
-                input->forwardManagedRowPartitionActiveCount(
-                    isInferenceOnly,
-                    managed.descriptor,
-                    validExampleCount,
-                    std::move(managed.hostOffsets),
-                    managed.logicalRowPartitionId.value());
-            } else {
-                input->forwardManagedRowPartitionOffsets(
-                    isInferenceOnly,
-                    managed.descriptor,
-                    validExampleCount,
-                    std::move(managed.hostOffsets),
-                    managed.logicalRowPartitionId);
-            }
+            if (managed.activeCountOnly) THOR_THROW_IF_FALSE(managed.logicalRowPartitionId.has_value());
+            THOR_THROW_IF_FALSE(carriersFilled.has_value());
+            input->forwardManagedRowPartitionCarrier(isInferenceOnly,
+                                                     managed.descriptor,
+                                                     validExampleCount,
+                                                     std::move(managed.hostOffsets),
+                                                     managed.logicalRowPartitionId,
+                                                     carriersFilled);
         } else {
             THOR_UNREACHABLE();
         }
@@ -1403,6 +1415,8 @@ void StampedNetwork::clearImpl(bool propagateCleanupFailure) {
             firstCleanupFailure = std::current_exception();
         }
     }
+    // Its table and destinations went with the ring and the carriers.
+    *managedPartitionCarrierTable = ManagedPartitionCarrierTable{};
 
     apiTensorToPhysicalDrivingLayer.clear();
     apiLayerToPhysicalLayer.clear();
@@ -1456,9 +1470,7 @@ void StampedNetwork::preallocateInputSlots(uint32_t numSlots) {
     for (NetworkInput* input : inputs) {
         input->preallocateInputSlots(numSlots);
     }
-    for (NetworkInput* input : managedPartitionInputs) {
-        input->preallocateInputSlots(numSlots);
-    }
+    // The managed row-partition carriers have no staging: their bytes are in the batch metadata ring.
     reserveBatchMetadataSlots(numSlots);
 }
 
@@ -1484,8 +1496,78 @@ void StampedNetwork::reserveBatchMetadataSlots(uint32_t slotCount) {
             THOR_THROW_IF_FALSE(!gpuNum.has_value() || gpuNum.value() == deviceNum);
             gpuNum = deviceNum;
         }
+
+        // The managed carriers, one after another on 16-byte boundaries; the split skips the padding (null
+        // destinations), so every carrier is copied in the widest packets its size allows.
+        ManagedPartitionCarrierTable &carriers = *managedPartitionCarrierTable;
+        THOR_THROW_IF_FALSE(!carriers.table.has_value());
+        uint64_t cursor = 0;
+        for (NetworkInput *input : managedPartitionInputs) {
+            THOR_THROW_IF_FALSE(input != nullptr);
+            std::optional<Tensor> carrier = input->getFeatureOutput();
+            THOR_THROW_IF_FALSE(carrier.has_value());
+            THOR_THROW_IF_FALSE(carrier->getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+            const int32_t deviceNum = static_cast<int32_t>(carrier->getPlacement().getDeviceNum());
+            THOR_THROW_IF_FALSE(!gpuNum.has_value() || gpuNum.value() == deviceNum);
+            gpuNum = deviceNum;
+            const uint64_t offset = (cursor + BatchMetadataRing::kTableAlignmentBytes - 1) /
+                                    BatchMetadataRing::kTableAlignmentBytes * BatchMetadataRing::kTableAlignmentBytes;
+            if (offset != cursor) {
+                carriers.splitDestinations.push_back(nullptr);
+                carriers.splitDataTypes.push_back(DataType::UINT8);
+                carriers.splitSpanBytes.push_back(offset - cursor);
+            }
+            const uint64_t bytes = carrier->getArraySizeInBytes();
+            THOR_THROW_IF_FALSE(bytes != 0);
+            carriers.carrierOffsetBytes.push_back(offset);
+            carriers.splitDestinations.push_back(carrier->getMemPtr());
+            carriers.splitDataTypes.push_back(DataType::UINT8);
+            carriers.splitSpanBytes.push_back(bytes);
+            cursor = offset + bytes;
+        }
+        if (cursor != 0) {
+            carriers.tableBytes = cursor;
+            carriers.table = batchMetadataRing->declareTable(cursor);
+        }
     }
     batchMetadataRing->reserveSlots(gpuNum.value_or(0), slotCount);
+}
+
+void StampedNetwork::writeManagedPartitionCarriers(const std::map<std::string, PhysicalBatchInput> &physicalBatchInputs) {
+    const ManagedPartitionCarrierTable &carriers = *managedPartitionCarrierTable;
+    if (!carriers.table.has_value()) {
+        THOR_THROW_IF_FALSE(managedPartitionInputs.empty());
+        return;
+    }
+    THOR_THROW_IF_FALSE(carriers.carrierOffsetBytes.size() == managedPartitionInputs.size());
+    uint8_t *table = batchMetadataRing->openTable(carriers.table.value());
+    for (size_t i = 0; i < managedPartitionInputs.size(); ++i) {
+        NetworkInput *input = managedPartitionInputs[i];
+        auto it = physicalBatchInputs.find(input->getName());
+        THOR_THROW_IF_FALSE(it != physicalBatchInputs.end());
+        THOR_THROW_IF_FALSE(std::holds_alternative<ManagedRowPartitionOffsetsInput>(it->second.value));
+        const ManagedRowPartitionOffsetsInput &managed = std::get<ManagedRowPartitionOffsetsInput>(it->second.value);
+        THOR_THROW_IF_FALSE(!managed.hostOffsets.empty());
+        // The active count is the partition's last offset; the offsets carrier holds every offset.
+        const uint64_t first = managed.activeCountOnly ? managed.hostOffsets.size() - 1 : 0;
+        const uint64_t count = managed.hostOffsets.size() - first;
+        const TensorDescriptor carrier = input->getFeatureOutput().value().getDescriptor();
+        const DataType offsetsDataType = managed.descriptor.getOffsetsDataType();
+        THOR_THROW_IF_FALSE(carrier.getDataType() == offsetsDataType && carrier.getTotalNumElements() == count);
+        uint8_t *destination = table + carriers.carrierOffsetBytes[i];
+        for (uint64_t j = 0; j < count; ++j) {
+            const uint64_t offset = managed.hostOffsets[first + j];
+            if (offsetsDataType == DataType::UINT32) {
+                THOR_THROW_IF_FALSE(offset <= std::numeric_limits<uint32_t>::max());
+                const uint32_t narrow = static_cast<uint32_t>(offset);
+                std::memcpy(destination + j * sizeof(uint32_t), &narrow, sizeof(uint32_t));
+            } else {
+                THOR_THROW_IF_FALSE(offsetsDataType == DataType::UINT64);
+                std::memcpy(destination + j * sizeof(uint64_t), &offset, sizeof(uint64_t));
+            }
+        }
+    }
+    batchMetadataRing->closeTable(carriers.table.value(), carriers.tableBytes);
 }
 
 void StampedNetwork::preallocateOutputSlots(uint32_t numSlots) {

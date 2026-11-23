@@ -55,9 +55,9 @@ uint8_t patternByte(uint64_t array, uint64_t byte) {
 }
 
 // One geometry both ways, every byte checked against the definition: the arrays' active slices concatenated into a
-// packed tensor of outerCapacity slices (the rest untouched), then the packed tensor split into fresh arrays (those
-// with a null destination, and the inactive slices, untouched). Every store starts offsetBytes past a tensor's
-// 256-byte boundary, so unaligned bases are covered too.
+// packed tensor of outerCapacity slices (the rest untouched; an array with a null source is zeros), then the packed
+// tensor split into fresh arrays (those with a null destination, and the inactive slices, untouched). Every store
+// starts offsetBytes past a tensor's 256-byte boundary, so unaligned bases are covered too.
 struct ReferenceCase {
     std::string name;
     uint64_t outerSlices = 1;
@@ -66,6 +66,7 @@ struct ReferenceCase {
     std::vector<uint64_t> splitOffsetBytes;   // empty: all zero
     std::vector<bool> nullSplitDestination;   // empty: none
     uint64_t inactiveSlices = 2;
+    std::vector<bool> nullSource;             // concatenate: empty, none
 };
 
 void runReferenceCase(const ReferenceCase &testCase) {
@@ -85,6 +86,8 @@ void runReferenceCase(const ReferenceCase &testCase) {
     splitOffsets.resize(arrays, 0);
     std::vector<bool> nullDestination = testCase.nullSplitDestination;
     nullDestination.resize(arrays, false);
+    std::vector<bool> nullSource = testCase.nullSource;
+    nullSource.resize(arrays, false);
 
     Stream stream(0);
     std::vector<Tensor> sources;
@@ -97,7 +100,7 @@ void runReferenceCase(const ReferenceCase &testCase) {
         withOffset.insert(withOffset.end(), sourceValues[a].begin(), sourceValues[a].end());
         withOffset.resize(std::max<size_t>(withOffset.size(), 16), sentinel);  // a tensor of no bytes is not allocated
         sources.push_back(makeGpuBytes(withOffset, stream));
-        sourcePointers.push_back(testCase.spanBytes[a] == 0 ? nullptr : sources.back().getMemPtr<uint8_t>() + splitOffsets[a]);
+        sourcePointers.push_back(testCase.spanBytes[a] == 0 || nullSource[a] ? nullptr : sources.back().getMemPtr<uint8_t>() + splitOffsets[a]);
     }
     Tensor packed = makeGpuBytes(std::vector<uint8_t>(testCase.packedOffsetBytes + outerCapacity * packedSliceBytes, sentinel), stream);
     uint8_t *const packedStart = packed.getMemPtr<uint8_t>() + testCase.packedOffsetBytes;
@@ -110,7 +113,8 @@ void runReferenceCase(const ReferenceCase &testCase) {
     for (uint64_t slice = 0; slice < outerCapacity; ++slice) {
         for (size_t a = 0; a < arrays; ++a) {
             for (uint64_t byte = 0; byte < testCase.spanBytes[a]; ++byte) {
-                const uint8_t expected = slice < testCase.outerSlices ? sourceValues[a][slice * testCase.spanBytes[a] + byte] : sentinel;
+                const uint8_t active = nullSource[a] ? 0 : sourceValues[a][slice * testCase.spanBytes[a] + byte];
+                const uint8_t expected = slice < testCase.outerSlices ? active : sentinel;
                 wrongBytes += packedValues[testCase.packedOffsetBytes + slice * packedSliceBytes + packedOffsetBytes[a] + byte] != expected;
             }
         }
@@ -132,7 +136,7 @@ void runReferenceCase(const ReferenceCase &testCase) {
         const uint64_t activeBytes = nullDestination[a] ? 0 : testCase.outerSlices * testCase.spanBytes[a];
         for (uint64_t byte = 0; byte < destinationValues.size(); ++byte) {
             const bool active = byte >= splitOffsets[a] && byte - splitOffsets[a] < activeBytes;
-            const uint8_t expected = active ? sourceValues[a][byte - splitOffsets[a]] : sentinel;
+            const uint8_t expected = active ? (nullSource[a] ? 0 : sourceValues[a][byte - splitOffsets[a]]) : sentinel;
             wrongBytes += destinationValues[byte] != expected;
         }
     }
@@ -181,6 +185,7 @@ struct TypedCase {
     std::vector<uint64_t> splitOffsetElements;   // empty: all zero
     std::vector<bool> nullSplitDestination;      // empty: none
     uint64_t inactiveSlices = 2;
+    std::vector<bool> nullSource;                // concatenate: empty, none (a null source is zeros of the packed type)
 };
 
 void runTypedCase(const TypedCase &testCase) {
@@ -200,6 +205,8 @@ void runTypedCase(const TypedCase &testCase) {
     splitOffsets.resize(arrays, 0);
     std::vector<bool> nullDestination = testCase.nullSplitDestination;
     nullDestination.resize(arrays, false);
+    std::vector<bool> nullSource = testCase.nullSource;
+    nullSource.resize(arrays, false);
     Stream stream(0);
 
     {
@@ -209,6 +216,13 @@ void runTypedCase(const TypedCase &testCase) {
         for (size_t a = 0; a < arrays; ++a) {
             const uint64_t arrayElementBytes = elementBytes(testCase.types[a]);
             const uint64_t span = testCase.spanElements[a];
+            if (nullSource[a] && span != 0) {
+                // The reference reads zeros of the packed type for it.
+                typedSources.push_back(nullptr);
+                stores.push_back(makeGpuStore(0, std::vector<uint8_t>(outerCapacity * span * packedElementBytes, 0), sentinel, stream));
+                referenceSources.push_back(stores.back().getMemPtr<uint8_t>());
+                continue;
+            }
             const std::vector<uint8_t> values = randomElements(testCase.types[a], outerCapacity * span, 1000 + a);
             stores.push_back(makeGpuStore(splitOffsets[a] * arrayElementBytes, values, sentinel, stream));
             typedSources.push_back(span == 0 ? nullptr : stores.back().getMemPtr<uint8_t>() + splitOffsets[a] * arrayElementBytes);
@@ -406,6 +420,28 @@ TEST(DenseConcatenateSpan, NullSplitDestinationsAreSkipped) {
     }
 }
 
+// A null source is zeros: every byte kernel (packets of each width, narrow and shifted packets, long slices), the
+// source before, between and after others, next to rows that straddle into it, and every source null.
+TEST(DenseConcatenateSpan, NullSourcesAreZeros) {
+    REQUIRE_CUDA_DEVICE();
+    for (const ReferenceCase &testCase : std::vector<ReferenceCase>{
+             {"16-byte packets, the middle source", 1000, {64, 64, 64}, 0, {}, {}, 2, {false, true, false}},
+             {"4-byte packets, the first source", 1000, {4, 8}, 0, {}, {}, 2, {true, false}},
+             {"narrow packets, odd spans", 300, {5, 7, 3}, 0, {}, {}, 2, {false, true, false}},
+             {"narrow, a packed tensor off a boundary", 1000, {40, 24}, 3, {}, {}, 2, {true, false}},
+             {"shifted, the middle source", 40000, {33, 35, 33}, 0, {}, {}, 2, {false, true, false}},
+             {"shifted, the first source", 40000, {33, 35, 33}, 0, {}, {}, 2, {true, false, false}},
+             {"shifted, the last source (the packed tensor's last row)", 40000, {33, 35, 33}, 0, {}, {}, 2, {false, false, true}},
+             {"shifted, two sources", 30000, {33, 17, 1025}, 0, {}, {}, 2, {true, false, true}},
+             {"long slices", 100, {2048, 4112, 2064}, 0, {}, {}, 2, {true, false, false}},
+             {"every source null", 50, {16, 32}, 0, {}, {}, 2, {true, true}},
+             {"every source null, shifted", 40000, {33, 35}, 0, {}, {}, 2, {true, true}},
+             {"a slice's worth of 1-byte packets", 3000, {100, 29}, 0, {}, {}, 2, {false, true}},
+         }) {
+        runReferenceCase(testCase);
+    }
+}
+
 // Every pair of element types, both ways: an array of each of the 15 types beside a packed tensor of each type. The
 // spans are of 2 to 64 elements, so the arrays take packets of every size, and one launch holds every type.
 TEST(DenseConcatenateTyped, EveryElementTypeConvertsAsTypeConverterDoes) {
@@ -509,6 +545,30 @@ TEST(DenseConcatenateTyped, OddSpansAndOffsetStoresTakeSmallerPackets) {
     }
 }
 
+// A null source converts nothing: its span is zeros of the packed type, in the converting kernel when another array
+// converts and in the byte kernels when every other array has the packed type, whatever type the null source names.
+TEST(DenseConcatenateTyped, NullSourcesAreZerosOfThePackedType) {
+    REQUIRE_CUDA_DEVICE();
+    for (const TypedCase &testCase : std::vector<TypedCase>{
+             {"between converting arrays", 1000, DataType::FP32, {DataType::BF16, DataType::FP32, DataType::FP8_E5M2}, {16, 16, 16}, 0, {}, {}, 2,
+              {false, true, false}},
+             {"named another type, beside one that converts", 600, DataType::BF16, {DataType::FP32, DataType::FP16}, {24, 8}, 0, {}, {}, 2,
+              {true, false}},
+             {"named another type, every other array the packed type: byte kernels", 600, DataType::BF16, {DataType::FP32, DataType::BF16},
+              {24, 8}, 0, {}, {}, 2, {true, false}},
+             {"long slices", 20, DataType::FP32, {DataType::FP32, DataType::BF16}, {1000, 600}, 0, {}, {}, 2, {true, false}},
+             {"four packets per thread", 40001, DataType::BF16, {DataType::FP32, DataType::BF16, DataType::FP8_E4M3}, {16, 16, 16}, 0, {}, {}, 2,
+              {false, true, false}},
+             {"odd spans, smaller packets", 300, DataType::BF16, {DataType::FP32, DataType::BF16, DataType::FP8_E5M2}, {3, 5, 7}, 0, {}, {}, 2,
+              {false, false, true}},
+             {"stores off a packet's boundary", 300, DataType::BF16, {DataType::FP32, DataType::BF16, DataType::FP8_E4M3}, {16, 16, 16}, 1,
+              {1, 3, 5}, {}, 2, {true, false, false}},
+             {"every source null", 300, DataType::FP16, {DataType::FP32, DataType::BF16}, {16, 16}, 0, {}, {}, 2, {true, true}},
+         }) {
+        runTypedCase(testCase);
+    }
+}
+
 // More arrays than a launch holds, null split destinations, and arrays that all have the packed type (the byte
 // kernels, through the typed call).
 TEST(DenseConcatenateTyped, ManyArraysNullDestinationsAndOneType) {
@@ -546,7 +606,6 @@ TEST(DenseConcatenateTyped, RejectsMalformedLaunches) {
     EXPECT_THROW(launchConcatenate(p, DataType::FP32, {a, b}, {DataType::FP32}, 1, {4, 4}, stream), std::invalid_argument);
     EXPECT_THROW(launchConcatenate(p, DataType::FP32, {a, b}, types, 1, {4}, stream), std::invalid_argument);
     EXPECT_THROW(launchConcatenate(nullptr, DataType::FP32, {a, b}, types, 1, {4, 4}, stream), std::invalid_argument);
-    EXPECT_THROW(launchConcatenate(p, DataType::FP32, {a, nullptr}, types, 1, {4, 4}, stream), std::invalid_argument);
     EXPECT_THROW(launchConcatenate(p, DataType::FP32, {a, b}, types, 1, {0, 0}, stream), std::invalid_argument);
     EXPECT_THROW(launchConcatenate(p, DataType::TF32, {a, b}, types, 1, {4, 4}, stream), std::invalid_argument);
     EXPECT_THROW(launchConcatenate(p, DataType::FP32, {a, b}, {DataType::FP32, DataType::TF32}, 1, {4, 4}, stream), std::invalid_argument);

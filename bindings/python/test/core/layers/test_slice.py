@@ -55,6 +55,45 @@ def test_slice_uses_logical_axes_and_serializes_declaratively():
     assert all("expression" not in layer for layer in slice_layers)
 
 
+def test_slice_output_data_type_defaults_to_the_inputs_and_converts():
+    network = thor.Network("slice-output-data-type")
+    sequence = thor.layers.NetworkInput(network, "sequence", [6, 2], thor.DataType.fp32).get_feature_output()
+
+    same = thor.layers.Slice(network, sequence, axis=0, start=-3, length=3)
+    assert same.output_data_type == thor.DataType.fp32
+    assert same.get_feature_output().get_data_type() == thor.DataType.fp32
+
+    narrowed = thor.layers.Slice(network, sequence, axis=1, start=0, length=1, output_data_type=thor.DataType.fp8_e5m2)
+    assert narrowed.output_data_type == thor.DataType.fp8_e5m2
+    assert narrowed.get_feature_output().get_data_type() == thor.DataType.fp8_e5m2
+    assert narrowed.get_feature_output().get_dimensions() == [6, 1]
+
+
+@pytest.mark.cuda
+def test_slice_converts_its_window_to_the_output_data_type(tmp_path):
+    network_name = "slice-converts-window"
+    network = thor.Network(network_name)
+    sequence = thor.layers.NetworkInput(network, "sequence", [6, 2], thor.DataType.fp32).get_feature_output()
+    half = thor.layers.Slice(network, sequence, axis=0, start=-3, length=3, output_data_type=thor.DataType.fp16)
+    e5m2 = thor.layers.Slice(network, sequence, axis=1, start=1, length=1, output_data_type=thor.DataType.fp8_e5m2)
+    thor.layers.NetworkOutput(network, "half", half.get_feature_output(), thor.DataType.fp16)
+    thor.layers.NetworkOutput(network, "e5m2", e5m2.get_feature_output(), thor.DataType.fp32)
+
+    # 0-7 are exact in FP8 E5M2 and FP16.
+    values = (np.arange(4 * 6 * 2) % 8).astype(np.float32).reshape(4, 6, 2)
+    outputs = _place(network, batch_size=4).infer({"sequence": _cpu_tensor_from_numpy(values, thor.DataType.fp32)})
+    np.testing.assert_array_equal(np.array(outputs["half"].numpy(), copy=True), values[:, -3:, :].astype(np.float16))
+    np.testing.assert_array_equal(np.array(outputs["e5m2"].numpy(), copy=True), values[:, :, 1:2])
+
+    save_dir = tmp_path / "slice_converting_model"
+    network.save(str(save_dir), overwrite=False)
+    loaded = thor.Network(network_name)
+    loaded.load(str(save_dir))
+    outputs = _place(loaded, batch_size=2).infer({"sequence": _cpu_tensor_from_numpy(values[:2], thor.DataType.fp32)})
+    np.testing.assert_array_equal(np.array(outputs["half"].numpy(), copy=True), values[:2, -3:, :].astype(np.float16))
+    np.testing.assert_array_equal(np.array(outputs["e5m2"].numpy(), copy=True), values[:2, :, 1:2])
+
+
 @pytest.mark.cuda
 def test_slice_forward_is_batch_polymorphic_across_placements():
     network, _ = _tail_network("slice-forward-batch-polymorphic")

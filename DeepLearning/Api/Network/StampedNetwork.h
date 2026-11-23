@@ -41,10 +41,9 @@ struct ManagedRowPartitionOffsetsInput {
 };
 
 struct PhysicalBatchInput {
-    // ManagedRowPartitionOffsetsInput is intentionally a normal physical NetworkInput
-    // submission. The difference from Tensor is ownership: Thor generates and owns
-    // the host source bytes and the NetworkInput slot keeps them alive through the
-    // asynchronous H2D copy.
+    // ManagedRowPartitionOffsetsInput is a Thor-managed carrier's batch: its bytes travel in the batch metadata ring
+    // (written in sendBatch, one copy with the batch's other metadata) and reach the carrier tensor in one launch for
+    // every carrier at the start of sendPhysicalBatch; the carrier NetworkInput then only publishes the host state.
     std::variant<Tensor, Thor::DeviceBatchReference, ManagedRowPartitionOffsetsInput> value;
     std::optional<Thor::BatchSourceReference> sourceReference;
 
@@ -403,10 +402,29 @@ class StampedNetwork {
     std::map<std::string, RowPartitionId> externalRowPartitionByValuesInputName;
     std::map<std::string, RaggedOutputBinding> raggedOutputByValuesOutputName;
 
-    // Per-batch metadata the stamp's operations read on the device (sequence-concatenate copy plans), a slot per queue
-    // slot. Shared by the copies of this stamp handle, as its layers are.
+    // Per-batch metadata the stamp's operations read on the device (sequence-concatenate copy plans, the managed
+    // row-partition carriers' bytes), a slot per queue slot. Shared by the copies of this stamp handle, as its layers
+    // are.
     std::shared_ptr<ThorImplementation::BatchMetadataRing> batchMetadataRing =
         std::make_shared<ThorImplementation::BatchMetadataRing>();
+
+    // The managed row-partition carriers (managedPartitionInputs, in order) as one ring table: carrier i's bytes at
+    // carrierOffsetBytes[i], each on a 16-byte boundary. At the start of a batch one byte split of the table, whose
+    // destinations are the carrier tensors with null destinations over the padding, fills every carrier; `filled` is
+    // recorded after it. Laid out once, with the ring's tables.
+    struct ManagedPartitionCarrierTable {
+        std::optional<ThorImplementation::BatchMetadataRing::TableId> table;
+        std::vector<uint64_t> carrierOffsetBytes;
+        uint64_t tableBytes = 0;
+        std::vector<void *> splitDestinations;
+        std::vector<ThorImplementation::DataType> splitDataTypes;
+        std::vector<uint64_t> splitSpanBytes;
+        Event filled;
+    };
+    std::shared_ptr<ManagedPartitionCarrierTable> managedPartitionCarrierTable =
+        std::make_shared<ManagedPartitionCarrierTable>();
+    // Write this batch's carrier bytes (from the batch's ManagedRowPartitionOffsetsInput entries) into the ring table.
+    void writeManagedPartitionCarriers(const std::map<std::string, PhysicalBatchInput> &physicalBatchInputs);
     // Declare the operations' tables (once) and give the ring at least `slotCount` slots.
     void reserveBatchMetadataSlots(uint32_t slotCount);
 

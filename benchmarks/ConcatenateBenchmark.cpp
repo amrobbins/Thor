@@ -7,6 +7,9 @@
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/Expression/CudaHelpers.h"
+#include "Utilities/Expression/Expression.h"
+#include "Utilities/Expression/FusedEquation.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 #include <cuda_runtime.h>
 
@@ -21,11 +24,14 @@
 #include <initializer_list>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <numeric>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -47,8 +53,8 @@ struct Options {
     uint64_t min_evict_bytes = 64ULL * MIB;
     uint64_t max_copy_bytes = 128ULL * MIB;
 
-    std::vector<std::string> kernels{
-        "concatenate", "split", "convert-concatenate", "convert-split", "sequence-forward", "sequence-backward"};
+    std::vector<std::string> kernels{"concatenate",      "split",           "convert-concatenate", "convert-split",
+                                     "sequence-forward", "sequence-backward", "slice-forward",     "slice-backward"};
     std::vector<uint64_t> outer_slices{1, 8, 64, 512, 4096, 32768};
     std::vector<uint32_t> num_arrays{2, 4, 8, 16};
     std::vector<uint64_t> span_bytes{4, 16, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 511, 512, 513,
@@ -69,6 +75,15 @@ struct Options {
     std::vector<std::string> sequence_length_layouts{"uniform", "random", "skewed"};
     std::vector<double> sequence_nonempty_fractions{1.0, 0.5};
     std::vector<std::string> sequence_span_formats{"packed"};
+
+    // The slice cases: a [outer, extent, inner] input, its middle axis sliced to round(keep x extent) elements from
+    // extent / 4 + a start offset.
+    std::vector<uint64_t> slice_outer{128, 1024, 16384};
+    std::vector<uint64_t> slice_extents{64, 1024};
+    std::vector<uint64_t> slice_inner{1, 16};
+    std::vector<double> slice_keep{0.125, 0.5};
+    std::vector<uint64_t> slice_start_offsets{0, 1};
+    std::vector<std::string> slice_dtypes{"bf16", "fp32"};
 };
 
 uint64_t parseUnsigned(std::string_view text, std::string_view flag) {
@@ -172,6 +187,12 @@ Options parseOptions(int argc, char **argv) {
         else if (arg == "--sequence-values-per-span") options.sequence_values_per_span = parseUnsignedCsv(requireValue(arg), arg);
         else if (arg == "--sequence-nonempty-fractions") options.sequence_nonempty_fractions = parseDoubleCsv(requireValue(arg), arg);
         else if (arg == "--sequence-span-formats") options.sequence_span_formats = parseStringCsv(requireValue(arg), arg);
+        else if (arg == "--slice-outer") options.slice_outer = parseUnsignedCsv(requireValue(arg), arg);
+        else if (arg == "--slice-extents") options.slice_extents = parseUnsignedCsv(requireValue(arg), arg);
+        else if (arg == "--slice-inner") options.slice_inner = parseUnsignedCsv(requireValue(arg), arg);
+        else if (arg == "--slice-keep") options.slice_keep = parseDoubleCsv(requireValue(arg), arg);
+        else if (arg == "--slice-start-offsets") options.slice_start_offsets = parseUnsignedCsv(requireValue(arg), arg);
+        else if (arg == "--slice-dtypes") options.slice_dtypes = parseStringCsv(requireValue(arg), arg);
         else if (arg == "--help" || arg == "-h") {
             std::cout
                 << "Usage: thor_concatenate_benchmark [options]\n"
@@ -182,7 +203,8 @@ Options parseOptions(int argc, char **argv) {
                 << "  --l2-evict-multiple X              untimed DRAM-read eviction / L2 (default 4.0)\n"
                 << "  --min-evict-mib N                  minimum eviction buffer (default 64)\n"
                 << "  --max-copy-mib N                   skip payloads larger than N MiB (default 128)\n"
-                << "  --kernels concatenate,split,convert-concatenate,convert-split,sequence-forward,sequence-backward\n"
+                << "  --kernels concatenate,split,convert-concatenate,convert-split,sequence-forward,sequence-backward,\n"
+                << "            slice-forward,slice-backward\n"
                 << "      (the ragged trailing-axis concatenate is the dense one over rows x outer slices)\n"
                 << "  --outer-slices a,b,c                dense slices before the concatenation axis\n"
                 << "  --num-arrays 2,4,8,16\n"
@@ -204,7 +226,13 @@ Options parseOptions(int argc, char **argv) {
                 << "      uniform: every row the mean; random: uniform in [1, 2 mean - 1] (mean >= 2);\n"
                 << "      skewed: one row of each input holds the tokens the others lack, the rest mean / 4 (mean >= 4)\n"
                 << "  --sequence-nonempty-fractions 1,0.5\n"
-                << "  --sequence-span-formats packed,wide  copy-plan spans of 8 or 32 bytes (default packed)\n\n"
+                << "  --sequence-span-formats packed,wide  copy-plan spans of 8 or 32 bytes (default packed)\n"
+                << "  --slice-outer a,b,c                 slice cases: a [outer, extent, inner] input, its middle axis sliced\n"
+                << "  --slice-extents a,b,c               to round(keep x extent) elements from extent / 4 + a start offset\n"
+                << "  --slice-inner a,b,c\n"
+                << "  --slice-keep 0.125,0.5\n"
+                << "  --slice-start-offsets 0,1\n"
+                << "  --slice-dtypes bf16,fp32           names as for --convert-dtypes\n\n"
                 << "A sample is launchesPerSample back-to-back launches between two events, each over its own set of\n"
                 << "inputs from a pool of at least 4x L2 and its own outputs; an untimed device-read pass of >L2 bytes\n"
                 << "runs before every sample, so every launch reads DRAM-cold inputs. Each case is also measured as a\n"
@@ -214,7 +242,15 @@ Options parseOptions(int argc, char **argv) {
                 << "A convert-* case is measured as: kernel, the typed concatenate or split, which converts as it moves;\n"
                 << "same_dtype, the byte concatenate or split with every array in the packed dtype; copy, a\n"
                 << "cudaMemcpyAsync of half the bytes the operation reads and writes (the same memory traffic); and\n"
-                << "launch_floor. Their read_write_GBps counts the arrays' bytes and the packed tensor's, once each.\n";
+                << "launch_floor. Their read_write_GBps counts the arrays' bytes and the packed tensor's, once each.\n"
+                << "A slice-* case is measured as: expression, the Slice layer's expression today (forward: a strided\n"
+                << "view copied into the slice; backward: its generated strided_view_backward kernel writing the\n"
+                << "input-sized gradient); split, the typed split with the pieces before and after the slice as null\n"
+                << "destinations (forward); concatenate_zero_sources, the typed concatenate of zero tensors around the\n"
+                << "slice's gradient (backward; the Split layer's backward today); concatenate_null_sources, the same\n"
+                << "with null sources, which the kernel writes as zeros (backward); copy, of half the traffic; and\n"
+                << "launch_floor. Each geometry's expression and split results are compared byte for byte first.\n"
+                << "layout is e<extent>_s<start>_l<length>_i<inner>; payload_bytes is the bytes written.\n";
             std::exit(0);
         } else {
             throw std::invalid_argument("Unknown argument: " + std::string(arg));
@@ -227,8 +263,21 @@ Options parseOptions(int argc, char **argv) {
     if (!(options.target_sample_us > 0.0)) throw std::invalid_argument("--target-sample-us must be positive");
     if (options.l2_evict_multiple < 2.0) throw std::invalid_argument("--l2-evict-multiple must be >= 2.0");
     requireAllowed(options.kernels,
-                   {"concatenate", "split", "convert-concatenate", "convert-split", "sequence-forward", "sequence-backward"},
+                   {"concatenate", "split", "convert-concatenate", "convert-split", "sequence-forward", "sequence-backward",
+                    "slice-forward", "slice-backward"},
                    "--kernels");
+    for (double keep : options.slice_keep) {
+        if (!(keep > 0.0 && keep <= 1.0)) throw std::invalid_argument("--slice-keep values must be in (0,1]");
+    }
+    for (uint64_t value : options.slice_extents) {
+        if (value == 0) throw std::invalid_argument("--slice-extents values must be positive");
+    }
+    for (uint64_t value : options.slice_outer) {
+        if (value == 0) throw std::invalid_argument("--slice-outer values must be positive");
+    }
+    for (uint64_t value : options.slice_inner) {
+        if (value == 0) throw std::invalid_argument("--slice-inner values must be positive");
+    }
     requireAllowed(options.span_layouts, {"uniform", "skewed"}, "--span-layouts");
     for (uint32_t n : options.num_arrays) {
         if (n < 2 || n > 256) throw std::invalid_argument("--num-arrays values must be in [2,256]");
@@ -725,7 +774,7 @@ ConvertDtype parseConvertDtype(std::string_view name) {
     for (const ConvertDtype &dtype : kConvertDtypes) {
         if (dtype.name == name) return dtype;
     }
-    throw std::invalid_argument("Unknown dtype in --convert-dtypes: " + std::string(name));
+    throw std::invalid_argument("Unknown dtype: " + std::string(name));
 }
 
 // "a+b>p": the arrays' dtypes, taken in rotation, and the packed tensor's.
@@ -847,6 +896,204 @@ void runConvertBenchmarks(const Options &options,
                             // The bytes read and written: the arrays' and the packed tensor's, each once.
                             result.readWriteBytes = name == "kernel" ? arraysBytes + packedBytes : name == "copy" ? 2 * copyBytes : 2 * packedBytes;
                             printResult(result);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The bytes of a device tensor, on the host.
+std::vector<uint8_t> downloadBytes(const Tensor &tensor, uint64_t bytes, Stream &stream) {
+    std::vector<uint8_t> host(bytes);
+    stream.synchronize();
+    CUDA_CHECK(cudaMemcpy(host.data(), tensor.getMemPtr(), bytes, cudaMemcpyDeviceToHost));
+    return host;
+}
+
+// Slice today against the kernels it will become. The input is [outer, extent, inner] (outer stands for the batch and
+// every axis before the sliced one), the slice elements [start, start + length) of the middle axis. Forward: the Slice
+// layer's expression (a strided view, copied into the slice as a terminal output) against the typed split with null
+// destinations for the pieces around the slice. Backward: the expression's autodiff (strided_view_backward over the
+// whole input) against the typed concatenate of zero tensors around the slice's gradient, which is what the Split
+// layer does today; the planned kernel writes those zeros instead of reading them. Every launch of a sample has its own
+// input, slice and input-gradient tensors.
+void runSliceBenchmarks(const Options &options,
+                        const cudaDeviceProp &properties,
+                        Stream &stream,
+                        DramReadEvictor &evictor,
+                        uint64_t &skipped) {
+    const bool doForward = contains(options.kernels, "slice-forward");
+    const bool doBackward = contains(options.kernels, "slice-backward");
+    if (!doForward && !doBackward) return;
+    const TensorPlacement gpu(TensorPlacement::MemDevices::GPU, options.gpu);
+
+    for (const std::string &dtypeName : options.slice_dtypes) {
+        const ConvertDtype dtype = parseConvertDtype(dtypeName);
+        for (uint64_t outer : options.slice_outer) {
+            for (uint64_t extent : options.slice_extents) {
+                for (uint64_t inner : options.slice_inner) {
+                    for (double keep : options.slice_keep) {
+                        for (uint64_t startOffset : options.slice_start_offsets) {
+                            const uint64_t length =
+                                std::max<uint64_t>(1, static_cast<uint64_t>(std::llround(keep * static_cast<double>(extent))));
+                            const uint64_t start = extent / 4 + startOffset;
+                            if (start + length > extent) continue;
+                            const uint64_t after = extent - start - length;
+                            const uint64_t inputBytes = checkedMultiply(
+                                checkedMultiply(checkedMultiply(outer, extent, "Slice input overflow"), inner, "Slice input overflow"),
+                                dtype.bytes, "Slice input bytes overflow");
+                            const uint64_t sliceBytes = outer * length * inner * dtype.bytes;
+                            if (inputBytes > options.max_copy_bytes) {
+                                ++skipped;
+                                continue;
+                            }
+                            const SampleShape shape = sampleShapeFor(options, properties, inputBytes);
+                            const TensorDescriptor inputDescriptor(dtype.dataType, {outer, extent, inner});
+                            const TensorDescriptor sliceDescriptor(dtype.dataType, {outer, length, inner});
+                            std::vector<Tensor> inputs;
+                            std::vector<Tensor> slices;
+                            std::vector<Tensor> inputGradients;
+                            for (uint32_t set = 0; set < shape.sets; ++set) {
+                                inputs.emplace_back(gpu, inputDescriptor);
+                                inputs.back().fillRandom(0.0, 1.0, stream);
+                                slices.emplace_back(gpu, sliceDescriptor);
+                                slices.back().fillRandom(0.0, 1.0, stream);
+                                if (doBackward) inputGradients.emplace_back(gpu, inputDescriptor);
+                            }
+                            // Zero sources for the pieces around the slice (none for a piece of no elements), shared
+                            // by every launch as the Split layer's are.
+                            std::optional<Tensor> zeroBefore;
+                            std::optional<Tensor> zeroAfter;
+                            if (doBackward && start != 0) {
+                                zeroBefore = Tensor(gpu, TensorDescriptor(dtype.dataType, {outer, start, inner}));
+                                zeroBefore->memsetAsync(stream, 0);
+                            }
+                            if (doBackward && after != 0) {
+                                zeroAfter = Tensor(gpu, TensorDescriptor(dtype.dataType, {outer, after, inner}));
+                                zeroAfter->memsetAsync(stream, 0);
+                            }
+                            const std::vector<uint64_t> spans{start * inner, length * inner, after * inner};
+                            const std::vector<DataType> types(3, dtype.dataType);
+
+                            // The Slice layer's expression, as its stamp builds it.
+                            const Expression featureInput = Expression::input("feature_input");
+                            const Expression view =
+                                featureInput.stridedView({outer, length, inner}, {extent * inner, inner, 1}, start * inner);
+                            const FusedEquation forward = FusedEquation::compile(
+                                Expression::outputs({{"feature_output", view}}).physicalOutputs(), options.gpu);
+                            std::vector<std::shared_ptr<StampedExecutionPlan>> forwardPlans;
+                            std::vector<std::shared_ptr<StampedExecutionPlan>> backwardPlans;
+                            // Held as the layer's DynamicExpression holds it (FusedEquation is not assignable).
+                            std::shared_ptr<FusedEquation> backward;
+                            if (doBackward)
+                                backward = std::make_shared<FusedEquation>(forward.compileBackward({"feature_input"}, std::string("dy")));
+                            for (uint32_t set = 0; set < shape.sets; ++set) {
+                                if (doForward) {
+                                    forwardPlans.push_back(std::make_shared<StampedExecutionPlan>(
+                                        forward.stamp({{"feature_input", inputs[set]}}, stream, {}, {{"feature_output", slices[set]}})));
+                                }
+                                if (doBackward) {
+                                    backwardPlans.push_back(std::make_shared<StampedExecutionPlan>(
+                                        backward->stamp({{"feature_input", inputs[set]}, {"dy", slices[set]}},
+                                                        stream,
+                                                        {},
+                                                        {{"feature_input_grad", inputGradients[set]}})));
+                                }
+                            }
+                            auto splitInto = [&](uint32_t set) {
+                                const std::vector<void *> destinations{nullptr, slices[set].getMemPtr(), nullptr};
+                                launchSplit(destinations, types, inputs[set].getMemPtr(), dtype.dataType, outer, spans, stream);
+                            };
+                            auto concatenateZeroSources = [&](uint32_t set) {
+                                const std::vector<void *> sources{zeroBefore.has_value() ? zeroBefore->getMemPtr() : nullptr,
+                                                                  slices[set].getMemPtr(),
+                                                                  zeroAfter.has_value() ? zeroAfter->getMemPtr() : nullptr};
+                                launchConcatenate(inputGradients[set].getMemPtr(), dtype.dataType, sources, types, outer, spans, stream);
+                            };
+                            // The planned backward: null sources, written as zeros by the kernel.
+                            auto concatenateNullSources = [&](uint32_t set) {
+                                const std::vector<void *> sources{nullptr, slices[set].getMemPtr(), nullptr};
+                                launchConcatenate(inputGradients[set].getMemPtr(), dtype.dataType, sources, types, outer, spans, stream);
+                            };
+
+                            std::ostringstream layout;
+                            layout << 'e' << extent << "_s" << start << "_l" << length << "_i" << inner;
+                            Result result;
+                            result.workRows = outer;
+                            result.numArrays = 3;
+                            result.averageSpanBytes = length * inner * dtype.bytes;
+                            result.layout = layout.str();
+                            result.valueBytes = dtype.bytes;
+                            result.valuesPerSpan = length * inner;
+                            result.spanCount = outer;
+                            result.dtypes = dtypeName;
+                            result.launchesPerSample = shape.launchesPerSample;
+
+                            for (const bool isForward : {true, false}) {
+                                if (!(isForward ? doForward : doBackward)) continue;
+                                // The two paths must agree on the first set's tensors before they are timed.
+                                if (isForward) {
+                                    forwardPlans[0]->run();
+                                    const std::vector<uint8_t> expected = downloadBytes(slices[0], sliceBytes, stream);
+                                    slices[0].memsetAsync(stream, -1);
+                                    splitInto(0);
+                                    if (downloadBytes(slices[0], sliceBytes, stream) != expected)
+                                        throw std::runtime_error("slice-forward: split differs from the expression at " + layout.str() + " " +
+                                                                 dtypeName);
+                                } else {
+                                    backwardPlans[0]->run();
+                                    const std::vector<uint8_t> expected = downloadBytes(inputGradients[0], inputBytes, stream);
+                                    for (const bool nullSources : {false, true}) {
+                                        inputGradients[0].memsetAsync(stream, -1);
+                                        if (nullSources) concatenateNullSources(0);
+                                        else concatenateZeroSources(0);
+                                        if (downloadBytes(inputGradients[0], inputBytes, stream) != expected)
+                                            throw std::runtime_error(std::string("slice-backward: ") +
+                                                                     (nullSources ? "null-source" : "zero-source") +
+                                                                     " concatenate differs from the expression at " + layout.str() + " " + dtypeName);
+                                    }
+                                }
+                                result.kernel = isForward ? "slice-forward" : "slice-backward";
+                                result.payloadBytes = isForward ? sliceBytes : inputBytes;
+                                const uint64_t traffic = isForward ? 2 * sliceBytes : sliceBytes + inputBytes;
+                                // Half the traffic, on a 16-byte boundary; the input (and its gradient) hold it.
+                                const uint64_t copyBytes = std::min(roundUp(traffic / 2, 16), inputBytes);
+                                const std::vector<const char *> variants =
+                                    isForward ? std::vector<const char *>{"expression", "split", "copy", "launch_floor"}
+                                              : std::vector<const char *>{"expression", "concatenate_zero_sources", "concatenate_null_sources",
+                                                                          "copy", "launch_floor"};
+                                for (const char *variant : variants) {
+                                    const std::string_view name(variant);
+                                    result.timing = benchmarkLaunchSamples(
+                                        stream, evictor, options.warmup == 0 ? 0 : 1, options.iterations, shape.launchesPerSample,
+                                        [&](uint32_t k) {
+                                            const uint32_t set = k % shape.sets;
+                                            if (name == "expression") {
+                                                (isForward ? forwardPlans : backwardPlans)[set]->run();
+                                            } else if (name == "split") {
+                                                splitInto(set);
+                                            } else if (name == "concatenate_zero_sources") {
+                                                concatenateZeroSources(set);
+                                            } else if (name == "concatenate_null_sources") {
+                                                concatenateNullSources(set);
+                                            } else if (name == "copy") {
+                                                void *destination = isForward ? slices[set].getMemPtr() : inputGradients[set].getMemPtr();
+                                                const uint64_t bytes = isForward ? sliceBytes : copyBytes;
+                                                CUDA_CHECK(cudaMemcpyAsync(destination, inputs[set].getMemPtr(), bytes,
+                                                                           cudaMemcpyDeviceToDevice, stream.getStream()));
+                                            } else {
+                                                launchFloorKernel<<<1, 32, 0, stream.getStream()>>>();
+                                                CUDA_CHECK(cudaGetLastError());
+                                            }
+                                        });
+                                    result.variant = variant;
+                                    result.readWriteBytes = name == "copy" ? 2 * (isForward ? sliceBytes : copyBytes) : traffic;
+                                    printResult(result);
+                                }
+                            }
+                            stream.synchronize();
                         }
                     }
                 }
@@ -1042,6 +1289,7 @@ int main(int argc, char **argv) {
     try {
         const Options options = parseOptions(argc, argv);
         for (const std::string &spec : options.convert_dtypes) (void)parseConvertMix(spec);
+        for (const std::string &name : options.slice_dtypes) (void)parseConvertDtype(name);
         ScopedGpu scopedGpu(options.gpu);
         cudaDeviceProp properties{};
         CUDA_CHECK(cudaGetDeviceProperties(&properties, options.gpu));
@@ -1070,6 +1318,7 @@ int main(int argc, char **argv) {
         runDenseBenchmarks(options, properties, stream, evictor, skipped);
         runConvertBenchmarks(options, properties, stream, evictor, skipped);
         runSequenceBenchmarks(options, properties, stream, evictor, skipped);
+        runSliceBenchmarks(options, properties, stream, evictor, skipped);
         stream.synchronize();
         if (skipped != 0) std::cerr << "Skipped " << skipped << " geometries above --max-copy-mib.\n";
         return 0;

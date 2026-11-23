@@ -324,38 +324,29 @@ class NetworkInput : public Layer {
             std::move(hostOffsets));
     }
 
-    // Thor-managed physical row-partition input. This uses the same NetworkInput
-    // staging/output ring as ordinary external inputs, but the CPU source bytes are
-    // generated from authoritative host offsets and therefore must be owned by the
-    // selected input slot until its asynchronous H2D copy has consumed them.
-    virtual void forwardManagedRowPartitionOffsets(
+    // Thor-managed physical row-partition carrier: the [B+1] offsets or the [1] active count. Its stamp writes this
+    // batch's bytes into the carrier tensor itself (from the batch metadata ring, every carrier in one launch), so this
+    // copies nothing and has no staging slots: it waits on carrierFilled (none when the bytes are already there in
+    // this input's stream order), publishes the authoritative host partition on the carrier, and drives its consumers.
+    virtual void forwardManagedRowPartitionCarrier(
         bool validationPass,
         RowPartitionDescriptor descriptor,
         uint32_t batchSize,
         std::vector<uint64_t> hostOffsets,
-        std::optional<RowPartitionId> logicalRowPartitionId = std::nullopt) {
-        forwardManagedRowPartitionPhysicalInput(
-            validationPass,
-            descriptor,
-            batchSize,
-            std::move(hostOffsets),
-            /*activeCountOnly=*/false,
-            logicalRowPartitionId);
-    }
-
-    virtual void forwardManagedRowPartitionActiveCount(
-        bool validationPass,
-        RowPartitionDescriptor descriptor,
-        uint32_t batchSize,
-        std::vector<uint64_t> hostOffsets,
-        RowPartitionId logicalRowPartitionId) {
-        forwardManagedRowPartitionPhysicalInput(
-            validationPass,
-            descriptor,
-            batchSize,
-            std::move(hostOffsets),
-            /*activeCountOnly=*/true,
-            logicalRowPartitionId);
+        std::optional<RowPartitionId> logicalRowPartitionId = std::nullopt,
+        std::optional<Event> carrierFilled = std::nullopt) {
+        THOR_THROW_IF_FALSE(!isPassThrough());
+        THOR_THROW_IF_FALSE(!isDeviceLoad());
+        THOR_THROW_IF_FALSE(!isDeviceReferenceLoad());
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
+        THOR_THROW_IF_FALSE(hostOffsets.size() == descriptor.getBatchSize() + 1);
+        const TensorDescriptor carrier = featureOutput.value().getDescriptor();
+        THOR_THROW_IF_FALSE(carrier == descriptor.getOffsetsDescriptor() ||
+                            carrier == TensorDescriptor(descriptor.getOffsetsDataType(), {1}));
+        if (carrierFilled.has_value()) stream.waitEvent(carrierFilled.value());
+        const RowPartitionId rowPartitionId = logicalRowPartitionId.value_or(featureOutput.value().getTensorId());
+        RowPartitionRuntime::publishHostState(featureOutput.value(), descriptor, rowPartitionId, std::move(hostOffsets));
+        if (nextLayer.has_value()) nextLayer.value()->forward(featureOutput, validationPass, batchSize);
     }
 
     // Ordinary values input carrying authoritative host row-partition metadata.
@@ -376,7 +367,6 @@ class NetworkInput : public Layer {
             std::move(sourceReference),
             descriptor,
             std::move(hostOffsets),
-            /*managedHostSource=*/false,
             logicalRowPartitionId);
     }
 
@@ -403,78 +393,6 @@ class NetworkInput : public Layer {
     }
 
    protected:
-    void forwardManagedRowPartitionPhysicalInput(
-        bool validationPass,
-        RowPartitionDescriptor descriptor,
-        uint32_t batchSize,
-        std::vector<uint64_t> hostOffsets,
-        bool activeCountOnly,
-        std::optional<RowPartitionId> logicalRowPartitionId) {
-        THOR_THROW_IF_FALSE(!isPassThrough());
-        THOR_THROW_IF_FALSE(!isDeviceLoad());
-        THOR_THROW_IF_FALSE(!isDeviceReferenceLoad());
-        THOR_THROW_IF_FALSE(contentDimensions.has_value());
-        THOR_THROW_IF_FALSE(contentDataType.has_value());
-        THOR_THROW_IF_FALSE(featureOutput.has_value());
-        THOR_THROW_IF_FALSE(hostOffsets.size() == descriptor.getBatchSize() + 1);
-
-        const TensorDescriptor expectedDescriptor = activeCountOnly
-            ? TensorDescriptor(descriptor.getOffsetsDataType(), {1})
-            : descriptor.getOffsetsDescriptor();
-        THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor() == expectedDescriptor);
-
-        if (inputSlots.empty()) {
-            allocateInputSlots(1);
-        }
-        THOR_THROW_IF_FALSE(activeInputSlot < inputSlots.size());
-        InputSlot& slot = inputSlots[activeInputSlot];
-
-        if (slot.managedHostSourceSubmitted) {
-            // Never rewrite this slot's CPU source while cudaMemcpyAsync may
-            // still be reading it. This is independent of downstream device
-            // buffer reuse, which remains guarded by outputBufferWritableEvent.
-            slot.managedHostSourceConsumedEvent.synchronize();
-        }
-
-        if (!slot.managedHostSource.has_value()) {
-            slot.managedHostSource = Tensor(
-                TensorPlacement(TensorPlacement::MemDevices::CPU), expectedDescriptor);
-        }
-        THOR_THROW_IF_FALSE(slot.managedHostSource.value().getDescriptor() == expectedDescriptor);
-
-        const uint64_t elementCount = activeCountOnly ? 1 : hostOffsets.size();
-        if (descriptor.getOffsetsDataType() == DataType::UINT32) {
-            uint32_t* dst = slot.managedHostSource.value().getMemPtr<uint32_t>();
-            if (activeCountOnly) {
-                THOR_THROW_IF_FALSE(hostOffsets.back() <= std::numeric_limits<uint32_t>::max());
-                dst[0] = static_cast<uint32_t>(hostOffsets.back());
-            } else {
-                for (uint64_t i = 0; i < elementCount; ++i) {
-                    THOR_THROW_IF_FALSE(hostOffsets[i] <= std::numeric_limits<uint32_t>::max());
-                    dst[i] = static_cast<uint32_t>(hostOffsets[i]);
-                }
-            }
-        } else {
-            THOR_THROW_IF_FALSE(descriptor.getOffsetsDataType() == DataType::UINT64);
-            uint64_t* dst = slot.managedHostSource.value().getMemPtr<uint64_t>();
-            if (activeCountOnly) {
-                dst[0] = hostOffsets.back();
-            } else {
-                for (uint64_t i = 0; i < elementCount; ++i) dst[i] = hostOffsets[i];
-            }
-        }
-
-        forwardMaterializedInput(
-            slot.managedHostSource,
-            validationPass,
-            batchSize,
-            std::nullopt,
-            descriptor,
-            std::move(hostOffsets),
-            /*managedHostSource=*/true,
-            logicalRowPartitionId);
-    }
-
     void forwardMaterializedInput(
         std::optional<Tensor> featureInput,
         bool validationPass,
@@ -482,15 +400,9 @@ class NetworkInput : public Layer {
         std::optional<Thor::BatchSourceReference> sourceReference,
         std::optional<RowPartitionDescriptor> rowPartitionDescriptor = std::nullopt,
         std::optional<std::vector<uint64_t>> rowPartitionHostOffsets = std::nullopt,
-        bool managedHostSource = false,
         std::optional<RowPartitionId> logicalRowPartitionId = std::nullopt) {
         const bool emitDiagnostics = layerSubmitDiagnosticsActive();
         const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-        if (managedHostSource) {
-            THOR_THROW_IF_FALSE(!isPassThrough());
-            THOR_THROW_IF_FALSE(!isDeviceLoad());
-            THOR_THROW_IF_FALSE(!isDeviceReferenceLoad());
-        }
         if (isPassThrough()) {
             validateOptionalForwardTensorMatchesPassThrough(featureInput);
         } else {
@@ -534,11 +446,6 @@ class NetworkInput : public Layer {
                 loadStream.waitEvent(slot.outputBufferWritableEvent);
 
                 // Copy into the slot-local prefetch buffer using the upload stream.
-                if (managedHostSource) {
-                    THOR_THROW_IF_FALSE(!sourceReference.has_value());
-                    THOR_THROW_IF_FALSE(slot.managedHostSource.has_value());
-                    THOR_THROW_IF_FALSE(featureInput.value() == slot.managedHostSource.value());
-                }
                 if (sourceReference.has_value()) sourceReference->waitUntilReady(loadStream);
                 slot.outputBuffer.value().copyFromAsync(featureInput.value(), loadStream);
 
@@ -546,15 +453,7 @@ class NetworkInput : public Layer {
                 // boundary and the point the processing stream must wait for.
                 // Reuse that one completion token instead of recording a second
                 // outputBufferLoadedEvent at the exact same load-stream tail.
-                if (managedHostSource) {
-                    THOR_THROW_IF_FALSE(!sourceReference.has_value());
-                    loadStream.putEvent(
-                        slot.managedHostSourceConsumedEvent,
-                        /*enableTiming=*/false,
-                        /*expectingHostToWaitOnThisOne=*/true);
-                    slot.managedHostSourceSubmitted = true;
-                    stream.waitEvent(slot.managedHostSourceConsumedEvent);
-                } else if (sourceReference.has_value()) {
+                if (sourceReference.has_value()) {
                     Event sourceConsumedEvent = sourceReference->recordConsumption(loadStream);
                     stream.waitEvent(sourceConsumedEvent);
                 } else {
@@ -747,14 +646,6 @@ class NetworkInput : public Layer {
         std::optional<Thor::DeviceBatchReference> deviceBatchReference;
         Event outputBufferLoadedEvent;
         Event outputBufferWritableEvent;
-
-        // Optional CPU source owned by this exact queue slot for Thor-generated
-        // inputs (currently RP6 row-partition physicalization). The consumed event
-        // is recorded immediately after the H2D staging copy and protects host
-        // memory reuse independently of downstream GPU completion.
-        std::optional<Tensor> managedHostSource;
-        Event managedHostSourceConsumedEvent;
-        bool managedHostSourceSubmitted = false;
     };
 
     void initializeInputSlotZero() {

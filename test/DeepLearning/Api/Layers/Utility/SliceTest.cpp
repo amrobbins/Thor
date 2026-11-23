@@ -6,7 +6,7 @@
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Training/PhaseGraphConnector.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
-#include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/Utility/Slice.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
 
@@ -219,6 +219,95 @@ TEST(SliceApi, DirectPlacementUsesRuntimeBatchInsteadOfApiInferenceBatch) {
     expectEqual(actual, expectedTail(values, batchSize));
 }
 
+// An output data type converts the window as it is copied (the input's type otherwise), survives save and load, and
+// is the stamped layer's output type. Values 0-7 are exact in FP8_E5M2.
+TEST(SliceApi, OutputDataTypeConvertsTheWindowAndSurvivesSaveLoad) {
+    constexpr uint32_t batchSize = 4;
+    const std::string networkName = "slice_output_data_type";
+    Api::Network network(networkName);
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("sequence")
+                                  .dimensions({6, 2})
+                                  .dataType(DataType::FP32)
+                                  .build();
+    Api::Slice::Builder twice;
+    twice.outputDataType(DataType::BF16);
+    EXPECT_THROW(twice.outputDataType(DataType::FP16), std::runtime_error);
+
+    Api::Slice slice = Api::Slice::Builder()
+                           .network(network)
+                           .featureInput(input.getFeatureOutput().value())
+                           .axis(0)
+                           .start(-3)
+                           .length(3)
+                           .outputDataType(DataType::FP8_E5M2)
+                           .build();
+    EXPECT_EQ(slice.getOutputDataType(), DataType::FP8_E5M2);
+    EXPECT_EQ(slice.getFeatureOutput()->getDataType(), DataType::FP8_E5M2);
+    EXPECT_EQ(slice.getFeatureOutput()->getDimensions(), (vector<uint64_t>{3, 2}));
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("tail")
+                                    .inputTensor(slice.getFeatureOutput().value())
+                                    .dataType(DataType::FP32)
+                                    .build();
+    {
+        Api::Network other("slice_default_data_type");
+        Api::NetworkInput otherInput =
+            Api::NetworkInput::Builder().network(other).name("sequence").dimensions({6, 2}).dataType(DataType::FP32).build();
+        Api::Slice same = Api::Slice::Builder()
+                              .network(other)
+                              .featureInput(otherInput.getFeatureOutput().value())
+                              .axis(1)
+                              .start(0)
+                              .length(1)
+                              .build();
+        EXPECT_EQ(same.getOutputDataType(), DataType::FP32);
+    }
+
+    vector<float> values(batchSize * 6 * 2);
+    for (uint64_t i = 0; i < values.size(); ++i) values[i] = static_cast<float>(i % 8);
+    {
+        vector<Event> initDoneEvents;
+        std::shared_ptr<Api::PlacedNetwork> placed = network.place(batchSize, initDoneEvents, true);
+        synchronizeEvents(initDoneEvents);
+        ASSERT_NE(placed, nullptr);
+        auto physicalSlice =
+            std::dynamic_pointer_cast<Impl::Slice>(placed->getStampedNetwork(0).getPhysicalLayerFromApiLayer(slice.getId()));
+        ASSERT_NE(physicalSlice, nullptr);
+        ASSERT_TRUE(physicalSlice->getFeatureOutputs()[0].has_value());
+        EXPECT_EQ(physicalSlice->getFeatureOutputs()[0]->getDataType(), DataType::FP8_E5M2);
+    }
+    // The NetworkOutput handle converts its input, so it is a compound layer: the network holds a TypeConverter and the
+    // NetworkOutput that is stamped.
+    std::shared_ptr<Api::NetworkOutput> stampedOutput = findOnlyLayerOfType<Api::NetworkOutput>(network);
+    ASSERT_NE(stampedOutput, nullptr);
+    EXPECT_NE(stampedOutput->getId(), output.getId());
+    expectEqual(runSingleInputNetwork(network, input, *stampedOutput, batchSize, {6, 2}, values),
+                expectedTail(values, batchSize));
+
+    std::filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
+    try {
+        network.save(archiveDir.string(), true);
+        Api::Network loaded(networkName);
+        loaded.load(archiveDir.string());
+        std::shared_ptr<Api::Slice> loadedSlice = findOnlyLayerOfType<Api::Slice>(loaded);
+        ASSERT_NE(loadedSlice, nullptr);
+        EXPECT_EQ(loadedSlice->getOutputDataType(), DataType::FP8_E5M2);
+        std::shared_ptr<Api::NetworkInput> loadedInput = findOnlyLayerOfType<Api::NetworkInput>(loaded);
+        std::shared_ptr<Api::NetworkOutput> loadedOutput = findOnlyLayerOfType<Api::NetworkOutput>(loaded);
+        ASSERT_NE(loadedInput, nullptr);
+        ASSERT_NE(loadedOutput, nullptr);
+        expectEqual(runSingleInputNetwork(loaded, *loadedInput, *loadedOutput, batchSize, {6, 2}, values),
+                    expectedTail(values, batchSize));
+    } catch (...) {
+        std::filesystem::remove_all(archiveDir);
+        throw;
+    }
+    std::filesystem::remove_all(archiveDir);
+}
+
 TEST(SliceApi, BackwardScattersGradientIntoTheSelectedLogicalWindow) {
     constexpr uint32_t batchSize = 4;
     Api::Network network("slice_backward");
@@ -251,7 +340,7 @@ TEST(SliceApi, BackwardScattersGradientIntoTheSelectedLogicalWindow) {
     Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
     auto physicalInput = std::dynamic_pointer_cast<Impl::NetworkInput>(stamped.getPhysicalLayerFromApiLayer(input.getId()));
     auto physicalOutput = std::dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(output.getId()));
-    auto physicalSlice = std::dynamic_pointer_cast<Impl::CustomLayer>(stamped.getPhysicalLayerFromApiLayer(slice.getId()));
+    auto physicalSlice = std::dynamic_pointer_cast<Impl::Slice>(stamped.getPhysicalLayerFromApiLayer(slice.getId()));
     ASSERT_NE(physicalInput, nullptr);
     ASSERT_NE(physicalOutput, nullptr);
     ASSERT_NE(physicalSlice, nullptr);
