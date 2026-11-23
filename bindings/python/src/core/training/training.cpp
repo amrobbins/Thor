@@ -2493,7 +2493,7 @@ against ``dataset``, and use it for the resumed run. New runs and direct
         [](const Thor::TrainingData& self, uint64_t maxInFlightBatches) {
             return self.openSession(maxInFlightBatches);
         },
-        "max_in_flight_batches"_a = 32);
+        "max_in_flight_batches"_a = 4);
     training_data.def(
         "open_validation_session",
         [](const Thor::TrainingData& self,
@@ -2503,7 +2503,7 @@ against ``dataset``, and use it for the resumed run. New runs and direct
                 validationPopulation, maxInFlightBatches);
         },
         "validation_population"_a,
-        "max_in_flight_batches"_a = 32);
+        "max_in_flight_batches"_a = 4);
     training_data.def_prop_ro("dataset", [](const Thor::TrainingData& self) {
         return std::const_pointer_cast<Thor::NamedDataset>(self.getDataset());
     });
@@ -2916,7 +2916,7 @@ staged fits, for example a GLM pretrain and a later Transformer phase.
         "training_program"_a.none() = nb::none(),
         "debug_synchronous"_a = false,
         "stats_interval_s"_a = 10.0,
-        "max_in_flight_batches"_a = 32,
+        "max_in_flight_batches"_a = 4,
         "scalar_tensors_to_report"_a = std::vector<std::string>{"loss"},
         "stats_stderr_also"_a = false,
         "stats_color"_a = "auto",
@@ -2949,7 +2949,7 @@ staged fits, for example a GLM pretrain and a later Transformer phase.
         "training_program"_a.none() = nb::none(),
         "debug_synchronous"_a = false,
         "stats_interval_s"_a = 10.0,
-        "max_in_flight_batches"_a = 32,
+        "max_in_flight_batches"_a = 4,
         "scalar_tensors_to_report"_a = std::vector<std::string>{"loss"},
         "stats_stderr_also"_a = false,
         "stats_color"_a = "auto",

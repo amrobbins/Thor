@@ -9,6 +9,7 @@
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/TensorOperations/Ragged/RaggedSequenceConcatenate.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -25,9 +26,10 @@ namespace ThorImplementation {
 // [value_0 .. value_N-1, unique_partition_carrier_0 .. unique_partition_carrier_M-1].
 // Distinct sequence values may share one canonical row partition, so only one
 // host partition carrier is connected for each unique logical partition. The
-// carrier payload is never interpreted by this layer. StampedNetwork derives and
-// stages the compact non-empty copy-span plan directly from authoritative host
-// partitions.
+// carrier payload is never interpreted by this layer. StampedNetwork derives the
+// compact copy-span plan from authoritative host partitions every batch, in a
+// table of its batch metadata ring (Utilities/Common/BatchMetadataRing.h), and
+// stages its device address here.
 //
 // The physical layer produces packed values only. A newly created logical
 // partition is physicalized by StampedNetwork: authoritative host offsets are
@@ -64,60 +66,30 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
 
     std::optional<Tensor> createFeatureOutputTensor() override { THOR_UNREACHABLE(); }
 
-    RaggedSequenceCopySpan32* beginBatchCopyPlan32(uint64_t requiredSpanCapacity) {
-        if (outputDescriptor.getOffsetsDataType() != DataType::UINT32) {
-            throw std::logic_error("RaggedSequenceConcatenate requested UINT32 copy-plan storage for a non-UINT32 partition.");
-        }
-        THOR_THROW_IF_FALSE(requiredSpanCapacity <= maxCopySpanCount);
-        prepareBatchCopyPlanHostStorageForWrite();
-        return static_cast<RaggedSequenceCopySpan32*>(copySpans_h);
-    }
+    // The copy plan's span format and capacity (valid once compiled). StampedNetwork declares a table of
+    // getCopyPlanCapacityBytes() in its batch metadata ring for this layer and builds the plan there every batch.
+    [[nodiscard]] RaggedSequenceCopySpanFormat getCopySpanFormat() const { return copySpanFormat; }
+    [[nodiscard]] std::size_t getCopySpanBytes() const { return raggedSequenceCopySpanBytes(copySpanFormat); }
+    [[nodiscard]] uint64_t getCopyPlanCapacitySpans() const { return maxCopySpanCount; }
+    [[nodiscard]] uint64_t getCopyPlanCapacityBytes() const { return maxCopySpanBytes; }
 
-    RaggedSequenceCopySpan64* beginBatchCopyPlan64(uint64_t requiredSpanCapacity) {
-        if (outputDescriptor.getOffsetsDataType() != DataType::UINT64) {
-            throw std::logic_error("RaggedSequenceConcatenate requested UINT64 copy-plan storage for a non-UINT64 partition.");
-        }
-        THOR_THROW_IF_FALSE(requiredSpanCapacity <= maxCopySpanCount);
-        prepareBatchCopyPlanHostStorageForWrite();
-        return static_cast<RaggedSequenceCopySpan64*>(copySpans_h);
-    }
-
-    void commitBatchCopyPlan(uint64_t spanCount,
-                             uint32_t validExampleCount,
-                             uint64_t activeOutputValues) {
-        THOR_THROW_IF_FALSE(copyPlanHostStoragePrepared);
+    // This batch's copy plan: spanCount spans at device address copySpans, there once `uploaded` is reached. The
+    // address holds until the batch's processing is done, so the backward reads the same plan.
+    void stageBatchCopyPlan(const void *copySpans,
+                            uint64_t spanCount,
+                            Event uploaded,
+                            uint32_t validExampleCount,
+                            uint64_t activeOutputValues) {
         THOR_THROW_IF_FALSE(validExampleCount >= 1 && validExampleCount <= outputDescriptor.getBatchSize());
         THOR_THROW_IF_FALSE(spanCount <= maxCopySpanCount);
         if (activeOutputValues == 0) THOR_THROW_IF_FALSE(spanCount == 0);
-        else THOR_THROW_IF_FALSE(spanCount != 0);
-
-        const std::size_t spanBytes = outputDescriptor.getOffsetsDataType() == DataType::UINT32
-            ? sizeof(RaggedSequenceCopySpan32)
-            : sizeof(RaggedSequenceCopySpan64);
-        if (spanCount > std::numeric_limits<std::size_t>::max() / spanBytes) {
-            throw std::invalid_argument("RaggedSequenceConcatenate staged copy-plan byte count overflow.");
-        }
-        const std::size_t bytes = static_cast<std::size_t>(spanCount) * spanBytes;
-        THOR_THROW_IF_FALSE(bytes <= maxCopySpanBytes);
-
-        ScopedGpu scopedGpu(featureInputs[0]->getPlacement().getDeviceNum());
-        if (bytes != 0) {
-            CUDA_CHECK(cudaMemcpyAsync(copySpans_d,
-                                       copySpans_h,
-                                       bytes,
-                                       cudaMemcpyHostToDevice,
-                                       streams[0].getStream()));
-            copyPlanUploadCompleteEvent.record(streams[0]);
-            copyPlanUploadInFlight = true;
-        } else {
-            copyPlanUploadInFlight = false;
-        }
-
+        else THOR_THROW_IF_FALSE(spanCount != 0 && copySpans != nullptr);
+        stagedCopySpans = copySpans;
+        stagedCopyPlanUploaded = std::move(uploaded);
         stagedCopySpanCount = spanCount;
         stagedActiveOutputValues = activeOutputValues;
         stagedValidExampleCount = validExampleCount;
         copyPlanStaged = true;
-        copyPlanHostStoragePrepared = false;
     }
 
 #if defined(THOR_GTEST) || defined(__JETBRAINS_IDE__)
@@ -133,52 +105,39 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         validateConnectedInputs();
         ensureOutputAllocated();
 
-        ScopedGpu scopedGpu(featureInputs[0]->getPlacement().getDeviceNum());
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&valueInputPointers_d), valueInputCount * sizeof(void *)));
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&valueGradientPointers_d), valueInputCount * sizeof(void *)));
-
         // Forward value-input and backward gradient destinations are immutable
         // while this compiled path remains executable. Post-compile loss-root
         // pruning can only remove the entire backward path; it cannot replace one
-        // live gradient destination with another. Upload both pointer tables once.
-        std::vector<void *> valueInputPointers(valueInputCount);
-        std::vector<void *> valueGradientPointers(valueInputCount, nullptr);
+        // live gradient destination with another. The pointers are fixed here and
+        // go to every launch as its parameters; an input without a gradient has a
+        // null entry, whose spans the backward skips.
+        valueInputPointers.assign(valueInputCount, nullptr);
+        valueGradientPointers.assign(valueInputCount, nullptr);
         for (uint32_t i = 0; i < valueInputCount; ++i) {
             THOR_THROW_IF_FALSE(featureInputs[i].has_value());
             valueInputPointers[i] = featureInputs[i]->getMemPtr();
             if (errorOutputs[i].has_value()) valueGradientPointers[i] = errorOutputs[i]->getMemPtr();
         }
-        CUDA_CHECK(cudaMemcpyAsync(valueInputPointers_d,
-                                   valueInputPointers.data(),
-                                   valueInputCount * sizeof(void *),
-                                   cudaMemcpyHostToDevice,
-                                   streams[0].getStream()));
-        CUDA_CHECK(cudaMemcpyAsync(valueGradientPointers_d,
-                                   valueGradientPointers.data(),
-                                   valueInputCount * sizeof(void *),
-                                   cudaMemcpyHostToDevice,
-                                   streams[0].getStream()));
-        // The host vectors are ordinary storage; compilation is a one-time
-        // boundary, so wait here rather than retaining them with a steady-state
-        // cudaLaunchHostFunc cleanup callback.
-        streams[0].synchronize();
 
         const uint64_t batchSize = outputDescriptor.getBatchSize();
-        if (batchSize > std::numeric_limits<uint64_t>::max() / valueInputCount) {
+        if (batchSize > std::numeric_limits<uint64_t>::max() / 2 / valueInputCount) {
             throw std::invalid_argument("RaggedSequenceConcatenate maximum copy-span count overflow.");
         }
-        maxCopySpanCount = batchSize * valueInputCount;
-        const std::size_t spanBytes = outputDescriptor.getOffsetsDataType() == DataType::UINT32
-            ? sizeof(RaggedSequenceCopySpan32)
-            : sizeof(RaggedSequenceCopySpan64);
-        if (maxCopySpanCount > std::numeric_limits<std::size_t>::max() / spanBytes) {
+        // Every row of every input, with the plan's allowance for the long ones it cuts.
+        maxCopySpanCount = raggedSequenceCopySpanCapacity(batchSize * valueInputCount);
+        // Packed 8-byte spans unless the output or an input holds more values than they can address.
+        uint64_t largestInputCapacity = 0;
+        for (uint32_t i = 0; i < valueInputCount; ++i) {
+            largestInputCapacity = std::max<uint64_t>(largestInputCapacity, featureInputs[i]->getDescriptor().getDimensions()[0]);
+        }
+        copySpanFormat = raggedSequenceCopySpanFormatFor(
+            valueInputCount, outputDescriptor.getValuesDescriptor().getDimensions()[0], largestInputCapacity);
+        const std::size_t spanBytes = getCopySpanBytes();
+        if (maxCopySpanCount > std::numeric_limits<uint64_t>::max() / spanBytes) {
             throw std::invalid_argument("RaggedSequenceConcatenate copy-span storage size overflow.");
         }
-        maxCopySpanBytes = static_cast<std::size_t>(maxCopySpanCount) * spanBytes;
+        maxCopySpanBytes = maxCopySpanCount * spanBytes;
         THOR_THROW_IF_FALSE(maxCopySpanBytes > 0);
-        CUDA_CHECK(cudaMalloc(&copySpans_d, maxCopySpanBytes));
-        CUDA_CHECK(cudaHostAlloc(&copySpans_h, maxCopySpanBytes, cudaHostAllocPortable));
-        copyPlanUploadCompleteEvent = Event(featureInputs[0]->getPlacement().getDeviceNum(), false, true);
 
         allFeatureInputTensorIds.clear();
         for (const std::optional<Tensor> &input : featureInputs) {
@@ -196,25 +155,16 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
 
     void cleanup() override {
         THOR_THROW_IF_FALSE(!featureInputs.empty() && featureInputs[0].has_value());
-        ScopedGpu scopedGpu(featureInputs[0]->getPlacement().getDeviceNum());
-        if (copyPlanUploadInFlight) copyPlanUploadCompleteEvent.synchronize();
-        if (valueInputPointers_d != nullptr) CUDA_CHECK(cudaFree(valueInputPointers_d));
-        if (valueGradientPointers_d != nullptr) CUDA_CHECK(cudaFree(valueGradientPointers_d));
-        if (copySpans_d != nullptr) CUDA_CHECK(cudaFree(copySpans_d));
-        if (copySpans_h != nullptr) CUDA_CHECK(cudaFreeHost(copySpans_h));
-        valueInputPointers_d = nullptr;
-        valueGradientPointers_d = nullptr;
-        copySpans_d = nullptr;
-        copySpans_h = nullptr;
+        valueInputPointers.clear();
+        valueGradientPointers.clear();
         maxCopySpanCount = 0;
         maxCopySpanBytes = 0;
+        stagedCopySpans = nullptr;
+        stagedCopyPlanUploaded = Event();
         stagedCopySpanCount = 0;
         stagedActiveOutputValues = 0;
         stagedValidExampleCount = 0;
         copyPlanStaged = false;
-        copyPlanHostStoragePrepared = false;
-        copyPlanUploadInFlight = false;
-        copyPlanUploadCompleteEvent = Event();
         for (Event &event : forwardInputReadyEvents) event = Event();
         backwardOutputsReadyEvent = Event();
         MultiConnectionLayer::cleanup();
@@ -261,13 +211,16 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
             featureOutputs[0].value(), outputDescriptor.getRowPartition());
         THOR_THROW_IF_FALSE(
             outputPartition.requireHostOffset(resolvedValidExampleCount) == stagedActiveOutputValues);
+        // The plan is in this stamp's batch metadata ring; this stream reads it once its upload is done. The backward
+        // runs on this stream after the forward, so it needs no wait of its own.
+        if (stagedCopySpanCount != 0) streams[0].waitEvent(stagedCopyPlanUploaded);
         launchRaggedSequenceConcatenate(featureOutputs[0]->getMemPtr(),
-                                        valueInputPointers_d,
-                                        copySpans_d,
+                                        valueInputPointers,
+                                        stagedCopySpans,
                                         stagedCopySpanCount,
                                         TensorDescriptor::getElementSizeInBytes(valuesDescriptor.getDataType()),
                                         elementsPerValue,
-                                        TensorDescriptor::getElementSizeInBytes(outputDescriptor.getOffsetsDataType()),
+                                        copySpanFormat,
                                         stagedActiveOutputValues,
                                         streams[0]);
 
@@ -296,20 +249,20 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         for (uint32_t d = 1; d < dimensions.size(); ++d) elementsPerValue *= dimensions[d];
 
         // Reuse the exact forward copy plan and the compile-time gradient
-        // destination table.
+        // destinations.
         THOR_THROW_IF_FALSE(copyPlanStaged);
         THOR_THROW_IF_FALSE(stagedValidExampleCount == resolvedValidExampleCount);
         RowPartitionRuntime outputPartition = RowPartitionRuntime::fromHostStateCarrier(
             featureOutputs[0].value(), outputDescriptor.getRowPartition());
         THOR_THROW_IF_FALSE(
             outputPartition.requireHostOffset(resolvedValidExampleCount) == stagedActiveOutputValues);
-        launchRaggedSequenceConcatenateBackward(valueGradientPointers_d,
+        launchRaggedSequenceConcatenateBackward(valueGradientPointers,
                                                 errorInput->getMemPtr(),
-                                                copySpans_d,
+                                                stagedCopySpans,
                                                 stagedCopySpanCount,
                                                 TensorDescriptor::getElementSizeInBytes(valuesDescriptor.getDataType()),
                                                 elementsPerValue,
-                                                TensorDescriptor::getElementSizeInBytes(outputDescriptor.getOffsetsDataType()),
+                                                copySpanFormat,
                                                 stagedActiveOutputValues,
                                                 streams[0]);
 
@@ -477,19 +430,6 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         return activeValues * bytesPerValue;
     }
 
-    void prepareBatchCopyPlanHostStorageForWrite() {
-        THOR_THROW_IF_FALSE(copySpans_d != nullptr && copySpans_h != nullptr);
-        ScopedGpu scopedGpu(featureInputs[0]->getPlacement().getDeviceNum());
-        // The pinned staging storage can be reused once the preceding H2D copy
-        // has completed; the prior value kernel does not read host staging.
-        if (copyPlanUploadInFlight) {
-            copyPlanUploadCompleteEvent.synchronize();
-            copyPlanUploadInFlight = false;
-        }
-        copyPlanStaged = false;
-        copyPlanHostStoragePrepared = true;
-    }
-
     void ensureOutputAllocated() {
         if (featureOutputs[0].has_value()) return;
         std::optional<Tensor> firstInput = getFirstPresentTensor(featureInputs);
@@ -549,19 +489,17 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
     uint32_t inputPortCount = 0;
     RaggedTensorDescriptor outputDescriptor;
 
-    void **valueInputPointers_d = nullptr;
-    void **valueGradientPointers_d = nullptr;
-    void *copySpans_d = nullptr;
-    void *copySpans_h = nullptr;
+    std::vector<void *> valueInputPointers;
+    std::vector<void *> valueGradientPointers;
+    RaggedSequenceCopySpanFormat copySpanFormat = RaggedSequenceCopySpanFormat::WIDE;
     uint64_t maxCopySpanCount = 0;
-    std::size_t maxCopySpanBytes = 0;
+    uint64_t maxCopySpanBytes = 0;
+    const void *stagedCopySpans = nullptr;
+    Event stagedCopyPlanUploaded;
     uint64_t stagedCopySpanCount = 0;
     uint64_t stagedActiveOutputValues = 0;
     uint32_t stagedValidExampleCount = 0;
     bool copyPlanStaged = false;
-    bool copyPlanHostStoragePrepared = false;
-    bool copyPlanUploadInFlight = false;
-    Event copyPlanUploadCompleteEvent;
 
     std::set<uint64_t> allFeatureInputTensorIds;
     std::set<uint64_t> stillWaitingForFeatureInputTensors;

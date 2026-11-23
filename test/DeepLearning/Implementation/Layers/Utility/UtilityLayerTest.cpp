@@ -1172,7 +1172,7 @@ TEST(Concatenate, Concatenates) {
 
         for (unsigned int i = 0; i < partsGpu.size(); ++i)
             layers.push_back(make_shared<NetworkInput>(partsGpu[i]));
-        layers.push_back(make_shared<Concatenate>(axis, numSplitTensors));
+        layers.push_back(make_shared<Concatenate>(axis, numSplitTensors, DataType::FP16));
         for (unsigned int i = 0; i < layers.size() - 1; ++i)
             layers[i]->connectToNextLayer(layers.back().get(), 0, static_cast<int>(i));
         layers.push_back(make_shared<NoOpLayer>());
@@ -1246,13 +1246,13 @@ TEST(Split, CreatesOneStreamPerOutput) {
     Tensor wholeGpu(gpuPlacement, TensorDescriptor(DataType::FP16, {6, 4}));
 
     shared_ptr<NetworkInput> inputLayer = make_shared<NetworkInput>(wholeGpu);
-    shared_ptr<Split> splitLayer = make_shared<Split>(0, vector<unsigned long>{1, 2, 3});
+    shared_ptr<Split> splitLayer = make_shared<Split>(0, vector<unsigned long>{1, 2, 3}, vector<DataType>(3, DataType::FP16));
     inputLayer->connectToNextLayer(splitLayer.get());
 
     vector<shared_ptr<NoOpLayer>> outputLayers;
     for (int output = 0; output < 3; ++output) {
         outputLayers.push_back(make_shared<NoOpLayer>());
-        splitLayer->connectToNextLayer(outputLayers.back().get());
+        splitLayer->connectToNextLayer(outputLayers.back().get(), output);
     }
 
     const vector<Stream> splitStreams = splitLayer->getStreams();
@@ -1360,7 +1360,7 @@ TEST(Split, Splits) {
             axisElements.push_back(static_cast<unsigned long>(axisElementsPerDestArray[output]));
         }
 
-        shared_ptr<Split> splitLayer = make_shared<Split>(axis, axisElements);
+        shared_ptr<Split> splitLayer = make_shared<Split>(axis, axisElements, vector<DataType>(axisElements.size(), DataType::FP16));
 
         layers.back()->connectToNextLayer(splitLayer.get());
         layers.push_back(splitLayer);
@@ -1373,7 +1373,7 @@ TEST(Split, Splits) {
             shared_ptr<Layer> noOpLayer = make_shared<NoOpLayer>();
 
             layers.push_back(noOpLayer);
-            splitLayer->connectToNextLayer(noOpLayer.get());
+            splitLayer->connectToNextLayer(noOpLayer.get(), output);
 
             shared_ptr<Layer> networkOutputLayer = make_shared<NetworkOutput>(gpuPlacement);
 
@@ -1467,6 +1467,135 @@ TEST(Split, Splits) {
                    << " expected=" << expected << " observed=" << observed;
         }
 
+        LayerTestHelper::tearDownNetwork(layers);
+    }
+}
+
+// An FP32 input split on axis 1 into FP32, BF16, FP32 and INT32 pieces, connected out of order. Forward: each piece
+// converted. Backward: the first two pieces' gradients go back (the BF16 one converted to FP32); the third piece's
+// next layer asks for none and the INT32 piece takes none, so their columns of the input's gradient are zeros.
+TEST(Split, ConvertsEachOutputAndGivesZerosWhereAnOutputTakesNoGradient) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    constexpr uint32_t rows = 4;
+    constexpr uint64_t inputWidth = 6;
+    const vector<unsigned long> widths{2, 2, 1, 1};
+    const vector<DataType> types{DataType::FP32, DataType::BF16, DataType::FP32, DataType::INT32};
+    const vector<uint32_t> firstColumn{0, 2, 4, 5};
+    // Every value is exact in each type it passes through (the INT32 column holds whole numbers).
+    auto inputValue = [](uint32_t row, uint32_t column) -> float {
+        return column == 5 ? row * 100.0f - 7.0f : row * 10.0f + column + 0.25f;
+    };
+    Tensor inputCpu(cpuPlacement, TensorDescriptor(DataType::FP32, {rows, inputWidth}));
+    for (uint32_t r = 0; r < rows; ++r)
+        for (uint32_t c = 0; c < inputWidth; ++c) writeUtilityLayerValue<float>(inputCpu, r * inputWidth + c, inputValue(r, c));
+    const vector<int> connectionOrder{2, 0, 3, 1};
+
+    {
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(gpuPlacement, DataType::FP32, vector<unsigned long>{rows, inputWidth}));
+        auto split = make_shared<Split>(1, widths, types);
+        layers.push_back(split);
+        layers[0]->connectToNextLayer(split.get());
+        vector<shared_ptr<Layer>> outputs(widths.size());
+        for (const int output : connectionOrder) {
+            outputs[output] = make_shared<NetworkOutput>(gpuPlacement);
+            layers.push_back(outputs[output]);
+            split->connectToNextLayer(outputs[output].get(), output);
+        }
+        LayerTestHelper::initializeNetwork(layers);
+        layers[0]->forward(inputCpu, false);
+        for (uint32_t output = 0; output < widths.size(); ++output) {
+            Tensor pieceGpu = outputs[output]->getFeatureOutput().value();
+            ASSERT_EQ(pieceGpu.getDescriptor().getDataType(), types[output]);
+            ASSERT_EQ(pieceGpu.getDimensions(), (vector<uint64_t>{rows, widths[output]}));
+            Tensor pieceCpu(cpuPlacement, pieceGpu.getDescriptor());
+            Stream stream = layers[0]->getStream();
+            stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(outputs[output])->getOutputReadyEvent());
+            pieceCpu.copyFromAsync(pieceGpu, stream);
+            stream.synchronize();
+            for (uint32_t r = 0; r < rows; ++r) {
+                for (uint32_t c = 0; c < widths[output]; ++c) {
+                    const uint64_t index = r * widths[output] + c;
+                    const float expected = inputValue(r, firstColumn[output] + c);
+                    if (types[output] == DataType::INT32) {
+                        EXPECT_EQ(pieceCpu.getMemPtr<int32_t>()[index], static_cast<int32_t>(expected)) << "row " << r;
+                    } else if (types[output] == DataType::BF16) {
+                        EXPECT_EQ(readUtilityLayerValue<__nv_bfloat16>(pieceCpu, index), expected) << "row " << r << " column " << c;
+                    } else {
+                        EXPECT_EQ(readUtilityLayerValue<float>(pieceCpu, index), expected) << "row " << r << " column " << c;
+                    }
+                }
+            }
+        }
+        LayerTestHelper::tearDownNetwork(layers);
+    }
+
+    {
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(gpuPlacement, DataType::FP32, vector<unsigned long>{rows, inputWidth}));
+        auto upstream = make_shared<NoOpLayer>();
+        layers.push_back(upstream);
+        layers[0]->connectToNextLayer(upstream.get());
+        auto split = make_shared<Split>(1, widths, types);
+        layers.push_back(split);
+        upstream->connectToNextLayer(split.get());
+        vector<shared_ptr<Layer>> outputs(widths.size());
+        for (const int output : connectionOrder) {
+            if (output == 2)
+                outputs[output] = make_shared<NetworkOutput>(gpuPlacement);  // asks for no gradient
+            else
+                outputs[output] = make_shared<BackpropDescriptorSinkLayer>();
+            layers.push_back(outputs[output]);
+            split->connectToNextLayer(outputs[output].get(), output);
+        }
+        LayerTestHelper::initializeNetwork(layers);
+
+        const vector<std::optional<Tensor>> errorInputs = split->getErrorInputs();
+        const vector<std::optional<Tensor>> errorOutputs = split->getErrorOutputs();
+        ASSERT_EQ(errorInputs.size(), widths.size());
+        ASSERT_TRUE(errorInputs[0].has_value());
+        ASSERT_TRUE(errorInputs[1].has_value());
+        EXPECT_FALSE(errorInputs[2].has_value());
+        EXPECT_FALSE(errorInputs[3].has_value()) << "an INT32 output takes no gradient";
+        ASSERT_EQ(errorOutputs.size(), 1U);
+        ASSERT_TRUE(errorOutputs[0].has_value());
+        EXPECT_EQ(errorInputs[1].value().getDescriptor().getDataType(), DataType::BF16);
+
+        auto gradient = [](uint32_t row, uint32_t column) { return (row + 1) * (column + 1) * 0.5f; };
+        Stream stream = split->getStreams()[0];
+        for (uint32_t output = 0; output < 2; ++output) {
+            Tensor gradientCpu(cpuPlacement, errorInputs[output].value().getDescriptor());
+            for (uint32_t r = 0; r < rows; ++r) {
+                for (uint32_t c = 0; c < widths[output]; ++c) {
+                    const float value = gradient(r, firstColumn[output] + c);
+                    if (types[output] == DataType::BF16)
+                        writeUtilityLayerValue<__nv_bfloat16>(gradientCpu, r * widths[output] + c, value);
+                    else
+                        writeUtilityLayerValue<float>(gradientCpu, r * widths[output] + c, value);
+                }
+            }
+            Tensor gradientGpu = errorInputs[output].value();
+            gradientGpu.copyFromAsync(gradientCpu, stream);
+        }
+        // Stale bytes where the zeros must land, so a missing span would show.
+        Tensor staleCpu(cpuPlacement, errorOutputs[0].value().getDescriptor());
+        for (uint64_t i = 0; i < rows * inputWidth; ++i) writeUtilityLayerValue<float>(staleCpu, i, -99.0f);
+        Tensor inputGradientGpu = errorOutputs[0].value();
+        inputGradientGpu.copyFromAsync(staleCpu, stream);
+        stream.synchronize();
+        // The output that arrives first waits; the second runs the concatenate.
+        split->backward(errorInputs[1], rows);
+        split->backward(errorInputs[0], rows);
+        Tensor inputGradientCpu(cpuPlacement, errorOutputs[0].value().getDescriptor());
+        inputGradientCpu.copyFromAsync(inputGradientGpu, stream);
+        stream.synchronize();
+        for (uint32_t r = 0; r < rows; ++r) {
+            for (uint32_t c = 0; c < inputWidth; ++c) {
+                const float expected = c < 4 ? gradient(r, c) : 0.0f;
+                EXPECT_EQ(readUtilityLayerValue<float>(inputGradientCpu, r * inputWidth + c), expected) << "row " << r << " column " << c;
+            }
+        }
         LayerTestHelper::tearDownNetwork(layers);
     }
 }
@@ -1896,7 +2025,7 @@ TEST(Concatenate, PropagatesPartialBatchCardinalityAndRejectsMismatchedInputs) {
 
     auto firstInput = make_shared<NetworkInput>(gpuPlacement, DataType::FP32, vector<unsigned long>{4, 1});
     auto secondInput = make_shared<NetworkInput>(gpuPlacement, DataType::FP32, vector<unsigned long>{4, 1});
-    auto concatenate = make_shared<Concatenate>(1, 2);
+    auto concatenate = make_shared<Concatenate>(1, 2, DataType::FP32);
     auto capture = make_shared<BatchCardinalityCaptureLayer>();
     auto output = make_shared<NetworkOutput>(cpuPlacement);
     vector<shared_ptr<Layer>> layers{firstInput, secondInput, concatenate, capture, output};
@@ -1927,7 +2056,7 @@ TEST(Concatenate, BatchAxisAcceptsOnlyFullCapacityInputs) {
 
     auto firstInput = make_shared<NetworkInput>(gpuPlacement, DataType::FP32, vector<unsigned long>{2, 1});
     auto secondInput = make_shared<NetworkInput>(gpuPlacement, DataType::FP32, vector<unsigned long>{3, 1});
-    auto concatenate = make_shared<Concatenate>(0, 2);
+    auto concatenate = make_shared<Concatenate>(0, 2, DataType::FP32);
     auto capture = make_shared<BatchCardinalityCaptureLayer>();
     auto output = make_shared<NetworkOutput>(cpuPlacement);
     vector<shared_ptr<Layer>> layers{firstInput, secondInput, concatenate, capture, output};
@@ -1948,6 +2077,113 @@ TEST(Concatenate, BatchAxisAcceptsOnlyFullCapacityInputs) {
     LayerTestHelper::tearDownNetwork(layers);
 }
 
+// Inputs of FP32, BF16 and INT32 into an FP32 output: each input is converted as it moves, the gradient goes back to
+// each floating-point input in its own type, and the INT32 input takes none.
+TEST(Concatenate, ConvertsEachInputToTheOutputTypeAndTheGradientBack) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    constexpr uint32_t rows = 4;
+    const vector<DataType> dataTypes{DataType::FP32, DataType::BF16, DataType::INT32};
+    const vector<uint64_t> widths{3, 2, 1};
+    constexpr uint64_t outputWidth = 6;
+
+    vector<Tensor> inputsCpu;
+    for (uint32_t i = 0; i < 3; ++i) inputsCpu.emplace_back(cpuPlacement, TensorDescriptor(dataTypes[i], {rows, widths[i]}));
+    // Every value is exact in each type it passes through.
+    auto inputValue = [](uint32_t input, uint32_t row, uint32_t column) -> float {
+        if (input == 0) return row * 10.0f + column + 0.25f;
+        if (input == 1) return -(row * 10.0f + column) - 0.5f;
+        return row * 100.0f - 7.0f;
+    };
+    for (uint32_t r = 0; r < rows; ++r) {
+        for (uint32_t c = 0; c < 3; ++c) writeUtilityLayerValue<float>(inputsCpu[0], r * 3 + c, inputValue(0, r, c));
+        for (uint32_t c = 0; c < 2; ++c) writeUtilityLayerValue<__nv_bfloat16>(inputsCpu[1], r * 2 + c, inputValue(1, r, c));
+        inputsCpu[2].getMemPtr<int32_t>()[r] = static_cast<int32_t>(inputValue(2, r, 0));
+    }
+
+    {
+        vector<shared_ptr<Layer>> layers;
+        for (uint32_t i = 0; i < 3; ++i)
+            layers.push_back(make_shared<NetworkInput>(gpuPlacement, dataTypes[i], vector<unsigned long>{rows, widths[i]}));
+        auto concatenate = make_shared<Concatenate>(1, 3, DataType::FP32);
+        layers.push_back(concatenate);
+        for (uint32_t i = 0; i < 3; ++i) layers[i]->connectToNextLayer(concatenate.get(), 0, static_cast<int>(i));
+        layers.push_back(make_shared<NoOpLayer>());
+        concatenate->connectToNextLayer(layers.back().get());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
+        layers[layers.size() - 2]->connectToNextLayer(layers.back().get());
+        LayerTestHelper::initializeNetwork(layers);
+
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
+        ASSERT_EQ(outputGpu.getDescriptor().getDataType(), DataType::FP32);
+        ASSERT_EQ(outputGpu.getDimensions(), (vector<uint64_t>{rows, outputWidth}));
+        for (uint32_t i = 0; i < 3; ++i) layers[i]->forward(inputsCpu[i], false);
+        Tensor outputCpu(cpuPlacement, outputGpu.getDescriptor());
+        Stream stream = layers[0]->getStream();
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
+        outputCpu.copyFromAsync(outputGpu, stream);
+        stream.synchronize();
+        for (uint32_t r = 0; r < rows; ++r) {
+            for (uint32_t c = 0; c < outputWidth; ++c) {
+                const uint32_t input = c < 3 ? 0 : c < 5 ? 1 : 2;
+                const uint32_t column = c < 3 ? c : c < 5 ? c - 3 : 0;
+                EXPECT_EQ(readUtilityLayerValue<float>(outputCpu, r * outputWidth + c), inputValue(input, r, column))
+                    << "row " << r << " column " << c;
+            }
+        }
+        LayerTestHelper::tearDownNetwork(layers);
+    }
+
+    {
+        vector<shared_ptr<Layer>> layers;
+        vector<shared_ptr<Layer>> upstream;
+        for (uint32_t i = 0; i < 3; ++i) {
+            layers.push_back(make_shared<NetworkInput>(gpuPlacement, dataTypes[i], vector<unsigned long>{rows, widths[i]}));
+            upstream.push_back(make_shared<NoOpLayer>());
+            layers.push_back(upstream.back());
+            layers[layers.size() - 2]->connectToNextLayer(upstream.back().get());
+        }
+        auto concatenate = make_shared<Concatenate>(1, 3, DataType::FP32);
+        layers.push_back(concatenate);
+        for (uint32_t i = 0; i < 3; ++i) upstream[i]->connectToNextLayer(concatenate.get(), 0, static_cast<int>(i));
+        layers.push_back(make_shared<BackpropDescriptorSinkLayer>());
+        concatenate->connectToNextLayer(layers.back().get());
+        LayerTestHelper::initializeNetwork(layers);
+
+        const vector<std::optional<Tensor>> errorInputs = concatenate->getErrorInputs();
+        const vector<std::optional<Tensor>> errorOutputs = concatenate->getErrorOutputs();
+        ASSERT_EQ(errorInputs.size(), 1U);
+        ASSERT_TRUE(errorInputs[0].has_value());
+        ASSERT_EQ(errorInputs[0].value().getDescriptor().getDataType(), DataType::FP32);
+        ASSERT_EQ(errorOutputs.size(), 3U);
+        ASSERT_TRUE(errorOutputs[0].has_value());
+        ASSERT_TRUE(errorOutputs[1].has_value());
+        EXPECT_FALSE(errorOutputs[2].has_value()) << "an INT32 input takes no gradient";
+        EXPECT_EQ(errorOutputs[0].value().getDescriptor().getDataType(), DataType::FP32);
+        EXPECT_EQ(errorOutputs[1].value().getDescriptor().getDataType(), DataType::BF16);
+
+        Tensor errorInputCpu(cpuPlacement, errorInputs[0].value().getDescriptor());
+        auto gradient = [](uint32_t row, uint32_t column) { return (row + 1) * (column + 1) * 0.5f; };
+        for (uint32_t r = 0; r < rows; ++r)
+            for (uint32_t c = 0; c < outputWidth; ++c) writeUtilityLayerValue<float>(errorInputCpu, r * outputWidth + c, gradient(r, c));
+        Stream stream = concatenate->getStreams()[0];
+        Tensor errorInputGpu = errorInputs[0].value();
+        errorInputGpu.copyFromAsync(errorInputCpu, stream);
+        concatenate->backward(errorInputs[0], rows);
+        Tensor wideGradientCpu(cpuPlacement, errorOutputs[0].value().getDescriptor());
+        Tensor halfGradientCpu(cpuPlacement, errorOutputs[1].value().getDescriptor());
+        wideGradientCpu.copyFromAsync(errorOutputs[0].value(), stream);
+        halfGradientCpu.copyFromAsync(errorOutputs[1].value(), stream);
+        stream.synchronize();
+        for (uint32_t r = 0; r < rows; ++r) {
+            for (uint32_t c = 0; c < 3; ++c) EXPECT_EQ(readUtilityLayerValue<float>(wideGradientCpu, r * 3 + c), gradient(r, c));
+            for (uint32_t c = 0; c < 2; ++c)
+                EXPECT_EQ(readUtilityLayerValue<__nv_bfloat16>(halfGradientCpu, r * 2 + c), gradient(r, 3 + c));
+        }
+        LayerTestHelper::tearDownNetwork(layers);
+    }
+}
+
 TEST(Split, PropagatesPartialBatchCardinalityToEveryOutput) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
@@ -1955,7 +2191,7 @@ TEST(Split, PropagatesPartialBatchCardinalityToEveryOutput) {
     Tensor inputCpu(cpuPlacement, inputDescriptor);
 
     auto input = make_shared<NetworkInput>(gpuPlacement, DataType::FP32, vector<unsigned long>{4, 2});
-    auto split = make_shared<Split>(1, vector<unsigned long>{1, 1});
+    auto split = make_shared<Split>(1, vector<unsigned long>{1, 1}, vector<DataType>(2, DataType::FP32));
     auto firstCapture = make_shared<BatchCardinalityCaptureLayer>();
     auto secondCapture = make_shared<BatchCardinalityCaptureLayer>();
     auto firstOutput = make_shared<NetworkOutput>(cpuPlacement);
@@ -1963,8 +2199,8 @@ TEST(Split, PropagatesPartialBatchCardinalityToEveryOutput) {
     vector<shared_ptr<Layer>> layers{input, split, firstCapture, secondCapture, firstOutput, secondOutput};
 
     input->connectToNextLayer(split.get());
-    split->connectToNextLayer(firstCapture.get());
-    split->connectToNextLayer(secondCapture.get());
+    split->connectToNextLayer(firstCapture.get(), 0);
+    split->connectToNextLayer(secondCapture.get(), 1);
     firstCapture->connectToNextLayer(firstOutput.get());
     secondCapture->connectToNextLayer(secondOutput.get());
     LayerTestHelper::initializeNetwork(layers);

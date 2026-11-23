@@ -42,6 +42,7 @@ void bind_segmented_log_softmax(nb::module_ &m);
 void bind_segmented_reduction(nb::module_ &m);
 void bind_segmented_softmax(nb::module_ &m);
 void bind_slice(nb::module_ &m);
+void bind_split(nb::module_ &m);
 void bind_stop_gradient(nb::module_ &m);
 void bind_network_input(nb::module_ &m);
 void bind_ragged_network_input(nb::module_ &m);
@@ -103,6 +104,7 @@ void bind_layers(nb::module_ &layers) {
     bind_segmented_reduction(layers);
     bind_segmented_softmax(layers);
     bind_slice(layers);
+    bind_split(layers);
     bind_stop_gradient(layers);
     bind_network_input(layers);
     bind_ragged_network_input(layers);

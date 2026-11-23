@@ -10,6 +10,7 @@
 #include "DeepLearning/Api/Data/BatchSourceResource.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
 #include "DeepLearning/Implementation/Layers/Metric.h"
+#include "Utilities/Common/BatchMetadataRing.h"
 #include "Utilities/Common/Event.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/LogicalWork.h"
@@ -18,6 +19,7 @@
 #include <optional>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 #include <variant>
 
@@ -198,6 +200,8 @@ class StampedNetwork {
         uint64_t sliceStart = 0;
         uint64_t sliceLength = 0;
         std::shared_ptr<ThorImplementation::Layer> producerPhysicalLayer;
+        // SEQUENCE_CONCATENATE: the producer's copy-plan table in batchMetadataRing.
+        std::optional<ThorImplementation::BatchMetadataRing::TableId> copyPlanTable;
     };
 
     struct RaggedOutputBinding {
@@ -398,6 +402,13 @@ class StampedNetwork {
     std::map<Thor::Tensor, RowPartitionId> internalRowPartitionByLogicalPartitionToken;
     std::map<std::string, RowPartitionId> externalRowPartitionByValuesInputName;
     std::map<std::string, RaggedOutputBinding> raggedOutputByValuesOutputName;
+
+    // Per-batch metadata the stamp's operations read on the device (sequence-concatenate copy plans), a slot per queue
+    // slot. Shared by the copies of this stamp handle, as its layers are.
+    std::shared_ptr<ThorImplementation::BatchMetadataRing> batchMetadataRing =
+        std::make_shared<ThorImplementation::BatchMetadataRing>();
+    // Declare the operations' tables (once) and give the ring at least `slotCount` slots.
+    void reserveBatchMetadataSlots(uint32_t slotCount);
 
     // std::map<uint64_t, std::shared_ptr<ThorImplementation::Parameterizable>> apiParameterizableToPhysicalParameterizable;
     // FIXME: get rid of raw pointers

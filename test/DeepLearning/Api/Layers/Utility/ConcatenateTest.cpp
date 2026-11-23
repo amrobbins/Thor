@@ -2,6 +2,7 @@
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Utility/Slice.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -126,6 +127,84 @@ TEST(UtilityApiLayers, ConcatenateConnectionTypesPreserveBuilderInputOrder) {
     EXPECT_EQ(concatenate.getConnectionType(second), 1);
     EXPECT_EQ(concatenate.getConnectionType(third), 2);
     EXPECT_EQ(concatenate.getConnectionType(concatenate.getFeatureOutput().value()), 0);
+}
+
+TEST(UtilityApiLayers, ConcatenateOfDifferentDataTypesTakesARequiredOutputType) {
+    Network network("concatenate_output_type");
+    NetworkInput wide = NetworkInput::Builder().network(network).name("wide").dimensions({3, 2}).dataType(DataType::FP32).build();
+    NetworkInput narrow = NetworkInput::Builder().network(network).name("narrow").dimensions({3, 5}).dataType(DataType::FP8_E5M2).build();
+    NetworkInput counts = NetworkInput::Builder().network(network).name("counts").dimensions({3, 1}).dataType(DataType::INT32).build();
+
+    try {
+        (void)Concatenate::Builder()
+            .network(network)
+            .featureInput(wide.getFeatureOutput().value())
+            .featureInput(narrow.getFeatureOutput().value())
+            .concatenationAxis(1)
+            .build();
+        FAIL() << "Expected Concatenate to require an output data type.";
+    } catch (const std::logic_error &error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("different data types"), std::string::npos);
+        EXPECT_NE(message.find("input[1]=fp8_e5m2"), std::string::npos) << message;
+        EXPECT_NE(message.find("outputDataType"), std::string::npos);
+    }
+
+    Concatenate concatenate = Concatenate::Builder()
+                                  .network(network)
+                                  .featureInput(wide.getFeatureOutput().value())
+                                  .featureInput(narrow.getFeatureOutput().value())
+                                  .featureInput(counts.getFeatureOutput().value())
+                                  .concatenationAxis(1)
+                                  .outputDataType(DataType::BF16)
+                                  .build();
+    ASSERT_EQ(concatenate.getFeatureOutputs().size(), 1U);
+    EXPECT_EQ(concatenate.getFeatureOutputs()[0].getDataType(), DataType::BF16);
+    EXPECT_EQ(concatenate.getFeatureOutputs()[0].getDimensions(), (vector<uint64_t>{3, 8}));
+    const json j = concatenate.architectureJson();
+    EXPECT_EQ(j.at("outputs").at(0).at("data_type").get<DataType>(), DataType::BF16);
+    EXPECT_EQ(j.at("inputs").at(1).at("data_type").get<DataType>(), DataType::FP8_E5M2);
+
+    // One input type: the output keeps it unless another is set.
+    {
+        Network defaults("concatenate_output_type_defaults");
+        Tensor first(DataType::FP16, {4});
+        Tensor second(DataType::FP16, {2});
+        EXPECT_EQ(Concatenate::Builder().network(defaults).featureInput(first).featureInput(second).concatenationAxis(0)
+                      .build().getFeatureOutputs()[0].getDataType(),
+                  DataType::FP16);
+        Tensor third(DataType::FP16, {4});
+        Tensor fourth(DataType::FP16, {2});
+        EXPECT_EQ(Concatenate::Builder().network(defaults).featureInput(third).featureInput(fourth).concatenationAxis(0)
+                      .outputDataType(DataType::FP32).build().getFeatureOutputs()[0].getDataType(),
+                  DataType::FP32);
+    }
+
+    NetworkOutput output = NetworkOutput::Builder()
+                               .network(network)
+                               .name("output")
+                               .inputTensor(concatenate.getFeatureOutputs()[0])
+                               .dataType(DataType::BF16)
+                               .build();
+    (void)output;
+
+    // Placed, the stamped layer converts each input to the output's type.
+    Stream stream(0);
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placed = network.place(4, initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+    for (Event &event : initDoneEvents) stream.waitEvent(event);
+    ThorImplementation::StampedNetwork stamped = placed->getStampedNetwork(0);
+    shared_ptr<ThorImplementation::Concatenate> physical;
+    for (const auto &layer : stamped.getOtherLayers()) {
+        if (auto candidate = dynamic_pointer_cast<ThorImplementation::Concatenate>(layer)) physical = candidate;
+    }
+    ASSERT_NE(physical, nullptr);
+    ASSERT_TRUE(physical->getFeatureOutputs()[0].has_value());
+    EXPECT_EQ(physical->getFeatureOutputs()[0].value().getDescriptor().getDataType(), DataType::BF16);
+    EXPECT_EQ(physical->getFeatureOutputs()[0].value().getDimensions(), (vector<uint64_t>{4, 3, 8}));
+    EXPECT_EQ(physical->getFeatureInputs()[2].value().getDescriptor().getDataType(), DataType::INT32);
+    stream.synchronize();
 }
 
 TEST(UtilityApiLayers, ConcatenateSerializeDeserialize) {
@@ -350,7 +429,7 @@ namespace {
 class TestableImplementationConcatenate : public ThorImplementation::Concatenate {
    public:
     TestableImplementationConcatenate(unsigned int axis, uint32_t expectedNumInputs)
-        : ThorImplementation::Concatenate(axis, expectedNumInputs) {}
+        : ThorImplementation::Concatenate(axis, expectedNumInputs, ThorImplementation::DataType::FP32) {}
 
     void setFeatureInputsForTest(const std::vector<ThorImplementation::Tensor> &inputs) {
         featureInputs.clear();

@@ -1,18 +1,16 @@
 #include "Utilities/TensorOperations/Ragged/RaggedSequenceConcatenate.h"
-#include "Utilities/TensorOperations/Ragged/RowPartition.h"
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
-#include "Utilities/Expression/CudaHelpers.h"
 #include "gtest/gtest.h"
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstdint>
-#include <limits>
+#include <cstring>
 #include <stdexcept>
-#include <type_traits>
-#include <utility>
+#include <string>
 #include <vector>
 
 using namespace ThorImplementation;
@@ -31,773 +29,473 @@ namespace {
 const TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
 const TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-template <typename T>
-DataType dtypeFor();
-template <>
-DataType dtypeFor<float>() { return DataType::FP32; }
-template <>
-DataType dtypeFor<uint8_t>() { return DataType::UINT8; }
-template <>
-DataType dtypeFor<uint32_t>() { return DataType::UINT32; }
-template <>
-DataType dtypeFor<uint64_t>() { return DataType::UINT64; }
-
-template <typename T>
-Tensor makeGpuTensor(const std::vector<uint64_t>& dimensions, const std::vector<T>& values, Stream& stream) {
-    Tensor host(cpuPlacement, TensorDescriptor(dtypeFor<T>(), dimensions));
-    if (host.getTotalNumElements() != values.size()) {
-        throw std::runtime_error("RaggedSequenceConcatenate test tensor value count mismatch.");
-    }
-    T* hostValues = host.getMemPtr<T>();
-    for (size_t i = 0; i < values.size(); ++i) hostValues[i] = values[i];
-    Tensor device(gpuPlacement, TensorDescriptor(dtypeFor<T>(), dimensions));
+Tensor makeGpuBytes(const std::vector<uint8_t> &values, Stream &stream) {
+    Tensor host(cpuPlacement, TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(std::max<size_t>(values.size(), 16))}));
+    uint8_t *hostValues = host.getMemPtr<uint8_t>();
+    for (size_t i = 0; i < host.getTotalNumElements(); ++i) hostValues[i] = i < values.size() ? values[i] : 0;
+    Tensor device(gpuPlacement, host.getDescriptor());
     device.copyFromAsync(host, stream);
     stream.synchronize();
     return device;
 }
 
-template <typename T>
-std::vector<T> copyGpuTensor(const Tensor& device, Stream& stream) {
-    Tensor host(cpuPlacement, TensorDescriptor(dtypeFor<T>(), device.getDimensions()));
+std::vector<uint8_t> copyGpuBytes(const Tensor &device, Stream &stream) {
+    Tensor host(cpuPlacement, TensorDescriptor(DataType::UINT8, device.getDimensions()));
     host.copyFromAsync(device, stream);
     stream.synchronize();
-    const T* hostValues = host.getMemPtr<T>();
-    return std::vector<T>(hostValues, hostValues + host.getTotalNumElements());
+    const uint8_t *hostValues = host.getMemPtr<uint8_t>();
+    return std::vector<uint8_t>(hostValues, hostValues + host.getTotalNumElements());
 }
 
-class DeviceAllocation {
-   public:
-    explicit DeviceAllocation(std::size_t bytes) { CUDA_CHECK(cudaMalloc(&pointer, bytes)); }
-    DeviceAllocation(const DeviceAllocation&) = delete;
-    DeviceAllocation& operator=(const DeviceAllocation&) = delete;
-    DeviceAllocation(DeviceAllocation&& other) noexcept : pointer(other.pointer) { other.pointer = nullptr; }
-    DeviceAllocation& operator=(DeviceAllocation&& other) noexcept {
-        if (this == &other) return *this;
-        if (pointer != nullptr) cudaFree(pointer);
-        pointer = other.pointer;
-        other.pointer = nullptr;
-        return *this;
-    }
-    ~DeviceAllocation() {
-        if (pointer != nullptr) cudaFree(pointer);
-    }
-    void* get() const { return pointer; }
+uint64_t splitMix64(uint64_t value) {
+    uint64_t z = value + 0x9e3779b97f4a7c15ULL;
+    z = (z ^ (z >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27U)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31U);
+}
 
-   private:
-    void* pointer = nullptr;
+// A batch of rows of every input, concatenated on the sequence axis: lengths[row][input] values of valueBytes bytes.
+// The copy plan is the one StampedNetwork derives (row by row, input by input, the run of every non-empty row of an
+// input, cut at the plan's span limit unless the case keeps its runs whole; rows from activeRows on are capacity and
+// get no span). Every array holds extraValues values past its active ones and
+// starts offsetBytes into its tensor, so a case chooses the packet the kernel can move. Checked byte for byte: the
+// output against the inputs, the gradients against the output's gradient, everything no span names untouched.
+struct SequenceCase {
+    std::string name;
+    uint64_t valueBytes = 4;
+    std::vector<std::vector<uint64_t>> lengths;
+    uint64_t activeRows = 0;  // 0: every row
+    bool wideSpans = false;
+    uint64_t extraValues = 3;
+    uint64_t outputOffsetBytes = 0;
+    std::vector<uint64_t> inputOffsetBytes;  // empty: none
+    std::vector<bool> nullGradient;          // empty: none
+    bool cutLongRuns = true;                 // false: a span per run, however long (more passes for its lanes)
 };
 
-DeviceAllocation makePointerTable(const std::vector<void*>& pointers, Stream& stream) {
-    DeviceAllocation allocation(pointers.size() * sizeof(void*));
-    CUDA_CHECK(cudaMemcpyAsync(
-        allocation.get(), pointers.data(), pointers.size() * sizeof(void*), cudaMemcpyHostToDevice, stream.getStream()));
-    stream.synchronize();
-    return allocation;
+// The rows of `inputs` inputs: row r of input i has lengthOf(r, i) values.
+template <typename LengthOf>
+std::vector<std::vector<uint64_t>> makeLengths(uint64_t rows, uint32_t inputs, LengthOf &&lengthOf) {
+    std::vector<std::vector<uint64_t>> lengths(rows, std::vector<uint64_t>(inputs, 0));
+    for (uint64_t row = 0; row < rows; ++row) {
+        for (uint32_t input = 0; input < inputs; ++input) lengths[row][input] = lengthOf(row, input);
+    }
+    return lengths;
 }
 
+void runSequenceCase(const SequenceCase &testCase) {
+    SCOPED_TRACE(testCase.name);
+    constexpr uint8_t sentinel = 0xD3;
+    const size_t inputs = testCase.lengths.front().size();
+    const uint64_t activeRows = testCase.activeRows == 0 ? testCase.lengths.size() : testCase.activeRows;
+    std::vector<uint64_t> inputOffsetBytes = testCase.inputOffsetBytes;
+    inputOffsetBytes.resize(inputs, 0);
+    std::vector<bool> nullGradient = testCase.nullGradient;
+    nullGradient.resize(inputs, false);
 
-template <typename OffsetT>
-using CopySpanT = std::conditional_t<sizeof(OffsetT) == sizeof(uint32_t),
-                                     RaggedSequenceCopySpan32,
-                                     RaggedSequenceCopySpan64>;
-
-template <typename OffsetT>
-std::vector<CopySpanT<OffsetT>> makeCopySpans(const std::vector<std::vector<OffsetT>>& inputOffsets,
-                                               uint64_t validBatchSize) {
-    static_assert(sizeof(OffsetT) == sizeof(uint32_t) || sizeof(OffsetT) == sizeof(uint64_t));
-    if (inputOffsets.empty()) throw std::invalid_argument("RaggedSequenceConcatenate test copy plan needs inputs.");
-    const uint64_t batchSize = inputOffsets.front().size() - 1;
-    if (validBatchSize > batchSize) throw std::invalid_argument("RaggedSequenceConcatenate test valid batch is too large.");
-
-    std::vector<CopySpanT<OffsetT>> spans;
-    spans.reserve(static_cast<std::size_t>(validBatchSize) * inputOffsets.size());
-    uint64_t outputBegin = 0;
-    for (uint64_t row = 0; row < validBatchSize; ++row) {
-        for (uint32_t input = 0; input < inputOffsets.size(); ++input) {
-            const auto& offsets = inputOffsets[input];
-            if (offsets.size() != batchSize + 1) throw std::invalid_argument("RaggedSequenceConcatenate test partition size mismatch.");
-            const uint64_t sourceBegin = static_cast<uint64_t>(offsets[row]);
-            const uint64_t sourceEnd = static_cast<uint64_t>(offsets[row + 1]);
-            if (sourceBegin > sourceEnd) throw std::invalid_argument("RaggedSequenceConcatenate test partition is not monotonic.");
-            const uint64_t valueCount = sourceEnd - sourceBegin;
-            if (valueCount != 0) {
-                if constexpr (sizeof(OffsetT) == sizeof(uint32_t)) {
-                    if (sourceBegin > std::numeric_limits<uint32_t>::max() ||
-                        outputBegin > std::numeric_limits<uint32_t>::max() ||
-                        valueCount > std::numeric_limits<uint32_t>::max()) {
-                        throw std::overflow_error("RaggedSequenceConcatenate UINT32 test copy span overflow.");
-                    }
-                    spans.push_back(RaggedSequenceCopySpan32{
-                        input,
-                        static_cast<uint32_t>(sourceBegin),
-                        static_cast<uint32_t>(outputBegin),
-                        static_cast<uint32_t>(valueCount)});
-                } else {
-                    spans.push_back(RaggedSequenceCopySpan64{input, 0, sourceBegin, outputBegin, valueCount});
-                }
-            }
-            if (outputBegin > std::numeric_limits<uint64_t>::max() - valueCount)
-                throw std::overflow_error("RaggedSequenceConcatenate test output placement overflow.");
-            outputBegin += valueCount;
-        }
-    }
-    return spans;
-}
-
-template <typename SpanT>
-DeviceAllocation makeCopySpanTable(const std::vector<SpanT>& spans, Stream& stream) {
-    const std::size_t bytes = spans.size() * sizeof(SpanT);
-    DeviceAllocation allocation(bytes == 0 ? sizeof(SpanT) : bytes);
-    if (bytes != 0) {
-        CUDA_CHECK(cudaMemcpyAsync(
-            allocation.get(), spans.data(), bytes, cudaMemcpyHostToDevice, stream.getStream()));
-        stream.synchronize();
-    }
-    return allocation;
-}
-
-template <typename OffsetT>
-void runForwardBackwardCase(DataType expectedOffsetsDataType) {
-    constexpr uint64_t batchSize = 3;
-    constexpr uint64_t leftCapacity = 6;
-    constexpr uint64_t rightCapacity = 7;
-    constexpr uint64_t outputCapacity = leftCapacity + rightCapacity;
-    constexpr uint64_t width = 2;
-    constexpr uint64_t activeOutputValues = 9;
-    constexpr float outputSentinel = -7001.0F;
-    constexpr float gradientSentinel = -8001.0F;
-    const float poison = std::numeric_limits<float>::quiet_NaN();
-
-    Stream stream(0);
-    const std::vector<std::vector<OffsetT>> offsetsHost{{0, 2, 2, 5}, {0, 1, 4, 4}};
-    EXPECT_EQ(dtypeFor<OffsetT>(), expectedOffsetsDataType);
-    const auto copySpansHost = makeCopySpans(offsetsHost, batchSize);
-    ASSERT_EQ(copySpansHost.size(), 4U);  // Exactly the four non-empty (row,input) spans.
-    DeviceAllocation copySpans = makeCopySpanTable(copySpansHost, stream);
-
-    std::vector<float> leftValues(leftCapacity * width, poison);
-    std::vector<float> rightValues(rightCapacity * width, poison);
-    for (uint64_t token = 0; token < 5; ++token) {
-        for (uint64_t d = 0; d < width; ++d) leftValues[token * width + d] = 1000.0F + 10.0F * token + d;
-    }
-    for (uint64_t token = 0; token < 4; ++token) {
-        for (uint64_t d = 0; d < width; ++d) rightValues[token * width + d] = 2000.0F + 10.0F * token + d;
-    }
-
-    Tensor left = makeGpuTensor<float>({leftCapacity, width}, leftValues, stream);
-    Tensor right = makeGpuTensor<float>({rightCapacity, width}, rightValues, stream);
-    Tensor output = makeGpuTensor<float>(
-        {outputCapacity, width}, std::vector<float>(outputCapacity * width, outputSentinel), stream);
-    Tensor outputOffsets = makeGpuTensor<OffsetT>({batchSize + 1}, std::vector<OffsetT>(batchSize + 1, 99), stream);
-    DeviceAllocation valueTable = makePointerTable({left.getMemPtr(), right.getMemPtr()}, stream);
-
-    rowPartitionUploadHostOffsets({0, 3, 6, 9}, outputOffsets, batchSize, stream);
-    launchRaggedSequenceConcatenate(output.getMemPtr(),
-                                    reinterpret_cast<void**>(valueTable.get()),
-                                    copySpans.get(),
-                                    copySpansHost.size(),
-                                    sizeof(float),
-                                    width,
-                                    sizeof(OffsetT),
-                                    activeOutputValues,
-                                    stream);
-    stream.synchronize();
-
-    EXPECT_EQ(copyGpuTensor<OffsetT>(outputOffsets, stream), (std::vector<OffsetT>{0, 3, 6, 9}));
-    const std::vector<float> actual = copyGpuTensor<float>(output, stream);
-    const std::vector<std::pair<const std::vector<float>*, uint64_t>> expectedTokenSources{
-        {&leftValues, 0}, {&leftValues, 1}, {&rightValues, 0},
-        {&rightValues, 1}, {&rightValues, 2}, {&rightValues, 3},
-        {&leftValues, 2}, {&leftValues, 3}, {&leftValues, 4},
-    };
-    for (uint64_t outputToken = 0; outputToken < expectedTokenSources.size(); ++outputToken) {
-        const auto& [source, sourceToken] = expectedTokenSources[outputToken];
-        for (uint64_t d = 0; d < width; ++d) {
-            EXPECT_EQ(actual[outputToken * width + d], (*source)[sourceToken * width + d]);
-        }
-    }
-    for (uint64_t scalar = activeOutputValues * width; scalar < actual.size(); ++scalar) {
-        EXPECT_EQ(actual[scalar], outputSentinel) << "inactive output scalar " << scalar;
-    }
-
-    std::vector<float> upstream(outputCapacity * width, 9999.0F);
-    for (uint64_t scalar = 0; scalar < activeOutputValues * width; ++scalar) {
-        upstream[scalar] = 3000.0F + static_cast<float>(scalar);
-    }
-    Tensor upstreamGpu = makeGpuTensor<float>({outputCapacity, width}, upstream, stream);
-    Tensor leftGradient = makeGpuTensor<float>(
-        {leftCapacity, width}, std::vector<float>(leftCapacity * width, gradientSentinel), stream);
-    Tensor rightGradient = makeGpuTensor<float>(
-        {rightCapacity, width}, std::vector<float>(rightCapacity * width, gradientSentinel), stream);
-    DeviceAllocation gradientTable = makePointerTable({leftGradient.getMemPtr(), rightGradient.getMemPtr()}, stream);
-
-    launchRaggedSequenceConcatenateBackward(reinterpret_cast<void**>(gradientTable.get()),
-                                            upstreamGpu.getMemPtr(),
-                                            copySpans.get(),
-                                            copySpansHost.size(),
-                                            sizeof(float),
-                                            width,
-                                            sizeof(OffsetT),
-                                            activeOutputValues,
-                                            stream);
-    stream.synchronize();
-
-    const std::vector<float> actualLeftGradient = copyGpuTensor<float>(leftGradient, stream);
-    const std::vector<float> actualRightGradient = copyGpuTensor<float>(rightGradient, stream);
-    const std::vector<uint64_t> leftOutputToken{0, 1, 6, 7, 8};
-    for (uint64_t token = 0; token < leftOutputToken.size(); ++token) {
-        for (uint64_t d = 0; d < width; ++d) {
-            EXPECT_EQ(actualLeftGradient[token * width + d], upstream[leftOutputToken[token] * width + d]);
-        }
-    }
-    for (uint64_t scalar = 5 * width; scalar < actualLeftGradient.size(); ++scalar) {
-        EXPECT_EQ(actualLeftGradient[scalar], gradientSentinel) << "inactive left gradient scalar " << scalar;
-    }
-
-    const std::vector<uint64_t> rightOutputToken{2, 3, 4, 5};
-    for (uint64_t token = 0; token < rightOutputToken.size(); ++token) {
-        for (uint64_t d = 0; d < width; ++d) {
-            EXPECT_EQ(actualRightGradient[token * width + d], upstream[rightOutputToken[token] * width + d]);
-        }
-    }
-    for (uint64_t scalar = 4 * width; scalar < actualRightGradient.size(); ++scalar) {
-        EXPECT_EQ(actualRightGradient[scalar], gradientSentinel) << "inactive right gradient scalar " << scalar;
-    }
-}
-
-template <typename OffsetT>
-void runAllEmptyCase() {
-    constexpr uint64_t batchSize = 3;
-    constexpr uint64_t leftCapacity = 2;
-    constexpr uint64_t rightCapacity = 3;
-    constexpr float sentinel = -9191.0F;
-
-    Stream stream(0);
-    const std::vector<std::vector<OffsetT>> offsetsHost{{0, 0, 0, 0}, {0, 0, 0, 0}};
-    const auto copySpansHost = makeCopySpans(offsetsHost, batchSize);
-    ASSERT_TRUE(copySpansHost.empty());
-    DeviceAllocation copySpans = makeCopySpanTable(copySpansHost, stream);
-
-    Tensor left = makeGpuTensor<float>({leftCapacity}, std::vector<float>(leftCapacity, 11.0F), stream);
-    Tensor right = makeGpuTensor<float>({rightCapacity}, std::vector<float>(rightCapacity, 22.0F), stream);
-    Tensor output = makeGpuTensor<float>({leftCapacity + rightCapacity},
-                                         std::vector<float>(leftCapacity + rightCapacity, sentinel),
-                                         stream);
-    Tensor outputOffsets = makeGpuTensor<OffsetT>({batchSize + 1}, std::vector<OffsetT>(batchSize + 1, 77), stream);
-    DeviceAllocation valueTable = makePointerTable({left.getMemPtr(), right.getMemPtr()}, stream);
-
-    rowPartitionUploadHostOffsets({0, 0, 0, 0}, outputOffsets, batchSize, stream);
-    launchRaggedSequenceConcatenate(output.getMemPtr(),
-                                    reinterpret_cast<void**>(valueTable.get()),
-                                    copySpans.get(),
-                                    copySpansHost.size(),
-                                    sizeof(float),
-                                    1,
-                                    sizeof(OffsetT),
-                                    0,
-                                    stream);
-    stream.synchronize();
-    EXPECT_EQ(copyGpuTensor<OffsetT>(outputOffsets, stream), (std::vector<OffsetT>{0, 0, 0, 0}));
-    for (float value : copyGpuTensor<float>(output, stream)) EXPECT_EQ(value, sentinel);
-
-    Tensor leftGradient = makeGpuTensor<float>({leftCapacity}, std::vector<float>(leftCapacity, sentinel), stream);
-    Tensor rightGradient = makeGpuTensor<float>({rightCapacity}, std::vector<float>(rightCapacity, sentinel), stream);
-    DeviceAllocation gradientTable = makePointerTable({leftGradient.getMemPtr(), rightGradient.getMemPtr()}, stream);
-    launchRaggedSequenceConcatenateBackward(reinterpret_cast<void**>(gradientTable.get()),
-                                            output.getMemPtr(),
-                                            copySpans.get(),
-                                            copySpansHost.size(),
-                                            sizeof(float),
-                                            1,
-                                            sizeof(OffsetT),
-                                            0,
-                                            stream);
-    stream.synchronize();
-    for (float value : copyGpuTensor<float>(leftGradient, stream)) EXPECT_EQ(value, sentinel);
-    for (float value : copyGpuTensor<float>(rightGradient, stream)) EXPECT_EQ(value, sentinel);
-}
-
-template <typename OffsetT>
-void runExactSpanGroupingBoundaryCase(uint32_t spanCount) {
-    ASSERT_GE(spanCount, 2U);
-    constexpr uint64_t batchSize = 1;
-    constexpr uint8_t gradientSentinel = 0xA7;
-
-    Stream stream(0);
-    std::vector<std::vector<OffsetT>> offsetsHost(spanCount, std::vector<OffsetT>{0, 1});
-    const auto copySpansHost = makeCopySpans(offsetsHost, batchSize);
-    ASSERT_EQ(copySpansHost.size(), spanCount);
-    DeviceAllocation copySpans = makeCopySpanTable(copySpansHost, stream);
-
-    std::vector<uint8_t> valuesHost(spanCount);
-    std::vector<uint8_t> upstreamHost(spanCount);
-    for (uint32_t input = 0; input < spanCount; ++input) {
-        valuesHost[input] = static_cast<uint8_t>((input * 41U + 7U) % 251U);
-        upstreamHost[input] = static_cast<uint8_t>((input * 23U + 11U) % 251U);
-    }
-
-    Tensor values = makeGpuTensor<uint8_t>({spanCount}, valuesHost, stream);
-    Tensor output = makeGpuTensor<uint8_t>({spanCount}, std::vector<uint8_t>(spanCount, 0xD3), stream);
-
-    std::vector<void *> valuePointers(spanCount);
-    uint8_t *valuesBase = values.getMemPtr<uint8_t>();
-    for (uint32_t input = 0; input < spanCount; ++input) valuePointers[input] = valuesBase + input;
-    DeviceAllocation valueTable = makePointerTable(valuePointers, stream);
-
-    launchRaggedSequenceConcatenate(output.getMemPtr(),
-                                    reinterpret_cast<void **>(valueTable.get()),
-                                    copySpans.get(),
-                                    copySpansHost.size(),
-                                    sizeof(uint8_t),
-                                    1,
-                                    sizeof(OffsetT),
-                                    spanCount,
-                                    stream);
-    stream.synchronize();
-    EXPECT_EQ(copyGpuTensor<uint8_t>(output, stream), valuesHost);
-
-    Tensor upstream = makeGpuTensor<uint8_t>({spanCount}, upstreamHost, stream);
-    Tensor gradients = makeGpuTensor<uint8_t>(
-        {spanCount}, std::vector<uint8_t>(spanCount, gradientSentinel), stream);
-    std::vector<void *> gradientPointers(spanCount);
-    uint8_t *gradientsBase = gradients.getMemPtr<uint8_t>();
-    for (uint32_t input = 0; input < spanCount; ++input) gradientPointers[input] = gradientsBase + input;
-    DeviceAllocation gradientTable = makePointerTable(gradientPointers, stream);
-
-    launchRaggedSequenceConcatenateBackward(reinterpret_cast<void **>(gradientTable.get()),
-                                            upstream.getMemPtr(),
-                                            copySpans.get(),
-                                            copySpansHost.size(),
-                                            sizeof(uint8_t),
-                                            1,
-                                            sizeof(OffsetT),
-                                            spanCount,
-                                            stream);
-    stream.synchronize();
-    EXPECT_EQ(copyGpuTensor<uint8_t>(gradients, stream), upstreamHost);
-}
-
-template <typename OffsetT>
-void runManyInputsOddWidthCase(uint64_t batchSize, uint32_t numInputs = 9) {
-    ASSERT_GT(numInputs, 0U);
-    constexpr uint64_t widthBytes = 17;
-    constexpr uint8_t valueSentinel = 0xD3;
-    constexpr uint8_t gradientSentinel = 0xA7;
-
-    Stream stream(0);
-    std::vector<std::vector<OffsetT>> offsetsHost(numInputs);
-    std::vector<std::vector<uint8_t>> valuesHost(numInputs);
-    std::vector<uint64_t> capacities(numInputs, 0);
-    std::vector<uint64_t> activeCounts(numInputs, 0);
-    std::vector<Tensor> values;
-    values.reserve(numInputs);
-
-    uint64_t outputCapacity = 0;
-    for (uint32_t input = 0; input < numInputs; ++input) {
-        auto &inputOffsets = offsetsHost[input];
-        inputOffsets.resize(batchSize + 1, 0);
-        for (uint64_t row = 0; row < batchSize; ++row) {
-            const uint64_t rowLength = (input * 3 + row * 2 + 1) % 4;
-            inputOffsets[row + 1] = static_cast<OffsetT>(
-                static_cast<uint64_t>(inputOffsets[row]) + rowLength);
-        }
-
-        activeCounts[input] = static_cast<uint64_t>(inputOffsets.back());
-        capacities[input] = activeCounts[input] + 1 + (input & 1U);
-        outputCapacity += capacities[input];
-
-        auto &inputValues = valuesHost[input];
-        inputValues.assign(capacities[input] * widthBytes, valueSentinel);
-        for (uint64_t token = 0; token < activeCounts[input]; ++token) {
-            for (uint64_t byte = 0; byte < widthBytes; ++byte) {
-                inputValues[token * widthBytes + byte] =
-                    static_cast<uint8_t>((input * 41 + token * 19 + byte * 7) % 251);
-            }
-        }
-
-        values.emplace_back(makeGpuTensor<uint8_t>({capacities[input], widthBytes}, inputValues, stream));
-    }
-
-    std::vector<void *> valuePointers;
-    valuePointers.reserve(numInputs);
-    for (uint32_t input = 0; input < numInputs; ++input) valuePointers.push_back(values[input].getMemPtr());
-    DeviceAllocation valueTable = makePointerTable(valuePointers, stream);
-    const auto copySpansHost = makeCopySpans(offsetsHost, batchSize);
-    uint64_t nonEmptySpans = 0;
-    for (uint64_t row = 0; row < batchSize; ++row)
-        for (uint32_t input = 0; input < numInputs; ++input)
-            nonEmptySpans += offsetsHost[input][row] != offsetsHost[input][row + 1] ? 1ULL : 0ULL;
-    ASSERT_EQ(copySpansHost.size(), nonEmptySpans);
-    DeviceAllocation copySpans = makeCopySpanTable(copySpansHost, stream);
+    // The runs, and each input's and the output's values (all rows: the inactive ones are capacity).
+    std::vector<RaggedSequenceCopySpan64> runs;
+    std::vector<uint64_t> inputValues(inputs, 0);
+    uint64_t outputValues = 0;
     uint64_t activeOutputValues = 0;
-    for (uint64_t activeCount : activeCounts) activeOutputValues += activeCount;
+    for (uint64_t row = 0; row < testCase.lengths.size(); ++row) {
+        for (uint32_t input = 0; input < inputs; ++input) {
+            const uint64_t length = testCase.lengths[row][input];
+            if (row < activeRows && length != 0) runs.push_back({input, 0, inputValues[input], outputValues, length});
+            inputValues[input] += length;
+            outputValues += length;
+        }
+        if (row + 1 == activeRows) activeOutputValues = outputValues;
+    }
+    // The plan, in both span formats.
+    const uint64_t valueLimit = testCase.cutLongRuns ? raggedSequenceCopySpanValueLimit(activeOutputValues, runs.size()) : activeOutputValues + 1;
+    const uint64_t spanCapacity = testCase.cutLongRuns ? raggedSequenceCopySpanCapacity(runs.size()) : runs.size();
+    const uint32_t inputBits = raggedSequenceCopySpanInputBits(inputs);
+    std::vector<RaggedSequenceCopySpanPacked> packed(spanCapacity);
+    std::vector<RaggedSequenceCopySpan64> spans64(spanCapacity);
+    uint64_t spanCount = 0;
+    for (const RaggedSequenceCopySpan64 &run : runs) {
+        const uint64_t before = spanCount;
+        spanCount = appendRaggedSequenceCopyRun(spans64.data(), before, spanCapacity, run.inputIndex, run.sourceBegin, run.destinationBegin,
+                                                run.valueCount, valueLimit, inputBits);
+        ASSERT_EQ(appendRaggedSequenceCopyRun(packed.data(), before, spanCapacity, run.inputIndex, run.sourceBegin, run.destinationBegin,
+                                              run.valueCount, valueLimit, inputBits),
+                  spanCount);
+    }
+    packed.resize(spanCount);
+    spans64.resize(spanCount);
+    if (!testCase.cutLongRuns) ASSERT_EQ(spanCount, runs.size());
+    const RaggedSequenceCopySpanFormat spanFormat = testCase.wideSpans ? RaggedSequenceCopySpanFormat::WIDE : RaggedSequenceCopySpanFormat::PACKED;
+    std::vector<uint8_t> spanBytes(spanCount * raggedSequenceCopySpanBytes(spanFormat));
+    if (!spanBytes.empty()) {
+        std::memcpy(spanBytes.data(), testCase.wideSpans ? static_cast<const void *>(spans64.data()) : static_cast<const void *>(packed.data()),
+                    spanBytes.size());
+    }
 
-    Tensor output = makeGpuTensor<uint8_t>(
-        {outputCapacity, widthBytes}, std::vector<uint8_t>(outputCapacity * widthBytes, valueSentinel), stream);
-    launchRaggedSequenceConcatenate(output.getMemPtr(),
-                                    reinterpret_cast<void **>(valueTable.get()),
-                                    copySpans.get(),
-                                    copySpansHost.size(),
-                                    sizeof(uint8_t),
-                                    widthBytes,
-                                    sizeof(OffsetT),
-                                    activeOutputValues,
-                                    stream);
+    Stream stream(0);
+    const Tensor spanTable = makeGpuBytes(spanBytes, stream);
+    const uint64_t valueBytes = testCase.valueBytes;
+    const auto arrayBytes = [&](uint64_t values, uint64_t offset) { return offset + (values + testCase.extraValues) * valueBytes; };
+
+    std::vector<std::vector<uint8_t>> inputBytes(inputs);
+    std::vector<Tensor> inputTensors;
+    std::vector<void *> inputPointers;
+    for (size_t input = 0; input < inputs; ++input) {
+        inputBytes[input].resize(arrayBytes(inputValues[input], inputOffsetBytes[input]));
+        for (uint64_t byte = 0; byte < inputBytes[input].size(); ++byte) {
+            inputBytes[input][byte] = static_cast<uint8_t>(splitMix64(byte * 131 + input * 977 + 5) >> 24U);
+        }
+        inputTensors.push_back(makeGpuBytes(inputBytes[input], stream));
+        inputPointers.push_back(inputTensors.back().getMemPtr<uint8_t>() + inputOffsetBytes[input]);
+    }
+    Tensor output = makeGpuBytes(std::vector<uint8_t>(arrayBytes(outputValues, testCase.outputOffsetBytes), sentinel), stream);
+    void *const outputPointer = output.getMemPtr<uint8_t>() + testCase.outputOffsetBytes;
+
+    launchRaggedSequenceConcatenate(outputPointer, inputPointers, spanTable.getMemPtr(), spanCount, 1, valueBytes, spanFormat,
+                                    activeOutputValues, stream);
     stream.synchronize();
-
-    std::vector<uint8_t> expected(outputCapacity * widthBytes, valueSentinel);
-    std::vector<std::vector<uint64_t>> inputTokenToOutput(numInputs);
-    for (uint32_t input = 0; input < numInputs; ++input) {
-        inputTokenToOutput[input].resize(activeCounts[input]);
+    std::vector<uint8_t> expectedOutput(arrayBytes(outputValues, testCase.outputOffsetBytes), sentinel);
+    for (const RaggedSequenceCopySpan64 &span : spans64) {
+        std::memcpy(expectedOutput.data() + testCase.outputOffsetBytes + span.destinationBegin * valueBytes,
+                    inputBytes[span.inputIndex].data() + inputOffsetBytes[span.inputIndex] + span.sourceBegin * valueBytes,
+                    span.valueCount * valueBytes);
     }
+    std::vector<uint8_t> outputBytes = copyGpuBytes(output, stream);
+    outputBytes.resize(expectedOutput.size());
+    uint64_t wrong = 0;
+    for (size_t byte = 0; byte < expectedOutput.size(); ++byte) wrong += outputBytes[byte] != expectedOutput[byte];
+    EXPECT_EQ(wrong, 0U) << "forward";
 
-    uint64_t outputToken = 0;
-    for (uint64_t row = 0; row < batchSize; ++row) {
-        for (uint32_t input = 0; input < numInputs; ++input) {
-            const uint64_t begin = static_cast<uint64_t>(offsetsHost[input][row]);
-            const uint64_t end = static_cast<uint64_t>(offsetsHost[input][row + 1]);
-            for (uint64_t token = begin; token < end; ++token, ++outputToken) {
-                inputTokenToOutput[input][token] = outputToken;
-                for (uint64_t byte = 0; byte < widthBytes; ++byte) {
-                    expected[outputToken * widthBytes + byte] = valuesHost[input][token * widthBytes + byte];
-                }
-            }
-        }
-    }
-    EXPECT_EQ(copyGpuTensor<uint8_t>(output, stream), expected);
-
-    std::vector<uint8_t> upstream(outputCapacity * widthBytes, 0xEF);
-    for (uint64_t token = 0; token < outputToken; ++token) {
-        for (uint64_t byte = 0; byte < widthBytes; ++byte) {
-            upstream[token * widthBytes + byte] = static_cast<uint8_t>((token * 23 + byte * 11 + 5) % 251);
-        }
-    }
-    Tensor upstreamGpu = makeGpuTensor<uint8_t>({outputCapacity, widthBytes}, upstream, stream);
-
-    std::vector<Tensor> gradients;
-    gradients.reserve(numInputs);
+    // Backward: the output's gradient back to the inputs' gradients; an input without one is not touched.
+    std::vector<uint8_t> upstream(arrayBytes(outputValues, testCase.outputOffsetBytes));
+    for (uint64_t byte = 0; byte < upstream.size(); ++byte) upstream[byte] = static_cast<uint8_t>(splitMix64(byte * 257 + 11) >> 16U);
+    const Tensor upstreamTensor = makeGpuBytes(upstream, stream);
+    std::vector<Tensor> gradientTensors;
     std::vector<void *> gradientPointers;
-    gradientPointers.reserve(numInputs);
-    for (uint32_t input = 0; input < numInputs; ++input) {
-        gradients.emplace_back(makeGpuTensor<uint8_t>(
-            {capacities[input], widthBytes},
-            std::vector<uint8_t>(capacities[input] * widthBytes, gradientSentinel),
-            stream));
-        // Exercise nullable gradient destinations while neighboring span slots in
-        // the same CTA remain active.
-        gradientPointers.push_back((input == 3 || input == 7) ? nullptr : gradients.back().getMemPtr());
+    for (size_t input = 0; input < inputs; ++input) {
+        gradientTensors.push_back(makeGpuBytes(std::vector<uint8_t>(inputBytes[input].size(), sentinel), stream));
+        gradientPointers.push_back(nullGradient[input] ? nullptr : gradientTensors.back().getMemPtr<uint8_t>() + inputOffsetBytes[input]);
     }
-    DeviceAllocation gradientTable = makePointerTable(gradientPointers, stream);
-
-    launchRaggedSequenceConcatenateBackward(reinterpret_cast<void **>(gradientTable.get()),
-                                            upstreamGpu.getMemPtr(),
-                                            copySpans.get(),
-                                            copySpansHost.size(),
-                                            sizeof(uint8_t),
-                                            widthBytes,
-                                            sizeof(OffsetT),
-                                            activeOutputValues,
-                                            stream);
+    launchRaggedSequenceConcatenateBackward(gradientPointers, upstreamTensor.getMemPtr<uint8_t>() + testCase.outputOffsetBytes,
+                                            spanTable.getMemPtr(), spanCount, valueBytes, 1, spanFormat, activeOutputValues, stream);
     stream.synchronize();
-
-    for (uint32_t input = 0; input < numInputs; ++input) {
-        std::vector<uint8_t> expectedGradient(capacities[input] * widthBytes, gradientSentinel);
-        if (input != 3 && input != 7) {
-            for (uint64_t token = 0; token < activeCounts[input]; ++token) {
-                const uint64_t sourceToken = inputTokenToOutput[input][token];
-                for (uint64_t byte = 0; byte < widthBytes; ++byte) {
-                    expectedGradient[token * widthBytes + byte] = upstream[sourceToken * widthBytes + byte];
-                }
+    wrong = 0;
+    for (size_t input = 0; input < inputs; ++input) {
+        std::vector<uint8_t> expected(inputBytes[input].size(), sentinel);
+        if (!nullGradient[input]) {
+            for (const RaggedSequenceCopySpan64 &span : spans64) {
+                if (span.inputIndex != input) continue;
+                std::memcpy(expected.data() + inputOffsetBytes[input] + span.sourceBegin * valueBytes,
+                            upstream.data() + testCase.outputOffsetBytes + span.destinationBegin * valueBytes, span.valueCount * valueBytes);
             }
         }
-        EXPECT_EQ(copyGpuTensor<uint8_t>(gradients[input], stream), expectedGradient) << "input " << input;
+        std::vector<uint8_t> gradientBytes = copyGpuBytes(gradientTensors[input], stream);
+        gradientBytes.resize(expected.size());
+        for (size_t byte = 0; byte < expected.size(); ++byte) wrong += gradientBytes[byte] != expected[byte];
     }
+    EXPECT_EQ(wrong, 0U) << "backward";
 }
 
-
-template <typename OffsetT>
-void runUniformSpanPayloadCase(uint64_t expectedSpanBytes, uint32_t expectedSpansPerBlock) {
-    ASSERT_GT(expectedSpanBytes, 0U);
-    ASSERT_GE(expectedSpansPerBlock, 1U);
-    ASSERT_LE(expectedSpansPerBlock, 256U);
-    ASSERT_EQ(expectedSpansPerBlock & (expectedSpansPerBlock - 1U), 0U);
-
-    constexpr uint32_t numInputs = 2;
-    const uint64_t totalSpans = static_cast<uint64_t>(expectedSpansPerBlock) * 64ULL;
-    ASSERT_EQ(totalSpans % numInputs, 0U);
-    const uint64_t batchSize = totalSpans / numInputs;
-    const uint64_t activePerInput = batchSize * expectedSpanBytes;
-    const uint64_t activeOutputValues = activePerInput * numInputs;
-    constexpr uint8_t outputSentinel = 0xD3;
-    constexpr uint8_t gradientSentinel = 0xA7;
-
-    Stream stream(0);
-    std::vector<OffsetT> offsetsHost(batchSize + 1, 0);
-    for (uint64_t row = 0; row < batchSize; ++row) {
-        const uint64_t next = (row + 1) * expectedSpanBytes;
-        ASSERT_LE(next, static_cast<uint64_t>(std::numeric_limits<OffsetT>::max()));
-        offsetsHost[row + 1] = static_cast<OffsetT>(next);
-    }
-    const std::vector<std::vector<OffsetT>> allOffsetsHost{offsetsHost, offsetsHost};
-    const auto copySpansHost = makeCopySpans(allOffsetsHost, batchSize);
-    ASSERT_EQ(copySpansHost.size(), totalSpans);
-    DeviceAllocation copySpans = makeCopySpanTable(copySpansHost, stream);
-
-    std::vector<uint8_t> leftHost(activePerInput);
-    std::vector<uint8_t> rightHost(activePerInput);
-    for (uint64_t i = 0; i < activePerInput; ++i) {
-        leftHost[i] = static_cast<uint8_t>((i * 17U + 3U) % 251U);
-        rightHost[i] = static_cast<uint8_t>((i * 29U + 11U) % 251U);
-    }
-    Tensor left = makeGpuTensor<uint8_t>({activePerInput}, leftHost, stream);
-    Tensor right = makeGpuTensor<uint8_t>({activePerInput}, rightHost, stream);
-    Tensor output = makeGpuTensor<uint8_t>(
-        {activeOutputValues + 1}, std::vector<uint8_t>(activeOutputValues + 1, outputSentinel), stream);
-
-    DeviceAllocation valueTable = makePointerTable({left.getMemPtr(), right.getMemPtr()}, stream);
-    launchRaggedSequenceConcatenate(output.getMemPtr(),
-                                    reinterpret_cast<void **>(valueTable.get()),
-                                    copySpans.get(),
-                                    copySpansHost.size(),
-                                    sizeof(uint8_t),
-                                    1,
-                                    sizeof(OffsetT),
-                                    activeOutputValues,
-                                    stream);
-    stream.synchronize();
-
-    const std::vector<uint8_t> actual = copyGpuTensor<uint8_t>(output, stream);
-    for (uint64_t row = 0; row < batchSize; ++row) {
-        const uint64_t inputBase = row * expectedSpanBytes;
-        const uint64_t outputBase = row * numInputs * expectedSpanBytes;
-        for (uint64_t byte = 0; byte < expectedSpanBytes; ++byte) {
-            EXPECT_EQ(actual[outputBase + byte], leftHost[inputBase + byte]);
-            EXPECT_EQ(actual[outputBase + expectedSpanBytes + byte], rightHost[inputBase + byte]);
-        }
-    }
-    EXPECT_EQ(actual[activeOutputValues], outputSentinel);
-
-    std::vector<uint8_t> upstreamHost(activeOutputValues);
-    for (uint64_t i = 0; i < activeOutputValues; ++i)
-        upstreamHost[i] = static_cast<uint8_t>((i * 13U + 5U) % 251U);
-    Tensor upstream = makeGpuTensor<uint8_t>({activeOutputValues}, upstreamHost, stream);
-    Tensor leftGradient = makeGpuTensor<uint8_t>(
-        {activePerInput + 1}, std::vector<uint8_t>(activePerInput + 1, gradientSentinel), stream);
-    Tensor rightGradient = makeGpuTensor<uint8_t>(
-        {activePerInput + 1}, std::vector<uint8_t>(activePerInput + 1, gradientSentinel), stream);
-    DeviceAllocation gradientTable = makePointerTable({leftGradient.getMemPtr(), rightGradient.getMemPtr()}, stream);
-
-    launchRaggedSequenceConcatenateBackward(reinterpret_cast<void **>(gradientTable.get()),
-                                            upstream.getMemPtr(),
-                                            copySpans.get(),
-                                            copySpansHost.size(),
-                                            sizeof(uint8_t),
-                                            1,
-                                            sizeof(OffsetT),
-                                            activeOutputValues,
-                                            stream);
-    stream.synchronize();
-
-    const std::vector<uint8_t> actualLeft = copyGpuTensor<uint8_t>(leftGradient, stream);
-    const std::vector<uint8_t> actualRight = copyGpuTensor<uint8_t>(rightGradient, stream);
-    for (uint64_t row = 0; row < batchSize; ++row) {
-        const uint64_t inputBase = row * expectedSpanBytes;
-        const uint64_t outputBase = row * numInputs * expectedSpanBytes;
-        for (uint64_t byte = 0; byte < expectedSpanBytes; ++byte) {
-            EXPECT_EQ(actualLeft[inputBase + byte], upstreamHost[outputBase + byte]);
-            EXPECT_EQ(actualRight[inputBase + byte], upstreamHost[outputBase + expectedSpanBytes + byte]);
-        }
-    }
-    EXPECT_EQ(actualLeft[activePerInput], gradientSentinel);
-    EXPECT_EQ(actualRight[activePerInput], gradientSentinel);
-}
-
-template <typename OffsetT>
-void runExactTailCase(uint32_t copyWidth, uint32_t tailBytes) {
-    ASSERT_GT(copyWidth, 1U);
-    ASSERT_GT(tailBytes, 0U);
-    ASSERT_LT(tailBytes, copyWidth);
-
-    uint64_t alignmentOffset = 0;
-    switch (copyWidth) {
-        case 32: alignmentOffset = 0; break;
-        case 16: alignmentOffset = 16; break;
-        case 8: alignmentOffset = 8; break;
-        case 4: alignmentOffset = 4; break;
-        case 2: alignmentOffset = 2; break;
-        default: FAIL() << "unsupported copy width"; return;
-    }
-
-    constexpr uint64_t batchSize = 1;
-    const uint64_t valueBytes = copyWidth + tailBytes;
-    const uint64_t sourceLogicalBytes = alignmentOffset + valueBytes;
-    const uint64_t destinationLogicalBytes = alignmentOffset + valueBytes + copyWidth;
-    constexpr uint8_t sentinel = 0xD7;
-
-    Stream stream(0);
-    const std::vector<std::vector<OffsetT>> offsetsHost{{0, 1}, {0, 0}};
-    const auto copySpansHost = makeCopySpans(offsetsHost, batchSize);
-    ASSERT_EQ(copySpansHost.size(), 1U);
-    DeviceAllocation copySpans = makeCopySpanTable(copySpansHost, stream);
-
-    std::vector<uint8_t> sourceHost(sourceLogicalBytes);
-    for (uint64_t i = 0; i < sourceLogicalBytes; ++i)
-        sourceHost[i] = static_cast<uint8_t>((37U * i + 11U) & 0xFFU);
-    Tensor source = makeGpuTensor<uint8_t>({sourceLogicalBytes}, sourceHost, stream);
-    auto *sourceStart = source.getMemPtr<uint8_t>() + alignmentOffset;
-
-    Tensor output = makeGpuTensor<uint8_t>(
-        {destinationLogicalBytes}, std::vector<uint8_t>(destinationLogicalBytes, sentinel), stream);
-    auto *outputStart = output.getMemPtr<uint8_t>() + alignmentOffset;
-    DeviceAllocation valueTable = makePointerTable({sourceStart, sourceStart}, stream);
-
-    launchRaggedSequenceConcatenate(outputStart,
-                                    reinterpret_cast<void **>(valueTable.get()),
-                                    copySpans.get(),
-                                    copySpansHost.size(),
-                                    sizeof(uint8_t),
-                                    valueBytes,
-                                    sizeof(OffsetT),
-                                    1,
-                                    stream);
-    stream.synchronize();
-
-    const std::vector<uint8_t> actual = copyGpuTensor<uint8_t>(output, stream);
-    for (uint64_t byte = 0; byte < valueBytes; ++byte)
-        EXPECT_EQ(actual[alignmentOffset + byte], sourceHost[alignmentOffset + byte]);
-    for (uint64_t byte = valueBytes; byte < valueBytes + copyWidth; ++byte)
-        EXPECT_EQ(actual[alignmentOffset + byte], sentinel) << "forward tail over-store byte=" << byte;
-
-    // Backward uses an output-gradient tensor that ends exactly at the source
-    // tail. The full-width final load therefore has to use Thor's physical
-    // 128-byte tensor padding, while the destination must remain exact-sized.
-    std::vector<uint8_t> upstreamHost(sourceLogicalBytes);
-    for (uint64_t i = 0; i < sourceLogicalBytes; ++i)
-        upstreamHost[i] = static_cast<uint8_t>((19U * i + 7U) & 0xFFU);
-    Tensor upstream = makeGpuTensor<uint8_t>({sourceLogicalBytes}, upstreamHost, stream);
-    auto *upstreamStart = upstream.getMemPtr<uint8_t>() + alignmentOffset;
-    Tensor gradient = makeGpuTensor<uint8_t>(
-        {destinationLogicalBytes}, std::vector<uint8_t>(destinationLogicalBytes, sentinel), stream);
-    auto *gradientStart = gradient.getMemPtr<uint8_t>() + alignmentOffset;
-    DeviceAllocation gradientTable = makePointerTable({gradientStart, nullptr}, stream);
-
-    launchRaggedSequenceConcatenateBackward(reinterpret_cast<void **>(gradientTable.get()),
-                                            upstreamStart,
-                                            copySpans.get(),
-                                            copySpansHost.size(),
-                                            sizeof(uint8_t),
-                                            valueBytes,
-                                            sizeof(OffsetT),
-                                            1,
-                                            stream);
-    stream.synchronize();
-
-    const std::vector<uint8_t> actualGradient = copyGpuTensor<uint8_t>(gradient, stream);
-    for (uint64_t byte = 0; byte < valueBytes; ++byte)
-        EXPECT_EQ(actualGradient[alignmentOffset + byte], upstreamHost[alignmentOffset + byte]);
-    for (uint64_t byte = valueBytes; byte < valueBytes + copyWidth; ++byte)
-        EXPECT_EQ(actualGradient[alignmentOffset + byte], sentinel) << "backward tail over-store byte=" << byte;
+// Row lengths uniform in [1, 2 mean - 1], a share of them empty.
+uint64_t randomLength(uint64_t row, uint32_t input, uint64_t mean, uint32_t emptyPerMille = 0) {
+    const uint64_t draw = splitMix64(row * 0xd1b54a32d192ed03ULL + input * 0x8cb92ba72f3d8dd7ULL + mean);
+    if (draw % 1000 < emptyPerMille) return 0;
+    return 1 + (draw >> 20U) % (2 * mean - 1);
 }
 
 }  // namespace
 
-TEST(RaggedSequenceConcatenate, ForwardBackwardUint32UsesHostDerivedPartitionAndIgnoresInactiveCapacity) {
+TEST(RaggedSequenceConcatenate, ForwardAndBackwardFollowTheCopyPlanAndLeaveInactiveCapacityUntouched) {
     REQUIRE_CUDA_DEVICE();
-    runForwardBackwardCase<uint32_t>(DataType::UINT32);
-}
-
-TEST(RaggedSequenceConcatenate, ForwardBackwardUint64UsesHostDerivedPartitionAndIgnoresInactiveCapacity) {
-    REQUIRE_CUDA_DEVICE();
-    runForwardBackwardCase<uint64_t>(DataType::UINT64);
-}
-
-TEST(RaggedSequenceConcatenate, AllEmptyRowsUseHostDerivedZeroOffsetsWithoutTouchingValueCapacity) {
-    REQUIRE_CUDA_DEVICE();
-    runAllEmptyCase<uint32_t>();
-    runAllEmptyCase<uint64_t>();
-}
-
-TEST(RaggedSequenceConcatenate, ManyInputsOddByteWidthBuildsOnlyNonEmptySpansAndHandlesNullableGradients) {
-    REQUIRE_CUDA_DEVICE();
-    runManyInputsOddWidthCase<uint32_t>(5);
-    runManyInputsOddWidthCase<uint64_t>(5);
-}
-
-TEST(RaggedSequenceConcatenate, SparseNonEmptySpanPlansRemainCorrectAcrossLaunchScales) {
-    REQUIRE_CUDA_DEVICE();
-    // Row/input pairs include many zero-length rows. The host plan omits them,
-    // so these sizes exercise sparse span counts across increasingly large batches.
-    for (uint64_t batchSize : {15ULL, 29ULL, 57ULL}) {
-        SCOPED_TRACE(::testing::Message() << "UINT32 batchSize=" << batchSize);
-        runManyInputsOddWidthCase<uint32_t>(batchSize);
-    }
-    for (uint64_t batchSize : {15ULL, 29ULL, 57ULL}) {
-        SCOPED_TRACE(::testing::Message() << "UINT64 batchSize=" << batchSize);
-        runManyInputsOddWidthCase<uint64_t>(batchSize);
+    for (const bool wideSpans : {false, true}) {
+        SequenceCase testCase;
+        testCase.name = wideSpans ? "FP32 pairs, wide spans" : "FP32 pairs, packed spans";
+        testCase.valueBytes = 8;
+        // Rows with an empty side, an empty row, and two rows of capacity past the active ones.
+        testCase.lengths = {{2, 1}, {0, 3}, {4, 0}, {0, 0}, {1, 1}, {5, 2}, {3, 3}};
+        testCase.activeRows = 5;
+        testCase.wideSpans = wideSpans;
+        runSequenceCase(testCase);
+        testCase.name += ", second input without a gradient";
+        testCase.nullGradient = {false, true};
+        runSequenceCase(testCase);
     }
 }
 
-TEST(RaggedSequenceConcatenate, AdaptiveSpanGroupingThresholdBoundariesCoverBothOffsetWidths) {
+TEST(RaggedSequenceConcatenate, AllEmptyRowsLaunchNothingAndTouchNothing) {
     REQUIRE_CUDA_DEVICE();
-    // One row with one active value per input makes numInputs == totalSpans while
-    // respecting the public contract that concatenation has at least two inputs.
-    // Contiguous value/gradient storage keeps the 127/511-input cases lightweight.
-    // These hit both sides of every launch-policy boundary exactly:
-    //   <128 -> 1 span/CTA, [128,256) -> 2, [256,512) -> 4, >=512 -> 8.
-    constexpr uint32_t spanCounts[] = {127, 128, 255, 256, 511, 512};
-    for (uint32_t spanCount : spanCounts) {
-        SCOPED_TRACE(::testing::Message() << "UINT32 totalSpans=" << spanCount);
-        runExactSpanGroupingBoundaryCase<uint32_t>(spanCount);
-    }
-    for (uint32_t spanCount : spanCounts) {
-        SCOPED_TRACE(::testing::Message() << "UINT64 totalSpans=" << spanCount);
-        runExactSpanGroupingBoundaryCase<uint64_t>(spanCount);
-    }
+    SequenceCase testCase;
+    testCase.name = "every active row empty";
+    testCase.lengths = {{0, 0}, {0, 0}, {0, 0}, {2, 5}};
+    testCase.activeRows = 3;
+    runSequenceCase(testCase);
 }
-TEST(RaggedSequenceConcatenate, PayloadAwareSpanGroupingCoversFullOneThrough256SpecializationLadder) {
+
+TEST(RaggedSequenceConcatenate, ValuesMoveInPacketsOfTheirWidthAndAlignment) {
     REQUIRE_CUDA_DEVICE();
-    // One byte per span lets payload geometry permit the widest grouping. The
-    // helper chooses exactly 64 CTAs worth of spans for each requested rung, so
-    // the parallelism floor forces every 1/2/4/.../256 spans-per-CTA template.
-    for (const uint32_t spansPerBlock : {1U, 2U, 4U, 8U, 16U, 32U, 64U, 128U, 256U}) {
-        SCOPED_TRACE(::testing::Message() << "UINT32 spansPerBlock=" << spansPerBlock);
-        runUniformSpanPayloadCase<uint32_t>(1, spansPerBlock);
+    // 300 rows of 3 inputs with random lengths around 6 values, a fifth of them empty: values of every packet width
+    // (16, 8, 4, 2 and 1 bytes), then 16-byte values in arrays that start off a 16-byte boundary.
+    const auto lengths = makeLengths(300, 3, [](uint64_t row, uint32_t input) { return randomLength(row, input, 6, 200); });
+    for (const uint64_t valueBytes : {1ULL, 2ULL, 3ULL, 4ULL, 6ULL, 8ULL, 12ULL, 16ULL, 20ULL, 33ULL, 48ULL, 100ULL}) {
+        SequenceCase testCase;
+        testCase.name = std::to_string(valueBytes) + "-byte values";
+        testCase.valueBytes = valueBytes;
+        testCase.lengths = lengths;
+        testCase.wideSpans = valueBytes % 3 == 0;
+        runSequenceCase(testCase);
     }
-    for (const uint32_t spansPerBlock : {1U, 2U, 4U, 8U, 16U, 32U, 64U, 128U, 256U}) {
-        SCOPED_TRACE(::testing::Message() << "UINT64 spansPerBlock=" << spansPerBlock);
-        runUniformSpanPayloadCase<uint64_t>(1, spansPerBlock);
+    for (const uint64_t offset : {8ULL, 4ULL, 2ULL, 1ULL}) {
+        SequenceCase testCase;
+        testCase.name = "16-byte values, the output " + std::to_string(offset) + " bytes off";
+        testCase.valueBytes = 16;
+        testCase.lengths = lengths;
+        testCase.outputOffsetBytes = offset;
+        runSequenceCase(testCase);
+        testCase.name = "16-byte values, the second input " + std::to_string(offset) + " bytes off";
+        testCase.outputOffsetBytes = 0;
+        testCase.inputOffsetBytes = {0, offset, 0};
+        runSequenceCase(testCase);
     }
 }
 
-TEST(RaggedSequenceConcatenate, PayloadThresholdTransitionsCoverEveryLaneAllocation) {
+TEST(RaggedSequenceConcatenate, SpansOfEveryLengthTakeTheirLanesAndPasses) {
     REQUIRE_CUDA_DEVICE();
-    struct LaunchCase {
-        uint64_t expectedSpanBytes;
-        uint32_t spansPerBlock;
-    };
-    // The first byte above every 32-bytes/lane boundary halves spans/CTA. Each
-    // helper invocation supplies enough spans that the 64-CTA parallelism floor
-    // permits exactly the payload-selected specialization.
-    const std::vector<LaunchCase> cases{
-        {32, 256}, {33, 128}, {65, 64}, {129, 32}, {257, 16},
-        {513, 8}, {1025, 4}, {2049, 2}, {4097, 1},
-    };
-    for (const LaunchCase& launchCase : cases) {
-        SCOPED_TRACE(::testing::Message() << "bytes=" << launchCase.expectedSpanBytes
-                                          << " spansPerBlock=" << launchCase.spansPerBlock);
-        runUniformSpanPayloadCase<uint32_t>(launchCase.expectedSpanBytes, launchCase.spansPerBlock);
+    // The lanes of a span follow the table's mean span, from one lane (a packet) to eight blocks of them (5000
+    // packets, four to a lane); a span longer than a pass takes more.
+    for (const uint64_t mean : {1ULL, 2ULL, 5ULL, 16ULL, 37ULL, 128ULL, 300ULL, 1000ULL, 5000ULL}) {
+        SequenceCase testCase;
+        testCase.valueBytes = 16;
+        testCase.name = "every row of " + std::to_string(mean) + " packets";
+        testCase.lengths = makeLengths(40, 2, [mean](uint64_t, uint32_t) { return mean; });
+        runSequenceCase(testCase);
+        if (mean == 1) continue;
+        testCase.name = "rows around " + std::to_string(mean) + " packets";
+        testCase.lengths = makeLengths(40, 2, [mean](uint64_t row, uint32_t input) { return randomLength(row, input, mean, 100); });
+        runSequenceCase(testCase);
+    }
+    {
+        SequenceCase testCase;
+        testCase.name = "a one-value input beside a long one";
+        testCase.valueBytes = 4;
+        testCase.lengths = makeLengths(500, 2, [](uint64_t row, uint32_t input) { return input == 0 ? 1 : randomLength(row, input, 200); });
+        runSequenceCase(testCase);
+    }
+    {
+        // One row of each input holds 30000 values among rows of 4. Cut by the plan, it is 790 spans of 38 values beside
+        // the short rows' spans of 4; kept whole, it is one span and about a thousand passes for its lanes.
+        SequenceCase testCase;
+        testCase.name = "one long row among short ones, cut";
+        testCase.valueBytes = 4;
+        testCase.lengths = makeLengths(2000, 2, [](uint64_t row, uint32_t input) { return row == 700 + input ? 30000 : 4; });
+        runSequenceCase(testCase);
+        testCase.name = "one long row among short ones, whole";
+        testCase.cutLongRuns = false;
+        runSequenceCase(testCase);
     }
 }
 
-TEST(RaggedSequenceConcatenate, AlignedBulkCopiesUseExactTailForEverySupportedWidthAndTailSize) {
-    REQUIRE_CUDA_DEVICE();
-    for (const uint32_t copyWidth : {32U, 16U, 8U, 4U, 2U}) {
-        for (uint32_t tailBytes = 1; tailBytes < copyWidth; ++tailBytes) {
-            SCOPED_TRACE(::testing::Message() << "copyWidth=" << copyWidth << " tailBytes=" << tailBytes);
-            runExactTailCase<uint32_t>(copyWidth, tailBytes);
+TEST(RaggedSequenceConcatenate, PlansCutRunsLongerThanTwiceTheMean) {
+    // The limit is twice the mean run, rounded up; a plan without runs has none to cut.
+    EXPECT_EQ(raggedSequenceCopySpanValueLimit(43, 8), 12U);
+    EXPECT_EQ(raggedSequenceCopySpanValueLimit(40, 8), 10U);
+    EXPECT_EQ(raggedSequenceCopySpanValueLimit(1, 1), 2U);
+    EXPECT_EQ(raggedSequenceCopySpanValueLimit(0, 0), 1U);
+    EXPECT_EQ(raggedSequenceCopySpanCapacity(8), 12U);
+    EXPECT_EQ(raggedSequenceCopySpanCapacity(1), 1U);
+
+    // A run of 36 values at a limit of 12, after two spans already in the plan: three packed spans that follow one
+    // another in the input and in the output, the input index (1 of 3 inputs: 2 bits) in the top bits.
+    const uint32_t inputBits = raggedSequenceCopySpanInputBits(3);
+    EXPECT_EQ(inputBits, 2U);
+    std::vector<RaggedSequenceCopySpanPacked> spans(6, RaggedSequenceCopySpanPacked{9, 9});
+    EXPECT_EQ(appendRaggedSequenceCopyRun(spans.data(), 2, spans.size(), 1, 100, 500, 36, 12, inputBits), 5U);
+    for (uint32_t piece = 0; piece < 3; ++piece) {
+        EXPECT_EQ(spans[2 + piece].sourceBegin, 100U + 12U * piece);
+        EXPECT_EQ(spans[2 + piece].destinationBeginAndInput, (500U + 12U * piece) | (1U << 30U));
+    }
+    EXPECT_EQ(spans[5].sourceBegin, 9U);
+    // A run that is not a multiple of the limit ends in a shorter span; a run within the limit is one span.
+    std::vector<RaggedSequenceCopySpan64> wide(4);
+    EXPECT_EQ(appendRaggedSequenceCopyRun(wide.data(), 0, wide.size(), 3, 7, 11, 25, 12, inputBits), 3U);
+    EXPECT_EQ(wide[2].sourceBegin, 31U);
+    EXPECT_EQ(wide[2].destinationBegin, 35U);
+    EXPECT_EQ(wide[2].valueCount, 1U);
+    EXPECT_EQ(appendRaggedSequenceCopyRun(wide.data(), 3, wide.size(), 0, 0, 36, 12, 12, inputBits), 4U);
+    EXPECT_EQ(wide[3].valueCount, 12U);
+    // No room, no limit, and packed spans past what they hold: a source past 32 bits, a destination past 30 bits
+    // (2 input bits), an input past 2 bits.
+    EXPECT_THROW(appendRaggedSequenceCopyRun(wide.data(), 4, wide.size(), 0, 0, 0, 1, 12, inputBits), std::length_error);
+    EXPECT_THROW(appendRaggedSequenceCopyRun(wide.data(), 0, wide.size(), 0, 0, 0, 1, 0, inputBits), std::invalid_argument);
+    EXPECT_THROW(appendRaggedSequenceCopyRun(spans.data(), 0, spans.size(), 0, 1ULL << 32U, 0, 1, 12, inputBits), std::overflow_error);
+    EXPECT_THROW(appendRaggedSequenceCopyRun(spans.data(), 0, spans.size(), 0, 0, 1ULL << 30U, 1, 12, inputBits), std::overflow_error);
+    EXPECT_THROW(appendRaggedSequenceCopyRun(spans.data(), 0, spans.size(), 4, 0, 0, 1, 12, inputBits), std::overflow_error);
+
+    // The format a concatenate takes: packed while its output and inputs fit, wide past that.
+    EXPECT_EQ(raggedSequenceCopySpanInputBits(1), 1U);
+    EXPECT_EQ(raggedSequenceCopySpanInputBits(2), 1U);
+    EXPECT_EQ(raggedSequenceCopySpanInputBits(16), 4U);
+    EXPECT_EQ(raggedSequenceCopySpanInputBits(17), 5U);
+    EXPECT_EQ(raggedSequenceCopySpanFormatFor(2, 1ULL << 31U, 1ULL << 32U), RaggedSequenceCopySpanFormat::PACKED);
+    EXPECT_EQ(raggedSequenceCopySpanFormatFor(2, (1ULL << 31U) + 1, 10), RaggedSequenceCopySpanFormat::WIDE);
+    EXPECT_EQ(raggedSequenceCopySpanFormatFor(16, 1ULL << 28U, 10), RaggedSequenceCopySpanFormat::PACKED);
+    EXPECT_EQ(raggedSequenceCopySpanFormatFor(17, 1ULL << 28U, 10), RaggedSequenceCopySpanFormat::WIDE);
+    EXPECT_EQ(raggedSequenceCopySpanFormatFor(2, 100, (1ULL << 32U) + 1), RaggedSequenceCopySpanFormat::WIDE);
+    EXPECT_EQ(raggedSequenceCopySpanBytes(RaggedSequenceCopySpanFormat::PACKED), 8U);
+    EXPECT_EQ(raggedSequenceCopySpanBytes(RaggedSequenceCopySpanFormat::WIDE), 32U);
+
+    // The capacity holds every plan: runs of all lengths, among them ones far longer than the rest.
+    for (uint64_t seed = 0; seed < 2000; ++seed) {
+        const uint64_t runCount = 1 + splitMix64(seed) % 40;
+        std::vector<uint64_t> runValues(runCount);
+        uint64_t values = 0;
+        for (uint64_t run = 0; run < runCount; ++run) {
+            const uint64_t draw = splitMix64(seed * 1000 + run);
+            runValues[run] = draw % 7 == 0 ? 1 + (draw >> 8U) % 5000 : 1 + (draw >> 8U) % 6;
+            values += runValues[run];
         }
+        const uint64_t limit = raggedSequenceCopySpanValueLimit(values, runCount);
+        std::vector<RaggedSequenceCopySpan64> plan(raggedSequenceCopySpanCapacity(runCount));
+        uint64_t count = 0;
+        uint64_t begin = 0;
+        for (const uint64_t run : runValues) {
+            count = appendRaggedSequenceCopyRun(plan.data(), count, plan.size(), 0, begin, begin, run, limit, 1);
+            begin += run;
+        }
+        uint64_t next = 0;
+        uint64_t wrong = 0;
+        for (uint64_t span = 0; span < count; ++span) {
+            wrong += plan[span].destinationBegin != next || plan[span].valueCount == 0 || plan[span].valueCount > limit;
+            next += plan[span].valueCount;
+        }
+        ASSERT_EQ(wrong, 0U) << "seed " << seed;
+        ASSERT_EQ(next, values) << "seed " << seed;
     }
-    // Offset width is orthogonal to the byte-copy tail machinery, but retain a
-    // wide-tail UINT64 case so both structural dtypes cross that path.
-    runExactTailCase<uint64_t>(32, 31);
+}
+
+TEST(RaggedSequenceConcatenate, LargeTablesDeepenTheLanes) {
+    REQUIRE_CUDA_DEVICE();
+    // Enough spans that a lane takes two and four packets a pass (past 768 blocks at the depth before), and a table
+    // of one-packet spans, which stays at one.
+    {
+        SequenceCase testCase;
+        testCase.name = "20000 rows x 2 of about 5 4-byte values";
+        testCase.valueBytes = 4;
+        testCase.lengths = makeLengths(20000, 2, [](uint64_t row, uint32_t input) { return randomLength(row, input, 5, 50); });
+        runSequenceCase(testCase);
+    }
+    {
+        SequenceCase testCase;
+        testCase.name = "60000 rows x 2 of about 5 4-byte values";
+        testCase.valueBytes = 4;
+        testCase.lengths = makeLengths(60000, 2, [](uint64_t row, uint32_t input) { return randomLength(row, input, 5, 50); });
+        runSequenceCase(testCase);
+    }
+    {
+        // 1-byte packets, four to a lane: 500 blocks, so the table stays on them.
+        SequenceCase testCase;
+        testCase.name = "2000 rows x 2 of about 80 1-byte values";
+        testCase.valueBytes = 1;
+        testCase.lengths = makeLengths(2000, 2, [](uint64_t row, uint32_t input) { return randomLength(row, input, 80); });
+        runSequenceCase(testCase);
+    }
+    {
+        SequenceCase testCase;
+        testCase.name = "150000 rows x 2 of one 16-byte value";
+        testCase.valueBytes = 16;
+        testCase.lengths = makeLengths(150000, 2, [](uint64_t row, uint32_t input) { return (row + input) % 5 == 0 ? 0 : 1; });
+        testCase.wideSpans = true;
+        runSequenceCase(testCase);
+    }
+}
+
+TEST(RaggedSequenceConcatenate, LargeTablesOfOneAndTwoByteValuesMoveInSixteenBytePackets) {
+    REQUIRE_CUDA_DEVICE();
+    // Tables of 1- and 2-byte packets past 768 blocks at four packets per lane take the 16-byte kernel: spans that
+    // start and end at any byte of arrays that start at any byte, their heads and tails in aligned pieces.
+    struct ByteCase {
+        const char *name;
+        uint64_t valueBytes;
+        uint64_t rows;
+        uint64_t mean;
+        uint32_t emptyPerMille;
+        bool wideSpans;
+    };
+    for (const ByteCase &byteCase : {
+             ByteCase{"110000 rows x 2 of about 3 bytes: spans inside one packet", 1, 110000, 3, 100, false},
+             ByteCase{"9000 rows x 2 of about 40 bytes", 1, 9000, 40, 50, true},
+             ByteCase{"4000 rows x 2 of about 3 33-byte values", 33, 4000, 3, 0, false},
+             ByteCase{"15000 rows x 2 of about 10 6-byte values (2-byte packets)", 6, 15000, 10, 50, false},
+             ByteCase{"40 rows x 2 of about 60000 bytes: lanes over several blocks, two packets each", 1, 40, 60000, 0, true},
+             ByteCase{"3000 rows x 2 of about 250 3-byte values", 3, 3000, 250, 20, false},
+         }) {
+        SequenceCase testCase;
+        testCase.name = byteCase.name;
+        testCase.valueBytes = byteCase.valueBytes;
+        testCase.wideSpans = byteCase.wideSpans;
+        const uint64_t mean = byteCase.mean;
+        const uint32_t emptyPerMille = byteCase.emptyPerMille;
+        testCase.lengths = makeLengths(byteCase.rows, 2, [mean, emptyPerMille](uint64_t row, uint32_t input) {
+            return randomLength(row, input, mean, emptyPerMille);
+        });
+        runSequenceCase(testCase);
+        testCase.name += ", arrays off their boundaries, no gradient for the first input";
+        testCase.outputOffsetBytes = 3;
+        testCase.inputOffsetBytes = {1, 7};
+        testCase.nullGradient = {true, false};
+        runSequenceCase(testCase);
+    }
+    {
+        // A long row cut by the plan among short ones, at 2-byte packets.
+        SequenceCase testCase;
+        testCase.name = "one row of 600000 2-byte values among 20000 rows of 6";
+        testCase.valueBytes = 2;
+        testCase.lengths = makeLengths(20000, 2, [](uint64_t row, uint32_t input) { return row == 7000 + input ? 600000 : 6; });
+        runSequenceCase(testCase);
+    }
+}
+
+TEST(RaggedSequenceConcatenate, MoreInputsThanALaunchHoldsAndNullableGradients) {
+    REQUIRE_CUDA_DEVICE();
+    for (const uint32_t inputs : {16U, 17U, 40U}) {
+        SequenceCase testCase;
+        testCase.name = std::to_string(inputs) + " inputs of odd-width values";
+        testCase.valueBytes = 5;
+        testCase.lengths = makeLengths(70, inputs, [](uint64_t row, uint32_t input) { return randomLength(row, input, 4, 300); });
+        testCase.activeRows = 61;
+        for (uint32_t input = 0; input < inputs; ++input) testCase.nullGradient.push_back(input % 3 == 1 || (input >= 16 && input < 32));
+        runSequenceCase(testCase);
+    }
+}
+
+TEST(RaggedSequenceConcatenate, RejectsMalformedLaunches) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor values = makeGpuBytes(std::vector<uint8_t>(256, 1), stream);
+    Tensor output = makeGpuBytes(std::vector<uint8_t>(256, 2), stream);
+    const std::vector<RaggedSequenceCopySpanPacked> spans{{0, 0}};
+    std::vector<uint8_t> spanBytes(sizeof(RaggedSequenceCopySpanPacked) + 16);
+    std::memcpy(spanBytes.data(), spans.data(), sizeof(RaggedSequenceCopySpanPacked));
+    Tensor spanTable = makeGpuBytes(spanBytes, stream);
+    const std::vector<void *> inputs{values.getMemPtr(), values.getMemPtr<uint8_t>() + 64};
+    const std::vector<void *> inputsWithNull{values.getMemPtr(), nullptr};
+    void *const table = spanTable.getMemPtr();
+
+    constexpr RaggedSequenceCopySpanFormat kPacked = RaggedSequenceCopySpanFormat::PACKED;
+    EXPECT_THROW(launchRaggedSequenceConcatenate(output.getMemPtr(), inputs, table, 1, 0, 1, kPacked, 1, stream), std::invalid_argument);
+    EXPECT_THROW(launchRaggedSequenceConcatenate(output.getMemPtr(), inputs, table, 1, 4, 0, kPacked, 1, stream), std::invalid_argument);
+    EXPECT_THROW(launchRaggedSequenceConcatenate(output.getMemPtr(), inputs, table, 1, 4, 1, static_cast<RaggedSequenceCopySpanFormat>(7), 1, stream), std::invalid_argument);
+    EXPECT_THROW(launchRaggedSequenceConcatenate(output.getMemPtr(), inputs, table, 1, 4, 1, kPacked, 0, stream), std::invalid_argument);
+    EXPECT_THROW(launchRaggedSequenceConcatenate(output.getMemPtr(), inputs, table, 0, 4, 1, kPacked, 1, stream), std::invalid_argument);
+    EXPECT_THROW(launchRaggedSequenceConcatenate(output.getMemPtr(), inputs, nullptr, 1, 4, 1, kPacked, 1, stream), std::invalid_argument);
+    EXPECT_THROW(launchRaggedSequenceConcatenate(output.getMemPtr(), inputs, spanTable.getMemPtr<uint8_t>() + 4, 1, 4, 1, kPacked, 1, stream),
+                 std::invalid_argument);
+    EXPECT_THROW(launchRaggedSequenceConcatenate(nullptr, inputs, table, 1, 4, 1, kPacked, 1, stream), std::invalid_argument);
+    EXPECT_THROW(launchRaggedSequenceConcatenate(output.getMemPtr(), inputsWithNull, table, 1, 4, 1, kPacked, 1, stream), std::invalid_argument);
+    EXPECT_THROW(launchRaggedSequenceConcatenate(output.getMemPtr(), {}, table, 1, 4, 1, kPacked, 1, stream), std::invalid_argument);
+    EXPECT_THROW(launchRaggedSequenceConcatenateBackward(inputs, output.getMemPtr(), table, 1, 4, 1, kPacked, 0, stream), std::invalid_argument);
+    EXPECT_THROW(launchRaggedSequenceConcatenateBackward(inputs, nullptr, table, 1, 4, 1, kPacked, 1, stream), std::invalid_argument);
+    // A null gradient is not an error, and neither is an empty plan for an empty active prefix.
+    EXPECT_NO_THROW(launchRaggedSequenceConcatenateBackward(inputsWithNull, output.getMemPtr(), table, 1, 4, 1, kPacked, 1, stream));
+    EXPECT_NO_THROW(launchRaggedSequenceConcatenate(output.getMemPtr(), inputs, nullptr, 0, 4, 1, kPacked, 0, stream));
+    stream.synchronize();
 }

@@ -35,13 +35,13 @@ class TrainingData {
                  DatasetAccessPolicy accessPolicy = {},
                  std::string datasetName = "dataset");
 
-    [[nodiscard]] std::shared_ptr<BatchSession> openSession(uint64_t maxInFlightBatches = 32) const;
+    [[nodiscard]] std::shared_ptr<BatchSession> openSession(uint64_t maxInFlightBatches = 4) const;
     [[nodiscard]] std::shared_ptr<BatchSession> openSession(
         uint64_t maxInFlightBatches,
         const DatasetFieldMaterializationRequirements& fieldRequirements) const;
     [[nodiscard]] std::shared_ptr<BatchSession> openValidationSession(
         const std::string& validationPopulation,
-        uint64_t maxInFlightBatches = 32) const;
+        uint64_t maxInFlightBatches = 4) const;
     [[nodiscard]] std::shared_ptr<BatchSession> openValidationSession(
         const std::string& validationPopulation,
         uint64_t maxInFlightBatches,

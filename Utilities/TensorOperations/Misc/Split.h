@@ -1,25 +1,14 @@
 #pragma once
 
-#include "Utilities/Common/Stream.h"
 #include "Utilities/TensorOperations/Misc/Concatenate.h"
 
-#include <cstdint>
-
-void launchSplit(void *dest[],
-                 void *source,
+// The reverse of launchConcatenate: for every outer slice, array i takes its span of spanElements[i] elements of
+// source, converted from sourceDataType to destDataTypes[i] as it moves. A null dests[i] skips array i (its elements
+// are not read); a span of no elements is skipped too.
+void launchSplit(const std::vector<void *> &dests,
+                 const std::vector<ThorImplementation::DataType> &destDataTypes,
+                 const void *source,
+                 ThorImplementation::DataType sourceDataType,
                  uint64_t outerSlices,
-                 uint32_t numDestArrays,
-                 uint64_t packedSliceBytes,
-                 const ConcatenateSpanGeometry spanGeometry[],
+                 const std::vector<uint64_t> &spanElements,
                  Stream stream);
-
-// Benchmark-only launch hook that forces one existing spans-per-CTA specialization.
-// Production callers should use launchSplit().
-void launchSplitWithSpansPerCtaForBenchmark(void *dest[],
-                                            void *source,
-                                            uint64_t outerSlices,
-                                            uint32_t numDestArrays,
-                                            uint64_t packedSliceBytes,
-                                            const ConcatenateSpanGeometry spanGeometry[],
-                                            uint32_t spansPerCta,
-                                            Stream stream);

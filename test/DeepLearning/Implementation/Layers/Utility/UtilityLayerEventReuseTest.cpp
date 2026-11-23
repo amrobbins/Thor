@@ -117,5 +117,8 @@ TEST(UtilityLayerEventReuse, Sync2dConcatenatePointerTablesAreCompileTimeStatic)
     EXPECT_EQ(raggedSequenceConcatenate.find("refreshGradientPointerTable"), string::npos);
     EXPECT_EQ(raggedSequenceConcatenate.find("releaseGradientPointerRefresh"), string::npos);
     EXPECT_EQ(raggedSequenceConcatenate.find("enqueueHostFunction"), string::npos);
-    EXPECT_NE(raggedSequenceConcatenate.find("valueGradientPointers.data()"), string::npos);
+    // The value and gradient pointers are host vectors fixed at compile and passed as launch parameters.
+    EXPECT_EQ(raggedSequenceConcatenate.find("valueInputPointers_d"), string::npos);
+    EXPECT_EQ(raggedSequenceConcatenate.find("valueGradientPointers_d"), string::npos);
+    EXPECT_NE(raggedSequenceConcatenate.find("valueGradientPointers.assign("), string::npos);
 }

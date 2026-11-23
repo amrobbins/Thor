@@ -4,6 +4,7 @@
 #include <limits>
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/LowPrecisionFloat.h"
+#include "Utilities/TensorOperations/DataTypeConversions/ElementConverter.h"
 
 using namespace ThorImplementation;
 using namespace std;
@@ -15,29 +16,6 @@ void launchOutOfPlaceConvertKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long nu
 // Launch the in-place widening kernel that converts the first chunk:
 template <typename FROM_TYPE, typename TO_TYPE>
 void launchReadConvertSyncWriteKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
-
-template <typename FROM_TYPE, typename TO_TYPE>
-struct Converter {
-    __device__ __forceinline__ TO_TYPE operator()(FROM_TYPE x) const {
-        if constexpr (ThorLowPrecision::isFloatingStorageType<FROM_TYPE> && ThorLowPrecision::isIntegerStorageType<TO_TYPE>)
-            return ThorLowPrecision::toIntegerSaturating<TO_TYPE>(x);
-        else
-            return static_cast<TO_TYPE>(x);
-    }
-};
-template <typename FROM_TYPE>
-struct Converter<FROM_TYPE, __nv_fp8_e4m3> {
-    __device__ __forceinline__ __nv_fp8_e4m3 operator()(FROM_TYPE x) const {
-        return ThorLowPrecision::toFp8E4M3Satfinite(x);
-    }
-};
-
-template <typename FROM_TYPE>
-struct Converter<FROM_TYPE, __nv_fp8_e5m2> {
-    __device__ __forceinline__ __nv_fp8_e5m2 operator()(FROM_TYPE x) const {
-        return ThorLowPrecision::toFp8E5M2Satfinite(x);
-    }
-};
 
 void TypeConverter::gpuConvertType(void *source_d,
                                    void *dest_d,
@@ -833,7 +811,7 @@ __global__ void convertOutOfPlaceKernelNoOvershoot(FROM_TYPE *source_d, TO_TYPE 
         long index = threadIdx.x + blockIdx.x * 256 * 8 + i * 256;
         if (index >= numElements)
             return;
-        dest_d[index] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)source_d)[index]);
+        dest_d[index] = ElementConverter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)source_d)[index]);
     }
 }
 
@@ -928,7 +906,7 @@ __global__ void convertReadWholeChunkThenWriteWholeChunkKernel(FROM_TYPE *source
     for (int i = 0; i < 8; ++i) {
         long index = threadIdx.x + blockIdx.x * 256 * 8 + i * 256;
         if (index < numElements)
-            dest_d[index] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)buffer_shared)[i * 256 + threadIdx.x]);
+            dest_d[index] = ElementConverter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)buffer_shared)[i * 256 + threadIdx.x]);
     }
 }
 
@@ -946,40 +924,6 @@ __host__ __device__ constexpr int outOfPlaceElementsPerThread() {
     return bytesOfTheWiderSide / wide;
 }
 
-template <int BYTES>
-__device__ __forceinline__ void loadConvertBytes(void *to, const void *from) {
-    if constexpr (BYTES >= 16) {
-        const uint4 *source = static_cast<const uint4 *>(__builtin_assume_aligned(from, BYTES >= 32 ? 32 : 16));
-#pragma unroll
-        for (int i = 0; i < BYTES / 16; ++i)
-            static_cast<uint4 *>(to)[i] = source[i];
-    } else if constexpr (BYTES == 8) {
-        *static_cast<uint2 *>(to) = *static_cast<const uint2 *>(from);
-    } else if constexpr (BYTES == 4) {
-        *static_cast<unsigned int *>(to) = *static_cast<const unsigned int *>(from);
-    } else {
-        static_assert(BYTES == 2, "accesses of 2 to 32 bytes");
-        *static_cast<unsigned short *>(to) = *static_cast<const unsigned short *>(from);
-    }
-}
-
-template <int BYTES>
-__device__ __forceinline__ void storeConvertBytes(void *to, const void *from) {
-    if constexpr (BYTES >= 16) {
-        uint4 *dest = static_cast<uint4 *>(__builtin_assume_aligned(to, BYTES >= 32 ? 32 : 16));
-#pragma unroll
-        for (int i = 0; i < BYTES / 16; ++i)
-            dest[i] = static_cast<const uint4 *>(from)[i];
-    } else if constexpr (BYTES == 8) {
-        *static_cast<uint2 *>(to) = *static_cast<const uint2 *>(from);
-    } else if constexpr (BYTES == 4) {
-        *static_cast<unsigned int *>(to) = *static_cast<const unsigned int *>(from);
-    } else {
-        static_assert(BYTES == 2, "accesses of 2 to 32 bytes");
-        *static_cast<unsigned short *>(to) = *static_cast<const unsigned short *>(from);
-    }
-}
-
 template <typename FROM_TYPE, typename TO_TYPE>
 __global__ void __launch_bounds__(256) convertOutOfPlaceKernel(const FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
     constexpr int E = outOfPlaceElementsPerThread<FROM_TYPE, TO_TYPE>();
@@ -991,7 +935,7 @@ __global__ void __launch_bounds__(256) convertOutOfPlaceKernel(const FROM_TYPE *
         // the kernel, not one per element.
 #pragma unroll 1
         for (long i = first; i < numElements; ++i)
-            dest_d[i] = Converter<FROM_TYPE, TO_TYPE>{}(source_d[i]);
+            dest_d[i] = ElementConverter<FROM_TYPE, TO_TYPE>{}(source_d[i]);
         return;
     }
 
@@ -1000,7 +944,7 @@ __global__ void __launch_bounds__(256) convertOutOfPlaceKernel(const FROM_TYPE *
     alignas(16) TO_TYPE out[E];
 #pragma unroll
     for (int i = 0; i < E; ++i)
-        out[i] = Converter<FROM_TYPE, TO_TYPE>{}(in[i]);
+        out[i] = ElementConverter<FROM_TYPE, TO_TYPE>{}(in[i]);
     storeConvertBytes<E * static_cast<int>(sizeof(TO_TYPE))>(dest_d + first, out);
 }
 

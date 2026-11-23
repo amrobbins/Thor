@@ -51,18 +51,20 @@ namespace ThorImplementation {
  * Tensor0's entries are in [0..63]  [0..7][0..127]
  * Tensor1's entries are in [0..63] [8..23][0..127]
  * Tensor2's entries are in [0..63][24..31][0..127]
+ *
+ * Each input may have its own data type; the output has outputDataType, and an input of another type is converted as
+ * it moves (one kernel launch reads every input and writes the output, converting as TypeConverter does). The backward
+ * split converts the output's gradient back to each input's type. An input of an integral type (BOOLEAN included), or
+ * every input when the output's type is integral, takes no gradient: its split destination is null.
  */
 class Concatenate : public MultiConnectionLayer {
    public:
     ~Concatenate() override {}
 
-    Concatenate(unsigned int axis, uint32_t expectedNumInputs) {
+    Concatenate(unsigned int axis, uint32_t expectedNumInputs, DataType outputDataType) {
         this->axis = (int)axis;
         this->expectedNumInputs = expectedNumInputs;
-        splitTensorFeatureInputMemoriesArray_d = nullptr;
-        splitTensorErrorOutputMemoriesArray_d = nullptr;
-        spanGeometryPerSplitTensor_d = nullptr;
-
+        this->outputDataType = outputDataType;
         if (expectedNumInputs < 2)
             throw std::invalid_argument("Concatenate requires at least two declared inputs.");
         previousLayers.resize(expectedNumInputs);
@@ -101,13 +103,6 @@ class Concatenate : public MultiConnectionLayer {
             }
 
             const TensorDescriptor &descriptor = featureInputs[i].value().getDescriptor();
-            if (descriptor.getDataType() != referenceDescriptor.getDataType()) {
-                THOR_THROW_LOGIC_ERROR("Concatenate data type mismatch between input[0] and input[" + std::to_string(i) + "]" +
-                                       layerContext() + ". expected_data_type=" + referenceDescriptor.getElementTypeName() +
-                                       ", actual_data_type=" + descriptor.getElementTypeName() + ", input_shapes=" + inputShapesToString() +
-                                       ". Convert inputs to the same storage data type before concatenating them.");
-            }
-
             const std::vector<uint64_t> &dimensions = descriptor.getDimensions();
             if (dimensions.size() != numDimensions) {
                 THOR_THROW_LOGIC_ERROR("Concatenate rank mismatch at input[" + std::to_string(i) + "]" + layerContext() +
@@ -137,7 +132,7 @@ class Concatenate : public MultiConnectionLayer {
 
         std::vector<uint64_t> outputDimensions = referenceDimensions;
         outputDimensions[axis] = newAxisSize;
-        TensorDescriptor outputDescriptor = TensorDescriptor(referenceDescriptor.getDataType(), outputDimensions);
+        TensorDescriptor outputDescriptor = TensorDescriptor(outputDataType, outputDimensions);
 
         return Tensor(featureInputs[0].value().getPlacement(), outputDescriptor);
     }
@@ -153,51 +148,22 @@ class Concatenate : public MultiConnectionLayer {
         ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
         const uint32_t numSplitTensors = static_cast<uint32_t>(featureInputs.size());
 
-        // Pointer tables and static span geometry are uploaded on the same
-        // non-blocking stream used by the copy kernels. The host vectors remain
-        // alive until the final synchronization below.
-        std::vector<void *> splitTensorFeatureInputMemoriesArray(numSplitTensors);
-        std::vector<void *> splitTensorErrorOutputMemoriesArray;
-
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&splitTensorFeatureInputMemoriesArray_d),
-                              numSplitTensors * sizeof(void *)));
+        // Feature-input connections cannot change after compilation, and Tensor handles retain their backing
+        // allocation for their lifetime, so the pointers are fixed for the runnable layer and go to every launch as
+        // its parameters.
+        splitTensorFeatureInputMemories.assign(numSplitTensors, nullptr);
         for (uint32_t i = 0; i < numSplitTensors; ++i) {
             THOR_THROW_IF_FALSE(featureInputs[i].has_value());
-            splitTensorFeatureInputMemoriesArray[i] = featureInputs[i].value().getMemPtr();
+            splitTensorFeatureInputMemories[i] = featureInputs[i].value().getMemPtr();
         }
-        CUDA_CHECK(cudaMemcpyAsync(splitTensorFeatureInputMemoriesArray_d,
-                                   splitTensorFeatureInputMemoriesArray.data(),
-                                   numSplitTensors * sizeof(void *),
-                                   cudaMemcpyHostToDevice,
-                                   streams[0].getStream()));
-
-        // Feature-input connections cannot change after compilation, and Tensor
-        // handles retain their backing allocation for their lifetime. Therefore
-        // this device pointer table is immutable for the runnable layer and does
-        // not need a per-batch H2D refresh or host-lifetime callback.
 
         if (errorInputs[0].has_value()) {
-            // Backpropagation through Concatenate may be intentionally sparse:
-            // missing upstream destinations are backed by throwaway tensors so
-            // Split can keep the same static span plan as forward.
-            discardedErrorOutputs.resize(numSplitTensors);
-            splitTensorErrorOutputMemoriesArray.resize(numSplitTensors);
-            CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&splitTensorErrorOutputMemoriesArray_d),
-                                  numSplitTensors * sizeof(void *)));
+            // Backpropagation through Concatenate may be sparse: an input that takes no gradient has a null
+            // destination, and the split neither reads nor writes its span.
+            splitTensorErrorOutputMemories.assign(numSplitTensors, nullptr);
             for (uint32_t i = 0; i < numSplitTensors; ++i) {
-                if (errorOutputs[i].has_value()) {
-                    splitTensorErrorOutputMemoriesArray[i] = errorOutputs[i].value().getMemPtr();
-                } else {
-                    THOR_THROW_IF_FALSE(featureInputs[i].has_value());
-                    discardedErrorOutputs[i] = featureInputs[i].value().clone();
-                    splitTensorErrorOutputMemoriesArray[i] = discardedErrorOutputs[i].value().getMemPtr();
-                }
+                if (errorOutputs[i].has_value()) splitTensorErrorOutputMemories[i] = errorOutputs[i].value().getMemPtr();
             }
-            CUDA_CHECK(cudaMemcpyAsync(splitTensorErrorOutputMemoriesArray_d,
-                                       splitTensorErrorOutputMemoriesArray.data(),
-                                       numSplitTensors * sizeof(void *),
-                                       cudaMemcpyHostToDevice,
-                                       streams[0].getStream()));
         }
 
         const TensorDescriptor &outputDescriptor = featureOutputs[0].value().getDescriptor();
@@ -209,32 +175,25 @@ class Concatenate : public MultiConnectionLayer {
             innerElements = checkedMultiply(innerElements, outputDimensions[d],
                                             "Concatenate inner geometry overflow.");
 
-        std::vector<uint64_t> axisElementsPerSplitTensor(numSplitTensors);
-        for (uint32_t i = 0; i < numSplitTensors; ++i)
-            axisElementsPerSplitTensor[i] = featureInputs[i].value().getDescriptor().getDimensions()[axis];
-
-        const std::vector<ConcatenateSpanGeometry> spanGeometry = buildConcatenateSpanGeometry(
-            TensorDescriptor::getElementSizeInBytes(outputDescriptor.getDataType()),
-            innerElements,
-            axisElementsPerSplitTensor);
-        THOR_THROW_IF_FALSE(spanGeometry.size() == numSplitTensors);
-        CUDA_CHECK(cudaMalloc(&spanGeometryPerSplitTensor_d,
-                              spanGeometry.size() * sizeof(ConcatenateSpanGeometry)));
-        CUDA_CHECK(cudaMemcpyAsync(spanGeometryPerSplitTensor_d,
-                                   spanGeometry.data(),
-                                   spanGeometry.size() * sizeof(ConcatenateSpanGeometry),
-                                   cudaMemcpyHostToDevice,
-                                   streams[0].getStream()));
-
-        packedSliceBytes = spanGeometry.back().packedOffsetBytes + spanGeometry.back().spanBytes;
-        THOR_THROW_IF_FALSE(packedSliceBytes > 0);
+        // A span is one input's elements of one outer slice: its extent on the axis times the elements after it.
+        splitTensorDataTypes.assign(numSplitTensors, outputDataType);
+        spanElementsPerSplitTensor.assign(numSplitTensors, 0);
+        uint64_t packedSliceElements = 0;
+        for (uint32_t i = 0; i < numSplitTensors; ++i) {
+            const TensorDescriptor &descriptor = featureInputs[i].value().getDescriptor();
+            splitTensorDataTypes[i] = descriptor.getDataType();
+            spanElementsPerSplitTensor[i] = checkedMultiply(descriptor.getDimensions()[axis], innerElements,
+                                                            "Concatenate span geometry overflow.");
+            if (spanElementsPerSplitTensor[i] > std::numeric_limits<uint64_t>::max() - packedSliceElements)
+                throw std::invalid_argument("Concatenate span geometry overflow.");
+            packedSliceElements += spanElementsPerSplitTensor[i];
+        }
+        THOR_THROW_IF_FALSE(packedSliceElements > 0);
 
         outerSlicesPerBatch = 1;
         for (uint32_t d = 1; d < axis; ++d)
             outerSlicesPerBatch = checkedMultiply(outerSlicesPerBatch, outputDimensions[d],
                                                   "Concatenate outer geometry overflow.");
-
-        streams[0].synchronize();
 
         for (unsigned int i = 0; i < featureInputs.size(); ++i)
             allFeatureInputTensorIds.insert(featureInputs[i].value().getTensorId());
@@ -259,12 +218,12 @@ class Concatenate : public MultiConnectionLayer {
     void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override {
         if (errorInput.has_value()) {
             const uint64_t activeOuterSlices = resolveActiveOuterSlices(errorInput.value().getDescriptor(), batchSize);
-            launchSplit(splitTensorErrorOutputMemoriesArray_d,
+            launchSplit(splitTensorErrorOutputMemories,
+                        splitTensorDataTypes,
                         errorInput.value().getMemPtr(),
+                        outputDataType,
                         activeOuterSlices,
-                        static_cast<uint32_t>(errorOutputs.size()),
-                        packedSliceBytes,
-                        spanGeometryPerSplitTensor_d,
+                        spanElementsPerSplitTensor,
                         streams[0]);
         }
 
@@ -317,11 +276,11 @@ class Concatenate : public MultiConnectionLayer {
                                             "Concatenate active outer-slice count overflow.");
         launchConcatenate(
             featureOutputs[0].value().getMemPtr(),
-            splitTensorFeatureInputMemoriesArray_d,
+            outputDataType,
+            splitTensorFeatureInputMemories,
+            splitTensorDataTypes,
             activeOuterSlices,
-            static_cast<uint32_t>(featureInputs.size()),
-            packedSliceBytes,
-            spanGeometryPerSplitTensor_d,
+            spanElementsPerSplitTensor,
             streams[0]);
 
         uint32_t outputValidExampleCount = currentValidExampleCount;
@@ -343,21 +302,10 @@ class Concatenate : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(featureInputs[0].has_value());
         TensorPlacement placement = featureInputs[0].value().getPlacement();
         THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-        ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
-        if (splitTensorFeatureInputMemoriesArray_d != nullptr) {
-            CUDA_CHECK(cudaFree(splitTensorFeatureInputMemoriesArray_d));
-            splitTensorFeatureInputMemoriesArray_d = nullptr;
-        }
-        if (splitTensorErrorOutputMemoriesArray_d != nullptr) {
-            CUDA_CHECK(cudaFree(splitTensorErrorOutputMemoriesArray_d));
-            splitTensorErrorOutputMemoriesArray_d = nullptr;
-        }
-        discardedErrorOutputs.clear();
-        if (spanGeometryPerSplitTensor_d != nullptr) {
-            CUDA_CHECK(cudaFree(spanGeometryPerSplitTensor_d));
-            spanGeometryPerSplitTensor_d = nullptr;
-        }
-        packedSliceBytes = 0;
+        splitTensorFeatureInputMemories.clear();
+        splitTensorErrorOutputMemories.clear();
+        splitTensorDataTypes.clear();
+        spanElementsPerSplitTensor.clear();
         outerSlicesPerBatch = 1;
         for (Event& event : forwardInputReadyEvents)
             event = Event();
@@ -416,7 +364,7 @@ class Concatenate : public MultiConnectionLayer {
         streams[inputIndex] = stream;
         previousLayers[inputIndex] = previousLayer;
         featureInputs[inputIndex] = featureInput;
-        if (backPropagateError && !isInferenceOnly())
+        if (backPropagateError && !isInferenceOnly() && takesGradient(featureInput.value().getDescriptor().getDataType()))
             errorOutputs[inputIndex] = featureInput.value().clone();
         else
             errorOutputs[inputIndex] = std::nullopt;
@@ -433,6 +381,12 @@ class Concatenate : public MultiConnectionLayer {
 
    private:
     uint32_t expectedNumInputs;
+    DataType outputDataType;
+
+    // A gradient passes through the conversion only between floating-point types.
+    bool takesGradient(DataType inputDataType) const {
+        return !TensorDescriptor::isIntegralType(inputDataType) && !TensorDescriptor::isIntegralType(outputDataType);
+    }
 
     static std::string dimensionsToString(const std::vector<uint64_t> &dimensions) {
         std::ostringstream out;
@@ -492,11 +446,10 @@ class Concatenate : public MultiConnectionLayer {
 
     unsigned int axis;
 
-    void **splitTensorFeatureInputMemoriesArray_d;
-    void **splitTensorErrorOutputMemoriesArray_d;
-    std::vector<std::optional<Tensor>> discardedErrorOutputs;
-    ConcatenateSpanGeometry *spanGeometryPerSplitTensor_d;
-    uint64_t packedSliceBytes = 0;
+    std::vector<void *> splitTensorFeatureInputMemories;
+    std::vector<void *> splitTensorErrorOutputMemories;
+    std::vector<DataType> splitTensorDataTypes;
+    std::vector<uint64_t> spanElementsPerSplitTensor;
     uint64_t outerSlicesPerBatch = 1;
 
     std::set<unsigned long> allFeatureInputTensorIds;

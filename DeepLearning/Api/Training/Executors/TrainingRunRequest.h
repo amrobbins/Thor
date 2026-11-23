@@ -49,7 +49,7 @@ struct NsightSystemsProfileConfig {
 };
 
 struct TrainingRuntimeConfig {
-    uint64_t maxInFlightBatches = 32;
+    uint64_t maxInFlightBatches = 4;
     double statsIntervalSeconds = 10.0;
     bool statsStderrAlso = false;
     LineStatsColorMode statsColorMode = LineStatsColorMode::AUTO;

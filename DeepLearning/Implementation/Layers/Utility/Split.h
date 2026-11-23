@@ -4,11 +4,14 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <string>
+#include <utility>
 #include <stdexcept>
 #include <vector>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Layers/DistinctProducerStreamJoin.h"
 #include "DeepLearning/Implementation/Layers/DistinctTargetStreamFanout.h"
 #include "Utilities/Expression/CudaHelpers.h"
@@ -49,124 +52,101 @@ namespace ThorImplementation {
  * Output tensor0's entries are from [0..63]  [0..7][0..127]
  * Output tensor1's entries are from [0..63] [8..23][0..127]
  * Output tensor2's entries are from [0..63][24..31][0..127]
+ *
+ * Output i has outputDataTypes[i], converted from the input's type as it moves (one launch writes every output). Output
+ * i is the layer's connection (driver connection type) i, whatever order the outputs are connected in. Backward, one
+ * concatenate converts each output's gradient to the input's type. An output that takes no gradient (its next layer
+ * asks for none, or its type or the input's is integral) contributes zeros: its span of the input's gradient is read
+ * from a zero tensor of the input's type, filled once at compile.
  */
 class Split : public MultiConnectionLayer {
    public:
     ~Split() override {}
 
-    Split(unsigned int axis, std::vector<unsigned long> axisElements) {
-        this->axis = axis;
-        this->axisElements = axisElements;
-        THOR_THROW_IF_FALSE(!axisElements.empty());
-        splitTensorErrorInputMemoriesArray_d = nullptr;
-        splitTensorFeatureOutputMemoriesArray_d = nullptr;
-        spanGeometryPerSplitTensor_d = nullptr;
+    Split(unsigned int axis, std::vector<unsigned long> axisElements, std::vector<DataType> outputDataTypes)
+        : axis(axis), axisElements(std::move(axisElements)), outputDataTypes(std::move(outputDataTypes)) {
+        if (this->axisElements.empty()) throw std::invalid_argument("Split requires at least one output.");
+        if (this->outputDataTypes.size() != this->axisElements.size())
+            throw std::invalid_argument("Split takes one output data type per output.");
+        for (const unsigned long elements : this->axisElements)
+            if (elements == 0) throw std::invalid_argument("Split outputs must have a positive extent on the axis.");
     }
 
     std::optional<Tensor> createFeatureOutputTensor() override {
-        unsigned int connection = featureOutputs.size();
-        THOR_THROW_IF_FALSE(connection < axisElements.size());
-        THOR_THROW_IF_FALSE(featureInputs[0].has_value());
-
-        std::vector<unsigned long> dimensions = featureInputs[0].value().getDescriptor().getDimensions();
-        dimensions[axis] = axisElements[connection];
-        return Tensor(featureInputs[0].value().getPlacement(),
-                      TensorDescriptor(featureInputs[0].value().getDescriptor().getDataType(), dimensions));
+        throw std::logic_error("Split creates output i when connection type i is connected.");
     }
 
     void compileImpl() override {
         MultiConnectionLayer::compileImpl();
+        const uint32_t numSplitTensors = static_cast<uint32_t>(axisElements.size());
         unsigned long totalAxisElements = 0;
-        for (unsigned int i = 0; i < axisElements.size(); ++i)
+        for (unsigned int i = 0; i < numSplitTensors; ++i)
             totalAxisElements += axisElements[i];
         THOR_THROW_IF_FALSE(featureInputs.size() == 1);
         THOR_THROW_IF_FALSE(featureInputs[0].has_value());
         const std::vector<unsigned long> inputDimensions = featureInputs[0].value().getDescriptor().getDimensions();
         THOR_THROW_IF_FALSE(inputDimensions.size() > axis);
         THOR_THROW_IF_FALSE(totalAxisElements == inputDimensions[axis]);
-        THOR_THROW_IF_FALSE(featureOutputs.size() == axisElements.size());
-        THOR_THROW_IF_FALSE(nextLayers.size() == featureOutputs.size());
-        THOR_THROW_IF_FALSE(streams.size() == featureOutputs.size());
+        THOR_THROW_IF_FALSE(featureOutputs.size() == numSplitTensors);
+        THOR_THROW_IF_FALSE(nextLayers.size() == numSplitTensors);
+        THOR_THROW_IF_FALSE(streams.size() == numSplitTensors);
+        THOR_THROW_IF_FALSE(errorInputs.size() == numSplitTensors);
+        for (unsigned int i = 0; i < numSplitTensors; ++i) {
+            if (!featureOutputs[i].has_value() || !nextLayers[i].has_value())
+                throw std::logic_error("Split output " + std::to_string(i) + " is not connected.");
+            THOR_THROW_IF_FALSE(featureOutputs[i].value().getDescriptor().getDimensions()[axis] == axisElements[i]);
+        }
         backwardInputReadyEvents.clear();
         backwardInputReadyEvents.resize(streams.size());
         outputsReadyEvent = Event();
-        for (unsigned int i = 0; i < axisElements.size(); ++i) {
-            THOR_THROW_IF_FALSE(featureOutputs[i].has_value());
-            THOR_THROW_IF_FALSE(featureOutputs[i].value().getDescriptor().getDimensions()[axis] == axisElements[i]);
-        }
 
         THOR_THROW_IF_FALSE(featureInputs[0].value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
-        const uint32_t numSplitTensors = static_cast<uint32_t>(featureOutputs.size());
-        THOR_THROW_IF_FALSE(errorInputs.size() == featureOutputs.size());
+        inputDataType = featureInputs[0].value().getDescriptor().getDataType();
 
-        const uint32_t numPresentErrorInputs = numPresentTensors(errorInputs);
-        THOR_THROW_IF_FALSE(numPresentErrorInputs == errorInputs.size() || numPresentErrorInputs == 0);
+        // No output gradient at all: nothing to send back, so the path upstream is pruned.
+        if (numPresentTensors(errorInputs) == 0 && errorOutputs[0].has_value()) {
+            THOR_THROW_IF_FALSE(previousLayers[0].has_value());
+            previousLayers[0].value()->replaceErrorInput(errorOutputs[0], std::nullopt);
+            errorOutputs[0].reset();
+        }
 
-        // Pointer tables and static span geometry are uploaded on the same
-        // non-blocking execution stream and synchronized once before compile
-        // returns, keeping pageable host metadata alive until DMA completes.
-        std::vector<void *> splitTensorFeatureOutputMemoriesArray(numSplitTensors);
-        std::vector<void *> splitTensorErrorInputMemoriesArray;
-
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&splitTensorFeatureOutputMemoriesArray_d),
-                              numSplitTensors * sizeof(void *)));
+        // The tensors cannot change after compilation, so their pointers are fixed for the runnable layer and go to
+        // every launch as its parameters.
+        splitTensorFeatureOutputMemories.assign(numSplitTensors, nullptr);
         for (uint32_t i = 0; i < numSplitTensors; ++i)
-            splitTensorFeatureOutputMemoriesArray[i] = featureOutputs[i].value().getMemPtr();
-        CUDA_CHECK(cudaMemcpyAsync(splitTensorFeatureOutputMemoriesArray_d,
-                                   splitTensorFeatureOutputMemoriesArray.data(),
-                                   numSplitTensors * sizeof(void *),
-                                   cudaMemcpyHostToDevice,
-                                   streams[0].getStream()));
+            splitTensorFeatureOutputMemories[i] = featureOutputs[i].value().getMemPtr();
 
-        if (numPresentErrorInputs > 0) {
-            splitTensorErrorInputMemoriesArray.resize(numSplitTensors);
-            CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&splitTensorErrorInputMemoriesArray_d),
-                                  numSplitTensors * sizeof(void *)));
-            for (uint32_t i = 0; i < numSplitTensors; ++i)
-                splitTensorErrorInputMemoriesArray[i] = errorInputs[i].value().getMemPtr();
-            CUDA_CHECK(cudaMemcpyAsync(splitTensorErrorInputMemoriesArray_d,
-                                       splitTensorErrorInputMemoriesArray.data(),
-                                       numSplitTensors * sizeof(void *),
-                                       cudaMemcpyHostToDevice,
-                                       streams[0].getStream()));
-        } else {
-            for (uint32_t i = 0; i < errorOutputs.size(); ++i) {
-                THOR_THROW_IF_FALSE(previousLayers[i].has_value());
-                if (errorOutputs[i].has_value())
-                    previousLayers[i].value()->replaceErrorInput(errorOutputs[i], std::nullopt);
+        backwardSourceMemories.clear();
+        backwardSourceDataTypes.clear();
+        zeroGradients.clear();
+        if (errorOutputs[0].has_value()) {
+            backwardSourceMemories.assign(numSplitTensors, nullptr);
+            backwardSourceDataTypes.assign(numSplitTensors, inputDataType);
+            for (uint32_t i = 0; i < numSplitTensors; ++i) {
+                if (errorInputs[i].has_value()) {
+                    backwardSourceMemories[i] = errorInputs[i].value().getMemPtr();
+                    backwardSourceDataTypes[i] = errorInputs[i].value().getDescriptor().getDataType();
+                } else {
+                    const TensorDescriptor zeroDescriptor(inputDataType, featureOutputs[i].value().getDescriptor().getDimensions());
+                    zeroGradients.push_back(Tensor::zeros(featureInputs[0].value().getPlacement(), zeroDescriptor, streams[0]));
+                    backwardSourceMemories[i] = zeroGradients.back().getMemPtr();
+                }
             }
         }
 
-        const TensorDescriptor &inputDescriptor = featureInputs[0].value().getDescriptor();
         uint64_t innerElements = 1;
         for (uint32_t d = axis + 1; d < inputDimensions.size(); ++d)
-            innerElements = checkedMultiply(innerElements, inputDimensions[d],
-                                            "Split inner geometry overflow.");
+            innerElements = checkedMultiply(innerElements, inputDimensions[d], "Split inner geometry overflow.");
 
-        std::vector<uint64_t> axisElements64(axisElements.begin(), axisElements.end());
-        const std::vector<ConcatenateSpanGeometry> spanGeometry = buildConcatenateSpanGeometry(
-            TensorDescriptor::getElementSizeInBytes(inputDescriptor.getDataType()),
-            innerElements,
-            axisElements64);
-        THOR_THROW_IF_FALSE(spanGeometry.size() == numSplitTensors);
-        CUDA_CHECK(cudaMalloc(&spanGeometryPerSplitTensor_d,
-                              spanGeometry.size() * sizeof(ConcatenateSpanGeometry)));
-        CUDA_CHECK(cudaMemcpyAsync(spanGeometryPerSplitTensor_d,
-                                   spanGeometry.data(),
-                                   spanGeometry.size() * sizeof(ConcatenateSpanGeometry),
-                                   cudaMemcpyHostToDevice,
-                                   streams[0].getStream()));
-
-        packedSliceBytes = spanGeometry.back().packedOffsetBytes + spanGeometry.back().spanBytes;
-        THOR_THROW_IF_FALSE(packedSliceBytes > 0);
+        // A span is one output's elements of one outer slice: its extent on the axis times the elements after it.
+        spanElementsPerSplitTensor.assign(numSplitTensors, 0);
+        for (uint32_t i = 0; i < numSplitTensors; ++i)
+            spanElementsPerSplitTensor[i] = checkedMultiply(axisElements[i], innerElements, "Split span geometry overflow.");
+        THOR_THROW_IF_FALSE(totalAxisElements > 0 && innerElements > 0);
 
         outerSlicesPerBatch = 1;
         for (uint32_t d = 1; d < axis; ++d)
-            outerSlicesPerBatch = checkedMultiply(outerSlicesPerBatch, inputDimensions[d],
-                                                  "Split outer geometry overflow.");
-
-        streams[0].synchronize();
+            outerSlicesPerBatch = checkedMultiply(outerSlicesPerBatch, inputDimensions[d], "Split outer geometry overflow.");
     }
 
     void infer(std::optional<Tensor> inputTensor,
@@ -186,12 +166,12 @@ class Split : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(nextLayers.size() == featureOutputs.size());
 
         const uint64_t activeOuterSlices = resolveActiveOuterSlices(featureInput.value().getDescriptor(), batchSize);
-        launchSplit(splitTensorFeatureOutputMemoriesArray_d,
+        launchSplit(splitTensorFeatureOutputMemories,
+                    outputDataTypes,
                     featureInput.value().getMemPtr(),
+                    inputDataType,
                     activeOuterSlices,
-                    static_cast<uint32_t>(featureOutputs.size()),
-                    packedSliceBytes,
-                    spanGeometryPerSplitTensor_d,
+                    spanElementsPerSplitTensor,
                     streams[0]);
 
         ThorImplementation::detail::recordCompletionAndWaitOnDistinctTargetStreams(
@@ -207,28 +187,26 @@ class Split : public MultiConnectionLayer {
         // Experimental - back propagation stops at empty error input
         if (!errorInput.has_value())
             return;
-
+        THOR_THROW_IF_FALSE(errorOutputs[0].has_value());
         THOR_THROW_IF_FALSE(streams.size() == errorInputs.size());
 
-        if (errorInputs.size() > 1) {
-            THOR_THROW_IF_FALSE(stillWaitingForErrorInputTensors.count(errorInput.value().getTensorId()) == 1);
-            stillWaitingForErrorInputTensors.erase(errorInput.value().getTensorId());
-            if (!stillWaitingForErrorInputTensors.empty())
-                return;
-
-            stillWaitingForErrorInputTensors = allErrorInputTensorIds;
-        }
+        // Every output that takes a gradient delivers it here; the last one to arrive runs the concatenate.
+        THOR_THROW_IF_FALSE(stillWaitingForErrorInputTensors.count(errorInput.value().getTensorId()) == 1);
+        stillWaitingForErrorInputTensors.erase(errorInput.value().getTensorId());
+        if (!stillWaitingForErrorInputTensors.empty())
+            return;
+        stillWaitingForErrorInputTensors = allErrorInputTensorIds;
 
         detail::waitForDistinctProducerStreams(streams[0], streams, backwardInputReadyEvents, 1);
 
         const uint64_t activeOuterSlices = resolveActiveOuterSlices(errorOutputs[0].value().getDescriptor(), batchSize);
         launchConcatenate(
             errorOutputs[0].value().getMemPtr(),
-            splitTensorErrorInputMemoriesArray_d,
+            inputDataType,
+            backwardSourceMemories,
+            backwardSourceDataTypes,
             activeOuterSlices,
-            static_cast<uint32_t>(errorInputs.size()),
-            packedSliceBytes,
-            spanGeometryPerSplitTensor_d,
+            spanElementsPerSplitTensor,
             streams[0]);
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
@@ -238,47 +216,40 @@ class Split : public MultiConnectionLayer {
     void cleanup() override {
         TensorPlacement placement = featureInputs[0].value().getPlacement();
         THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-        ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
-        if (splitTensorFeatureOutputMemoriesArray_d != nullptr) {
-            CUDA_CHECK(cudaFree(splitTensorFeatureOutputMemoriesArray_d));
-            splitTensorFeatureOutputMemoriesArray_d = nullptr;
-        }
-        if (splitTensorErrorInputMemoriesArray_d != nullptr) {
-            CUDA_CHECK(cudaFree(splitTensorErrorInputMemoriesArray_d));
-            splitTensorErrorInputMemoriesArray_d = nullptr;
-        }
-        if (spanGeometryPerSplitTensor_d != nullptr) {
-            CUDA_CHECK(cudaFree(spanGeometryPerSplitTensor_d));
-            spanGeometryPerSplitTensor_d = nullptr;
-        }
-        packedSliceBytes = 0;
+        splitTensorFeatureOutputMemories.clear();
+        backwardSourceMemories.clear();
+        backwardSourceDataTypes.clear();
+        zeroGradients.clear();
+        spanElementsPerSplitTensor.clear();
         outerSlicesPerBatch = 1;
         outputsReadyEvent = Event();
         backwardInputReadyEvents.clear();
     }
 
+    // Connection type driverConnectionType is output driverConnectionType.
     void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
-        // FIXME: Reuse MultiConnectionLayer connectToNextLayer and add any additional logic here if needed
         THOR_THROW_IF_FALSE(!running);
-        THOR_THROW_IF_FALSE(featureInputs.size() == 1);
+        THOR_THROW_IF_FALSE(featureInputs.size() == 1 && featureInputs[0].has_value());
+        if (driverConnectionType < 0 || static_cast<size_t>(driverConnectionType) >= axisElements.size())
+            throw std::invalid_argument("Split has no output " + std::to_string(driverConnectionType) + ".");
+        const uint32_t output = static_cast<uint32_t>(driverConnectionType);
+        if (featureOutputs[output].has_value())
+            throw std::logic_error("Split output " + std::to_string(output) + " is already connected.");
 
-        unsigned int connection = featureOutputs.size();
-        THOR_THROW_IF_FALSE(connection < axisElements.size());
+        const Tensor &input = featureInputs[0].value();
+        THOR_THROW_IF_FALSE(input.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        std::vector<unsigned long> dimensions = input.getDescriptor().getDimensions();
+        THOR_THROW_IF_FALSE(axis < dimensions.size());
+        dimensions[axis] = axisElements[output];
+        featureOutputs[output] = Tensor(input.getPlacement(), TensorDescriptor(outputDataTypes[output], dimensions));
+        nextLayers[output] = nextLayer;
+        errorInputs[output] = nextLayer->connectToPreviousLayer(
+            this, featureOutputs[output], streams[output],
+            shouldConnectToBackPropErrorIn() && !isBackPropStub() && takesGradient(output), loaderConnectionType);
 
-        TensorPlacement placement = featureInputs[0].value().getPlacement();
-        THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-
-        featureOutputs.push_back(createFeatureOutputTensor());
-        nextLayers.push_back(nextLayer);
-        if (connection != 0)
-            streams.emplace_back(placement.getDeviceNum());
-        errorInputs.emplace_back(nextLayer->connectToPreviousLayer(
-            this, featureOutputs.back(), streams.back(), shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType));
-
-        if (errorInputs.back().has_value()) {
-            THOR_THROW_IF_FALSE(errorInputs.back().value().getDescriptor() == featureOutputs.back().value().getDescriptor());
-            THOR_THROW_IF_FALSE(errorInputs.back().value().getPlacement() == errorInputs.front().value().getPlacement());
-            THOR_THROW_IF_FALSE(errorInputs.back().value().getPlacement() == featureOutputs.back().value().getPlacement());
+        if (errorInputs[output].has_value()) {
+            THOR_THROW_IF_FALSE(errorInputs[output].value().getDescriptor() == featureOutputs[output].value().getDescriptor());
+            THOR_THROW_IF_FALSE(errorInputs[output].value().getPlacement() == featureOutputs[output].value().getPlacement());
         }
         ensureNoDeviceCrossing();
     }
@@ -288,12 +259,20 @@ class Split : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(!compiled);
         THOR_THROW_IF_FALSE(featureInputs.empty());
         THOR_THROW_IF_FALSE(featureInput.has_value());
+        const uint32_t numSplitTensors = static_cast<uint32_t>(axisElements.size());
 
+        // Output 0 runs on the input's stream, every other output on its own.
+        streams.clear();
         streams.push_back(stream);
+        for (uint32_t i = 1; i < numSplitTensors; ++i) streams.emplace_back(featureInput.value().getPlacement().getDeviceNum());
+        featureOutputs.assign(numSplitTensors, std::nullopt);
+        nextLayers.assign(numSplitTensors, std::nullopt);
+        errorInputs.assign(numSplitTensors, std::nullopt);
 
         previousLayers.push_back(previousLayer);
         featureInputs.emplace_back(featureInput);
-        if (backPropagateError && !isInferenceOnly())
+        if (backPropagateError && !isInferenceOnly() &&
+            !TensorDescriptor::isIntegralType(featureInput.value().getDescriptor().getDataType()))
             errorOutputs.emplace_back(featureInput.value().clone());
         else
             errorOutputs.emplace_back(std::nullopt);
@@ -307,11 +286,39 @@ class Split : public MultiConnectionLayer {
         return errorOutputs.back();
     }
 
+    // One input and several outputs, so an error input is not paired with an error output by index. When every output
+    // is connected and none takes a gradient, the input's gradient goes too (compile does the same for outputs that
+    // never took one).
+    void replaceErrorInput(std::optional<Tensor> oldErrorInput, std::optional<Tensor> newErrorInput) override {
+        THOR_THROW_IF_FALSE(oldErrorInput.has_value());
+        bool replaced = false;
+        for (uint32_t i = 0; i < errorInputs.size(); ++i) {
+            if (!errorInputs[i].has_value() || errorInputs[i].value() != oldErrorInput.value()) continue;
+            replaced = true;
+            allErrorInputTensorIds.erase(errorInputs[i].value().getTensorId());
+            errorInputs[i] = newErrorInput;
+            if (errorInputs[i].has_value()) allErrorInputTensorIds.insert(errorInputs[i].value().getTensorId());
+        }
+        THOR_THROW_IF_FALSE(replaced);
+        stillWaitingForErrorInputTensors = allErrorInputTensorIds;
+        if (numPresentTensors(featureOutputs) == featureOutputs.size() && numPresentTensors(errorInputs) == 0 &&
+            !errorOutputs.empty() && errorOutputs[0].has_value()) {
+            if (previousLayers[0].has_value()) previousLayers[0].value()->replaceErrorInput(errorOutputs[0], std::nullopt);
+            errorOutputs[0].reset();
+        }
+    }
+
    private:
     static uint64_t checkedMultiply(uint64_t lhs, uint64_t rhs, const char *what) {
         if (lhs != 0 && rhs > std::numeric_limits<uint64_t>::max() / lhs)
             throw std::invalid_argument(what);
         return lhs * rhs;
+    }
+
+    // A gradient passes through the conversion only between floating-point types.
+    bool takesGradient(uint32_t output) const {
+        return !TensorDescriptor::isIntegralType(outputDataTypes[output]) &&
+               !TensorDescriptor::isIntegralType(featureInputs[0].value().getDescriptor().getDataType());
     }
 
     uint64_t resolveActiveOuterSlices(const TensorDescriptor &descriptor, uint32_t batchSize) const {
@@ -330,11 +337,14 @@ class Split : public MultiConnectionLayer {
 
     unsigned int axis;
     std::vector<unsigned long> axisElements;
+    std::vector<DataType> outputDataTypes;
+    DataType inputDataType = DataType::FP32;
 
-    void **splitTensorErrorInputMemoriesArray_d;
-    void **splitTensorFeatureOutputMemoriesArray_d;
-    ConcatenateSpanGeometry *spanGeometryPerSplitTensor_d;
-    uint64_t packedSliceBytes = 0;
+    std::vector<void *> splitTensorFeatureOutputMemories;
+    std::vector<void *> backwardSourceMemories;
+    std::vector<DataType> backwardSourceDataTypes;
+    std::vector<Tensor> zeroGradients;
+    std::vector<uint64_t> spanElementsPerSplitTensor;
     uint64_t outerSlicesPerBatch = 1;
 
     Event outputsReadyEvent;

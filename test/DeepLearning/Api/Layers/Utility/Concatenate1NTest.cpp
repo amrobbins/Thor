@@ -137,6 +137,35 @@ TEST(RaggedConcatenate1N, RejectsIncompatibleModesAndInputs) {
     EXPECT_NO_THROW((void)joined(n, a, b, 1));
 }
 
+TEST(RaggedConcatenate1N, InputsOfDifferentValuesTypesTakeARequiredOutputType) {
+    Network n("concat_neutral_types");
+    auto a = owner(n);
+    auto half = RaggedNetworkInput::Builder().network(n).name("half")
+        .partition(a).valuesDataType(DataType::BF16).trailingDimensions({2, 5}).build();
+    try {
+        (void)joined(n, a, half, 1);
+        FAIL() << "Expected Concatenate to require an output data type.";
+    } catch (const std::logic_error& error) {
+        const string message = error.what();
+        EXPECT_NE(message.find("different data types"), string::npos);
+        EXPECT_NE(message.find("outputDataType"), string::npos);
+    }
+    auto layer = Concatenate::Builder().network(n).featureInput(a).featureInput(half)
+        .concatenationAxis(1).outputDataType(DataType::FP16).build();
+    ASSERT_TRUE(layer.getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(layer.getRaggedFeatureOutput()->getValuesDataType(), DataType::FP16);
+    EXPECT_EQ(layer.getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{4, 2, 8}));
+    EXPECT_TRUE(layer.getRaggedFeatureOutput()->sharesPartitionWith(a));
+    const json j = layer.architectureJson();
+    EXPECT_EQ(j.at("outputs").at(0).at("data_type").get<DataType>(), DataType::FP16);
+    ASSERT_NO_THROW(Concatenate::deserialize(j, &n));
+    auto restored = dynamic_pointer_cast<Concatenate>(n.getLayer(n.getNumLayers() - 1));
+    ASSERT_NE(restored, nullptr);
+    EXPECT_EQ(restored->getRaggedFeatureOutput()->getValuesDataType(), DataType::FP16);
+    // One values type: the output keeps it unless another is set.
+    EXPECT_EQ(joined(n, a, sibling(n, a, "same"), 1).getRaggedFeatureOutput()->getValuesDataType(), DataType::FP32);
+}
+
 TEST(RaggedConcatenate1N, StrictOneOneReferencesAndLegacyCompatibility) {
     Network n("concat_neutral_schema");
     auto a = owner(n);
@@ -164,8 +193,17 @@ TEST(RaggedConcatenate1N, StrictOneOneReferencesAndLegacyCompatibility) {
     bad = j; bad["ragged_output"]["max_values_per_row"] = 3; reject(n, bad);
     bad = j; bad["outputs"][0]["dimensions"] = vector<uint64_t>{4, 2, 9};
     bad["ragged_output"]["values"]["dimensions"] = vector<uint64_t>{4, 2, 9}; reject(n, bad);
-    bad = j; bad["outputs"][0]["data_type"] = DataType::BF16;
-    bad["ragged_output"]["values"]["data_type"] = DataType::BF16; reject(n, bad);
+    bad = j; bad["outputs"][0]["data_type"] = DataType::BF16; reject(n, bad);  // the two output references disagree
+    {
+        // An output values type of its own is what Builder::outputDataType builds; the artifact carries it.
+        json converted = j;
+        converted["outputs"][0]["data_type"] = DataType::BF16;
+        converted["ragged_output"]["values"]["data_type"] = DataType::BF16;
+        ASSERT_NO_THROW(Concatenate::deserialize(converted, &n));
+        auto restored = dynamic_pointer_cast<Concatenate>(n.getLayer(n.getNumLayers() - 1));
+        ASSERT_NE(restored, nullptr);
+        EXPECT_EQ(restored->getRaggedFeatureOutput()->getValuesDataType(), DataType::BF16);
+    }
     bad = j; bad["concatenation_axis"] = 0; reject(n, bad); // other trailing axis cannot sum to output
     bad = j; bad["ragged_inputs"].push_back(j["ragged_inputs"][0]); reject(n, bad);
     bad = j; bad["inputs"] = json::array(); reject(n, bad);

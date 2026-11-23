@@ -92,63 +92,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     }
 }
 
-// The n-th set bit of a 4-bit count, counting from its lowest bit up (0 if it has no such bit).
-__device__ __forceinline__ uint32_t nthSetBit(uint32_t fourBits, uint32_t n) {
-    uint32_t found = 0;
-    uint32_t seen = 0;
-#pragma unroll
-    for (uint32_t bit = 0; bit < 4; ++bit) {
-        const uint32_t isSet = (fourBits >> bit) & 1U;
-        found = isSet != 0 && seen == n ? bit : found;
-        seen += isSet;
-    }
-    return found;
-}
-
-// Store the packets of a lane's pass that are in its row: the 16 bytes from byte packetShift of the packet's first word
-// on.
-template <typename LengthT, uint32_t PacketsPerLane>
-__device__ __forceinline__ void storeShiftedPackets(uint4 *__restrict__ destination,
-                                                    LengthT firstPacket,
-                                                    const LengthT (&packet)[PacketsPerLane],
-                                                    const bool (&inRow)[PacketsPerLane],
-                                                    const uint4 (&firstWord)[PacketsPerLane],
-                                                    const uint4 (&lastWord)[PacketsPerLane],
-                                                    uint32_t packetShift) {
-#pragma unroll
-    for (uint32_t k = 0; k < PacketsPerLane; ++k) {
-        if (inRow[k]) destination[firstPacket + packet[k]] = bytesFrom(firstWord[k], lastWord[k], packetShift);
-    }
-}
-
 /**
  * Materialize the rows of a ragged field in 16-byte packets whatever byte its rows start and end at (the launcher
- * takes it for large batches of values on a 1- or 2-byte boundary). The grid, the lanes, the passes and the load
- * order are raggedPacketsKernel's.
+ * takes it for large batches of values on a 1- or 2-byte boundary). The grid, the lanes and the passes are
+ * raggedPacketsKernel's; a lane's share of a row is copyRowBytes (DeviceResidentPacketGrid.h): the row's whole
+ * 16-byte packets of the batch with their source words shifted, and its head and tail in aligned pieces.
  *
- * A row is the batch bytes [firstByte, endByte), which start and end at any byte, and every store is an aligned
- * 1, 2, 4, 8 or 16 bytes of one row. A row that reaches a 16-byte boundary of the batch is its head (the bytes
- * before its first boundary, at most 15), its whole 16-byte packets, and its tail (the bytes after its last
- * boundary, at most 15). The head is one piece per set bit of its length, the smaller pieces first: each piece ends
- * where the next larger boundary begins, so each is aligned. The tail is one piece per set bit of its length, the
- * larger pieces first. A row inside one packet is split the same way at the most aligned byte it holds.
- *
- * The packets are what the lanes share out, PacketsPerLane to a lane in a pass, as in raggedPacketsKernel. The
- * pieces (8 a row at most) ride along: in a pass a lane also takes one piece if the row has one left for it, and
- * the launcher sizes the lanes to the packets.
- *
- * The source bytes start at any byte of the value store and are read as aligned words and shifted (bytesFrom). A
- * packet's are the 16-byte word that holds the first of them and, unless they are that word, the next; every packet
- * of a row starts at the same byte of its word. A piece's are the 8-byte words that hold its first and its last
- * byte, and it stores the first bytes of the result. A packet past the row's end reads word 0 of the value store
- * and is not stored. A word may end up to 15 bytes past the store, inside the padding every tensor is allocated
- * with.
- *
- * In a pass a lane issues its packets' loads, under no test, before anything waits for memory. A lane with a piece
- * then loads and stores it, with the packets' words on their way, and stores its packets. The packets' stores are
- * written on both sides of the piece's test, so their loads have a reader on each side of it and stay ahead of it.
- * With one reader, behind the test, the compiler moved the loads down to it, behind the piece's store, and such a
- * lane waited for memory twice (the SASS of the one-packet-per-lane kernel of patch 1552).
+ * A thread issues its index and offset loads, then the record load, then the row's value loads.
  */
 template <typename OffsetT, typename LengthT, uint32_t PacketsPerLane>
 __global__ void __launch_bounds__(kThreadsPerBlock)
@@ -162,14 +112,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
                       uint64_t referenceOffsetBytes,
                       LengthT valueBytes,
                       uint32_t lanesPerRowLog2) {
-    constexpr LengthT kPacketBytes = static_cast<LengthT>(sizeof(uint4));
     const uint32_t lanesPerRow = 1U << lanesPerRowLog2;
     const uint32_t rowsPerBlock = kThreadsPerBlock >> lanesPerRowLog2;
     const uint32_t lane = threadIdx.x & (lanesPerRow - 1U);
-    const LengthT packetsPerPass = static_cast<LengthT>(lanesPerRow) * PacketsPerLane;
     const uint64_t rowStride = static_cast<uint64_t>(gridDim.x) * rowsPerBlock;
-    const uint64_t *const valueWords = reinterpret_cast<const uint64_t *>(values);
-    uint8_t *const destinationBytes = reinterpret_cast<uint8_t *>(destination);
     for (uint64_t row = static_cast<uint64_t>(blockIdx.x) * rowsPerBlock + (threadIdx.x >> lanesPerRowLog2); row < logicalRows;
          row += rowStride) {
         const uint64_t index = rowIndices[row];
@@ -180,70 +126,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
         const LengthT firstByte = static_cast<LengthT>(firstOffset) * valueBytes;
         const LengthT endByte = static_cast<LengthT>(endOffset) * valueBytes;
         const uint64_t sourceByte = firstValue * valueBytes;
-        // Where the head ends and the tail begins: the row's first and last 16-byte boundaries, or, for a row
-        // inside one packet, both at its most aligned byte. The first and end bytes of such a row differ only in
-        // their low four bits; the highest bit they differ in is that byte's alignment.
-        const LengthT firstBoundary = (firstByte + (kPacketBytes - 1)) & ~(kPacketBytes - 1);
-        const uint32_t differing = (static_cast<uint32_t>(firstByte ^ endByte) & 15U) | 1U;
-        const uint32_t splitLog2 = differing >= 8U ? 3U : differing >= 4U ? 2U : differing >= 2U ? 1U : 0U;
-        const LengthT split = endByte & ~((static_cast<LengthT>(1) << splitLog2) - 1);
-        const bool reachesBoundary = firstBoundary <= endByte;
-        const LengthT headEnd = reachesBoundary ? firstBoundary : split;
-        const LengthT tailBegin = reachesBoundary ? endByte & ~(kPacketBytes - 1) : split;
-        const uint32_t headBytes = static_cast<uint32_t>(headEnd - firstByte);
-        const uint32_t tailBytes = static_cast<uint32_t>(endByte - tailBegin);
-        const uint32_t headPieces = static_cast<uint32_t>(__popc(headBytes));
-        const uint32_t rowPieces = headPieces + static_cast<uint32_t>(__popc(tailBytes));
-        // The row's packets: the first is packet firstPacket of the batch, and its bytes start at byte packetShift
-        // of word firstSourceWord of the value store.
-        const LengthT rowPackets = (tailBegin - headEnd) / kPacketBytes;
-        const LengthT firstPacket = headEnd / kPacketBytes;
-        const uint64_t firstSourceWord = (sourceByte + headBytes) / sizeof(uint4);
-        const uint32_t packetShift = static_cast<uint32_t>(sourceByte + headBytes) & 15U;
-        LengthT pass = 0;
-        // The piece lane 0 takes in this pass.
-        uint32_t firstPiece = 0;
-        while (pass < rowPackets || firstPiece < rowPieces) {
-            LengthT packet[PacketsPerLane];
-            bool inRow[PacketsPerLane];
-            uint4 firstWord[PacketsPerLane];
-            uint4 lastWord[PacketsPerLane];
-#pragma unroll
-            for (uint32_t k = 0; k < PacketsPerLane; ++k) {
-                packet[k] = pass + static_cast<LengthT>(k * lanesPerRow + lane);
-                inRow[k] = packet[k] < rowPackets;
-                const uint64_t word = inRow[k] ? firstSourceWord + packet[k] : 0;
-                firstWord[k] = values[word];
-                lastWord[k] = values[inRow[k] && packetShift != 0 ? word + 1 : word];
-            }
-            const uint32_t piece = firstPiece + lane;
-            if (piece < rowPieces) {
-                const bool inHead = piece < headPieces;
-                const uint32_t pieceLog2 = nthSetBit(inHead ? headBytes : tailBytes, inHead ? piece : piece - headPieces);
-                // The batch byte the piece starts at: a head piece after the head's smaller pieces, a tail piece
-                // after the tail's larger ones.
-                const LengthT pieceByte = inHead ? firstByte + (headBytes & ((1U << pieceLog2) - 1U))
-                                                 : tailBegin + (tailBytes & ~((2U << pieceLog2) - 1U));
-                const uint64_t pieceSourceByte = sourceByte + (pieceByte - firstByte);
-                const uint64_t bytes = bytesFrom(valueWords[pieceSourceByte / sizeof(uint64_t)],
-                                                 valueWords[(pieceSourceByte + ((1U << pieceLog2) - 1U)) / sizeof(uint64_t)],
-                                                 static_cast<uint32_t>(pieceSourceByte) & 7U);
-                if (pieceLog2 == 3) {
-                    *reinterpret_cast<uint64_t *>(destinationBytes + pieceByte) = bytes;
-                } else if (pieceLog2 == 2) {
-                    *reinterpret_cast<uint32_t *>(destinationBytes + pieceByte) = static_cast<uint32_t>(bytes);
-                } else if (pieceLog2 == 1) {
-                    *reinterpret_cast<uint16_t *>(destinationBytes + pieceByte) = static_cast<uint16_t>(bytes);
-                } else {
-                    destinationBytes[pieceByte] = static_cast<uint8_t>(bytes);
-                }
-                storeShiftedPackets(destination, firstPacket, packet, inRow, firstWord, lastWord, packetShift);
-            } else {
-                storeShiftedPackets(destination, firstPacket, packet, inRow, firstWord, lastWord, packetShift);
-            }
-            pass += packetsPerPass;
-            firstPiece += lanesPerRow;
-        }
+        copyRowBytes<LengthT, PacketsPerLane>(values, destination, firstByte, endByte, sourceByte, lane, lanesPerRow);
     }
 }
 

@@ -154,9 +154,11 @@ class Concatenate : public MultiConnectionLayer {
             return std::make_shared<ThorImplementation::RaggedConcatenate>(
                 concatenationAxis + 1,
                 static_cast<uint32_t>(raggedFeatureInputs.size()),
-                runtimeB);
+                runtimeB,
+                featureOutputs[0].getDataType());
         }
-        return std::make_shared<ThorImplementation::Concatenate>(concatenationAxis + 1, featureInputs.size());
+        return std::make_shared<ThorImplementation::Concatenate>(concatenationAxis + 1, featureInputs.size(),
+                                                                 featureOutputs[0].getDataType());
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
@@ -196,7 +198,9 @@ class Concatenate : public MultiConnectionLayer {
     friend class Network;
 };
 
-// featureInput and numOutputFeatures are required, all other parameters are optional.
+// network, two or more featureInputs and concatenationAxis are required. Each input may have its own data type; the
+// output's is outputDataType, which is required when the inputs' types differ (Concatenate does not promote) and is
+// the inputs' type otherwise unless set. The kernel converts each input as it moves.
 class Concatenate::Builder {
    public:
     Builder() {}
@@ -232,11 +236,9 @@ class Concatenate::Builder {
                     THOR_THROW_LOGIC_ERROR("Concatenate RaggedTensor inputs must share the exact same row partition.");
                 }
                 if (input.getOffsetsDataType() != reference.getOffsetsDataType() ||
-                    input.getValuesDataType() != reference.getValuesDataType() ||
                     !input.hasMaxValuesPerRow() || !reference.hasMaxValuesPerRow() ||
                     input.getMaxValuesPerRow() != reference.getMaxValuesPerRow()) {
-                    THOR_THROW_LOGIC_ERROR(
-                        "Concatenate RaggedTensor inputs must share row-partition capacity metadata and values dtype.");
+                    THOR_THROW_LOGIC_ERROR("Concatenate RaggedTensor inputs must share row-partition capacity metadata.");
                 }
                 const std::vector<uint64_t> trailing = input.getTrailingDimensions();
                 if (trailing.size() != referenceTrailing.size()) {
@@ -268,7 +270,7 @@ class Concatenate::Builder {
             concatenate.featureInputs.push_back(reference.getOffsets());
             std::vector<uint64_t> outputValuesDimensions = reference.getValuesDimensions();
             outputValuesDimensions[concatenationAxis + 1] = outputTrailing[concatenationAxis];
-            Tensor outputValues(reference.getValuesDataType(), outputValuesDimensions);
+            Tensor outputValues(outputDataTypeFor(), outputValuesDimensions);
             concatenate.featureOutputs.push_back(outputValues);
             concatenate.raggedFeatureOutput = reference.withValues(outputValues);
         } else {
@@ -289,11 +291,6 @@ class Concatenate::Builder {
                                            std::to_string(referenceDimensions.size()) + ", actual_rank=" +
                                            std::to_string(dimensions.size()) + ", input_shapes=" + inputShapesToString() +
                                            ". All inputs must have the same rank and identical logical dimensions except on the concatenation axis.");
-                }
-                if (_featureInputs[i].getDataType() != _featureInputs[0].getDataType()) {
-                    THOR_THROW_LOGIC_ERROR("Concatenate API data type mismatch between input[0] and input[" +
-                                           std::to_string(i) + "]. input_shapes=" + inputShapesToString() +
-                                           ". Convert inputs to the same storage data type before concatenating them.");
                 }
                 for (uint32_t j = 0; j < referenceDimensions.size(); ++j) {
                     if (j == concatenationAxis) continue;
@@ -317,7 +314,7 @@ class Concatenate::Builder {
             outputDimensions[concatenate.concatenationAxis] = 0;
             for (const Tensor &input : concatenate.featureInputs)
                 outputDimensions[concatenate.concatenationAxis] += input.getDimensions()[concatenate.concatenationAxis];
-            concatenate.featureOutputs.push_back(Tensor(concatenate.featureInputs[0].getDataType(), outputDimensions));
+            concatenate.featureOutputs.push_back(Tensor(outputDataTypeFor(), outputDimensions));
         }
 
         for (const Tensor &input : concatenate.featureInputs)
@@ -337,8 +334,6 @@ class Concatenate::Builder {
         THOR_THROW_IF_FALSE(_raggedFeatureInputs.empty());
         THOR_THROW_IF_FALSE(!_featureInput.getDimensions().empty());
         this->_featureInputs.push_back(_featureInput);
-        if (_featureInputs.size() > 1)
-            THOR_THROW_IF_FALSE(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
         return *this;
     }
 
@@ -355,7 +350,35 @@ class Concatenate::Builder {
         return *this;
     }
 
+    virtual Concatenate::Builder &outputDataType(DataType _outputDataType) {
+        THOR_THROW_IF_FALSE(!this->_outputDataType.has_value());
+        THOR_THROW_IF_FALSE(Tensor::dataTypeValid(_outputDataType));
+        this->_outputDataType = _outputDataType;
+        return *this;
+    }
+
    private:
+    // The output's data type: the one set, else the inputs' when they share one.
+    DataType outputDataTypeFor() const {
+        std::vector<DataType> inputDataTypes;
+        for (const Tensor &input : _featureInputs) inputDataTypes.push_back(input.getDataType());
+        for (const RaggedTensor &input : _raggedFeatureInputs) inputDataTypes.push_back(input.getValuesDataType());
+        THOR_THROW_IF_FALSE(!inputDataTypes.empty());
+        if (_outputDataType.has_value()) return _outputDataType.value();
+        for (const DataType dataType : inputDataTypes) {
+            if (dataType != inputDataTypes.front()) {
+                std::string names;
+                for (size_t i = 0; i < inputDataTypes.size(); ++i)
+                    names += (i == 0 ? "" : ", ") + std::string("input[") + std::to_string(i) +
+                             "]=" + ThorImplementation::TensorDescriptor::getElementTypeName(inputDataTypes[i]);
+                THOR_THROW_LOGIC_ERROR("Concatenate inputs have different data types (" + names +
+                                       "). Set the output data type (outputDataType); Concatenate converts each input to "
+                                       "it and does not choose one.");
+            }
+        }
+        return inputDataTypes.front();
+    }
+
     static std::string dimensionsToString(const std::vector<uint64_t> &dimensions) {
         std::ostringstream out;
         out << '[';
@@ -384,6 +407,7 @@ class Concatenate::Builder {
     std::vector<Tensor> _featureInputs;
     std::vector<RaggedTensor> _raggedFeatureInputs;
     std::optional<uint32_t> _concatenationAxis;
+    std::optional<DataType> _outputDataType;
 };
 
 }  // namespace Thor

@@ -165,8 +165,6 @@ inline int computeFlatIndex(int index[], long stridePerDimension[], int numDimen
 TEST(Split, SplitsCorrectly) {
     srand(time(NULL));
 
-    cudaError_t cudaStatus;
-
     Stream stream(0);
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
@@ -214,15 +212,9 @@ TEST(Split, SplitsCorrectly) {
         }
         wholeGpu.copyFromAsync(wholeCpu, stream);
 
-        half *splitTensorMemArray[10];
-        half **splitTensorMemArray_d;
+        std::vector<void *> splitTensorMemArray(numSplitTensors);
         for (int i = 0; i < numSplitTensors; ++i)
-            splitTensorMemArray[i] = (half *)partsGpu[i].getMemPtr();
-        cudaStatus = cudaMalloc(&splitTensorMemArray_d, numSplitTensors * sizeof(half *));
-        assert(cudaStatus == cudaSuccess);
-        cudaStatus = cudaMemcpyAsync(
-            splitTensorMemArray_d, splitTensorMemArray, numSplitTensors * sizeof(half *), cudaMemcpyHostToDevice, stream.getStream());
-        assert(cudaStatus == cudaSuccess);
+            splitTensorMemArray[i] = partsGpu[i].getMemPtr();
 
         stridePerSourceDimension[numDimensions - 1] = 1;
         for (int dest = 0; dest < numSplitTensors; dest++)
@@ -242,29 +234,11 @@ TEST(Split, SplitsCorrectly) {
         for (int d = axis + 1; d < numDimensions; ++d) innerElements *= wholeDimensions[d];
         uint64_t outerSlices = 1;
         for (int d = 0; d < axis; ++d) outerSlices *= wholeDimensions[d];
-        std::vector<uint64_t> axisElements(numSplitTensors);
-        for (int i = 0; i < numSplitTensors; ++i) axisElements[i] = axisElementsPerDestArray[i];
-        const std::vector<ConcatenateSpanGeometry> spanGeometry =
-            buildConcatenateSpanGeometry(sizeof(half), innerElements, axisElements);
-        ConcatenateSpanGeometry *spanGeometry_d;
-        cudaStatus = cudaMalloc(&spanGeometry_d, spanGeometry.size() * sizeof(ConcatenateSpanGeometry));
-        assert(cudaStatus == cudaSuccess);
-        cudaStatus = cudaMemcpyAsync(spanGeometry_d,
-                                     spanGeometry.data(),
-                                     spanGeometry.size() * sizeof(ConcatenateSpanGeometry),
-                                     cudaMemcpyHostToDevice,
-                                     stream.getStream());
-        assert(cudaStatus == cudaSuccess);
-        const uint64_t packedSliceBytes =
-            spanGeometry.back().packedOffsetBytes + spanGeometry.back().spanBytes;
+        std::vector<uint64_t> spanElements(numSplitTensors);
+        for (int i = 0; i < numSplitTensors; ++i) spanElements[i] = axisElementsPerDestArray[i] * innerElements;
+        const std::vector<DataType> types(numSplitTensors, DataType::FP16);
 
-        launchSplit(reinterpret_cast<void **>(splitTensorMemArray_d),
-                    wholeGpu.getMemPtr(),
-                    outerSlices,
-                    static_cast<uint32_t>(numSplitTensors),
-                    packedSliceBytes,
-                    spanGeometry_d,
-                    stream);
+        launchSplit(splitTensorMemArray, types, wholeGpu.getMemPtr(), DataType::FP16, outerSlices, spanElements, stream);
 
         for (int i = 0; i < numSplitTensors; ++i)
             partsCpu[i].copyFromAsync(partsGpu[i], stream);
@@ -294,18 +268,11 @@ TEST(Split, SplitsCorrectly) {
             half *partsMem = (half *)partsCpu[dest].getMemPtr();
             ASSERT_EQ((float)wholeMem[sourceFlatIndex], (float)partsMem[destFlatIndex]);
         }
-
-        cudaStatus = cudaFree(spanGeometry_d);
-        assert(cudaStatus == cudaSuccess);
-        cudaStatus = cudaFree(splitTensorMemArray_d);
-        assert(cudaStatus == cudaSuccess);
     }
 }
 
 TEST(Concatenate, ConcatenatesCorrectly) {
     srand(time(NULL));
-
-    cudaError_t cudaStatus;
 
     Stream stream(0);
 
@@ -356,15 +323,9 @@ TEST(Concatenate, ConcatenatesCorrectly) {
             partsGpu[i].copyFromAsync(partsCpu[i], stream);
         }
 
-        half *splitTensorMemArray[10];
-        half **splitTensorMemArray_d;
+        std::vector<void *> splitTensorMemArray(numSplitTensors);
         for (int i = 0; i < numSplitTensors; ++i)
-            splitTensorMemArray[i] = (half *)partsGpu[i].getMemPtr();
-        cudaStatus = cudaMalloc(&splitTensorMemArray_d, numSplitTensors * sizeof(half *));
-        assert(cudaStatus == cudaSuccess);
-        cudaStatus = cudaMemcpyAsync(
-            splitTensorMemArray_d, splitTensorMemArray, numSplitTensors * sizeof(half *), cudaMemcpyHostToDevice, stream.getStream());
-        assert(cudaStatus == cudaSuccess);
+            splitTensorMemArray[i] = partsGpu[i].getMemPtr();
 
         stridePerDestDimension[numDimensions - 1] = 1;
         for (int dest = 0; dest < numSplitTensors; dest++)
@@ -384,30 +345,12 @@ TEST(Concatenate, ConcatenatesCorrectly) {
         for (int d = axis + 1; d < numDimensions; ++d) innerElements *= wholeDimensions[d];
         uint64_t outerSlices = 1;
         for (int d = 0; d < axis; ++d) outerSlices *= wholeDimensions[d];
-        std::vector<uint64_t> axisElements(numSplitTensors);
-        for (int i = 0; i < numSplitTensors; ++i) axisElements[i] = axisElementsPerSourceArray[i];
-        const std::vector<ConcatenateSpanGeometry> spanGeometry =
-            buildConcatenateSpanGeometry(sizeof(half), innerElements, axisElements);
-        ConcatenateSpanGeometry *spanGeometry_d;
-        cudaStatus = cudaMalloc(&spanGeometry_d, spanGeometry.size() * sizeof(ConcatenateSpanGeometry));
-        assert(cudaStatus == cudaSuccess);
-        cudaStatus = cudaMemcpyAsync(spanGeometry_d,
-                                     spanGeometry.data(),
-                                     spanGeometry.size() * sizeof(ConcatenateSpanGeometry),
-                                     cudaMemcpyHostToDevice,
-                                     stream.getStream());
-        assert(cudaStatus == cudaSuccess);
-        const uint64_t packedSliceBytes =
-            spanGeometry.back().packedOffsetBytes + spanGeometry.back().spanBytes;
+        std::vector<uint64_t> spanElements(numSplitTensors);
+        for (int i = 0; i < numSplitTensors; ++i) spanElements[i] = axisElementsPerSourceArray[i] * innerElements;
+        const std::vector<DataType> types(numSplitTensors, DataType::FP16);
 
         long numElements = wholeCpu.getDescriptor().getTotalNumElements();
-        launchConcatenate(wholeGpu.getMemPtr(),
-                          reinterpret_cast<void **>(splitTensorMemArray_d),
-                          outerSlices,
-                          static_cast<uint32_t>(numSplitTensors),
-                          packedSliceBytes,
-                          spanGeometry_d,
-                          stream);
+        launchConcatenate(wholeGpu.getMemPtr(), DataType::FP16, splitTensorMemArray, types, outerSlices, spanElements, stream);
 
         wholeCpu.copyFromAsync(wholeGpu, stream);
         stream.synchronize();
@@ -439,10 +382,5 @@ TEST(Concatenate, ConcatenatesCorrectly) {
             // (float)partsMem[sourceFlatIndex], (float)wholeMem[destFlatIndex]);
             ASSERT_EQ((float)wholeMem[destFlatIndex], (float)partsMem[sourceFlatIndex]);
         }
-
-        cudaStatus = cudaFree(spanGeometry_d);
-        assert(cudaStatus == cudaSuccess);
-        cudaStatus = cudaFree(splitTensorMemArray_d);
-        assert(cudaStatus == cudaSuccess);
     }
 }

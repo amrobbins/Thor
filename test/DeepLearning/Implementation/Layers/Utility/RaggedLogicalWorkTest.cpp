@@ -87,7 +87,7 @@ TEST(RaggedLogicalWork, Lwa4e1RaggedConcatenateUsesActivePrefixAndAuthoredGradie
         const RowPartitionDescriptor partition(batch_size, capacity, DataType::UINT32);
         RowPartitionRuntime::publishHostState(carrier, partition, carrier.getTensorId(), {0, 2, 5, 7});
 
-        RaggedConcatenateLogicalWorkProbe concatenate(/*valuesAxis=*/1, /*expectedValueInputs=*/2, batch_size);
+        RaggedConcatenateLogicalWorkProbe concatenate(/*valuesAxis=*/1, /*expectedValueInputs=*/2, batch_size, DataType::FP32);
         concatenate.bind({input0, input1}, carrier, output, dOutput, {dInput0, dInput1});
 
         constexpr uint64_t bytes_per_active_row = (2 + 3 + 5) * sizeof(float);

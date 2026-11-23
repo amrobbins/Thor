@@ -66,6 +66,8 @@ Public API metadata source: **generated .pyi**.
 
 ::: thor.layers.Slice
 
+::: thor.layers.Split
+
 ::: thor.layers.StopGradient
 
 ::: thor.layers.NetworkInput

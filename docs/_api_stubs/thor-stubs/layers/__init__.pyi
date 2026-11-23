@@ -507,7 +507,7 @@ class DropOut(Layer):
     def is_training_dropout_enabled(self) -> bool: ...
 
 class Concatenate(Layer):
-    def __init__(self, network: thor.Network, feature_inputs: object, concatenation_axis: int) -> None:
+    def __init__(self, network: thor.Network, feature_inputs: object, concatenation_axis: int, output_data_type: thor.DataType | None = None) -> None:
         """
         Create and attach a Concatenate layer to a Network.
 
@@ -519,6 +519,11 @@ class Concatenate(Layer):
             Dense feature tensors, or ragged tensors sharing the exact same row partition.
         concatenation_axis : int
             Axis along which to concatenate the input tensors.
+        output_data_type : thor.DataType or None, default None
+            Data type of the output. Each input may have its own data type and is converted to this one as it
+            is concatenated, in the same kernel (the gradient is converted back to each input's type). Required
+            when the inputs' data types differ; when they share one, None keeps it. An input of an integer or
+            boolean type takes no gradient.
 
         For example, if your input tensors have dimensions:
             1. [2, 4, 5, 7]
@@ -1302,6 +1307,45 @@ class Slice(Layer):
 
     @property
     def length(self) -> int: ...
+
+class Split(Layer):
+    def __init__(self, network: thor.Network, feature_input: object, axis: int, sizes: Sequence[int], output_data_types: Sequence[thor.DataType] | None = None) -> None:
+        """
+        Split one tensor along an axis into consecutive pieces, in one kernel launch.
+
+        Parameters
+        ----------
+        network : thor.Network
+            Network the layer should be added to.
+        feature_input : thor.Tensor or thor.RaggedTensor
+            The tensor to split. A ragged tensor splits along a trailing value axis, and every piece is a ragged
+            tensor sharing its row partition; only the active packed values are moved.
+        axis : int
+            Axis to split along; the batch dimension is not one of the axes (for a ragged tensor, the axes are its
+            trailing dimensions).
+        sizes : list[int]
+            The pieces' extents on the axis, in order: two or more, each positive, summing to the input's extent.
+        output_data_types : list[thor.DataType] or None, default None
+            One data type per piece; each piece is converted to its type as it is split, in the same kernel (the
+            gradients are converted back to the input's type). None gives every piece the input's type. A piece
+            of an integer or boolean type takes no gradient, and a piece whose consumers send none contributes
+            zeros to the input's gradient.
+
+        For example, an input of dimensions [12, 5] split on axis 0 with sizes [4, 6, 2] gives pieces of
+        dimensions [4, 5], [6, 5] and [2, 5]: rows 0-3, 4-9 and 10-11.
+        """
+
+    def get_feature_outputs(self) -> list:
+        """Return the pieces, in order: thor.Tensor, or thor.RaggedTensor for a ragged input."""
+
+    @property
+    def use_ragged(self) -> bool: ...
+
+    @property
+    def axis(self) -> int: ...
+
+    @property
+    def sizes(self) -> list[int]: ...
 
 class StopGradient(Layer):
     def __init__(self, network: thor.Network, feature_input: object) -> None:

@@ -1485,6 +1485,191 @@ TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateValuesOnlyDoesNotMateria
               std::optional<std::vector<uint64_t>>(std::vector<uint64_t>{0, 3, 9, 11}));
 }
 
+TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateCutsARowFarLongerThanTheMeanIntoSeveralSpans) {
+    constexpr uint32_t batchSize = 4;
+    Network network("ragged_internal_concat_long_row");
+
+    RaggedTensor left = RaggedNetworkInput::Builder()
+                            .network(network)
+                            .name("left")
+                            .valuesDataType(DataType::FP32)
+                            .offsetsDataType(DataType::UINT32)
+                            .trailingDimensions({3})
+                            .maxValuesPerRow(40)
+                            .build();
+    RaggedTensor right = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("right")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({3})
+                             .maxValuesPerRow(2)
+                             .build();
+    RaggedSequenceConcatenate concatenate = RaggedSequenceConcatenate::Builder()
+                                                  .network(network)
+                                                  .featureInput(left)
+                                                  .featureInput(right)
+                                                  .build();
+    const RaggedTensor joined = concatenate.getRaggedFeatureOutput();
+    (void)RaggedNetworkOutput::Builder()
+        .network(network)
+        .name("joined")
+        .inputTensor(joined)
+        .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    auto& stamp = placed->getStampedNetwork(0);
+    auto physicalConcatenate = std::dynamic_pointer_cast<ThorImplementation::RaggedSequenceConcatenate>(
+        stamp.getPhysicalLayerFromApiLayer(concatenate.getId()));
+    ASSERT_NE(physicalConcatenate, nullptr);
+
+    // Row 2 of the left input holds 36 of its 39 values; every other row of either input holds one.
+    const std::vector<std::vector<uint64_t>> offsets{{0, 1, 2, 38, 39}, {0, 1, 2, 3, 4}};
+    Batch batch = makeFp32RaggedBatch("left", left, offsets[0]);
+    Batch rightBatch = makeFp32RaggedBatch("right", right, offsets[1]);
+    // Tell the two inputs' values apart.
+    constexpr float rightBias = 1000.0f;
+    ThorImplementation::Tensor rightValues = rightBatch.getRaggedTensor("right").getValues();
+    for (uint64_t i = 0; i < rightValues.getTotalNumElements(); ++i) rightValues.getMemPtr<float>()[i] += rightBias;
+    batch.insert("right", rightBatch.getRaggedTensor("right"));
+    std::map<std::string, InferenceOutputValue> outputs;
+    ASSERT_NO_THROW(outputs = placed->inferLogical(batch));
+    // 8 runs of 43 values: a span of the plan holds at most 12 (twice the mean run of 6), so the 36-value row is 3.
+    EXPECT_EQ(physicalConcatenate->getStagedCopySpanCountForTest(), 10u);
+    ASSERT_TRUE(outputs.contains("joined"));
+    ASSERT_TRUE(std::holds_alternative<ThorImplementation::RaggedTensor>(outputs.at("joined")));
+    const ThorImplementation::RaggedTensor& output =
+        std::get<ThorImplementation::RaggedTensor>(outputs.at("joined"));
+    EXPECT_EQ(output.getHostOffsetsIfAvailable(),
+              std::optional<std::vector<uint64_t>>(std::vector<uint64_t>{0, 2, 4, 41, 43}));
+
+    // Every row of the output is its left values, then its right values.
+    const ThorImplementation::Tensor outputValues = output.getValues();
+    const float* joinedValues = outputValues.getMemPtr<float>();
+    uint64_t joinedValue = 0;
+    uint64_t wrong = 0;
+    for (uint32_t row = 0; row < batchSize; ++row) {
+        for (uint32_t input = 0; input < 2; ++input) {
+            for (uint64_t value = offsets[input][row]; value < offsets[input][row + 1]; ++value, ++joinedValue) {
+                for (uint64_t f = 0; f < 3; ++f) {
+                    const float expected = static_cast<float>(value * 3 + f + 1) * 0.03125f + (input == 1 ? rightBias : 0.0f);
+                    wrong += joinedValues[joinedValue * 3 + f] != expected;
+                }
+            }
+        }
+    }
+    EXPECT_EQ(joinedValue, 43u);
+    EXPECT_EQ(wrong, 0u);
+}
+
+TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateKeepsEachQueuedBatchsCopyPlanInItsOwnSlot) {
+    constexpr uint32_t batchSize = 4;
+    constexpr uint32_t queueDepth = 3;
+    Network network("ragged_internal_concat_queued_plans");
+
+    RaggedTensor left = RaggedNetworkInput::Builder()
+                            .network(network)
+                            .name("left")
+                            .valuesDataType(DataType::FP32)
+                            .offsetsDataType(DataType::UINT32)
+                            .trailingDimensions({3})
+                            .maxValuesPerRow(40)
+                            .build();
+    RaggedTensor right = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("right")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({3})
+                             .maxValuesPerRow(2)
+                             .build();
+    RaggedSequenceConcatenate concatenate = RaggedSequenceConcatenate::Builder()
+                                                  .network(network)
+                                                  .featureInput(left)
+                                                  .featureInput(right)
+                                                  .build();
+    (void)RaggedNetworkOutput::Builder()
+        .network(network)
+        .name("joined")
+        .inputTensor(concatenate.getRaggedFeatureOutput())
+        .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+    placed->preallocateInputSlots(queueDepth);
+    placed->preallocateOutputSlots(queueDepth);
+    placed->synchronize();
+
+    // Three batches of different row lengths (the first with a row the plan cuts), each in its own queue slot, all
+    // submitted before any is waited on: each must be concatenated by its own copy plan.
+    const std::vector<std::vector<std::vector<uint64_t>>> offsets{
+        {{0, 1, 2, 38, 39}, {0, 1, 2, 3, 4}},
+        {{0, 5, 5, 6, 10}, {0, 0, 2, 2, 4}},
+        {{0, 0, 0, 0, 40}, {0, 2, 4, 6, 8}},
+    };
+    const std::string valuesOutputName = "__thor_ragged_output.joined.values";
+    std::vector<std::map<std::string, ThorImplementation::Tensor>> outputs(offsets.size());
+    std::vector<std::map<std::string, Event>> outputReadyEvents(offsets.size());
+    std::vector<Event> done;
+    for (uint32_t b = 0; b < offsets.size(); ++b) {
+        Batch batch = makeFp32RaggedBatch("left", left, offsets[b][0]);
+        Batch rightBatch = makeFp32RaggedBatch("right", right, offsets[b][1]);
+        ThorImplementation::Tensor leftValues = batch.getRaggedTensor("left").getValues();
+        for (uint64_t i = 0; i < leftValues.getTotalNumElements(); ++i) leftValues.getMemPtr<float>()[i] += 100.0f * b;
+        ThorImplementation::Tensor rightValues = rightBatch.getRaggedTensor("right").getValues();
+        for (uint64_t i = 0; i < rightValues.getTotalNumElements(); ++i)
+            rightValues.getMemPtr<float>()[i] += 1000.0f + 100.0f * b;
+        batch.insert("right", rightBatch.getRaggedTensor("right"));
+        ASSERT_NO_THROW(done.push_back(placed->submitBatch(0,
+                                                           batch,
+                                                           outputs[b],
+                                                           outputReadyEvents[b],
+                                                           /*isInferenceOnly=*/true,
+                                                           /*reusableProcessingFinishedEvent=*/nullptr,
+                                                           /*waitForOutputsOnProcessingStream=*/true,
+                                                           /*submitTiming=*/nullptr,
+                                                           /*outputSlotIndex=*/b)));
+    }
+
+    const ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    for (uint32_t b = 0; b < offsets.size(); ++b) {
+        SCOPED_TRACE(::testing::Message() << "batch " << b);
+        done[b].synchronize();
+        ASSERT_TRUE(outputs[b].contains(valuesOutputName));
+        outputReadyEvents[b].at(valuesOutputName).synchronize();
+        ThorImplementation::Tensor values = outputs[b].at(valuesOutputName);
+        if (values.getPlacement().getMemDevice() != ThorImplementation::TensorPlacement::MemDevices::CPU) {
+            ThorImplementation::Tensor host = values.clone(cpuPlacement);
+            Stream stream(values.getPlacement().getDeviceNum());
+            host.copyFromAsync(values, stream);
+            stream.synchronize();
+            values = host;
+        }
+        const float* joined = values.getMemPtr<float>();
+        uint64_t joinedValue = 0;
+        uint64_t wrong = 0;
+        for (uint32_t row = 0; row < batchSize; ++row) {
+            for (uint32_t input = 0; input < 2; ++input) {
+                for (uint64_t value = offsets[b][input][row]; value < offsets[b][input][row + 1]; ++value, ++joinedValue) {
+                    for (uint64_t f = 0; f < 3; ++f) {
+                        const float expected = static_cast<float>(value * 3 + f + 1) * 0.03125f + 100.0f * b +
+                                               (input == 1 ? 1000.0f : 0.0f);
+                        wrong += joined[joinedValue * 3 + f] != expected;
+                    }
+                }
+            }
+        }
+        EXPECT_EQ(joinedValue, offsets[b][0].back() + offsets[b][1].back());
+        EXPECT_EQ(wrong, 0u);
+    }
+}
+
 TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateReusesSharedAuthoritativeInputPartition) {
     constexpr uint32_t batchSize = 2;
     Network network("ragged_internal_concat_shared_input_partition");

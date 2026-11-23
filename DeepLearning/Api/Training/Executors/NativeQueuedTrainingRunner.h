@@ -8,7 +8,7 @@
 namespace Thor {
 
 struct NativeQueuedTrainingOptions {
-    uint64_t maxInFlightBatches = 32;
+    uint64_t maxInFlightBatches = 4;
     bool synchronizeAfterEveryBatch = false;
 };
 

@@ -53,11 +53,10 @@ void validateLogicalConcatGeometry(const vector<RaggedTensor>& inputs, const Ten
         if (!input.sharesPartitionWith(reference) ||
             input.getRowPartitionToken() != reference.getRowPartitionToken() ||
             input.getMaxValuesPerRow() != reference.getMaxValuesPerRow() ||
-            input.getValuesDataType() != reference.getValuesDataType() ||
             input.getOffsetsDataType() != reference.getOffsetsDataType() ||
             input.getTrailingDimensions().size() != trailing.size() ||
             !valueIds.insert(input.getValues().getOriginalId()).second) {
-            throw runtime_error("Concatenate canonical schema inputs disagree on partition, dtype, M or port identity.");
+            throw runtime_error("Concatenate canonical schema inputs disagree on partition, offsets dtype, M or port identity.");
         }
         const auto dims = input.getTrailingDimensions();
         for (uint32_t d = 0; d < dims.size(); ++d) {
@@ -68,8 +67,8 @@ void validateLogicalConcatGeometry(const vector<RaggedTensor>& inputs, const Ten
             throw overflow_error("Concatenate canonical schema output dimension overflows.");
         expected[axis + 1] += dims[axis];
     }
-    if (output.getDataType() != reference.getValuesDataType() ||
-        output.getDimensions() != expected || valueIds.count(output.getOriginalId())) {
+    // The inputs may have their own values types; the output's is the artifact's (set at build, converted to).
+    if (output.getDimensions() != expected || valueIds.count(output.getOriginalId())) {
         throw runtime_error("Concatenate canonical schema output does not match concatenated semantic dimensions.");
     }
 }

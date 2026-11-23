@@ -564,6 +564,8 @@ std::vector<Event> StampedNetwork::getSynchronizeEvents() const {
     appendLayerEvents(outputsShared);
     appendLayerEvents(trainableLayersShared);
     appendLayerEvents(otherLayersShared);
+    if (std::optional<Event> metadataUploaded = batchMetadataRing->synchronizeEvent(); metadataUploaded.has_value())
+        events.push_back(std::move(metadataUploaded.value()));
     return events;
 }
 
@@ -988,68 +990,67 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
                 std::dynamic_pointer_cast<RaggedSequenceConcatenate>(physicalization.producerPhysicalLayer);
             THOR_THROW_IF_FALSE(physicalConcatenate != nullptr);
 
-            // Derive the output partition and copy placement together. Each source
-            // boundary is inspected exactly once per row/input. Empty spans are
-            // omitted, and rows outside the valid example prefix contribute only
-            // to semantic output offsets, never to CUDA work.
-            const uint64_t maxActiveSpans =
-                static_cast<uint64_t>(validExampleCount) * static_cast<uint64_t>(sources.size());
-            if (physicalization.descriptor.getOffsetsDataType() == DataType::UINT32) {
-                RaggedSequenceCopySpan32* spans = physicalConcatenate->beginBatchCopyPlan32(maxActiveSpans);
-                uint64_t spanCount = 0;
-                for (uint64_t row = 0; row < physicalization.descriptor.getBatchSize(); ++row) {
-                    uint64_t destination = derived[row];
-                    for (uint32_t input = 0; input < sources.size(); ++input) {
-                        const std::vector<uint64_t>& source = *sources[input];
-                        const uint64_t begin = source[row];
-                        const uint64_t end = source[row + 1];
-                        THOR_THROW_IF_FALSE(begin <= end);
-                        const uint64_t length = end - begin;
-                        if (row < validExampleCount && length != 0) {
-                            THOR_THROW_IF_FALSE(spanCount < maxActiveSpans);
-                            THOR_THROW_IF_FALSE(begin <= std::numeric_limits<uint32_t>::max());
-                            THOR_THROW_IF_FALSE(destination <= std::numeric_limits<uint32_t>::max());
-                            THOR_THROW_IF_FALSE(length <= std::numeric_limits<uint32_t>::max());
-                            spans[spanCount++] = RaggedSequenceCopySpan32{
-                                input,
-                                static_cast<uint32_t>(begin),
-                                static_cast<uint32_t>(destination),
-                                static_cast<uint32_t>(length)};
-                        }
-                        THOR_THROW_IF_FALSE(destination <= std::numeric_limits<uint64_t>::max() - length);
-                        destination += length;
-                    }
-                    derived[row + 1] = destination;
+            // Derive the output partition, then the copy plan. A run is one
+            // input's non-empty row inside the valid example prefix; rows
+            // outside it contribute only to semantic output offsets, never to
+            // CUDA work.
+            uint64_t activeRuns = 0;
+            for (uint64_t row = 0; row < physicalization.descriptor.getBatchSize(); ++row) {
+                uint64_t destination = derived[row];
+                for (uint32_t input = 0; input < sources.size(); ++input) {
+                    const std::vector<uint64_t>& source = *sources[input];
+                    THOR_THROW_IF_FALSE(source[row] <= source[row + 1]);
+                    const uint64_t length = source[row + 1] - source[row];
+                    if (row < validExampleCount && length != 0) ++activeRuns;
+                    THOR_THROW_IF_FALSE(destination <= std::numeric_limits<uint64_t>::max() - length);
+                    destination += length;
                 }
-                THOR_THROW_IF_FALSE(derived.back() <= physicalization.descriptor.getMaxTotalValues());
-                physicalConcatenate->commitBatchCopyPlan(
-                    spanCount, validExampleCount, derived[validExampleCount]);
-            } else {
-                THOR_THROW_IF_FALSE(physicalization.descriptor.getOffsetsDataType() == DataType::UINT64);
-                RaggedSequenceCopySpan64* spans = physicalConcatenate->beginBatchCopyPlan64(maxActiveSpans);
-                uint64_t spanCount = 0;
-                for (uint64_t row = 0; row < physicalization.descriptor.getBatchSize(); ++row) {
-                    uint64_t destination = derived[row];
-                    for (uint32_t input = 0; input < sources.size(); ++input) {
-                        const std::vector<uint64_t>& source = *sources[input];
-                        const uint64_t begin = source[row];
-                        const uint64_t end = source[row + 1];
-                        THOR_THROW_IF_FALSE(begin <= end);
-                        const uint64_t length = end - begin;
-                        if (row < validExampleCount && length != 0) {
-                            THOR_THROW_IF_FALSE(spanCount < maxActiveSpans);
-                            spans[spanCount++] = RaggedSequenceCopySpan64{
-                                input, 0, begin, destination, length};
-                        }
-                        THOR_THROW_IF_FALSE(destination <= std::numeric_limits<uint64_t>::max() - length);
-                        destination += length;
-                    }
-                    derived[row + 1] = destination;
-                }
-                THOR_THROW_IF_FALSE(derived.back() <= physicalization.descriptor.getMaxTotalValues());
-                physicalConcatenate->commitBatchCopyPlan(
-                    spanCount, validExampleCount, derived[validExampleCount]);
+                derived[row + 1] = destination;
             }
+            THOR_THROW_IF_FALSE(derived.back() <= physicalization.descriptor.getMaxTotalValues());
+
+            // The plan holds every run, a run longer than the plan's span limit
+            // (twice the mean run) as several spans, so that the value kernel
+            // spreads a long row over as many lanes as its length calls for.
+            const uint64_t activeValues = derived[validExampleCount];
+            const uint64_t valueLimit = raggedSequenceCopySpanValueLimit(activeValues, activeRuns);
+            const uint64_t spanCapacity = raggedSequenceCopySpanCapacity(activeRuns);
+            const uint32_t inputBits = raggedSequenceCopySpanInputBits(sources.size());
+            const auto buildCopyPlan = [&](auto* spans) {
+                uint64_t spanCount = 0;
+                for (uint64_t row = 0; row < validExampleCount; ++row) {
+                    uint64_t destination = derived[row];
+                    for (uint32_t input = 0; input < sources.size(); ++input) {
+                        const std::vector<uint64_t>& source = *sources[input];
+                        const uint64_t begin = source[row];
+                        const uint64_t length = source[row + 1] - begin;
+                        if (length != 0) {
+                            spanCount = appendRaggedSequenceCopyRun(
+                                spans, spanCount, spanCapacity, input, begin, destination, length, valueLimit, inputBits);
+                        }
+                        destination += length;
+                    }
+                }
+                return spanCount;
+            };
+            // The plan goes to this concatenate's table in the stamp's batch metadata ring, which uploads every
+            // table of the batch in one copy once they are all built (below, before the physical batch runs).
+            THOR_THROW_IF_FALSE(physicalization.copyPlanTable.has_value());
+            THOR_THROW_IF_FALSE(spanCapacity <= physicalConcatenate->getCopyPlanCapacitySpans());
+            const ThorImplementation::BatchMetadataRing::TableId table = physicalization.copyPlanTable.value();
+            uint8_t* planBytes = batchMetadataRing->openTable(table);
+            uint64_t spanCount = 0;
+            if (physicalConcatenate->getCopySpanFormat() == RaggedSequenceCopySpanFormat::PACKED) {
+                spanCount = buildCopyPlan(reinterpret_cast<RaggedSequenceCopySpanPacked*>(planBytes));
+            } else {
+                spanCount = buildCopyPlan(reinterpret_cast<RaggedSequenceCopySpan64*>(planBytes));
+            }
+            batchMetadataRing->closeTable(table, spanCount * physicalConcatenate->getCopySpanBytes());
+            physicalConcatenate->stageBatchCopyPlan(batchMetadataRing->deviceTable(table),
+                                                    spanCount,
+                                                    batchMetadataRing->uploadedEvent(),
+                                                    validExampleCount,
+                                                    activeValues);
         }
         THOR_THROW_IF_FALSE(!derived.empty() && derived.front() == 0);
         THOR_THROW_IF_FALSE(derived.back() <= physicalization.descriptor.getMaxTotalValues());
@@ -1057,6 +1058,10 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
         return submittedHostOffsetsByPartition.emplace(rowPartitionId, std::move(derived)).first->second;
     };
 
+    // This batch's metadata (the sequence-concatenate copy plans built while the internal partitions resolve) takes the
+    // ring slot of its queue slot and is uploaded in one copy before any physical input runs.
+    reserveBatchMetadataSlots(1);
+    batchMetadataRing->beginBatch(outputSlotIndex.value_or(0));
     for (auto& [rowPartitionId, physicalization] : internalRowPartitions) {
         const std::vector<uint64_t>& hostOffsets = resolveHostOffsets(rowPartitionId);
         THOR_THROW_IF_FALSE(physicalization.producerPhysicalLayer != nullptr);
@@ -1078,6 +1083,8 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
         addManagedInput(physicalization.activeCountInput, /*activeCountOnly=*/true);
         addManagedInput(physicalization.offsetsInput, /*activeCountOnly=*/false);
     }
+
+    batchMetadataRing->commitBatch();
 
     const auto unwrapFinish = timingNow(submitTiming);
     BatchSubmissionTiming localTiming;
@@ -1325,6 +1332,8 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
     Event processingFinishedEvent;
     const auto processingEventStart = timingNow(submitTiming);
     joinProcessingDataStreams(inputs[0]->getStream());
+    // Every reader of this batch's metadata is joined here: its ring slot may take its next batch.
+    batchMetadataRing->releaseBatch(inputs[0]->getStream());
     if (reusableProcessingFinishedEvent != nullptr) {
         inputs[0]->getStream().putEvent(*reusableProcessingFinishedEvent, false, true);
         processingFinishedEvent = *reusableProcessingFinishedEvent;
@@ -1387,6 +1396,13 @@ void StampedNetwork::clearImpl(bool propagateCleanupFailure) {
     cleanupLayers(outputs);
     cleanupLayers(trainableLayers);
     cleanupLayers(otherLayers);
+    try {
+        batchMetadataRing->clear();
+    } catch (...) {
+        if (firstCleanupFailure == nullptr) {
+            firstCleanupFailure = std::current_exception();
+        }
+    }
 
     apiTensorToPhysicalDrivingLayer.clear();
     apiLayerToPhysicalLayer.clear();
@@ -1443,6 +1459,33 @@ void StampedNetwork::preallocateInputSlots(uint32_t numSlots) {
     for (NetworkInput* input : managedPartitionInputs) {
         input->preallocateInputSlots(numSlots);
     }
+    reserveBatchMetadataSlots(numSlots);
+}
+
+void StampedNetwork::reserveBatchMetadataSlots(uint32_t slotCount) {
+    THOR_THROW_IF_FALSE(slotCount >= 1);
+    // The tables are declared with the first slots, from the compiled operations that read them.
+    std::optional<int32_t> gpuNum;
+    if (batchMetadataRing->getDepth() != 0) {
+        gpuNum = batchMetadataRing->getGpu();
+    } else {
+        for (auto& [rowPartitionId, physicalization] : internalRowPartitions) {
+            (void)rowPartitionId;
+            if (physicalization.derivationKind != InternalRowPartitionPhysicalization::DerivationKind::SEQUENCE_CONCATENATE)
+                continue;
+            auto physicalConcatenate =
+                std::dynamic_pointer_cast<RaggedSequenceConcatenate>(physicalization.producerPhysicalLayer);
+            THOR_THROW_IF_FALSE(physicalConcatenate != nullptr);
+            THOR_THROW_IF_FALSE(!physicalization.copyPlanTable.has_value());
+            physicalization.copyPlanTable = batchMetadataRing->declareTable(physicalConcatenate->getCopyPlanCapacityBytes());
+            const auto values = physicalConcatenate->getFeatureOutput();
+            THOR_THROW_IF_FALSE(values.has_value());
+            const int32_t deviceNum = static_cast<int32_t>(values->getPlacement().getDeviceNum());
+            THOR_THROW_IF_FALSE(!gpuNum.has_value() || gpuNum.value() == deviceNum);
+            gpuNum = deviceNum;
+        }
+    }
+    batchMetadataRing->reserveSlots(gpuNum.value_or(0), slotCount);
 }
 
 void StampedNetwork::preallocateOutputSlots(uint32_t numSlots) {

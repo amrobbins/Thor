@@ -210,14 +210,22 @@ uint64_t RaggedSequenceConcatenate::getFirstInstanceMemRequirementInBytes(
     const uint64_t valuesBytes = getOutputTensorBytes(batchSize);
     const uint64_t offsetBytes = raggedFeatureOutput.getDescriptorForPlacement(batchSize)
         .getOffsetsDescriptor().getArraySizeInBytes();
-    // The physical copy plan reserves at most N spans per row; storage includes pinned host and device.
-    const uint64_t spanBytes = raggedFeatureOutput.getOffsetsDataType() == DataType::UINT32 ?
-        sizeof(ThorImplementation::RaggedSequenceCopySpan32) : sizeof(ThorImplementation::RaggedSequenceCopySpan64);
+    // The physical copy plan reserves the span capacity of N runs per row, in the span format the physical layer
+    // takes; storage includes pinned host and device.
     const uint64_t n = raggedFeatureInputs.size();
-    if (n > std::numeric_limits<uint64_t>::max() / batchSize ||
-        batchSize * n > std::numeric_limits<uint64_t>::max() / (2 * spanBytes))
+    if (n > std::numeric_limits<uint64_t>::max() / batchSize)
         throw std::overflow_error("RaggedSequenceConcatenate copy-plan allocation overflow.");
-    const uint64_t copyPlanBytes = 2 * batchSize * n * spanBytes; // pinned host and device
+    uint64_t largestInputCapacity = 0;
+    for (const RaggedTensor& input : raggedFeatureInputs) {
+        largestInputCapacity = std::max<uint64_t>(
+            largestInputCapacity, input.getDescriptorForPlacement(batchSize).getValuesDescriptor().getDimensions()[0]);
+    }
+    const uint64_t spanBytes = ThorImplementation::raggedSequenceCopySpanBytes(ThorImplementation::raggedSequenceCopySpanFormatFor(
+        n, raggedFeatureOutput.getDescriptorForPlacement(batchSize).getValuesDescriptor().getDimensions()[0], largestInputCapacity));
+    const uint64_t spanCapacity = ThorImplementation::raggedSequenceCopySpanCapacity(batchSize * n);
+    if (spanCapacity > std::numeric_limits<uint64_t>::max() / (2 * spanBytes))
+        throw std::overflow_error("RaggedSequenceConcatenate copy-plan allocation overflow.");
+    const uint64_t copyPlanBytes = 2 * spanCapacity * spanBytes; // pinned host and device
     if (valuesBytes > std::numeric_limits<uint64_t>::max() - offsetBytes ||
         valuesBytes + offsetBytes > std::numeric_limits<uint64_t>::max() - copyPlanBytes)
         throw std::overflow_error("RaggedSequenceConcatenate total allocation overflow.");

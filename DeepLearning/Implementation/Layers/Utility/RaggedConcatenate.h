@@ -6,6 +6,8 @@
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Expression/CudaHelpers.h"
+#include "Utilities/TensorOperations/Misc/Concatenate.h"
+#include "Utilities/TensorOperations/Misc/Split.h"
 #include "Utilities/TensorOperations/Ragged/RaggedConcatenate.h"
 
 #include <cstddef>
@@ -25,10 +27,14 @@ namespace ThorImplementation {
 // value axis. The final input port is the shared managed [1] active-count
 // carrier. CUDA no longer reads that scalar payload; its authoritative published
 // host partition determines the active packed prefix and is propagated onward.
+// Each values input may have its own data type and the output has
+// outputDataType, converted as it moves, as in the dense Concatenate; an input of
+// an integral type, or every input when the output's is integral, takes no
+// gradient.
 class RaggedConcatenate : public MultiConnectionLayer {
    public:
-    RaggedConcatenate(unsigned int valuesAxis, uint32_t expectedValueInputs, uint64_t batchSize)
-        : axis(valuesAxis), valueInputCount(expectedValueInputs), batchSize(batchSize) {
+    RaggedConcatenate(unsigned int valuesAxis, uint32_t expectedValueInputs, uint64_t batchSize, DataType outputDataType)
+        : axis(valuesAxis), valueInputCount(expectedValueInputs), batchSize(batchSize), outputDataType(outputDataType) {
         if (valueInputCount < 2) throw std::invalid_argument("RaggedConcatenate requires at least two values inputs.");
         if (batchSize == 0) throw std::invalid_argument("RaggedConcatenate batch size must be positive.");
         partitionInputIndex = valueInputCount;
@@ -57,9 +63,8 @@ class RaggedConcatenate : public MultiConnectionLayer {
             if (!featureInputs[i].has_value()) throw std::logic_error("RaggedConcatenate values input is missing.");
             const TensorDescriptor& descriptor = featureInputs[i]->getDescriptor();
             const auto& dimensions = descriptor.getDimensions();
-            if (descriptor.getDataType() != reference.getDataType() || dimensions.size() != referenceDimensions.size() ||
-                dimensions[0] != capacityRows) {
-                throw std::invalid_argument("RaggedConcatenate values inputs must share dtype, rank, and packed capacity.");
+            if (dimensions.size() != referenceDimensions.size() || dimensions[0] != capacityRows) {
+                throw std::invalid_argument("RaggedConcatenate values inputs must share rank and packed capacity.");
             }
             for (uint32_t d = 1; d < dimensions.size(); ++d) {
                 if (d != axis && dimensions[d] != referenceDimensions[d]) {
@@ -81,7 +86,7 @@ class RaggedConcatenate : public MultiConnectionLayer {
 
         std::vector<uint64_t> outputDimensions = referenceDimensions;
         outputDimensions[axis] = newAxisSize;
-        return Tensor(featureInputs[0]->getPlacement(), TensorDescriptor(reference.getDataType(), outputDimensions));
+        return Tensor(featureInputs[0]->getPlacement(), TensorDescriptor(outputDataType, outputDimensions));
     }
 
     void compileImpl() override {
@@ -92,57 +97,26 @@ class RaggedConcatenate : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(featureInputs[0].has_value());
         THOR_THROW_IF_FALSE(featureInputs[0]->getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
-        ScopedGpu scopedGpu(featureInputs[0]->getPlacement().getDeviceNum());
-        splitTensorFeatureInputMemoriesArray_d = nullptr;
-        splitTensorErrorOutputMemoriesArray_d = nullptr;
-        spanGeometryPerSplitTensor_d = nullptr;
-
-        std::vector<void*> valuePointers(valueInputCount);
-        for (uint32_t i = 0; i < valueInputCount; ++i) valuePointers[i] = featureInputs[i]->getMemPtr();
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&splitTensorFeatureInputMemoriesArray_d), valueInputCount * sizeof(void*)));
-        CUDA_CHECK(cudaMemcpyAsync(splitTensorFeatureInputMemoriesArray_d, valuePointers.data(), valueInputCount * sizeof(void*),
-                                   cudaMemcpyHostToDevice, streams[0].getStream()));
-
-        // Value-input connections and their Tensor backing allocations are fixed
-        // once this layer is compiled, so the forward pointer table is static.
-        // Keeping it device-resident avoids a per-batch H2D copy and callback.
-
-        if (errorInputs[0].has_value()) {
-            discardedErrorOutputs.resize(valueInputCount);
-            std::vector<void*> errorPointers(valueInputCount);
-            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&splitTensorErrorOutputMemoriesArray_d), valueInputCount * sizeof(void*)));
+        // Value-input connections and their Tensor backing allocations are fixed once this layer is compiled, so the
+        // pointers go to every launch as its parameters. An input that takes no gradient has a null split destination:
+        // the split neither reads nor writes its span.
+        valueInputMemories.assign(valueInputCount, nullptr);
+        for (uint32_t i = 0; i < valueInputCount; ++i) valueInputMemories[i] = featureInputs[i]->getMemPtr();
+        backPropagatesError = errorInputs[0].has_value();
+        errorOutputMemories.assign(valueInputCount, nullptr);
+        if (backPropagatesError) {
             for (uint32_t i = 0; i < valueInputCount; ++i) {
-                if (errorOutputs[i].has_value()) {
-                    errorPointers[i] = errorOutputs[i]->getMemPtr();
-                } else {
-                    discardedErrorOutputs[i] = featureInputs[i]->clone();
-                    errorPointers[i] = discardedErrorOutputs[i]->getMemPtr();
-                }
+                if (errorOutputs[i].has_value()) errorOutputMemories[i] = errorOutputs[i]->getMemPtr();
             }
-            CUDA_CHECK(cudaMemcpyAsync(splitTensorErrorOutputMemoriesArray_d, errorPointers.data(), valueInputCount * sizeof(void*),
-                                       cudaMemcpyHostToDevice, streams[0].getStream()));
         }
 
-        std::vector<uint64_t> axisOffsets(valueInputCount + 1, 0);
+        std::vector<uint64_t> axisElementsPerInput(valueInputCount, 0);
+        valueInputDataTypes.assign(valueInputCount, outputDataType);
         for (uint32_t i = 0; i < valueInputCount; ++i) {
-            axisOffsets[i + 1] = axisOffsets[i] + featureInputs[i]->getDescriptor().getDimensions()[axis];
+            axisElementsPerInput[i] = featureInputs[i]->getDescriptor().getDimensions()[axis];
+            valueInputDataTypes[i] = featureInputs[i]->getDescriptor().getDataType();
         }
-        const TensorDescriptor& outputDescriptor = featureOutputs[0]->getDescriptor();
-        const auto& outputDimensions = outputDescriptor.getDimensions();
-        uint64_t outerSlicesPerValue = 1;
-        for (uint32_t d = 1; d < axis; ++d) outerSlicesPerValue *= outputDimensions[d];
-        uint64_t innerElements = 1;
-        for (uint32_t d = axis + 1; d < outputDimensions.size(); ++d) innerElements *= outputDimensions[d];
-        const std::vector<RaggedConcatenateSpanGeometry> spanGeometry = buildRaggedConcatenateSpanGeometry(
-            TensorDescriptor::getElementSizeInBytes(outputDescriptor.getDataType()),
-            outerSlicesPerValue,
-            innerElements,
-            axisOffsets);
-        CUDA_CHECK(cudaMalloc(&spanGeometryPerSplitTensor_d, spanGeometry.size() * sizeof(RaggedConcatenateSpanGeometry)));
-        CUDA_CHECK(cudaMemcpyAsync(spanGeometryPerSplitTensor_d, spanGeometry.data(),
-                                   spanGeometry.size() * sizeof(RaggedConcatenateSpanGeometry),
-                                   cudaMemcpyHostToDevice, streams[0].getStream()));
-        streams[0].synchronize();
+        geometry = buildRaggedTrailingConcatenateGeometry(featureOutputs[0]->getDescriptor().getDimensions(), axis, axisElementsPerInput);
 
         for (uint32_t i = 0; i < featureInputs.size(); ++i) allFeatureInputTensorIds.insert(featureInputs[i]->getTensorId());
     }
@@ -183,25 +157,14 @@ class RaggedConcatenate : public MultiConnectionLayer {
 
         detail::waitForDistinctProducerStreams(streams[0], streams, forwardInputReadyEvents, 1);
 
-        const TensorDescriptor& outputDescriptor = featureOutputs[0]->getDescriptor();
-        const auto& outputDimensions = outputDescriptor.getDimensions();
+        const auto& outputDimensions = featureOutputs[0]->getDescriptor().getDimensions();
         THOR_THROW_IF_FALSE(!outputDimensions.empty() && outputDimensions[0] > 0);
-        const uint64_t elementsPerOutputValue = outputDescriptor.getTotalNumElements() / outputDimensions[0];
-        uint64_t outerSlicesPerValue = 1;
-        for (uint32_t d = 1; d < axis; ++d) outerSlicesPerValue *= outputDimensions[d];
         RowPartitionRuntime rowPartition = RowPartitionRuntime::fromHostStateCarrier(
             featureInputs[partitionInputIndex].value(), batchSize, outputDimensions[0]);
         const uint64_t activeRows = rowPartition.requireHostOffset(currentValidExampleCount);
-        launchRaggedConcatenate(
-            featureOutputs[0]->getMemPtr(),
-            splitTensorFeatureInputMemoriesArray_d,
-            outputDimensions[0],
-            elementsPerOutputValue * TensorDescriptor::getElementSizeInBytes(outputDescriptor.getDataType()),
-            outerSlicesPerValue,
-            valueInputCount,
-            spanGeometryPerSplitTensor_d,
-            activeRows,
-            streams[0]);
+        THOR_THROW_IF_FALSE(activeRows <= outputDimensions[0]);
+        launchConcatenate(featureOutputs[0]->getMemPtr(), outputDataType, valueInputMemories, valueInputDataTypes,
+                          geometry.outerSlicesFor(activeRows), geometry.spanElements, streams[0]);
 
         rowPartition.publishHostStateTo(featureOutputs[0].value());
         nextLayers[0].value()->forward(featureOutputs[0], validationPass, currentValidExampleCount);
@@ -217,25 +180,15 @@ class RaggedConcatenate : public MultiConnectionLayer {
             runtimeBatchSize == 0 ? physicalBatchCapacity : runtimeBatchSize;
         THOR_THROW_IF_FALSE(resolvedValidExampleCount >= 1);
         THOR_THROW_IF_FALSE(resolvedValidExampleCount <= physicalBatchCapacity);
-        if (splitTensorErrorOutputMemoriesArray_d != nullptr) {
-            const TensorDescriptor& errorDescriptor = errorInput->getDescriptor();
-            const auto& dimensions = errorDescriptor.getDimensions();
-            const uint64_t elementsPerSourceValue = errorDescriptor.getTotalNumElements() / dimensions[0];
-            uint64_t outerSlicesPerValue = 1;
-            for (uint32_t d = 1; d < axis; ++d) outerSlicesPerValue *= dimensions[d];
+        if (backPropagatesError) {
+            const auto& dimensions = errorInput->getDescriptor().getDimensions();
+            THOR_THROW_IF_FALSE(dimensions == featureOutputs[0]->getDescriptor().getDimensions());
             RowPartitionRuntime rowPartition = RowPartitionRuntime::fromHostStateCarrier(
                 featureInputs[partitionInputIndex].value(), batchSize, dimensions[0]);
             const uint64_t activeRows = rowPartition.requireHostOffset(resolvedValidExampleCount);
-            launchRaggedSplit(
-                splitTensorErrorOutputMemoriesArray_d,
-                errorInput->getMemPtr(),
-                dimensions[0],
-                elementsPerSourceValue * TensorDescriptor::getElementSizeInBytes(errorDescriptor.getDataType()),
-                outerSlicesPerValue,
-                valueInputCount,
-                spanGeometryPerSplitTensor_d,
-                activeRows,
-                streams[0]);
+            THOR_THROW_IF_FALSE(activeRows <= dimensions[0]);
+            launchSplit(errorOutputMemories, valueInputDataTypes, errorInput->getMemPtr(), outputDataType,
+                        geometry.outerSlicesFor(activeRows), geometry.spanElements, streams[0]);
         }
 
         ThorImplementation::detail::recordCompletionAndWaitOnDistinctTargetStreams(
@@ -252,14 +205,11 @@ class RaggedConcatenate : public MultiConnectionLayer {
 
     void cleanup() override {
         THOR_THROW_IF_FALSE(featureInputs[0].has_value());
-        ScopedGpu scopedGpu(featureInputs[0]->getPlacement().getDeviceNum());
-        if (splitTensorFeatureInputMemoriesArray_d != nullptr) CUDA_CHECK(cudaFree(splitTensorFeatureInputMemoriesArray_d));
-        if (splitTensorErrorOutputMemoriesArray_d != nullptr) CUDA_CHECK(cudaFree(splitTensorErrorOutputMemoriesArray_d));
-        if (spanGeometryPerSplitTensor_d != nullptr) CUDA_CHECK(cudaFree(spanGeometryPerSplitTensor_d));
-        splitTensorFeatureInputMemoriesArray_d = nullptr;
-        splitTensorErrorOutputMemoriesArray_d = nullptr;
-        spanGeometryPerSplitTensor_d = nullptr;
-        discardedErrorOutputs.clear();
+        valueInputMemories.clear();
+        errorOutputMemories.clear();
+        valueInputDataTypes.clear();
+        backPropagatesError = false;
+        geometry = RaggedTrailingConcatenateGeometry{};
         for (Event& event : forwardInputReadyEvents)
             event = Event();
         backwardOutputsReadyEvent = Event();
@@ -296,7 +246,9 @@ class RaggedConcatenate : public MultiConnectionLayer {
         streams[inputIndex] = stream;
         previousLayers[inputIndex] = previousLayer;
         featureInputs[inputIndex] = featureInput;
-        if (inputIndex < valueInputCount && backPropagateError && !isInferenceOnly())
+        if (inputIndex < valueInputCount && backPropagateError && !isInferenceOnly() &&
+            !TensorDescriptor::isIntegralType(featureInput->getDescriptor().getDataType()) &&
+            !TensorDescriptor::isIntegralType(outputDataType))
             errorOutputs[inputIndex] = featureInput->clone();
         else
             errorOutputs[inputIndex] = std::nullopt;
@@ -335,9 +287,8 @@ class RaggedConcatenate : public MultiConnectionLayer {
             const std::optional<uint64_t> inputBytes = logicalBytesForActiveRows(errorInputs[0].value(), *activeRows);
             if (!inputBytes.has_value()) return 0;
             uint64_t bytes = *inputBytes;
-            // The physical split kernel may write discarded buffers for pruned
-            // branches. Those are implementation artifacts, not authored logical
-            // gradient results, so count only the error outputs that remain connected.
+            // Only the error outputs that remain connected are written (a pruned
+            // branch has a null split destination).
             for (uint32_t i = 0; i < valueInputCount; ++i) {
                 if (!errorOutputs[i].has_value()) continue;
                 const std::optional<uint64_t> outputBytes = logicalBytesForActiveRows(errorOutputs[i].value(), *activeRows);
@@ -394,10 +345,12 @@ class RaggedConcatenate : public MultiConnectionLayer {
     uint32_t valueInputCount;
     uint32_t partitionInputIndex;
     uint64_t batchSize;
-    void **splitTensorFeatureInputMemoriesArray_d = nullptr;
-    void **splitTensorErrorOutputMemoriesArray_d = nullptr;
-    RaggedConcatenateSpanGeometry *spanGeometryPerSplitTensor_d = nullptr;
-    std::vector<std::optional<Tensor>> discardedErrorOutputs;
+    DataType outputDataType;
+    std::vector<void *> valueInputMemories;
+    std::vector<DataType> valueInputDataTypes;
+    std::vector<void *> errorOutputMemories;
+    bool backPropagatesError = false;
+    RaggedTrailingConcatenateGeometry geometry;
     std::set<uint64_t> allFeatureInputTensorIds;
     std::set<uint64_t> stillWaitingForFeatureInputTensors;
     uint32_t currentValidExampleCount = 0;

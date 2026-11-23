@@ -139,6 +139,16 @@ values only and consumes the source partitions needed to locate input rows. It d
 not force any physical representation of `Q`; downstream requirements decide whether
 `Q` gets `HOST_EXTENT`, `[1]`, `[B+1]`, or nothing.
 
+The same host pass builds the concatenate's copy plan: a span per non-empty row of
+each input (a row much longer than the batch's mean as several spans), naming where
+its values come from and go to. The plan is per-batch metadata, not a partition
+representation: it is written into the concatenate's table in the stamp's batch
+metadata ring (`Utilities/Common/BatchMetadataRing.h`), a slot per queue slot, and
+every table of the batch is uploaded in one copy on a pooled upload stream before
+the batch's physical inputs run. The value kernels read the slot's device table; the
+slot is released when the batch's processing streams are joined, so it is rewritten
+only a queue depth of batches later.
+
 ### `RaggedSequenceSlice`
 
 The CPU derives clipped output host offsets `Q` from the authoritative source

@@ -51,13 +51,28 @@ def test_concatenate_rejects_rank_mismatch():
         thor.layers.Concatenate(n, [t1, t2], 0)
 
 
-def test_concatenate_rejects_dtype_mismatch():
+def test_concatenate_of_different_data_types_requires_output_data_type():
     n = _net()
     t1 = _tensor([2, 3], thor.DataType.fp32)
     t2 = _tensor([2, 3], thor.DataType.fp16)
 
-    with pytest.raises(ValueError, match=r"same data type"):
+    with pytest.raises(ValueError, match=r"different data types; pass output_data_type"):
         thor.layers.Concatenate(n, [t1, t2], 0)
+
+
+def test_concatenate_converts_to_output_data_type():
+    n = _net()
+    t1 = _tensor([2, 3], thor.DataType.fp32)
+    t2 = _tensor([2, 5], thor.DataType.fp8_e5m2)
+    t3 = _tensor([2, 1], thor.DataType.int32)
+    layer = thor.layers.Concatenate(n, [t1, t2, t3], 1, output_data_type=thor.DataType.bf16)
+    assert layer.get_feature_output().get_data_type() == thor.DataType.bf16
+    assert layer.get_feature_output().get_dimensions() == [2, 9]
+
+    same = thor.layers.Concatenate(n, [_tensor([2, 3]), _tensor([2, 3])], 0)
+    assert same.get_feature_output().get_data_type() == thor.DataType.fp32
+    narrowed = thor.layers.Concatenate(n, [_tensor([2, 3]), _tensor([2, 3])], 0, output_data_type=thor.DataType.fp16)
+    assert narrowed.get_feature_output().get_data_type() == thor.DataType.fp16
 
 
 def test_concatenate_rejects_dim_mismatch_non_axis():

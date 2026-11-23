@@ -1,4 +1,7 @@
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
+
+#include <optional>
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Utility/Concatenate.h"
@@ -34,7 +37,11 @@ void bind_concatenate(nb::module_ &m) {
 
     concatenate.def(
         "__init__",
-        [](Concatenate *self, Network &network, nb::object feature_inputs_obj, uint32_t concatenation_axis) {
+        [](Concatenate *self,
+           Network &network,
+           nb::object feature_inputs_obj,
+           uint32_t concatenation_axis,
+           std::optional<ThorImplementation::DataType> output_data_type) {
             nb::list feature_inputs = pybind::castArgument<nb::list>(
                 feature_inputs_obj, "Concatenate", "feature_inputs", "list[thor.Tensor | thor.RaggedTensor]", false);
             if (feature_inputs.size() == 0) {
@@ -48,8 +55,16 @@ void bind_concatenate(nb::module_ &m) {
                     if (!nb::isinstance<RaggedTensor>(feature_inputs[i])) {
                         throw nb::type_error("Concatenate cannot mix thor.Tensor and thor.RaggedTensor inputs.");
                     }
-                    builder.featureInput(raggedFromFeatureInputs(feature_inputs, i));
+                    const RaggedTensor input = raggedFromFeatureInputs(feature_inputs, i);
+                    if (!output_data_type.has_value() &&
+                        input.getValuesDataType() != raggedFromFeatureInputs(feature_inputs, 0).getValuesDataType()) {
+                        throw nb::value_error(
+                            "Concatenate instance: the inputs have different data types; pass output_data_type, the type "
+                            "every input is converted to.");
+                    }
+                    builder.featureInput(input);
                 }
+                if (output_data_type.has_value()) builder.outputDataType(output_data_type.value());
                 new (self) Concatenate(std::move(builder.build()));
                 return;
             }
@@ -95,10 +110,10 @@ void bind_concatenate(nb::module_ &m) {
                     throw nb::value_error(msg.c_str());
                 }
 
-                if (ti.getDataType() != ref_dtype) {
+                if (ti.getDataType() != ref_dtype && !output_data_type.has_value()) {
                     string msg =
-                        "Concatenate instance: all tensors must have the same data type. "
-                        "First tensor: " +
+                        "Concatenate instance: the inputs have different data types; pass output_data_type, the type "
+                        "every input is converted to. First tensor: " +
                         string(t0.getDescriptorString()) + "tensor[" + to_string(i) + "]: " + string(ti.getDescriptorString());
                     throw nb::value_error(msg.c_str());
                 }
@@ -121,6 +136,7 @@ void bind_concatenate(nb::module_ &m) {
             for (size_t i = 0; i < feature_inputs.size(); ++i) {
                 builder.featureInput(tensorFromFeatureInputs(feature_inputs, i));
             }
+            if (output_data_type.has_value()) builder.outputDataType(output_data_type.value());
 
             // Move the concatenate layer into the pre-allocated but uninitialized memory at self
             new (self) Concatenate(std::move(builder.build()));
@@ -128,6 +144,7 @@ void bind_concatenate(nb::module_ &m) {
         "network"_a,
         "feature_inputs"_a,
         "concatenation_axis"_a,
+        "output_data_type"_a.none() = nb::none(),
 
         R"nbdoc(
             Create and attach a Concatenate layer to a Network.
@@ -140,6 +157,11 @@ void bind_concatenate(nb::module_ &m) {
                 Dense feature tensors, or ragged tensors sharing the exact same row partition.
             concatenation_axis : int
                 Axis along which to concatenate the input tensors.
+            output_data_type : thor.DataType or None, default None
+                Data type of the output. Each input may have its own data type and is converted to this one as it
+                is concatenated, in the same kernel (the gradient is converted back to each input's type). Required
+                when the inputs' data types differ; when they share one, None keeps it. An input of an integer or
+                boolean type takes no gradient.
 
             For example, if your input tensors have dimensions:
                 1. [2, 4, 5, 7]
