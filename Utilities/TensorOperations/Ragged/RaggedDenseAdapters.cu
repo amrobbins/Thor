@@ -1,7 +1,7 @@
 #include "Utilities/TensorOperations/Ragged/RaggedDenseAdapters.h"
 
 #include "Utilities/Expression/CudaHelpers.h"
-#include "Utilities/TensorOperations/Cub/CubDevicePrimitiveSupport.h"
+#include "Utilities/Common/TensorRequirements.h"
 #include "Utilities/TensorOperations/Ragged/RowPartition.h"
 
 #include <algorithm>
@@ -12,7 +12,7 @@
 
 namespace ThorImplementation {
 namespace {
-using namespace CubDevicePrimitiveSupport;
+using namespace TensorRequirements;
 
 uint64_t checkedMul(uint64_t a, uint64_t b, const char* label) {
     if (a != 0 && b > std::numeric_limits<uint64_t>::max() / a) {

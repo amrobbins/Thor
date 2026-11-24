@@ -4,9 +4,9 @@
 #include "Utilities/Common/Event.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Expression/CudaHelpers.h"
-#include "Utilities/TensorOperations/Cub/CubDevicePrimitiveSupport.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingSparseGradientCudaCompile.h"
 #include "Utilities/TensorOperations/Embedding/ReduceStageController.h"
+#include "Utilities/TensorOperations/Sort/RadixSort.h"
 
 #include <cuda.h>
 #include <cuda_bf16.h>
@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <cstdio>
 #include <limits>
@@ -32,6 +33,12 @@
 
 namespace ThorImplementation {
 namespace {
+
+// The bits a sort of keys at most largest_key has to order. The bits above them are zero in every key, so sorting
+// them would only add passes that move nothing. At least 1, so a sort whose only key is 0 still has a bit.
+[[nodiscard]] uint32_t sortKeyBits(uint64_t largest_key) {
+    return std::max(1U, static_cast<uint32_t>(std::bit_width(largest_key)));
+}
 
 #ifndef THOR_EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX
 #define THOR_EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX 16U
@@ -416,16 +423,24 @@ __global__ void materializeEmbeddingSparseGradientSortPairsKernel(const IndexT* 
     tokenIds[token] = static_cast<uint32_t>(token);
 }
 
+// The sort orders only the active tokens (activeTokenCount, written here by token 0). The run-length pass still reads
+// the whole capacity, so the inactive tail goes straight to the sort's output (sortedRowKeys, sortedTokenIds), where
+// the sort leaves it alone: there it is what a sort of the capacity would have put there, the sentinel row (the
+// largest key) for every inactive token in token order.
 template <typename IndexT, typename RowT, typename ActiveCountT>
-__global__ void materializeEmbeddingSparseGradientSortPairsRaggedKernel(const IndexT* __restrict__ indices,
-                                                                        RowT* __restrict__ rowKeys,
-                                                                        uint32_t* __restrict__ tokenIds,
-                                                                        const ActiveCountT* __restrict__ activeValueCount,
-                                                                        uint64_t numTokens,
-                                                                        uint64_t elementsPerValue,
-                                                                        uint64_t vocabularySize,
-                                                                        uint64_t paddingIndex,
-                                                                        bool hasPaddingIndex) {
+__global__ void materializeEmbeddingSparseGradientSortPairsRaggedKernel(
+    const IndexT* __restrict__ indices,
+    RowT* rowKeys,       // may be sortedRowKeys
+    uint32_t* tokenIds,  // may be sortedTokenIds
+    RowT* sortedRowKeys,
+    uint32_t* sortedTokenIds,
+    uint64_t* __restrict__ activeTokenCount,
+    const ActiveCountT* __restrict__ activeValueCount,
+    uint64_t numTokens,
+    uint64_t elementsPerValue,
+    uint64_t vocabularySize,
+    uint64_t paddingIndex,
+    bool hasPaddingIndex) {
     static_assert(!std::is_signed_v<IndexT>, "Embedding sparse-gradient indices are unsigned-only.");
     static_assert(!std::is_signed_v<RowT>, "Embedding sparse-gradient row keys are unsigned-only.");
     static_assert(!std::is_signed_v<ActiveCountT>, "Ragged active-value counts are unsigned-only.");
@@ -438,11 +453,12 @@ __global__ void materializeEmbeddingSparseGradientSortPairsRaggedKernel(const In
     const uint64_t activeValues = static_cast<uint64_t>(*activeValueCount);
     const uint64_t activeTokens =
         activeValues <= numTokens / elementsPerValue ? activeValues * elementsPerValue : numTokens;
+    if (token == 0) *activeTokenCount = activeTokens;
     if (token >= activeTokens) {
         // Inactive packed capacity is logically nonexistent.  Emit the same
         // sentinel used for invalid/padding rows without touching indices.
-        rowKeys[token] = static_cast<RowT>(vocabularySize);
-        tokenIds[token] = static_cast<uint32_t>(token);
+        sortedRowKeys[token] = static_cast<RowT>(vocabularySize);
+        sortedTokenIds[token] = static_cast<uint32_t>(token);
         return;
     }
 
@@ -833,13 +849,6 @@ EmbeddingSparseGradientReduceGridUpdateConfig ultraHighFinalReduceGridUpdateConf
     config.maxReduceGridDimX = ultraHighFinalReduceGridDimXForEmbeddingSparseGradient(maxRows, embeddingDim);
     config.maxReduceGridDimY = config.reduceGridDimY;
     return config;
-}
-
-template <typename RowT>
-size_t querySortTempBytes(RowT* keysIn, RowT* keysOut, uint32_t* valuesIn, uint32_t* valuesOut, int numItems, int endBit) {
-    size_t bytes = 0;
-    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(nullptr, bytes, keysIn, keysOut, valuesIn, valuesOut, numItems, 0, endBit));
-    return bytes;
 }
 
 template <typename RowT>
@@ -1516,10 +1525,17 @@ struct PreparedEmbeddingSparseGradient {
     EmbeddingSparseGradientRunBucketConfig runBucketConfig;
     std::optional<RaggedRuntimeExtent> raggedRuntimeExtent;
 
+    // The sort's pairs: materialized into (rowKeys, tokenIds), its passes alternating with (rowKeysAlternate,
+    // tokenIdsAlternate); sortedRowKeys and sortedTokenIds are the pair it ends in (sortPlan.sortedInAlternate).
     Tensor rowKeys;
     Tensor tokenIds;
+    Tensor rowKeysAlternate;
+    Tensor tokenIdsAlternate;
     Tensor sortedRowKeys;
     Tensor sortedTokenIds;
+    RadixSortPairsPlan sortPlan;
+    Tensor sortScratch;
+    Tensor activeTokenCount;  // [1] UINT64, the ragged producer's active tokens (written by the materialize kernel)
     Tensor runCounts;
     Tensor runOffsets;
     Tensor numRuns;
@@ -1544,12 +1560,9 @@ struct PreparedEmbeddingSparseGradient {
     Tensor twoStageHighRunRowCounts;
     Tensor twoStageUltraHighRunRowCounts;
     Tensor twoStageUltraHighPartialCounts;
-    Tensor sortTempStorage;
     Tensor rleTempStorage;
     Tensor scanTempStorage;
     uint64_t maxUltraHighPartials = 1;
-    int sortEndBit = 64;  // row keys are at most vocabularySize, the invalid-row sentinel
-    size_t sortTempBytes = 0;
     size_t rleTempBytes = 0;
     size_t scanTempBytes = 0;
 
@@ -1787,10 +1800,16 @@ void allocateTypedPreparedBuffers(PreparedEmbeddingSparseGradient& prepared,
                                     " cannot represent vocabulary_size as the invalid-row sentinel.");
     }
 
+    // Row keys are at most vocabularySize, the invalid-row sentinel.
+    prepared.sortPlan = planRadixSortPairs(rowDTypeForCppType<RowT>(), numTokens, sortKeyBits(prepared.vocabularySize));
     prepared.rowKeys = Tensor(placement, TensorDescriptor(rowDTypeForCppType<RowT>(), {numTokens}));
     prepared.tokenIds = Tensor(placement, TensorDescriptor(DataType::UINT32, {numTokens}));
-    prepared.sortedRowKeys = Tensor(placement, TensorDescriptor(rowDTypeForCppType<RowT>(), {numTokens}));
-    prepared.sortedTokenIds = Tensor(placement, TensorDescriptor(DataType::UINT32, {numTokens}));
+    prepared.rowKeysAlternate = Tensor(placement, TensorDescriptor(rowDTypeForCppType<RowT>(), {numTokens}));
+    prepared.tokenIdsAlternate = Tensor(placement, TensorDescriptor(DataType::UINT32, {numTokens}));
+    prepared.sortedRowKeys = prepared.sortPlan.sortedInAlternate ? prepared.rowKeysAlternate : prepared.rowKeys;
+    prepared.sortedTokenIds = prepared.sortPlan.sortedInAlternate ? prepared.tokenIdsAlternate : prepared.tokenIds;
+    prepared.sortScratch = Tensor(placement, TensorDescriptor(DataType::UINT32, {prepared.sortPlan.scratchWords}));
+    prepared.activeTokenCount = Tensor(placement, TensorDescriptor(DataType::UINT64, {1}));
     prepared.runCounts = Tensor(placement, TensorDescriptor(DataType::UINT32, {numTokens}));
     prepared.runOffsets = Tensor(placement, TensorDescriptor(DataType::UINT32, {numTokens}));
     prepared.numRuns = Tensor(placement, TensorDescriptor(DataType::UINT32, {1}));
@@ -1824,13 +1843,6 @@ void allocateTypedPreparedBuffers(PreparedEmbeddingSparseGradient& prepared,
         prepared.twoStageUltraHighPartialCounts = Tensor(placement, TensorDescriptor(DataType::UINT32, {stageBlocks}));
     }
 
-    prepared.sortEndBit = CubDevicePrimitiveSupport::radixSortEndBit(prepared.vocabularySize);
-    prepared.sortTempBytes = querySortTempBytes(prepared.rowKeys.getMemPtr<RowT>(),
-                                                prepared.sortedRowKeys.getMemPtr<RowT>(),
-                                                prepared.tokenIds.getMemPtr<uint32_t>(),
-                                                prepared.sortedTokenIds.getMemPtr<uint32_t>(),
-                                                cubItems,
-                                                prepared.sortEndBit);
     prepared.rleTempBytes = queryRleTempBytes(prepared.sortedRowKeys.getMemPtr<RowT>(),
                                               outputGradient.rows.getMemPtr<RowT>(),
                                               prepared.runCounts.getMemPtr<uint32_t>(),
@@ -1838,7 +1850,6 @@ void allocateTypedPreparedBuffers(PreparedEmbeddingSparseGradient& prepared,
                                               cubItems);
     prepared.scanTempBytes =
         queryScanTempBytes(prepared.runCounts.getMemPtr<uint32_t>(), prepared.runOffsets.getMemPtr<uint32_t>(), cubItems);
-    prepared.sortTempStorage = allocateByteScratch(placement, prepared.sortTempBytes);
     prepared.rleTempStorage = allocateByteScratch(placement, prepared.rleTempBytes);
     prepared.scanTempStorage = allocateByteScratch(placement, prepared.scanTempBytes);
 }
@@ -1868,6 +1879,9 @@ void launchMaterializeSortPairsRaggedTyped(const Tensor& indices, PreparedEmbedd
         <<<grid, block, 0, stream.getStream()>>>(indices.getMemPtr<IndexT>(),
                                                  prepared.rowKeys.getMemPtr<RowT>(),
                                                  prepared.tokenIds.getMemPtr<uint32_t>(),
+                                                 prepared.sortedRowKeys.getMemPtr<RowT>(),
+                                                 prepared.sortedTokenIds.getMemPtr<uint32_t>(),
+                                                 prepared.activeTokenCount.getMemPtr<uint64_t>(),
                                                  extent.activeValueCount.pointer<ActiveCountT>(),
                                                  prepared.numTokens,
                                                  extent.elementsPerValue,
@@ -2190,34 +2204,19 @@ void launchFinalizeRows(PreparedEmbeddingSparseGradient& prepared,
                                                           stream);
 }
 
-template <typename RowT>
-void sortPairsTyped(PreparedEmbeddingSparseGradient& prepared, int cubItems, Stream stream) {
-    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(prepared.sortTempStorage.getMemPtr<void>(),
-                                               prepared.sortTempBytes,
-                                               prepared.rowKeys.getMemPtr<RowT>(),
-                                               prepared.sortedRowKeys.getMemPtr<RowT>(),
-                                               prepared.tokenIds.getMemPtr<uint32_t>(),
-                                               prepared.sortedTokenIds.getMemPtr<uint32_t>(),
-                                               cubItems,
-                                               0,
-                                               prepared.sortEndBit,
-                                               stream.getStream()));
-}
-
-void sortPairs(PreparedEmbeddingSparseGradient& prepared, int cubItems, Stream stream) {
-    switch (prepared.rowDataType) {
-        case DataType::UINT16:
-            sortPairsTyped<uint16_t>(prepared, cubItems, stream);
-            break;
-        case DataType::UINT32:
-            sortPairsTyped<uint32_t>(prepared, cubItems, stream);
-            break;
-        case DataType::UINT64:
-            sortPairsTyped<uint64_t>(prepared, cubItems, stream);
-            break;
-        default:
-            throw std::runtime_error("Prepared Embedding sparse-gradient producer has unsupported row dtype.");
-    }
+// Sorts the active tokens' pairs by row: all of them for the dense producer, the device count the materialize kernel
+// wrote for the ragged one.
+void sortPairs(PreparedEmbeddingSparseGradient& prepared, Stream stream) {
+    const bool ragged = prepared.raggedRuntimeExtent.has_value();
+    launchRadixSortPairs(prepared.sortPlan,
+                         prepared.rowKeys.getMemPtr(),
+                         prepared.rowKeysAlternate.getMemPtr(),
+                         prepared.tokenIds.getMemPtr<uint32_t>(),
+                         prepared.tokenIdsAlternate.getMemPtr<uint32_t>(),
+                         prepared.sortScratch.getMemPtr<uint32_t>(),
+                         ragged ? prepared.activeTokenCount.getMemPtr() : nullptr,
+                         DataType::UINT64,
+                         stream);
 }
 
 template <typename RowT>
@@ -2555,8 +2554,8 @@ EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradient(Prep
     result.gradientDataType = prepared.gradientDataType;
     result.rowDataType = prepared.rowDataType;
     result.fusedSparseRowUpdate = false;
-    result.sortEndBit = prepared.sortEndBit;
-    result.sortTempBytes = prepared.sortTempBytes;
+    result.sortKeyBits = prepared.sortPlan.keyBits;
+    result.sortScratchBytes = prepared.sortPlan.scratchWords * sizeof(uint32_t);
     result.rleTempBytes = prepared.rleTempBytes;
     result.scanTempBytes = prepared.scanTempBytes;
 
@@ -2599,8 +2598,8 @@ EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradientWithS
     result.gradientDataType = prepared.gradientDataType;
     result.rowDataType = prepared.rowDataType;
     result.fusedSparseRowUpdate = true;
-    result.sortEndBit = prepared.sortEndBit;
-    result.sortTempBytes = prepared.sortTempBytes;
+    result.sortKeyBits = prepared.sortPlan.keyBits;
+    result.sortScratchBytes = prepared.sortPlan.scratchWords * sizeof(uint32_t);
     result.rleTempBytes = prepared.rleTempBytes;
     result.scanTempBytes = prepared.scanTempBytes;
 
@@ -2663,8 +2662,9 @@ void capturePreparedEmbeddingSparseGradientImpl(CudaGraphCaptureBuilder& builder
 
     launchMaterializeSortPairs(indices, prepared, stream);
 
+    sortPairs(prepared, stream);
+
     const int cubItems = checkedCubItems(prepared.numTokens, "token count");
-    sortPairs(prepared, cubItems, stream);
 
     // RLE writes only the first numRuns counts.
     rleRows(prepared, outputGradient, cubItems, stream);

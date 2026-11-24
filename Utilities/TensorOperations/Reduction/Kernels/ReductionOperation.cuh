@@ -3,7 +3,6 @@
 #include "DeepLearning/Implementation/Tensor/StridedSpan.h"
 #include "Utilities/Common/LowPrecisionFloat.h"
 #include "Utilities/Expression/CudaHelpers.h"
-#include "Utilities/TensorOperations/Cub/CubDataTypePolicy.h"
 #include "Utilities/TensorOperations/Reduction/Kernels/ScalarOps.cuh"
 #include "Utilities/TensorOperations/Reduction/Reducer.h"
 #include "Utilities/TensorOperations/Reduction/Kernels/StageSemantics.h"
@@ -30,12 +29,10 @@ namespace ThorImplementation::ReductionInternal {
 template <typename Fn>
 decltype(auto) dispatchReductionInputDType(DataType dtype, Fn&& fn) {
     switch (dtype) {
-#if THOR_CUB_ENABLE_FP8_TYPES
         case DataType::FP8_E4M3:
             return fn.template operator()<__nv_fp8_e4m3>();
         case DataType::FP8_E5M2:
             return fn.template operator()<__nv_fp8_e5m2>();
-#endif
         case DataType::FP16:
             return fn.template operator()<__half>();
         case DataType::BF16:
@@ -302,7 +299,6 @@ template <bool Fold, bool SignFold, typename InputT, int ItemsPerLane>
     }
 }
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 template <typename InputT, int ItemsPerLane, typename ReductionOpT, typename InputTransformT>
 __device__ __forceinline__ void reducePackedFp8ValuesToFp32(
     float (&local)[ItemsPerLane],
@@ -321,7 +317,6 @@ __device__ __forceinline__ void reducePackedFp8ValuesToFp32(
         local[item + 1] = reduction_op(local[item + 1], input_transform(decoded.y));
     }
 }
-#endif
 
 // Arbitrary row strides can shift an otherwise contiguous per-thread packet away from a 16-byte boundary. Never issue
 // a misaligned 8/16-byte vector access: align the global window down to 16 bytes, load one additional uint4 when the

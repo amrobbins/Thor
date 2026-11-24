@@ -99,7 +99,6 @@ __device__ __forceinline__ void raggedRKStoreChunk(void* output, DataType output
             }
             return;
         }
-#if THOR_CUB_ENABLE_FP8_TYPES
         else if ((output_dtype == DataType::FP8_E4M3 || output_dtype == DataType::FP8_E5M2) && V == 16) {
             uint8_t* out = static_cast<uint8_t*>(output) + index;
             if ((reinterpret_cast<uintptr_t>(out) & 15U) == 0) {
@@ -115,7 +114,6 @@ __device__ __forceinline__ void raggedRKStoreChunk(void* output, DataType output
                 return;
             }
         }
-#endif
     }
 #pragma unroll
     for (uint32_t k = 0; k < V; ++k) {

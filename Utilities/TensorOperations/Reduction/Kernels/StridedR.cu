@@ -59,7 +59,6 @@ struct StridedRElement<__nv_bfloat16> {
     }
 };
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 template <>
 struct StridedRElement<__nv_fp8_e4m3> {
     using Bits = unsigned char;
@@ -75,7 +74,6 @@ struct StridedRElement<__nv_fp8_e5m2> {
         return static_cast<float>(ThorLowPrecision::fp8E5M2FromBits(static_cast<__nv_fp8_storage_t>(bits)));
     }
 };
-#endif
 
 // The input transform (0 identity, 1 |x|, 2 x^2) and MAX's sign fold, uniform for the launch.
 __device__ __forceinline__ float stridedRTransform(float value, uint32_t transform, bool negate) {
@@ -213,12 +211,10 @@ __global__ __launch_bounds__(STRIDED_R_THREADS, 2) void stridedRKernel(
 
 __device__ __forceinline__ float stridedRLoadRuntime(const void* input, DataType dtype) {
     switch (dtype) {
-#if THOR_CUB_ENABLE_FP8_TYPES
         case DataType::FP8_E4M3:
             return StridedRElement<__nv_fp8_e4m3>::decode(__ldg(static_cast<const unsigned char*>(input)));
         case DataType::FP8_E5M2:
             return StridedRElement<__nv_fp8_e5m2>::decode(__ldg(static_cast<const unsigned char*>(input)));
-#endif
         case DataType::FP16:
             return StridedRElement<__half>::decode(__ldg(static_cast<const unsigned short*>(input)));
         case DataType::BF16:
@@ -318,10 +314,8 @@ decltype(auto) dispatchStridedR(DataType input_dtype, int combine, Fn&& fn) {
         throw std::logic_error("StridedR: unknown combine");
     };
     switch (input_dtype) {
-#if THOR_CUB_ENABLE_FP8_TYPES
         case DataType::FP8_E4M3: return by_combine.template operator()<__nv_fp8_e4m3>();
         case DataType::FP8_E5M2: return by_combine.template operator()<__nv_fp8_e5m2>();
-#endif
         case DataType::FP16: return by_combine.template operator()<__half>();
         case DataType::BF16: return by_combine.template operator()<__nv_bfloat16>();
         case DataType::FP32: return by_combine.template operator()<float>();
@@ -351,10 +345,8 @@ std::string stridedRLaunchName(const StridedRLaunch& launch) {
 
 bool stridedRSupportsInput(DataType dtype) {
     switch (dtype) {
-#if THOR_CUB_ENABLE_FP8_TYPES
         case DataType::FP8_E4M3:
         case DataType::FP8_E5M2:
-#endif
         case DataType::FP16:
         case DataType::BF16:
         case DataType::FP32:

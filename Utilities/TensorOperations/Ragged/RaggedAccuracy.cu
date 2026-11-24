@@ -1,7 +1,7 @@
 #include "Utilities/TensorOperations/Ragged/RaggedAccuracy.h"
 
 #include "Utilities/Expression/CudaHelpers.h"
-#include "Utilities/TensorOperations/Cub/CubDevicePrimitiveSupport.h"
+#include "Utilities/Common/TensorRequirements.h"
 #include "Utilities/TensorOperations/Reduction/Kernels/ReductionOperation.cuh"
 
 #include <cub/block/block_reduce.cuh>
@@ -15,7 +15,7 @@
 
 namespace ThorImplementation {
 namespace {
-using namespace CubDevicePrimitiveSupport;
+using namespace TensorRequirements;
 using ReductionInternal::ToFp32;
 
 constexpr uint32_t kBlockSize = 256;

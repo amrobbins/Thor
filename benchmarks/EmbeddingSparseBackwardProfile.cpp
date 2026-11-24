@@ -142,6 +142,12 @@ struct Options {
     std::vector<uint64_t> lowRunMaxs = parseU64List(envString("THOR_EMBEDDING_BACKWARD_PROFILE_LOW_RUN_MAXS", "16"));
     std::vector<uint64_t> ultraHighRunMins = parseU64List(envString("THOR_EMBEDDING_BACKWARD_PROFILE_ULTRA_HIGH_RUN_MINS", "512"));
     std::vector<uint64_t> ultraHighTokensPerPartials = parseU64List(envString("THOR_EMBEDDING_BACKWARD_PROFILE_ULTRA_HIGH_TOKENS_PER_PARTIALS", "1024"));
+    // "dense": the dense producer over every token. A number f in (0, 1]: the ragged producer (the Embedding layer's on a
+    // RaggedTensor) with a device active count of floor(f * tokens); the tokens past it are inactive capacity.
+    std::vector<std::string> activeFractions =
+        parseStringList(envString("THOR_EMBEDDING_BACKWARD_PROFILE_ACTIVE_FRACTIONS", "dense,1,0.5,0.25"));
+    // Checks each case's rows (and, on the materialized path, values) against a host reference once before timing.
+    bool verify = envBool("THOR_EMBEDDING_BACKWARD_PROFILE_VERIFY", true);
 };
 struct CaseConfig {
     uint64_t vocabularySize = 0;
@@ -155,11 +161,15 @@ struct CaseConfig {
     uint32_t lowRunMax = 16U;
     uint32_t ultraHighRunMin = 512U;
     uint32_t ultraHighTokensPerPartial = 1024U;
+    std::string activeMode = "dense";  // "dense", or the active fraction as given
+    uint64_t activeTokens = 0;         // the tokens a batch holds: numTokens when dense
+
+    [[nodiscard]] bool ragged() const { return activeMode != "dense"; }
 
     std::string name() const {
         std::ostringstream ss;
         ss << "V" << vocabularySize << "_D" << embeddingDim << "_N" << numTokens << "_" << dtypeName(upstreamDType) << "_" << duplicateMode
-           << "_" << optimizer;
+           << "_" << optimizer << "_A" << activeMode;
         return ss.str();
     }
 };
@@ -168,6 +178,7 @@ struct PoolSlot {
     Tensor indices;
     Tensor upstream;
     Tensor weights;
+    Tensor activeCount;  // [1] UINT32, ragged cases only
     std::unique_ptr<Sgd> optimizer;
     SparseRowGradient gradient;
     std::shared_ptr<PreparedEmbeddingSparseGradient> prepared;
@@ -332,6 +343,21 @@ void fillCpuIndices(Tensor& tensor, const CaseConfig& cfg, int slot) {
     }
 }
 
+// Inactive capacity (ragged cases) holds an out-of-range index and NaN gradients: nothing may read them.
+void poisonInactiveTokens(Tensor& indices, Tensor& upstream, const CaseConfig& cfg) {
+    uint32_t* index = indices.getMemPtr<uint32_t>();
+    for (uint64_t t = cfg.activeTokens; t < cfg.numTokens; ++t) index[t] = std::numeric_limits<uint32_t>::max();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    for (uint64_t i = cfg.activeTokens * cfg.embeddingDim; i < cfg.numTokens * cfg.embeddingDim; ++i) {
+        switch (cfg.upstreamDType) {
+            case DataType::FP32: upstream.getMemPtr<float>()[i] = nan; break;
+            case DataType::FP16: static_cast<__half*>(upstream.getMemPtr())[i] = __float2half(nan); break;
+            case DataType::BF16: static_cast<__nv_bfloat16*>(upstream.getMemPtr())[i] = __float2bfloat16(nan); break;
+            default: throw std::invalid_argument("Unsupported upstream dtype.");
+        }
+    }
+}
+
 void fillCpuUpstream(Tensor& tensor, const CaseConfig& cfg, int slot) {
     const uint64_t n = checkedMul(cfg.numTokens, cfg.embeddingDim, "upstream element count");
     switch (cfg.upstreamDType) {
@@ -460,18 +486,30 @@ std::vector<PoolSlot> buildPool(const Options& opts, const CaseConfig& cfg, int 
     }
 
     const uint64_t capacity = std::min(cfg.numTokens, cfg.vocabularySize);
+    std::optional<Tensor> activeCount;
+    if (cfg.ragged()) {
+        if (cfg.activeTokens > std::numeric_limits<uint32_t>::max())
+            throw std::invalid_argument("The ragged cases count active tokens in UINT32.");
+        activeCount = makeGpuTensorFromCpu(cpuPlacement, gpuPlacement, TensorDescriptor(DataType::UINT32, {1}), stream,
+                                           [&](Tensor& cpu) { cpu.getMemPtr<uint32_t>()[0] = static_cast<uint32_t>(cfg.activeTokens); });
+    }
     for (int i = 0; i < poolSlots; ++i) {
         PoolSlot slot;
-        slot.indices = makeGpuTensorFromCpu(cpuPlacement,
-                                            gpuPlacement,
-                                            TensorDescriptor(DataType::UINT32, {cfg.numTokens}),
-                                            stream,
-                                            [&](Tensor& cpu) { fillCpuIndices(cpu, cfg, i); });
-        slot.upstream = makeGpuTensorFromCpu(cpuPlacement,
-                                             gpuPlacement,
-                                             TensorDescriptor(cfg.upstreamDType, {cfg.numTokens, cfg.embeddingDim}),
-                                             stream,
-                                             [&](Tensor& cpu) { fillCpuUpstream(cpu, cfg, i); });
+        Tensor cpuIndices(cpuPlacement, TensorDescriptor(DataType::UINT32, {cfg.numTokens}));
+        Tensor cpuUpstream(cpuPlacement, TensorDescriptor(cfg.upstreamDType, {cfg.numTokens, cfg.embeddingDim}));
+        fillCpuIndices(cpuIndices, cfg, i);
+        fillCpuUpstream(cpuUpstream, cfg, i);
+        if (cfg.ragged()) poisonInactiveTokens(cpuIndices, cpuUpstream, cfg);
+        slot.indices = Tensor(gpuPlacement, cpuIndices.getDescriptor());
+        slot.upstream = Tensor(gpuPlacement, cpuUpstream.getDescriptor());
+        slot.indices.copyFromAsync(cpuIndices, stream);
+        slot.upstream.copyFromAsync(cpuUpstream, stream);
+        stream.synchronize();
+        std::optional<RaggedRuntimeExtent> extent;
+        if (activeCount.has_value()) {
+            slot.activeCount = activeCount.value();
+            extent = raggedRuntimeExtentFromActiveValueCount(slot.activeCount, cfg.numTokens, 1);
+        }
 
         slot.weights = sharedWeights;
 
@@ -509,18 +547,29 @@ std::vector<PoolSlot> buildPool(const Options& opts, const CaseConfig& cfg, int 
         slot.fusedSparseRowUpdate = opts.useFusedUpdate && optimizerSupportsSparseRowUpdateFusion && reducerSupportsSparseRowUpdateFusion;
         if (slot.fusedSparseRowUpdate) {
             SparseRowOptimizerExpression updateExpression = slot.optimizer->toSparseRowUpdateExpression(slot.weights, slot.gradient);
-            slot.prepared = prepareEmbeddingSparseGradientWithSparseRowUpdate(slot.indices,
-                                                                             slot.upstream,
-                                                                             slot.gradient,
-                                                                             updateExpression.outputs,
-                                                                             updateExpression.inputs,
-                                                                             updateExpression.indexedOutputs,
-                                                                             std::nullopt);
+            slot.prepared = extent.has_value()
+                                ? prepareEmbeddingSparseGradientWithSparseRowUpdateRagged(slot.indices,
+                                                                                          slot.upstream,
+                                                                                          slot.gradient,
+                                                                                          updateExpression.outputs,
+                                                                                          updateExpression.inputs,
+                                                                                          updateExpression.indexedOutputs,
+                                                                                          std::nullopt,
+                                                                                          extent.value())
+                                : prepareEmbeddingSparseGradientWithSparseRowUpdate(slot.indices,
+                                                                                   slot.upstream,
+                                                                                   slot.gradient,
+                                                                                   updateExpression.outputs,
+                                                                                   updateExpression.inputs,
+                                                                                   updateExpression.indexedOutputs,
+                                                                                   std::nullopt);
             if (!preparedEmbeddingSparseGradientHasSparseRowUpdate(*slot.prepared)) {
                 throw std::runtime_error("Benchmark prepared a producer for fused sparse-row update, but the prepared plan does not contain sparse-row update fusion.");
             }
         } else {
-            slot.prepared = prepareEmbeddingSparseGradient(slot.indices, slot.upstream, slot.gradient, std::nullopt);
+            slot.prepared = extent.has_value() ? prepareEmbeddingSparseGradientRagged(slot.indices, slot.upstream, slot.gradient,
+                                                                                      std::nullopt, extent.value())
+                                               : prepareEmbeddingSparseGradient(slot.indices, slot.upstream, slot.gradient, std::nullopt);
         }
 
         if (opts.profileGraph) {
@@ -546,19 +595,103 @@ std::vector<PoolSlot> buildPool(const Options& opts, const CaseConfig& cfg, int 
     return pool;
 }
 
+uint64_t readUnsigned(const Tensor& cpu, uint64_t i) {
+    switch (cpu.getDataType()) {
+        case DataType::UINT16: return cpu.getMemPtr<uint16_t>()[i];
+        case DataType::UINT32: return cpu.getMemPtr<uint32_t>()[i];
+        case DataType::UINT64: return cpu.getMemPtr<uint64_t>()[i];
+        default: throw std::invalid_argument("Unsupported row dtype.");
+    }
+}
+
+float readFloat(const Tensor& cpu, uint64_t i) {
+    switch (cpu.getDataType()) {
+        case DataType::FP32: return cpu.getMemPtr<float>()[i];
+        case DataType::FP16: return __half2float(static_cast<const __half*>(cpu.getMemPtr())[i]);
+        case DataType::BF16: return __bfloat162float(static_cast<const __nv_bfloat16*>(cpu.getMemPtr())[i]);
+        default: throw std::invalid_argument("Unsupported value dtype.");
+    }
+}
+
+Tensor toCpu(const Tensor& gpu, Stream stream) {
+    Tensor cpu(TensorPlacement(TensorPlacement::MemDevices::CPU), gpu.getDescriptor());
+    cpu.copyFromAsync(gpu, stream);
+    stream.synchronize();
+    return cpu;
+}
+
+// One launch of the slot's producer (not the graph), then its unique rows (ascending, the sentinel excluded) against
+// the host's, and on the materialized path each row's summed gradient (FP32 against a double reference, within 1e-4
+// of the sum of the magnitudes). "rows+values", "rows" (fused: the values are the optimizer's), or exits on a mismatch.
+std::string verifyCase(PoolSlot& slot, const CaseConfig& cfg, uint32_t batchSize, Stream stream) {
+    if (slot.fusedSparseRowUpdate) {
+        launchPreparedEmbeddingSparseGradientWithSparseRowUpdate(*slot.prepared, slot.indices, slot.upstream, slot.gradient,
+                                                                 slot.optimizer->sparseRowUpdateRuntimeScalars(batchSize), stream);
+    } else {
+        launchPreparedEmbeddingSparseGradient(*slot.prepared, slot.indices, slot.upstream, slot.gradient, stream);
+    }
+    stream.synchronize();
+    const Tensor indices = toCpu(slot.indices, stream);
+    const Tensor upstream = toCpu(slot.upstream, stream);
+    const Tensor numRows = toCpu(slot.gradient.numRows, stream);
+    const Tensor rows = toCpu(slot.gradient.rows, stream);
+
+    std::vector<uint64_t> expectedRows;
+    for (uint64_t t = 0; t < cfg.activeTokens; ++t) {
+        const uint64_t row = indices.getMemPtr<uint32_t>()[t];
+        if (row < cfg.vocabularySize) expectedRows.push_back(row);
+    }
+    std::sort(expectedRows.begin(), expectedRows.end());
+    expectedRows.erase(std::unique(expectedRows.begin(), expectedRows.end()), expectedRows.end());
+
+    auto fail = [&](const std::string& what) {
+        throw std::runtime_error("verification FAILED for " + cfg.name() + ": " + what);
+    };
+    const uint64_t gotRows = readUnsigned(numRows, 0);
+    if (gotRows != expectedRows.size())
+        fail("num_rows " + std::to_string(gotRows) + ", expected " + std::to_string(expectedRows.size()));
+    for (uint64_t r = 0; r < gotRows; ++r) {
+        if (readUnsigned(rows, r) != expectedRows[r])
+            fail("row " + std::to_string(r) + " is " + std::to_string(readUnsigned(rows, r)) + ", expected " +
+                 std::to_string(expectedRows[r]));
+    }
+    if (slot.fusedSparseRowUpdate) return "rows";
+
+    const Tensor values = toCpu(slot.gradient.values, stream);
+    const uint64_t dim = cfg.embeddingDim;
+    std::vector<double> sums(expectedRows.size() * dim, 0.0), magnitudes(expectedRows.size() * dim, 0.0);
+    for (uint64_t t = 0; t < cfg.activeTokens; ++t) {
+        const uint64_t row = indices.getMemPtr<uint32_t>()[t];
+        if (row >= cfg.vocabularySize) continue;
+        const uint64_t r = static_cast<uint64_t>(std::lower_bound(expectedRows.begin(), expectedRows.end(), row) - expectedRows.begin());
+        for (uint64_t d = 0; d < dim; ++d) {
+            const double x = readFloat(upstream, t * dim + d);
+            sums[r * dim + d] += x;
+            magnitudes[r * dim + d] += std::fabs(x);
+        }
+    }
+    for (uint64_t i = 0; i < sums.size(); ++i) {
+        const double got = readFloat(values, i);
+        if (!(std::fabs(got - sums[i]) <= 1e-4 * magnitudes[i] + 1e-6))
+            fail("value " + std::to_string(i) + " is " + std::to_string(got) + ", expected " + std::to_string(sums[i]));
+    }
+    return "rows+values";
+}
+
 void printCsvHeader() {
     std::cout << "case,vocab,dim,tokens,upstream_dtype,row_dtype,dup_mode,optimizer,update_path,low_run_max,ultra_high_run_min,ultra_high_tokens_per_partial,pool_slots,pool_bytes,l2_bytes,"
                  "materialize_ms,sort_ms,clear_counts_ms,rle_ms,finalize_ms,scan_ms,reduce_ms,"
                  "sparse_gradient_ms,sparse_update_ms,total_backward_update_ms,graph_sparse_gradient_ms,"
                  "active_rows,singleton_rows,duplicate_rows,low_run_rows,high_run_rows,ultra_high_run_rows,"
                  "low_run_tokens,high_run_tokens,ultra_high_run_tokens,max_run_count,"
-                 "sort_end_bit,sort_temp_bytes,rle_temp_bytes,scan_temp_bytes\n";
+                 "sort_key_bits,sort_scratch_bytes,rle_temp_bytes,scan_temp_bytes,active_mode,active_tokens,check\n";
 }
 
 void printCsvRow(const CaseConfig& cfg,
                  const EmbeddingSparseGradientProfileResult& meta,
                  const StageStats& stats,
                  const std::string& updatePath,
+                 const std::string& check,
                  int poolSlots,
                  uint64_t poolBytes,
                  uint64_t l2Bytes) {
@@ -571,7 +704,8 @@ void printCsvRow(const CaseConfig& cfg,
               << stats.activeRows.mean() << ',' << stats.singletonRows.mean() << ',' << stats.duplicateRows.mean() << ','
               << stats.lowRunRows.mean() << ',' << stats.highRunRows.mean() << ',' << stats.ultraHighRunRows.mean() << ','
               << stats.lowRunTokens.mean() << ',' << stats.highRunTokens.mean() << ',' << stats.ultraHighRunTokens.mean() << ','
-              << stats.maxRunCount.mean() << ',' << meta.sortEndBit << ',' << meta.sortTempBytes << ',' << meta.rleTempBytes << ',' << meta.scanTempBytes << '\n';
+              << stats.maxRunCount.mean() << ',' << meta.sortKeyBits << ',' << meta.sortScratchBytes << ',' << meta.rleTempBytes << ',' << meta.scanTempBytes << ','
+              << cfg.activeMode << ',' << cfg.activeTokens << ',' << check << '\n';
 }
 
 bool keepCase(const Options& opts, const CaseConfig& cfg) {
@@ -597,6 +731,7 @@ void profileCase(const Options& opts, const CaseConfig& cfg, const cudaDevicePro
     setEmbeddingSparseGradientRunBucketConfigOverrideForTesting(EmbeddingSparseGradientRunBucketConfig{
         cfg.lowRunMax, cfg.ultraHighRunMin, cfg.ultraHighTokensPerPartial});
     std::vector<PoolSlot> pool = buildPool(opts, cfg, poolSlots, stream);
+    const std::string check = opts.verify ? verifyCase(pool.front(), cfg, opts.batchSize, stream) : "off";
 
     for (int i = 0; i < opts.warmupIters; ++i) {
         PoolSlot& slot = pool[static_cast<size_t>(i % poolSlots)];
@@ -660,7 +795,16 @@ void profileCase(const Options& opts, const CaseConfig& cfg, const cudaDevicePro
     }
 
     const bool fusedUpdatePath = !pool.empty() && pool.front().fusedSparseRowUpdate;
-    printCsvRow(cfg, meta, stats, fusedUpdatePath ? "fused" : "materialized", poolSlots, poolBytes, l2Bytes);
+    printCsvRow(cfg, meta, stats, fusedUpdatePath ? "fused" : "materialized", check, poolSlots, poolBytes, l2Bytes);
+}
+
+uint64_t activeTokensFor(const std::string& mode, uint64_t tokens) {
+    if (mode == "dense") return tokens;
+    size_t used = 0;
+    const double fraction = std::stod(mode, &used);
+    if (used != mode.size() || !(fraction > 0.0) || fraction > 1.0)
+        throw std::invalid_argument("THOR_EMBEDDING_BACKWARD_PROFILE_ACTIVE_FRACTIONS takes dense or numbers in (0, 1]: " + mode);
+    return std::min<uint64_t>(tokens, static_cast<uint64_t>(std::floor(fraction * static_cast<double>(tokens))));
 }
 
 std::vector<CaseConfig> makeCases(const Options& opts) {
@@ -699,8 +843,13 @@ std::vector<CaseConfig> makeCases(const Options& opts) {
                                         if (cfg.ultraHighTokensPerPartial == 0U) {
                                             throw std::invalid_argument("Embedding sparse backward profile requires ultra_high_tokens_per_partial > 0.");
                                         }
-                                        if (keepCase(opts, cfg)) {
-                                            cases.push_back(std::move(cfg));
+                                        for (const std::string& active : opts.activeFractions) {
+                                            CaseConfig activeCfg = cfg;
+                                            activeCfg.activeMode = active;
+                                            activeCfg.activeTokens = activeTokensFor(active, tokens);
+                                            if (keepCase(opts, activeCfg)) {
+                                                cases.push_back(std::move(activeCfg));
+                                            }
                                         }
                                     }
                                 }
@@ -739,7 +888,9 @@ void printUsage() {
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_LOW_RUN_MAXS=16\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_ULTRA_HIGH_RUN_MINS=512\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_ULTRA_HIGH_TOKENS_PER_PARTIALS=1024\n"
-              << "  THOR_EMBEDDING_BACKWARD_PROFILE_OPTIMIZERS=sgd\n";
+              << "  THOR_EMBEDDING_BACKWARD_PROFILE_OPTIMIZERS=sgd\n"
+              << "  THOR_EMBEDDING_BACKWARD_PROFILE_ACTIVE_FRACTIONS=dense,1,0.5,0.25  # dense, or the ragged active fraction\n"
+              << "  THOR_EMBEDDING_BACKWARD_PROFILE_VERIFY=1\n";
 }
 
 }  // namespace

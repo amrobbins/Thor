@@ -2,8 +2,7 @@
 
 #include "Utilities/TensorOperations/Reduction/FrontEnd.h"
 
-#include "Utilities/TensorOperations/Cub/CubDataTypePolicy.h"
-#include "Utilities/TensorOperations/Cub/CubDevicePrimitiveSupport.h"
+#include "Utilities/Common/TensorRequirements.h"
 #include "Utilities/TensorOperations/Reduction/Planner/DenseProductionPhysicalSelectionContext.h"
 
 #include <cuda_runtime_api.h>
@@ -16,15 +15,13 @@ namespace ThorImplementation {
 
 namespace ReductionFrontEnd {
 
-using namespace CubDevicePrimitiveSupport;
+using namespace TensorRequirements;
 using namespace ReductionInternal;
 
 [[nodiscard]] bool isSupportedFloatingStorageDType(DataType dtype) {
     switch (dtype) {
-#if THOR_CUB_ENABLE_FP8_TYPES
         case DataType::FP8_E4M3:
         case DataType::FP8_E5M2:
-#endif
         case DataType::FP16:
         case DataType::BF16:
         case DataType::FP32:
@@ -38,7 +35,7 @@ void requireSupportedFloatingStorageDType(DataType dtype, const char* role) {
     if (!isSupportedFloatingStorageDType(dtype)) {
         throw std::invalid_argument(std::string("Tensor reduction does not support ") + role + " dtype " +
                                     dtypeName(dtype) +
-                                    ". Supported storage dtypes are FP8 (per THOR_CUB_ENABLE_FP8_TYPES), FP16, BF16 "
+                                    ". Supported storage dtypes are FP8 (E4M3, E5M2), FP16, BF16 "
                                     "and FP32; TF32 is not a storage dtype.");
     }
 }
@@ -128,7 +125,7 @@ void requireSupportedOperation(ReductionOp op) {
 
 namespace {
 
-using namespace CubDevicePrimitiveSupport;
+using namespace TensorRequirements;
 using namespace ReductionInternal;
 using namespace ReductionFrontEnd;
 

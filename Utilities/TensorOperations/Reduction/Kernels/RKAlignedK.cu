@@ -24,7 +24,6 @@
 namespace ThorImplementation::ReductionInternal {
 namespace {
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 template <typename InputT, typename TransformT, typename ReductionOpT,
           size_t PacketBytes, int BlockThreads, RKStageTopology Topology>
 constexpr bool prunedFp8AlignedInstantiation() {
@@ -82,7 +81,6 @@ template <RKStageTopology Topology, typename Callback>
     }
     return dispatched;
 }
-#endif
 
 template <typename ReductionOpT>
 struct AlignedKReductionIdentityFp32;
@@ -259,7 +257,6 @@ __device__ inline void storeAlignedKFinalPacket(void* output,
     }
 }
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 
 // The FP8 AlignedK kernels: the K-parallel reduction topology over one-byte storage, at the naturally coalesced
 // 16/8/4/2-byte packet widths. Each lane owns one contiguous FP8 packet, performs its complete R reduction in FP32
@@ -1136,7 +1133,6 @@ __global__ __launch_bounds__(BlockThreads) void fp8AlignedKValueCompleteUnifiedK
 }
 
 
-#endif  // THOR_CUB_ENABLE_FP8_TYPES
 
 
 // ---- AlignedK on FP32 input. A copy of the FP8 AlignedK
@@ -1726,7 +1722,7 @@ __global__ __launch_bounds__(FP32_ARG_PACKED_SPLIT_MAX_THREADS) void fp32ArgWide
 // word. Results leave as 16-byte (P8, through a per-warp shared transpose, as VALUE's P8 writeback) or 8-byte (P2)
 // lane-contiguous stores (one scalar per component, 8 bytes apart per lane, measured 1.5x VALUE, 4.4x at R = 4).
 constexpr int FP8_ARG_ALIGNED_MAX_THREADS = 128;
-// VALUE's AlignedK load-ahead depth (as FP8_ALIGNED_K_LOAD_AHEAD_ROWS above, which only FP8 builds define).
+// VALUE's AlignedK load-ahead depth (as FP8_ALIGNED_K_LOAD_AHEAD_ROWS above).
 template <int PacketBytes>
 inline constexpr uint32_t FP8_ALIGNED_K_ARG_LOAD_AHEAD_ROWS = PacketBytes >= 8 ? 4U : 8U;
 constexpr int FP8_ARG_ALIGNED_STRIPE_PITCH = 33;
@@ -2079,7 +2075,6 @@ template <RKStageTopology Topology, bool ScalarPacket = false, uint32_t ElementB
     }
 }
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 
 template <typename InputT, size_t PacketBytes, int BlockThreads, RKStageTopology Topology>
 [[nodiscard]] KernelOccupancyInfo queryFp8AlignedKOccupancyForBlock() {
@@ -2149,9 +2144,7 @@ template <typename InputT, RKStageTopology Topology>
     return occupancy;
 }
 
-#endif  // THOR_CUB_ENABLE_FP8_TYPES
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 
 template <typename InputT,
           typename InputTransformT,
@@ -2297,15 +2290,12 @@ void launchFp8AlignedKForBlock(const StridedSpan& input,
 }
 
 
-#endif  // THOR_CUB_ENABLE_FP8_TYPES
 
 [[nodiscard]] size_t elementBytes(DataType dtype) {
     switch (dtype) {
-#if THOR_CUB_ENABLE_FP8_TYPES
         case DataType::FP8_E4M3:
         case DataType::FP8_E5M2:
             return 1;
-#endif
         case DataType::FP16:
         case DataType::BF16:
             return 2;
@@ -2328,7 +2318,6 @@ void launchFp8AlignedKForBlock(const StridedSpan& input,
     throw std::logic_error("Unsupported AlignedK output finalizer.");
 }
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 
 // The FP8 AlignedK stage dispatch. Every FP8 (transform, combine, finalizer) composition is routed only through the
 // policy's packet/CTA configurations (FP16 / BF16 / FP32 use their own AlignedK kernels). Within a configuration,
@@ -2423,7 +2412,6 @@ void dispatchFp8AlignedKStageSemantics(const ReductionStageSemantics& semantics,
     throw std::logic_error("Unsupported FP8 AlignedK stage semantics.");
 }
 
-#endif  // THOR_CUB_ENABLE_FP8_TYPES
 
 void validateCompleteOutput(const StridedSpan& output, const ReductionGeometry& geometry) {
     if (geometry.outer_size > std::numeric_limits<uint64_t>::max() / geometry.inner_size) {
@@ -2466,7 +2454,6 @@ KernelOccupancyInfo queryFp8AlignedKIdentityOccupancy(DataType input_dtype,
         throw std::logic_error("AlignedK occupancy query requires a compile-time-specialized CTA width.");
     }
     switch (input_dtype) {
-#if THOR_CUB_ENABLE_FP8_TYPES
         case DataType::FP8_E4M3:
             if (plan.topology == RKStageTopology::Complete) {
                 return queryFp8AlignedKOccupancy<__nv_fp8_e4m3, RKStageTopology::Complete>(
@@ -2481,7 +2468,6 @@ KernelOccupancyInfo queryFp8AlignedKIdentityOccupancy(DataType input_dtype,
             }
             return queryFp8AlignedKOccupancy<__nv_fp8_e5m2, RKStageTopology::Staged>(
                 plan.packet_bytes, plan.block_threads);
-#endif
         default:
             // FP16 / BF16 / FP32 use their own AlignedK passes.
             throw std::logic_error("AlignedK occupancy query requires FP8 input.");
@@ -2505,18 +2491,13 @@ void launchFp8AlignedKStage(const ReductionStageSemantics& semantics,
     if (plan.packet_bytes != 2 && plan.packet_bytes != 4 && plan.packet_bytes != 8 && plan.packet_bytes != 16) {
         throw std::logic_error("AlignedK stage requires a 2-, 4-, 8-, or 16-byte input packet.");
     }
-#if THOR_CUB_ENABLE_FP8_TYPES
     const bool fp8_input =
         input.getDataType() == DataType::FP8_E4M3 || input.getDataType() == DataType::FP8_E5M2;
-#else
-    const bool fp8_input = false;
-#endif
     if (!fp8_input) {
         // FP16 / BF16 / FP32 use their own AlignedK passes.
         throw std::logic_error("AlignedK stage requires FP8 input.");
     }
     const size_t input_element_bytes = elementBytes(input.getDataType());
-#if THOR_CUB_ENABLE_FP8_TYPES
     if (!fp8AlignedKOutputDTypeSupported(stage_output.getDataType())) {
         throw std::logic_error("FP8 AlignedK writeback requires a floating-point output dtype.");
     }
@@ -2525,7 +2506,6 @@ void launchFp8AlignedKStage(const ReductionStageSemantics& semantics,
         throw std::logic_error(
             "Narrow FP8 AlignedK packets require the input base to be naturally packet-aligned.");
     }
-#endif
     if (plan.packet_bytes < input_element_bytes || plan.packet_bytes % input_element_bytes != 0
         || geometry.inner_size % static_cast<uint64_t>(plan.packet_bytes / input_element_bytes) != 0) {
         throw std::logic_error("AlignedK stage requires naturally aligned whole-row input packets.");
@@ -2534,11 +2514,9 @@ void launchFp8AlignedKStage(const ReductionStageSemantics& semantics,
         && plan.block_threads != 256) {
         throw std::logic_error("AlignedK stage requires a compile-time-specialized CTA width.");
     }
-#if THOR_CUB_ENABLE_FP8_TYPES
     if (fp8_input && (reinterpret_cast<uintptr_t>(stage_output.getMemPtr()) & uintptr_t{15}) != 0) {
         throw std::logic_error("FP8 AlignedK writeback requires a 16-byte-aligned output base.");
     }
-#endif
 
     switch (plan.topology) {
         case RKStageTopology::Staged: {
@@ -2559,17 +2537,14 @@ void launchFp8AlignedKStage(const ReductionStageSemantics& semantics,
             ReductionStageSemantics partial_semantics = semantics;
             partial_semantics.finalize = ReductionStageFinalize::Identity;
             partial_semantics.finalize_divisor = 1;
-#if THOR_CUB_ENABLE_FP8_TYPES
             dispatchFp8AlignedKStageSemantics<RKStageTopology::Staged>(
                 partial_semantics, input, stage_output, geometry, plan, 1.0f, stream);
-#endif
             return;
         }
         case RKStageTopology::Complete:
             if (plan.shards_per_output != 1) {
                 throw std::logic_error("AlignedK complete topology requires exactly one R shard.");
             }
-#if THOR_CUB_ENABLE_FP8_TYPES
             if (fp8_input) {
                 if (geometry.tiled_output_inner_stride != 1) {
                     throw std::logic_error("FP8 AlignedK complete writeback requires contiguous inner output.");
@@ -2586,12 +2561,9 @@ void launchFp8AlignedKStage(const ReductionStageSemantics& semantics,
                         "FP8 AlignedK complete writeback requires rows aligned to its physical store width.");
                 }
             }
-#endif
             validateCompleteOutput(stage_output, geometry);
-#if THOR_CUB_ENABLE_FP8_TYPES
             dispatchFp8AlignedKStageSemantics<RKStageTopology::Complete>(
                 semantics, input, stage_output, geometry, plan, output_scale, stream);
-#endif
             return;
     }
     throw std::logic_error("AlignedK stage selected an invalid topology.");
@@ -2603,7 +2575,6 @@ void launchFp8AlignedKStage(const ReductionStageSemantics& semantics,
 KernelOccupancyInfo queryFp8AlignedKCompleteOccupancy(
     DataType input_dtype, DataType output_dtype, ReductionStageCombine operation,
     const Fp8AlignedKStagePlan& plan) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     if (plan.topology != RKStageTopology::Complete || plan.shards_per_output != 1 ||
         !((plan.packet_bytes == 2 && plan.block_threads == 32) ||
           (plan.packet_bytes == 8 && (plan.block_threads == 32 || plan.block_threads == 64))) ||
@@ -2652,15 +2623,9 @@ KernelOccupancyInfo queryFp8AlignedKCompleteOccupancy(
         case DataType::FP8_E5M2: return per_dtype.template operator()<__nv_fp8_e5m2>();
         default: throw std::logic_error("AlignedK Complete occupancy requires FP8 input.");
     }
-#else
-    static_cast<void>(input_dtype); static_cast<void>(output_dtype);
-    static_cast<void>(operation); static_cast<void>(plan);
-    throw std::logic_error("AlignedK Complete occupancy requires FP8 support.");
-#endif
 }
 
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 
 template <RKStageTopology Topology, typename InputT, typename TransformT,
           typename ReductionOpT, typename FinalizeT>
@@ -2752,7 +2717,6 @@ template <RKStageTopology Topology, typename InputT>
     throw std::logic_error("Transformed AlignedK occupancy requires ABS or square transform.");
 }
 
-#endif  // THOR_CUB_ENABLE_FP8_TYPES
 
 // Occupancy of the ACTUALLY selected transformed FP8 AlignedK packet kernel.
 // The Identity occupancy queries are responsible for the hoisted Staged and mixed Complete implementations; they must
@@ -2764,7 +2728,6 @@ KernelOccupancyInfo queryFp8AlignedKStageOccupancy(
         return plan.topology == RKStageTopology::Complete
             ? queryFp8AlignedKCompleteOccupancy(input_dtype, output_dtype, operation, plan)
             : queryFp8AlignedKIdentityOccupancy(input_dtype, plan);
-#if THOR_CUB_ENABLE_FP8_TYPES
     if (!fp8AlignedKOutputDTypeSupported(output_dtype))
         throw std::logic_error("Transformed AlignedK occupancy requires a floating-point output.");
     const auto typed = [&]<typename InputT>() -> KernelOccupancyInfo {
@@ -2784,11 +2747,6 @@ KernelOccupancyInfo queryFp8AlignedKStageOccupancy(
         case DataType::FP8_E5M2: return typed.template operator()<__nv_fp8_e5m2>();
         default: throw std::logic_error("Transformed AlignedK occupancy requires FP8 input.");
     }
-#else
-    static_cast<void>(input_dtype); static_cast<void>(output_dtype);
-    static_cast<void>(operation); static_cast<void>(plan);
-    throw std::logic_error("Transformed AlignedK occupancy requires FP8 support.");
-#endif
 }
 
 
@@ -2825,10 +2783,8 @@ bool f16AlignedKSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t 
 namespace {
 [[nodiscard]] bool fp32AlignedKOutputSupported(DataType dtype) {
     switch (dtype) {
-#if THOR_CUB_ENABLE_FP8_TYPES
         case DataType::FP8_E4M3:
         case DataType::FP8_E5M2:
-#endif
         case DataType::FP16:
         case DataType::BF16:
         case DataType::FP32:
@@ -3410,7 +3366,6 @@ void launchFp8AlignedKArgPass(const StridedSpan& input,
                               uint64_t domain_stride,
                               Stream& stream,
                               uint32_t* packed_partials) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     const DataType input_dtype = input.getDataType();
     const uint64_t outputs = geometry.outer_size * shards * geometry.inner_size;
     const bool packed = packed_partials != nullptr;
@@ -3463,20 +3418,6 @@ void launchFp8AlignedKArgPass(const StridedSpan& input,
             bytes, arg_outputs, geometry.outer_size, geometry.reduction_size, geometry.inner_size, shards, tiles, rows);
     }
     CUDA_CHECK(cudaGetLastError());
-#else
-    static_cast<void>(input);
-    static_cast<void>(value_output);
-    static_cast<void>(index_output);
-    static_cast<void>(geometry);
-    static_cast<void>(packet_bytes);
-    static_cast<void>(cta_threads);
-    static_cast<void>(shards);
-    static_cast<void>(maximum);
-    static_cast<void>(domain_stride);
-    static_cast<void>(stream);
-    static_cast<void>(packed_partials);
-    throw std::logic_error("FP8 AlignedK ARG requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
 }
 
 // FP8 ARG packed continuations: the shard-split test and layout, and the launcher.
@@ -3516,7 +3457,6 @@ void launchFp8ArgPackedContinuation(const uint32_t* packed_partials,
                                     bool maximum,
                                     uint64_t domain_stride,
                                     Stream& stream) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     const uint64_t outputs = outer_size * inner_size;
     if ((input_dtype != DataType::FP8_E4M3 && input_dtype != DataType::FP8_E5M2) || packed_partials == nullptr ||
         // 55-bit widened indices; 32-bit shard loop.
@@ -3563,21 +3503,6 @@ void launchFp8ArgPackedContinuation(const uint32_t* packed_partials,
     fp8ArgPackedContinuationKernel<0><<<static_cast<unsigned int>(blocks), Threads, 0, stream.getStream()>>>(
         packed_partials, arg_outputs, outer_size, shards, inner_size, rows);
     CUDA_CHECK(cudaGetLastError());
-#else
-    static_cast<void>(packed_partials);
-    static_cast<void>(value_output);
-    static_cast<void>(index_output);
-    static_cast<void>(input_dtype);
-    static_cast<void>(outer_size);
-    static_cast<void>(reduction_size);
-    static_cast<void>(inner_size);
-    static_cast<void>(shards);
-    static_cast<void>(uniform_rows_per_shard);
-    static_cast<void>(maximum);
-    static_cast<void>(domain_stride);
-    static_cast<void>(stream);
-    throw std::logic_error("FP8 packed ARG continuation requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
 }
 
 }  // namespace ThorImplementation::ReductionInternal

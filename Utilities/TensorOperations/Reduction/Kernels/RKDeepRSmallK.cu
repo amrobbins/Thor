@@ -653,7 +653,6 @@ template <typename InputT, int PacketBytes, int MaxComponentsPerLane, typename I
 // DeepRSmallK P16 geometry helpers: five depths (a runtime operand, validated against
 // Fp8DeepRSmallKPolicy::compiled_rows, and compiled in for the one-component ownership only) and seven K ownership
 // choices, shared by all four typed FP32 reduction operations.
-#if THOR_CUB_ENABLE_FP8_TYPES
 [[nodiscard]] uint32_t deepRSmallKRowDepth(uint64_t rows) {
     const auto& depths = RK::Fp8::Fp8DeepRSmallKPolicy::compiled_rows;
     if (std::find(depths.begin(), depths.end(), rows) == depths.end()) {
@@ -877,7 +876,6 @@ auto dispatchDeepRSmallKCombine(const ReductionStageSemantics& semantics, Callba
     throw std::logic_error("DeepRSmallK retained kernel received invalid reduction combine.");
 }
 
-#endif
 
 // The FP8 DeepRSmallK argmin/argmax twins: the staged first stages of deepRSmallKValue{,TinyK}Kernel (P16, grid x =
 // shard, z = outer, eight warps staging whole-row groups, the same rows per warp group and the same load-ahead rule)
@@ -1759,7 +1757,6 @@ void launchFp8DeepRSmallKFirstStage(const ReductionStageSemantics& semantics,
                                     const StridedSpan& input, const StridedSpan& fp32_partials,
                                     const ReductionGeometry& geometry, uint64_t rows,
                                     uint64_t shards, Stream& stream) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     const auto& depths = RK::Fp8::Fp8DeepRSmallKPolicy::compiled_rows;
     if (std::find(depths.begin(), depths.end(), rows) == depths.end())
         throw std::logic_error("DeepRSmallK retained first stage requires a selected depth.");
@@ -1787,16 +1784,6 @@ void launchFp8DeepRSmallKFirstStage(const ReductionStageSemantics& semantics,
         default:
             throw std::logic_error("DeepRSmallK retained first stage requires E4M3 or E5M2.");
     }
-#else
-    static_cast<void>(semantics);
-    static_cast<void>(input);
-    static_cast<void>(fp32_partials);
-    static_cast<void>(geometry);
-    static_cast<void>(rows);
-    static_cast<void>(shards);
-    static_cast<void>(stream);
-    throw std::logic_error("DeepRSmallK retained first stage requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
 }
 
 bool fp32DeepRSmallKSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size, uint64_t rows) {
@@ -1814,7 +1801,6 @@ void launchFp32DeepRSmallKFirstStage(const ReductionStageSemantics& semantics,
                                      const StridedSpan& input, const StridedSpan& fp32_partials,
                                      const ReductionGeometry& geometry, uint64_t rows,
                                      uint64_t shards, Stream& stream) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     if (input.getDataType() != DataType::FP32 ||
         !fp32DeepRSmallKSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size, rows) ||
         shards != ceilDivideU64(geometry.reduction_size, rows) ||
@@ -1832,21 +1818,10 @@ void launchFp32DeepRSmallKFirstStage(const ReductionStageSemantics& semantics,
                                                               stream.getStream());
     };
     dispatchDeepRSmallKCombine<float>(semantics, launch);
-#else
-    static_cast<void>(semantics);
-    static_cast<void>(input);
-    static_cast<void>(fp32_partials);
-    static_cast<void>(geometry);
-    static_cast<void>(rows);
-    static_cast<void>(shards);
-    static_cast<void>(stream);
-    throw std::logic_error("FP32 DeepRSmallK requires THOR_CUB_ENABLE_FP8_TYPES (the retained kernels' gate).");
-#endif
 }
 
 KernelOccupancyInfo queryFp32DeepRSmallKOccupancy(uint64_t rows, uint64_t k,
                                                             const ReductionStageSemantics& semantics) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     const auto& depths = RK::Fp8::Fp8DeepRSmallKPolicy::compiled_rows;
     if (k == 0 || k > 125 || std::find(depths.begin(), depths.end(), rows) == depths.end())
         throw std::logic_error("FP32 DeepRSmallK occupancy requires a retained depth and K <= 125.");
@@ -1854,12 +1829,6 @@ KernelOccupancyInfo queryFp32DeepRSmallKOccupancy(uint64_t rows, uint64_t k,
         return queryFp32DeepRSmallKRows<TransformT, ReductionOpT>(rows, k);
     };
     return dispatchDeepRSmallKCombine<float>(semantics, query);
-#else
-    static_cast<void>(rows);
-    static_cast<void>(k);
-    static_cast<void>(semantics);
-    throw std::logic_error("FP32 DeepRSmallK requires THOR_CUB_ENABLE_FP8_TYPES (the retained kernels' gate).");
-#endif
 }
 
 bool f16DeepRSmallKSupports(uint64_t outer_size, uint64_t reduction_size, uint64_t inner_size, uint64_t rows) {
@@ -1876,7 +1845,6 @@ void launchF16DeepRSmallKFirstStage(const ReductionStageSemantics& semantics,
                                     const StridedSpan& input, const StridedSpan& fp32_partials,
                                     const ReductionGeometry& geometry, uint64_t rows,
                                     uint64_t shards, Stream& stream) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     const DataType dtype = input.getDataType();
     if ((dtype != DataType::FP16 && dtype != DataType::BF16) ||
         !f16DeepRSmallKSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size, rows) ||
@@ -1898,21 +1866,10 @@ void launchF16DeepRSmallKFirstStage(const ReductionStageSemantics& semantics,
     } else {
         dispatchDeepRSmallKCombine<__nv_bfloat16>(semantics, launch);
     }
-#else
-    static_cast<void>(semantics);
-    static_cast<void>(input);
-    static_cast<void>(fp32_partials);
-    static_cast<void>(geometry);
-    static_cast<void>(rows);
-    static_cast<void>(shards);
-    static_cast<void>(stream);
-    throw std::logic_error("FP16 / BF16 DeepRSmallK requires THOR_CUB_ENABLE_FP8_TYPES (the retained kernels' gate).");
-#endif
 }
 
 KernelOccupancyInfo queryF16DeepRSmallKOccupancy(DataType input_dtype, uint64_t rows, uint64_t k,
                                                            const ReductionStageSemantics& semantics) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     const auto& depths = RK::Fp8::Fp8DeepRSmallKPolicy::compiled_rows;
     if ((input_dtype != DataType::FP16 && input_dtype != DataType::BF16) || k == 0 || k > 249 ||
         std::find(depths.begin(), depths.end(), rows) == depths.end())
@@ -1923,18 +1880,10 @@ KernelOccupancyInfo queryF16DeepRSmallKOccupancy(DataType input_dtype, uint64_t 
     };
     if (input_dtype == DataType::FP16) return dispatchDeepRSmallKCombine<__half>(semantics, query);
     return dispatchDeepRSmallKCombine<__nv_bfloat16>(semantics, query);
-#else
-    static_cast<void>(input_dtype);
-    static_cast<void>(rows);
-    static_cast<void>(k);
-    static_cast<void>(semantics);
-    throw std::logic_error("FP16 / BF16 DeepRSmallK requires THOR_CUB_ENABLE_FP8_TYPES (the retained kernels' gate).");
-#endif
 }
 
 KernelOccupancyInfo queryFp8DeepRSmallKOccupancy(
     DataType dtype, uint64_t rows, uint64_t k, const ReductionStageSemantics& semantics) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     const auto& depths = RK::Fp8::Fp8DeepRSmallKPolicy::compiled_rows;
     if (k == 0 || k > 256 || std::find(depths.begin(), depths.end(), rows) == depths.end())
         throw std::logic_error("DeepRSmallK retained occupancy requires selected P16 depth and K <= 256.");
@@ -1946,13 +1895,6 @@ KernelOccupancyInfo queryFp8DeepRSmallKOccupancy(
         case DataType::FP8_E5M2: return dispatchDeepRSmallKCombine<__nv_fp8_e5m2>(semantics, query);
         default: throw std::logic_error("DeepRSmallK retained occupancy requires E4M3 or E5M2.");
     }
-#else
-    static_cast<void>(dtype);
-    static_cast<void>(rows);
-    static_cast<void>(k);
-    static_cast<void>(semantics);
-    throw std::logic_error("DeepRSmallK retained occupancy requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
 }
 
 
@@ -1963,7 +1905,6 @@ bool fp8DeepRSmallKArgSupports(uint64_t outer_size, uint64_t reduction_size, uin
            rows_per_shard < FP8_ARG_MAX_LANE_ROWS;
 }
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 namespace {
 void dispatchFp8DeepRSmallKArgFirstStage(const StridedSpan& input,
                                          const Fp8ArgOutputs& arg_outputs,
@@ -1972,7 +1913,6 @@ void dispatchFp8DeepRSmallKArgFirstStage(const StridedSpan& input,
                                          uint64_t shards,
                                          Stream& stream);
 }  // namespace
-#endif
 
 void launchFp8DeepRSmallKArgFirstStage(const StridedSpan& input,
                                        const StridedSpan& value_partials,
@@ -1983,7 +1923,6 @@ void launchFp8DeepRSmallKArgFirstStage(const StridedSpan& input,
                                        bool maximum,
                                        uint64_t domain_stride,
                                        Stream& stream) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     const DataType input_dtype = input.getDataType();
     const uint64_t partials = geometry.outer_size * shards * geometry.inner_size;
     if ((input_dtype != DataType::FP8_E4M3 && input_dtype != DataType::FP8_E5M2) ||
@@ -2005,18 +1944,6 @@ void launchFp8DeepRSmallKArgFirstStage(const StridedSpan& input,
                                     fp8ArgFold(maximum, input_dtype == DataType::FP8_E5M2),
                                     input_dtype == DataType::FP8_E5M2};
     dispatchFp8DeepRSmallKArgFirstStage(input, arg_outputs, geometry, rows_per_shard, shards, stream);
-#else
-    static_cast<void>(input);
-    static_cast<void>(value_partials);
-    static_cast<void>(index_partials);
-    static_cast<void>(geometry);
-    static_cast<void>(rows_per_shard);
-    static_cast<void>(shards);
-    static_cast<void>(maximum);
-    static_cast<void>(domain_stride);
-    static_cast<void>(stream);
-    throw std::logic_error("FP8 DeepRSmallK ARG requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
 }
 
 void launchFp8DeepRSmallKArgFirstStagePacked(const StridedSpan& input,
@@ -2026,7 +1953,6 @@ void launchFp8DeepRSmallKArgFirstStagePacked(const StridedSpan& input,
                                              uint64_t shards,
                                              bool maximum,
                                              Stream& stream) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     const DataType input_dtype = input.getDataType();
     if ((input_dtype != DataType::FP8_E4M3 && input_dtype != DataType::FP8_E5M2) || packed_partials == nullptr ||
         !fp8DeepRSmallKArgSupports(geometry.outer_size, geometry.reduction_size, geometry.inner_size,
@@ -2040,19 +1966,8 @@ void launchFp8DeepRSmallKArgFirstStagePacked(const StridedSpan& input,
                               input_dtype == DataType::FP8_E5M2};
     arg_outputs.packed = packed_partials;
     dispatchFp8DeepRSmallKArgFirstStage(input, arg_outputs, geometry, rows_per_shard, shards, stream);
-#else
-    static_cast<void>(input);
-    static_cast<void>(packed_partials);
-    static_cast<void>(geometry);
-    static_cast<void>(rows_per_shard);
-    static_cast<void>(shards);
-    static_cast<void>(maximum);
-    static_cast<void>(stream);
-    throw std::logic_error("FP8 DeepRSmallK ARG requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
 }
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 namespace {
 void dispatchFp8DeepRSmallKArgFirstStage(const StridedSpan& input,
                                          const Fp8ArgOutputs& arg_outputs,
@@ -2089,7 +2004,6 @@ void dispatchFp8DeepRSmallKArgFirstStage(const StridedSpan& input,
     CUDA_CHECK(cudaGetLastError());
 }
 }  // namespace
-#endif
 
 
 // ---- The FP32 and FP16 / BF16 RK ARG DeepRSmallK twins (see deepRSmallKArgKernel).

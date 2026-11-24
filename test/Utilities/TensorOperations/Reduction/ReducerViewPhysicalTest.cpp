@@ -30,10 +30,8 @@ const std::vector<ReductionOp> kOps = {ReductionOp::Sum,    ReductionOp::Min,   
 
 std::vector<DataType> valueDtypes() {
     return {DataType::FP32, DataType::FP16, DataType::BF16
-#if THOR_CUB_ENABLE_FP8_TYPES
             ,
             DataType::FP8_E4M3, DataType::FP8_E5M2
-#endif
     };
 }
 
@@ -353,9 +351,6 @@ double longRowExpected(ReductionOp op, uint64_t row) {
 
 TEST(ReducerViewPhysical, RowsPastTheCubIntLimitReduceExactly) {
     REQUIRE_CUDA_DEVICE();
-#if !THOR_CUB_ENABLE_FP8_TYPES
-    GTEST_SKIP() << "FP8 reductions are not compiled in.";
-#else
     if (!haveFreeDeviceBytes(kLongPeakBytes)) {
         GTEST_SKIP() << "needs " << kLongPeakBytes << " bytes of free device memory";
     }
@@ -393,14 +388,10 @@ TEST(ReducerViewPhysical, RowsPastTheCubIntLimitReduceExactly) {
             }
         }
     }
-#endif
 }
 
 TEST(ReducerViewPhysical, ArgRowsPastTheCubIntLimitFindTheirIndices) {
     REQUIRE_CUDA_DEVICE();
-#if !THOR_CUB_ENABLE_FP8_TYPES
-    GTEST_SKIP() << "FP8 reductions are not compiled in.";
-#else
     if (!haveFreeDeviceBytes(kLongPeakBytes)) {
         GTEST_SKIP() << "needs " << kLongPeakBytes << " bytes of free device memory";
     }
@@ -430,5 +421,4 @@ TEST(ReducerViewPhysical, ArgRowsPastTheCubIntLimitFindTheirIndices) {
             EXPECT_EQ(values[row], e.value[row]) << "row " << row;
         }
     }
-#endif
 }

@@ -1629,7 +1629,6 @@ __global__ __launch_bounds__(FP32_ARG_ROTATED_THREADS) void runtimeKRotatedCarri
     }
 }
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 
 // The FP8 RuntimeK rotated first stage, owned by RK::Fp8::Fp8RuntimeKPolicy: p16 packets with 16 cooperative warps,
 // exact (512) or prefix-reserved (497) K tiles, and only the policy's row depths. Packet width is not a runtime axis
@@ -1703,7 +1702,6 @@ template <bool IdentityOnly = false, typename Callback>
     return dispatched;
 }
 
-#endif  // THOR_CUB_ENABLE_FP8_TYPES
 
 }  // namespace
 
@@ -1737,7 +1735,6 @@ void launchFp8RuntimeKRotatedFirstStageTyped(const StridedSpan& input,
                                              uint64_t shards_per_output,
                                              Stream& stream,
                                              ReductionStageInputTransform transform) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     if (rows_per_shard == 0 || shards_per_output <= 1
         || shards_per_output != ceilDivideU64(geometry.reduction_size, rows_per_shard)
         || fp32_partials.getDataType() != DataType::FP32
@@ -1758,17 +1755,6 @@ void launchFp8RuntimeKRotatedFirstStageTyped(const StridedSpan& input,
     if (!launched) {
         throw std::logic_error("FP8 RuntimeK rotated first stage requires a retained compiled specialization.");
     }
-#else
-    static_cast<void>(input);
-    static_cast<void>(fp32_partials);
-    static_cast<void>(geometry);
-    static_cast<void>(exact_tile);
-    static_cast<void>(rows_per_shard);
-    static_cast<void>(shards_per_output);
-    static_cast<void>(stream);
-    static_cast<void>(transform);
-    throw std::logic_error("FP8 RuntimeK rotated first stage requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
 }
 
 template <typename ReductionOpT>
@@ -1776,7 +1762,6 @@ KernelOccupancyInfo queryFp8RuntimeKRotatedOccupancyTyped(DataType input_dtype,
                                                           bool exact_tile,
                                                           uint64_t rows_per_shard,
                                                           ReductionStageInputTransform transform) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     constexpr bool Fold = fp8RotatedFoldedExtremum<ReductionOpT>;
     static_cast<void>(fp8RotatedExtremumFold<ReductionOpT>(exact_tile, transform));  // validates the transform
     KernelOccupancyInfo occupancy{};
@@ -1794,13 +1779,6 @@ KernelOccupancyInfo queryFp8RuntimeKRotatedOccupancyTyped(DataType input_dtype,
         throw std::logic_error("FP8 RuntimeK rotated occupancy requires a retained compiled specialization.");
     }
     return occupancy;
-#else
-    static_cast<void>(input_dtype);
-    static_cast<void>(exact_tile);
-    static_cast<void>(rows_per_shard);
-    static_cast<void>(transform);
-    throw std::logic_error("FP8 RuntimeK rotated occupancy requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
 }
 
 void launchFp8RuntimeKRotatedFirstStage(
@@ -1945,10 +1923,8 @@ namespace {
 // The value dtypes storeFp32AsRuntimeDType writes.
 [[nodiscard]] bool fp32ArgValueStorageSupported(DataType dtype) {
     switch (dtype) {
-#if THOR_CUB_ENABLE_FP8_TYPES
         case DataType::FP8_E4M3:
         case DataType::FP8_E5M2:
-#endif
         case DataType::FP16:
         case DataType::BF16:
         case DataType::FP32:
@@ -2225,7 +2201,6 @@ void launchFp8RuntimeKArgPass(const StridedSpan& input,
                               uint64_t domain_stride,
                               Stream& stream,
                               uint32_t* packed_partials) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     const DataType input_dtype = input.getDataType();
     const uint64_t shards = rows_per_shard == 0 ? 0 : ceilDivideU64(geometry.reduction_size, rows_per_shard);
     const uint64_t outputs = geometry.outer_size * shards * geometry.inner_size;
@@ -2265,19 +2240,6 @@ void launchFp8RuntimeKArgPass(const StridedSpan& input,
         bytes, arg_outputs, geometry.outer_size, geometry.reduction_size, geometry.inner_size, shards, tiles,
         static_cast<uint32_t>(rows_per_shard));
     CUDA_CHECK(cudaGetLastError());
-#else
-    static_cast<void>(input);
-    static_cast<void>(value_output);
-    static_cast<void>(index_output);
-    static_cast<void>(geometry);
-    static_cast<void>(rows_per_shard);
-    static_cast<void>(packet_bytes);
-    static_cast<void>(maximum);
-    static_cast<void>(domain_stride);
-    static_cast<void>(stream);
-    static_cast<void>(packed_partials);
-    throw std::logic_error("FP8 RuntimeK ARG requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
 }
 
 // RuntimeK PacketComplete: the VALUE launchers (FP8, FP32, FP16 / BF16) and the ARG launchers.
@@ -2291,7 +2253,6 @@ void launchFp8PacketCompleteTyped(
     Stream& stream,
     const ReductionStageSemantics& semantics,
     float output_scale) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     const AdditiveFinalizeFp32 output_finalize = fp8CompleteFinalizerFromSemantics(semantics);
     if (geometry.outer_size == 0 || geometry.reduction_size == 0 || geometry.inner_size == 0 ||
         geometry.inner_size > RK::RK_MAX_UINT32 ||
@@ -2336,17 +2297,6 @@ void launchFp8PacketCompleteTyped(
         default:
             throw std::logic_error("FP8 RuntimeK PacketComplete requires FP8 input.");
     }
-#else
-    static_cast<void>(input);
-    static_cast<void>(output);
-    static_cast<void>(geometry);
-    static_cast<void>(warps_per_output);
-    static_cast<void>(tile_components);
-    static_cast<void>(stream);
-    static_cast<void>(semantics);
-    static_cast<void>(output_scale);
-    throw std::logic_error("FP8 RuntimeK PacketComplete requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
 }
 
 
@@ -2377,7 +2327,6 @@ void launchFp8PacketComplete(
 template <int FixedOp>
 KernelOccupancyInfo queryFp8PacketCompleteOccupancyTyped(
     DataType input_dtype, ReductionStageInputTransform transform) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     const auto dispatch = [&]<typename InputT>() -> KernelOccupancyInfo {
         switch (transform) {
             case ReductionStageInputTransform::Identity:
@@ -2395,10 +2344,6 @@ KernelOccupancyInfo queryFp8PacketCompleteOccupancyTyped(
         default:
             throw std::logic_error("FP8 RuntimeK PacketComplete occupancy requires FP8 input.");
     }
-#else
-    static_cast<void>(input_dtype); static_cast<void>(transform);
-    throw std::logic_error("FP8 RuntimeK PacketComplete occupancy requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
 }
 
 
@@ -2778,7 +2723,6 @@ void launchFp8PacketCompleteArg(const StridedSpan& input,
                                 bool maximum,
                                 uint64_t domain_stride,
                                 Stream& stream) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     const DataType input_dtype = input.getDataType();
     const uint64_t outputs = geometry.outer_size * geometry.inner_size;
     if ((input_dtype != DataType::FP8_E4M3 && input_dtype != DataType::FP8_E5M2) ||
@@ -2818,18 +2762,6 @@ void launchFp8PacketCompleteArg(const StridedSpan& input,
         static_cast<uint32_t>(geometry.outer_size), static_cast<uint32_t>(geometry.reduction_size),
         static_cast<uint32_t>(geometry.inner_size), tile_components, tile_count, warps_per_output);
     CUDA_CHECK(cudaGetLastError());
-#else
-    static_cast<void>(input);
-    static_cast<void>(value_output);
-    static_cast<void>(index_output);
-    static_cast<void>(geometry);
-    static_cast<void>(warps_per_output);
-    static_cast<void>(tile_components);
-    static_cast<void>(maximum);
-    static_cast<void>(domain_stride);
-    static_cast<void>(stream);
-    throw std::logic_error("FP8 PacketComplete ARG requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
 }
 
 }  // namespace ThorImplementation::ReductionInternal

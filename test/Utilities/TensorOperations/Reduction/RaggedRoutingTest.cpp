@@ -99,9 +99,7 @@ TEST(RaggedRouting, RoutedStampsComputeTheReference) {
     Stream stream(0);
     std::mt19937_64 rng(1328);
     std::vector<DataType> dtypes{DataType::FP16, DataType::BF16, DataType::FP32};
-#if THOR_CUB_ENABLE_FP8_TYPES
     dtypes.push_back(DataType::FP8_E4M3);
-#endif
     size_t k = 0;
     for (const DataType dtype : dtypes) {
         for (const std::vector<uint64_t>& trailing :

@@ -8,13 +8,7 @@
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/Common/CudnnHelper.h"
 #include "Utilities/Common/Stream.h"
-#include "Utilities/TensorOperations/Arithmetic/Average.h"
-#include "Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.h"
-#include "Utilities/TensorOperations/Arithmetic/Exponentiation.h"
-#include "Utilities/TensorOperations/Arithmetic/MultiplyByScalar.h"
 #include "Utilities/TensorOperations/Arithmetic/Sum.h"
-#include "Utilities/TensorOperations/Arithmetic/SumManyToOne.h"
-#include "Utilities/TensorOperations/Arithmetic/SumScale.h"
 
 #include <cuda_fp16.h>
 #include <cudnn.h>
@@ -347,34 +341,6 @@ class Layer {
         std::set<uint64_t> synchronizedStreamIds;
         appendSynchronizeEvent(events, synchronizedStreamIds, stream);
         return events;
-    }
-
-    static void average(half result_d[], half *sources_d[], int numElements, int numSources, Stream stream) {
-        launchAverage(result_d, sources_d, numSources, numElements, stream);
-    }
-
-    static void sum(half result_d[], half *sources_d[], uint32_t numSources, uint64_t numElements, Stream stream) {
-        launchSum<half>(result_d, sources_d, numSources, numElements, stream);
-    }
-
-    static void sumScale(
-        float result_d[], float nonScaledSource_d[], float scaledSource_d[], float scale, uint64_t numElements, Stream stream) {
-        launchSumScale(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
-    }
-
-    static void sumScaleHalfSourceDest(
-        half result_d[], half nonScaledSource_d[], float scaledSource_d[], float scale, uint64_t numElements, Stream stream) {
-        launchSumScaleHalfSourceDest(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
-    }
-
-    static void sumScaleHalfSourceDestScaleSource(
-        half result_d[], half nonScaledSource_d[], half scaledSource_d[], float scale, uint64_t numElements, Stream stream) {
-        launchSumScaleHalfSourceDestScaleSource(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
-    }
-
-    static void sumScaleHalfAll(
-        half result_d[], half nonScaledSource_d[], half scaledSource_d[], half scale, uint64_t numElements, Stream stream) {
-        launchSumScaleHalfAll(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
     }
 
     uint64_t getId() const { return id; }

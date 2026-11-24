@@ -779,16 +779,11 @@ template <typename Callback>
                                ...));
         }(std::make_index_sequence<ONE_WINDOW_UNITS.size()>{});
     };
-#if THOR_CUB_ENABLE_FP8_TYPES
     switch (input_dtype) {
         case DataType::FP8_E4M3: for_type.template operator()<__nv_fp8_e4m3>(); break;
         case DataType::FP8_E5M2: for_type.template operator()<__nv_fp8_e5m2>(); break;
         default: break;
     }
-#else
-    static_cast<void>(input_dtype);
-    static_cast<void>(for_type);
-#endif
     return dispatched;
 }
 
@@ -936,7 +931,6 @@ void launchFp8OneWindowCompleteTyped(const StridedSpan& input,
                                      Stream& stream,
                                      const ReductionStageSemantics& semantics,
                                      float output_scale) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     const AdditiveFinalizeFp32 output_finalize = fp8CompleteFinalizerFromSemantics(semantics);
     // The plan of the base's alignment (rows per group leave room for the prefix off a 16-byte boundary).
     const bool aligned_base = oneWindowBaseIsAligned(input);
@@ -978,17 +972,6 @@ void launchFp8OneWindowCompleteTyped(const StridedSpan& input,
     if (!launched) {
         throw std::logic_error("FP8 bucketed OneWindow has no kernel for this request.");
     }
-#else
-    static_cast<void>(input);
-    static_cast<void>(output);
-    static_cast<void>(geometry);
-    static_cast<void>(unit);
-    static_cast<void>(warps_per_output);
-    static_cast<void>(stream);
-    static_cast<void>(semantics);
-    static_cast<void>(output_scale);
-    throw std::logic_error("FP8 bucketed OneWindow requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
 }
 
 template <int FixedOp>
@@ -1014,7 +997,6 @@ KernelOccupancyInfo queryFp8OneWindowOccupancyTyped(DataType input_dtype,
     return occupancy;
 }
 
-#if THOR_CUB_ENABLE_FP8_TYPES  // FP32 shares the FP8 OneWindow kernel, so it shares its gate
 template <int FixedOp>
 void launchFp32OneWindowCompleteTyped(const StridedSpan& input,
                                       const StridedSpan& output,
@@ -1163,7 +1145,6 @@ KernelOccupancyInfo queryF16OneWindowOccupancyTyped(DataType input_dtype,
     }
     return occupancy;
 }
-#endif  // THOR_CUB_ENABLE_FP8_TYPES
 
 // ---------------------------------------------------------------------------------------------------------------
 // The FP32 RK ARG OneWindow twin: the FP32 path of oneWindowValueKernel (the FP32 units, buckets <= 4: packet windows
@@ -2597,16 +2578,6 @@ void launchFp32OneWindow(const StridedSpan& input,
                          Stream& stream,
                          const ReductionStageSemantics& semantics,
                          float output_scale) {
-#if !THOR_CUB_ENABLE_FP8_TYPES
-    static_cast<void>(input);
-    static_cast<void>(output);
-    static_cast<void>(geometry);
-    static_cast<void>(unit);
-    static_cast<void>(warps_per_output);
-    static_cast<void>(stream);
-    static_cast<void>(output_scale);
-    throw std::logic_error("FP32 OneWindow requires THOR_CUB_ENABLE_FP8_TYPES (the retained kernels' gate).");
-#else
     switch (semantics.combine) {
         case ReductionStageCombine::Sum:
             return launchFp32OneWindowCompleteTyped<0>(input, output, geometry, unit, warps_per_output, stream,
@@ -2622,20 +2593,12 @@ void launchFp32OneWindow(const StridedSpan& input,
                                                        semantics, output_scale);
     }
     throw std::logic_error("Invalid FP32 OneWindow combine operation.");
-#endif
 }
 
 KernelOccupancyInfo queryFp32OneWindowOccupancy(uint64_t inner_size,
                                                 const OneWindowUnit& unit,
                                                 uint32_t warps_per_output,
                                                 ReductionStageCombine combine) {
-#if !THOR_CUB_ENABLE_FP8_TYPES
-    static_cast<void>(inner_size);
-    static_cast<void>(unit);
-    static_cast<void>(warps_per_output);
-    static_cast<void>(combine);
-    throw std::logic_error("FP32 OneWindow requires THOR_CUB_ENABLE_FP8_TYPES (the retained kernels' gate).");
-#else
     switch (combine) {
         case ReductionStageCombine::Sum:
             return queryFp32OneWindowOccupancyTyped<0>(inner_size, unit, warps_per_output);
@@ -2647,7 +2610,6 @@ KernelOccupancyInfo queryFp32OneWindowOccupancy(uint64_t inner_size,
             return queryFp32OneWindowOccupancyTyped<3>(inner_size, unit, warps_per_output);
     }
     throw std::logic_error("Invalid FP32 OneWindow occupancy combine operation.");
-#endif
 }
 
 std::vector<OneWindowUnit> f16OneWindowUnits(uint64_t inner_size) {
@@ -2668,17 +2630,6 @@ void launchF16OneWindow(const StridedSpan& input,
                         Stream& stream,
                         const ReductionStageSemantics& semantics,
                         float output_scale) {
-#if !THOR_CUB_ENABLE_FP8_TYPES
-    static_cast<void>(input);
-    static_cast<void>(output);
-    static_cast<void>(geometry);
-    static_cast<void>(unit);
-    static_cast<void>(warps_per_output);
-    static_cast<void>(stream);
-    static_cast<void>(semantics);
-    static_cast<void>(output_scale);
-    throw std::logic_error("FP16 / BF16 OneWindow requires THOR_CUB_ENABLE_FP8_TYPES (the retained kernels' gate).");
-#else
     switch (semantics.combine) {
         case ReductionStageCombine::Sum:
             return launchF16OneWindowCompleteTyped<0>(input, output, geometry, unit, warps_per_output, stream,
@@ -2694,7 +2645,6 @@ void launchF16OneWindow(const StridedSpan& input,
                                                       semantics, output_scale);
     }
     throw std::logic_error("Invalid FP16 / BF16 OneWindow combine operation.");
-#endif
 }
 
 KernelOccupancyInfo queryF16OneWindowOccupancy(DataType input_dtype,
@@ -2702,14 +2652,6 @@ KernelOccupancyInfo queryF16OneWindowOccupancy(DataType input_dtype,
                                                const OneWindowUnit& unit,
                                                uint32_t warps_per_output,
                                                ReductionStageCombine combine) {
-#if !THOR_CUB_ENABLE_FP8_TYPES
-    static_cast<void>(input_dtype);
-    static_cast<void>(inner_size);
-    static_cast<void>(unit);
-    static_cast<void>(warps_per_output);
-    static_cast<void>(combine);
-    throw std::logic_error("FP16 / BF16 OneWindow requires THOR_CUB_ENABLE_FP8_TYPES (the retained kernels' gate).");
-#else
     switch (combine) {
         case ReductionStageCombine::Sum:
             return queryF16OneWindowOccupancyTyped<0>(input_dtype, inner_size, unit, warps_per_output);
@@ -2721,7 +2663,6 @@ KernelOccupancyInfo queryF16OneWindowOccupancy(DataType input_dtype,
             return queryF16OneWindowOccupancyTyped<3>(input_dtype, inner_size, unit, warps_per_output);
     }
     throw std::logic_error("Invalid FP16 / BF16 OneWindow occupancy combine operation.");
-#endif
 }
 
 // ---- The FP32 and FP16 / BF16 RK ARG OneWindow twins (see oneWindowArgKernel).
@@ -3030,7 +2971,6 @@ void launchFp8OneWindowArg(const StridedSpan& input,
                            bool maximum,
                            uint64_t domain_stride,
                            Stream& stream) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     const DataType input_dtype = input.getDataType();
     const uint64_t outputs = geometry.outer_size * geometry.inner_size;
     // The plan of the base's alignment (rows per group leave room for the prefix off a 16-byte boundary).
@@ -3081,18 +3021,6 @@ void launchFp8OneWindowArg(const StridedSpan& input,
     if (!launched) {
         throw std::logic_error("FP8 OneWindow ARG has no kernel for this unit.");
     }
-#else
-    static_cast<void>(input);
-    static_cast<void>(value_output);
-    static_cast<void>(index_output);
-    static_cast<void>(geometry);
-    static_cast<void>(unit);
-    static_cast<void>(warps_per_output);
-    static_cast<void>(maximum);
-    static_cast<void>(domain_stride);
-    static_cast<void>(stream);
-    throw std::logic_error("FP8 OneWindow ARG requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
 }
 
 }  // namespace ThorImplementation::ReductionInternal

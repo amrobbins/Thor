@@ -7,7 +7,6 @@ namespace ThorImplementation::ReductionInternal::RaggedKR {
 
 void raggedRKLaunchMainFp8Narrow(DataType input, int fixed_op, uint32_t grid, const RaggedRKParams& params,
                                  cudaStream_t stream) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     if (input == DataType::FP8_E4M3) {
         raggedRKLaunchMainFor<__nv_fp8_e4m3, RaggedMergePath::RAGGED_RK_ROWS_NARROW>(fixed_op, grid, params, stream);
     } else if (input == DataType::FP8_E5M2) {
@@ -15,22 +14,10 @@ void raggedRKLaunchMainFp8Narrow(DataType input, int fixed_op, uint32_t grid, co
     } else {
         throw std::invalid_argument("Ragged RK: the FP8 object takes FP8_E4M3 or FP8_E5M2");
     }
-#else
-    static_cast<void>(input);
-    static_cast<void>(fixed_op);
-    static_cast<void>(grid);
-    static_cast<void>(params);
-    static_cast<void>(stream);
-    throw std::invalid_argument("Ragged RK: FP8 types are disabled in this build");
-#endif
 }
 
 int raggedRKResidentFp8Narrow() {
-#if THOR_CUB_ENABLE_FP8_TYPES
     return raggedRKResidentFor<__nv_fp8_e4m3, RaggedMergePath::RAGGED_RK_ROWS_NARROW>();
-#else
-    throw std::invalid_argument("Ragged RK: FP8 types are disabled in this build");
-#endif
 }
 
 }  // namespace ThorImplementation::ReductionInternal::RaggedKR

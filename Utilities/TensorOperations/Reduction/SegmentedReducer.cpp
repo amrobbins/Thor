@@ -3,8 +3,7 @@
 #include "Utilities/TensorOperations/Reduction/SegmentedReducer.h"
 
 #include "Utilities/Common/ScopedGpu.h"
-#include "Utilities/TensorOperations/Cub/CubDataTypePolicy.h"
-#include "Utilities/TensorOperations/Cub/CubDevicePrimitiveSupport.h"
+#include "Utilities/Common/TensorRequirements.h"
 #include "Utilities/TensorOperations/Reduction/FrontEnd.h"
 #include "Utilities/TensorOperations/Reduction/Planner/DenseProductionPhysicalSelectionContext.h"
 #include "Utilities/TensorOperations/Reduction/Ragged/RaggedStampAutotuner.h"
@@ -20,7 +19,7 @@ namespace ThorImplementation {
 
 namespace {
 
-using namespace CubDevicePrimitiveSupport;
+using namespace TensorRequirements;
 using namespace ReductionInternal;
 using namespace ReductionFrontEnd;
 
@@ -186,11 +185,9 @@ bool SegmentedReducer::isOffsetDataTypeSupported(DataType dtype) {
     if (dtype == DataType::UINT32) {
         return true;
     }
-#if THOR_CUB_ENABLE_64BIT_SEGMENT_OFFSETS
     if (dtype == DataType::UINT64) {
         return true;
     }
-#endif
     return false;
 }
 
@@ -322,11 +319,9 @@ bool SegmentedArgReducer::isOffsetDataTypeSupported(DataType dtype) {
     if (dtype == DataType::UINT32) {
         return true;
     }
-#if THOR_CUB_ENABLE_64BIT_SEGMENT_OFFSETS
     if (dtype == DataType::UINT64) {
         return true;
     }
-#endif
     return false;
 }
 

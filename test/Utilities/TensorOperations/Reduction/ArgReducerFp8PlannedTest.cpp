@@ -18,7 +18,6 @@ using namespace ThorImplementation;
 using namespace ThorImplementation::ReductionTestSupport;
 namespace Reference = ThorImplementation::Fp8ArgReference;
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 
 namespace {
 
@@ -249,4 +248,3 @@ TEST(ArgReducerFp8Planned, RerunAfterInputChangeUsesSameStamp) {
     }
 }
 
-#endif  // THOR_CUB_ENABLE_FP8_TYPES

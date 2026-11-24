@@ -19,10 +19,8 @@ using RaggedKR::RaggedRKParams;
 
 [[nodiscard]] bool raggedRKOutputSupported(DataType dtype) {
     switch (dtype) {
-#if THOR_CUB_ENABLE_FP8_TYPES
         case DataType::FP8_E4M3:
         case DataType::FP8_E5M2:
-#endif
         case DataType::FP16:
         case DataType::BF16:
         case DataType::FP32:
@@ -146,9 +144,6 @@ void launchRaggedRKValue(ReductionOp op,
         fail("the input must be FP8, FP16, BF16 or FP32");
     const DataType input_dtype = input.getDataType();
     const uint32_t bytes = raggedRKInputBytes(input_dtype);
-#if !THOR_CUB_ENABLE_FP8_TYPES
-    if (bytes == 1) fail("FP8 types are disabled in this build");
-#endif
     // Each tensor's dimensions are copied once (GCC 14's -Warray-bounds false positive on repeated copies).
     const std::vector<uint64_t> input_dims = input.getDimensions();
     const std::vector<uint64_t> offsets_dims =

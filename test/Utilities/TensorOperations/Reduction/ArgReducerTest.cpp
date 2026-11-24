@@ -235,10 +235,8 @@ TEST(ArgReducer, EverySupportedFloatingInputDtypeUsesFp32CandidateValues) {
     Stream stream(0);
 
     std::vector<DataType> input_dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
-#if THOR_CUB_ENABLE_FP8_TYPES
     input_dtypes.push_back(DataType::FP8_E4M3);
     input_dtypes.push_back(DataType::FP8_E5M2);
-#endif
 
     for (DataType input_dtype : input_dtypes) {
         SCOPED_TRACE(static_cast<int>(input_dtype));
@@ -572,10 +570,8 @@ TEST(ArgReducer, DenseTiledVectorizedPathsSupportEveryFloatingInputDtype) {
     Stream stream(0);
 
     std::vector<DataType> input_dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
-#if THOR_CUB_ENABLE_FP8_TYPES
     input_dtypes.push_back(DataType::FP8_E4M3);
     input_dtypes.push_back(DataType::FP8_E5M2);
-#endif
 
     for (uint64_t inner_size : {8ULL, 17ULL, 64ULL, 129ULL, 4097ULL}) {
         SCOPED_TRACE(inner_size);

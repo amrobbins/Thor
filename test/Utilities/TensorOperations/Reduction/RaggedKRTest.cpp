@@ -36,7 +36,6 @@ using namespace ThorImplementation::ReductionTestSupport;
 using namespace ThorImplementation::ReductionInternal;
 namespace A = ThorImplementation::RaggedReductionAudit;
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 
 namespace {
 
@@ -1757,4 +1756,3 @@ TEST(RaggedKR, RkArgIgnoresInactiveCapacityEmptySegmentsPartsAndTheContract) {
     stream.synchronize();
 }
 
-#endif  // THOR_CUB_ENABLE_FP8_TYPES

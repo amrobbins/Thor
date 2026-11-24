@@ -100,7 +100,7 @@ TEST(ExpressionReductionArchitecture, ActiveSourcesDoNotUseCudnnReductionApis) {
                                        }();
 }
 
-TEST(ExpressionReductionArchitecture, GeneralReductionsAreCentralizedUnderCubReduction) {
+TEST(ExpressionReductionArchitecture, GeneralReductionsUseThorsReducer) {
     const std::vector<std::filesystem::path> source_roots = {
         std::filesystem::path(SOURCE_DIR) / "Utilities",
         std::filesystem::path(SOURCE_DIR) / "DeepLearning",
@@ -133,11 +133,6 @@ TEST(ExpressionReductionArchitecture, GeneralReductionsAreCentralizedUnderCubRed
     forEachActiveSourceFile(source_roots, [&](const std::filesystem::path& path) {
         const std::filesystem::path relative = std::filesystem::relative(path, SOURCE_DIR);
         const std::string relative_string = relative.generic_string();
-        if (relative_string.rfind("Utilities/TensorOperations/Cub/CubReduction", 0) == 0
-            || relative_string.rfind("Utilities/TensorOperations/Cub/CubArgReduction", 0) == 0) {
-            return;
-        }
-
         const std::string contents = readTextFile(path);
         for (const std::string& token : forbidden_tokens) {
             if (contents.find(token) != std::string::npos) {
@@ -146,7 +141,8 @@ TEST(ExpressionReductionArchitecture, GeneralReductionsAreCentralizedUnderCubRed
         }
     });
 
-    EXPECT_TRUE(violations.empty()) << "General value and arg reductions must use the central CUB reduction utility.\n"
+    EXPECT_TRUE(violations.empty()) << "General value and arg reductions must use Thor's reducer "
+                                       "(Utilities/TensorOperations/Reduction).\n"
                                     << [&]() {
                                            std::ostringstream message;
                                            for (const std::string& violation : violations) {
@@ -154,6 +150,13 @@ TEST(ExpressionReductionArchitecture, GeneralReductionsAreCentralizedUnderCubRed
                                            }
                                            return message.str();
                                        }();
+}
+
+// The Cub/ directory is gone: CUB is called only where a kernel uses it directly, and the argument checks it held are
+// in Utilities/Common/TensorRequirements.h.
+TEST(ExpressionReductionArchitecture, CubWrapperDirectoryStaysDeleted) {
+    const std::filesystem::path cub_root = std::filesystem::path(SOURCE_DIR) / "Utilities/TensorOperations/Cub";
+    EXPECT_TRUE(!std::filesystem::exists(cub_root) || std::filesystem::is_empty(cub_root)) << cub_root;
 }
 
 TEST(ExpressionReductionArchitecture, ArgReductionDoesNotRetainSupersededKernelFamilies) {

@@ -94,7 +94,6 @@ struct RaggedKRInput<float> {
     using Storage = uint32_t;
     static constexpr uint32_t Rows = 16 / Bytes, PerWord = 4 / Bytes;
 };
-#if THOR_CUB_ENABLE_FP8_TYPES
 template <>
 struct RaggedKRInput<__nv_fp8_e4m3> {
     static constexpr uint32_t Bytes = 1;
@@ -107,7 +106,6 @@ struct RaggedKRInput<__nv_fp8_e5m2> {
     using Storage = uint8_t;
     static constexpr uint32_t Rows = 16 / Bytes, PerWord = 4 / Bytes;
 };
-#endif
 
 // One 32-bit word (already sign-folded for MAX) into its PerWord FP32 values, exactly, in element order.
 template <typename InputT>
@@ -121,13 +119,11 @@ __device__ __forceinline__ void raggedKRDecodeWord(uint32_t word, float* out) {
         out[0] = __uint_as_float(word << 16);
         out[1] = __uint_as_float(word & 0xffff0000U);
     } else {
-#if THOR_CUB_ENABLE_FP8_TYPES
         const float4 d = decodeFp8x4ToFp32<InputT>(word);
         out[0] = d.x;
         out[1] = d.y;
         out[2] = d.z;
         out[3] = d.w;
-#endif
     }
 }
 

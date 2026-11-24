@@ -389,7 +389,7 @@ def func_symbols(readelf_output: str) -> list[tuple[str, int]]:
 
 def find_object(build: Path, name: str) -> Path:
     found = sorted(build.rglob(name))
-    preferred = [p for p in found if 'ThorCubCudaObjects' in str(p)]
+    preferred = [p for p in found if 'ThorSelfContainedCudaObjects' in str(p)]
     if not (preferred or found):
         sys.exit(f'no {name} under {build} (build Thor first)')
     return (preferred or found)[0].resolve()

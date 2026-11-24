@@ -1004,16 +1004,16 @@ file(GLOB_RECURSE THOR_SOURCES CONFIGURE_DEPENDS
 # generation they were measured with (compiled with RDC and device LTO they
 # regress, FP8 E5M2 most; benchmarks/reducer_compile_contract.py checks it).
 # The set is every .cu directly in Scan/ and every .cu anywhere under Reduction/.
-file(GLOB THOR_CUB_CUDA_SELF_CONTAINED_SOURCES CONFIGURE_DEPENDS
+file(GLOB THOR_SELF_CONTAINED_CUDA_SOURCES CONFIGURE_DEPENDS
         "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Scan/*.cu"
 )
 file(GLOB_RECURSE _thor_reduction_cuda_sources CONFIGURE_DEPENDS
         "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/*.cu"
 )
-list(APPEND THOR_CUB_CUDA_SELF_CONTAINED_SOURCES ${_thor_reduction_cuda_sources})
+list(APPEND THOR_SELF_CONTAINED_CUDA_SOURCES ${_thor_reduction_cuda_sources})
 unset(_thor_reduction_cuda_sources)
-if (NOT THOR_CUB_CUDA_SELF_CONTAINED_SOURCES)
-    message(FATAL_ERROR "Thor Cub CUDA source set is empty")
+if (NOT THOR_SELF_CONTAINED_CUDA_SOURCES)
+    message(FATAL_ERROR "Thor self-contained CUDA source set is empty")
 endif ()
 # A .cu in a subdirectory of Scan/ would fall out of the set into the ordinary
 # (RDC, device LTO) build without notice: stop instead.
@@ -1022,15 +1022,15 @@ file(GLOB_RECURSE _thor_reducer_cuda_tree CONFIGURE_DEPENDS
         "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Reduction/*.cu"
 )
 foreach (_thor_reducer_cuda_source IN LISTS _thor_reducer_cuda_tree)
-    if (NOT _thor_reducer_cuda_source IN_LIST THOR_CUB_CUDA_SELF_CONTAINED_SOURCES)
+    if (NOT _thor_reducer_cuda_source IN_LIST THOR_SELF_CONTAINED_CUDA_SOURCES)
         message(FATAL_ERROR "Reducer CUDA source outside the self-contained set "
                 "(move it to Scan/ or Reduction/): ${_thor_reducer_cuda_source}")
     endif ()
 endforeach ()
 unset(_thor_reducer_cuda_tree)
-foreach (_thor_cub_cuda_source IN LISTS THOR_CUB_CUDA_SELF_CONTAINED_SOURCES)
-    if (NOT EXISTS "${_thor_cub_cuda_source}")
-        message(FATAL_ERROR "Thor Cub CUDA source selected for self-contained compilation is missing: ${_thor_cub_cuda_source}")
+foreach (_thor_self_contained_cuda_source IN LISTS THOR_SELF_CONTAINED_CUDA_SOURCES)
+    if (NOT EXISTS "${_thor_self_contained_cuda_source}")
+        message(FATAL_ERROR "Thor CUDA source selected for self-contained compilation is missing: ${_thor_self_contained_cuda_source}")
     endif ()
 endforeach ()
 # Line tables for the ragged kernels (every dtype's object) and StridedR's, so Nsight Compute attributes instructions
@@ -1078,13 +1078,13 @@ if (_thor_python_release_wheel_bundle)
             list(APPEND THOR_HOST_SOURCES "${_thor_source}")
         endif ()
     endforeach ()
-    list(REMOVE_ITEM THOR_CUDA_SOURCES ${THOR_CUB_CUDA_SELF_CONTAINED_SOURCES})
+    list(REMOVE_ITEM THOR_CUDA_SOURCES ${THOR_SELF_CONTAINED_CUDA_SOURCES})
 
     add_library(ThorHostObjects OBJECT ${THOR_HOST_SOURCES})
     add_library(ThorCudaSm89Objects OBJECT ${THOR_CUDA_SOURCES})
     add_library(ThorCudaSm120Objects OBJECT ${THOR_CUDA_SOURCES})
-    add_library(ThorCubCudaSm89Objects OBJECT ${THOR_CUB_CUDA_SELF_CONTAINED_SOURCES})
-    add_library(ThorCubCudaSm120Objects OBJECT ${THOR_CUB_CUDA_SELF_CONTAINED_SOURCES})
+    add_library(ThorSelfContainedCudaSm89Objects OBJECT ${THOR_SELF_CONTAINED_CUDA_SOURCES})
+    add_library(ThorSelfContainedCudaSm120Objects OBJECT ${THOR_SELF_CONTAINED_CUDA_SOURCES})
 
     set_target_properties(ThorHostObjects PROPERTIES
             CXX_STANDARD 23
@@ -1102,14 +1102,14 @@ if (_thor_python_release_wheel_bundle)
             CUDA_SEPARABLE_COMPILATION ON
             POSITION_INDEPENDENT_CODE ON
     )
-    set_target_properties(ThorCubCudaSm89Objects PROPERTIES
+    set_target_properties(ThorSelfContainedCudaSm89Objects PROPERTIES
             CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
             CUDA_ARCHITECTURES 89
             CUDA_SEPARABLE_COMPILATION OFF
             POSITION_INDEPENDENT_CODE ON
             INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
     )
-    set_target_properties(ThorCubCudaSm120Objects PROPERTIES
+    set_target_properties(ThorSelfContainedCudaSm120Objects PROPERTIES
             CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
             CUDA_ARCHITECTURES 120
             CUDA_SEPARABLE_COMPILATION OFF
@@ -1120,12 +1120,12 @@ if (_thor_python_release_wheel_bundle)
     set(_thor_sm120_backend_objects
             $<TARGET_OBJECTS:ThorHostObjects>
             $<TARGET_OBJECTS:ThorCudaSm120Objects>
-            $<TARGET_OBJECTS:ThorCubCudaSm120Objects>
+            $<TARGET_OBJECTS:ThorSelfContainedCudaSm120Objects>
     )
     set(_thor_sm89_backend_objects
             $<TARGET_OBJECTS:ThorHostObjects>
             $<TARGET_OBJECTS:ThorCudaSm89Objects>
-            $<TARGET_OBJECTS:ThorCubCudaSm89Objects>
+            $<TARGET_OBJECTS:ThorSelfContainedCudaSm89Objects>
     )
 
     add_library(Thor SHARED ${_thor_sm120_backend_objects})
@@ -1137,9 +1137,9 @@ if (_thor_python_release_wheel_bundle)
             LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/wheel_backends/sm89"
     )
 else ()
-    list(REMOVE_ITEM THOR_SOURCES ${THOR_CUB_CUDA_SELF_CONTAINED_SOURCES})
-    add_library(ThorCubCudaObjects OBJECT ${THOR_CUB_CUDA_SELF_CONTAINED_SOURCES})
-    set_target_properties(ThorCubCudaObjects PROPERTIES
+    list(REMOVE_ITEM THOR_SOURCES ${THOR_SELF_CONTAINED_CUDA_SOURCES})
+    add_library(ThorSelfContainedCudaObjects OBJECT ${THOR_SELF_CONTAINED_CUDA_SOURCES})
+    set_target_properties(ThorSelfContainedCudaObjects PROPERTIES
             CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
             CUDA_SEPARABLE_COMPILATION OFF
             POSITION_INDEPENDENT_CODE ON
@@ -1149,7 +1149,7 @@ else ()
     #add_library(Thor STATIC ${THOR_SOURCES})
     add_library(Thor SHARED
             ${THOR_SOURCES}
-            $<TARGET_OBJECTS:ThorCubCudaObjects>
+            $<TARGET_OBJECTS:ThorSelfContainedCudaObjects>
     )
 endif ()
 
@@ -1687,8 +1687,9 @@ target_compile_definitions(Thor PRIVATE
 )
 
 # Object libraries intentionally reuse the exact compile contract accumulated on
-# Thor above. Cub CUDA object targets differ only in that they are self-contained
-# device code: separable compilation/RDC and Release IPO/device LTO are disabled.
+# Thor above. The ThorSelfContainedCuda*Objects targets differ only in that their
+# device code is self-contained: separable compilation/RDC and Release IPO/device
+# LTO are disabled.
 function(thor_copy_target_property source_target destination_target property_name)
     get_target_property(_thor_property_value ${source_target} ${property_name})
     if (NOT _thor_property_value STREQUAL "_thor_property_value-NOTFOUND")
@@ -1702,11 +1703,11 @@ if (_thor_python_release_wheel_bundle)
             ThorHostObjects
             ThorCudaSm89Objects
             ThorCudaSm120Objects
-            ThorCubCudaSm89Objects
-            ThorCubCudaSm120Objects
+            ThorSelfContainedCudaSm89Objects
+            ThorSelfContainedCudaSm120Objects
     )
 else ()
-    list(APPEND _thor_compile_contract_object_targets ThorCubCudaObjects)
+    list(APPEND _thor_compile_contract_object_targets ThorSelfContainedCudaObjects)
 endif ()
 
 foreach (_thor_object_target IN LISTS _thor_compile_contract_object_targets)
@@ -1739,8 +1740,8 @@ if (_thor_python_release_wheel_bundle)
     set_property(TARGET ThorHostObjects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET ThorCudaSm89Objects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET ThorCudaSm120Objects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-    set_property(TARGET ThorCubCudaSm89Objects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
-    set_property(TARGET ThorCubCudaSm120Objects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+    set_property(TARGET ThorSelfContainedCudaSm89Objects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+    set_property(TARGET ThorSelfContainedCudaSm120Objects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
 
     # Thor itself is the sm120 backend used to resolve _thor at build time. The
     # sm89 backend must have an identical host/runtime link contract while using
@@ -1754,7 +1755,7 @@ if (_thor_python_release_wheel_bundle)
         set_property(TARGET ThorKernelSm89 PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
     endif ()
 else ()
-    set_property(TARGET ThorCubCudaObjects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+    set_property(TARGET ThorSelfContainedCudaObjects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
 endif ()
 
 file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS
@@ -2093,6 +2094,23 @@ target_link_libraries(thor_residency_materialization_benchmark PRIVATE Thor ${TH
 target_link_libraries(thor_residency_materialization_benchmark PRIVATE OpenMP::OpenMP_CXX)
 target_link_libraries(thor_residency_materialization_benchmark PRIVATE PkgConfig::LIBURING)
 target_compile_options(thor_residency_materialization_benchmark PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3>
+        $<$<CONFIG:Debug>:-O0>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G>
+)
+
+# Thor's radix sort against cub::DeviceRadixSort (the benchmark calls CUB, so it compiles as CUDA).
+set_source_files_properties(benchmarks/SortBenchmark.cpp PROPERTIES LANGUAGE CUDA)
+add_executable(thor_sort_benchmark EXCLUDE_FROM_ALL
+        benchmarks/SortBenchmark.cpp
+)
+thor_apply_linker_settings(thor_sort_benchmark)
+thor_enable_release_no_semantic_interposition(thor_sort_benchmark)
+target_link_libraries(thor_sort_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_link_libraries(thor_sort_benchmark PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(thor_sort_benchmark PRIVATE PkgConfig::LIBURING)
+target_compile_options(thor_sort_benchmark PRIVATE
         $<$<CONFIG:Release>:-O3>
         $<$<CONFIG:RelWithDebInfo>:-O3>
         $<$<CONFIG:Debug>:-O0>
@@ -2729,7 +2747,7 @@ endif ()
 
 # Optional, explicitly requested size probe for the four FP8 mode-local selector
 # inventories.  Its generated translation units, objects and archive live entirely
-# in the build directory.  It never changes Thor/ThorCubCudaObjects and is not ALL.
+# in the build directory.  It never changes Thor/ThorSelfContainedCudaObjects and is not ALL.
 option(THOR_ENABLE_FP8_SELECTED_INVENTORY_SIZE_TARGET
        "Expose isolated compile target for FP8 selector-reachable first-stage kernel sizes" ON)
 if (THOR_ENABLE_FP8_SELECTED_INVENTORY_SIZE_TARGET AND NOT _thor_python_release_wheel_bundle)

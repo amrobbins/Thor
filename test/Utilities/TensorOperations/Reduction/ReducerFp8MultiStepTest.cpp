@@ -41,7 +41,6 @@ using namespace ThorImplementation::ReductionTestSupport;
 namespace Reference = ThorImplementation::Fp8ArgReference;
 namespace Internal = ThorImplementation::ReductionInternal;
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 
 namespace {
 
@@ -418,4 +417,3 @@ TEST(ReducerFp8MultiStep, RandomShapesEveryOperationAndDepth) {
     std::cout << summary.str() << std::endl;
 }
 
-#endif  // THOR_CUB_ENABLE_FP8_TYPES

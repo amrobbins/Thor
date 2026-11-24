@@ -31,7 +31,6 @@ namespace Reference = ThorImplementation::Fp8ArgReference;
 namespace F = ThorImplementation::ReductionInternal::RK;
 namespace G = ThorImplementation::ReductionInternal::RK::Fp8::Fp8RKPolicy;
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 
 namespace {
 
@@ -282,4 +281,3 @@ TEST(ArgReducerFp8Candidates, EveryCandidateMatchesReference) {
     }
 }
 
-#endif  // THOR_CUB_ENABLE_FP8_TYPES

@@ -4,10 +4,10 @@
 The reducer's and the scan kernel's CUDA translation units (every .cu directly in Utilities/TensorOperations/Scan/,
 and every .cu anywhere under Utilities/TensorOperations/Reduction/) compile as
 self-contained objects: no relocatable device code and no device LTO (CMakeLists.txt,
-THOR_CUB_CUDA_SELF_CONTAINED_SOURCES). Compiled like the rest of Thor they regress, FP8
+THOR_SELF_CONTAINED_CUDA_SOURCES). Compiled like the rest of Thor they regress, FP8
 E5M2 especially. This tool checks, for every such file:
 
-  - it has a compile command, and that command builds an object of the self-contained target (ThorCubCuda*Objects);
+  - it has a compile command, and that command builds an object of the self-contained target (ThorSelfContainedCuda*Objects);
   - the command asks for no relocatable device code (-rdc=true, --relocatable-device-code=true, -dc, --device-c) and no
     link-time optimization (-dlto, --dlink-time-opt, -flto, -gen-opt-lto, an lto_NN target code);
   - with --compare=OLD.json (an earlier build's compile_commands.json): its options equal the old command's for the
@@ -29,7 +29,7 @@ import shlex
 import sys
 from pathlib import Path
 
-CUB = 'Utilities/TensorOperations/Cub'
+CUB = 'Utilities/TensorOperations/Cub'  # the old home of the reducer's sources (RENAMED_SOURCES)
 SCAN = 'Utilities/TensorOperations/Scan'
 REDUCTION = 'Utilities/TensorOperations/Reduction'
 # Reducer CUDA sources moved from an old path: new path -> old path, both from the source root.
@@ -57,7 +57,7 @@ NEW_SOURCES = {f'{SCAN}/ScanMinMaxBackward.cu', f'{SCAN}/SegmentedScanArg.cu', f
 # not with -dlto: an lto_NN code is LTO.
 FORBIDDEN = re.compile(r'^(-rdc=true|--relocatable-device-code=true|-dc|--device-c|-dlto|--dlink-time-opt|-flto.*|'
                        r'-gen-opt-lto|.*[=,]-flto.*|.*-dlto.*|.*\blto_\d+.*)$')
-TARGET = re.compile(r'ThorCubCuda\w*Objects')
+TARGET = re.compile(r'ThorSelfContainedCuda\w*Objects')
 
 
 def reducer_sources(source: Path) -> list[str]:
@@ -113,7 +113,7 @@ def check(build_commands: list[dict], source: Path, files: list[str], old_comman
         else:
             args = arguments(entry)
             if not any(TARGET.search(a) for a in args + [entry.get('output', '')]):
-                problems.append('not built by the self-contained target (ThorCubCuda*Objects)')
+                problems.append('not built by the self-contained target (ThorSelfContainedCuda*Objects)')
             bad = [a for a in args if FORBIDDEN.match(a)]
             if bad:
                 problems.append('relocatable device code or LTO: ' + ' '.join(bad))
@@ -141,7 +141,7 @@ def self_test():
     cub = '/src/' + CUB
     red = '/src/' + REDUCTION
 
-    def cmd(path, target='ThorCubCudaObjects', extra=''):
+    def cmd(path, target='ThorSelfContainedCudaObjects', extra=''):
         name = Path(path).name
         return {'directory': '/b', 'file': path,
                 'command': f'/usr/local/cuda/bin/nvcc -DX=1 -I/src -O3 --use_fast_math {extra} -x cu -c {path} '

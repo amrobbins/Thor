@@ -1,7 +1,7 @@
 #include "Utilities/TensorOperations/Ragged/RaggedWeightedReduction.h"
 
 #include "Utilities/Expression/CudaHelpers.h"
-#include "Utilities/TensorOperations/Cub/CubDevicePrimitiveSupport.h"
+#include "Utilities/Common/TensorRequirements.h"
 #include "Utilities/TensorOperations/Reduction/Kernels/ReductionOperation.cuh"
 #include "Utilities/TensorOperations/Reduction/SegmentedReducer.h"
 
@@ -17,7 +17,7 @@
 
 namespace ThorImplementation {
 namespace {
-using namespace CubDevicePrimitiveSupport;
+using namespace TensorRequirements;
 using ReductionInternal::dispatchReductionInputDType;
 using ReductionInternal::ToFp32;
 

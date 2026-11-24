@@ -21,7 +21,6 @@ namespace ThorImplementation::ReductionInternal {
 // on the tensor's word grid (FP8_KR_UNROLL loads in flight) and masks bytes outside its work.
 // VALUE compiles only the reachable semantics: SUM x {identity, |x|, x^2}, PRODUCT, and MIN / MAX through RK's shared
 // MIN kernel with the byte fold of Fp8ExtremumFold (MAX negates through output_scale; |x| / x^2 fold into the bytes).
-#if THOR_CUB_ENABLE_FP8_TYPES
 namespace {
 
 constexpr uint32_t FP8_KR_UNROLL = 4;
@@ -1646,7 +1645,6 @@ void launchKRArgFamily(const KR::KRSegmentShape& shape, const Fp8KRLaunchGeometr
 }
 
 }  // namespace
-#endif  // THOR_CUB_ENABLE_FP8_TYPES
 
 bool fp8KRValueSupports(const ReductionStageSemantics& semantics) {
     switch (semantics.combine) {
@@ -1671,7 +1669,6 @@ void launchFp8KRValueSegments(const ReductionStageSemantics& semantics,
                               float output_scale,
                               Stream& stream,
                               KR::KRSplitStages stages) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     requireFp8KRInput(input, shape, scratch, scratch_bytes, false);
     if (output.getTotalNumElements() != shape.rows || !fp8CompleteSupportsOutputStorage(output.getDataType()) ||
         !fp8KRValueSupports(semantics)) {
@@ -1684,18 +1681,6 @@ void launchFp8KRValueSegments(const ReductionStageSemantics& semantics,
         launchKRValueTyped<__nv_fp8_e5m2>(semantics, input, output, shape, scratch, output_scale, stream,
                                           stages);
     }
-#else
-    static_cast<void>(semantics);
-    static_cast<void>(input);
-    static_cast<void>(output);
-    static_cast<void>(shape);
-    static_cast<void>(scratch);
-    static_cast<void>(scratch_bytes);
-    static_cast<void>(output_scale);
-    static_cast<void>(stream);
-    static_cast<void>(stages);
-    throw std::logic_error("Retained FP8 KR VALUE requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
 }
 
 void launchFp32KRValueSegments(const ReductionStageSemantics& semantics,
@@ -1707,7 +1692,6 @@ void launchFp32KRValueSegments(const ReductionStageSemantics& semantics,
                                float output_scale,
                                Stream& stream,
                                KR::KRSplitStages stages) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     // The FP8 kernels at one element per word. Rows are whole elements on a 4-byte aligned input (head 0), so no word
     // holds bytes of two rows and the FP32 branches need no masks.
     if (input.getDataType() != DataType::FP32 || !KR::retainedKRShapeLegalForElement(shape, 4) ||
@@ -1725,18 +1709,6 @@ void launchFp32KRValueSegments(const ReductionStageSemantics& semantics,
         throw std::logic_error("Retained FP32 KR VALUE pass received an unsupported output or semantics.");
     }
     launchKRValueTyped<float>(semantics, input, output, shape, scratch, output_scale, stream, stages);
-#else
-    static_cast<void>(semantics);
-    static_cast<void>(input);
-    static_cast<void>(output);
-    static_cast<void>(shape);
-    static_cast<void>(scratch);
-    static_cast<void>(scratch_bytes);
-    static_cast<void>(output_scale);
-    static_cast<void>(stream);
-    static_cast<void>(stages);
-    throw std::logic_error("Retained FP32 KR VALUE requires THOR_CUB_ENABLE_FP8_TYPES (the retained kernels' gate).");
-#endif
 }
 
 void launchF16KRValueSegments(const ReductionStageSemantics& semantics,
@@ -1748,7 +1720,6 @@ void launchF16KRValueSegments(const ReductionStageSemantics& semantics,
                               float output_scale,
                               Stream& stream,
                               KR::KRSplitStages stages) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     // The FP8 kernels at two elements per word. Rows are whole elements on a 2-byte aligned input, so a row may start
     // mid-word (head 2, or an odd element count before it) and the 2-byte branches mask half-words.
     const DataType dtype = input.getDataType();
@@ -1772,19 +1743,6 @@ void launchF16KRValueSegments(const ReductionStageSemantics& semantics,
         launchKRValueTyped<__nv_bfloat16>(semantics, input, output, shape, scratch, output_scale, stream,
                                           stages);
     }
-#else
-    static_cast<void>(semantics);
-    static_cast<void>(input);
-    static_cast<void>(output);
-    static_cast<void>(shape);
-    static_cast<void>(scratch);
-    static_cast<void>(scratch_bytes);
-    static_cast<void>(output_scale);
-    static_cast<void>(stream);
-    static_cast<void>(stages);
-    throw std::logic_error(
-        "Retained FP16 / BF16 KR VALUE requires THOR_CUB_ENABLE_FP8_TYPES (the retained kernels' gate).");
-#endif
 }
 
 void launchFp8KRArgSegments(const StridedSpan& input,
@@ -1797,7 +1755,6 @@ void launchFp8KRArgSegments(const StridedSpan& input,
                             uint64_t domain_stride,
                             Stream& stream,
                             KR::KRSplitStages stages) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     requireFp8KRInput(input, shape, scratch, scratch_bytes, true);
     const uint64_t outputs = shape.rows;
     if (shape.row_bytes - 1 > FP8_ARG_MAX_WIDE_INDEX || (value_output == nullptr && index_output == nullptr) ||
@@ -1834,19 +1791,6 @@ void launchFp8KRArgSegments(const StridedSpan& input,
     } else {
         launchKRArgFamily<Fp8KRArgFormat>(shape, launch, fold, arg_outputs, scratch, stream, stages);
     }
-#else
-    static_cast<void>(input);
-    static_cast<void>(value_output);
-    static_cast<void>(index_output);
-    static_cast<void>(shape);
-    static_cast<void>(scratch);
-    static_cast<void>(scratch_bytes);
-    static_cast<void>(maximum);
-    static_cast<void>(domain_stride);
-    static_cast<void>(stream);
-    static_cast<void>(stages);
-    throw std::logic_error("Retained FP8 KR ARG requires THOR_CUB_ENABLE_FP8_TYPES.");
-#endif
 }
 
 void launchF16KRArgSegments(const StridedSpan& input,
@@ -1859,7 +1803,6 @@ void launchF16KRArgSegments(const StridedSpan& input,
                             uint64_t domain_stride,
                             Stream& stream,
                             KR::KRSplitStages stages) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     // FP8's ARG kernels at two elements per word (F16KRArgFormat), on a 2-byte aligned input.
     const DataType dtype = input.getDataType();
     if ((dtype != DataType::FP16 && dtype != DataType::BF16) || !KR::f16KRArgShapeLegal(shape) ||
@@ -1897,20 +1840,6 @@ void launchF16KRArgSegments(const StridedSpan& input,
                                     dtype == DataType::BF16};
     launchKRArgFamily<F16KRArgFormat>(shape, fp8KRLaunchGeometry(input, shape), fold, arg_outputs, scratch,
                                       stream, stages);
-#else
-    static_cast<void>(input);
-    static_cast<void>(value_output);
-    static_cast<void>(index_output);
-    static_cast<void>(shape);
-    static_cast<void>(scratch);
-    static_cast<void>(scratch_bytes);
-    static_cast<void>(maximum);
-    static_cast<void>(domain_stride);
-    static_cast<void>(stream);
-    static_cast<void>(stages);
-    throw std::logic_error(
-        "Retained FP16 / BF16 KR ARG requires THOR_CUB_ENABLE_FP8_TYPES (the retained kernels' gate).");
-#endif
 }
 
 void launchFp32KRArgSegments(const StridedSpan& input,
@@ -1923,7 +1852,6 @@ void launchFp32KRArgSegments(const StridedSpan& input,
                              uint64_t domain_stride,
                              Stream& stream,
                              KR::KRSplitStages stages) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     // Whole-element rows on a 4-byte aligned input, as the FP32 VALUE launcher.
     if (input.getDataType() != DataType::FP32 || !KR::fp32KRArgShapeLegal(shape) ||
         input.getTotalNumElements() * 4 != shape.rows * shape.row_bytes ||
@@ -1985,19 +1913,6 @@ void launchFp32KRArgSegments(const StridedSpan& input,
         }
     }
     CUDA_CHECK(cudaGetLastError());
-#else
-    static_cast<void>(input);
-    static_cast<void>(value_output);
-    static_cast<void>(index_output);
-    static_cast<void>(shape);
-    static_cast<void>(scratch);
-    static_cast<void>(scratch_bytes);
-    static_cast<void>(maximum);
-    static_cast<void>(domain_stride);
-    static_cast<void>(stream);
-    static_cast<void>(stages);
-    throw std::logic_error("Retained FP32 KR ARG requires THOR_CUB_ENABLE_FP8_TYPES (the retained kernels' gate).");
-#endif
 }
 
 uint64_t fp32KRCarriedArgScratchBytes(const KR::KRSegmentShape& shape) {
@@ -2015,7 +1930,6 @@ void launchFp32KRCarriedArgSegments(const StridedSpan& input,
                                     uint64_t row_stride,
                                     Stream& stream,
                                     KR::KRSplitStages stages) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     const uint64_t elements = shape.rows * (shape.row_bytes / 4);
     if (input.getDataType() != DataType::FP32 || !KR::fp32KRArgShapeLegal(shape) ||
         input.getTotalNumElements() * 4 != shape.rows * shape.row_bytes ||
@@ -2090,21 +2004,6 @@ void launchFp32KRCarriedArgSegments(const StridedSpan& input,
     };
     if (index_dtype == DataType::UINT64) run.template operator()<uint64_t>();
     else run.template operator()<uint32_t>();
-#else
-    static_cast<void>(input);
-    static_cast<void>(carried_index);
-    static_cast<void>(value_output);
-    static_cast<void>(index_output);
-    static_cast<void>(shape);
-    static_cast<void>(scratch);
-    static_cast<void>(scratch_bytes);
-    static_cast<void>(maximum);
-    static_cast<void>(row_stride);
-    static_cast<void>(stream);
-    static_cast<void>(stages);
-    throw std::logic_error(
-        "Retained FP32 KR carried ARG requires THOR_CUB_ENABLE_FP8_TYPES (the retained kernels' gate).");
-#endif
 }
 
 }  // namespace ThorImplementation::ReductionInternal

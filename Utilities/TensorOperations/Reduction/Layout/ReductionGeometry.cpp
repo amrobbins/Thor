@@ -3,7 +3,7 @@
 #include "Utilities/TensorOperations/Reduction/Layout/ReductionGeometry.h"
 
 #include "Utilities/Exceptions.h"
-#include "Utilities/TensorOperations/Cub/CubDevicePrimitiveSupport.h"
+#include "Utilities/Common/TensorRequirements.h"
 #include "Utilities/TensorOperations/Reduction/ArgReducer.h"
 #include "Utilities/TensorOperations/Reduction/FrontEnd.h"
 #include "Utilities/TensorOperations/Reduction/Planner/DenseProductionPhysicalSelectionContext.h"
@@ -21,7 +21,7 @@ namespace ThorImplementation {
 
 namespace ReductionFrontEnd {
 
-using namespace CubDevicePrimitiveSupport;
+using namespace TensorRequirements;
 using namespace ReductionInternal;
 
 [[nodiscard]] bool isDirectDenseReductionPath(ReductionLayout path) {
@@ -33,7 +33,7 @@ using namespace ReductionInternal;
 
 namespace {
 
-using namespace CubDevicePrimitiveSupport;
+using namespace TensorRequirements;
 using namespace ReductionInternal;
 using namespace ReductionFrontEnd;
 

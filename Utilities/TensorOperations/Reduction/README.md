@@ -25,8 +25,8 @@ ranker for a GPU is in `benchmarks/FP8_RANKER_RETRAINING.md`.
 | `Ragged/` | The ragged kernels (one object per family and dtype), their launchers, finishers, host / device walks and the ragged selector (`RaggedStampAutotuner`) |
 | `Rankers/` | The generated ranker models (do not edit by hand) |
 
-`Utilities/TensorOperations/Cub/` keeps only the CUB wrappers (sort, scan, select, top-k, run-length encode, find);
-none of them reduces a tensor axis.
+Thor's reductions use no CUB device-wide or segmented reduce (`ReductionSourceGuardTest` forbids them); the argument
+checks the reducers share with the ragged kernels are in `Utilities/Common/TensorRequirements.h`.
 
 ## 2. The contract
 
@@ -587,10 +587,11 @@ Lessons that cost a patch each:
   `RaggedExpression`), `ReductionTuningDepthTest`, `NetworkReductionTuningDepthTest`.
 - Guards (`ExpressionReductionArchitecture.*`, `test/Utilities/Expression/ReductionSourceGuardTest.cpp`):
   - `ActiveSourcesDoNotUseCudnnReductionApis`: no cuDNN reduction descriptors, workspace queries or calls.
-  - `GeneralReductionsAreCentralizedUnderCubReduction`: no direct general-purpose CUB value or ARG reduction in
+  - `GeneralReductionsUseThorsReducer`: no direct general-purpose CUB value or ARG reduction in
     `Utilities`, `DeepLearning` or `bindings`.
   - `NoReductionCallsACubDeviceReduction`: no `cub::DeviceReduce::` or `cub::DeviceSegmentedReduce::` call and no
     device-reduce header anywhere, this directory included, with no exemption.
+  - `CubWrapperDirectoryStaysDeleted`: `Utilities/TensorOperations/Cub/` holds no file.
   - `ArgReductionDoesNotRetainSupersededKernelFamilies`, `SegmentedReductionDoesNotRetainLegacyOffsetSegmentedKernels`,
     `ValueReductionDoesNotRetainTiledViewFamily`, `ValueReductionDoesNotRetainAdaptiveCooperativeTiledKernel`,
     `ValueReductionDoesNotRetainLegacyLogicalIndexFallback`: the deleted kernels and the logical-index backend stay

@@ -2,7 +2,7 @@
 
 #include "Utilities/TensorOperations/Reduction/Planner/DensePhysicalPassExecution.h"
 
-#include "Utilities/TensorOperations/Cub/CubDevicePrimitiveSupport.h"
+#include "Utilities/Common/TensorRequirements.h"
 #include "Utilities/TensorOperations/Reduction/Arg/Fp32ArgPhysicalPlan.h"
 #include "Utilities/TensorOperations/Reduction/Arg/Fp8ArgPhysicalPlan.h"
 #include "Utilities/TensorOperations/Reduction/FrontEnd.h"
@@ -22,7 +22,7 @@ namespace ThorImplementation {
 
 namespace {
 
-using namespace CubDevicePrimitiveSupport;
+using namespace TensorRequirements;
 using namespace ReductionInternal;
 using namespace ReductionFrontEnd;
 

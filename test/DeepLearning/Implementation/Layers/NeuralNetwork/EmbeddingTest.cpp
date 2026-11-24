@@ -764,6 +764,86 @@ TEST(EmbeddingRaggedRuntimeTest, Lwa4e3LogicalBytesUseActivePrefixAndSelectedRow
     EXPECT_EQ(workForCapacity(6), workForCapacity(12));
 }
 
+TEST(EmbeddingRaggedRuntimeTest, SparseGradientSortsOnlyTheActiveTokensAcrossTilesAndPassCounts) {
+    // The sort orders only the active tokens, read on the device, and the inactive tail goes straight to the sorted
+    // pairs. Vocabularies of 9 and 17 key bits (2 and 3 sort passes: the sorted pairs end in the materialized arrays
+    // and in the alternates), several sort tiles, invalid and padding tokens among the active ones, and one prepared
+    // producer launched with active counts that shrink and grow, so the tail of an earlier launch is overwritten.
+    Stream stream(gpuPlacement);
+    constexpr uint64_t embeddingDim = 4;
+    constexpr uint64_t maxTotalValues = 5000;
+    constexpr uint64_t paddingIndex = 7;
+    for (const uint64_t vocabularySize : {300ULL, 70000ULL}) {
+        SCOPED_TRACE("vocabulary " + std::to_string(vocabularySize));
+        std::vector<uint32_t> indices(maxTotalValues);
+        std::vector<float> upstream(maxTotalValues * embeddingDim);
+        uint64_t state = 0x9e3779b97f4a7c15ULL ^ vocabularySize;
+        auto next = [&state]() {
+            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+            return static_cast<uint32_t>(state >> 33);
+        };
+        for (uint64_t t = 0; t < maxTotalValues; ++t) {
+            const uint32_t r = next();
+            // Mostly a few hundred rows (long runs), some anywhere in the vocabulary, some invalid, some padding.
+            indices[t] = r % 16 == 0   ? static_cast<uint32_t>(vocabularySize + r % 5)
+                         : r % 16 == 1 ? static_cast<uint32_t>(paddingIndex)
+                         : r % 4 == 0  ? static_cast<uint32_t>(next() % vocabularySize)
+                                       : static_cast<uint32_t>(next() % 200);
+            for (uint64_t d = 0; d < embeddingDim; ++d)
+                upstream[t * embeddingDim + d] = static_cast<float>(next() % 9) - 4.0f;
+        }
+        Tensor cpuIndices = makeCpuUint32Tensor({maxTotalValues}, indices);
+        Tensor gpuIndices = copyCpuToGpu(cpuIndices, stream);
+        Tensor cpuUpstream = makeCpuFloatTensor(DataType::FP32, {maxTotalValues, embeddingDim}, upstream);
+        Tensor gpuUpstream = copyCpuToGpu(cpuUpstream, stream);
+        Tensor cpuOffsets = makeCpuUint32Tensor({2}, {0U, 0U});
+        Tensor gpuOffsets = copyCpuToGpu(cpuOffsets, stream);
+        RaggedRuntimeExtent extent = raggedRuntimeExtentFromOffsets(gpuOffsets, 1, maxTotalValues, 1);
+
+        SparseRowGradient gradient = SparseRowGradient::allocate(gpuPlacement,
+                                                                 std::min<uint64_t>(maxTotalValues, vocabularySize),
+                                                                 vocabularySize,
+                                                                 embeddingDim,
+                                                                 DataType::FP32,
+                                                                 SparseRowGradient::chooseRowDataType(vocabularySize));
+        auto prepared = prepareEmbeddingSparseGradientRagged(gpuIndices, gpuUpstream, gradient, paddingIndex, extent);
+
+        for (const uint32_t active : {3001U, 1200U, 5000U, 513U, 4097U}) {
+            SCOPED_TRACE("active " + std::to_string(active));
+            Tensor cpuActiveOffsets = makeCpuUint32Tensor({2}, {0U, active});
+            copyCpuToExistingGpu(gpuOffsets, cpuActiveOffsets, stream);
+            launchPreparedEmbeddingSparseGradient(*prepared, gpuIndices, gpuUpstream, gradient, stream);
+            stream.synchronize();
+
+            std::vector<uint64_t> expectedRows;
+            std::vector<float> sums(vocabularySize * embeddingDim, 0.0f);
+            std::vector<bool> seen(vocabularySize, false);
+            for (uint64_t t = 0; t < active; ++t) {
+                const uint64_t row = indices[t];
+                if (row >= vocabularySize || row == paddingIndex) continue;
+                seen[row] = true;
+                for (uint64_t d = 0; d < embeddingDim; ++d)
+                    sums[row * embeddingDim + d] += upstream[t * embeddingDim + d];
+            }
+            std::vector<float> expectedValues;
+            for (uint64_t row = 0; row < vocabularySize; ++row) {
+                if (!seen[row]) continue;
+                expectedRows.push_back(row);
+                for (uint64_t d = 0; d < embeddingDim; ++d) expectedValues.push_back(sums[row * embeddingDim + d]);
+            }
+
+            const std::vector<uint64_t> numRows = copyGpuRowTensorToUint64Values(gradient.numRows, stream);
+            ASSERT_EQ(numRows[0], expectedRows.size());
+            std::vector<uint64_t> rows = copyGpuRowTensorToUint64Values(gradient.rows, stream);
+            rows.resize(expectedRows.size());
+            EXPECT_EQ(rows, expectedRows);
+            std::vector<float> values = copyGpuFloatTensorToValues(gradient.values, stream);
+            values.resize(expectedValues.size());
+            expectAllClose(values, expectedValues, 0.0f, 0.0f, "ragged sparse gradient over the active tokens");
+        }
+    }
+}
+
 TEST(EmbeddingRaggedRuntimeTest, EndToEndSparseTrainingReusesCapturedGraphAcrossChangingActiveExtent) {
     constexpr uint64_t vocabularySize = 6;
     constexpr uint64_t embeddingDim = 2;
@@ -1620,7 +1700,7 @@ TEST(EmbeddingSparseBackwardTest, SparseGradientSortCoversRowKeysUpToTheSentinel
     struct Case {
         uint64_t vocabularySize;
         DataType rowDataType;
-        int sortEndBit;
+        uint32_t sortKeyBits;
     };
     for (const Case& c : {Case{1, DataType::UINT16, 1},
                           Case{1024, DataType::UINT16, 11},
@@ -1646,7 +1726,7 @@ TEST(EmbeddingSparseBackwardTest, SparseGradientSortCoversRowKeysUpToTheSentinel
         EmbeddingSparseGradientProfileResult profile =
             profilePreparedEmbeddingSparseGradient(*prepared, gpuIndices, gpuUpstream, gradient, stream);
         stream.synchronize();
-        EXPECT_EQ(profile.sortEndBit, c.sortEndBit);
+        EXPECT_EQ(profile.sortKeyBits, c.sortKeyBits);
 
         const std::vector<uint64_t> expectedRows = vocab == 1 ? std::vector<uint64_t>{0} : std::vector<uint64_t>{0, vocab - 1};
         const std::vector<float> expectedValues = vocab == 1 ? std::vector<float>{109.0f} : std::vector<float>{69.0f, 40.0f};

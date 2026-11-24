@@ -53,9 +53,7 @@ TEST(SegmentedReducer, ConvertsLowPrecisionInputAndAccumulatesInFp32) {
     Stream stream(0);
 
     std::vector<DataType> input_dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
-#if THOR_CUB_ENABLE_FP8_TYPES
     input_dtypes.insert(input_dtypes.begin(), {DataType::FP8_E4M3, DataType::FP8_E5M2});
-#endif
     for (DataType dtype : input_dtypes) {
         SCOPED_TRACE(static_cast<int>(dtype));
         Tensor input = makeGpuTensor({1.0f, 2.0f, 3.0f, 4.0f}, {4}, stream, dtype);
@@ -71,7 +69,6 @@ TEST(SegmentedReducer, ConvertsLowPrecisionInputAndAccumulatesInFp32) {
     }
 }
 
-#if THOR_CUB_ENABLE_64BIT_SEGMENT_OFFSETS
 TEST(SegmentedReducer, SupportsUint64SegmentOffsets) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -85,7 +82,6 @@ TEST(SegmentedReducer, SupportsUint64SegmentOffsets) {
     stream.synchronize();
     expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {1.0f, 9.0f});
 }
-#endif
 
 TEST(SegmentedArgReducer, GlobalWinnerIndicesMatchDenseTieAndNanPolicyForBothOffsetDTypes) {
     REQUIRE_CUDA_DEVICE();
@@ -163,9 +159,7 @@ TEST(SegmentedArgReducer, VectorValuesConvertLowPrecisionInputAndCompareInFp32) 
     Stream stream(0);
 
     std::vector<DataType> input_dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
-#if THOR_CUB_ENABLE_FP8_TYPES
     input_dtypes.insert(input_dtypes.begin(), {DataType::FP8_E4M3, DataType::FP8_E5M2});
-#endif
     for (DataType dtype : input_dtypes) {
         SCOPED_TRACE(static_cast<int>(dtype));
         Tensor input = makeGpuTensor({1.0f, 10.0f,
@@ -343,9 +337,7 @@ TEST(SegmentedReducer, VectorValuesConvertLowPrecisionInputAndAccumulateInFp32) 
     Stream stream(0);
 
     std::vector<DataType> input_dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
-#if THOR_CUB_ENABLE_FP8_TYPES
     input_dtypes.insert(input_dtypes.begin(), {DataType::FP8_E4M3, DataType::FP8_E5M2});
-#endif
     for (DataType dtype : input_dtypes) {
         SCOPED_TRACE(static_cast<int>(dtype));
         // Keep source values exactly representable in every enabled storage format, including FP8 E5M2.
@@ -390,7 +382,6 @@ TEST(SegmentedReducer, VectorWideTrailingValuesUseMultipleComponentTiles) {
     expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
 }
 
-#if THOR_CUB_ENABLE_64BIT_SEGMENT_OFFSETS
 TEST(SegmentedReducer, VectorValuesSupportUint64SegmentOffsets) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -401,7 +392,6 @@ TEST(SegmentedReducer, VectorValuesSupportUint64SegmentOffsets) {
     stream.synchronize();
     expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {1.0f, 10.0f, 5.0f, 50.0f});
 }
-#endif
 
 TEST(SegmentedReducer, VectorMinAndMaxPropagateNanPerComponent) {
     REQUIRE_CUDA_DEVICE();

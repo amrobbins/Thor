@@ -361,8 +361,7 @@ def generate(source: Path, out: Path):
     unknown = dropped_aligned - matched
     if unknown:
         raise ValueError(f'Accepted pruning contains unrecognized physical kernels: {sorted(unknown)}')
-    # The first two TU prefixes already opened both namespaces. The aligned
-    # prefix also has THOR_CUB_ENABLE_FP8_TYPES #if closed before its cut.
+    # The first two TU prefixes already opened both namespaces.
     out.mkdir(parents=True,exist_ok=True)
     for tu, prefix in source_text.items():
         body = '\n'.join(refs[tu]); assert refs[tu]
@@ -372,7 +371,7 @@ def generate(source: Path, out: Path):
                f'}} // anonymous namespace\n}} // ThorImplementation::ReductionInternal\n')
         generated = ('// GENERATED: isolated FP8 inventory size probe; do not edit or use for production.\n'
                      f'// Extracted from {specs[tu][0]}, preserving the source kernel definitions.\n'
-                     + prefix + '\n#if !THOR_CUB_ENABLE_FP8_TYPES\n#error FP8 must be enabled for the isolated size probe\n#endif\n' + end)
+                     + prefix + '\n' + end)
         (out/f'{tu}.cu').write_text(generated)
     (out/'expected.json').write_text(json.dumps(manifest,indent=2)+'\n')
     for tu in INVENTORY_TUS:

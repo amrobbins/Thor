@@ -100,7 +100,6 @@ TEST(ReducerFp8KR, CandidateShapesAreLegalDistinctAndOrdered) {
     EXPECT_TRUE(KR::fp8KRSegmentShapeLegal({8, 16, 16, 1, 8}));
 }
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 
 namespace {
 
@@ -410,4 +409,3 @@ TEST(ReducerFp8KR, ProductionStampsMatchReference) {
     }
 }
 
-#endif  // THOR_CUB_ENABLE_FP8_TYPES

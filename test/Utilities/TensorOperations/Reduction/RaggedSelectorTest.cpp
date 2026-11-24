@@ -324,9 +324,7 @@ TEST(RaggedSelector, WinnerComputesWhatTheFirstCandidateAndTheReferenceCompute) 
     }
     sites.push_back(valueSite(DataType::BF16, 9, ReductionOp::Mean, 20000, 900));  // RK, odd D
     sites.push_back(argSite(DataType::FP32, 1, ArgReductionOp::ArgMin, 40000, 1200));  // KR D 1
-#if THOR_CUB_ENABLE_FP8_TYPES
     sites.push_back(argSite(DataType::FP8_E4M3, 5, ArgReductionOp::ArgMax, 30000, 400));  // KR components
-#endif
     {
         RaggedSite s = argSite(DataType::BF16, 17, ArgReductionOp::ArgMin, 9000, 250, DataType::UINT64);  // RK
         sites.push_back(s);

@@ -1,6 +1,5 @@
 #pragma once
 
-#include "Utilities/TensorOperations/Cub/CubDataTypePolicy.h"
 #include "Utilities/TensorOperations/Reduction/Reducer.h"
 
 #include "cuda_runtime.h"

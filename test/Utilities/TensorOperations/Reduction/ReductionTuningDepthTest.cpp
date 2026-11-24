@@ -114,7 +114,6 @@ TEST(ReductionTuningDepth, ScopesStayOnTheirThread) {
     EXPECT_EQ(valueDepth(), ReductionTuningDepth::Ultra);  // the worker's scope did not reach this thread
 }
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 
 namespace {
 
@@ -209,4 +208,3 @@ TEST(ReductionTuningDepth, AmbientScopeReachesTheSelectionCaches) {
     EXPECT_GE(stampSum({6221, 67}, 0, ReductionTuningDepth::Ultra, stream).rk, 1U);
 }
 
-#endif  // THOR_CUB_ENABLE_FP8_TYPES

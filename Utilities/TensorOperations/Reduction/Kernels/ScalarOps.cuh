@@ -4,7 +4,6 @@
 // lean (no CUB, Thrust, cooperative groups or pipeline includes) so the ragged translation units compile quickly.
 #include "DeepLearning/Implementation/Tensor/DataType.h"
 #include "Utilities/Common/LowPrecisionFloat.h"
-#include "Utilities/TensorOperations/Cub/CubDataTypePolicy.h"
 #include "Utilities/TensorOperations/Reduction/Kernels/StageSemantics.h"
 
 #include <cuda/std/limits>
@@ -217,14 +216,12 @@ inline __host__ __device__ void storeFp32AsRuntimeDType(void* output,
                                                          uint64_t index,
                                                          float value) {
     switch (output_dtype) {
-#if THOR_CUB_ENABLE_FP8_TYPES
         case DataType::FP8_E4M3:
             static_cast<__nv_fp8_e4m3*>(output)[index] = ThorLowPrecision::toFp8E4M3Satfinite(value);
             return;
         case DataType::FP8_E5M2:
             static_cast<__nv_fp8_e5m2*>(output)[index] = ThorLowPrecision::toFp8E5M2Satfinite(value);
             return;
-#endif
         case DataType::FP16:
             static_cast<__half*>(output)[index] = __float2half_rn(value);
             return;
@@ -239,7 +236,6 @@ inline __host__ __device__ void storeFp32AsRuntimeDType(void* output,
     }
 }
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 template <typename InputT>
 [[nodiscard]] __device__ __forceinline__ float2 decodeFp8x2ToFp32(uint16_t packed_fp8) {
     static_assert(std::is_same_v<InputT, __nv_fp8_e4m3> || std::is_same_v<InputT, __nv_fp8_e5m2>);
@@ -264,6 +260,5 @@ template <typename InputT>
     const float2 high = decodeFp8x2ToFp32<InputT>(static_cast<uint16_t>(packed_fp8 >> 16));
     return make_float4(low.x, low.y, high.x, high.y);
 }
-#endif
 
 }  // namespace ThorImplementation::ReductionInternal

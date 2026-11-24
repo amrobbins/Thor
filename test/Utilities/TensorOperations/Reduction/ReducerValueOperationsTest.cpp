@@ -35,7 +35,6 @@ void expectStageSemantics(ReductionOp op,
 }  // namespace
 
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 // The FP8 RK selector must use the same public VALUE operation and floating-output surface as ordinary production
 // reducers. These inputs are exactly representable in both FP8 formats: every reduction domain has one -1 and all
 // remaining elements are +1. This distinguishes the four combines, both input transforms, division and square-root
@@ -152,7 +151,6 @@ TEST(Reducer, RetainedFp8RKDefaultOutputDTypeMatchesInput) {
                               std::vector<float>(2 * 32, 8.0f), 0.0f);
     }
 }
-#endif // THOR_CUB_ENABLE_FP8_TYPES
 
 TEST(Reducer, ValueStageSemanticsSeparateFirstTransformCombineAndFinalization) {
     using ReductionInternal::ReductionStageCombine;
@@ -295,7 +293,6 @@ TEST(Reducer, ValueStageSemanticsSeparateFirstTransformCombineAndFinalization) {
                          ReductionStageFinalize::Identity);
 }
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 // The DeepRSmallK P16 kernels select the reduction operation at compile time. Exercise both tiny-K ownership
 // geometries, all five depths, regular-K component ownership and all input transforms, including a partial last shard.
 // The partials must remain unfinalized FP32 values.
@@ -976,7 +973,6 @@ TEST(Reducer, Fp8RuntimeKPacketCompleteCoversOuterAndKTilesAcrossPersistentGrid)
         }
     }
 }
-#endif
 
 TEST(Reducer, DefinesExplicitFp32EmptyReductionValues) {
     EXPECT_FLOAT_EQ(Reducer::getFp32EmptyReductionValue(ReductionOp::Sum), 0.0f);
@@ -1231,10 +1227,8 @@ TEST(Reducer, RotatedOutputViewSupportsStorageDTypesAndTailTiles) {
     }
 
     std::vector<DataType> input_dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
-#if THOR_CUB_ENABLE_FP8_TYPES
     input_dtypes.push_back(DataType::FP8_E4M3);
     input_dtypes.push_back(DataType::FP8_E5M2);
-#endif
     for (DataType dtype : input_dtypes) {
         SCOPED_TRACE(static_cast<int>(dtype));
         Tensor storage = makeGpuTensor(values, {outer, reduction, inner}, stream, dtype);

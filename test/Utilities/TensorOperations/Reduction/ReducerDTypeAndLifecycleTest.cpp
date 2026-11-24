@@ -24,10 +24,8 @@ TEST(Reducer, EverySupportedInputStorageDtypeAccumulatesInFp32) {
     expectInputStorageAccumulatesInFp32(DataType::FP32, stream);
     expectInputStorageAccumulatesInFp32(DataType::FP16, stream);
     expectInputStorageAccumulatesInFp32(DataType::BF16, stream);
-#if THOR_CUB_ENABLE_FP8_TYPES
     expectInputStorageAccumulatesInFp32(DataType::FP8_E4M3, stream);
     expectInputStorageAccumulatesInFp32(DataType::FP8_E5M2, stream);
-#endif
 }
 
 // A rotated-output view, refused by the reducer, run in the caller's two parts.
@@ -48,10 +46,8 @@ TEST(Reducer, RotatedOutputViewTwoPartsSupportEveryInputStorageDtype) {
     run_dtype(DataType::FP32);
     run_dtype(DataType::FP16);
     run_dtype(DataType::BF16);
-#if THOR_CUB_ENABLE_FP8_TYPES
     run_dtype(DataType::FP8_E4M3);
     run_dtype(DataType::FP8_E5M2);
-#endif
 }
 
 TEST(Reducer, AsyncTiledLowPrecisionAlignmentPeelCoversEveryFullRowFamily) {
@@ -194,13 +190,10 @@ TEST(Reducer, AwkwardLargeVectorizedShardsHandleAlignmentAndPaddedInputTailForEv
     run_dtype(DataType::FP32);
     run_dtype(DataType::FP16);
     run_dtype(DataType::BF16);
-#if THOR_CUB_ENABLE_FP8_TYPES
     run_dtype(DataType::FP8_E4M3);
     run_dtype(DataType::FP8_E5M2);
-#endif
 }
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 TEST(Reducer, UnderSuppliedFp8OrdinaryDenseUsesRetainedFirstStageWithoutLegacyFallback) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -245,7 +238,6 @@ TEST(Reducer, UnderSuppliedFp8OrdinaryDenseUsesRetainedFirstStageWithoutLegacyFa
         }
     }
 }
-#endif
 
 
 TEST(Reducer, WholeTensorBf16SumAccumulatesInFp32AndDefaultsOutputToInputDtype) {
@@ -348,7 +340,6 @@ TEST(Reducer, PreallocatedOutputOverlapUsesTheInputSpansReachableStorage) {
     EXPECT_THROW(static_cast<void>(reduction.stamp(input, storage, stream)), std::invalid_argument);
 }
 
-#if THOR_CUB_ENABLE_FP8_TYPES
 TEST(Reducer, RuntimeKCompleteRoundsFp8AndConsumesDeepRTail) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -1456,7 +1447,6 @@ TEST(Reducer, Fp8OutputsUseCanonicalSatfiniteOverflowSemantics) {
     expectFloatVectorNear(copyGpuTensorAsFloat(e4m3->getOutputTensor(), stream), {448.0f, -448.0f});
     expectFloatVectorNear(copyGpuTensorAsFloat(e5m2->getOutputTensor(), stream), {57344.0f, -57344.0f});
 }
-#endif
 
 TEST(Reducer, RuntimeOutputIteratorSupportsEveryConfiguredOutputDtype) {
     REQUIRE_CUDA_DEVICE();
@@ -1464,10 +1454,8 @@ TEST(Reducer, RuntimeOutputIteratorSupportsEveryConfiguredOutputDtype) {
     Tensor input = makeGpuTensor({1.0f, 2.0f, 3.0f}, {1, 3}, stream, DataType::FP32);
 
     std::vector<DataType> output_dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
-#if THOR_CUB_ENABLE_FP8_TYPES
     output_dtypes.push_back(DataType::FP8_E4M3);
     output_dtypes.push_back(DataType::FP8_E5M2);
-#endif
 
     for (DataType output_dtype : output_dtypes) {
         SCOPED_TRACE(static_cast<int>(output_dtype));

@@ -108,10 +108,8 @@ __device__ __forceinline__ float4 transformFp8CompleteDecodedPacket(
 // store's default arm writes nothing.
 [[nodiscard]] inline bool fp8CompleteSupportsOutputStorage(DataType dtype) {
     switch (dtype) {
-#if THOR_CUB_ENABLE_FP8_TYPES
         case DataType::FP8_E4M3:
         case DataType::FP8_E5M2:
-#endif
         case DataType::FP16:
         case DataType::BF16:
         case DataType::FP32:
@@ -154,7 +152,6 @@ __device__ __forceinline__ float widenF16Bits(uint32_t bits) {
 }
 
 __device__ __forceinline__ float decodeFp8ArgByte(uint32_t byte, bool e5m2) {
-#if THOR_CUB_ENABLE_FP8_TYPES
     if (e5m2) {
         __nv_fp8_e5m2 value;
         value.__x = static_cast<__nv_fp8_storage_t>(byte);
@@ -163,11 +160,6 @@ __device__ __forceinline__ float decodeFp8ArgByte(uint32_t byte, bool e5m2) {
     __nv_fp8_e4m3 value;
     value.__x = static_cast<__nv_fp8_storage_t>(byte);
     return static_cast<float>(value);
-#else
-    static_cast<void>(byte);
-    static_cast<void>(e5m2);
-    return 0.0f;
-#endif
 }
 
 struct Fp8ArgOutputs {

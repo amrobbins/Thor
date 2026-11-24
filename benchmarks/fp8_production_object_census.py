@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inventory compiled FP8 CUDA kernels in *production* ThorCubCudaObjects.
+"""Inventory compiled FP8 CUDA kernels in *production* ThorSelfContainedCudaObjects.
 
 The selected-inventory CMake target builds isolated source copies; it cannot
 answer whether additional FP8 kernels still exist in production CUDA objects.
@@ -8,7 +8,7 @@ not decide whether an extra FP8 kernel is legitimate (R/KR, ARG and view paths
 may own independent kernels). Review the 'other-fp8-kernel' rows individually.
 
 Requires the CUDA toolkit cuobjdump, binutils readelf/c++filt, and a completed
-ThorCubCudaObjects build. Produces a CSV and a summary; never changes sources
+ThorSelfContainedCudaObjects build. Produces a CSV and a summary; never changes sources
 or build objects. Results are per-object/per-device-ELF, not linked libThor size.
 """
 from __future__ import annotations
@@ -272,7 +272,7 @@ def load_selected_symbol_rows(build: Path) -> list[dict] | None:
 
 
 def find_objects(build: Path) -> list[Path]:
-    root = build / 'CMakeFiles' / 'ThorCubCudaObjects.dir'
+    root = build / 'CMakeFiles' / 'ThorSelfContainedCudaObjects.dir'
     if not root.is_dir():
         raise ValueError(f'Production CUDA object directory not found: {root}')
     objects = sorted(root.rglob('*.cu.o'))

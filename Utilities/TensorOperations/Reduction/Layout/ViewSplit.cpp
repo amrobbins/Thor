@@ -3,8 +3,7 @@
 #include "Utilities/TensorOperations/Reduction/Layout/ViewSplit.h"
 
 #include "Utilities/Exceptions.h"
-#include "Utilities/TensorOperations/Cub/CubDataTypePolicy.h"
-#include "Utilities/TensorOperations/Cub/CubDevicePrimitiveSupport.h"
+#include "Utilities/Common/TensorRequirements.h"
 #include "Utilities/TensorOperations/Reduction/FrontEnd.h"
 #include "Utilities/TensorOperations/Reduction/Kernels/KernelLaunchers.h"
 #include "Utilities/TensorOperations/Reduction/Planner/DenseProductionPhysicalSelectionContext.h"
@@ -22,7 +21,7 @@ namespace ThorImplementation {
 
 namespace ReductionFrontEnd {
 
-using namespace CubDevicePrimitiveSupport;
+using namespace TensorRequirements;
 using namespace ReductionInternal;
 
 [[nodiscard]] std::optional<ViewPhysicalDenseProblem> densePermutationRuns(const std::vector<uint64_t>& dimensions,
@@ -154,7 +153,7 @@ void launchPitchedComplete(const PitchedCompleteLaunch& launch,
 
 namespace {
 
-using namespace CubDevicePrimitiveSupport;
+using namespace TensorRequirements;
 using namespace ReductionInternal;
 using namespace ReductionFrontEnd;
 
@@ -203,11 +202,9 @@ using namespace ReductionFrontEnd;
         case DataType::FP16:
         case DataType::BF16:
             return 248;
-#if THOR_CUB_ENABLE_FP8_TYPES
         case DataType::FP8_E4M3:
         case DataType::FP8_E5M2:
             return 496;
-#endif
         default:
             return 0;
     }

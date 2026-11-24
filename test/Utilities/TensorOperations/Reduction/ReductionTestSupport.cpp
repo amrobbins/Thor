@@ -42,7 +42,6 @@ void storeCpuValues(Tensor& cpu, DataType dtype, const std::vector<float>& value
             }
             return;
         }
-#if THOR_CUB_ENABLE_FP8_TYPES
         case DataType::FP8_E4M3: {
             __nv_fp8_e4m3* typed = static_cast<__nv_fp8_e4m3*>(storage);
             for (size_t i = 0; i < values.size(); ++i) {
@@ -57,7 +56,6 @@ void storeCpuValues(Tensor& cpu, DataType dtype, const std::vector<float>& value
             }
             return;
         }
-#endif
         default:
             throw std::invalid_argument("Unsupported reduction test storage dtype.");
     }
@@ -125,7 +123,6 @@ std::vector<float> readCpuValues(const Tensor& cpu) {
             }
             return values;
         }
-#if THOR_CUB_ENABLE_FP8_TYPES
         case DataType::FP8_E4M3: {
             const __nv_fp8_e4m3* typed = static_cast<const __nv_fp8_e4m3*>(storage);
             for (size_t i = 0; i < num_elements; ++i) {
@@ -140,7 +137,6 @@ std::vector<float> readCpuValues(const Tensor& cpu) {
             }
             return values;
         }
-#endif
         default:
             throw std::invalid_argument("Unsupported reduction test output dtype.");
     }

@@ -1,7 +1,7 @@
 #include "Utilities/TensorOperations/Ragged/RowPartition.h"
 
 #include "Utilities/Expression/CudaHelpers.h"
-#include "Utilities/TensorOperations/Cub/CubDevicePrimitiveSupport.h"
+#include "Utilities/Common/TensorRequirements.h"
 
 #include <limits>
 #include <memory>
@@ -12,7 +12,7 @@
 
 namespace ThorImplementation {
 namespace {
-using namespace CubDevicePrimitiveSupport;
+using namespace TensorRequirements;
 
 struct HostOffsetsUploadArgs : public HostFunctionArgsBase {
     std::vector<uint32_t> offsets32;

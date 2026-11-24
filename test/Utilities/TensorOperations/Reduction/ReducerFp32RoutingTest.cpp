@@ -461,9 +461,6 @@ TEST(ReducerFp32Routing, RandomMultiPassPlans) {
         std::mt19937_64 rng(mix(seed ^ mix(case_index)));
         const ReductionOp op = ops[case_index % ops.size()];
         const bool fp8 = (case_index / ops.size()) % InputDtypes == 1;
-#if !THOR_CUB_ENABLE_FP8_TYPES
-        if (fp8) continue;
-#endif
         const Shape shape = drawShape(rng);
         const bool e5m2 = rng() % 2;
         const DataType dtype = !fp8 ? DataType::FP32 : e5m2 ? DataType::FP8_E5M2 : DataType::FP8_E4M3;
@@ -556,9 +553,6 @@ TEST(ReducerFp32Routing, RandomMultiPassArgPlans) {
         if (only_case && *only_case != case_index) continue;
         std::mt19937_64 rng(mix(seed ^ mix(0x41524700ULL + case_index)));
         const bool fp8 = case_index % 2 == 1;
-#if !THOR_CUB_ENABLE_FP8_TYPES
-        if (fp8) continue;
-#endif
         const bool maximum = rng() % 2;
         const Shape shape = drawShape(rng);
         const bool e5m2 = rng() % 2;

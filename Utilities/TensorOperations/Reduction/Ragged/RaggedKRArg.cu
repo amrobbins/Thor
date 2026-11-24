@@ -85,9 +85,6 @@ void launchRaggedKRArg(ArgReductionOp op,
     if (grid == 0 || grid > RAGGED_FINISH_MAX_GRID) fail("the grid must be 1 to " + std::to_string(RAGGED_FINISH_MAX_GRID));
     if (!input.isInitialized()) fail("the input must be an FP8, FP16, BF16 or FP32 tensor");
     const DataType input_dtype = input.getDataType();
-#if !THOR_CUB_ENABLE_FP8_TYPES
-    if (input_dtype == DataType::FP8_E4M3 || input_dtype == DataType::FP8_E5M2) fail("FP8 types are disabled in this build");
-#endif
     // Each tensor's dimensions are copied once (GCC 14's -Warray-bounds false positive, as launchRaggedKRValue).
     const std::vector<uint64_t> input_dims = input.getDimensions();
     const std::vector<uint64_t> offsets_dims = offsets.isInitialized() ? offsets.getDimensions() : std::vector<uint64_t>{};

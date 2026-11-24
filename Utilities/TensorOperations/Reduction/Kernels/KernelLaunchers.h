@@ -569,7 +569,7 @@ void launchFp32DeepRSmallKCarriedArg(const StridedSpan& input,
  *  K <= 125 / 61 / 29 / 13) with one ARG candidate per owned component; Complete only, R <= 2^31 - 1, input at most
  *  2^32 - 1 bytes; any 4-byte aligned base, as the VALUE launcher (off a 16-byte boundary K is at most
  *  RK::oneWindowUnalignedCapacity and the input 2^32 - 16 bytes; the launch throws otherwise). Outputs as
- *  launchFp32AlignedKArg's. Not behind THOR_CUB_ENABLE_FP8_TYPES (its kernel is FP32-only). */
+ *  launchFp32AlignedKArg's. */
 [[nodiscard]] bool fp32OneWindowArgSupports(uint64_t outer_size,
                                             uint64_t reduction_size,
                                             uint64_t inner_size,

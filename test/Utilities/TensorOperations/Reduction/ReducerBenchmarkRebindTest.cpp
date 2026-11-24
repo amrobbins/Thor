@@ -32,11 +32,9 @@ std::vector<Case> cases() {
         {{9, 4099, 37}, {1}, DataType::FP32},     // RK
         {{6, 5, 1000}, {1, 2}, DataType::FP32},   // two reduced axes
     };
-#if THOR_CUB_ENABLE_FP8_TYPES
     out.push_back({{16, 65536, 3}, {1}, DataType::FP8_E4M3});  // deep R, small K: staged FP8 RK plus an FP32 pass
     out.push_back({{257, 1031}, {1}, DataType::FP8_E4M3});     // FP8 KR
     out.push_back({{6, 5, 1000}, {0, 2}, DataType::FP8_E5M2});  // multi-pass FP8
-#endif
     return out;
 }
 

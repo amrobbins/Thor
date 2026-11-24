@@ -1,6 +1,6 @@
-#include "Utilities/TensorOperations/Cub/CubDevicePrimitiveSupport.h"
+#include "Utilities/Common/TensorRequirements.h"
 
-namespace ThorImplementation::CubDevicePrimitiveSupport {
+namespace ThorImplementation::TensorRequirements {
 
 std::string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
@@ -41,4 +41,4 @@ void requireTempStorage(const Tensor& temp_storage, const TensorPlacement& place
     }
 }
 
-}  // namespace ThorImplementation::CubDevicePrimitiveSupport
+}  // namespace ThorImplementation::TensorRequirements
