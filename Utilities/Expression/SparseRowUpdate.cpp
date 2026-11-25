@@ -434,6 +434,90 @@ std::vector<DataType> rootInputDTypes(const PhysicalExpression& expr,
     return dtypes;
 }
 
+// 1624: FP16 and BF16 rows move four elements as one 8-byte access when the address allows it, else as two 4-byte
+// pairs, else as four scalars. The address is checked on the device, so a row of any alignment is correct, and the
+// values are the same on every path: each lane is converted on its own, rounding to nearest even.
+void appendTwoByteVector4Helpers(std::ostringstream& ss, bool includeMasked) {
+    struct TwoByteType {
+        const char* scalar;
+        const char* pair;
+        const char* pairToFloat2;
+        const char* floatsToPair;
+        const char* toFloat;
+        const char* fromFloat;
+    };
+    static constexpr TwoByteType kTypes[] = {
+        {"__half", "__half2", "__half22float2", "__floats2half2_rn", "__half2float", "__float2half_rn"},
+        {"__nv_bfloat16", "__nv_bfloat162", "__bfloat1622float2", "__floats2bfloat162_rn", "__bfloat162float", "__float2bfloat16"},
+    };
+    for (const TwoByteType& t : kTypes) {
+        const std::string scalar = t.scalar;
+        const std::string pair = t.pair;
+        const std::string toFloat2 = t.pairToFloat2;
+        const std::string toPair = t.floatsToPair;
+        const std::string toFloat = t.toFloat;
+        const std::string fromFloat = t.fromFloat;
+        ss << "__device__ __forceinline__ float4 thor_sparse_load_float4(const " << scalar << "* p, unsigned long long i) {\n";
+        ss << "  const " << scalar << "* q = p + i;\n";
+        ss << "  const unsigned long long address = reinterpret_cast<unsigned long long>(q);\n";
+        ss << "  if ((address & 7ULL) == 0ULL) {\n";
+        ss << "    const uint2 bits = *reinterpret_cast<const uint2*>(q);\n";
+        ss << "    const float2 lo = " << toFloat2 << "(*reinterpret_cast<const " << pair << "*>(&bits.x));\n";
+        ss << "    const float2 hi = " << toFloat2 << "(*reinterpret_cast<const " << pair << "*>(&bits.y));\n";
+        ss << "    return make_float4(lo.x, lo.y, hi.x, hi.y);\n";
+        ss << "  }\n";
+        ss << "  if ((address & 3ULL) == 0ULL) {\n";
+        ss << "    const float2 lo = " << toFloat2 << "(*reinterpret_cast<const " << pair << "*>(q));\n";
+        ss << "    const float2 hi = " << toFloat2 << "(*reinterpret_cast<const " << pair << "*>(q + 2));\n";
+        ss << "    return make_float4(lo.x, lo.y, hi.x, hi.y);\n";
+        ss << "  }\n";
+        ss << "  return make_float4(" << toFloat << "(q[0]), " << toFloat << "(q[1]), " << toFloat << "(q[2]), " << toFloat
+           << "(q[3]));\n";
+        ss << "}\n";
+        ss << "__device__ __forceinline__ void thor_sparse_store_float4(" << scalar << "* p, unsigned long long i, float4 v) {\n";
+        ss << "  " << scalar << "* q = p + i;\n";
+        ss << "  const unsigned long long address = reinterpret_cast<unsigned long long>(q);\n";
+        ss << "  if ((address & 7ULL) == 0ULL) {\n";
+        ss << "    const " << pair << " lo = " << toPair << "(v.x, v.y);\n";
+        ss << "    const " << pair << " hi = " << toPair << "(v.z, v.w);\n";
+        ss << "    uint2 bits;\n";
+        ss << "    bits.x = *reinterpret_cast<const unsigned int*>(&lo);\n";
+        ss << "    bits.y = *reinterpret_cast<const unsigned int*>(&hi);\n";
+        ss << "    *reinterpret_cast<uint2*>(q) = bits;\n";
+        ss << "    return;\n";
+        ss << "  }\n";
+        ss << "  if ((address & 3ULL) == 0ULL) {\n";
+        ss << "    *reinterpret_cast<" << pair << "*>(q) = " << toPair << "(v.x, v.y);\n";
+        ss << "    *reinterpret_cast<" << pair << "*>(q + 2) = " << toPair << "(v.z, v.w);\n";
+        ss << "    return;\n";
+        ss << "  }\n";
+        ss << "  q[0] = " << fromFloat << "(v.x);\n";
+        ss << "  q[1] = " << fromFloat << "(v.y);\n";
+        ss << "  q[2] = " << fromFloat << "(v.z);\n";
+        ss << "  q[3] = " << fromFloat << "(v.w);\n";
+        ss << "}\n";
+        if (!includeMasked) {
+            continue;
+        }
+        ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_masked(const " << scalar
+           << "* p, unsigned long long i, unsigned int lanes) {\n";
+        ss << "  if (lanes >= 4U) return thor_sparse_load_float4(p, i);\n";
+        ss << "  float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
+        ss << "  if (lanes > 0U) v.x = " << toFloat << "(p[i]);\n";
+        ss << "  if (lanes > 1U) v.y = " << toFloat << "(p[i + 1ULL]);\n";
+        ss << "  if (lanes > 2U) v.z = " << toFloat << "(p[i + 2ULL]);\n";
+        ss << "  return v;\n";
+        ss << "}\n";
+        ss << "__device__ __forceinline__ void thor_sparse_store_float4_masked(" << scalar
+           << "* p, unsigned long long i, float4 v, unsigned int lanes) {\n";
+        ss << "  if (lanes >= 4U) { thor_sparse_store_float4(p, i, v); return; }\n";
+        ss << "  if (lanes > 0U) p[i] = " << fromFloat << "(v.x);\n";
+        ss << "  if (lanes > 1U) p[i + 1ULL] = " << fromFloat << "(v.y);\n";
+        ss << "  if (lanes > 2U) p[i + 2ULL] = " << fromFloat << "(v.z);\n";
+        ss << "}\n";
+    }
+}
+
 std::string emitVector4KernelSource(const PhysicalOutputs& outputs,
                                     const std::vector<SparseRowUpdatePlan::RuntimeInputSlot>& inputSlots,
                                     const std::vector<SparseRowUpdatePlan::RuntimeOutputSlot>& outputSlots,
@@ -507,29 +591,8 @@ std::string emitVector4KernelSource(const PhysicalOutputs& outputs,
     ss << "  if (shift == 2U) return make_float4(lo.z, lo.w, hi.x, hi.y);\n";
     ss << "  return make_float4(lo.w, hi.x, hi.y, hi.z);\n";
     ss << "}\n";
-    ss << "__device__ __forceinline__ float4 thor_sparse_load_float4(const __half* p, unsigned long long i) {\n";
-    ss << "  const __half2 lo = *reinterpret_cast<const __half2*>(p + i);\n";
-    ss << "  const __half2 hi = *reinterpret_cast<const __half2*>(p + i + 2ULL);\n";
-    ss << "  const float2 a = __half22float2(lo);\n";
-    ss << "  const float2 b = __half22float2(hi);\n";
-    ss << "  return make_float4(a.x, a.y, b.x, b.y);\n";
-    ss << "}\n";
-    ss << "__device__ __forceinline__ float4 thor_sparse_load_float4(const __nv_bfloat16* p, unsigned long long i) {\n";
-    ss << "  return make_float4(__bfloat162float(p[i]), __bfloat162float(p[i + 1ULL]), __bfloat162float(p[i + 2ULL]), __bfloat162float(p[i "
-          "+ 3ULL]));\n";
-    ss << "}\n";
     ss << "__device__ __forceinline__ void thor_sparse_store_float4(float* p, unsigned long long i, float4 v) { "
           "*reinterpret_cast<float4*>(p + i) = v; }\n";
-    ss << "__device__ __forceinline__ void thor_sparse_store_float4(__half* p, unsigned long long i, float4 v) {\n";
-    ss << "  *reinterpret_cast<__half2*>(p + i) = __floats2half2_rn(v.x, v.y);\n";
-    ss << "  *reinterpret_cast<__half2*>(p + i + 2ULL) = __floats2half2_rn(v.z, v.w);\n";
-    ss << "}\n";
-    ss << "__device__ __forceinline__ void thor_sparse_store_float4(__nv_bfloat16* p, unsigned long long i, float4 v) {\n";
-    ss << "  p[i] = __float2bfloat16(v.x);\n";
-    ss << "  p[i + 1ULL] = __float2bfloat16(v.y);\n";
-    ss << "  p[i + 2ULL] = __float2bfloat16(v.z);\n";
-    ss << "  p[i + 3ULL] = __float2bfloat16(v.w);\n";
-    ss << "}\n";
     if (!fullVectorRows) {
         ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_masked(const float* p, unsigned long long i, unsigned int lanes) {\n";
         ss << "  if (lanes >= 4U) return thor_sparse_load_float4_full(p, i);\n";
@@ -540,23 +603,6 @@ std::string emitVector4KernelSource(const PhysicalOutputs& outputs,
         ss << "  if (lanes > 3U) v.w = p[i + 3ULL];\n";
         ss << "  return v;\n";
         ss << "}\n";
-        ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_masked(const __half* p, unsigned long long i, unsigned int lanes) {\n";
-        ss << "  if (lanes >= 4U && ((i & 1ULL) == 0ULL)) return thor_sparse_load_float4(p, i);\n";
-        ss << "  float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
-        ss << "  if (lanes > 0U) v.x = __half2float(p[i]);\n";
-        ss << "  if (lanes > 1U) v.y = __half2float(p[i + 1ULL]);\n";
-        ss << "  if (lanes > 2U) v.z = __half2float(p[i + 2ULL]);\n";
-        ss << "  if (lanes > 3U) v.w = __half2float(p[i + 3ULL]);\n";
-        ss << "  return v;\n";
-        ss << "}\n";
-        ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_masked(const __nv_bfloat16* p, unsigned long long i, unsigned int lanes) {\n";
-        ss << "  float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
-        ss << "  if (lanes > 0U) v.x = __bfloat162float(p[i]);\n";
-        ss << "  if (lanes > 1U) v.y = __bfloat162float(p[i + 1ULL]);\n";
-        ss << "  if (lanes > 2U) v.z = __bfloat162float(p[i + 2ULL]);\n";
-        ss << "  if (lanes > 3U) v.w = __bfloat162float(p[i + 3ULL]);\n";
-        ss << "  return v;\n";
-        ss << "}\n";
         ss << "__device__ __forceinline__ void thor_sparse_store_float4_masked(float* p, unsigned long long i, float4 v, unsigned int lanes) {\n";
         ss << "  if (lanes >= 4U && ((i & 3ULL) == 0ULL)) { thor_sparse_store_float4(p, i, v); return; }\n";
         ss << "  if (lanes > 0U) p[i] = v.x;\n";
@@ -564,20 +610,8 @@ std::string emitVector4KernelSource(const PhysicalOutputs& outputs,
         ss << "  if (lanes > 2U) p[i + 2ULL] = v.z;\n";
         ss << "  if (lanes > 3U) p[i + 3ULL] = v.w;\n";
         ss << "}\n";
-        ss << "__device__ __forceinline__ void thor_sparse_store_float4_masked(__half* p, unsigned long long i, float4 v, unsigned int lanes) {\n";
-        ss << "  if (lanes >= 4U && ((i & 1ULL) == 0ULL)) { thor_sparse_store_float4(p, i, v); return; }\n";
-        ss << "  if (lanes > 0U) p[i] = __float2half_rn(v.x);\n";
-        ss << "  if (lanes > 1U) p[i + 1ULL] = __float2half_rn(v.y);\n";
-        ss << "  if (lanes > 2U) p[i + 2ULL] = __float2half_rn(v.z);\n";
-        ss << "  if (lanes > 3U) p[i + 3ULL] = __float2half_rn(v.w);\n";
-        ss << "}\n";
-        ss << "__device__ __forceinline__ void thor_sparse_store_float4_masked(__nv_bfloat16* p, unsigned long long i, float4 v, unsigned int lanes) {\n";
-        ss << "  if (lanes > 0U) p[i] = __float2bfloat16(v.x);\n";
-        ss << "  if (lanes > 1U) p[i + 1ULL] = __float2bfloat16(v.y);\n";
-        ss << "  if (lanes > 2U) p[i + 2ULL] = __float2bfloat16(v.z);\n";
-        ss << "  if (lanes > 3U) p[i + 3ULL] = __float2bfloat16(v.w);\n";
-        ss << "}\n";
     }
+    appendTwoByteVector4Helpers(ss, !fullVectorRows);
     ss << "\n";
 
     ss << "extern \"C\" __global__\n";
@@ -1117,29 +1151,8 @@ std::string emitSparseRowUpdateFusionHelperSource() {
     ss << "  if (shift == 2U) return make_float4(lo.z, lo.w, hi.x, hi.y);\n";
     ss << "  return make_float4(lo.w, hi.x, hi.y, hi.z);\n";
     ss << "}\n";
-    ss << "__device__ __forceinline__ float4 thor_sparse_load_float4(const __half* p, unsigned long long i) {\n";
-    ss << "  const __half2 lo = *reinterpret_cast<const __half2*>(p + i);\n";
-    ss << "  const __half2 hi = *reinterpret_cast<const __half2*>(p + i + 2ULL);\n";
-    ss << "  const float2 a = __half22float2(lo);\n";
-    ss << "  const float2 b = __half22float2(hi);\n";
-    ss << "  return make_float4(a.x, a.y, b.x, b.y);\n";
-    ss << "}\n";
-    ss << "__device__ __forceinline__ float4 thor_sparse_load_float4(const __nv_bfloat16* p, unsigned long long i) {\n";
-    ss << "  return make_float4(__bfloat162float(p[i]), __bfloat162float(p[i + 1ULL]), __bfloat162float(p[i + 2ULL]), __bfloat162float(p[i "
-          "+ 3ULL]));\n";
-    ss << "}\n";
     ss << "__device__ __forceinline__ void thor_sparse_store_float4(float* p, unsigned long long i, float4 v) { "
           "*reinterpret_cast<float4*>(p + i) = v; }\n";
-    ss << "__device__ __forceinline__ void thor_sparse_store_float4(__half* p, unsigned long long i, float4 v) {\n";
-    ss << "  *reinterpret_cast<__half2*>(p + i) = __floats2half2_rn(v.x, v.y);\n";
-    ss << "  *reinterpret_cast<__half2*>(p + i + 2ULL) = __floats2half2_rn(v.z, v.w);\n";
-    ss << "}\n";
-    ss << "__device__ __forceinline__ void thor_sparse_store_float4(__nv_bfloat16* p, unsigned long long i, float4 v) {\n";
-    ss << "  p[i] = __float2bfloat16(v.x);\n";
-    ss << "  p[i + 1ULL] = __float2bfloat16(v.y);\n";
-    ss << "  p[i + 2ULL] = __float2bfloat16(v.z);\n";
-    ss << "  p[i + 3ULL] = __float2bfloat16(v.w);\n";
-    ss << "}\n";
     ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_masked(const float* p, unsigned long long i, unsigned int lanes) {\n";
     ss << "  if (lanes >= 4U) return thor_sparse_load_float4_full(p, i);\n";
     ss << "  float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
@@ -1149,23 +1162,6 @@ std::string emitSparseRowUpdateFusionHelperSource() {
     ss << "  if (lanes > 3U) v.w = p[i + 3ULL];\n";
     ss << "  return v;\n";
     ss << "}\n";
-    ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_masked(const __half* p, unsigned long long i, unsigned int lanes) {\n";
-    ss << "  if (lanes >= 4U && ((i & 1ULL) == 0ULL)) return thor_sparse_load_float4(p, i);\n";
-    ss << "  float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
-    ss << "  if (lanes > 0U) v.x = __half2float(p[i]);\n";
-    ss << "  if (lanes > 1U) v.y = __half2float(p[i + 1ULL]);\n";
-    ss << "  if (lanes > 2U) v.z = __half2float(p[i + 2ULL]);\n";
-    ss << "  if (lanes > 3U) v.w = __half2float(p[i + 3ULL]);\n";
-    ss << "  return v;\n";
-    ss << "}\n";
-    ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_masked(const __nv_bfloat16* p, unsigned long long i, unsigned int lanes) {\n";
-    ss << "  float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
-    ss << "  if (lanes > 0U) v.x = __bfloat162float(p[i]);\n";
-    ss << "  if (lanes > 1U) v.y = __bfloat162float(p[i + 1ULL]);\n";
-    ss << "  if (lanes > 2U) v.z = __bfloat162float(p[i + 2ULL]);\n";
-    ss << "  if (lanes > 3U) v.w = __bfloat162float(p[i + 3ULL]);\n";
-    ss << "  return v;\n";
-    ss << "}\n";
     ss << "__device__ __forceinline__ void thor_sparse_store_float4_masked(float* p, unsigned long long i, float4 v, unsigned int lanes) {\n";
     ss << "  if (lanes >= 4U && ((i & 3ULL) == 0ULL)) { thor_sparse_store_float4(p, i, v); return; }\n";
     ss << "  if (lanes > 0U) p[i] = v.x;\n";
@@ -1173,19 +1169,8 @@ std::string emitSparseRowUpdateFusionHelperSource() {
     ss << "  if (lanes > 2U) p[i + 2ULL] = v.z;\n";
     ss << "  if (lanes > 3U) p[i + 3ULL] = v.w;\n";
     ss << "}\n";
-    ss << "__device__ __forceinline__ void thor_sparse_store_float4_masked(__half* p, unsigned long long i, float4 v, unsigned int lanes) {\n";
-    ss << "  if (lanes >= 4U && ((i & 1ULL) == 0ULL)) { thor_sparse_store_float4(p, i, v); return; }\n";
-    ss << "  if (lanes > 0U) p[i] = __float2half_rn(v.x);\n";
-    ss << "  if (lanes > 1U) p[i + 1ULL] = __float2half_rn(v.y);\n";
-    ss << "  if (lanes > 2U) p[i + 2ULL] = __float2half_rn(v.z);\n";
-    ss << "  if (lanes > 3U) p[i + 3ULL] = __float2half_rn(v.w);\n";
-    ss << "}\n";
-    ss << "__device__ __forceinline__ void thor_sparse_store_float4_masked(__nv_bfloat16* p, unsigned long long i, float4 v, unsigned int lanes) {\n";
-    ss << "  if (lanes > 0U) p[i] = __float2bfloat16(v.x);\n";
-    ss << "  if (lanes > 1U) p[i + 1ULL] = __float2bfloat16(v.y);\n";
-    ss << "  if (lanes > 2U) p[i + 2ULL] = __float2bfloat16(v.z);\n";
-    ss << "  if (lanes > 3U) p[i + 3ULL] = __float2bfloat16(v.w);\n";
-    ss << "}\n\n";
+    appendTwoByteVector4Helpers(ss, /*includeMasked=*/true);
+    ss << "\n";
     return ss.str();
 }
 
@@ -1235,9 +1220,14 @@ SparseRowUpdateFusionSource emitVector4SparseRowUpdateFusionSource(
         slotByInputSlot[namedInput.slot] = &inputSlots[namedInput.slot];
     }
 
+    // 1628: the tensor loads (the weight row, the optimizer's state), their offsets and (1629) the runtime scalars'
+    // loads go to loadSource, which needs only the sru_ row and vector variables, so a reducer can issue them before
+    // its sum; the rest (the sum's local input, literals, math, stores) goes to computeSource. bodySource is the two in
+    // order.
+    std::ostringstream loads;
     std::ostringstream body;
-    body << "  const unsigned long long sru_logical_offset = sru_logical_row * embeddingDim + sru_vector_index * 4ULL;\n";
-    body << "  const unsigned long long sru_indexed_offset = sru_indexed_row * embeddingDim + sru_vector_index * 4ULL;\n";
+    loads << "  const unsigned long long sru_logical_offset = sru_logical_row * embeddingDim + sru_vector_index * 4ULL;\n";
+    loads << "  const unsigned long long sru_indexed_offset = sru_indexed_row * embeddingDim + sru_vector_index * 4ULL;\n";
     for (uint32_t nodeIdx = 0; nodeIdx < outputs.expr->nodes.size(); ++nodeIdx) {
         const ExprNode& node = outputs.expr->nodes[nodeIdx];
         switch (node.op) {
@@ -1259,7 +1249,7 @@ SparseRowUpdateFusionSource emitVector4SparseRowUpdateFusionSource(
                     break;
                 }
                 const std::string offset = slot.tensorKind == SparseRowUpdateTensorKind::IndexedRows ? "sru_indexed_offset" : "sru_logical_offset";
-                body << "  const float4 " << ref(nodeIdx) << " = "
+                loads << "  const float4 " << ref(nodeIdx) << " = "
                      << (fullVectorRows ? vectorLoadExpr("sru_in" + std::to_string(node.input_slot), offset)
                                         : maskedVectorLoadExpr("sru_in" + std::to_string(node.input_slot), offset))
                      << ";\n";
@@ -1274,7 +1264,9 @@ SparseRowUpdateFusionSource emitVector4SparseRowUpdateFusionSource(
                 if (slot.inputKind != NamedInput::Kind::RuntimeScalarFp32) {
                     throw std::runtime_error("Sparse row update fusion source runtime scalar node was not bound to a runtime scalar input.");
                 }
-                body << "  const float4 " << ref(nodeIdx) << " = " << splatFloat4("sru_in" + std::to_string(node.input_slot) + "[0]") << ";\n";
+                // 1629: a runtime scalar is read from device memory, so it goes with the loads too (1628 at 16K: 17.7% of
+                // the stall samples waited for the step, read after the sum).
+                loads << "  const float4 " << ref(nodeIdx) << " = " << splatFloat4("sru_in" + std::to_string(node.input_slot) + "[0]") << ";\n";
                 break;
             }
             case ExprOp::SCALAR_FP:
@@ -1307,7 +1299,9 @@ SparseRowUpdateFusionSource emitVector4SparseRowUpdateFusionSource(
                                 : maskedVectorOutputStoreStmt("sru_out" + std::to_string(outputIdx), "sru_indexed_offset", ref(out.node_idx)))
              << "\n";
     }
-    source.bodySource = body.str();
+    source.loadSource = loads.str();
+    source.computeSource = body.str();
+    source.bodySource = source.loadSource + source.computeSource;
     return source;
 }
 

@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/Layers/Optimizers/Adam.h"
 #include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Event.h"
@@ -50,17 +51,11 @@ struct RunningStats {
 };
 
 struct StageStats {
-    RunningStats materialize;
-    RunningStats sort;
-    RunningStats clearCounts;
-    RunningStats rle;
-    RunningStats finalize;
-    RunningStats scan;
-    RunningStats reduce;
     RunningStats sparseGradientTotal;
     RunningStats sparseSgdUpdate;
     RunningStats totalBackwardAndUpdate;
     RunningStats graphSparseGradientTotal;
+    RunningStats graphStepTotal;
     RunningStats activeRows;
     RunningStats singletonRows;
     RunningStats duplicateRows;
@@ -148,6 +143,9 @@ struct Options {
         parseStringList(envString("THOR_EMBEDDING_BACKWARD_PROFILE_ACTIVE_FRACTIONS", "dense,1,0.5,0.25"));
     // Checks each case's rows (and, on the materialized path, values) against a host reference once before timing.
     bool verify = envBool("THOR_EMBEDDING_BACKWARD_PROFILE_VERIFY", true);
+    // Before each timed graph and step: overwrite a buffer of twice the L2's size and wait, so the timed work starts
+    // with a cold L2 on an idle stream (the pool's rotation alone left the slot just used by the one-shot launch in L2).
+    bool flushL2 = envBool("THOR_EMBEDDING_BACKWARD_PROFILE_FLUSH_L2", true);
 };
 struct CaseConfig {
     uint64_t vocabularySize = 0;
@@ -179,7 +177,7 @@ struct PoolSlot {
     Tensor upstream;
     Tensor weights;
     Tensor activeCount;  // [1] UINT32, ragged cases only
-    std::unique_ptr<Sgd> optimizer;
+    std::shared_ptr<Optimizer> optimizer;  // one for the pool (see buildPool)
     SparseRowGradient gradient;
     std::shared_ptr<PreparedEmbeddingSparseGradient> prepared;
     bool fusedSparseRowUpdate = false;
@@ -454,11 +452,41 @@ std::pair<float, EmbeddingSparseGradientProfileResult> profileSparseGradient(Poo
     return {result.totalMs, result};
 }
 
-float profileGraphSparseGradient(PoolSlot& slot, Stream stream) {
+// The fused graph reads its runtime scalars from a node the layer sets before each launch (as Embedding.cpp does).
+void setGraphRuntimeScalars(PoolSlot& slot, uint32_t batchSize) {
+    if (!slot.fusedSparseRowUpdate) return;
+    updateCapturedEmbeddingSparseGradientSparseRowUpdateRuntimeScalars(
+        *slot.prepared, slot.captured, slot.graph.value(), slot.optimizer->sparseRowUpdateRuntimeScalars(batchSize));
+}
+
+// The graph alone: its runtime scalars are set before the timed interval.
+float profileGraphSparseGradient(PoolSlot& slot, Stream stream, uint32_t batchSize) {
     if (!slot.graph.has_value()) {
         return 0.0f;
     }
+    setGraphRuntimeScalars(slot, batchSize);
     return timeCallableMs(stream, [&] { slot.graph->launch(stream); });
+}
+
+// One training step's sparse backward and weight update as the Embedding layer issues it: on the fused path the host
+// sets the graph's runtime scalars, then launches the graph (whose reducers apply the update); on the materialized
+// path the graph, then the optimizer's sparse-row update. Timed from an event recorded before the host's work, so on
+// an idle stream the host's share is in the time too.
+void launchGraphStep(PoolSlot& slot, Stream stream, uint32_t batchSize) {
+    if (slot.fusedSparseRowUpdate) {
+        setGraphRuntimeScalars(slot, batchSize);
+        slot.graph->launch(stream);
+    } else {
+        slot.graph->launch(stream);
+        slot.optimizer->updateSparseRows(batchSize);
+    }
+}
+
+float profileGraphStep(PoolSlot& slot, Stream stream, uint32_t batchSize) {
+    if (!slot.graph.has_value()) {
+        return 0.0f;
+    }
+    return timeCallableMs(stream, [&] { launchGraphStep(slot, stream, batchSize); });
 }
 
 float profileSparseUpdate(PoolSlot& slot, Stream stream, uint32_t batchSize) {
@@ -486,6 +514,25 @@ std::vector<PoolSlot> buildPool(const Options& opts, const CaseConfig& cfg, int 
     }
 
     const uint64_t capacity = std::min(cfg.numTokens, cfg.vocabularySize);
+
+    // One optimizer, its state and its sparse-row gradient for the whole pool, as one Embedding layer has one: the slots
+    // rotate the indices and the upstream gradient. (An optimizer a slot would hold an Adam state of vocabulary x dim
+    // x 8 bytes a slot.)
+    std::shared_ptr<Optimizer> optimizer;
+    if (cfg.optimizer == "sgd") {
+        optimizer = std::make_shared<Sgd>(1, 0.01f, 0.0f, 0.0f, false);
+    } else if (cfg.optimizer == "momentum") {
+        optimizer = std::make_shared<Sgd>(1, 0.01f, 0.0f, 0.9f, false);
+    } else if (cfg.optimizer == "nesterov") {
+        optimizer = std::make_shared<Sgd>(1, 0.01f, 0.0f, 0.9f, true);
+    } else if (cfg.optimizer == "adam") {
+        optimizer = std::make_shared<Adam>(1, 0.001f, 0.9f, 0.999f, 1e-8f);
+    } else {
+        throw std::invalid_argument("Unsupported optimizer mode: " + cfg.optimizer + " (sgd, momentum, nesterov, adam)");
+    }
+    const SparseRowGradient gradient = optimizer->compileSparseRows(sharedWeights, capacity, stream);
+    stream.synchronize();
+
     std::optional<Tensor> activeCount;
     if (cfg.ragged()) {
         if (cfg.activeTokens > std::numeric_limits<uint32_t>::max())
@@ -513,19 +560,8 @@ std::vector<PoolSlot> buildPool(const Options& opts, const CaseConfig& cfg, int 
 
         slot.weights = sharedWeights;
 
-        float momentum = 0.0f;
-        bool nesterov = false;
-        if (cfg.optimizer == "momentum") {
-            momentum = 0.9f;
-        } else if (cfg.optimizer == "nesterov") {
-            momentum = 0.9f;
-            nesterov = true;
-        } else if (cfg.optimizer != "sgd") {
-            throw std::invalid_argument("Unsupported optimizer mode: " + cfg.optimizer);
-        }
-        slot.optimizer = std::make_unique<Sgd>(static_cast<uint64_t>(i + 1), 0.01f, 0.0f, momentum, nesterov);
-        slot.gradient = slot.optimizer->compileSparseRows(slot.weights, capacity, stream);
-        stream.synchronize();
+        slot.optimizer = optimizer;
+        slot.gradient = gradient;
 
         const bool optimizerSupportsSparseRowUpdateFusion = slot.optimizer->supportsSparseRowUpdateFusion();
         const bool reducerSupportsSparseRowUpdateFusion = supportsEmbeddingSparseGradientFusedSparseRowUpdate(cfg.embeddingDim);
@@ -576,17 +612,13 @@ std::vector<PoolSlot> buildPool(const Options& opts, const CaseConfig& cfg, int 
             slot.captured = CapturedEmbeddingSparseGradient(opts.gpu);
             CudaGraphCaptureBuilder builder(stream);
             if (slot.fusedSparseRowUpdate) {
-                capturePreparedEmbeddingSparseGradientWithSparseRowUpdate(builder,
-                                                                         *slot.prepared,
-                                                                         slot.indices,
-                                                                         slot.upstream,
-                                                                         slot.gradient,
-                                                                         slot.optimizer->sparseRowUpdateRuntimeScalars(opts.batchSize),
-                                                                         slot.captured);
+                // As Embedding.cpp captures it: the runtime scalars' node is set before each launch.
+                capturePreparedEmbeddingSparseGradientWithSparseRowUpdateRuntimeScalarStorage(
+                    builder, *slot.prepared, slot.indices, slot.upstream, slot.gradient, slot.captured);
             } else {
                 capturePreparedEmbeddingSparseGradient(builder, *slot.prepared, slot.indices, slot.upstream, slot.gradient, slot.captured);
             }
-            slot.graph.emplace(builder.endCaptureAndInstantiate(stream));
+            slot.graph.emplace(endCaptureAndInstantiatePreparedEmbeddingSparseGradientGraph(builder, slot.captured, stream));
             slot.captured.uploadTargetNodes(stream);
         }
         pool.push_back(std::move(slot));
@@ -680,11 +712,10 @@ std::string verifyCase(PoolSlot& slot, const CaseConfig& cfg, uint32_t batchSize
 
 void printCsvHeader() {
     std::cout << "case,vocab,dim,tokens,upstream_dtype,row_dtype,dup_mode,optimizer,update_path,low_run_max,ultra_high_run_min,ultra_high_tokens_per_partial,pool_slots,pool_bytes,l2_bytes,"
-                 "materialize_ms,sort_ms,clear_counts_ms,rle_ms,finalize_ms,scan_ms,reduce_ms,"
                  "sparse_gradient_ms,sparse_update_ms,total_backward_update_ms,graph_sparse_gradient_ms,"
                  "active_rows,singleton_rows,duplicate_rows,low_run_rows,high_run_rows,ultra_high_run_rows,"
                  "low_run_tokens,high_run_tokens,ultra_high_run_tokens,max_run_count,"
-                 "sort_key_bits,sort_scratch_bytes,rle_temp_bytes,scan_temp_bytes,active_mode,active_tokens,check\n";
+                 "sort_key_bits,sort_scratch_bytes,runs_scratch_bytes,active_mode,active_tokens,check,graph_step_ms\n";
 }
 
 void printCsvRow(const CaseConfig& cfg,
@@ -698,14 +729,13 @@ void printCsvRow(const CaseConfig& cfg,
     std::cout << cfg.name() << ',' << cfg.vocabularySize << ',' << cfg.embeddingDim << ',' << cfg.numTokens << ',' << dtypeName(cfg.upstreamDType) << ','
               << dtypeName(meta.rowDataType) << ',' << cfg.duplicateMode << ',' << cfg.optimizer << ',' << updatePath << ','
               << cfg.lowRunMax << ',' << cfg.ultraHighRunMin << ',' << cfg.ultraHighTokensPerPartial << ',' << poolSlots << ',' << poolBytes << ',' << l2Bytes << ','
-              << stats.materialize.mean() << ',' << stats.sort.mean() << ',' << stats.clearCounts.mean() << ',' << stats.rle.mean() << ','
-              << stats.finalize.mean() << ',' << stats.scan.mean() << ',' << stats.reduce.mean() << ',' << stats.sparseGradientTotal.mean() << ','
+              << stats.sparseGradientTotal.mean() << ','
               << stats.sparseSgdUpdate.mean() << ',' << stats.totalBackwardAndUpdate.mean() << ',' << stats.graphSparseGradientTotal.mean() << ','
               << stats.activeRows.mean() << ',' << stats.singletonRows.mean() << ',' << stats.duplicateRows.mean() << ','
               << stats.lowRunRows.mean() << ',' << stats.highRunRows.mean() << ',' << stats.ultraHighRunRows.mean() << ','
               << stats.lowRunTokens.mean() << ',' << stats.highRunTokens.mean() << ',' << stats.ultraHighRunTokens.mean() << ','
-              << stats.maxRunCount.mean() << ',' << meta.sortKeyBits << ',' << meta.sortScratchBytes << ',' << meta.rleTempBytes << ',' << meta.scanTempBytes << ','
-              << cfg.activeMode << ',' << cfg.activeTokens << ',' << check << '\n';
+              << stats.maxRunCount.mean() << ',' << meta.sortKeyBits << ',' << meta.sortScratchBytes << ',' << meta.runsScratchBytes << ','
+              << cfg.activeMode << ',' << cfg.activeTokens << ',' << check << ',' << stats.graphStepTotal.mean() << '\n';
 }
 
 bool keepCase(const Options& opts, const CaseConfig& cfg) {
@@ -733,6 +763,16 @@ void profileCase(const Options& opts, const CaseConfig& cfg, const cudaDevicePro
     std::vector<PoolSlot> pool = buildPool(opts, cfg, poolSlots, stream);
     const std::string check = opts.verify ? verifyCase(pool.front(), cfg, opts.batchSize, stream) : "off";
 
+    std::optional<Tensor> l2Flush;
+    if (opts.flushL2) {
+        l2Flush.emplace(TensorPlacement(TensorPlacement::MemDevices::GPU, opts.gpu), TensorDescriptor(DataType::UINT8, {2 * l2Bytes}));
+    }
+    auto flushL2 = [&] {
+        if (!l2Flush.has_value()) return;
+        l2Flush->memsetAsync(stream, 0);
+        stream.synchronize();
+    };
+
     for (int i = 0; i < opts.warmupIters; ++i) {
         PoolSlot& slot = pool[static_cast<size_t>(i % poolSlots)];
         if (slot.fusedSparseRowUpdate) {
@@ -749,7 +789,7 @@ void profileCase(const Options& opts, const CaseConfig& cfg, const cudaDevicePro
             }
         }
         if (opts.profileGraph && slot.graph.has_value()) {
-            slot.graph->launch(stream);
+            launchGraphStep(slot, stream, opts.batchSize);
         }
     }
     stream.synchronize();
@@ -760,13 +800,6 @@ void profileCase(const Options& opts, const CaseConfig& cfg, const cudaDevicePro
         PoolSlot& slot = pool[static_cast<size_t>(i % poolSlots)];
         const auto [totalMs, profile] = profileSparseGradient(slot, stream, opts.batchSize);
         meta = profile;
-        stats.materialize.add(profile.materializeSortPairsMs);
-        stats.sort.add(profile.cubSortMs);
-        stats.clearCounts.add(profile.clearRunCountsMs);
-        stats.rle.add(profile.cubRleMs);
-        stats.finalize.add(profile.finalizeRowsMs);
-        stats.scan.add(profile.cubScanOffsetsMs);
-        stats.reduce.add(profile.reduceValuesMs);
         stats.sparseGradientTotal.add(totalMs);
         stats.activeRows.add(static_cast<double>(profile.activeRows));
         stats.singletonRows.add(static_cast<double>(profile.singletonRows));
@@ -790,7 +823,10 @@ void profileCase(const Options& opts, const CaseConfig& cfg, const cudaDevicePro
         stats.totalBackwardAndUpdate.add(totalMs + updateMs);
 
         if (opts.profileGraph && slot.graph.has_value()) {
-            stats.graphSparseGradientTotal.add(profileGraphSparseGradient(slot, stream));
+            flushL2();
+            stats.graphSparseGradientTotal.add(profileGraphSparseGradient(slot, stream, opts.batchSize));
+            flushL2();
+            stats.graphStepTotal.add(profileGraphStep(slot, stream, opts.batchSize));
         }
     }
 
@@ -888,9 +924,10 @@ void printUsage() {
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_LOW_RUN_MAXS=16\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_ULTRA_HIGH_RUN_MINS=512\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_ULTRA_HIGH_TOKENS_PER_PARTIALS=1024\n"
-              << "  THOR_EMBEDDING_BACKWARD_PROFILE_OPTIMIZERS=sgd\n"
+              << "  THOR_EMBEDDING_BACKWARD_PROFILE_OPTIMIZERS=sgd  # sgd, momentum, nesterov, adam\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_ACTIVE_FRACTIONS=dense,1,0.5,0.25  # dense, or the ragged active fraction\n"
-              << "  THOR_EMBEDDING_BACKWARD_PROFILE_VERIFY=1\n";
+              << "  THOR_EMBEDDING_BACKWARD_PROFILE_VERIFY=1\n"
+              << "  THOR_EMBEDDING_BACKWARD_PROFILE_FLUSH_L2=1  # a cold L2 before each timed graph and step\n";
 }
 
 }  // namespace

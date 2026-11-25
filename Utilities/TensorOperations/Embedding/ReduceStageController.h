@@ -8,40 +8,6 @@
 
 namespace ThorImplementation {
 
-#ifndef THOR_EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUN_THRESHOLD
-#define THOR_EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUN_THRESHOLD 32768ULL
-#endif
-
-#ifndef THOR_EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK
-#define THOR_EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK 4096ULL
-#endif
-
-constexpr uint64_t EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUN_THRESHOLD =
-    THOR_EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUN_THRESHOLD;
-constexpr uint64_t EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK =
-    THOR_EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK;
-static_assert(EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK != 0ULL,
-              "THOR_EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK must be non-zero.");
-
-inline bool useTwoStageEmbeddingSparseGradientFinalize(uint64_t maxPossibleRuns) {
-    return EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUN_THRESHOLD != 0ULL &&
-           maxPossibleRuns >= EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUN_THRESHOLD;
-}
-
-inline uint64_t twoStageEmbeddingSparseGradientFinalizeBlockCount(uint64_t maxPossibleRuns) {
-    return (maxPossibleRuns + EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK - 1ULL) /
-           EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK;
-}
-
-inline uint32_t runtimeTwoStageEmbeddingSparseGradientFinalizeRunThreshold() {
-    if (EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUN_THRESHOLD == 0ULL) {
-        return 0U;
-    }
-    return EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUN_THRESHOLD > 0xffffffffULL
-               ? 0xffffffffU
-               : static_cast<uint32_t>(EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUN_THRESHOLD);
-}
-
 struct EmbeddingSparseGradientReduceGridUpdateConfig {
     uint32_t reduceRowsPerGridX = 1U;
     uint32_t reduceGridDimY = 1U;
@@ -50,83 +16,73 @@ struct EmbeddingSparseGradientReduceGridUpdateConfig {
     uint32_t maxReduceGridDimY = 1U;
 };
 
-struct EmbeddingSparseGradientTwoStageFinalizeCapturedNodes {
-    DeviceUpdatableKernelNode classifyNode;
-    DeviceUpdatableKernelNode accumulateNode;
-};
+/**
+ * UINT64 words of scratch the runs need for up to `capacity` keys (1 to 2^30 - 1; throws std::invalid_argument
+ * otherwise).
+ */
+[[nodiscard]] uint64_t embeddingSparseGradientRunsScratchWords(uint64_t capacity);
 
-void initializeEmbeddingKernelsSharedAttributes();
-
-void launchFinalizeAndBucketizeEmbeddingSparseGradientRows(const void* outputRows,
-                                                           const uint32_t* numRuns,
-                                                           void* outputNumRows,
-                                                           const uint32_t* runCounts,
-                                                           uint32_t* lowRunRowIndices,
-                                                           uint32_t* highRunRowIndices,
-                                                           uint32_t* ultraHighRunRowIndices,
-                                                           uint32_t* ultraHighRunPartialCounts,
-                                                           uint32_t* ultraHighRunPartialOffsets,
-                                                           uint32_t* numUltraHighPartials,
-                                                           uint32_t* numLowRunRows,
-                                                           uint32_t* numHighRunRows,
-                                                           uint32_t* numUltraHighRunRows,
-                                                           uint64_t vocabularySize,
-                                                           uint32_t maxPossibleRuns,
-                                                           DataType rowDataType,
-                                                           uint32_t lowRunMax,
-                                                           uint32_t ultraHighRunMin,
-                                                           uint32_t ultraHighTokensPerPartial,
-                                                           const DeviceUpdatableKernelNodeDeviceHandle* lowReduceNodeHandle,
-                                                           const DeviceUpdatableKernelNodeDeviceHandle* highReduceNodeHandle,
-                                                           const DeviceUpdatableKernelNodeDeviceHandle* ultraHighPartialReduceNodeHandle,
-                                                           const DeviceUpdatableKernelNodeDeviceHandle* ultraHighReduceNodeHandle,
-                                                           const DeviceUpdatableKernelNodeDeviceHandle* twoStageClassifyNodeHandle,
-                                                           const DeviceUpdatableKernelNodeDeviceHandle* twoStageAccumulateNodeHandle,
-                                                           EmbeddingSparseGradientReduceGridUpdateConfig lowReduceGridConfig,
-                                                           EmbeddingSparseGradientReduceGridUpdateConfig highReduceGridConfig,
-                                                           EmbeddingSparseGradientReduceGridUpdateConfig ultraHighPartialReduceGridConfig,
-                                                           EmbeddingSparseGradientReduceGridUpdateConfig ultraHighReduceGridConfig,
-                                                           bool runtimeTwoStageDelegate,
-                                                           uint32_t runtimeTwoStageRunThreshold,
-                                                           Stream stream);
-
-EmbeddingSparseGradientTwoStageFinalizeCapturedNodes captureTwoStageFinalizeAndBucketizeEmbeddingSparseGradientRows(
-    const void* outputRows,
-    const uint32_t* numRuns,
-    void* outputNumRows,
-    const uint32_t* runCounts,
-    uint32_t* lowRunRowIndices,
-    uint32_t* highRunRowIndices,
-    uint32_t* ultraHighRunRowIndices,
-    uint32_t* ultraHighRunPartialCounts,
-    uint32_t* ultraHighRunPartialOffsets,
-    uint32_t* numUltraHighPartials,
-    uint32_t* numLowRunRows,
-    uint32_t* numHighRunRows,
-    uint32_t* numUltraHighRunRows,
-    uint32_t* twoStageLowRunRowsScratch,
-    uint32_t* twoStageHighRunRowsScratch,
-    uint32_t* twoStageUltraHighRunRowsScratch,
-    uint32_t* twoStageUltraHighRunPartialCountsScratch,
-    uint32_t* twoStageUltraHighRunPartialOffsetsScratch,
-    uint32_t* twoStageLowRunRowCounts,
-    uint32_t* twoStageHighRunRowCounts,
-    uint32_t* twoStageUltraHighRunRowCounts,
-    uint32_t* twoStageUltraHighPartialCounts,
-    uint64_t vocabularySize,
-    uint32_t maxPossibleRuns,
-    DataType rowDataType,
-    uint32_t lowRunMax,
-    uint32_t ultraHighRunMin,
-    uint32_t ultraHighTokensPerPartial,
-    const DeviceUpdatableKernelNodeDeviceHandle* lowReduceNodeHandle,
-    const DeviceUpdatableKernelNodeDeviceHandle* highReduceNodeHandle,
-    const DeviceUpdatableKernelNodeDeviceHandle* ultraHighPartialReduceNodeHandle,
-    const DeviceUpdatableKernelNodeDeviceHandle* ultraHighReduceNodeHandle,
-    EmbeddingSparseGradientReduceGridUpdateConfig lowReduceGridConfig,
-    EmbeddingSparseGradientReduceGridUpdateConfig highReduceGridConfig,
-    EmbeddingSparseGradientReduceGridUpdateConfig ultraHighPartialReduceGridConfig,
-    EmbeddingSparseGradientReduceGridUpdateConfig ultraHighReduceGridConfig,
-    Stream stream);
+/**
+ * The step between the sort of the row keys and the reducers, one kernel: the runs of the first n sorted keys
+ * (n = capacity when activeCount is null, else min(*activeCount, capacity) read on the device; activeCountDataType
+ * UINT32 or UINT64) and their buckets.
+ *
+ * The runs: with R runs of equal keys, *numRuns = R and for r < R, rows[r] is run r's key, runOffsets[r] its first
+ * position and runCounts[r] its length (keyDataType UINT16, UINT32 or UINT64; rows of the same type). n = 0 gives
+ * R = 0.
+ *
+ * The buckets: the valid runs are all but a last run of the sentinel row `vocabularySize`; their number goes to
+ * numRows (of the rows' type). Each valid run goes into one bucket by its length: low (at most lowRunMax), ultra-high
+ * (at least ultraHighRunMin) or high (between). A bucket lists its runs in run order and has its size written
+ * (numLowRunRows, numHighRunRows, numUltraHighRunRows). The high and ultra-high buckets list the runs' indices
+ * (highRunRowIndices, ultraHighRunRowIndices). The low bucket lists an entry of four words a run (lowRunEntries,
+ * 16-byte aligned): the run's index, its first position, its length and the low 32 bits of its key, so its reducer
+ * needs no second load to find them. An ultra-high run is reduced in partials of ultraHighTokensPerPartial tokens:
+ * ultraHighRunPartialCounts holds each run's partials, ultraHighRunPartialOffsets the partials before it, and
+ * numUltraHighPartials their total. Where a reducer's node handle is given, its grid is set on the device for its
+ * bucket's size (rows / reduceRowsPerGridX rounded up, within its limits).
+ *
+ * Nothing past R runs or a bucket's size is written. The grid is sized for the capacity and the count is read on the
+ * device, so a launch can be captured in a CUDA graph. `scratch` holds embeddingSparseGradientRunsScratchWords(capacity)
+ * words, which the launch clears first; with clearScratch false it does not, and they must already be 0 (cleared by
+ * an earlier kernel of the same stream or graph). Throws std::invalid_argument for a missing pointer, rows over the
+ * keys, low-bucket entries not 16-byte aligned, a capacity out of range, keys that are not UINT16 / UINT32 / UINT64, a
+ * count type that is not UINT32 / UINT64, a partial of 0 tokens, or a node handle that is not initialized, is on
+ * another GPU or has an invalid grid configuration.
+ */
+void launchEncodeAndBucketizeEmbeddingSparseGradientRuns(const void* sortedKeys,
+                                                         DataType keyDataType,
+                                                         uint64_t capacity,
+                                                         const void* activeCount,
+                                                         DataType activeCountDataType,
+                                                         void* rows,
+                                                         uint32_t* runCounts,
+                                                         uint32_t* runOffsets,
+                                                         uint32_t* numRuns,
+                                                         void* numRows,
+                                                         uint32_t* lowRunEntries,
+                                                         uint32_t* highRunRowIndices,
+                                                         uint32_t* ultraHighRunRowIndices,
+                                                         uint32_t* ultraHighRunPartialCounts,
+                                                         uint32_t* ultraHighRunPartialOffsets,
+                                                         uint32_t* numUltraHighPartials,
+                                                         uint32_t* numLowRunRows,
+                                                         uint32_t* numHighRunRows,
+                                                         uint32_t* numUltraHighRunRows,
+                                                         uint64_t* scratch,
+                                                         uint64_t vocabularySize,
+                                                         uint32_t lowRunMax,
+                                                         uint32_t ultraHighRunMin,
+                                                         uint32_t ultraHighTokensPerPartial,
+                                                         const DeviceUpdatableKernelNodeDeviceHandle* lowReduceNodeHandle,
+                                                         const DeviceUpdatableKernelNodeDeviceHandle* highReduceNodeHandle,
+                                                         const DeviceUpdatableKernelNodeDeviceHandle* ultraHighPartialReduceNodeHandle,
+                                                         const DeviceUpdatableKernelNodeDeviceHandle* ultraHighReduceNodeHandle,
+                                                         EmbeddingSparseGradientReduceGridUpdateConfig lowReduceGridConfig,
+                                                         EmbeddingSparseGradientReduceGridUpdateConfig highReduceGridConfig,
+                                                         EmbeddingSparseGradientReduceGridUpdateConfig ultraHighPartialReduceGridConfig,
+                                                         EmbeddingSparseGradientReduceGridUpdateConfig ultraHighReduceGridConfig,
+                                                         Stream stream,
+                                                         bool clearScratch = true);
 
 }  // namespace ThorImplementation

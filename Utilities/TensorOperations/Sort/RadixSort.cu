@@ -10,6 +10,7 @@
 #include <initializer_list>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 
 namespace ThorImplementation {
 namespace {
@@ -141,8 +142,37 @@ __global__ void __launch_bounds__(kThreads) radixSortHistogramKernel(const __gri
 // goes to j + binOffset[its digit], where binOffset is the pairs of smaller digits (the launch's histogram) plus those
 // of the digit in the tiles before this one (the lookback) less tileStart. Consecutive threads write consecutive
 // places of a digit's run, so the stores are whole sectors rather than one pair each.
+// Place p lies at slot exchangeSlot(p) of that memory, and a thread writes out the slots at its own indices: slot j
+// holds place placeOfSlot(j), and the 32 slots of a warp's item hold 32 consecutive places, so a warp's store is
+// still 32 consecutive places. placeOfSlot is shifts and exclusive-ors, and a thread's slots are its index plus
+// whole blocks, which share no bit with it: each slot's place is the thread's first with a constant exclusive-ored
+// in, an instruction an item as the index was.
 // The launch bounds hold the kernel to 64 registers (1024 / threads blocks of that many threads fill an SM's 64K):
 // without them the 8-item kernels take 75 to 84 and a block fewer fits on an SM, which measured slower at every size.
+
+// Where place p lies in the exchange memory of a tile of Tile pairs: a one-to-one map of [0, Tile) onto itself that
+// carries the bits above a place's low five down into them (a tile of up to 1024 places has five of them, so one
+// shift; up to 32768, two); placeOfSlot is its inverse for both. Shared memory has 32 banks, a word apart,
+// and a warp's accesses to one bank go one after another. When the keys come in order (consecutive rows, as an
+// embedding of positions has them) a warp's 32 lanes hold 32 consecutive digits, each with the same number of pairs
+// in the tile: 32 in a 4096 tile of 7-bit digits. Placed straight, the lanes' stores are then 32 words apart, all in
+// one bank, 32 turns a store: the sort of 1M consecutive 21-bit keys took 44.9 us against 35.5 for random keys
+// (sort_keys_1635.csv). Folded, it took 32.9 against 35.8 (sort_gate_1636.csv): places any power of two apart take
+// at most two turns, and random places are as before. The fold moves the one-bank spacings rather than removing
+// them: places a multiple of 31 or 33 apart share a bank now (32 consecutive digits of 33 pairs each), where placed
+// straight they took one turn. Keys in order make the powers of two in every tile, the tile and the bins being
+// powers of two; 31 and 33 take keys that repeat unevenly (1,000 rows cycled through a 4096 tile come near).
+template <uint32_t Tile>
+__device__ __forceinline__ uint32_t exchangeSlot(uint32_t place) {
+    static_assert((Tile & (Tile - 1U)) == 0U && Tile <= (1U << 15));  // the slots stay inside the tile
+    if constexpr (Tile <= (1U << 10)) {
+        return place ^ (place >> 5);
+    } else {
+        return place ^ (place >> 5) ^ (place >> 10);
+    }
+}
+__device__ __forceinline__ uint32_t placeOfSlot(uint32_t slot) { return slot ^ (slot >> 5); }
+
 template <typename KeyT, int ItemsPerThread, int Warps>
 __global__ void __launch_bounds__(Warps * 32, 1024 / (Warps * 32))
     radixSortPassKernel(const __grid_constant__ PassParams p) {
@@ -267,17 +297,19 @@ __global__ void __launch_bounds__(Warps * 32, 1024 / (Warps * 32))
     }
     __syncthreads();
 
-    // Each pair's place in the tile (a place past the count takes kTile), and the tile's keys go to shared memory in
-    // that order; then the values are loaded. None of it waits for the tiles before this one, so all of it is done
-    // before the lookback: the other warps' share of it runs while the digits' threads walk, and the walk starts
-    // later, when more of the tiles behind have published their prefixes.
+    // Each pair's place in the tile, kept as its slot (a place past the count takes kTile), and the tile's keys go to
+    // shared memory in that order, a word a key or two for 64-bit keys; then the values are loaded. None of it waits
+    // for the tiles before this one, so all of it is done before the lookback: the other warps' share of it runs
+    // while the digits' threads walk, and the walk starts later, when more of the tiles behind have published their
+    // prefixes.
     uint32_t place[ItemsPerThread];
     for (int r = 0; r < ItemsPerThread; ++r) {
         const uint32_t digit = digitOf(key[r], shift, mask);
         const uint32_t inTile = tileStart[digit] + countsOfWarp[digit] + rank[r];
-        place[r] = first + static_cast<uint32_t>(r) * 32U < count ? inTile : kTile;
+        place[r] = first + static_cast<uint32_t>(r) * 32U < count ? exchangeSlot<kTile>(inTile) : kTile;
     }
-    KeyT* tileKeys = reinterpret_cast<KeyT*>(exchange);
+    using ExchangeKeyT = std::conditional_t<(sizeof(KeyT) > sizeof(uint32_t)), uint64_t, uint32_t>;
+    ExchangeKeyT* tileKeys = reinterpret_cast<ExchangeKeyT*>(exchange);
     for (int r = 0; r < ItemsPerThread; ++r) {
         if (place[r] != kTile) tileKeys[place[r]] = key[r];
     }
@@ -334,13 +366,18 @@ __global__ void __launch_bounds__(Warps * 32, 1024 / (Warps * 32))
     }
     __syncthreads();
 
+    // Slot tid + r x kBlockThreads holds place placedOfThread ^ placeOfSlot(r x kBlockThreads): tid is under
+    // kBlockThreads, a power of two, so the sum is an exclusive-or, and placeOfSlot of one is that of its parts.
+    static_assert((kBlockThreads & (kBlockThreads - 1U)) == 0U);
+    const uint32_t placedOfThread = placeOfSlot(tid);
     KeyT* keysOut = static_cast<KeyT*>(p.keysOut);
     uint32_t to[ItemsPerThread];
     for (int r = 0; r < ItemsPerThread; ++r) {
         const uint32_t j = tid + static_cast<uint32_t>(r) * kBlockThreads;
-        if (j >= count) continue;
-        const KeyT k = tileKeys[j];
-        to[r] = j + binOffset[digitOf(k, shift, mask)];
+        const uint32_t placed = placedOfThread ^ placeOfSlot(static_cast<uint32_t>(r) * kBlockThreads);
+        if (placed >= count) continue;
+        const KeyT k = static_cast<KeyT>(tileKeys[j]);
+        to[r] = placed + binOffset[digitOf(k, shift, mask)];
         keysOut[to[r]] = k;
     }
     __syncthreads();
@@ -353,7 +390,8 @@ __global__ void __launch_bounds__(Warps * 32, 1024 / (Warps * 32))
 
     for (int r = 0; r < ItemsPerThread; ++r) {
         const uint32_t j = tid + static_cast<uint32_t>(r) * kBlockThreads;
-        if (j < count) p.valuesOut[to[r]] = tileValues[j];
+        const uint32_t placed = placedOfThread ^ placeOfSlot(static_cast<uint32_t>(r) * kBlockThreads);
+        if (placed < count) p.valuesOut[to[r]] = tileValues[j];
     }
 }
 
@@ -475,7 +513,8 @@ void launchRadixSortPairs(const RadixSortPairsPlan& plan,
                           uint32_t* scratch,
                           const void* activeCount,
                           DataType activeCountDataType,
-                          Stream stream) {
+                          Stream stream,
+                          bool clearScratch) {
     if (plan != planRadixSortPairs(plan.keyDataType, plan.capacity, plan.keyBits, plan.tilePairs)) {
         throw std::invalid_argument("Radix sort: the plan is not one planRadixSortPairs made.");
     }
@@ -495,7 +534,9 @@ void launchRadixSortPairs(const RadixSortPairsPlan& plan,
     }
 
     ScopedGpu scopedGpu(stream.getGpuNum());
-    CUDA_CHECK(cudaMemsetAsync(scratch, 0, plan.scratchWords * sizeof(uint32_t), stream.getStream()));
+    if (clearScratch) {
+        CUDA_CHECK(cudaMemsetAsync(scratch, 0, plan.scratchWords * sizeof(uint32_t), stream.getStream()));
+    }
     switch (plan.keyDataType) {
         case DataType::UINT16:
             launchTyped<uint16_t>(plan,

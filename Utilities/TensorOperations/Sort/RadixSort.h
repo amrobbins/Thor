@@ -54,7 +54,9 @@ struct RadixSortPairsPlan {
 /**
  * Sorts the first n pairs, n = the plan's capacity when activeCount is null, else min(*activeCount, capacity) read on
  * the device (activeCountDataType UINT32 or UINT64). Stream-ordered, no allocation, no synchronization. `scratch`
- * holds plan.scratchWords UINT32 words. Every array is on the stream's GPU; the pairs' arrays do not overlap.
+ * holds plan.scratchWords UINT32 words, which the launch clears first; with clearScratch false it does not, and they
+ * must already be 0 (cleared by an earlier kernel of the same stream or graph, which saves a memset node). Every array
+ * is on the stream's GPU; the pairs' arrays do not overlap.
  */
 void launchRadixSortPairs(const RadixSortPairsPlan& plan,
                           void* keys,
@@ -64,6 +66,7 @@ void launchRadixSortPairs(const RadixSortPairsPlan& plan,
                           uint32_t* scratch,
                           const void* activeCount,
                           DataType activeCountDataType,
-                          Stream stream);
+                          Stream stream,
+                          bool clearScratch = true);
 
 }  // namespace ThorImplementation

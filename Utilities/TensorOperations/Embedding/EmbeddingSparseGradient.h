@@ -45,9 +45,8 @@ struct EmbeddingSparseGradientProfileResult {
     DataType rowDataType = DataType::UINT64;
     bool fusedSparseRowUpdate = false;
     uint32_t sortKeyBits = 0;  // the row-key bits the sort orders: bit_width(vocabularySize), at least 1
-    size_t sortScratchBytes = 0;
-    size_t rleTempBytes = 0;
-    size_t scanTempBytes = 0;
+    size_t sortScratchBytes = 0;  // 0 when the token capacity fits the one-block sort
+    size_t runsScratchBytes = 0;
 
     uint64_t activeRows = 0;
     uint64_t singletonRows = 0;
@@ -60,14 +59,7 @@ struct EmbeddingSparseGradientProfileResult {
     uint64_t ultraHighRunTokens = 0;
     uint32_t maxRunCount = 0;
 
-    float materializeSortPairsMs = 0.0f;
-    float cubSortMs = 0.0f;
-    float clearRunCountsMs = 0.0f;
-    float cubRleMs = 0.0f;
-    float finalizeRowsMs = 0.0f;
-    float cubScanOffsetsMs = 0.0f;
-    float reduceValuesMs = 0.0f;
-    float totalMs = 0.0f;
+    float totalMs = 0.0f;  // one launch of the producer's graph
 };
 
 struct CapturedEmbeddingSparseGradient {
@@ -77,8 +69,6 @@ struct CapturedEmbeddingSparseGradient {
           highReduceNodeHandle(deviceNum),
           ultraHighPartialReduceNodeHandle(deviceNum),
           ultraHighReduceNodeHandle(deviceNum),
-          twoStageFinalizeClassifyNodeHandle(deviceNum),
-          twoStageFinalizeAccumulateNodeHandle(deviceNum),
           highRunCaptureStream(deviceNum),
           ultraHighRunCaptureStream(deviceNum) {}
 
@@ -94,26 +84,16 @@ struct CapturedEmbeddingSparseGradient {
             ultraHighPartialReduceNodeHandle.upload(ultraHighPartialReduceNode, stream);
         }
         ultraHighReduceNodeHandle.upload(ultraHighReduceNode, stream);
-        if (twoStageFinalizeClassifyNode) {
-            twoStageFinalizeClassifyNodeHandle.upload(twoStageFinalizeClassifyNode, stream);
-        }
-        if (twoStageFinalizeAccumulateNode) {
-            twoStageFinalizeAccumulateNodeHandle.upload(twoStageFinalizeAccumulateNode, stream);
-        }
     }
 
     DeviceUpdatableKernelNodeDeviceHandle lowReduceNodeHandle;
     DeviceUpdatableKernelNodeDeviceHandle highReduceNodeHandle;
     DeviceUpdatableKernelNodeDeviceHandle ultraHighPartialReduceNodeHandle;
     DeviceUpdatableKernelNodeDeviceHandle ultraHighReduceNodeHandle;
-    DeviceUpdatableKernelNodeDeviceHandle twoStageFinalizeClassifyNodeHandle;
-    DeviceUpdatableKernelNodeDeviceHandle twoStageFinalizeAccumulateNodeHandle;
     DeviceUpdatableKernelNode lowReduceNode;
     DeviceUpdatableKernelNode highReduceNode;
     DeviceUpdatableKernelNode ultraHighPartialReduceNode;
     DeviceUpdatableKernelNode ultraHighReduceNode;
-    DeviceUpdatableKernelNode twoStageFinalizeClassifyNode;
-    DeviceUpdatableKernelNode twoStageFinalizeAccumulateNode;
     // CUDA events recorded/waited during multi-stream graph capture must not be
     // destroyed while capture is still active. Keep them with the captured graph
     // metadata instead of using temporaries inside capturePrepared...().
@@ -158,8 +138,6 @@ std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradientW
     const RaggedRuntimeExtent& runtimeExtent);
 
 bool preparedEmbeddingSparseGradientHasSparseRowUpdate(const PreparedEmbeddingSparseGradient& prepared);
-
-bool preparedEmbeddingSparseGradientUsesTwoStageFinalize(const PreparedEmbeddingSparseGradient& prepared);
 
 // Compatibility-only one-shot graph wrappers for unit tests, microbenchmarks, and migration code.
 // Production Embedding layers must capture and instantiate their sparse-gradient graph once during

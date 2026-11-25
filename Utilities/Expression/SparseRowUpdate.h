@@ -113,7 +113,11 @@ class SparseRowUpdatePlan {
 struct SparseRowUpdateFusionSource {
     std::string helperSource;
     std::string parameterSource;
-    std::string bodySource;
+    std::string bodySource;  // loadSource then computeSource
+    // The tensor loads, their offsets and the runtime scalars' loads: they need only sru_logical_row, sru_indexed_row,
+    // sru_vector_index and sru_vector_valid_lanes, so a reducer may emit them before its sum, then computeSource after.
+    std::string loadSource;
+    std::string computeSource;
     std::vector<SparseRowUpdatePlan::RuntimeInputSlot> kernelInputSlots;
     std::vector<SparseRowUpdatePlan::RuntimeOutputSlot> outputSlots;
 };

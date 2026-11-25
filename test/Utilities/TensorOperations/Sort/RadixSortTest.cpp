@@ -50,6 +50,7 @@ struct SortCase {
     std::optional<uint64_t> active;  // the device item count; none: the capacity, no device count
     DataType activeDataType = DataType::UINT32;
     Keys keys = Keys::Random;
+    bool scratchAlreadyClear = false;  // the caller zeroes the scratch and the launch is told not to
 };
 
 template <typename KeyT>
@@ -90,7 +91,8 @@ void expectSorted(const SortCase& c, uint64_t seed) {
     values.copyFromAsync(valuesCpu, stream);
     keysAlternate.copyFromAsync(staleKeysCpu, stream);
     valuesAlternate.copyFromAsync(staleValuesCpu, stream);
-    scratch.memsetAsync(stream, 0x5E);  // the launch must not depend on what the scratch held
+    // The launch must not depend on what the scratch held, unless it is told the scratch is clear.
+    scratch.memsetAsync(stream, c.scratchAlreadyClear ? 0 : 0x5E);
 
     std::optional<Tensor> activeCount;
     const void* activePointer = nullptr;
@@ -115,7 +117,8 @@ void expectSorted(const SortCase& c, uint64_t seed) {
                          scratch.getMemPtr<uint32_t>(),
                          activePointer,
                          c.activeDataType,
-                         stream);
+                         stream,
+                         /*clearScratch=*/!c.scratchAlreadyClear);
     Tensor sortedKeysCpu(cpu, keysDescriptor), sortedValuesCpu(cpu, valuesDescriptor),
         otherKeysCpu(cpu, keysDescriptor), otherValuesCpu(cpu, valuesDescriptor);
     sortedKeysCpu.copyFromAsync(plan.sortedInAlternate ? keysAlternate : keys, stream);
@@ -279,6 +282,21 @@ TEST(RadixSortPairs, SortsOnlyTheDeviceItemCount) {
                                    ++seed);
         }
     }
+}
+
+// The scratch zeroed by the caller (in a graph, by an earlier kernel) and no memset by the launch.
+TEST(RadixSortPairs, SortsOnScratchTheCallerCleared) {
+    REQUIRE_CUDA_DEVICE();
+    uint64_t seed = 3000;
+    for (const uint32_t tilePairs : {512U, 4096U}) {
+        const uint64_t tile = tilePairs;
+        expectSorted<uint32_t>(SortCase{9 * tile + 1, 21, tilePairs, {}, DataType::UINT32, Keys::Random, true}, ++seed);
+        expectSorted<uint32_t>(SortCase{9 * tile + 1, 17, tilePairs, 4 * tile + 9, DataType::UINT64, Keys::Skewed, true},
+                               ++seed);
+        expectSorted<uint16_t>(SortCase{4 * tile, 16, tilePairs, {}, DataType::UINT32, Keys::FewValues, true}, ++seed);
+        expectSorted<uint64_t>(SortCase{3 * tile + 77, 40, tilePairs, {}, DataType::UINT32, Keys::Random, true}, ++seed);
+    }
+    expectSorted<uint32_t>(SortCase{1000003, 21, 0, {}, DataType::UINT32, Keys::Random, true}, ++seed);
 }
 
 // Many tiles: the lookback runs through tiles that publish in any order. Twice each, to the same result.

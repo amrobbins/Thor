@@ -1003,7 +1003,8 @@ file(GLOB_RECURSE THOR_SOURCES CONFIGURE_DEPENDS
 # dependencies, and keeping these kernels out of RDC preserves the code
 # generation they were measured with (compiled with RDC and device LTO they
 # regress, FP8 E5M2 most; benchmarks/reducer_compile_contract.py checks it).
-# The set is every .cu directly in Scan/ and every .cu anywhere under Reduction/.
+# The set is every .cu directly in Scan/ and every .cu anywhere under Reduction/,
+# and the two radix sorts (below).
 file(GLOB THOR_SELF_CONTAINED_CUDA_SOURCES CONFIGURE_DEPENDS
         "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Scan/*.cu"
 )
@@ -1012,6 +1013,18 @@ file(GLOB_RECURSE _thor_reduction_cuda_sources CONFIGURE_DEPENDS
 )
 list(APPEND THOR_SELF_CONTAINED_CUDA_SOURCES ${_thor_reduction_cuda_sources})
 unset(_thor_reduction_cuda_sources)
+# The radix sorts have no cross-translation-unit device dependencies either.
+# Under device LTO the code of RadixSort.cu's pass kernels changed from one
+# build of the library to another with their source untouched: the 512-pair
+# kernels at 64 registers in some builds and 59 or 60 in others, the sort 1.3%
+# to 6.5% slower in the second kind at every size (sort_1629.csv against
+# sort_gate_1630.csv and sort_gate_1631.csv; taking the one-block sort out of
+# the LTO set alone did not bring the first kind back). Compiled self-contained,
+# a sort's code depends on its own file only and is made once, not at every link.
+list(APPEND THOR_SELF_CONTAINED_CUDA_SOURCES
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Sort/RadixSort.cu"
+        "${CMAKE_SOURCE_DIR}/Utilities/TensorOperations/Sort/RadixSortOneBlock.cu"
+)
 if (NOT THOR_SELF_CONTAINED_CUDA_SOURCES)
     message(FATAL_ERROR "Thor self-contained CUDA source set is empty")
 endif ()
@@ -2115,6 +2128,22 @@ target_compile_options(thor_sort_benchmark PRIVATE
         $<$<CONFIG:RelWithDebInfo>:-O3>
         $<$<CONFIG:Debug>:-O0>
         $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G>
+)
+
+# Packed (ragged) LayerNorm backward against cuDNN's dense LayerNorm backward and a copy (host code only).
+add_executable(thor_packed_layernorm_backward_benchmark EXCLUDE_FROM_ALL
+        benchmarks/PackedLayerNormBackwardBenchmark.cpp
+)
+thor_apply_linker_settings(thor_packed_layernorm_backward_benchmark)
+thor_enable_release_host_lto(thor_packed_layernorm_backward_benchmark)
+thor_enable_release_no_semantic_interposition(thor_packed_layernorm_backward_benchmark)
+target_link_libraries(thor_packed_layernorm_backward_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_link_libraries(thor_packed_layernorm_backward_benchmark PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(thor_packed_layernorm_backward_benchmark PRIVATE PkgConfig::LIBURING)
+target_compile_options(thor_packed_layernorm_backward_benchmark PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3>
+        $<$<CONFIG:Debug>:-O0>
 )
 
 # Concatenate benchmark contains a small CUDA cache-eviction kernel while keeping

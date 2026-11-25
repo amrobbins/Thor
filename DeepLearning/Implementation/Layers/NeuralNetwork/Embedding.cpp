@@ -1,5 +1,4 @@
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Embedding.h"
-#include "Utilities/TensorOperations/Embedding/ReduceStageController.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
@@ -167,8 +166,6 @@ void Embedding::compileImpl() {
     }
 
     attachGradientUpdateStream();
-
-    initializeEmbeddingKernelsSharedAttributes();
 
     if (isRagged()) {
         const RaggedEmbeddingConfig& config = raggedConfig.value();
